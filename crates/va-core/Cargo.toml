@@ -1,0 +1,13 @@
+[package]
+name = "va-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T3: MNA assembly, Newton, linear solve, and convergence (DC). Depends only on va-abi."
+
+# CRITICAL INVARIANT (§2): va-core depends on va-abi (Interface β) and NOTHING ELSE.
+# Do not add va-frontend / va-codegen here.
+[dependencies]
+va-abi = { workspace = true }
+faer = { workspace = true }
+thiserror = { workspace = true }

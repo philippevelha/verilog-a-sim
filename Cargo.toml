@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://example.org/verilog-a-sim"
+
+# Shared dependency versions. Crates opt in with `dep = { workspace = true }`.
+[workspace.dependencies]
+faer = "0.22"
+thiserror = "2"
+logos = "0.15"
+anyhow = "1"
+
+# Internal crates (path deps), referenced by sibling crates per the §3 table.
+va-ir = { path = "crates/va-ir" }
+va-abi = { path = "crates/va-abi" }
+va-frontend = { path = "crates/va-frontend" }
+va-codegen = { path = "crates/va-codegen" }
+va-core = { path = "crates/va-core" }
+va-transient = { path = "crates/va-transient" }
+va-acnoise = { path = "crates/va-acnoise" }
+va-netlist = { path = "crates/va-netlist" }
+va-cli = { path = "crates/va-cli" }
+va-harness = { path = "crates/va-harness" }
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,13 @@
+// Linear resistor — bring-up model.
+// Matches the hand-written reference in va-abi (crates/va-abi/src/reference/resistor.rs).
+`include "disciplines.vams"
+
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R = 1000.0 from (0:inf);   // resistance, ohms
+
+    analog begin
+        I(p, n) <+ V(p, n) / R;
+    end
+endmodule

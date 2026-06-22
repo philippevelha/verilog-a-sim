@@ -1,0 +1,10 @@
+[package]
+name = "va-netlist"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T6: circuit-level netlist parser producing wired model instances."
+
+[dependencies]
+va-abi = { workspace = true }
+thiserror = { workspace = true }

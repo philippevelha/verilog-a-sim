@@ -1,0 +1,61 @@
+//! T6 — `va-cli`: the binary front door that wires the whole pipeline together.
+//!
+//! Usage (the bring-up target):
+//!
+//! ```text
+//! va-cli sim circuits/divider.net --model models/resistor.va
+//! ```
+//!
+//! This binary only parses arguments and dispatches to [`va_cli::run_sim`]; the pipeline
+//! itself lives in the library so `va-harness` can drive it directly.
+
+use anyhow::{bail, Context, Result};
+use va_cli::{run_sim, Analysis};
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("sim") => cmd_sim(&args[1..]),
+        Some("--help") | Some("-h") | None => {
+            print_usage();
+            Ok(())
+        }
+        Some(other) => {
+            print_usage();
+            bail!("unknown subcommand `{other}`");
+        }
+    }
+}
+
+/// Print the CLI usage banner.
+fn print_usage() {
+    eprintln!(
+        "va-cli — verilog-a-sim front door\n\n\
+         USAGE:\n    \
+         va-cli sim <netlist.net> --model <model.va> [--ac|--tran]\n\n\
+         FLAGS:\n    \
+         -h, --help    Print this help"
+    );
+}
+
+/// The `sim` subcommand: run a netlist through the pipeline.
+fn cmd_sim(args: &[String]) -> Result<()> {
+    let netlist = args.first().context("expected a netlist path")?;
+    let model = parse_flag(args, "--model").context("expected --model <model.va>")?;
+    let analysis = if args.iter().any(|a| a == "--tran") {
+        Analysis::Transient
+    } else if args.iter().any(|a| a == "--ac") {
+        Analysis::Ac
+    } else {
+        Analysis::Dc
+    };
+
+    eprintln!("[va-cli] sim netlist={netlist} model={model} analysis={analysis:?}");
+    run_sim(netlist, &model, analysis)
+}
+
+/// Pull the value following `flag` out of `args`.
+fn parse_flag(args: &[String], flag: &str) -> Option<String> {
+    let pos = args.iter().position(|a| a == flag)?;
+    args.get(pos + 1).cloned()
+}

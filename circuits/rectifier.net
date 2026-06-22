@@ -1,0 +1,9 @@
+* Half-wave diode rectifier — bring-up rung 4 (transient).
+* Vin --[D1]-- out, with an RC load to ground.
+* 1 kHz, 5 V sinusoidal source; observe the rectified, filtered output at `out`.
+V1 in  gnd  SIN(0 5 1k)
+D1 in  out  diode
+R1 out gnd  1000
+C1 out gnd  1e-6
+.tran 10u 5m
+.end

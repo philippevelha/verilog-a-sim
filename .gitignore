@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

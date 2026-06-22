@@ -1,0 +1,9 @@
+[package]
+name = "va-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interface α: elaborated Verilog-A intermediate representation (leaf crate)."
+
+# va-ir is a LEAF crate. Do NOT add internal `va-*` dependencies (§3).
+[dependencies]

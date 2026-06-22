@@ -1,0 +1,16 @@
+// Shockley diode — bring-up model.
+// Matches the hand-written reference in va-abi (crates/va-abi/src/reference/diode.rs).
+// Static DC model: no junction capacitance, series resistance, or breakdown.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module diode(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+    parameter real Is = 1e-14 from (0:inf);   // saturation current, A
+    parameter real N  = 1.0   from (0:inf);   // ideality factor
+
+    analog begin
+        I(anode, cathode) <+ Is * (exp(V(anode, cathode) / (N * $vt)) - 1.0);
+    end
+endmodule

@@ -1,0 +1,14 @@
+// Linear capacitor — bring-up model.
+// Matches the hand-written reference in va-abi (crates/va-abi/src/reference/capacitor.rs).
+// Contributes only to the charge channel; open-circuit to DC.
+`include "disciplines.vams"
+
+module capacitor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real C = 1e-12 from (0:inf);    // capacitance, farads
+
+    analog begin
+        I(p, n) <+ ddt(C * V(p, n));
+    end
+endmodule

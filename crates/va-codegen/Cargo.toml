@@ -1,0 +1,11 @@
+[package]
+name = "va-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T2: lower va-ir to differentiated model instances (automatic differentiation)."
+
+[dependencies]
+va-ir = { workspace = true }
+va-abi = { workspace = true }
+thiserror = { workspace = true }

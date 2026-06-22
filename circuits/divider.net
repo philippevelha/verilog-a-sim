@@ -1,0 +1,8 @@
+* Resistor divider — bring-up rung 1.
+* Vin --[R1]-- mid --[R2]-- gnd, driven by a 1 V DC source.
+* Expected DC: V(mid) = Vin * R2/(R1+R2) = 1.0 * 1k/2k = 0.5 V.
+V1 in  gnd  DC 1.0
+R1 in  mid  1000
+R2 mid gnd  1000
+.op
+.end

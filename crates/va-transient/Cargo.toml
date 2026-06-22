@@ -1,0 +1,11 @@
+[package]
+name = "va-transient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T4: transient integration, timestep/LTE control, and event handling."
+
+[dependencies]
+va-core = { workspace = true }
+va-abi = { workspace = true }
+thiserror = { workspace = true }

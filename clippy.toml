@@ -1,0 +1,3 @@
+# Minimal clippy configuration. House rule: `cargo clippy -- -D warnings` must be clean.
+# Keep cognitive-complexity generous; numerics kernels are inherently dense.
+cognitive-complexity-threshold = 30

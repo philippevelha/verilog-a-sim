@@ -1,0 +1,29 @@
+[package]
+name = "va-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T6: the binary front door wiring the whole pipeline together."
+
+# A small `lib.rs` exposes the pipeline so `va-harness` (which depends on va-cli per §3)
+# can link it; `main.rs` is a thin CLI wrapper over the library. This is the only
+# deviation from the §3 tree (which lists main.rs only) and exists purely so the
+# binary-owning crate can also be a library dependency.
+[lib]
+name = "va_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "va-cli"
+path = "src/main.rs"
+
+[dependencies]
+va-ir = { workspace = true }
+va-abi = { workspace = true }
+va-frontend = { workspace = true }
+va-codegen = { workspace = true }
+va-core = { workspace = true }
+va-transient = { workspace = true }
+va-acnoise = { workspace = true }
+va-netlist = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "va-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T1: Verilog-A lexer, parser, AST, and elaboration into va-ir (Interface α)."
+
+[dependencies]
+va-ir = { workspace = true }
+thiserror = { workspace = true }
+logos = { workspace = true }

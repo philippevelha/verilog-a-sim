@@ -1,0 +1,10 @@
+[alias]
+xtask = "run --package xtask --"
+
+# Force the GNU toolchain's bundled, self-contained linker on Windows.
+# Without this, a stray `gcc.exe`/`link.exe` earlier on PATH (e.g. an old
+# CppSim/MSYS install) can shadow the real linker and break the build with a
+# misleading `link: extra operand` error. Scoped to the windows-gnu host, so
+# MSVC/Linux contributors are unaffected. Path-relative — no per-machine paths.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]
