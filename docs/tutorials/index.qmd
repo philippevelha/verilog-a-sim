@@ -1,0 +1,46 @@
+---
+title: "verilog-a-sim — Developer Tutorials"
+---
+
+This book is the project's living, executable documentation. Every thesis (T1–T6) documents
+the features it builds as a tutorial here, so each student can **explain what they developed
+to everyone** — supervisors, sibling students, and future maintainers.
+
+It is the companion to:
+
+- [`docs/roadmap.md`](../roadmap.md) — the phased plan; every phase ships one tutorial here.
+- [`docs/thesis-map.md`](../thesis-map.md) — who owns which crate, and the fallback deliverables.
+- [`docs/interfaces.md`](../interfaces.md) — the two frozen contracts (Interface α and β).
+- [`docs/validation.md`](../validation.md) — metrics, tolerances, and the bring-up ladder.
+
+## How to read these
+
+Tutorials are grouped into one **part per thesis**, ordered by phase. Start with **Shared
+contracts** — the two interfaces and the reference models are the vocabulary every other
+tutorial speaks.
+
+## The standard tutorial skeleton
+
+Every tutorial follows the same shape (see `docs/roadmap.md` → *Quarto tutorials*):
+
+1. **Goal** — one sentence.
+2. **Where it fits** — the pipeline diagram, the relevant box highlighted.
+3. **The idea** — theory, equations, the design choice.
+4. **The code** — the public API the student built, with the doc-comment caveats surfaced.
+5. **It works** — the test or `va-harness` result that proves it (a plot vs ngspice golden
+   where applicable).
+6. **Limitations** — stated honestly (`CLAUDE.md` §5).
+7. **What's next** — pointer to the next phase.
+
+Prefer **executable** content: runnable code blocks, or captured `cargo run -p va-cli -- …`
+output that is plotted in the document. A tutorial that cannot be re-run to reproduce its
+figures has rotted.
+
+## Building this book
+
+```bash
+cargo xtask tutorials            # render to target/tutorials/
+cargo xtask tutorials --preview  # live-reloading preview while you write
+```
+
+Requires the [Quarto CLI](https://quarto.org) on `PATH`.

@@ -1,0 +1,39 @@
+﻿---
+title: "AC linearization"
+subtitle: "T5 · Phase T5.1 · `va-acnoise`"
+---
+
+::: {.callout-note}
+**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
+the phase definition, validation gate, and where this tutorial fits.
+:::
+
+## Goal
+
+Small-signal linearization about a DC point and the complex-valued frequency sweep; a Bode plot vs ngspice.
+
+## Where it fits
+
+_Drop the §2 pipeline diagram here with the relevant box highlighted._
+
+## The idea
+
+_The theory, the equations, the design choice behind this feature._
+
+## The code
+
+_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
+code blocks over prose._
+
+## It works
+
+_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
+A tutorial that cannot be re-run to reproduce its figures has rotted._
+
+## Limitations
+
+_Stated honestly (`CLAUDE.md` §5)._
+
+## What's next
+
+_Pointer to the next phase / tutorial._

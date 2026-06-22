@@ -1,0 +1,61 @@
+# Quarto project for the verilog-a-sim developer tutorials.
+#
+# One book, one part per thesis (T1–T6) plus the shared contracts. Each chapter is a
+# per-phase tutorial following the standard skeleton in docs/roadmap.md. Render with
+# `cargo xtask tutorials` (which shells out to `quarto render` here).
+project:
+  type: book
+  # Rendered output lands in target/ so it is git-ignored; never commit rendered HTML.
+  output-dir: ../../target/tutorials
+
+book:
+  title: "verilog-a-sim — Developer Tutorials"
+  subtitle: "What each thesis built, explained for everyone"
+  search: true
+  reader-mode: true
+  page-footer: "verilog-a-sim · developer tutorials · see docs/roadmap.md"
+  chapters:
+    - index.qmd
+    - part: "Shared contracts"
+      chapters:
+        - shared/01-interfaces.qmd
+        - shared/02-reference-models.qmd
+    - part: "T1 — Frontend (`va-frontend`)"
+      chapters:
+        - t1-frontend/01-lexing.qmd
+        - t1-frontend/02-parsing.qmd
+        - t1-frontend/03-elaboration.qmd
+    - part: "T2 — Codegen (`va-codegen`)"
+      chapters:
+        - t2-codegen/01-ad-core.qmd
+        - t2-codegen/02-lowering.qmd
+        - t2-codegen/03-charge-and-coverage.qmd
+    - part: "T3 — Core (`va-core`)"
+      chapters:
+        - t3-core/01-mna.qmd
+        - t3-core/02-newton.qmd
+        - t3-core/03-nonlinear-dc.qmd
+    - part: "T4 — Transient (`va-transient`)"
+      chapters:
+        - t4-transient/01-integration.qmd
+        - t4-transient/02-lte-timestep.qmd
+        - t4-transient/03-events.qmd
+    - part: "T5 — AC & Noise (`va-acnoise`)"
+      chapters:
+        - t5-acnoise/01-ac.qmd
+        - t5-acnoise/02-noise.qmd
+    - part: "T6 — Integration (`va-netlist` · `va-cli` · `va-harness`)"
+      chapters:
+        - t6-integration/01-netlist.qmd
+        - t6-integration/02-cli.qmd
+        - t6-integration/03-validation.qmd
+
+format:
+  # HTML only, to guarantee reproducible rendering without a LaTeX toolchain.
+  # To also build a PDF, install TinyTeX (`quarto install tinytex`) and add a `pdf:` block.
+  html:
+    theme: cosmo
+    toc: true
+    number-sections: false
+    code-copy: true
+    code-overflow: wrap

@@ -2,6 +2,11 @@
 **/*.rs.bk
 Cargo.lock.orig
 
+# Quarto tutorial build caches (rendered output goes to /target/tutorials)
+.quarto/
+/_freeze/
+**/.jupyter_cache/
+
 # Editor / OS cruft
 .vscode/
 .idea/
