@@ -5,8 +5,8 @@ members = ["crates/*", "xtask"]
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
-repository = "https://example.org/verilog-a-sim"
+license = "Apache-2.0"
+repository = "https://github.com/philippevelha/verilog-a-sim"
 
 # Shared dependency versions. Crates opt in with `dep = { workspace = true }`.
 [workspace.dependencies]
