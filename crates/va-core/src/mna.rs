@@ -59,9 +59,14 @@ impl StampSink for System {
 
 /// Assemble all `instances` at solution `x` into a fresh [`System`].
 ///
-/// Stubbed until T3; will `clear()` then call `load` on each instance.
-pub fn assemble(_instances: &[&dyn ModelInstance], _x: &[f64], _dim: usize) -> System {
-    todo!("T3: assemble the MNA system from model stamps")
+/// Allocates a zeroed [`System`] and lets every instance stamp its residual and Jacobian.
+/// The charge channel is dropped here (DC); the transient companion model (T4) consumes it.
+pub fn assemble(instances: &[&dyn ModelInstance], x: &[f64], dim: usize) -> System {
+    let mut sys = System::new(dim);
+    for inst in instances {
+        inst.load(x, &mut sys);
+    }
+    sys
 }
 
 #[cfg(test)]
@@ -71,12 +76,22 @@ mod tests {
 
     #[test]
     fn sink_accumulates_resistor_stamp() {
-        // The System sink itself is real even though `assemble` is stubbed: a 1 kΩ resistor
-        // to ground at 1 V deposits 1 mA / 1 mS. This keeps the assembly contract honest.
+        // A 1 kΩ resistor to ground at 1 V deposits 1 mA / 1 mS.
         let r = Resistor::new(0, GROUND, 1000.0);
         let mut sys = System::new(1);
         r.load(&[1.0], &mut sys);
         assert!((sys.residual[0] - 1e-3).abs() < 1e-15);
         assert!((sys.jacobian[0] - 1e-3).abs() < 1e-18);
+    }
+
+    #[test]
+    fn assemble_sums_parallel_resistors() {
+        // Two 1 kΩ resistors from node 0 to ground in parallel: G_total = 2 mS, I = 2 mA at 1 V.
+        let r1 = Resistor::new(0, GROUND, 1000.0);
+        let r2 = Resistor::new(0, GROUND, 1000.0);
+        let insts: [&dyn ModelInstance; 2] = [&r1, &r2];
+        let sys = assemble(&insts, &[1.0], 1);
+        assert!((sys.residual[0] - 2e-3).abs() < 1e-15);
+        assert!((sys.jacobian[0] - 2e-3).abs() < 1e-18);
     }
 }
