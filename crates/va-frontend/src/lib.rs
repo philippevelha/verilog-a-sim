@@ -39,7 +39,6 @@ pub fn compile(source: &str) -> Result<va_ir::Module, FrontendError> {
 #[cfg(test)]
 mod tests {
     #[test]
-    #[ignore = "T1: first milestone — elaborate models/resistor.va into a va_ir::Module"]
     fn elaborates_resistor_model() {
         let src = include_str!("../../../models/resistor.va");
         let module = super::compile(src).expect("resistor.va should elaborate");
