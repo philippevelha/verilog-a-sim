@@ -6,6 +6,11 @@ downstream crate, get owner agreement, and update this file together with the cr
 PR with stub adapters so the workspace keeps compiling. **Never** silently widen or reshape
 them in a feature PR — a broken contract blocks every sibling thesis at once.
 
+> This file holds the **verbatim v0 sketches**. The full semantic specifications — meaning,
+> invariants, conventions, worked examples, and evolution rules — live in
+> [`bridges/`](bridges/README.md): [Bridge α](bridges/interface-alpha-ir.md) and
+> [Bridge β](bridges/interface-beta-abi.md).
+
 ## Interface α — elaborated IR (`va-ir`)
 
 Arena/index representation is mandatory (§5). Expressions and statements are stored in
