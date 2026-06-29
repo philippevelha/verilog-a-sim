@@ -24,6 +24,48 @@ shared, demoable milestone that several theses light up at once.
 
 ---
 
+## Status at a glance
+
+> Updated 2026-06-29. Legend:
+> **✅ Complete** — code, tests, the validation gate, *and* the tutorial are all green.
+> **🟢 Code complete** — implementation + unit/FD tests committed and green (`fmt`,
+> `clippy -D warnings`, `test` clean), but at least one of {harness-vs-golden gate, Quarto
+> tutorial} is still outstanding, so the phase is **not yet "done"** by criteria 1–2 above.
+> **⬜ Not started.**
+
+| Phase | What exists | Status |
+|-------|-------------|--------|
+| 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | 🟢 |
+| T1.1 — lexing | `logos` lexer over the subset; 8 tests | 🟢 |
+| T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity; 6 tests | 🟢 |
+| T1.3 — elaboration | AST → `va_ir::Module`; the three zoo models elaborate end-to-end; 6 tests | 🟢 |
+| T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance`; generated resistor/diode reproduce the reference stamps | 🟢 |
+| T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
+| T3.1 — MNA & dense solve | `assemble` + `faer` LU solve with singularity detection | 🟢 |
+| T3.2 — Newton & divider | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
+| T3.3 — nonlinear DC & sweep | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
+| T4 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
+
+**Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
+
+1. **No harness-vs-golden validation yet.** `va-harness`, `golden/`, and the CLI are still
+   stubs, so the analysis crates are validated against *analytic values and inline unit
+   tests*, **not** against committed ngspice golden. The formal ladder-rung gates (rung 1 DC
+   ≤ 1e-4, etc.) cannot go green until T6 lands. Rungs below track *implementation*, not a
+   passed gate.
+2. **No Quarto tutorials written yet.** Only the `docs/tutorials/` scaffold exists. A phase
+   with green tests but no tutorial is explicitly *not finished* (criterion 2), which is why
+   nothing above is marked ✅.
+
+Also approximated vs. the literal phase wording, and worth tightening later: T1.3 uses
+structural IR assertions rather than committed golden-IR snapshots; T2.2 checks the generated
+diode at an operating point + FD rather than a full committed sweep; T2/T3 currently run over
+hand-built IR / reference instances — the frontend→codegen→core path is not yet wired by a
+netlist driver (that is T6).
+
+---
+
 ## Quarto tutorials
 
 Every student documents the features they build as [Quarto](https://quarto.org) tutorials, so
@@ -109,6 +151,11 @@ matches the code verbatim.
 **Fallback (thesis-map):** a rigorous Verilog-A subset grammar + parser study.
 
 ### Phase T1.1 — Lexing & the grammar subset
+> **Status: 🟢 code complete** — `logos` lexer in `va-frontend/src/lexer.rs`; tokens, `<+`,
+> numeric literals with scientific notation + SI suffixes, `$`-system funcs, directives,
+> comments. Subset documented in the module header (no separate grammar file yet). 8 tests.
+> *Outstanding:* `t1-frontend/01-lexing.qmd`.
+
 - Define the supported Verilog-A subset precisely (tokens, keywords, operators). Write it
   down as a grammar before writing code.
 - Implement the lexer (optionally `logos`); property/round-trip tests on token streams.
@@ -116,12 +163,23 @@ matches the code verbatim.
   "what we deliberately do *not* support" section.
 
 ### Phase T1.2 — Parsing to an AST
+> **Status: 🟢 code complete** — recursive-descent parser + arena AST in
+> `va-frontend/src/{parser,ast}.rs`; precedence-climbing expressions (correct `*`/`+`
+> precedence, right-associative `**`). Returns `FrontendError::Parse` (no panics). 6 tests.
+> *Outstanding:* `t1-frontend/02-parsing.qmd`.
+
 - Recursive-descent (or chosen) parser → AST for module headers, ports, params with ranges,
   the analog block, `<+`, `if/else`, analog function calls.
 - Error handling returns `Result` with `thiserror` enums (never panics — §5).
 - **Tutorial:** `t1-frontend/02-parsing.qmd` — AST shape, parsing strategy, error reporting.
 
 ### Phase T1.3 — Elaboration → `va-ir`
+> **Status: 🟢 code complete** — `va-frontend/src/elaborate.rs` lowers AST → `va_ir::Module`:
+> nets→`NodeId`, const-eval'd params + ranges, branch accesses→`BranchId`, builtins→`Builtin`.
+> All three zoo models elaborate end-to-end (the `compile()` milestone test is green). 6 tests.
+> *Outstanding:* committed golden-IR snapshots (currently structural assertions);
+> `t1-frontend/03-elaboration.qmd`.
+
 - Resolve names/params, flatten to the arena IR (`Module`, `Expr`, `Stmt`), validate
   parameter ranges, lower `ddt`/`idt`/built-ins into IR `Call`s.
 - Golden-IR tests: source in, expected `va-ir` out, for `resistor.va`, `capacitor.va`,
@@ -138,6 +196,11 @@ matches the code verbatim.
 **Fallback:** an AD-for-compact-models report (forward vs reverse, FD validation).
 
 ### Phase T2.1 — Evaluator & dual-number AD core
+> **Status: 🟢 code complete** — `va-codegen/src/ad.rs`: forward-mode `Dual` over the IR
+> arena (`+ - * / neg`, `exp/ln/log10/sqrt/abs`, variable-exponent `pow`) with an eval `Ctx`.
+> Each operator is FD-checked (`div_matches_finite_difference`, `exp_chain_rule`).
+> *Outstanding:* `t2-codegen/01-ad-core.qmd`.
+
 - Walk the IR arena and evaluate expressions; implement forward-mode AD (`Dual`) over the
   unknowns.
 - **Every differentiated operator has a finite-difference test** (analytic vs central
@@ -146,6 +209,13 @@ matches the code verbatim.
   kills Newton, the FD validation methodology.
 
 ### Phase T2.2 — Lowering IR to a `ModelInstance`
+> **Status: 🟢 code complete** — `va-codegen/src/{lower,lib}.rs`: flow contributions split
+> into resistive/charge terms; `build_instance` validates the subset then emits a
+> `GeneratedModel` whose `load` stamps like `stamp_conductance`/`stamp_charge`. Generated
+> resistor reproduces `va-abi`'s hand-checked stamp; diode matches analytic current +
+> conductance; **§5 AD-vs-FD milestone green**. *Outstanding:* `if/else` + analog functions
+> (v0 rejects them); full committed sweep; `t2-codegen/02-lowering.qmd`.
+
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.
 - Handle `if/else` branches and analog functions.
@@ -155,6 +225,11 @@ matches the code verbatim.
   reference diode, side by side.
 
 ### Phase T2.3 — Charge channel (transient-ready) & coverage
+> **Status: 🟢 partial** — `ddt(q)` terms are routed to the charge/`dcharge` channel; the
+> generated capacitor stamps only charge (`Q=C·V`, `dQ/dV=C`), ready for T4. `idt` and a
+> formal coverage matrix are still open; `ddt` is recognised only as a top-level additive
+> term. *Outstanding:* coverage tracking; `t2-codegen/03-charge-and-coverage.qmd`.
+
 - Emit the charge/`dcharge` channel from `ddt`/`idt` so T4 can integrate.
 - Broaden operator/built-in coverage toward the declared subset; track what is supported.
 - **Tutorial:** `t2-codegen/03-charge-and-coverage.qmd` — the companion-model charge path
@@ -168,18 +243,36 @@ matches the code verbatim.
 **Fallback:** a study of MNA + Newton + convergence aids on the reference models.
 
 ### Phase T3.1 — MNA assembly & dense linear solve
+> **Status: 🟢 code complete** — `va-core/src/mna.rs` `assemble` walks instances into the
+> `System` sink (ground reduction via `row < dim`); `linsolve.rs` does a `faer` LU solve with
+> singularity detection (non-finite output or failed `A·x≈b` check). 6 tests.
+> *Outstanding:* `t3-core/01-mna.qmd`.
+
 - Assemble the system (`mna.rs`) from a set of `ModelInstance`s via `StampSink`; dense solve
   through `faer` (`linsolve.rs`). Pure-Rust, no native deps (§5).
 - **Tutorial:** `t3-core/01-mna.qmd` — nodal analysis, how stamps become a matrix, solving a
   linear resistor network by hand vs by code.
 
 ### Phase T3.2 — Newton & the resistor-divider rung
+> **Status: 🟢 code complete (harness gate pending)** — `va-core/src/newton.rs` Newton loop
+> (assemble → `J·dx=−f` → `x+=dx`), converging on residual≤abstol **or** relative update≤reltol.
+> The resistor divider solves to the analytic midpoint (`1.0 V`, < 1e-9). *Outstanding:* the
+> formal rung-1 gate is vs **ngspice golden via `va-harness`** — awaits T6; currently checked
+> against the analytic value. `t3-core/02-newton.qmd`.
+
 - Newton–Raphson loop (`newton.rs`) with abstol/reltol; solve the linear resistor divider.
 - **Validation gate (ladder rung 1):** resistor divider DC matches golden ≤ 1e-4.
 - **Tutorial:** `t3-core/02-newton.qmd` — the Newton iteration, convergence criteria, the
   first green `va-harness` run.
 
 ### Phase T3.3 — Nonlinear DC, sweeps & convergence aids
+> **Status: 🟢 code complete (harness gate pending)** — nonlinear Newton converges on a
+> diode–resistor clamp from the zero guess (KCL balances < 1e-9); `dc.rs` provides
+> `operating_point` + `sweep`. `convergence.rs` ships `pnjlim`-style junction limiting and a
+> geometric `gmin` schedule as **tested helpers**, not yet wired into the loop (limiting needs
+> per-device state the stateless ABI doesn't carry). *Outstanding:* rung-2 gate vs golden
+> (T6); wiring the aids into a homotopy loop; `t3-core/03-nonlinear-dc.qmd`.
+
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
   stepping, source stepping, damping) in `convergence.rs`.
 - **Validation gate (ladder rung 2):** diode I–V sweep matches golden ≤ 1e-4; convergence
@@ -269,17 +362,21 @@ methodology + metrics report vs ngspice.
 
 Each rung is a shared demo where the responsible theses present their tutorials together:
 
-| Rung | Circuit            | Analysis  | Lights up                | Tutorials presented           |
-|------|--------------------|-----------|--------------------------|-------------------------------|
-| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            |
-| 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              |
-| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    |
-| 4    | diode rectifier    | transient | T4                       | T4.2                          |
-| 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        |
-| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          |
+| Rung | Circuit            | Analysis  | Lights up                | Tutorials presented           | Status |
+|------|--------------------|-----------|--------------------------|-------------------------------|--------|
+| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | solves analytically in `va-core`; **harness/CLI gate pending T6** |
+| 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | pieces work in isolation (frontend, codegen, nonlinear DC); not yet wired or golden-gated |
+| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | charge channel ready (T2.3); needs T4 |
+| 4    | diode rectifier    | transient | T4                       | T4.2                          | ⬜ |
+| 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
+| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.
+
+> **No rung is formally "passed" yet** — passing requires `va-harness` green against committed
+> `golden/` (per `validation.md`), which awaits T6. The table records *implementation reach*,
+> not passed gates.
 
 ---
 

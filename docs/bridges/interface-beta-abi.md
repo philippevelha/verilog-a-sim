@@ -161,7 +161,9 @@ Adding a trait method is a breaking change for every implementor; prefer a defau
 a new sub-trait when the addition is optional (e.g. a future small-signal noise channel).
 
 **Open items** (draft backlog, not yet contract):
-- [ ] Pin the exact residual/Jacobian sign relative to the Newton update in `va-core`, with a
-      shared test fixture both crates import.
+- [~] The residual/Jacobian sign is now *established in code* (2026-06-29): `va-core`'s Newton
+      solves `J·dx = −residual` (`newton.rs`), and `va-codegen`'s generated models reproduce
+      `va-abi`'s reference stamps, so both producers agree. **Still open:** a single shared
+      test fixture both crates import, rather than parallel checks.
 - [ ] Decide how AC small-signal noise sources attach — extra channel vs separate trait.
 - [ ] Specify the `Result`-returning constructor pattern for degenerate parameters.
