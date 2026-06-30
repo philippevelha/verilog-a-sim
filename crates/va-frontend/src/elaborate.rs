@@ -22,6 +22,9 @@
 //!   distinct branches rather than sign-related aliases.
 //! - Range bounds are mapped to `Param::min`/`max` losing the inclusive/exclusive
 //!   distinction; an infinite bound becomes `None` (unbounded).
+//! - `analysis("…")` is folded to a constant under v0's DC-only model (`1.0` for the
+//!   `static`/`dc`/`ic`/`nodeset` phases, else `0.0`); the same IR is not reusable for other
+//!   analyses. System tasks (`$strobe`, …) are no-ops. Both drop their string arguments.
 //! - `while`/`for`/`repeat`/`case` control flow and `analog function` definitions are lowered
 //!   into the corresponding [`va_ir`] nodes. Functions are lowered in source order against
 //!   their own variable scope (arguments + return variable + locals) and may read module
@@ -508,6 +511,12 @@ impl Elaborator<'_> {
                 ))
             }
             ExprAst::Probe(access) => Expr::Probe(self.lower_access(access)?),
+            ExprAst::Call { name, args } if name == "analysis" => {
+                // `analysis("name", …)` queries the current analysis. v0 is DC-only, so it
+                // folds to a constant: true for the DC/operating-point phases.
+                let active = self.analysis_matches(args)?;
+                Expr::Const(if active { 1.0 } else { 0.0 })
+            }
             ExprAst::Call { name, args } => {
                 let mut ids = Vec::with_capacity(args.len());
                 for &a in args {
@@ -542,6 +551,24 @@ impl Elaborator<'_> {
             }
         };
         Ok(self.out.push_expr(expr))
+    }
+
+    /// Whether an `analysis(...)` call is active under v0's DC-only model: true if any
+    /// string argument names a DC/operating-point phase. Arguments must be string literals.
+    fn analysis_matches(&self, args: &[ExprRef]) -> Result<bool, FrontendError> {
+        const DC_PHASES: &[&str] = &["static", "dc", "ic", "nodeset"];
+        let mut matched = false;
+        for &a in args {
+            match self.ast.expr(a) {
+                ExprAst::Str(s) => matched |= DC_PHASES.contains(&s.as_str()),
+                _ => {
+                    return Err(elab(
+                        "`analysis` arguments must be string literals".to_string(),
+                    ))
+                }
+            }
+        }
+        Ok(matched)
     }
 
     fn lower_access(&mut self, access: &ast::Access) -> Result<Access, FrontendError> {
@@ -935,6 +962,28 @@ mod tests {
             }
             other => panic!("expected a contribution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn analysis_folds_to_dc_constant() {
+        // `analysis("static")` is true in DC → folds to 1.0; `analysis("tran")` → 0.0.
+        let m = elaborate_src(
+            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ analysis("static") ? 1.0 : 2.0; end endmodule"#,
+        );
+        // The selector folds to a constant 1.0 (no Call to `analysis` survives in the IR).
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 1.0)));
+
+        // A full end-to-end check: varistor's pattern `analysis("static") && expr` elaborates.
+        let m = elaborate_src(
+            r#"module t(a, b); electrical a, b; analog begin if (analysis("tran") && V(a, b) > 1.0) $strobe("hi"); I(a, b) <+ V(a, b); end endmodule"#,
+        );
+        assert!(m
+            .analog
+            .iter()
+            .any(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
     }
 
     #[test]
