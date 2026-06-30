@@ -189,6 +189,12 @@ pub struct CaseArm {
 pub enum Stmt {
     /// A `begin … end` block.
     Block(Vec<Stmt>),
+    /// A block-local variable declaration, `real x, y;` / `integer i;`. Carries no value; it
+    /// only introduces variable names (the base type is not retained).
+    VarDecl {
+        /// Declared variable names.
+        names: Vec<String>,
+    },
     /// A `<+` contribution: `target <+ value;`.
     Contribute {
         /// The access being contributed to.

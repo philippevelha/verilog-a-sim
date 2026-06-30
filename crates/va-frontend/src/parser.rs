@@ -391,6 +391,11 @@ impl Parser<'_> {
     fn parse_block_or_single(&mut self) -> Result<Vec<Stmt>, FrontendError> {
         if self.at(&Token::Begin) {
             self.pos += 1;
+            // An optional `: label` names the block (Verilog-A); the name is discarded.
+            if self.at(&Token::Colon) {
+                self.pos += 1;
+                self.expect_ident()?;
+            }
             let mut stmts = Vec::new();
             while !self.at(&Token::End) {
                 if self.peek().is_none() {
@@ -408,6 +413,13 @@ impl Parser<'_> {
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
         match self.peek() {
             Some(Token::Begin) => Ok(Stmt::Block(self.parse_block_or_single()?)),
+            // A block-local variable declaration, `real x, y;` / `integer i;`.
+            Some(Token::Real) | Some(Token::Integer) => {
+                self.pos += 1; // base type (not retained)
+                let names = self.ident_list()?;
+                self.eat(&Token::Semicolon)?;
+                Ok(Stmt::VarDecl { names })
+            }
             Some(Token::If) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
@@ -997,6 +1009,23 @@ mod tests {
         assert!(!range.lo_inclusive);
         assert!(range.hi_inclusive);
         assert!(range.exclude);
+    }
+
+    #[test]
+    fn named_block_with_local_var_decls() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin : blk real x, y; x = V(a, b); y = x; I(a, b) <+ y; end endmodule",
+        );
+        let body = analog_body(&m);
+        match &body[0] {
+            Stmt::VarDecl { names } => {
+                assert_eq!(names, &vec!["x".to_string(), "y".to_string()]);
+            }
+            other => panic!("expected a local declaration, got {other:?}"),
+        }
+        // The `: blk` label is consumed; the rest of the block parses normally.
+        assert!(matches!(body[1], Stmt::Assign { .. }));
+        assert!(matches!(body.last(), Some(Stmt::Contribute { .. })));
     }
 
     #[test]

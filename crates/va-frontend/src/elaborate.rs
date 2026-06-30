@@ -314,13 +314,23 @@ impl Elaborator<'_> {
         }
     }
 
+    /// Register `name` as a local variable unless it is already a parameter or known variable.
+    fn register_var(&mut self, name: &str) {
+        if !self.params.contains_key(name) && !self.vars.contains_key(name) {
+            let id = VarId(self.out.vars.len() as u32);
+            self.out.vars.push(VarDecl {
+                name: name.to_string(),
+            });
+            self.vars.insert(name.to_string(), id);
+        }
+    }
+
     fn collect_vars_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Assign { lhs, .. } => {
-                if !self.params.contains_key(lhs) && !self.vars.contains_key(lhs) {
-                    let id = VarId(self.out.vars.len() as u32);
-                    self.out.vars.push(VarDecl { name: lhs.clone() });
-                    self.vars.insert(lhs.clone(), id);
+            Stmt::Assign { lhs, .. } => self.register_var(lhs),
+            Stmt::VarDecl { names } => {
+                for name in names {
+                    self.register_var(name);
                 }
             }
             Stmt::Block(body) => body.iter().for_each(|s| self.collect_vars_stmt(s)),
@@ -380,6 +390,8 @@ impl Elaborator<'_> {
                 }
                 Ok(va_ir::Stmt::Block(out))
             }
+            // A declaration introduces a variable (registered in pass 3) but emits no code.
+            Stmt::VarDecl { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
             Stmt::Contribute { target, value } => {
                 let target = self.lower_access(target)?;
                 let value = self.lower_expr(*value)?;
@@ -570,6 +582,7 @@ fn collect_assign_targets(stmts: &[Stmt], out: &mut Vec<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Assign { lhs, .. } => out.push(lhs.clone()),
+            Stmt::VarDecl { names } => out.extend(names.iter().cloned()),
             Stmt::Block(body) => collect_assign_targets(body, out),
             Stmt::If { then_, else_, .. } => {
                 collect_assign_targets(then_, out);
@@ -842,6 +855,20 @@ mod tests {
         // No duplicate registration despite `q`/`v` also being assignment targets.
         assert_eq!(m.vars.iter().filter(|d| d.name == "q").count(), 1);
         assert_eq!(m.vars.iter().filter(|d| d.name == "v").count(), 1);
+    }
+
+    #[test]
+    fn block_local_variable_is_registered_and_lowered() {
+        // A named block with a local `real x;` declaration; `x` becomes an IR variable and
+        // the declaration lowers to a no-op (empty block).
+        let src = "module t(a, b); electrical a, b; analog begin : blk real x; x = V(a, b); I(a, b) <+ x; end endmodule";
+        let m = elaborate_src(src);
+        assert!(
+            m.vars.iter().any(|d| d.name == "x"),
+            "x should be a variable"
+        );
+        // The block lowers; the declaration contributes an empty block, not a statement error.
+        assert!(!m.analog.is_empty());
     }
 
     #[test]
