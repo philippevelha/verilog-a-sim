@@ -731,12 +731,13 @@ impl Parser<'_> {
             Some(Token::SysFunc(name)) => {
                 let name = name.clone();
                 self.pos += 1;
-                // v0 system functions ($vt, $temperature) take no arguments; tolerate `()`.
-                if self.at(&Token::LParen) {
-                    self.pos += 1;
-                    self.eat(&Token::RParen)?;
-                }
-                Ok(self.push(ExprAst::SysFunc(name)))
+                // `$vt`/`$temperature` take no args; `$simparam("name", default)` etc. do.
+                let args = if self.at(&Token::LParen) {
+                    self.parse_call_args()?
+                } else {
+                    Vec::new()
+                };
+                Ok(self.push(ExprAst::SysFunc { name, args }))
             }
             Some(Token::Str(s)) => {
                 let s = s.clone();
@@ -915,7 +916,7 @@ mod tests {
         assert!(m
             .exprs
             .iter()
-            .any(|e| matches!(e, ExprAst::SysFunc(s) if s == "vt")));
+            .any(|e| matches!(e, ExprAst::SysFunc { name, .. } if name == "vt")));
         // exp(...) call present.
         assert!(m
             .exprs

@@ -303,7 +303,7 @@ impl Elaborator<'_> {
                     self.const_eval(*else_)
                 }
             }
-            ExprAst::SysFunc(name) => Err(elab(format!(
+            ExprAst::SysFunc { name, .. } => Err(elab(format!(
                 "system function `${name}` is not constant in a parameter context"
             ))),
             ExprAst::Str(_) => Err(elab(
@@ -504,7 +504,24 @@ impl Elaborator<'_> {
                     return Err(elab(format!("unknown identifier `{name}`")));
                 }
             }
-            ExprAst::SysFunc(name) => Expr::Call(sysfunc_builtin(name)?, Vec::new()),
+            ExprAst::SysFunc { name, args } if name == "simparam" => {
+                // `$simparam(param_name [, default])`: the queried parameter is always unknown
+                // in v0 (no simulator parameter store), so the call returns the `default`
+                // expression. With no default, an unknown parameter is an error — matching the
+                // LRM, where `$simparam` errors on an unknown parameter when no default is
+                // given. The `param_name` (a string) is not evaluated.
+                match args.get(1) {
+                    Some(&default) => return self.lower_expr(default),
+                    None => {
+                        return Err(elab(
+                            "$simparam without a default: the parameter is unknown in v0 (no \
+                             simulator parameters)"
+                                .to_string(),
+                        ))
+                    }
+                }
+            }
+            ExprAst::SysFunc { name, .. } => Expr::Call(sysfunc_builtin(name)?, Vec::new()),
             ExprAst::Str(_) => {
                 return Err(elab(
                     "a string literal is only valid as a system-task argument".to_string(),
@@ -516,6 +533,16 @@ impl Elaborator<'_> {
                 // folds to a constant: true for the DC/operating-point phases.
                 let active = self.analysis_matches(args)?;
                 Expr::Const(if active { 1.0 } else { 0.0 })
+            }
+            // Small-signal noise sources contribute nothing to a DC operating point; fold to
+            // zero (their string label and arguments are not evaluated).
+            ExprAst::Call { name, .. }
+                if matches!(
+                    name.as_str(),
+                    "white_noise" | "flicker_noise" | "noise_table"
+                ) =>
+            {
+                Expr::Const(0.0)
             }
             ExprAst::Call { name, args } => {
                 let mut ids = Vec::with_capacity(args.len());
@@ -962,6 +989,33 @@ mod tests {
             }
             other => panic!("expected a contribution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn simparam_folds_to_default_and_noise_to_zero() {
+        // `$simparam("gmin", 1e-9)` folds to its default; `white_noise(...)` folds to 0 in DC.
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin", 1e-9) * V(a, b) + white_noise(1.0, "thermal"); end endmodule"#;
+        let m = elaborate_src(src);
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 1e-9)));
+        // No string literal survives into the IR (no Call to white_noise either).
+        assert!(m
+            .analog
+            .iter()
+            .any(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
+
+        // The default may be any expression, not just a constant.
+        let src = r#"module t(a, b); electrical a, b; parameter real g = 1e-3; analog begin I(a, b) <+ $simparam("gmin", g) * V(a, b); end endmodule"#;
+        let m = elaborate_src(src);
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Param(_))));
+
+        // `$simparam` with no default is an error (unknown parameter).
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin") * V(a, b); end endmodule"#;
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

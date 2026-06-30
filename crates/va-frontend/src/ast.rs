@@ -270,8 +270,14 @@ pub enum ExprAst {
     Number(f64),
     /// A bare identifier: a parameter or variable reference (resolved at elaboration).
     Ident(String),
-    /// A system function reference with the `$` stripped, e.g. `vt`, `temperature`.
-    SysFunc(String),
+    /// A system function call with the `$` stripped, e.g. `$vt`, `$temperature`,
+    /// `$simparam("gmin", 0)`. `args` is empty for the zero-argument forms.
+    SysFunc {
+        /// Name without the leading `$`.
+        name: String,
+        /// Argument expressions (may include string literals).
+        args: Vec<ExprRef>,
+    },
     /// A string literal, e.g. a `$strobe`/`analysis` argument. Has no numeric value; valid
     /// only where a string is expected (a system-task or analysis-style argument).
     Str(String),
