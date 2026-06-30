@@ -296,8 +296,9 @@ impl Parser<'_> {
         self.eat(&Token::Assign)?;
         let default = self.parse_expr()?;
 
-        let range = if self.at(&Token::From) || self.at(&Token::Exclude) {
-            let exclude = self.at(&Token::Exclude);
+        // An optional `from` range, then zero or more `exclude` clauses. Only the `from`
+        // range is retained (it sets min/max); exclusions are parsed and discarded in v0.
+        let range = if self.at(&Token::From) {
             self.pos += 1;
             // A bound may open with `[` (inclusive) or `(` (exclusive) and close with `]`
             // (inclusive) or `)` (exclusive), independently — e.g. `from [0:inf)`.
@@ -311,11 +312,14 @@ impl Parser<'_> {
                 hi,
                 lo_inclusive,
                 hi_inclusive,
-                exclude,
             })
         } else {
             None
         };
+        while self.at(&Token::Exclude) {
+            self.pos += 1;
+            self.skip_exclude_clause()?;
+        }
         self.eat(&Token::Semicolon)?;
         Ok(Item::Param {
             ty,
@@ -323,6 +327,21 @@ impl Parser<'_> {
             default,
             range,
         })
+    }
+
+    /// Parse and discard one `exclude` clause: either a range (`exclude (a:b)` / `[a:b]`) or a
+    /// single value (`exclude 0`). v0 does not enforce exclusions.
+    fn skip_exclude_clause(&mut self) -> Result<(), FrontendError> {
+        if self.at(&Token::LParen) || self.at(&Token::LBracket) {
+            self.open_bound()?;
+            self.parse_expr()?;
+            self.eat(&Token::Colon)?;
+            self.parse_expr()?;
+            self.close_bound()?;
+        } else {
+            self.parse_expr()?;
+        }
+        Ok(())
     }
 
     /// Parse an analog function definition:
@@ -1112,10 +1131,22 @@ mod tests {
             .expect("a range");
         assert!(range.lo_inclusive, "[ should be inclusive");
         assert!(!range.hi_inclusive, ") should be exclusive");
-        assert!(!range.exclude, "from-range, not exclude");
+    }
 
-        // `exclude (a:b]` — exclusive lower, inclusive upper.
-        let m = parse_src("module t(); parameter real X = 5 exclude (1:10]; endmodule");
+    #[test]
+    fn exclude_clauses_are_accepted() {
+        // Standalone single-value exclusion (`exclude 0`), no `from` range.
+        let m = parse_src("module t(); parameter real vj = 1.0 exclude 0; endmodule");
+        assert!(m.items.iter().any(|it| matches!(
+            it,
+            Item::Param { name, range, .. } if name == "vj" && range.is_none()
+        )));
+
+        // `from [..] exclude <value>` and a range-form exclusion both parse; the `from`
+        // range is retained.
+        let m = parse_src(
+            "module t(); parameter integer level = 1 from [1:4] exclude 3 exclude (10:20); endmodule",
+        );
         let range = m
             .items
             .iter()
@@ -1123,10 +1154,8 @@ mod tests {
                 Item::Param { range, .. } => range.clone(),
                 _ => None,
             })
-            .unwrap();
-        assert!(!range.lo_inclusive);
-        assert!(range.hi_inclusive);
-        assert!(range.exclude);
+            .expect("a from range");
+        assert!(range.lo_inclusive && range.hi_inclusive);
     }
 
     #[test]

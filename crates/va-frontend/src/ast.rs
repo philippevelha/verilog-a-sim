@@ -86,7 +86,10 @@ pub struct Access {
     pub args: Vec<String>,
 }
 
-/// A parameter value range, e.g. `from (0:inf)` or `exclude (a:b)`.
+/// A parameter's `from` value range, e.g. `from (0:inf)` or `from [0:c0)`.
+///
+/// `exclude` clauses (single values or ranges) are parsed but not represented here — v0 keeps
+/// only the `from` range, which sets the parameter's min/max.
 #[derive(Clone, Debug)]
 pub struct Range {
     /// Lower bound expression.
@@ -97,8 +100,6 @@ pub struct Range {
     pub lo_inclusive: bool,
     /// Whether the upper bound is inclusive (`]`) rather than exclusive (`)`).
     pub hi_inclusive: bool,
-    /// `true` for an `exclude` range, `false` for a `from` range.
-    pub exclude: bool,
 }
 
 /// A top-level item inside a module: a declaration or the analog block.
