@@ -19,6 +19,9 @@
 //! - Access functions are limited to `V` and `I`; other natures are out of scope for v0.
 //! - Analog functions retain argument directions and body only; argument/local *types*
 //!   (`real x;`) are parsed and discarded.
+//! - Event control `@(event) stmt` is parsed but the trigger is discarded — the controlled
+//!   statement runs unconditionally. This matches DC operating-point semantics (`initial_step`
+//!   setup runs once regardless); proper event scheduling is a transient-analysis concern.
 
 use crate::ast::{
     Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
@@ -92,6 +95,26 @@ impl Parser<'_> {
         } else {
             self.err(format!("expected `{name}`"))
         }
+    }
+
+    /// Consume tokens through the `)` matching an already-consumed `(`, honouring nesting.
+    /// Used to skip the contents of an `@(...)` event expression.
+    fn skip_balanced_parens(&mut self) -> Result<(), FrontendError> {
+        let mut depth = 1usize;
+        loop {
+            match self.bump() {
+                Some(Token::LParen) => depth += 1,
+                Some(Token::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        self.err("unterminated `@(...)` event expression".to_string())
     }
 
     fn err<T>(&self, what: String) -> Result<T, FrontendError> {
@@ -413,6 +436,15 @@ impl Parser<'_> {
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
         match self.peek() {
             Some(Token::Begin) => Ok(Stmt::Block(self.parse_block_or_single()?)),
+            // Event control `@(event) statement`. v0 discards the trigger and runs the
+            // controlled statement: correct for a DC operating point, where `initial_step`
+            // setup would run once anyway. (Proper event scheduling is a transient concern.)
+            Some(Token::At) => {
+                self.pos += 1;
+                self.eat(&Token::LParen)?;
+                self.skip_balanced_parens()?;
+                self.parse_stmt()
+            }
             // A block-local variable declaration, `real x, y;` / `integer i;`.
             Some(Token::Real) | Some(Token::Integer) => {
                 self.pos += 1; // base type (not retained)
@@ -1033,6 +1065,31 @@ mod tests {
         assert!(!range.lo_inclusive);
         assert!(range.hi_inclusive);
         assert!(range.exclude);
+    }
+
+    #[test]
+    fn event_control_runs_the_controlled_statement() {
+        // `@(initial_step) begin … end` — the trigger is discarded; the body survives.
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(initial_step) begin x = 1.0; end I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        // The event-controlled block becomes a plain block of one assignment.
+        match &body[0] {
+            Stmt::Block(inner) => assert!(matches!(inner[0], Stmt::Assign { .. })),
+            other => panic!("expected the controlled block, got {other:?}"),
+        }
+        assert!(matches!(body[1], Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn event_control_with_nested_parens_in_trigger() {
+        // `@(cross(V(a,b) - 1.0, +1))` — nested parens in the event are skipped.
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(cross(V(a, b) - 1.0, 1)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        assert!(matches!(body[0], Stmt::Assign { .. }));
     }
 
     #[test]

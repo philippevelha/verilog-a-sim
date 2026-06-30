@@ -349,6 +349,9 @@ pub enum Token {
     /// `]` — closes an inclusive parameter range bound.
     #[token("]")]
     RBracket,
+    /// `@` — opens an event-control expression, `@(initial_step)`.
+    #[token("@")]
+    At,
     /// `,`.
     #[token(",")]
     Comma,
@@ -547,6 +550,19 @@ mod tests {
                 "`{word}` must not lex as an identifier"
             );
         }
+    }
+
+    #[test]
+    fn at_sign_lexes() {
+        assert_eq!(
+            lex_ok("@(initial_step)"),
+            vec![
+                Token::At,
+                Token::LParen,
+                Token::Keyword(crate::keywords::Keyword::from_ident("initial_step").unwrap()),
+                Token::RParen,
+            ]
+        );
     }
 
     #[test]
