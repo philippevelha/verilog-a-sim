@@ -41,7 +41,9 @@ fn print_usage() {
 /// The `sim` subcommand: run a netlist through the pipeline.
 fn cmd_sim(args: &[String]) -> Result<()> {
     let netlist = args.first().context("expected a netlist path")?;
-    let model = parse_flag(args, "--model").context("expected --model <model.va>")?;
+    // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
+    // models, so a Verilog-A model is only needed for custom devices.
+    let model = parse_flag(args, "--model");
     let analysis = if args.iter().any(|a| a == "--tran") {
         Analysis::Transient
     } else if args.iter().any(|a| a == "--ac") {
@@ -50,8 +52,11 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         Analysis::Dc
     };
 
-    eprintln!("[va-cli] sim netlist={netlist} model={model} analysis={analysis:?}");
-    run_sim(netlist, &model, analysis)
+    eprintln!(
+        "[va-cli] sim netlist={netlist} model={} analysis={analysis:?}",
+        model.as_deref().unwrap_or("<none>")
+    );
+    run_sim(netlist, model.as_deref(), analysis)
 }
 
 /// Pull the value following `flag` out of `args`.
