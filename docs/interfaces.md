@@ -29,17 +29,19 @@ pub struct Module {
     pub nodes: Vec<NodeDecl>,
     pub branches: Vec<Branch>,
     pub params: Vec<Param>,
-    pub exprs: Vec<Expr>,   // arena
-    pub analog: Vec<Stmt>,  // top-level analog block
+    pub exprs: Vec<Expr>,         // arena
+    pub functions: Vec<Function>, // user-defined analog functions
+    pub analog: Vec<Stmt>,        // top-level analog block
 }
 
 pub enum Expr {
     Const(f64),
     Param(ParamId),
-    Probe(Access),               // V(b) or I(b)
+    Probe(Access),                 // V(b) or I(b)
     Unary(UnOp, ExprId),
     Binary(BinOp, ExprId, ExprId),
-    Call(Builtin, Vec<ExprId>),  // exp, ln, ddt, idt, $vt, $temperature, ...
+    Call(Builtin, Vec<ExprId>),    // exp, ln, ddt, idt, $vt, $temperature, ...
+    CallUser(FuncId, Vec<ExprId>), // user-defined analog function call
 }
 
 pub enum Stmt {
@@ -47,11 +49,25 @@ pub enum Stmt {
     If { cond: ExprId, then_: Vec<Stmt>, else_: Vec<Stmt> },
     Assign { lhs: VarId, rhs: ExprId },
     Block(Vec<Stmt>),
+    While { cond: ExprId, body: Vec<Stmt> },
+    For { init: Box<Stmt>, cond: ExprId, step: Box<Stmt>, body: Vec<Stmt> },
+    Repeat { count: ExprId, body: Vec<Stmt> },
+    Case { selector: ExprId, arms: Vec<CaseArm>, default: Vec<Stmt> },
 }
+
+// CaseArm { labels: Vec<ExprId>, body: Vec<Stmt> }
+// Function { name: String, args: Vec<VarId>, ret: VarId, body: Vec<Stmt> }
 ```
 
-The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `Discipline`, `AccessKind`,
-helper methods) without restructuring the contract.
+The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discipline`,
+`AccessKind`, helper methods) without restructuring the contract.
+
+> **Revision (§6 change, 2026-06-30):** added the analog control-flow statements (`While`,
+> `For`, `Repeat`, `Case` + `CaseArm`) and user-defined analog functions (`Module.functions`,
+> `Function`, `Expr::CallUser`, `FuncId`). The frontend lowers all of them; `va-codegen` v0
+> still rejects them during its own lowering (stub adapters), so the workspace keeps
+> compiling. The `Box<Stmt>` in `For` is a finite-size tree node, not a shared graph, so it
+> respects the §5 arena rule.
 
 ## Interface β — model instance ABI (`va-abi`)
 

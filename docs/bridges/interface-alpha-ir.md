@@ -2,6 +2,10 @@
 
 > Status: **draft**, describing the **frozen v0** types in `crates/va-ir/src/lib.rs`.
 > Type sketch of record: [`../interfaces.md` §α](../interfaces.md). Changes follow §6.
+>
+> Revised 2026-06-30 (§6): added analog control-flow statements (`While`/`For`/`Repeat`/
+> `Case`) and user-defined analog functions (`Function`, `Expr::CallUser`, `Module.functions`,
+> `FuncId`). Lowered by `va-frontend`; rejected (stub adapters) by `va-codegen` v0.
 
 ## 1. Role
 
@@ -34,27 +38,33 @@ defeat the point of the leaf crate.
 ## 3. The contract
 
 The authoritative definition is `crates/va-ir/src/lib.rs`. The shipped types flesh out the
-§4 sketch (adding `VarId`, `VarDecl`, `Discipline`, `AccessKind`, and arena helpers) without
-restructuring it. The shape:
+§4 sketch (adding `VarId`, `VarDecl`, `FuncId`, `Discipline`, `AccessKind`, and arena
+helpers) without restructuring it. The shape:
 
 ```
 Module
-├── name:     String
-├── ports:    Vec<NodeId>          // indices into nodes, in declaration order
-├── nodes:    Vec<NodeDecl>        // { name, discipline }
-├── branches: Vec<Branch>          // { p: NodeId, n: NodeId }
-├── params:   Vec<Param>           // { name, default, min?, max? }
-├── vars:     Vec<VarDecl>         // local analog variables
-├── exprs:    Vec<Expr>            // the expression ARENA
-└── analog:   Vec<Stmt>            // the top-level analog block (flat list)
+├── name:      String
+├── ports:     Vec<NodeId>          // indices into nodes, in declaration order
+├── nodes:     Vec<NodeDecl>        // { name, discipline }
+├── branches:  Vec<Branch>          // { p: NodeId, n: NodeId }
+├── params:    Vec<Param>           // { name, default, min?, max? }
+├── vars:      Vec<VarDecl>         // local analog variables (incl. function args/locals)
+├── exprs:     Vec<Expr>            // the expression ARENA
+├── functions: Vec<Function>        // user-defined analog functions
+└── analog:    Vec<Stmt>            // the top-level analog block (flat list)
 ```
 
-- **Handles** (`NodeId`, `ParamId`, `ExprId`, `BranchId`, `VarId`) are `Copy` newtypes over
-  `u32`. They are positions in the correspondingly-named `Vec`.
+- **Handles** (`NodeId`, `ParamId`, `ExprId`, `BranchId`, `VarId`, `FuncId`) are `Copy`
+  newtypes over `u32`. They are positions in the correspondingly-named `Vec`.
 - **`Expr`** is an arena node: `Const`, `Param`, `Var`, `Probe(Access)`, `Unary`, `Binary`,
-  `Call(Builtin, …)`. Children are `ExprId`s — never `Box`, never `&`.
-- **`Stmt`** is `Contribute { target, value }` (`<+`), `If`, `Assign { lhs, rhs }`, `Block`.
-  Control flow nests via owned `Vec<Stmt>`, which is still arena-friendly (no shared refs).
+  `Call(Builtin, …)`, `CallUser(FuncId, …)`. Children are `ExprId`s — never `Box`, never `&`.
+- **`Stmt`** is `Contribute { target, value }` (`<+`), `If`, `Assign { lhs, rhs }`, `Block`,
+  and the analog control-flow forms `While`, `For`, `Repeat`, `Case` (with `CaseArm`).
+  Control flow nests via owned `Vec<Stmt>`; `For` boxes its single `init`/`step` statements
+  (a finite-size tree node, not a shared graph), so the §5 arena rule still holds.
+- **`Function`** = `{ name, args: Vec<VarId>, ret: VarId, body: Vec<Stmt> }`. A function's
+  arguments, return variable, and locals all live in `Module.vars`; `CallUser` binds the
+  argument expressions positionally to `args`.
 - **`Access`** = `{ kind: AccessKind, branch: BranchId }`, where `AccessKind` is `Potential`
   (`V(b)`) or `Flow` (`I(b)`). It is used both as a probe (`Expr::Probe`) and as a
   contribution target (`Stmt::Contribute`).
@@ -89,6 +99,10 @@ consumer may rely on them without re-checking.
 9. **`Builtin` arity is correct.** Each `Call` carries exactly the argument count its
    `Builtin` requires (e.g. `Exp`/`Ln`/`Sqrt`/`Ddt`/`Idt` take 1; `Pow` takes 2; `Vt`/
    `Temperature` take 0).
+10. **`CallUser` is well-formed.** Every `FuncId` is `< functions.len()`, and the argument
+    count equals the callee's `args.len()`. A function's `args`/`ret`/local `VarId`s are valid
+    indices into `vars`. Functions are pure and non-recursive (no `CallUser` to itself or a
+    cycle); the frontend resolves calls in source order, so the call graph is a DAG.
 
 > These invariants are the draft acceptance criteria for `va-frontend`'s elaboration output
 > and should become a `va-ir::validate(&Module) -> Result<(), IrError>` checker (open item,

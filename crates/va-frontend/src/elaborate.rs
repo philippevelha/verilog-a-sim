@@ -21,14 +21,20 @@
 //!   distinct branches rather than sign-related aliases.
 //! - Range bounds are mapped to `Param::min`/`max` losing the inclusive/exclusive
 //!   distinction; an infinite bound becomes `None` (unbounded).
+//! - `while`/`for`/`repeat`/`case` control flow and `analog function` definitions are lowered
+//!   into the corresponding [`va_ir`] nodes. Functions are lowered in source order against
+//!   their own variable scope (arguments + return variable + locals) and may read module
+//!   parameters; forward references to a function defined later in source are unsupported and
+//!   resolve as an unknown function. Note that back-ends need not consume these yet —
+//!   `va-codegen` v0 still rejects them during its own lowering.
 
 use std::collections::HashMap;
 
 use crate::ast::{self, ExprAst, ExprRef, Item, ModuleAst, Stmt};
 use crate::FrontendError;
 use va_ir::{
-    Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, ExprId, Module, NodeDecl,
-    NodeId, Param, ParamId, VarDecl, VarId,
+    Access, AccessKind, Branch, BranchId, Builtin, CaseArm, Discipline, Expr, ExprId, FuncId,
+    Function, Module, NodeDecl, NodeId, Param, ParamId, VarDecl, VarId,
 };
 
 /// Elaborate a parsed module into the IR.
@@ -45,6 +51,7 @@ pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
         params: HashMap::new(),
         param_vals: HashMap::new(),
         vars: HashMap::new(),
+        funcs: HashMap::new(),
         branches: HashMap::new(),
         ground: None,
     };
@@ -58,7 +65,10 @@ struct Elaborator<'a> {
     nodes: HashMap<String, NodeId>,
     params: HashMap<String, ParamId>,
     param_vals: HashMap<String, f64>,
+    /// The variable name → id scope currently in effect. Holds module analog variables while
+    /// lowering the analog block, and a function's local scope while lowering that function.
     vars: HashMap<String, VarId>,
+    funcs: HashMap<String, FuncId>,
     branches: HashMap<(u32, u32), BranchId>,
     ground: Option<NodeId>,
 }
@@ -68,8 +78,74 @@ impl Elaborator<'_> {
         self.collect_nodes()?;
         self.resolve_ports()?;
         self.collect_params()?;
+        self.collect_functions()?;
         self.collect_vars();
         self.lower_analog()?;
+        Ok(())
+    }
+
+    /// Push a fresh local variable and return its id.
+    fn new_var(&mut self, name: &str) -> VarId {
+        let id = VarId(self.out.vars.len() as u32);
+        self.out.vars.push(VarDecl {
+            name: name.to_string(),
+        });
+        id
+    }
+
+    // --- pass: analog functions ------------------------------------------------------
+
+    /// Lower each `analog function` definition into a [`Function`]. Functions are lowered in
+    /// source order against their own variable scope (arguments, return variable, and locals);
+    /// they may read module parameters but not module analog variables. A call to a function
+    /// defined later in source resolves as unknown (forward references are unsupported in v0).
+    fn collect_functions(&mut self) -> Result<(), FrontendError> {
+        let ast = self.ast;
+        for item in &ast.items {
+            let f = match item {
+                Item::Function(f) => f,
+                _ => continue,
+            };
+            // Build the function-local scope: return variable, arguments, then any locals
+            // discovered as assignment targets in the body.
+            let mut local: HashMap<String, VarId> = HashMap::new();
+            let ret = self.new_var(&f.name);
+            local.insert(f.name.clone(), ret);
+
+            let mut args = Vec::with_capacity(f.args.len());
+            for a in &f.args {
+                let id = self.new_var(&a.name);
+                local.insert(a.name.clone(), id);
+                args.push(id);
+            }
+
+            let mut targets = Vec::new();
+            collect_assign_targets(&f.body, &mut targets);
+            for name in targets {
+                if let std::collections::hash_map::Entry::Vacant(slot) = local.entry(name) {
+                    let id = VarId(self.out.vars.len() as u32);
+                    self.out.vars.push(VarDecl {
+                        name: slot.key().clone(),
+                    });
+                    slot.insert(id);
+                }
+            }
+
+            // Lower the body with the function scope swapped in, then restore.
+            let saved = std::mem::replace(&mut self.vars, local);
+            let body = self.lower_stmts(&f.body);
+            self.vars = saved;
+            let body = body?;
+
+            let fid = FuncId(self.out.functions.len() as u32);
+            self.out.functions.push(Function {
+                name: f.name.clone(),
+                args,
+                ret,
+                body,
+            });
+            self.funcs.insert(f.name.clone(), fid);
+        }
         Ok(())
     }
 
@@ -207,6 +283,24 @@ impl Elaborator<'_> {
                 then_.iter().for_each(|s| self.collect_vars_stmt(s));
                 else_.iter().for_each(|s| self.collect_vars_stmt(s));
             }
+            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                body.iter().for_each(|s| self.collect_vars_stmt(s));
+            }
+            Stmt::For {
+                init, step, body, ..
+            } => {
+                self.collect_vars_stmt(init);
+                self.collect_vars_stmt(step);
+                body.iter().for_each(|s| self.collect_vars_stmt(s));
+            }
+            Stmt::Case { arms, default, .. } => {
+                for arm in arms {
+                    arm.body.iter().for_each(|s| self.collect_vars_stmt(s));
+                }
+                if let Some(body) = default {
+                    body.iter().for_each(|s| self.collect_vars_stmt(s));
+                }
+            }
             Stmt::Contribute { .. } => {}
         }
     }
@@ -260,6 +354,58 @@ impl Elaborator<'_> {
                 let else_ = self.lower_stmts(else_)?;
                 Ok(va_ir::Stmt::If { cond, then_, else_ })
             }
+            Stmt::While { cond, body } => {
+                let cond = self.lower_expr(*cond)?;
+                let body = self.lower_stmts(body)?;
+                Ok(va_ir::Stmt::While { cond, body })
+            }
+            Stmt::Repeat { count, body } => {
+                let count = self.lower_expr(*count)?;
+                let body = self.lower_stmts(body)?;
+                Ok(va_ir::Stmt::Repeat { count, body })
+            }
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                let init = Box::new(self.lower_stmt(init)?);
+                let cond = self.lower_expr(*cond)?;
+                let step = Box::new(self.lower_stmt(step)?);
+                let body = self.lower_stmts(body)?;
+                Ok(va_ir::Stmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                })
+            }
+            Stmt::Case {
+                selector,
+                arms,
+                default,
+            } => {
+                let selector = self.lower_expr(*selector)?;
+                let mut ir_arms = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let mut labels = Vec::with_capacity(arm.labels.len());
+                    for &l in &arm.labels {
+                        labels.push(self.lower_expr(l)?);
+                    }
+                    let body = self.lower_stmts(&arm.body)?;
+                    ir_arms.push(CaseArm { labels, body });
+                }
+                let default = match default {
+                    Some(b) => self.lower_stmts(b)?,
+                    None => Vec::new(),
+                };
+                Ok(va_ir::Stmt::Case {
+                    selector,
+                    arms: ir_arms,
+                    default,
+                })
+            }
         }
     }
 
@@ -289,12 +435,16 @@ impl Elaborator<'_> {
             ExprAst::SysFunc(name) => Expr::Call(sysfunc_builtin(name)?, Vec::new()),
             ExprAst::Probe(access) => Expr::Probe(self.lower_access(access)?),
             ExprAst::Call { name, args } => {
-                let builtin = call_builtin(name)?;
                 let mut ids = Vec::with_capacity(args.len());
                 for &a in args {
                     ids.push(self.lower_expr(a)?);
                 }
-                Expr::Call(builtin, ids)
+                // A user-defined function takes precedence over the built-in table.
+                if let Some(fid) = self.funcs.get(name).copied() {
+                    Expr::CallUser(fid, ids)
+                } else {
+                    Expr::Call(call_builtin(name)?, ids)
+                }
             }
             ExprAst::Unary(op, e) => {
                 let inner = self.lower_expr(*e)?;
@@ -361,6 +511,40 @@ impl Elaborator<'_> {
 
 fn elab(msg: String) -> FrontendError {
     FrontendError::Elaborate(msg)
+}
+
+/// Collect every assignment-target name in a statement list (recursing through control flow),
+/// used to discover a function's local variables before lowering its body.
+fn collect_assign_targets(stmts: &[Stmt], out: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { lhs, .. } => out.push(lhs.clone()),
+            Stmt::Block(body) => collect_assign_targets(body, out),
+            Stmt::If { then_, else_, .. } => {
+                collect_assign_targets(then_, out);
+                collect_assign_targets(else_, out);
+            }
+            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                collect_assign_targets(body, out)
+            }
+            Stmt::For {
+                init, step, body, ..
+            } => {
+                collect_assign_targets(std::slice::from_ref(&**init), out);
+                collect_assign_targets(std::slice::from_ref(&**step), out);
+                collect_assign_targets(body, out);
+            }
+            Stmt::Case { arms, default, .. } => {
+                for arm in arms {
+                    collect_assign_targets(&arm.body, out);
+                }
+                if let Some(body) = default {
+                    collect_assign_targets(body, out);
+                }
+            }
+            Stmt::Contribute { .. } => {}
+        }
+    }
 }
 
 fn bool_to_f64(b: bool) -> f64 {
@@ -554,6 +738,65 @@ mod tests {
         let ast = parse(&toks).expect("parse");
         let err = elaborate(&ast).unwrap_err();
         assert!(matches!(err, FrontendError::Elaborate(_)));
+    }
+
+    #[test]
+    fn for_loop_lowers_to_ir() {
+        // `for`/`while`/`repeat`/`case` now lower into the corresponding IR nodes.
+        let src = "module t(); electrical a; analog begin for (i = 0; i < 3; i = i + 1) I(a) <+ 1.0; end endmodule";
+        let m = elaborate_src(src);
+        match &m.analog[0] {
+            va_ir::Stmt::For {
+                init, step, body, ..
+            } => {
+                assert!(matches!(**init, va_ir::Stmt::Assign { .. }));
+                assert!(matches!(**step, va_ir::Stmt::Assign { .. }));
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("expected a lowered for-loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn case_lowers_with_arms_and_default() {
+        let src = "module t(); parameter real sel = 1.0; electrical a; analog begin case (sel) 0: I(a) <+ 1.0; default: I(a) <+ 0.0; endcase end endmodule";
+        let m = elaborate_src(src);
+        match &m.analog[0] {
+            va_ir::Stmt::Case { arms, default, .. } => {
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].labels.len(), 1);
+                assert_eq!(default.len(), 1);
+            }
+            other => panic!("expected a lowered case, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analog_function_lowers_and_call_resolves() {
+        // The function lowers to a Function node; a call to it lowers to Expr::CallUser.
+        let src = "module t(p, n); electrical p, n; analog function real sq; input x; real x; sq = x * x; endfunction analog begin I(p, n) <+ sq(V(p, n)); end endmodule";
+        let m = elaborate_src(src);
+        assert_eq!(m.functions.len(), 1);
+        let f = &m.functions[0];
+        assert_eq!(f.name, "sq");
+        assert_eq!(f.args.len(), 1);
+        // The function body assigns to its return variable.
+        assert!(matches!(f.body[0], va_ir::Stmt::Assign { lhs, .. } if lhs == f.ret));
+        // The analog block calls it via CallUser.
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::CallUser(va_ir::FuncId(0), _))));
+    }
+
+    #[test]
+    fn unknown_function_call_is_rejected() {
+        // A call to a name that is neither a built-in nor a user function is an error.
+        let src =
+            "module t(p, n); electrical p, n; analog begin I(p, n) <+ nope(V(p, n)); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

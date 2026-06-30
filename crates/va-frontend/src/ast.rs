@@ -131,6 +131,43 @@ pub enum Item {
     },
     /// The `analog` block (always normalised to a [`Stmt::Block`]).
     Analog(Stmt),
+    /// An analog function definition, `analog function real f; … endfunction`.
+    Function(AnalogFunction),
+}
+
+/// A user-defined analog function (`analog function`).
+///
+/// The function name doubles as the return variable inside the body, per Verilog-A. Argument
+/// *types* (`real x;` declarations inside the body) are consumed but not tracked in v0; only
+/// the argument directions and the body statements are retained.
+#[derive(Clone, Debug)]
+pub struct AnalogFunction {
+    /// Function name (and implicit return variable).
+    pub name: String,
+    /// Declared return base type (defaults to [`ParamType::Real`]).
+    pub ret_ty: ParamType,
+    /// Formal arguments, in declaration order.
+    pub args: Vec<FuncArg>,
+    /// Body statements.
+    pub body: Vec<Stmt>,
+}
+
+/// A formal argument of an [`AnalogFunction`].
+#[derive(Clone, Debug)]
+pub struct FuncArg {
+    /// Argument direction (`input`/`output`/`inout`).
+    pub dir: Direction,
+    /// Argument name.
+    pub name: String,
+}
+
+/// One arm of a [`Stmt::Case`].
+#[derive(Clone, Debug)]
+pub struct CaseArm {
+    /// Label expressions; an arm may list several (`1, 2, 3:`).
+    pub labels: Vec<ExprRef>,
+    /// Statements executed when a label matches.
+    pub body: Vec<Stmt>,
 }
 
 /// An analog statement.
@@ -160,6 +197,40 @@ pub enum Stmt {
         then_: Vec<Stmt>,
         /// `else` arm (empty when absent).
         else_: Vec<Stmt>,
+    },
+    /// `while (cond) body`.
+    While {
+        /// Loop condition.
+        cond: ExprRef,
+        /// Loop body.
+        body: Vec<Stmt>,
+    },
+    /// `for (init; cond; step) body`. `init`/`step` are single (assignment) statements.
+    For {
+        /// Initialiser statement.
+        init: Box<Stmt>,
+        /// Loop condition.
+        cond: ExprRef,
+        /// Step statement, run after each iteration.
+        step: Box<Stmt>,
+        /// Loop body.
+        body: Vec<Stmt>,
+    },
+    /// `repeat (count) body`.
+    Repeat {
+        /// Iteration count expression.
+        count: ExprRef,
+        /// Loop body.
+        body: Vec<Stmt>,
+    },
+    /// `case (selector) arms… [default: …] endcase`.
+    Case {
+        /// The value being switched on.
+        selector: ExprRef,
+        /// Labelled arms, in source order.
+        arms: Vec<CaseArm>,
+        /// The `default` arm, if present.
+        default: Option<Vec<Stmt>>,
     },
 }
 

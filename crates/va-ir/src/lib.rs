@@ -14,8 +14,14 @@
 //! # Limitations
 //!
 //! This is the v0 contract. It models a single module with electrical/thermal disciplines,
-//! `<+` contributions, `ddt`/`idt`, `if/else`, analog functions, and ranged parameters.
-//! Multi-module hierarchy, generate loops, and the full LRM are explicitly out of scope.
+//! `<+` contributions, `ddt`/`idt`, ranged parameters, the full set of analog control-flow
+//! statements (`if`/`else`, `while`, `for`, `repeat`, `case`), and user-defined analog
+//! functions ([`Function`], [`Expr::CallUser`]). Multi-module hierarchy, generate loops, and
+//! the full LRM are explicitly out of scope.
+//!
+//! Note that *modeling* a construct in the IR does not imply every back-end consumes it yet:
+//! `va-codegen` v0, for example, still rejects loops/case/user-functions during its own
+//! lowering. Adding IR nodes is the contract change (§6); back-end support follows per crate.
 
 #![forbid(unsafe_code)]
 
@@ -43,6 +49,10 @@ pub struct BranchId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct VarId(pub u32);
 
+/// Index of a user-defined analog function within [`Module::functions`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FuncId(pub u32);
+
 // ---------------------------------------------------------------------------------------
 // Module — the top-level elaborated unit.
 // ---------------------------------------------------------------------------------------
@@ -62,8 +72,11 @@ pub struct Module {
     pub params: Vec<Param>,
     /// Expression arena. [`ExprId`]s index into this `Vec`.
     pub exprs: Vec<Expr>,
-    /// Local analog variables referenced by [`VarId`].
+    /// Local analog variables referenced by [`VarId`]. Function arguments and locals share
+    /// this arena; the owning [`Function`] records which [`VarId`]s are its arguments/return.
     pub vars: Vec<VarDecl>,
+    /// User-defined analog functions referenced by [`FuncId`] (see [`Expr::CallUser`]).
+    pub functions: Vec<Function>,
     /// The top-level `analog` block, as a flat statement list.
     pub analog: Vec<Stmt>,
 }
@@ -183,6 +196,9 @@ pub enum Expr {
     Binary(BinOp, ExprId, ExprId),
     /// Built-in / system function call: `exp`, `ln`, `ddt`, `idt`, `$vt`, `$temperature`…
     Call(Builtin, Vec<ExprId>),
+    /// A call to a user-defined analog function ([`Module::functions`]), with one argument
+    /// expression per the function's declared inputs.
+    CallUser(FuncId, Vec<ExprId>),
 }
 
 /// Unary operators.
@@ -264,6 +280,51 @@ pub enum Stmt {
     Assign { lhs: VarId, rhs: ExprId },
     /// A `begin … end` block.
     Block(Vec<Stmt>),
+    /// `while (cond) { body }`.
+    While { cond: ExprId, body: Vec<Stmt> },
+    /// `for (init; cond; step) { body }`. `init`/`step` are single statements (usually
+    /// [`Stmt::Assign`]); boxed so the recursive `Stmt` has a finite size.
+    For {
+        init: Box<Stmt>,
+        cond: ExprId,
+        step: Box<Stmt>,
+        body: Vec<Stmt>,
+    },
+    /// `repeat (count) { body }`.
+    Repeat { count: ExprId, body: Vec<Stmt> },
+    /// `case (selector) { arms… } [default]`. `default` is empty when no default arm exists.
+    Case {
+        selector: ExprId,
+        arms: Vec<CaseArm>,
+        default: Vec<Stmt>,
+    },
+}
+
+/// One arm of a [`Stmt::Case`]: a set of label expressions and the body they select.
+#[derive(Clone, Debug)]
+pub struct CaseArm {
+    /// Label expressions compared against the selector (`1, 2, 3:` lists several).
+    pub labels: Vec<ExprId>,
+    /// Statements executed when a label matches.
+    pub body: Vec<Stmt>,
+}
+
+/// A user-defined analog function (`analog function`).
+///
+/// Verilog-A analog functions are pure and non-recursive. The function name doubles as the
+/// return variable in source; here [`Self::ret`] names that variable. Arguments and locals
+/// live in [`Module::vars`]; [`Self::args`] lists the arguments in declaration order, bound
+/// positionally from a [`Expr::CallUser`]'s argument expressions.
+#[derive(Clone, Debug)]
+pub struct Function {
+    /// Function name as written in source.
+    pub name: String,
+    /// Argument variables, in declaration order.
+    pub args: Vec<VarId>,
+    /// The return variable (named after the function in source).
+    pub ret: VarId,
+    /// Body statements; they assign to `ret`/locals and read `args`.
+    pub body: Vec<Stmt>,
 }
 
 #[cfg(test)]
@@ -284,5 +345,46 @@ mod tests {
             _ => panic!("expected a binary add"),
         }
         assert_eq!(m.exprs.len(), 3);
+    }
+
+    #[test]
+    fn control_flow_and_function_nodes() {
+        let mut m = Module::new("ctrl");
+        // A user function `sq(x)` with body `sq = x * x`.
+        let x = VarId(m.vars.len() as u32);
+        m.vars.push(VarDecl { name: "x".into() });
+        let sq = VarId(m.vars.len() as u32);
+        m.vars.push(VarDecl { name: "sq".into() });
+        let xe = m.push_expr(Expr::Var(x));
+        let body_rhs = m.push_expr(Expr::Binary(BinOp::Mul, xe, xe));
+        m.functions.push(Function {
+            name: "sq".into(),
+            args: vec![x],
+            ret: sq,
+            body: vec![Stmt::Assign {
+                lhs: sq,
+                rhs: body_rhs,
+            }],
+        });
+        let fid = FuncId(0);
+
+        // A `case` whose default calls the function.
+        let sel = m.push_expr(Expr::Const(1.0));
+        let label = m.push_expr(Expr::Const(0.0));
+        let arg = m.push_expr(Expr::Const(2.0));
+        let call = m.push_expr(Expr::CallUser(fid, vec![arg]));
+        let stmt = Stmt::Case {
+            selector: sel,
+            arms: vec![CaseArm {
+                labels: vec![label],
+                body: vec![Stmt::Assign { lhs: sq, rhs: call }],
+            }],
+            default: Vec::new(),
+        };
+        m.analog.push(stmt);
+
+        assert_eq!(m.functions.len(), 1);
+        assert!(matches!(m.expr(call), Expr::CallUser(FuncId(0), _)));
+        assert!(matches!(m.analog[0], Stmt::Case { .. }));
     }
 }

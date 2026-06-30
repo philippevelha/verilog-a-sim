@@ -13,7 +13,9 @@
 //! - `ddt` is recognised only as a top-level additive term (optionally negated), matching how
 //!   compact models are written (`I <+ resistive + ddt(charge)`); `ddt` nested inside a
 //!   nonlinear function is rejected later by the AD evaluator.
-//! - `if`/`else` and local-variable assignments in the analog block are not yet lowered.
+//! - `if`/`else`, local-variable assignments, loops/`case`, and user-defined analog functions
+//!   in the analog block are not yet lowered. The IR (Interface α) models these, but codegen
+//!   v0 rejects them with [`CodegenError::Unsupported`].
 
 use crate::CodegenError;
 use va_ir::{AccessKind, BinOp, Builtin, Expr, ExprId, Module, Stmt, UnOp};
@@ -118,6 +120,9 @@ fn lower_stmt(
         Stmt::Assign { .. } => Err(unsupported(
             "local variable assignments are not supported in codegen v0",
         )),
+        Stmt::While { .. } | Stmt::For { .. } | Stmt::Repeat { .. } | Stmt::Case { .. } => Err(
+            unsupported("loops and case statements are not supported in codegen v0"),
+        ),
     }
 }
 

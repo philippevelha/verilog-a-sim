@@ -237,6 +237,9 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             })
         }
         Expr::Call(builtin, args) => eval_call(ctx, *builtin, args),
+        Expr::CallUser(..) => Err(unsupported(
+            "user-defined analog functions are not supported in codegen v0",
+        )),
     }
 }
 

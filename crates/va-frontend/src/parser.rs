@@ -4,6 +4,11 @@
 //! expression parser. It parses exactly one `module`. Compiler directives (`` `include ``)
 //! are skipped — v0 has no preprocessor.
 //!
+//! Beyond `if`/`else`, the parser accepts the analog control-flow statements `while`, `for`,
+//! `repeat`, and `case`, and `analog function` definitions. These are surfaced in the AST but
+//! cannot yet be lowered into the frozen v0 IR (only `if`/`else` and module-level statements
+//! are lowered); elaboration rejects them with a clear error. See [`crate::elaborate`].
+//!
 //! # Limitations
 //!
 //! - Errors are reported by token index, not source byte offset: the lexer discards spans
@@ -11,10 +16,12 @@
 //! - Parameter ranges accept only parenthesised `( … : … )` bounds; bracketed inclusive
 //!   bounds (`[ … ]`) are not yet lexed and so cannot be parsed.
 //! - Access functions are limited to `V` and `I`; other natures are out of scope for v0.
+//! - Analog functions retain argument directions and body only; argument/local *types*
+//!   (`real x;`) are parsed and discarded.
 
 use crate::ast::{
-    Access, AccessKind, BinOp, Direction, Discipline, ExprAst, ExprRef, Item, ModuleAst, ParamType,
-    Range, Stmt, UnOp,
+    Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
+    FuncArg, Item, ModuleAst, ParamType, Range, Stmt, UnOp,
 };
 use crate::lexer::Token;
 use crate::FrontendError;
@@ -68,6 +75,21 @@ impl Parser<'_> {
             Ok(())
         } else {
             self.err(format!("expected {t:?}"))
+        }
+    }
+
+    /// Whether the cursor is on the reserved word `name` (a [`Token::Keyword`]).
+    fn at_keyword(&self, name: &str) -> bool {
+        matches!(self.peek(), Some(Token::Keyword(kw)) if kw.as_str() == name)
+    }
+
+    /// Consume the reserved word `name`, or error.
+    fn eat_keyword(&mut self, name: &str) -> Result<(), FrontendError> {
+        if self.at_keyword(name) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            self.err(format!("expected `{name}`"))
         }
     }
 
@@ -180,6 +202,10 @@ impl Parser<'_> {
                 Ok(Item::Net { discipline, nets })
             }
             Some(Token::Parameter) => self.parse_param(),
+            // `analog function …` is a function definition; a bare `analog` is the block.
+            Some(Token::Analog) if matches!(self.nth(1), Some(Token::Keyword(kw)) if kw.as_str() == "function") => {
+                self.parse_function()
+            }
             Some(Token::Analog) => {
                 self.pos += 1;
                 let body = self.parse_block_or_single()?;
@@ -233,6 +259,68 @@ impl Parser<'_> {
             default,
             range,
         })
+    }
+
+    /// Parse an analog function definition:
+    /// `analog function [real|integer] name; <decls> <stmts> endfunction`.
+    ///
+    /// Argument *type* declarations (`real x;`) inside the body are consumed but not retained
+    /// in v0; only argument directions and body statements are kept (see [`AnalogFunction`]).
+    fn parse_function(&mut self) -> Result<Item, FrontendError> {
+        self.eat(&Token::Analog)?;
+        self.eat_keyword("function")?;
+        let ret_ty = match self.peek() {
+            Some(Token::Real) => {
+                self.pos += 1;
+                ParamType::Real
+            }
+            Some(Token::Integer) => {
+                self.pos += 1;
+                ParamType::Integer
+            }
+            // An untyped analog function returns real.
+            _ => ParamType::Real,
+        };
+        let name = self.expect_ident()?;
+        self.eat(&Token::Semicolon)?;
+
+        let mut args = Vec::new();
+        let mut body = Vec::new();
+        loop {
+            if self.at_keyword("endfunction") {
+                break;
+            }
+            if self.peek().is_none() {
+                return self.err("unexpected end of input before `endfunction`".to_string());
+            }
+            match self.peek() {
+                Some(Token::Input) | Some(Token::Output) | Some(Token::Inout) => {
+                    let dir = match self.bump() {
+                        Some(Token::Input) => Direction::Input,
+                        Some(Token::Output) => Direction::Output,
+                        _ => Direction::Inout,
+                    };
+                    for name in self.ident_list()? {
+                        args.push(FuncArg { dir, name });
+                    }
+                    self.eat(&Token::Semicolon)?;
+                }
+                // Argument/local type declarations: consumed, types not tracked in v0.
+                Some(Token::Real) | Some(Token::Integer) => {
+                    self.pos += 1;
+                    self.ident_list()?;
+                    self.eat(&Token::Semicolon)?;
+                }
+                _ => body.push(self.parse_stmt()?),
+            }
+        }
+        self.eat_keyword("endfunction")?;
+        Ok(Item::Function(AnalogFunction {
+            name,
+            ret_ty,
+            args,
+            body,
+        }))
     }
 
     // --- statements ----------------------------------------------------------------
@@ -289,12 +377,107 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::Assign { lhs, rhs })
             }
-            Some(Token::Keyword(kw)) => self.err(format!(
-                "reserved word `{}` begins a construct outside the v0 subset",
-                kw.as_str()
-            )),
+            Some(&Token::Keyword(kw)) => match kw.as_str() {
+                "while" => self.parse_while(),
+                "repeat" => self.parse_repeat(),
+                "for" => self.parse_for(),
+                "case" => self.parse_case(),
+                other => self.err(format!(
+                    "reserved word `{other}` begins a construct outside the v0 subset"
+                )),
+            },
             _ => self.err("expected a statement".to_string()),
         }
+    }
+
+    /// Parse `while (cond) body`.
+    fn parse_while(&mut self) -> Result<Stmt, FrontendError> {
+        self.eat_keyword("while")?;
+        self.eat(&Token::LParen)?;
+        let cond = self.parse_expr()?;
+        self.eat(&Token::RParen)?;
+        let body = self.parse_block_or_single()?;
+        Ok(Stmt::While { cond, body })
+    }
+
+    /// Parse `repeat (count) body`.
+    fn parse_repeat(&mut self) -> Result<Stmt, FrontendError> {
+        self.eat_keyword("repeat")?;
+        self.eat(&Token::LParen)?;
+        let count = self.parse_expr()?;
+        self.eat(&Token::RParen)?;
+        let body = self.parse_block_or_single()?;
+        Ok(Stmt::Repeat { count, body })
+    }
+
+    /// Parse `for (init; cond; step) body`. `init`/`step` are bare assignments.
+    fn parse_for(&mut self) -> Result<Stmt, FrontendError> {
+        self.eat_keyword("for")?;
+        self.eat(&Token::LParen)?;
+        let init = Box::new(self.parse_assignment()?);
+        self.eat(&Token::Semicolon)?;
+        let cond = self.parse_expr()?;
+        self.eat(&Token::Semicolon)?;
+        let step = Box::new(self.parse_assignment()?);
+        self.eat(&Token::RParen)?;
+        let body = self.parse_block_or_single()?;
+        Ok(Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        })
+    }
+
+    /// Parse `case (selector) arm… [default[:] body] endcase`.
+    fn parse_case(&mut self) -> Result<Stmt, FrontendError> {
+        self.eat_keyword("case")?;
+        self.eat(&Token::LParen)?;
+        let selector = self.parse_expr()?;
+        self.eat(&Token::RParen)?;
+
+        let mut arms = Vec::new();
+        let mut default = None;
+        loop {
+            if self.at_keyword("endcase") {
+                break;
+            }
+            if self.peek().is_none() {
+                return self.err("unexpected end of input before `endcase`".to_string());
+            }
+            if self.at_keyword("default") {
+                self.pos += 1;
+                // The colon after `default` is optional in Verilog.
+                if self.at(&Token::Colon) {
+                    self.pos += 1;
+                }
+                default = Some(self.parse_block_or_single()?);
+                continue;
+            }
+            // `label {, label} : body`.
+            let mut labels = vec![self.parse_expr()?];
+            while self.at(&Token::Comma) {
+                self.pos += 1;
+                labels.push(self.parse_expr()?);
+            }
+            self.eat(&Token::Colon)?;
+            let body = self.parse_block_or_single()?;
+            arms.push(CaseArm { labels, body });
+        }
+        self.eat_keyword("endcase")?;
+        Ok(Stmt::Case {
+            selector,
+            arms,
+            default,
+        })
+    }
+
+    /// Parse a bare `lhs = rhs` assignment with no trailing terminator (for `for` headers).
+    fn parse_assignment(&mut self) -> Result<Stmt, FrontendError> {
+        let lhs = self.expect_ident()?;
+        self.eat(&Token::Assign)?;
+        let rhs = self.parse_expr()?;
+        Ok(Stmt::Assign { lhs, rhs })
     }
 
     /// Parse an access function application `V(a[, b])` / `I(a[, b])`.
@@ -617,6 +800,88 @@ mod tests {
             }
             other => panic!("expected sqrt(...) call, got {other:?}"),
         }
+    }
+
+    /// Pull the analog block's statement list out of a parsed module.
+    fn analog_body(m: &ModuleAst) -> Vec<Stmt> {
+        m.items
+            .iter()
+            .find_map(|it| match it {
+                Item::Analog(Stmt::Block(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("analog block")
+    }
+
+    #[test]
+    fn while_loop_parses() {
+        let m = parse_src(
+            "module t(); electrical a; analog begin while (i < 3) i = i + 1; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::While { body, .. } => assert_eq!(body.len(), 1),
+            other => panic!("expected a while loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeat_loop_parses() {
+        let m =
+            parse_src("module t(); electrical a; analog begin repeat (4) i = i + 1; end endmodule");
+        assert!(matches!(analog_body(&m)[0], Stmt::Repeat { .. }));
+    }
+
+    #[test]
+    fn for_loop_parses_init_cond_step() {
+        let m = parse_src(
+            "module t(); electrical a; analog begin for (i = 0; i < 3; i = i + 1) x = x + i; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::For {
+                init, step, body, ..
+            } => {
+                assert!(matches!(**init, Stmt::Assign { .. }));
+                assert!(matches!(**step, Stmt::Assign { .. }));
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("expected a for loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn case_with_default_parses() {
+        let m = parse_src(
+            "module t(); electrical a; analog begin case (sel) 0, 1: x = 1; 2: x = 2; default: x = 0; endcase end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Case { arms, default, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert_eq!(arms[0].labels.len(), 2); // `0, 1:`
+                assert!(default.is_some());
+            }
+            other => panic!("expected a case, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analog_function_definition_parses() {
+        let m = parse_src(
+            "module t(); analog function real sq; input x; real x; sq = x * x; endfunction endmodule",
+        );
+        let f = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Function(f) => Some(f),
+                _ => None,
+            })
+            .expect("function item");
+        assert_eq!(f.name, "sq");
+        assert_eq!(f.ret_ty, ParamType::Real);
+        assert_eq!(f.args.len(), 1);
+        assert_eq!(f.args[0].name, "x");
+        assert_eq!(f.args[0].dir, Direction::Input);
+        assert_eq!(f.body.len(), 1); // `sq = x * x;` (the `real x;` decl is discarded)
     }
 
     #[test]
