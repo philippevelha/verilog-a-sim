@@ -258,6 +258,14 @@ pub enum Builtin {
     Sqrt,
     /// `abs(x)`.
     Abs,
+    /// `floor(x)` — round toward −∞.
+    Floor,
+    /// `ceil(x)` — round toward +∞.
+    Ceil,
+    /// `round(x)` — round to nearest.
+    Round,
+    /// `int(x)` — truncate toward zero.
+    Int,
     /// `pow(x, y)`.
     Pow,
     /// `hypot(x, y)` — `sqrt(x*x + y*y)`.

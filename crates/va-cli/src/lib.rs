@@ -112,11 +112,15 @@ pub fn check_models(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Collect `.va`/`.vams` files in `dir` (non-recursive) into `out`.
+/// Collect `.va`/`.vams` files under `dir`, recursing into subdirectories so model libraries
+/// kept in their own folder are included (each file resolves `` `include `` against its own
+/// directory).
 fn collect_va_files(dir: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if path.is_dir() {
+            collect_va_files(&path, out)?;
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if ext == "va" || ext == "vams" {
                 out.push(path.to_string_lossy().into_owned());
             }

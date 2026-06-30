@@ -737,6 +737,10 @@ fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
         "log" => Builtin::Log,
         "sqrt" => Builtin::Sqrt,
         "abs" => Builtin::Abs,
+        "floor" => Builtin::Floor,
+        "ceil" => Builtin::Ceil,
+        "round" => Builtin::Round,
+        "int" => Builtin::Int,
         "pow" => Builtin::Pow,
         "hypot" => Builtin::Hypot,
         "atan2" => Builtin::Atan2,
@@ -807,6 +811,10 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
         "log" => arg1()?.log10(),
         "sqrt" => arg1()?.sqrt(),
         "abs" => arg1()?.abs(),
+        "floor" => arg1()?.floor(),
+        "ceil" => arg1()?.ceil(),
+        "round" => arg1()?.round(),
+        "int" => arg1()?.trunc(),
         "sin" => arg1()?.sin(),
         "cos" => arg1()?.cos(),
         "tan" => arg1()?.tan(),
@@ -895,6 +903,34 @@ mod tests {
             .exprs
             .iter()
             .any(|e| matches!(e, Expr::Call(Builtin::Exp, _))));
+    }
+
+    #[test]
+    fn rounding_builtins_map_and_fold() {
+        // Lowered to their IR builtins in the analog block.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ floor(V(a, b)) + ceil(V(a, b)) + round(V(a, b)) + int(V(a, b)); end endmodule",
+        );
+        for bi in [
+            va_ir::Builtin::Floor,
+            va_ir::Builtin::Ceil,
+            va_ir::Builtin::Round,
+            va_ir::Builtin::Int,
+        ] {
+            assert!(
+                m.exprs
+                    .iter()
+                    .any(|e| matches!(e, va_ir::Expr::Call(b, _) if *b == bi)),
+                "missing {bi:?}"
+            );
+        }
+
+        // Const-folded in a parameter context.
+        let m = elaborate_src(
+            "module t(); parameter real X = floor(3.7) + ceil(1.2) + round(2.5) + int(-2.9); electrical a; analog begin I(a) <+ X; end endmodule",
+        );
+        // 3 + 2 + 3 + (-2) = 6
+        assert_eq!(m.params[0].default, 6.0);
     }
 
     #[test]

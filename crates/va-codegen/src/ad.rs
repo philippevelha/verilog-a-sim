@@ -384,6 +384,11 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
         Builtin::Log => arg(0)?.log10(),
         Builtin::Sqrt => arg(0)?.sqrt(),
         Builtin::Abs => arg(0)?.abs(),
+        // Rounding functions are piecewise constant: value is the rounded primal, gradient 0.
+        Builtin::Floor => Dual::constant(arg(0)?.value.floor(), count),
+        Builtin::Ceil => Dual::constant(arg(0)?.value.ceil(), count),
+        Builtin::Round => Dual::constant(arg(0)?.value.round(), count),
+        Builtin::Int => Dual::constant(arg(0)?.value.trunc(), count),
         Builtin::Pow => arg(0)?.powf(&arg(1)?),
         Builtin::Hypot => arg(0)?.hypot(&arg(1)?),
         Builtin::Atan2 => arg(0)?.atan2(&arg(1)?),
