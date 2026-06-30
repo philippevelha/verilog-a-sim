@@ -27,6 +27,8 @@
 //!   elaboration. A later stage may consume or ignore them.
 //! - Numeric literals require a leading digit (`0.5`, not `.5`), matching common Verilog-A
 //!   usage. Sized/based integer literals (`4'b0101`) are out of scope.
+//! - Attribute instances `(* … *)` are skipped entirely (treated like a comment); their
+//!   metadata (`units`, `desc`, …) is not retained.
 
 use crate::keywords::Keyword;
 use crate::FrontendError;
@@ -41,6 +43,7 @@ use logos::Logos;
 #[logos(skip r"[ \t\r\n\f]+")] // whitespace
 #[logos(skip r"//[^\n]*")] // line comment
 #[logos(skip r"/\*[^*]*\*+([^/*][^*]*\*+)*/")] // block comment
+#[logos(skip r"\(\*[^*]*\*+([^)*][^*]*\*+)*\)")] // (* attribute *) — metadata, discarded
 pub enum Token {
     // --- literals & names -------------------------------------------------------------
     /// An identifier (also covers built-in math/access names, classified later).
@@ -553,6 +556,30 @@ mod tests {
                 "`{word}` must not lex as an identifier"
             );
         }
+    }
+
+    #[test]
+    fn attributes_are_skipped() {
+        // A single attribute, an attribute with a comma/quotes, and a multi-line one.
+        assert_eq!(
+            lex_ok(r#"(* units="m", desc="length" *) parameter"#),
+            vec![Token::Parameter]
+        );
+        assert_eq!(
+            lex_ok("(* desc=\n  \"x*y\" *) real r"),
+            vec![Token::Real, Token::Ident("r".into())]
+        );
+        // A real multiply is untouched (no `(*` adjacency).
+        assert_eq!(
+            lex_ok("(a * b)"),
+            vec![
+                Token::LParen,
+                Token::Ident("a".into()),
+                Token::Star,
+                Token::Ident("b".into()),
+                Token::RParen,
+            ]
+        );
     }
 
     #[test]
