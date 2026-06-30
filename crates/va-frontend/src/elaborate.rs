@@ -730,6 +730,9 @@ fn map_binop(op: ast::BinOp) -> va_ir::BinOp {
 fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
     Ok(match name {
         "exp" => Builtin::Exp,
+        // `limexp` is a numerically-limited exponential (a Newton convergence aid); its value
+        // and derivative are those of `exp`, which is what v0 models.
+        "limexp" => Builtin::Exp,
         "ln" => Builtin::Ln,
         "log" => Builtin::Log,
         "sqrt" => Builtin::Sqrt,
@@ -799,7 +802,7 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
         _ => Err(arity_err()),
     };
     Ok(match name {
-        "exp" => arg1()?.exp(),
+        "exp" | "limexp" => arg1()?.exp(),
         "ln" => arg1()?.ln(),
         "log" => arg1()?.log10(),
         "sqrt" => arg1()?.sqrt(),
@@ -892,6 +895,17 @@ mod tests {
             .exprs
             .iter()
             .any(|e| matches!(e, Expr::Call(Builtin::Exp, _))));
+    }
+
+    #[test]
+    fn limexp_maps_to_exp() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ limexp(V(a, b)); end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::Exp, _))));
     }
 
     #[test]
