@@ -237,6 +237,12 @@ pub enum BinOp {
     Ge,
     /// Equality comparison.
     Eq,
+    /// Inequality comparison (`!=`). Yields `1.0`/`0.0`.
+    Ne,
+    /// Logical AND (`&&`): `1.0` iff both operands are non-zero.
+    And,
+    /// Logical OR (`||`): `1.0` iff either operand is non-zero.
+    Or,
 }
 
 /// Built-in and system functions recognized by the IR.

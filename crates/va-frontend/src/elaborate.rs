@@ -529,7 +529,7 @@ impl Elaborator<'_> {
                 Expr::Unary(op, inner)
             }
             ExprAst::Binary(op, l, rhs) => {
-                let op = map_binop(*op)?;
+                let op = map_binop(*op);
                 let l = self.lower_expr(*l)?;
                 let rhs = self.lower_expr(*rhs)?;
                 Expr::Binary(op, l, rhs)
@@ -651,11 +651,11 @@ fn bound(v: f64) -> Option<f64> {
     }
 }
 
-/// Map a surface [`ast::BinOp`] to the IR's. The IR has no `!=`/`&&`/`||` in v0.
-fn map_binop(op: ast::BinOp) -> Result<va_ir::BinOp, FrontendError> {
+/// Map a surface [`ast::BinOp`] to the IR's. Every surface operator has an IR counterpart.
+fn map_binop(op: ast::BinOp) -> va_ir::BinOp {
     use ast::BinOp as A;
     use va_ir::BinOp as B;
-    Ok(match op {
+    match op {
         A::Add => B::Add,
         A::Sub => B::Sub,
         A::Mul => B::Mul,
@@ -666,12 +666,10 @@ fn map_binop(op: ast::BinOp) -> Result<va_ir::BinOp, FrontendError> {
         A::Gt => B::Gt,
         A::Ge => B::Ge,
         A::Eq => B::Eq,
-        A::Ne | A::And | A::Or => {
-            return Err(elab(format!(
-                "operator `{op:?}` is not supported in the v0 IR"
-            )))
-        }
-    })
+        A::Ne => B::Ne,
+        A::And => B::And,
+        A::Or => B::Or,
+    }
 }
 
 /// Map a call-syntax function name to a math [`Builtin`].
@@ -937,6 +935,28 @@ mod tests {
             }
             other => panic!("expected a contribution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logical_operators_fold_and_lower() {
+        // Const-folded in a parameter: (1 && 0) + (2 != 3) + (0 || 5) = 0 + 1 + 1 = 2.
+        let m = elaborate_src(
+            "module t(); parameter real X = (1 && 0) + (2 != 3) + (0 || 5); electrical a; analog begin I(a) <+ X; end endmodule",
+        );
+        assert_eq!(m.params[0].default, 2.0);
+
+        // Lowered in the analog block to the corresponding IR BinOps.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin x = V(a, b) > 0 && V(a, b) != 1; I(a, b) <+ x; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::And, _, _))));
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Ne, _, _))));
     }
 
     #[test]

@@ -349,6 +349,9 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 BinOp::Gt => Dual::constant(bool_to_f64(a.value > b.value), count),
                 BinOp::Ge => Dual::constant(bool_to_f64(a.value >= b.value), count),
                 BinOp::Eq => Dual::constant(bool_to_f64(a.value == b.value), count),
+                BinOp::Ne => Dual::constant(bool_to_f64(a.value != b.value), count),
+                BinOp::And => Dual::constant(bool_to_f64(a.value != 0.0 && b.value != 0.0), count),
+                BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0), count),
             })
         }
         Expr::Call(builtin, args) => eval_call(ctx, *builtin, args),

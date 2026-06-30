@@ -8,7 +8,8 @@
 > `FuncId`). Lowered by `va-frontend`; rejected (stub adapters) by `va-codegen` v0.
 > Also added the trig/hyperbolic and `hypot`/`atan2`/`min`/`max` math `Builtin`s, with AD
 > derivatives in `va-codegen` (FD-validated per §5). Added `Expr::Select` for the ternary
-> `?:` (only the taken branch is evaluated; its gradient flows through).
+> `?:` (only the taken branch is evaluated; its gradient flows through), and the logical/
+> inequality `BinOp`s `Ne`/`And`/`Or` (boolean-valued `0.0`/`1.0`, zero gradient).
 
 ## 1. Role
 
