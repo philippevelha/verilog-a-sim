@@ -5,9 +5,13 @@
 //! models into a [`va_ir::Module`] that `va-codegen` can differentiate.
 
 #![forbid(unsafe_code)]
+// The lexer declares ~170 `#[token]` keyword attributes on one variant; the `logos` derive
+// expands them recursively, overflowing the default 128 limit.
+#![recursion_limit = "512"]
 
 pub mod ast;
 pub mod elaborate;
+pub mod keywords;
 pub mod lexer;
 pub mod parser;
 

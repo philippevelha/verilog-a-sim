@@ -9,9 +9,16 @@
 //! This covers the declared subset: module/analog structure, parameter and net
 //! declarations, `<+` contributions, branch accesses, comparison/boolean operators for
 //! `if`/`else`, system functions (`$vt`, `$temperature`), and `` `include `` directives.
-//! Built-in math names (`exp`, `ln`, `ddt`, `idt`, …) and access functions (`V`, `I`) are
-//! **not** keywords — they lex as [`Token::Ident`] and are classified later, during
-//! elaboration, so they remain usable as ordinary identifiers where the grammar allows.
+//!
+//! # Reserved words
+//!
+//! All 166-ish Verilog-A/AMS reserved words (LRM Annex D, see [`crate::keywords`]) are
+//! recognised — only in lowercase. The structural keywords the grammar consumes directly
+//! (`module`, `analog`, `if`, …) have dedicated [`Token`] variants; every other reserved
+//! word, including the math/analog built-ins (`exp`, `ln`, `ddt`, `idt`, …), is carried as
+//! [`Token::Keyword`]. The parser routes the built-ins to call expressions, so elaboration
+//! still classifies them by name. Access functions `V`/`I` are **not** reserved words: they
+//! lex as [`Token::Ident`] and are recognised contextually.
 //!
 //! # Limitations
 //!
@@ -21,6 +28,7 @@
 //! - Numeric literals require a leading digit (`0.5`, not `.5`), matching common Verilog-A
 //!   usage. Sized/based integer literals (`4'b0101`) are out of scope.
 
+use crate::keywords::Keyword;
 use crate::FrontendError;
 use logos::Logos;
 
@@ -117,6 +125,167 @@ pub enum Token {
     #[token("inf")]
     Inf,
 
+    // --- reserved words without a dedicated token ------------------------------------
+    /// Any Verilog-A/AMS reserved word that the grammar does not consume through one of the
+    /// dedicated variants above (LRM Annex D; see [`crate::keywords`]).
+    ///
+    /// This covers the math/analog built-ins (`exp`, `ln`, `ddt`, `idt`, …) — which the
+    /// parser routes to call expressions — plus gate primitives and constructs outside the
+    /// v0 subset. The `kw` callback maps the matched lexeme back to its [`Keyword`].
+    #[token("abs", kw)]
+    #[token("abstol", kw)]
+    #[token("access", kw)]
+    #[token("acos", kw)]
+    #[token("acosh", kw)]
+    #[token("ac_stim", kw)]
+    #[token("always", kw)]
+    #[token("analysis", kw)]
+    #[token("and", kw)]
+    #[token("asin", kw)]
+    #[token("asinh", kw)]
+    #[token("assign", kw)]
+    #[token("atan", kw)]
+    #[token("atan2", kw)]
+    #[token("atanh", kw)]
+    #[token("bound_step", kw)]
+    #[token("branch", kw)]
+    #[token("buf", kw)]
+    #[token("bufif0", kw)]
+    #[token("bufif1", kw)]
+    #[token("case", kw)]
+    #[token("casex", kw)]
+    #[token("casez", kw)]
+    #[token("cmos", kw)]
+    #[token("cos", kw)]
+    #[token("cosh", kw)]
+    #[token("cross", kw)]
+    #[token("ddt", kw)]
+    #[token("ddt_nature", kw)]
+    #[token("deassign", kw)]
+    #[token("default", kw)]
+    #[token("defparam", kw)]
+    #[token("delay", kw)]
+    #[token("disable", kw)]
+    #[token("discipline", kw)]
+    #[token("discontinuity", kw)]
+    #[token("edge", kw)]
+    #[token("endcase", kw)]
+    #[token("enddiscipline", kw)]
+    #[token("endfunction", kw)]
+    #[token("endnature", kw)]
+    #[token("endprimitive", kw)]
+    #[token("endspecify", kw)]
+    #[token("endtable", kw)]
+    #[token("endtask", kw)]
+    #[token("event", kw)]
+    #[token("exp", kw)]
+    #[token("final_step", kw)]
+    #[token("flicker_noise", kw)]
+    #[token("flow", kw)]
+    #[token("for", kw)]
+    #[token("force", kw)]
+    #[token("forever", kw)]
+    #[token("fork", kw)]
+    #[token("function", kw)]
+    #[token("generate", kw)]
+    #[token("highz0", kw)]
+    #[token("highz1", kw)]
+    #[token("hypot", kw)]
+    #[token("idt", kw)]
+    #[token("idt_nature", kw)]
+    #[token("ifnone", kw)]
+    #[token("initial", kw)]
+    #[token("initial_step", kw)]
+    #[token("join", kw)]
+    #[token("laplace_nd", kw)]
+    #[token("laplace_np", kw)]
+    #[token("laplace_zd", kw)]
+    #[token("laplace_zp", kw)]
+    #[token("large", kw)]
+    #[token("last_crossing", kw)]
+    #[token("ln", kw)]
+    #[token("log", kw)]
+    #[token("macromodule", kw)]
+    #[token("max", kw)]
+    #[token("medium", kw)]
+    #[token("min", kw)]
+    #[token("nand", kw)]
+    #[token("nature", kw)]
+    #[token("negedge", kw)]
+    #[token("nmos", kw)]
+    #[token("noise_table", kw)]
+    #[token("nor", kw)]
+    #[token("not", kw)]
+    #[token("notif0", kw)]
+    #[token("notif1", kw)]
+    #[token("or", kw)]
+    #[token("pmos", kw)]
+    #[token("posedge", kw)]
+    #[token("potential", kw)]
+    #[token("pow", kw)]
+    #[token("primitive", kw)]
+    #[token("pull0", kw)]
+    #[token("pull1", kw)]
+    #[token("pulldown", kw)]
+    #[token("pullup", kw)]
+    #[token("rcmos", kw)]
+    #[token("realtime", kw)]
+    #[token("reg", kw)]
+    #[token("release", kw)]
+    #[token("repeat", kw)]
+    #[token("rnmos", kw)]
+    #[token("rpmos", kw)]
+    #[token("rtran", kw)]
+    #[token("rtranif0", kw)]
+    #[token("rtranif1", kw)]
+    #[token("scalared", kw)]
+    #[token("sin", kw)]
+    #[token("sinh", kw)]
+    #[token("slew", kw)]
+    #[token("small", kw)]
+    #[token("specify", kw)]
+    #[token("specparam", kw)]
+    #[token("sqrt", kw)]
+    #[token("strong0", kw)]
+    #[token("strong1", kw)]
+    #[token("supply0", kw)]
+    #[token("supply1", kw)]
+    #[token("table", kw)]
+    #[token("tan", kw)]
+    #[token("tanh", kw)]
+    #[token("task", kw)]
+    #[token("temperature", kw)]
+    #[token("time", kw)]
+    #[token("timer", kw)]
+    #[token("tran", kw)]
+    #[token("tranif0", kw)]
+    #[token("tranif1", kw)]
+    #[token("transition", kw)]
+    #[token("tri", kw)]
+    #[token("tri0", kw)]
+    #[token("tri1", kw)]
+    #[token("triand", kw)]
+    #[token("trior", kw)]
+    #[token("trireg", kw)]
+    #[token("units", kw)]
+    #[token("vectored", kw)]
+    #[token("vt", kw)]
+    #[token("wait", kw)]
+    #[token("wand", kw)]
+    #[token("weak0", kw)]
+    #[token("weak1", kw)]
+    #[token("while", kw)]
+    #[token("white_noise", kw)]
+    #[token("wire", kw)]
+    #[token("wor", kw)]
+    #[token("xnor", kw)]
+    #[token("xor", kw)]
+    #[token("zi_nd", kw)]
+    #[token("zi_np", kw)]
+    #[token("zi_zd", kw)]
+    #[token("zi_zp", kw)]
+    Keyword(Keyword),
+
     // --- operators --------------------------------------------------------------------
     /// `<+`, the analog contribution operator.
     #[token("<+")]
@@ -186,6 +355,14 @@ pub enum Token {
     /// `.`.
     #[token(".")]
     Dot,
+}
+
+/// Map a matched reserved-word lexeme to its [`Keyword`].
+///
+/// The slice is always one of the reserved words declared on [`Token::Keyword`], so the
+/// table lookup in [`Keyword::from_ident`] never fails.
+fn kw(lex: &logos::Lexer<Token>) -> Keyword {
+    Keyword::from_ident(lex.slice()).expect("matched lexeme is a reserved word")
 }
 
 /// Parse a numeric-literal slice into its scaled `f64` value.
@@ -338,6 +515,44 @@ mod tests {
         ] {
             assert!(lex(src).is_ok(), "model should lex cleanly");
         }
+    }
+
+    #[test]
+    fn reserved_words_lex_as_keyword_not_ident() {
+        use crate::keywords::Keyword;
+        // Math/analog built-ins and other reserved words carry a Keyword payload.
+        for word in ["exp", "ddt", "idt", "branch", "analysis", "white_noise"] {
+            assert_eq!(
+                lex_ok(word),
+                vec![Token::Keyword(Keyword::from_ident(word).unwrap())],
+                "`{word}` should lex as a reserved word"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reserved_word_is_reserved() {
+        // No reserved word (dedicated token or generic keyword) may lex as a bare identifier.
+        for word in crate::keywords::RESERVED_WORDS {
+            let toks = lex_ok(word);
+            assert_eq!(toks.len(), 1, "`{word}` should be a single token");
+            assert!(
+                !matches!(toks[0], Token::Ident(_)),
+                "`{word}` must not lex as an identifier"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_words_are_lowercase_only() {
+        // Case-sensitive: uppercased spellings are ordinary identifiers (LRM §2).
+        assert_eq!(lex_ok("EXP"), vec![Token::Ident("EXP".into())]);
+        assert_eq!(lex_ok("Branch"), vec![Token::Ident("Branch".into())]);
+        // A longer word that merely starts with a keyword is an identifier.
+        assert_eq!(
+            lex_ok("expression"),
+            vec![Token::Ident("expression".into())]
+        );
     }
 
     #[test]

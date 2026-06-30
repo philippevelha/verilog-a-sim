@@ -87,6 +87,10 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(s)
             }
+            Some(Token::Keyword(kw)) => self.err(format!(
+                "expected an identifier, but `{}` is a reserved word",
+                kw.as_str()
+            )),
             _ => self.err("expected an identifier".to_string()),
         }
     }
@@ -285,6 +289,10 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::Assign { lhs, rhs })
             }
+            Some(Token::Keyword(kw)) => self.err(format!(
+                "reserved word `{}` begins a construct outside the v0 subset",
+                kw.as_str()
+            )),
             _ => self.err("expected a statement".to_string()),
         }
     }
@@ -386,6 +394,19 @@ impl Parser<'_> {
                 } else {
                     self.pos += 1;
                     Ok(self.push(ExprAst::Ident(name)))
+                }
+            }
+            // A reserved word in expression position must be a built-in function call
+            // (`exp(x)`, `ddt(...)`, `pow(x, y)`, …). Elaboration maps the name to a
+            // [`va_ir::Builtin`] and rejects any unsupported reserved word.
+            Some(Token::Keyword(kw)) => {
+                let name = kw.as_str().to_string();
+                if self.nth(1) == Some(&Token::LParen) {
+                    self.parse_call(name)
+                } else {
+                    self.err(format!(
+                        "reserved word `{name}` is not valid in an expression"
+                    ))
                 }
             }
             _ => self.err("expected an expression".to_string()),
@@ -574,6 +595,35 @@ mod tests {
             }
             other => panic!("expected right-associative Pow, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn builtin_keyword_parses_as_a_call() {
+        // `sqrt` is now a reserved word; followed by `(` it must parse to a call node so
+        // elaboration can map it to a built-in (Call name unchanged from the old design).
+        let m = parse_src("module t(); parameter real X = sqrt(4.0); endmodule");
+        let default = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { default, .. } => Some(*default),
+                _ => None,
+            })
+            .unwrap();
+        match m.expr(default) {
+            ExprAst::Call { name, args } => {
+                assert_eq!(name, "sqrt");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected sqrt(...) call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_word_as_identifier_is_rejected() {
+        // `time` is a reserved word and may not name a net.
+        let toks = lex("module t(); electrical time; analog begin end endmodule").expect("lex");
+        assert!(parse(&toks).is_err());
     }
 
     #[test]
