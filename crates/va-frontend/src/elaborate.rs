@@ -296,6 +296,9 @@ impl Elaborator<'_> {
             ExprAst::SysFunc(name) => Err(elab(format!(
                 "system function `${name}` is not constant in a parameter context"
             ))),
+            ExprAst::Str(_) => Err(elab(
+                "a string literal is not valid in a parameter context".to_string(),
+            )),
             ExprAst::Probe(_) => Err(elab(
                 "a branch probe is not constant in a parameter context".to_string(),
             )),
@@ -356,7 +359,7 @@ impl Elaborator<'_> {
                     body.iter().for_each(|s| self.collect_vars_stmt(s));
                 }
             }
-            Stmt::Contribute { .. } => {}
+            Stmt::Contribute { .. } | Stmt::Task { .. } => {}
         }
     }
 
@@ -392,6 +395,8 @@ impl Elaborator<'_> {
             }
             // A declaration introduces a variable (registered in pass 3) but emits no code.
             Stmt::VarDecl { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
+            // System tasks (`$strobe`, `$finish`, …) have no effect on a DC solve.
+            Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
             Stmt::Contribute { target, value } => {
                 let target = self.lower_access(target)?;
                 let value = self.lower_expr(*value)?;
@@ -490,6 +495,11 @@ impl Elaborator<'_> {
                 }
             }
             ExprAst::SysFunc(name) => Expr::Call(sysfunc_builtin(name)?, Vec::new()),
+            ExprAst::Str(_) => {
+                return Err(elab(
+                    "a string literal is only valid as a system-task argument".to_string(),
+                ))
+            }
             ExprAst::Probe(access) => Expr::Probe(self.lower_access(access)?),
             ExprAst::Call { name, args } => {
                 let mut ids = Vec::with_capacity(args.len());
@@ -606,7 +616,7 @@ fn collect_assign_targets(stmts: &[Stmt], out: &mut Vec<String>) {
                     collect_assign_targets(body, out);
                 }
             }
-            Stmt::Contribute { .. } => {}
+            Stmt::Contribute { .. } | Stmt::Task { .. } => {}
         }
     }
 }
@@ -855,6 +865,28 @@ mod tests {
         // No duplicate registration despite `q`/`v` also being assignment targets.
         assert_eq!(m.vars.iter().filter(|d| d.name == "q").count(), 1);
         assert_eq!(m.vars.iter().filter(|d| d.name == "v").count(), 1);
+    }
+
+    #[test]
+    fn system_task_statement_is_a_noop() {
+        // `$strobe(...)` elaborates (lowers to an empty block) and does not affect the model.
+        let src = r#"module t(a, b); electrical a, b; analog begin $strobe("hi", V(a, b)); I(a, b) <+ V(a, b); end endmodule"#;
+        let m = elaborate_src(src);
+        // The contribution is present; the task contributed no further statement of substance.
+        assert!(m
+            .analog
+            .iter()
+            .any(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
+    }
+
+    #[test]
+    fn string_in_numeric_context_is_rejected() {
+        // A bare string where a value is expected is an elaboration error.
+        let src =
+            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ "oops"; end endmodule"#;
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

@@ -420,6 +420,18 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::VarDecl { names })
             }
+            // A system-task call statement, `$strobe("…", a);` or `$finish;`.
+            Some(Token::SysFunc(name)) => {
+                let name = name.clone();
+                self.pos += 1;
+                let args = if self.at(&Token::LParen) {
+                    self.parse_call_args()?
+                } else {
+                    Vec::new()
+                };
+                self.eat(&Token::Semicolon)?;
+                Ok(Stmt::Task { name, args })
+            }
             Some(Token::If) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
@@ -638,6 +650,11 @@ impl Parser<'_> {
                 }
                 Ok(self.push(ExprAst::SysFunc(name)))
             }
+            Some(Token::Str(s)) => {
+                let s = s.clone();
+                self.pos += 1;
+                Ok(self.push(ExprAst::Str(s)))
+            }
             Some(Token::Ident(name)) => {
                 let name = name.clone();
                 if self.nth(1) == Some(&Token::LParen) {
@@ -671,6 +688,13 @@ impl Parser<'_> {
 
     fn parse_call(&mut self, name: String) -> Result<ExprRef, FrontendError> {
         self.pos += 1; // name
+        let args = self.parse_call_args()?;
+        Ok(self.push(ExprAst::Call { name, args }))
+    }
+
+    /// Parse a parenthesised, comma-separated argument list `( [expr {, expr}] )`. The cursor
+    /// must be on the opening `(`.
+    fn parse_call_args(&mut self) -> Result<Vec<ExprRef>, FrontendError> {
         self.eat(&Token::LParen)?;
         let mut args = Vec::new();
         if !self.at(&Token::RParen) {
@@ -681,7 +705,7 @@ impl Parser<'_> {
             }
         }
         self.eat(&Token::RParen)?;
-        Ok(self.push(ExprAst::Call { name, args }))
+        Ok(args)
     }
 }
 
@@ -1009,6 +1033,23 @@ mod tests {
         assert!(!range.lo_inclusive);
         assert!(range.hi_inclusive);
         assert!(range.exclude);
+    }
+
+    #[test]
+    fn system_task_statement_with_string_arg() {
+        let m = parse_src(
+            r#"module t(a, b); electrical a, b; analog begin $strobe("v=%E", V(a, b)); I(a, b) <+ 0.0; end endmodule"#,
+        );
+        let body = analog_body(&m);
+        match &body[0] {
+            Stmt::Task { name, args } => {
+                assert_eq!(name, "strobe");
+                assert_eq!(args.len(), 2);
+                // First argument is the format string.
+                assert!(matches!(m.expr(args[0]), ExprAst::Str(s) if s == "v=%E"));
+            }
+            other => panic!("expected a system-task statement, got {other:?}"),
+        }
     }
 
     #[test]

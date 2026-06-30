@@ -195,6 +195,14 @@ pub enum Stmt {
         /// Declared variable names.
         names: Vec<String>,
     },
+    /// A system-task call statement, e.g. `$strobe("…", a, b);` or `$finish;`. v0 treats
+    /// these as no-ops (no output side effects in a DC solve).
+    Task {
+        /// Task name with the leading `$` stripped (e.g. `strobe`).
+        name: String,
+        /// Argument expressions (may include string literals).
+        args: Vec<ExprRef>,
+    },
     /// A `<+` contribution: `target <+ value;`.
     Contribute {
         /// The access being contributed to.
@@ -263,6 +271,9 @@ pub enum ExprAst {
     Ident(String),
     /// A system function reference with the `$` stripped, e.g. `vt`, `temperature`.
     SysFunc(String),
+    /// A string literal, e.g. a `$strobe`/`analysis` argument. Has no numeric value; valid
+    /// only where a string is expected (a system-task or analysis-style argument).
+    Str(String),
     /// A branch probe, `V(...)`/`I(...)`.
     Probe(Access),
     /// A function call, e.g. `exp(x)`, `ddt(C*V(p,n))`, `pow(x, y)`.
