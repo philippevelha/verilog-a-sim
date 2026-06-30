@@ -138,6 +138,121 @@ impl Dual {
             .collect();
         Dual { value, grad }
     }
+
+    /// Sine. `sin' = cos`.
+    pub fn sin(&self) -> Dual {
+        self.chain(self.value.sin(), self.value.cos())
+    }
+
+    /// Cosine. `cos' = -sin`.
+    pub fn cos(&self) -> Dual {
+        self.chain(self.value.cos(), -self.value.sin())
+    }
+
+    /// Tangent. `tan' = 1 + tan²`.
+    pub fn tan(&self) -> Dual {
+        let t = self.value.tan();
+        self.chain(t, 1.0 + t * t)
+    }
+
+    /// Hyperbolic sine. `sinh' = cosh`.
+    pub fn sinh(&self) -> Dual {
+        self.chain(self.value.sinh(), self.value.cosh())
+    }
+
+    /// Hyperbolic cosine. `cosh' = sinh`.
+    pub fn cosh(&self) -> Dual {
+        self.chain(self.value.cosh(), self.value.sinh())
+    }
+
+    /// Hyperbolic tangent. `tanh' = 1 - tanh²`.
+    pub fn tanh(&self) -> Dual {
+        let t = self.value.tanh();
+        self.chain(t, 1.0 - t * t)
+    }
+
+    /// Arcsine. `asin'(x) = 1/√(1-x²)`.
+    pub fn asin(&self) -> Dual {
+        self.chain(
+            self.value.asin(),
+            1.0 / (1.0 - self.value * self.value).sqrt(),
+        )
+    }
+
+    /// Arccosine. `acos'(x) = -1/√(1-x²)`.
+    pub fn acos(&self) -> Dual {
+        self.chain(
+            self.value.acos(),
+            -1.0 / (1.0 - self.value * self.value).sqrt(),
+        )
+    }
+
+    /// Arctangent. `atan'(x) = 1/(1+x²)`.
+    pub fn atan(&self) -> Dual {
+        self.chain(self.value.atan(), 1.0 / (1.0 + self.value * self.value))
+    }
+
+    /// Inverse hyperbolic sine. `asinh'(x) = 1/√(x²+1)`.
+    pub fn asinh(&self) -> Dual {
+        self.chain(
+            self.value.asinh(),
+            1.0 / (self.value * self.value + 1.0).sqrt(),
+        )
+    }
+
+    /// Inverse hyperbolic cosine. `acosh'(x) = 1/√(x²-1)`.
+    pub fn acosh(&self) -> Dual {
+        self.chain(
+            self.value.acosh(),
+            1.0 / (self.value * self.value - 1.0).sqrt(),
+        )
+    }
+
+    /// Inverse hyperbolic tangent. `atanh'(x) = 1/(1-x²)`.
+    pub fn atanh(&self) -> Dual {
+        self.chain(self.value.atanh(), 1.0 / (1.0 - self.value * self.value))
+    }
+
+    /// Two-argument arctangent `atan2(self, x)` (self is `y`):
+    /// `d atan2 = (x·dy - y·dx) / (x²+y²)`.
+    pub fn atan2(&self, x: &Dual) -> Dual {
+        let (y, denom) = (self, self.value * self.value + x.value * x.value);
+        let grad = (0..self.n())
+            .map(|i| (x.value * y.grad[i] - y.value * x.grad[i]) / denom)
+            .collect();
+        Dual {
+            value: y.value.atan2(x.value),
+            grad,
+        }
+    }
+
+    /// Euclidean norm `hypot(self, o) = √(self²+o²)`:
+    /// `d hypot = (self·dself + o·do) / hypot`.
+    pub fn hypot(&self, o: &Dual) -> Dual {
+        let value = self.value.hypot(o.value);
+        let grad = (0..self.n())
+            .map(|i| (self.value * self.grad[i] + o.value * o.grad[i]) / value)
+            .collect();
+        Dual { value, grad }
+    }
+
+    /// Minimum. The derivative follows the selected argument (subgradient at a tie).
+    pub fn min(&self, o: &Dual) -> Dual {
+        if self.value <= o.value {
+            self.clone()
+        } else {
+            o.clone()
+        }
+    }
+
+    /// Maximum. The derivative follows the selected argument (subgradient at a tie).
+    pub fn max(&self, o: &Dual) -> Dual {
+        if self.value >= o.value {
+            self.clone()
+        } else {
+            o.clone()
+        }
+    }
 }
 
 fn zip_with(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
@@ -258,6 +373,22 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
         Builtin::Sqrt => arg(0)?.sqrt(),
         Builtin::Abs => arg(0)?.abs(),
         Builtin::Pow => arg(0)?.powf(&arg(1)?),
+        Builtin::Hypot => arg(0)?.hypot(&arg(1)?),
+        Builtin::Atan2 => arg(0)?.atan2(&arg(1)?),
+        Builtin::Min => arg(0)?.min(&arg(1)?),
+        Builtin::Max => arg(0)?.max(&arg(1)?),
+        Builtin::Sin => arg(0)?.sin(),
+        Builtin::Cos => arg(0)?.cos(),
+        Builtin::Tan => arg(0)?.tan(),
+        Builtin::Sinh => arg(0)?.sinh(),
+        Builtin::Cosh => arg(0)?.cosh(),
+        Builtin::Tanh => arg(0)?.tanh(),
+        Builtin::Asin => arg(0)?.asin(),
+        Builtin::Acos => arg(0)?.acos(),
+        Builtin::Atan => arg(0)?.atan(),
+        Builtin::Asinh => arg(0)?.asinh(),
+        Builtin::Acosh => arg(0)?.acosh(),
+        Builtin::Atanh => arg(0)?.atanh(),
         Builtin::Vt => Dual::constant(ctx.vt, count),
         Builtin::Temperature => Dual::constant(ctx.temp, count),
         Builtin::Ddt | Builtin::Idt => {
@@ -303,6 +434,61 @@ mod tests {
         let e = 1.0_f64.exp();
         assert!((f.value - e).abs() < 1e-12);
         assert!((f.grad[0] - 2.0 * e).abs() < 1e-12);
+    }
+
+    /// A unary-function FD test case: name, the [`Dual`] method, the scalar `f64` function,
+    /// and a point to check the derivative at.
+    type UnaryCase = (&'static str, fn(&Dual) -> Dual, fn(f64) -> f64, f64);
+
+    #[test]
+    fn unary_builtins_match_finite_difference() {
+        // §5: every differentiated operator must agree with a central finite difference.
+        let h = 1e-6;
+        let cases: &[UnaryCase] = &[
+            ("sin", Dual::sin, f64::sin, 0.7),
+            ("cos", Dual::cos, f64::cos, 0.7),
+            ("tan", Dual::tan, f64::tan, 0.5),
+            ("sinh", Dual::sinh, f64::sinh, 0.6),
+            ("cosh", Dual::cosh, f64::cosh, 0.6),
+            ("tanh", Dual::tanh, f64::tanh, 0.6),
+            ("asin", Dual::asin, f64::asin, 0.4),
+            ("acos", Dual::acos, f64::acos, 0.4),
+            ("atan", Dual::atan, f64::atan, 0.4),
+            ("asinh", Dual::asinh, f64::asinh, 0.4),
+            ("acosh", Dual::acosh, f64::acosh, 1.5),
+            ("atanh", Dual::atanh, f64::atanh, 0.4),
+        ];
+        for (name, dfn, ffn, x0) in cases {
+            let analytic = dfn(&Dual::variable(*x0, 0, 1)).grad[0];
+            let fd = (ffn(*x0 + h) - ffn(*x0 - h)) / (2.0 * h);
+            assert!(
+                (analytic - fd).abs() < 1e-5,
+                "{name}: analytic {analytic} vs fd {fd}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_arg_builtins_gradients() {
+        // hypot(3,4) = 5; d/dx = 3/5, d/dy = 4/5.
+        let x = Dual::variable(3.0, 0, 2);
+        let y = Dual::variable(4.0, 1, 2);
+        let hp = x.hypot(&y);
+        assert!((hp.value - 5.0).abs() < 1e-12);
+        assert!((hp.grad[0] - 0.6).abs() < 1e-12);
+        assert!((hp.grad[1] - 0.8).abs() < 1e-12);
+
+        // atan2(y, x): d/dy = x/(x²+y²), d/dx = -y/(x²+y²).
+        let denom = 3.0_f64 * 3.0 + 4.0 * 4.0;
+        let at = y.atan2(&x);
+        assert!((at.grad[1] - 3.0 / denom).abs() < 1e-12);
+        assert!((at.grad[0] + 4.0 / denom).abs() < 1e-12);
+
+        // min/max select the active argument's value and gradient.
+        let mn = x.min(&y);
+        assert_eq!((mn.value, mn.grad[0], mn.grad[1]), (3.0, 1.0, 0.0));
+        let mx = x.max(&y);
+        assert_eq!((mx.value, mx.grad[0], mx.grad[1]), (4.0, 0.0, 1.0));
     }
 
     #[test]

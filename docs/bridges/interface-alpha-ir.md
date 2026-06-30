@@ -6,6 +6,8 @@
 > Revised 2026-06-30 (§6): added analog control-flow statements (`While`/`For`/`Repeat`/
 > `Case`) and user-defined analog functions (`Function`, `Expr::CallUser`, `Module.functions`,
 > `FuncId`). Lowered by `va-frontend`; rejected (stub adapters) by `va-codegen` v0.
+> Also added the trig/hyperbolic and `hypot`/`atan2`/`min`/`max` math `Builtin`s, with AD
+> derivatives in `va-codegen` (FD-validated per §5).
 
 ## 1. Role
 
@@ -97,8 +99,10 @@ consumer may rely on them without re-checking.
    resolved.
 8. **Parameter ranges are consistent.** If both present, `min <= default <= max`.
 9. **`Builtin` arity is correct.** Each `Call` carries exactly the argument count its
-   `Builtin` requires (e.g. `Exp`/`Ln`/`Sqrt`/`Ddt`/`Idt` take 1; `Pow` takes 2; `Vt`/
-   `Temperature` take 0).
+   `Builtin` requires: the unary functions (`Exp`/`Ln`/`Log`/`Sqrt`/`Abs`/`Ddt`/`Idt` and the
+   trig/hyperbolic family `Sin`/`Cos`/`Tan`/`Sinh`/`Cosh`/`Tanh`/`Asin`/`Acos`/`Atan`/
+   `Asinh`/`Acosh`/`Atanh`) take 1; the binary functions (`Pow`/`Hypot`/`Atan2`/`Min`/`Max`)
+   take 2; `Vt`/`Temperature` take 0.
 10. **`CallUser` is well-formed.** Every `FuncId` is `< functions.len()`, and the argument
     count equals the callee's `args.len()`. A function's `args`/`ret`/local `VarId`s are valid
     indices into `vars`. Functions are pure and non-recursive (no `CallUser` to itself or a

@@ -619,6 +619,22 @@ fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
         "sqrt" => Builtin::Sqrt,
         "abs" => Builtin::Abs,
         "pow" => Builtin::Pow,
+        "hypot" => Builtin::Hypot,
+        "atan2" => Builtin::Atan2,
+        "min" => Builtin::Min,
+        "max" => Builtin::Max,
+        "sin" => Builtin::Sin,
+        "cos" => Builtin::Cos,
+        "tan" => Builtin::Tan,
+        "sinh" => Builtin::Sinh,
+        "cosh" => Builtin::Cosh,
+        "tanh" => Builtin::Tanh,
+        "asin" => Builtin::Asin,
+        "acos" => Builtin::Acos,
+        "atan" => Builtin::Atan,
+        "asinh" => Builtin::Asinh,
+        "acosh" => Builtin::Acosh,
+        "atanh" => Builtin::Atanh,
         "ddt" => Builtin::Ddt,
         "idt" => Builtin::Idt,
         other => return Err(elab(format!("unknown function `{other}`"))),
@@ -662,16 +678,48 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
         ))
     };
     let arg1 = || args.first().copied().ok_or_else(arity_err);
+    let arg2 = || match (args.first(), args.get(1)) {
+        (Some(x), Some(y)) => Ok((*x, *y)),
+        _ => Err(arity_err()),
+    };
     Ok(match name {
         "exp" => arg1()?.exp(),
         "ln" => arg1()?.ln(),
         "log" => arg1()?.log10(),
         "sqrt" => arg1()?.sqrt(),
         "abs" => arg1()?.abs(),
-        "pow" => match (args.first(), args.get(1)) {
-            (Some(x), Some(y)) => x.powf(*y),
-            _ => return Err(arity_err()),
-        },
+        "sin" => arg1()?.sin(),
+        "cos" => arg1()?.cos(),
+        "tan" => arg1()?.tan(),
+        "sinh" => arg1()?.sinh(),
+        "cosh" => arg1()?.cosh(),
+        "tanh" => arg1()?.tanh(),
+        "asin" => arg1()?.asin(),
+        "acos" => arg1()?.acos(),
+        "atan" => arg1()?.atan(),
+        "asinh" => arg1()?.asinh(),
+        "acosh" => arg1()?.acosh(),
+        "atanh" => arg1()?.atanh(),
+        "pow" => {
+            let (x, y) = arg2()?;
+            x.powf(y)
+        }
+        "atan2" => {
+            let (y, x) = arg2()?;
+            y.atan2(x)
+        }
+        "hypot" => {
+            let (x, y) = arg2()?;
+            x.hypot(y)
+        }
+        "min" => {
+            let (x, y) = arg2()?;
+            x.min(y)
+        }
+        "max" => {
+            let (x, y) = arg2()?;
+            x.max(y)
+        }
         other => return Err(elab(format!("`{other}` is not constant-evaluable"))),
     })
 }

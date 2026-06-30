@@ -250,6 +250,38 @@ pub enum Builtin {
     Abs,
     /// `pow(x, y)`.
     Pow,
+    /// `hypot(x, y)` — `sqrt(x*x + y*y)`.
+    Hypot,
+    /// `atan2(y, x)` — two-argument arctangent.
+    Atan2,
+    /// `min(x, y)`.
+    Min,
+    /// `max(x, y)`.
+    Max,
+    /// `sin(x)`.
+    Sin,
+    /// `cos(x)`.
+    Cos,
+    /// `tan(x)`.
+    Tan,
+    /// `sinh(x)`.
+    Sinh,
+    /// `cosh(x)`.
+    Cosh,
+    /// `tanh(x)`.
+    Tanh,
+    /// `asin(x)`.
+    Asin,
+    /// `acos(x)`.
+    Acos,
+    /// `atan(x)`.
+    Atan,
+    /// `asinh(x)`.
+    Asinh,
+    /// `acosh(x)`.
+    Acosh,
+    /// `atanh(x)`.
+    Atanh,
     /// `ddt(x)` — time derivative (becomes a charge contribution).
     Ddt,
     /// `idt(x)` — time integral.
