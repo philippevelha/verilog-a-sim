@@ -13,8 +13,9 @@
 //!
 //! - Errors are reported by token index, not source byte offset: the lexer discards spans
 //!   in v0 (see [`crate::lexer`]). Carrying spans is a planned improvement.
-//! - Parameter ranges accept only parenthesised `( … : … )` bounds; bracketed inclusive
-//!   bounds (`[ … ]`) are not yet lexed and so cannot be parsed.
+//! - Parameter ranges accept mixed inclusive/exclusive delimiters — `[`/`]` (inclusive) and
+//!   `(`/`)` (exclusive) in any combination, e.g. `from [0:inf)`. The inclusive/exclusive
+//!   flags are recorded in the AST but dropped by elaboration (see [`crate::elaborate`]).
 //! - Access functions are limited to `V` and `I`; other natures are out of scope for v0.
 //! - Analog functions retain argument directions and body only; argument/local *types*
 //!   (`real x;`) are parsed and discarded.
@@ -236,17 +237,18 @@ impl Parser<'_> {
         let range = if self.at(&Token::From) || self.at(&Token::Exclude) {
             let exclude = self.at(&Token::Exclude);
             self.pos += 1;
-            // Only parenthesised (exclusive) bounds are lexable in v0.
-            self.eat(&Token::LParen)?;
+            // A bound may open with `[` (inclusive) or `(` (exclusive) and close with `]`
+            // (inclusive) or `)` (exclusive), independently — e.g. `from [0:inf)`.
+            let lo_inclusive = self.open_bound()?;
             let lo = self.parse_expr()?;
             self.eat(&Token::Colon)?;
             let hi = self.parse_expr()?;
-            self.eat(&Token::RParen)?;
+            let hi_inclusive = self.close_bound()?;
             Some(Range {
                 lo,
                 hi,
-                lo_inclusive: false,
-                hi_inclusive: false,
+                lo_inclusive,
+                hi_inclusive,
                 exclude,
             })
         } else {
@@ -321,6 +323,38 @@ impl Parser<'_> {
             args,
             body,
         }))
+    }
+
+    /// Consume a range's opening delimiter, returning whether it is inclusive (`[`) rather
+    /// than exclusive (`(`).
+    fn open_bound(&mut self) -> Result<bool, FrontendError> {
+        match self.peek() {
+            Some(Token::LBracket) => {
+                self.pos += 1;
+                Ok(true)
+            }
+            Some(Token::LParen) => {
+                self.pos += 1;
+                Ok(false)
+            }
+            _ => self.err("expected `[` or `(` to open a range bound".to_string()),
+        }
+    }
+
+    /// Consume a range's closing delimiter, returning whether it is inclusive (`]`) rather
+    /// than exclusive (`)`).
+    fn close_bound(&mut self) -> Result<bool, FrontendError> {
+        match self.peek() {
+            Some(Token::RBracket) => {
+                self.pos += 1;
+                Ok(true)
+            }
+            Some(Token::RParen) => {
+                self.pos += 1;
+                Ok(false)
+            }
+            _ => self.err("expected `]` or `)` to close a range bound".to_string()),
+        }
     }
 
     // --- statements ----------------------------------------------------------------
@@ -889,6 +923,37 @@ mod tests {
         // `time` is a reserved word and may not name a net.
         let toks = lex("module t(); electrical time; analog begin end endmodule").expect("lex");
         assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn inclusive_and_mixed_range_bounds() {
+        // `from [0:inf)` — inclusive lower, exclusive upper (the varactor/diode style).
+        let m = parse_src("module t(); parameter real C = 0.5 from [0:inf); endmodule");
+        let range = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { range, .. } => range.clone(),
+                _ => None,
+            })
+            .expect("a range");
+        assert!(range.lo_inclusive, "[ should be inclusive");
+        assert!(!range.hi_inclusive, ") should be exclusive");
+        assert!(!range.exclude, "from-range, not exclude");
+
+        // `exclude (a:b]` — exclusive lower, inclusive upper.
+        let m = parse_src("module t(); parameter real X = 5 exclude (1:10]; endmodule");
+        let range = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { range, .. } => range.clone(),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!range.lo_inclusive);
+        assert!(range.hi_inclusive);
+        assert!(range.exclude);
     }
 
     #[test]

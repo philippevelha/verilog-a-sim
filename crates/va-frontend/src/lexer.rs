@@ -343,6 +343,12 @@ pub enum Token {
     /// `)`.
     #[token(")")]
     RParen,
+    /// `[` — opens an inclusive parameter range bound.
+    #[token("[")]
+    LBracket,
+    /// `]` — closes an inclusive parameter range bound.
+    #[token("]")]
+    RBracket,
     /// `,`.
     #[token(",")]
     Comma,
@@ -541,6 +547,20 @@ mod tests {
                 "`{word}` must not lex as an identifier"
             );
         }
+    }
+
+    #[test]
+    fn brackets_lex() {
+        assert_eq!(
+            lex_ok("[ 0 : 1 ]"),
+            vec![
+                Token::LBracket,
+                Token::Number(0.0),
+                Token::Colon,
+                Token::Number(1.0),
+                Token::RBracket,
+            ]
+        );
     }
 
     #[test]
