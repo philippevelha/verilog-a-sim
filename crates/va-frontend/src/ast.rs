@@ -140,6 +140,13 @@ pub enum Item {
         /// Declared variable names.
         names: Vec<String>,
     },
+    /// A named branch declaration, `branch (a, b) br1, br2;` (one terminal = node-to-reference).
+    Branch {
+        /// The one or two terminal net names.
+        terminals: Vec<String>,
+        /// The declared branch names (all aliasing the same terminals).
+        names: Vec<String>,
+    },
 }
 
 /// A user-defined analog function (`analog function`).

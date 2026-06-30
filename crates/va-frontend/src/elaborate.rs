@@ -54,6 +54,7 @@ pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
         vars: HashMap::new(),
         funcs: HashMap::new(),
         branches: HashMap::new(),
+        named_branches: HashMap::new(),
         ground: None,
     };
     e.run()?;
@@ -71,6 +72,8 @@ struct Elaborator<'a> {
     vars: HashMap<String, VarId>,
     funcs: HashMap<String, FuncId>,
     branches: HashMap<(u32, u32), BranchId>,
+    /// Named branches declared with `branch (a, b) name;`, resolved to their [`BranchId`].
+    named_branches: HashMap<String, BranchId>,
     ground: Option<NodeId>,
 }
 
@@ -78,6 +81,7 @@ impl Elaborator<'_> {
     fn run(&mut self) -> Result<(), FrontendError> {
         self.collect_nodes()?;
         self.resolve_ports()?;
+        self.collect_branches()?;
         self.collect_params()?;
         self.collect_functions()?;
         self.collect_var_decls();
@@ -210,6 +214,24 @@ impl Elaborator<'_> {
                     return Err(elab(format!(
                         "port `{port}` has no discipline declaration (e.g. `electrical {port};`)"
                     )))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // --- pass: named branches --------------------------------------------------------
+
+    /// Resolve each `branch (a, b) name;` declaration to a [`BranchId`] and register its
+    /// name(s). The branch is interned by its terminal node pair, so a named access
+    /// `V(name)` and a positional access `V(a, b)` refer to the same branch.
+    fn collect_branches(&mut self) -> Result<(), FrontendError> {
+        let ast = self.ast;
+        for item in &ast.items {
+            if let Item::Branch { terminals, names } = item {
+                let id = self.resolve_branch(terminals)?;
+                for name in names {
+                    self.named_branches.insert(name.clone(), id);
                 }
             }
         }
@@ -497,6 +519,12 @@ impl Elaborator<'_> {
     }
 
     fn resolve_branch(&mut self, args: &[String]) -> Result<BranchId, FrontendError> {
+        // A single argument may be a declared branch name (e.g. `V(br_rseries)`).
+        if args.len() == 1 {
+            if let Some(id) = self.named_branches.get(&args[0]) {
+                return Ok(*id);
+            }
+        }
         let p = *self
             .nodes
             .get(&args[0])
@@ -814,6 +842,29 @@ mod tests {
         // No duplicate registration despite `q`/`v` also being assignment targets.
         assert_eq!(m.vars.iter().filter(|d| d.name == "q").count(), 1);
         assert_eq!(m.vars.iter().filter(|d| d.name == "v").count(), 1);
+    }
+
+    #[test]
+    fn named_branch_resolves_and_coincides_with_positional() {
+        // `V(br)`/`I(br)` and `V(a,b)` all refer to the one declared branch.
+        let src = "module t(a, b); electrical a, b; branch (a, b) br; analog begin I(br) <+ V(a, b); end endmodule";
+        let m = elaborate_src(src);
+        assert_eq!(
+            m.branches.len(),
+            1,
+            "named and positional access share one branch"
+        );
+        match &m.analog[0] {
+            va_ir::Stmt::Contribute { target, value } => {
+                assert_eq!(target.kind, AccessKind::Flow);
+                // The probe `V(a,b)` resolves to the same branch as the named target `I(br)`.
+                assert!(matches!(
+                    m.expr(*value),
+                    va_ir::Expr::Probe(a) if a.branch == target.branch
+                ));
+            }
+            other => panic!("expected a contribution, got {other:?}"),
+        }
     }
 
     #[test]

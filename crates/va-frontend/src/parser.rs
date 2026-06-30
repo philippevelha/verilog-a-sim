@@ -214,6 +214,7 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Var { ty, names })
             }
+            Some(Token::Keyword(kw)) if kw.as_str() == "branch" => self.parse_branch_decl(),
             // `analog function …` is a function definition; a bare `analog` is the block.
             Some(Token::Analog) if matches!(self.nth(1), Some(Token::Keyword(kw)) if kw.as_str() == "function") => {
                 self.parse_function()
@@ -334,6 +335,21 @@ impl Parser<'_> {
             args,
             body,
         }))
+    }
+
+    /// Parse a named branch declaration: `branch (a[, b]) name {, name};`.
+    fn parse_branch_decl(&mut self) -> Result<Item, FrontendError> {
+        self.eat_keyword("branch")?;
+        self.eat(&Token::LParen)?;
+        let mut terminals = vec![self.expect_ident()?];
+        if self.at(&Token::Comma) {
+            self.pos += 1;
+            terminals.push(self.expect_ident()?);
+        }
+        self.eat(&Token::RParen)?;
+        let names = self.ident_list()?;
+        self.eat(&Token::Semicolon)?;
+        Ok(Item::Branch { terminals, names })
     }
 
     /// Consume a range's opening delimiter, returning whether it is inclusive (`[`) rather
@@ -981,6 +997,23 @@ mod tests {
         assert!(!range.lo_inclusive);
         assert!(range.hi_inclusive);
         assert!(range.exclude);
+    }
+
+    #[test]
+    fn branch_declaration_parses() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; branch (a, b) br1, br2; analog begin I(br1) <+ V(br1); end endmodule",
+        );
+        let (terminals, names) = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Branch { terminals, names } => Some((terminals.clone(), names.clone())),
+                _ => None,
+            })
+            .expect("branch item");
+        assert_eq!(terminals, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(names, vec!["br1".to_string(), "br2".to_string()]);
     }
 
     #[test]
