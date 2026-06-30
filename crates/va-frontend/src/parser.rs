@@ -203,6 +203,17 @@ impl Parser<'_> {
                 Ok(Item::Net { discipline, nets })
             }
             Some(Token::Parameter) => self.parse_param(),
+            // A bare `real`/`integer` at module scope declares variables (a `parameter`
+            // declaration starts with `parameter`, and an `analog function` with `analog`).
+            Some(Token::Real) | Some(Token::Integer) => {
+                let ty = match self.bump() {
+                    Some(Token::Integer) => ParamType::Integer,
+                    _ => ParamType::Real,
+                };
+                let names = self.ident_list()?;
+                self.eat(&Token::Semicolon)?;
+                Ok(Item::Var { ty, names })
+            }
             // `analog function …` is a function definition; a bare `analog` is the block.
             Some(Token::Analog) if matches!(self.nth(1), Some(Token::Keyword(kw)) if kw.as_str() == "function") => {
                 self.parse_function()
@@ -923,6 +934,22 @@ mod tests {
         // `time` is a reserved word and may not name a net.
         let toks = lex("module t(); electrical time; analog begin end endmodule").expect("lex");
         assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn module_level_variable_declarations() {
+        let m = parse_src("module t(); real q, v; integer i; endmodule");
+        let vars: Vec<_> = m
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Var { ty, names } => Some((*ty, names.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0], (ParamType::Real, vec!["q".into(), "v".into()]));
+        assert_eq!(vars[1], (ParamType::Integer, vec!["i".into()]));
     }
 
     #[test]

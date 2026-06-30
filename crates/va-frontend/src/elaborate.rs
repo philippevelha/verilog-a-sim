@@ -7,7 +7,8 @@
 //!
 //! 1. **Nodes** — intern every net declared with a discipline; resolve the port list.
 //! 2. **Parameters** — const-evaluate each default and range bound into `f64`.
-//! 3. **Variables** — register every assignment target as a local variable.
+//! 3. **Variables** — register explicitly declared module variables (`real q, v;`), then
+//!    every remaining assignment target, as local variables.
 //! 4. **Lowering** — translate the analog block's expressions and statements, creating
 //!    branches on demand as branch accesses are resolved.
 //!
@@ -79,9 +80,31 @@ impl Elaborator<'_> {
         self.resolve_ports()?;
         self.collect_params()?;
         self.collect_functions()?;
+        self.collect_var_decls();
         self.collect_vars();
         self.lower_analog()?;
         Ok(())
+    }
+
+    /// Register explicitly declared module-level variables (`real q, v;`). The base type is
+    /// not retained — the IR has no variable type and treats every value as `f64`. Assignment
+    /// targets in the analog block are still auto-registered by [`Self::collect_vars`]; this
+    /// pass just lets a variable be declared before (or without) being assigned.
+    fn collect_var_decls(&mut self) {
+        let ast = self.ast;
+        for item in &ast.items {
+            if let Item::Var { names, .. } = item {
+                for name in names {
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        self.vars.entry(name.clone())
+                    {
+                        let id = VarId(self.out.vars.len() as u32);
+                        self.out.vars.push(VarDecl { name: name.clone() });
+                        slot.insert(id);
+                    }
+                }
+            }
+        }
     }
 
     /// Push a fresh local variable and return its id.
@@ -729,6 +752,20 @@ mod tests {
             })
             .expect("a division");
         assert!(matches!(m.expr(div), Expr::Param(_)));
+    }
+
+    #[test]
+    fn declared_module_variable_is_registered_and_usable() {
+        // `real q, v;` declared at module scope; both are usable in the analog block, and a
+        // declared-but-unassigned variable still becomes an IR var.
+        let src = "module t(p, n); electrical p, n; real q, v; analog begin v = V(p, n); q = v; I(p, n) <+ q; end endmodule";
+        let m = elaborate_src(src);
+        let names: Vec<&str> = m.vars.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"q"));
+        assert!(names.contains(&"v"));
+        // No duplicate registration despite `q`/`v` also being assignment targets.
+        assert_eq!(m.vars.iter().filter(|d| d.name == "q").count(), 1);
+        assert_eq!(m.vars.iter().filter(|d| d.name == "v").count(), 1);
     }
 
     #[test]

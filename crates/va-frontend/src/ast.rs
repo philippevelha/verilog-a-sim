@@ -133,6 +133,13 @@ pub enum Item {
     Analog(Stmt),
     /// An analog function definition, `analog function real f; … endfunction`.
     Function(AnalogFunction),
+    /// A module-level variable declaration, `real q, v;` / `integer i;`.
+    Var {
+        /// Declared base type (`real`/`integer`).
+        ty: ParamType,
+        /// Declared variable names.
+        names: Vec<String>,
+    },
 }
 
 /// A user-defined analog function (`analog function`).
