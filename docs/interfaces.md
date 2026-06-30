@@ -42,6 +42,7 @@ pub enum Expr {
     Binary(BinOp, ExprId, ExprId),
     Call(Builtin, Vec<ExprId>),    // exp, ln, ddt, idt, $vt, $temperature, ...
     CallUser(FuncId, Vec<ExprId>), // user-defined analog function call
+    Select(ExprId, ExprId, ExprId),// ternary cond ? then : else
 }
 
 pub enum Stmt {

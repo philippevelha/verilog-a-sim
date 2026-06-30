@@ -352,6 +352,9 @@ pub enum Token {
     /// `@` — opens an event-control expression, `@(initial_step)`.
     #[token("@")]
     At,
+    /// `?` — the ternary conditional operator, `cond ? a : b`.
+    #[token("?")]
+    Question,
     /// `,`.
     #[token(",")]
     Comma,

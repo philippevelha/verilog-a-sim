@@ -293,6 +293,13 @@ impl Elaborator<'_> {
                 let vals: Result<Vec<f64>, _> = args.iter().map(|a| self.const_eval(*a)).collect();
                 eval_const_call(name, &vals?)
             }
+            ExprAst::Cond { cond, then_, else_ } => {
+                if self.const_eval(*cond)? != 0.0 {
+                    self.const_eval(*then_)
+                } else {
+                    self.const_eval(*else_)
+                }
+            }
             ExprAst::SysFunc(name) => Err(elab(format!(
                 "system function `${name}` is not constant in a parameter context"
             ))),
@@ -526,6 +533,12 @@ impl Elaborator<'_> {
                 let l = self.lower_expr(*l)?;
                 let rhs = self.lower_expr(*rhs)?;
                 Expr::Binary(op, l, rhs)
+            }
+            ExprAst::Cond { cond, then_, else_ } => {
+                let cond = self.lower_expr(*cond)?;
+                let then_ = self.lower_expr(*then_)?;
+                let else_ = self.lower_expr(*else_)?;
+                Expr::Select(cond, then_, else_)
             }
         };
         Ok(self.out.push_expr(expr))
@@ -924,6 +937,20 @@ mod tests {
             }
             other => panic!("expected a contribution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ternary_lowers_to_select_and_folds_in_params() {
+        // In a parameter context the ternary is const-folded.
+        let m = elaborate_src("module t(); parameter real X = 1 > 0 ? 7 : 9; electrical a; analog begin I(a) <+ X; end endmodule");
+        assert_eq!(m.params[0].default, 7.0);
+
+        // In the analog block it lowers to Expr::Select.
+        let m = elaborate_src("module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) > 0 ? 1.0 : 2.0; end endmodule");
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Select(_, _, _))));
     }
 
     #[test]

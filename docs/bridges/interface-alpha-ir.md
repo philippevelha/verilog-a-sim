@@ -7,7 +7,8 @@
 > `Case`) and user-defined analog functions (`Function`, `Expr::CallUser`, `Module.functions`,
 > `FuncId`). Lowered by `va-frontend`; rejected (stub adapters) by `va-codegen` v0.
 > Also added the trig/hyperbolic and `hypot`/`atan2`/`min`/`max` math `Builtin`s, with AD
-> derivatives in `va-codegen` (FD-validated per §5).
+> derivatives in `va-codegen` (FD-validated per §5). Added `Expr::Select` for the ternary
+> `?:` (only the taken branch is evaluated; its gradient flows through).
 
 ## 1. Role
 
@@ -59,7 +60,8 @@ Module
 - **Handles** (`NodeId`, `ParamId`, `ExprId`, `BranchId`, `VarId`, `FuncId`) are `Copy`
   newtypes over `u32`. They are positions in the correspondingly-named `Vec`.
 - **`Expr`** is an arena node: `Const`, `Param`, `Var`, `Probe(Access)`, `Unary`, `Binary`,
-  `Call(Builtin, …)`, `CallUser(FuncId, …)`. Children are `ExprId`s — never `Box`, never `&`.
+  `Call(Builtin, …)`, `CallUser(FuncId, …)`, `Select(cond, then, else)` (the ternary `?:`).
+  Children are `ExprId`s — never `Box`, never `&`.
 - **`Stmt`** is `Contribute { target, value }` (`<+`), `If`, `Assign { lhs, rhs }`, `Block`,
   and the analog control-flow forms `While`, `For`, `Repeat`, `Case` (with `CaseArm`).
   Control flow nests via owned `Vec<Stmt>`; `For` boxes its single `init`/`step` statements

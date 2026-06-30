@@ -287,6 +287,15 @@ pub enum ExprAst {
     Unary(UnOp, ExprRef),
     /// Binary operation.
     Binary(BinOp, ExprRef, ExprRef),
+    /// Ternary conditional `cond ? then_ : else_`.
+    Cond {
+        /// The selector; non-zero chooses `then_`.
+        cond: ExprRef,
+        /// Value when `cond` is non-zero.
+        then_: ExprRef,
+        /// Value when `cond` is zero.
+        else_: ExprRef,
+    },
 }
 
 /// Unary operators.

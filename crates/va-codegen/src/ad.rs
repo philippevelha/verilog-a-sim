@@ -355,6 +355,15 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         Expr::CallUser(..) => Err(unsupported(
             "user-defined analog functions are not supported in codegen v0",
         )),
+        // Ternary: evaluate the selector, then only the taken branch (so an unselected,
+        // possibly-undefined branch is never touched). The gradient is the taken branch's.
+        Expr::Select(cond, then, else_) => {
+            if eval(ctx, *cond)?.value != 0.0 {
+                eval(ctx, *then)
+            } else {
+                eval(ctx, *else_)
+            }
+        }
     }
 }
 
@@ -466,6 +475,44 @@ mod tests {
                 "{name}: analytic {analytic} vs fd {fd}"
             );
         }
+    }
+
+    #[test]
+    fn select_evaluates_only_the_taken_branch() {
+        use va_ir::{Expr, Module};
+
+        // cond != 0 → `then`; the `else` branch (a `Var`, which eval rejects) is never touched,
+        // so the call still succeeds.
+        let mut m = Module::new("sel");
+        let cond = m.push_expr(Expr::Const(1.0));
+        let then = m.push_expr(Expr::Const(2.0));
+        let bad = m.push_expr(Expr::Var(va_ir::VarId(0))); // eval() would Err on this
+        let sel = m.push_expr(Expr::Select(cond, then, bad));
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &[],
+            terminals: &[],
+            vt: 0.0,
+            temp: 0.0,
+        };
+        assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
+
+        // cond == 0 → `else`.
+        let mut m = Module::new("sel");
+        let cond = m.push_expr(Expr::Const(0.0));
+        let then = m.push_expr(Expr::Const(2.0));
+        let els = m.push_expr(Expr::Const(3.0));
+        let sel = m.push_expr(Expr::Select(cond, then, els));
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &[],
+            terminals: &[],
+            vt: 0.0,
+            temp: 0.0,
+        };
+        assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);
     }
 
     #[test]

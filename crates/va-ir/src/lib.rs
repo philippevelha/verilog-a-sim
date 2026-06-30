@@ -199,6 +199,10 @@ pub enum Expr {
     /// A call to a user-defined analog function ([`Module::functions`]), with one argument
     /// expression per the function's declared inputs.
     CallUser(FuncId, Vec<ExprId>),
+    /// Ternary selection `cond ? then : else_` (from `?:`). A non-zero `cond` selects `then`.
+    /// Only the selected branch is evaluated, so an unselected branch may be undefined at the
+    /// current point (e.g. `x > 0 ? ln(x) : 0`).
+    Select(ExprId, ExprId, ExprId),
 }
 
 /// Unary operators.

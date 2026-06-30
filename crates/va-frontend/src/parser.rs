@@ -618,7 +618,17 @@ impl Parser<'_> {
     // --- expressions (precedence climbing) -----------------------------------------
 
     fn parse_expr(&mut self) -> Result<ExprRef, FrontendError> {
-        self.parse_bin(0)
+        let cond = self.parse_bin(0)?;
+        // The ternary `?:` binds looser than every binary operator and is right-associative.
+        if self.at(&Token::Question) {
+            self.pos += 1;
+            let then_ = self.parse_expr()?;
+            self.eat(&Token::Colon)?;
+            let else_ = self.parse_expr()?;
+            Ok(self.push(ExprAst::Cond { cond, then_, else_ }))
+        } else {
+            Ok(cond)
+        }
     }
 
     fn parse_bin(&mut self, min_bp: u8) -> Result<ExprRef, FrontendError> {
@@ -885,6 +895,31 @@ mod tests {
                 assert!(matches!(m.expr(*r), ExprAst::Binary(BinOp::Mul, _, _)));
             }
             other => panic!("expected Add at the root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ternary_parses_and_is_right_associative() {
+        // `1 + 2 > 0 ? 10 : 20 ? 30 : 40` ==> Cond(1+2>0, 10, Cond(20, 30, 40)).
+        let m =
+            parse_src("module t(); parameter real X = 1 + 2 > 0 ? 10 : 20 ? 30 : 40; endmodule");
+        let default = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { default, .. } => Some(*default),
+                _ => None,
+            })
+            .unwrap();
+        match m.expr(default) {
+            ExprAst::Cond { cond, then_, else_ } => {
+                // The condition is the full `1 + 2 > 0` comparison, not just `0`.
+                assert!(matches!(m.expr(*cond), ExprAst::Binary(BinOp::Gt, _, _)));
+                assert!(matches!(m.expr(*then_), ExprAst::Number(v) if *v == 10.0));
+                // Right-associative: the else-branch is itself a ternary.
+                assert!(matches!(m.expr(*else_), ExprAst::Cond { .. }));
+            }
+            other => panic!("expected a ternary, got {other:?}"),
         }
     }
 
