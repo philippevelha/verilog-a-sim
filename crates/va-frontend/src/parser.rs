@@ -167,10 +167,37 @@ impl Parser<'_> {
         }
     }
 
+    /// Skip directives and top-level `discipline …  enddiscipline` / `nature … endnature`
+    /// blocks (e.g. from an expanded `disciplines.vams`) that precede the module. v0 models
+    /// disciplines natively, so these declarations are ignored.
+    fn skip_preamble(&mut self) {
+        loop {
+            self.skip_directives();
+            if self.at_keyword("discipline") {
+                self.skip_block_until("enddiscipline");
+            } else if self.at_keyword("nature") {
+                self.skip_block_until("endnature");
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Consume tokens up to and including the reserved word `end` (e.g. `enddiscipline`).
+    fn skip_block_until(&mut self, end: &str) {
+        while let Some(tok) = self.peek() {
+            let done = matches!(tok, Token::Keyword(kw) if kw.as_str() == end);
+            self.pos += 1;
+            if done {
+                break;
+            }
+        }
+    }
+
     // --- module --------------------------------------------------------------------
 
     fn parse_module(&mut self) -> Result<ModuleAst, FrontendError> {
-        self.skip_directives();
+        self.skip_preamble();
         self.eat(&Token::Module)?;
         let name = self.expect_ident()?;
 

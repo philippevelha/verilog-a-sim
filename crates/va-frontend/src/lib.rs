@@ -14,12 +14,17 @@ pub mod elaborate;
 pub mod keywords;
 pub mod lexer;
 pub mod parser;
+pub mod preprocess;
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors produced anywhere in the frontend pipeline.
 #[derive(Debug, Error)]
 pub enum FrontendError {
+    /// The preprocessor hit a bad directive, undefined macro, or include problem.
+    #[error("preprocess error: {0}")]
+    Preprocess(String),
     /// The lexer hit a character it cannot tokenize.
     #[error("lex error at byte {offset}: {message}")]
     Lex { offset: usize, message: String },
@@ -31,11 +36,22 @@ pub enum FrontendError {
     Elaborate(String),
 }
 
-/// Compile Verilog-A `source` into an elaborated [`va_ir::Module`].
+/// Compile Verilog-A `source` into an elaborated [`va_ir::Module`], with no `` `include ``
+/// search path (unresolved includes are skipped — the standard disciplines are built in).
 ///
-/// This is the crate's front door: lex → parse → elaborate. Stubbed until T1 lands.
+/// The crate's front door: preprocess → lex → parse → elaborate.
 pub fn compile(source: &str) -> Result<va_ir::Module, FrontendError> {
-    let tokens = lexer::lex(source)?;
+    compile_with_includes(source, &[])
+}
+
+/// Like [`compile`], but resolving `` `include `` against `include_dirs` (searched in order),
+/// so standard headers (`disciplines.vams`, `constants.vams`) and their macros expand.
+pub fn compile_with_includes(
+    source: &str,
+    include_dirs: &[PathBuf],
+) -> Result<va_ir::Module, FrontendError> {
+    let expanded = preprocess::preprocess(source, include_dirs)?;
+    let tokens = lexer::lex(&expanded)?;
     let ast = parser::parse(&tokens)?;
     elaborate::elaborate(&ast)
 }

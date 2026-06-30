@@ -57,7 +57,12 @@ pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result
         Some(path) => {
             let src =
                 std::fs::read_to_string(path).with_context(|| format!("reading model {path}"))?;
-            let module = va_frontend::compile(&src)
+            // Resolve `include against the model's own directory.
+            let include_dirs: Vec<std::path::PathBuf> = std::path::Path::new(path)
+                .parent()
+                .map(|p| vec![p.to_path_buf()])
+                .unwrap_or_default();
+            let module = va_frontend::compile_with_includes(&src, &include_dirs)
                 .with_context(|| format!("compiling Verilog-A model {path}"))?;
             eprintln!(
                 "[va-cli] compiled Verilog-A model `{}` from {path}",
@@ -127,6 +132,18 @@ fn check_one(path: &str) -> bool {
         Ok(s) => s,
         Err(e) => {
             println!("  [read ] {path}: {e}");
+            return false;
+        }
+    };
+    // Resolve `include against the file's own directory (where the headers live).
+    let include_dirs: Vec<std::path::PathBuf> = std::path::Path::new(path)
+        .parent()
+        .map(|p| vec![p.to_path_buf()])
+        .unwrap_or_default();
+    let src = match va_frontend::preprocess::preprocess(&src, &include_dirs) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  [pp   ] {path}: {e}");
             return false;
         }
     };
