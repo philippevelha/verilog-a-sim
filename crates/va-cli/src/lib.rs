@@ -73,6 +73,95 @@ pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result
     Ok(())
 }
 
+/// Run the frontend (lex → parse → elaborate) over each path and print a per-file report of
+/// the first failing stage. `paths` may be individual files or directories (scanned for
+/// `.va`/`.vams`). This is a diagnostic tool: it always returns `Ok`, reporting status to
+/// stdout, and is how we discover which Verilog-A constructs the v0 frontend is missing.
+///
+/// # Errors
+///
+/// Only if a directory cannot be read.
+pub fn check_models(paths: &[String]) -> Result<()> {
+    let mut files = Vec::new();
+    for p in paths {
+        let path = std::path::Path::new(p);
+        if path.is_dir() {
+            collect_va_files(path, &mut files)
+                .with_context(|| format!("scanning directory {p}"))?;
+        } else {
+            files.push(p.clone());
+        }
+    }
+    files.sort();
+
+    let mut passed = 0usize;
+    for file in &files {
+        if check_one(file) {
+            passed += 1;
+        }
+    }
+    println!(
+        "\n{passed}/{} files passed the frontend (lex → parse → elaborate)",
+        files.len()
+    );
+    Ok(())
+}
+
+/// Collect `.va`/`.vams` files in `dir` (non-recursive) into `out`.
+fn collect_va_files(dir: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext == "va" || ext == "vams" {
+                out.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check a single source file through the frontend stages, printing a tagged status line.
+/// Returns whether it elaborated cleanly.
+fn check_one(path: &str) -> bool {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  [read ] {path}: {e}");
+            return false;
+        }
+    };
+    let tokens = match va_frontend::lexer::lex(&src) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("  [lex  ] {path}: {e}");
+            return false;
+        }
+    };
+    let ast = match va_frontend::parser::parse(&tokens) {
+        Ok(a) => a,
+        Err(e) => {
+            println!("  [parse] {path}: {e}");
+            return false;
+        }
+    };
+    match va_frontend::elaborate::elaborate(&ast) {
+        Ok(m) => {
+            println!(
+                "  [ok   ] {path}: module `{}` ({} nodes, {} params, {} funcs)",
+                m.name,
+                m.nodes.len(),
+                m.params.len(),
+                m.functions.len()
+            );
+            true
+        }
+        Err(e) => {
+            println!("  [elab ] {path}: {e}");
+            false
+        }
+    }
+}
+
 /// Reject analyses v0 does not implement (anything but DC).
 fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
     if matches!(net.analysis, AnalysisCard::Tran | AnalysisCard::Ac) {

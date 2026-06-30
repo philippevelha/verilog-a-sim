@@ -10,12 +10,13 @@
 //! itself lives in the library so `va-harness` can drive it directly.
 
 use anyhow::{bail, Context, Result};
-use va_cli::{run_sim, Analysis};
+use va_cli::{check_models, run_sim, Analysis};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("sim") => cmd_sim(&args[1..]),
+        Some("check") => cmd_check(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -32,10 +33,19 @@ fn print_usage() {
     eprintln!(
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
-         va-cli sim <netlist.net> --model <model.va> [--ac|--tran]\n\n\
+         va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran]\n    \
+         va-cli check <model.va|dir> [more…]   Run the frontend over models, report gaps\n\n\
          FLAGS:\n    \
          -h, --help    Print this help"
     );
+}
+
+/// The `check` subcommand: run the frontend over models/directories and report what fails.
+fn cmd_check(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("expected at least one model file or directory");
+    }
+    check_models(args)
 }
 
 /// The `sim` subcommand: run a netlist through the pipeline.
