@@ -16,10 +16,12 @@
 //! # Note on the count
 //!
 //! The source document's prose states 166 reserved words, but its table lists 169 distinct
-//! lowercase words. We recognise all 169 listed words, plus `aliasparam`: the Annex D table
-//! omits it, but it is a real grammar production (`aliasparam_declaration`) used pervasively
-//! by the compact-model corpus. A lexer that reserves a superset is conservative (it only
-//! forbids a few extra identifiers) and none of the surplus words collide with the model zoo.
+//! lowercase words. We recognise all 169 listed words, plus `aliasparam` and `genvar`: the
+//! Annex D table omits both, but each is a real grammar production (`aliasparam_declaration`,
+//! `genvar_declaration`) seen in the compact-model corpus (`genvar i;` guards a hand-unrolled
+//! generate loop in more than one zoo model). A lexer that reserves a superset is conservative
+//! (it only forbids a few extra identifiers) and none of the surplus words collide with the
+//! model zoo.
 
 /// A Verilog-A/AMS reserved word carried generically by the lexer.
 ///
@@ -64,7 +66,7 @@ impl std::fmt::Display for Keyword {
 /// [`crate::lexer::Token`] variant (`analog`, `begin`, `else`, `end`, `endmodule`,
 /// `exclude`, `from`, `ground`, `if`, `inf`, `inout`, `input`, `integer`, `module`,
 /// `output`, `parameter`, `real`) appear here for completeness but are tokenized directly.
-pub const RESERVED_WORDS: [&str; 170] = [
+pub const RESERVED_WORDS: [&str; 171] = [
     "abs",
     "abstol",
     "access",
@@ -129,6 +131,7 @@ pub const RESERVED_WORDS: [&str; 170] = [
     "from",
     "function",
     "generate",
+    "genvar",
     "ground",
     "highz0",
     "highz1",

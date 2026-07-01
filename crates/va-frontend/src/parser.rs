@@ -264,6 +264,18 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Var { ty, names })
             }
+            // `genvar i;` declares a generate-loop index. v0 does not unroll `generate`
+            // blocks, so it is lowered to a plain integer variable — enough to let models
+            // that declare (but do not actually generate-unroll) a genvar parse cleanly.
+            Some(Token::Genvar) => {
+                self.pos += 1;
+                let names = self.ident_list()?;
+                self.eat(&Token::Semicolon)?;
+                Ok(Item::Var {
+                    ty: ParamType::Integer,
+                    names,
+                })
+            }
             Some(Token::Keyword(kw)) if kw.as_str() == "branch" => self.parse_branch_decl(),
             Some(Token::Keyword(kw)) if kw.as_str() == "aliasparam" => self.parse_aliasparam_decl(),
             // `analog function …` is a function definition; a bare `analog` is the block.
@@ -1136,6 +1148,17 @@ mod tests {
         assert_eq!(vars.len(), 2);
         assert_eq!(vars[0], (ParamType::Real, vec!["q".into(), "v".into()]));
         assert_eq!(vars[1], (ParamType::Integer, vec!["i".into()]));
+    }
+
+    #[test]
+    fn genvar_parses_like_integer() {
+        // v0 does not unroll `generate` blocks, so `genvar i;` just introduces an integer
+        // variable — enough for models that declare one without using it (see the corpus).
+        let m = parse_src("module t(); genvar i; endmodule");
+        assert!(m.items.iter().any(|it| matches!(
+            it,
+            Item::Var { ty, names } if *ty == ParamType::Integer && names == &["i".to_string()]
+        )));
     }
 
     #[test]

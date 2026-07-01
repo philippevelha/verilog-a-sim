@@ -94,6 +94,10 @@ pub enum Token {
     /// `integer`.
     #[token("integer")]
     Integer,
+    /// `genvar` — a generate-loop index. v0 does not unroll `generate` blocks, so a `genvar`
+    /// declaration is lowered like a bare `integer` (see [`crate::parser`]).
+    #[token("genvar")]
+    Genvar,
     /// `input`.
     #[token("input")]
     Input,
@@ -544,6 +548,14 @@ mod tests {
                 "`{word}` should lex as a reserved word"
             );
         }
+    }
+
+    #[test]
+    fn genvar_is_its_own_token() {
+        assert_eq!(
+            lex_ok("genvar i;"),
+            vec![Token::Genvar, Token::Ident("i".into()), Token::Semicolon]
+        );
     }
 
     #[test]
