@@ -141,6 +141,7 @@ pub enum Token {
     #[token("acos", kw)]
     #[token("acosh", kw)]
     #[token("ac_stim", kw)]
+    #[token("aliasparam", kw)]
     #[token("always", kw)]
     #[token("analysis", kw)]
     #[token("and", kw)]

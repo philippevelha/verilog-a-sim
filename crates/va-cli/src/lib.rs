@@ -87,21 +87,24 @@ pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result
 ///
 /// Only if a directory cannot be read.
 pub fn check_models(paths: &[String]) -> Result<()> {
-    let mut files = Vec::new();
+    // Each entry pairs a file with the root directory it was scanned from, so nested
+    // library folders (e.g. `external/some-lib/`) can still resolve `` `include `` of
+    // shared headers (`constants.vams`, `disciplines.vams`) that live at the scanned root.
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
     for p in paths {
         let path = std::path::Path::new(p);
         if path.is_dir() {
-            collect_va_files(path, &mut files)
+            collect_va_files(path, path, &mut files)
                 .with_context(|| format!("scanning directory {p}"))?;
         } else {
-            files.push(p.clone());
+            files.push((p.clone(), std::path::PathBuf::new()));
         }
     }
-    files.sort();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut passed = 0usize;
-    for file in &files {
-        if check_one(file) {
+    for (file, root) in &files {
+        if check_one(file, root) {
             passed += 1;
         }
     }
@@ -113,16 +116,21 @@ pub fn check_models(paths: &[String]) -> Result<()> {
 }
 
 /// Collect `.va`/`.vams` files under `dir`, recursing into subdirectories so model libraries
-/// kept in their own folder are included (each file resolves `` `include `` against its own
-/// directory).
-fn collect_va_files(dir: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
+/// kept in their own folder are included. Each file is paired with `root` (the top-level
+/// directory the scan started from) so its includes can fall back to shared headers kept
+/// there, in addition to the file's own directory.
+fn collect_va_files(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
-            collect_va_files(&path, out)?;
+            collect_va_files(&path, root, out)?;
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if ext == "va" || ext == "vams" {
-                out.push(path.to_string_lossy().into_owned());
+                out.push((path.to_string_lossy().into_owned(), root.to_path_buf()));
             }
         }
     }
@@ -130,8 +138,10 @@ fn collect_va_files(dir: &std::path::Path, out: &mut Vec<String>) -> std::io::Re
 }
 
 /// Check a single source file through the frontend stages, printing a tagged status line.
-/// Returns whether it elaborated cleanly.
-fn check_one(path: &str) -> bool {
+/// `scan_root` is the top-level directory the file was discovered under (empty if the file
+/// was passed directly rather than found via directory scan). Returns whether it elaborated
+/// cleanly.
+fn check_one(path: &str, scan_root: &std::path::Path) -> bool {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -139,11 +149,14 @@ fn check_one(path: &str) -> bool {
             return false;
         }
     };
-    // Resolve `include against the file's own directory (where the headers live).
-    let include_dirs: Vec<std::path::PathBuf> = std::path::Path::new(path)
-        .parent()
-        .map(|p| vec![p.to_path_buf()])
-        .unwrap_or_default();
+    // Resolve `include against the file's own directory first, then fall back to the
+    // scanned root so nested library folders can still reach shared headers kept there.
+    let own_dir = std::path::Path::new(path).parent();
+    let mut include_dirs: Vec<std::path::PathBuf> =
+        own_dir.map(|p| vec![p.to_path_buf()]).unwrap_or_default();
+    if !scan_root.as_os_str().is_empty() && Some(scan_root) != own_dir {
+        include_dirs.push(scan_root.to_path_buf());
+    }
     let src = match va_frontend::preprocess::preprocess(&src, &include_dirs) {
         Ok(s) => s,
         Err(e) => {

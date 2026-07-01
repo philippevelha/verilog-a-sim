@@ -245,27 +245,42 @@ impl Elaborator<'_> {
 
     fn collect_params(&mut self) -> Result<(), FrontendError> {
         for item in &self.ast.items {
-            if let Item::Param {
-                name,
-                default,
-                range,
-                ..
-            } = item
-            {
-                let default_val = self.const_eval(*default)?;
-                let (min, max) = match range {
-                    Some(r) => (bound(self.const_eval(r.lo)?), bound(self.const_eval(r.hi)?)),
-                    None => (None, None),
-                };
-                let id = ParamId(self.out.params.len() as u32);
-                self.out.params.push(Param {
-                    name: name.clone(),
-                    default: default_val,
-                    min,
-                    max,
-                });
-                self.params.insert(name.clone(), id);
-                self.param_vals.insert(name.clone(), default_val);
+            match item {
+                Item::Param {
+                    name,
+                    default,
+                    range,
+                    ..
+                } => {
+                    let default_val = self.const_eval(*default)?;
+                    let (min, max) = match range {
+                        Some(r) => (bound(self.const_eval(r.lo)?), bound(self.const_eval(r.hi)?)),
+                        None => (None, None),
+                    };
+                    let id = ParamId(self.out.params.len() as u32);
+                    self.out.params.push(Param {
+                        name: name.clone(),
+                        default: default_val,
+                        min,
+                        max,
+                    });
+                    self.params.insert(name.clone(), id);
+                    self.param_vals.insert(name.clone(), default_val);
+                }
+                // `aliasparam name = target;` introduces no new parameter: `name` is just
+                // another name resolving to `target`'s existing `ParamId`/value. `target`
+                // must already be declared — forward references are unsupported in v0.
+                Item::AliasParam { name, target } => {
+                    let id = *self.params.get(target).ok_or_else(|| {
+                        elab(format!(
+                            "aliasparam `{name}` targets unknown parameter `{target}`"
+                        ))
+                    })?;
+                    let val = self.param_vals[target];
+                    self.params.insert(name.clone(), id);
+                    self.param_vals.insert(name.clone(), val);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -521,7 +536,26 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            ExprAst::SysFunc { name, .. } => Expr::Call(sysfunc_builtin(name)?, Vec::new()),
+            ExprAst::SysFunc { name, args } => {
+                let builtin = sysfunc_builtin(name)?;
+                let mut ids = Vec::with_capacity(args.len());
+                for &a in args {
+                    ids.push(self.lower_expr(a)?);
+                }
+                // Arity: `$vt` accepts `$vt` (ambient) or `$vt(T)` (thermal voltage at the
+                // absolute temperature `T`). Every other system function here takes none.
+                match builtin {
+                    Builtin::Vt if ids.len() > 1 => {
+                        return Err(elab(format!("`${name}` takes at most one argument")))
+                    }
+                    Builtin::Vt => {}
+                    _ if !ids.is_empty() => {
+                        return Err(elab(format!("`${name}` takes no arguments")))
+                    }
+                    _ => {}
+                }
+                Expr::Call(builtin, ids)
+            }
             ExprAst::Str(_) => {
                 return Err(elab(
                     "a string literal is only valid as a system-task argument".to_string(),
@@ -891,6 +925,31 @@ mod tests {
     }
 
     #[test]
+    fn aliasparam_resolves_to_the_same_param_id() {
+        // `aliasparam` introduces no new parameter: `Rtherm` and `Rth` must share a `ParamId`,
+        // and a reference to the alias in the analog block lowers to that same expression.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; \
+             parameter real Rth = 1000 from (0:inf); \
+             aliasparam Rtherm = Rth; \
+             analog begin I(a, b) <+ V(a, b) / Rtherm; end endmodule",
+        );
+        assert_eq!(m.params.len(), 1, "aliasparam must not add a new parameter");
+        assert_eq!(m.params[0].name, "Rth");
+        assert_eq!(m.params[0].default, 1000.0);
+        assert!(m.exprs.iter().any(|e| matches!(e, Expr::Param(ParamId(0)))));
+    }
+
+    #[test]
+    fn aliasparam_targeting_unknown_param_is_an_error() {
+        let src = "module t(a, b); electrical a, b; \
+                   aliasparam alias = nope; \
+                   analog begin I(a, b) <+ V(a, b); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
     fn diode_maps_exp_and_vt() {
         let m = elaborate_src(include_str!("../../../models/diode.va"));
         assert_eq!(m.params.len(), 2);
@@ -903,6 +962,29 @@ mod tests {
             .exprs
             .iter()
             .any(|e| matches!(e, Expr::Call(Builtin::Exp, _))));
+    }
+
+    #[test]
+    fn vt_of_temperature_keeps_its_argument() {
+        // `$vt(T)` lowers to `Builtin::Vt` with one argument (the temperature expression),
+        // whereas bare `$vt` lowers with none.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) / $vt(V(a, b)); end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, Expr::Call(Builtin::Vt, args) if args.len() == 1)));
+
+        // `$vt` with more than one argument is a arity error.
+        let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $vt(V(a, b), 1.0); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+
+        // `$temperature` takes no arguments.
+        let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $temperature(V(a, b)); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

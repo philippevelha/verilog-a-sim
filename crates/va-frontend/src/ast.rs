@@ -148,6 +148,15 @@ pub enum Item {
         /// The declared branch names (all aliasing the same terminals).
         names: Vec<String>,
     },
+    /// An `aliasparam` declaration, `aliasparam alias = existing;` — a second name for an
+    /// already-declared parameter. Does not introduce a new parameter: `alias` resolves to
+    /// the same value as `existing`.
+    AliasParam {
+        /// The new name being introduced.
+        name: String,
+        /// The name of the parameter it aliases.
+        target: String,
+    },
 }
 
 /// A user-defined analog function (`analog function`).

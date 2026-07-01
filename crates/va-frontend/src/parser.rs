@@ -265,6 +265,7 @@ impl Parser<'_> {
                 Ok(Item::Var { ty, names })
             }
             Some(Token::Keyword(kw)) if kw.as_str() == "branch" => self.parse_branch_decl(),
+            Some(Token::Keyword(kw)) if kw.as_str() == "aliasparam" => self.parse_aliasparam_decl(),
             // `analog function …` is a function definition; a bare `analog` is the block.
             Some(Token::Analog) if matches!(self.nth(1), Some(Token::Keyword(kw)) if kw.as_str() == "function") => {
                 self.parse_function()
@@ -419,6 +420,18 @@ impl Parser<'_> {
         let names = self.ident_list()?;
         self.eat(&Token::Semicolon)?;
         Ok(Item::Branch { terminals, names })
+    }
+
+    /// Parse an `aliasparam` declaration: `aliasparam name = target;`. The grammar is a fixed
+    /// `identifier = identifier`, not a general expression — `target` must name an
+    /// already-declared parameter (checked at elaboration).
+    fn parse_aliasparam_decl(&mut self) -> Result<Item, FrontendError> {
+        self.eat_keyword("aliasparam")?;
+        let name = self.expect_ident()?;
+        self.eat(&Token::Assign)?;
+        let target = self.expect_ident()?;
+        self.eat(&Token::Semicolon)?;
+        Ok(Item::AliasParam { name, target })
     }
 
     /// Consume a range's opening delimiter, returning whether it is inclusive (`[`) rather
