@@ -33,7 +33,7 @@
 
 use crate::ast::{
     Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
-    FuncArg, Item, ModuleAst, NetArg, NetDecl, ParamType, Range, Stmt, UnOp,
+    FuncArg, Item, ModuleAst, NetArg, NetDecl, ParamType, Range, Stmt, UnOp, VarEntry,
 };
 use crate::lexer::Token;
 use crate::FrontendError;
@@ -164,15 +164,21 @@ impl Parser<'_> {
     /// expression — checked at elaboration, not here.
     fn parse_net_arg(&mut self) -> Result<NetArg, FrontendError> {
         let name = self.expect_ident()?;
-        let index = if self.at(&Token::LBracket) {
-            self.pos += 1;
-            let idx = self.parse_expr()?;
-            self.eat(&Token::RBracket)?;
-            Some(idx)
-        } else {
-            None
-        };
+        let index = self.parse_optional_index()?;
         Ok(NetArg { name, index })
+    }
+
+    /// Parse an optional bracketed index, `[expr]` — one element of a vector net or array
+    /// variable. The index, when present, must be a compile-time-constant or genvar
+    /// expression — checked at elaboration, not here.
+    fn parse_optional_index(&mut self) -> Result<Option<ExprRef>, FrontendError> {
+        if !self.at(&Token::LBracket) {
+            return Ok(None);
+        }
+        self.pos += 1;
+        let idx = self.parse_expr()?;
+        self.eat(&Token::RBracket)?;
+        Ok(Some(idx))
     }
 
     /// Parse an optional `[msb:lsb]` bracket, e.g. a vector net/port's declared width.
@@ -198,6 +204,27 @@ impl Parser<'_> {
         let name = self.expect_ident()?;
         let range = self.parse_bracket_range()?.or(default_range);
         Ok(NetDecl { name, range })
+    }
+
+    /// Parse one entry of a `real`/`integer` variable-declaration list: a name, optionally
+    /// followed by its own `[msb:lsb]` array range (§ array variables) — e.g.
+    /// `real out_val[0:15], tmp;`. Unlike a net declaration, there is no shared prefix-range
+    /// form here: a scalar/array `real`/`integer` never carries a width before the name list,
+    /// only a per-name array dimension after it.
+    fn parse_var_entry(&mut self) -> Result<VarEntry, FrontendError> {
+        let name = self.expect_ident()?;
+        let range = self.parse_bracket_range()?;
+        Ok(VarEntry { name, range })
+    }
+
+    /// A non-empty comma-separated list of [`Self::parse_var_entry`].
+    fn parse_var_entry_list(&mut self) -> Result<Vec<VarEntry>, FrontendError> {
+        let mut names = vec![self.parse_var_entry()?];
+        while self.at(&Token::Comma) {
+            self.pos += 1;
+            names.push(self.parse_var_entry()?);
+        }
+        Ok(names)
     }
 
     fn push(&mut self, e: ExprAst) -> ExprRef {
@@ -324,7 +351,7 @@ impl Parser<'_> {
                     Some(Token::Integer) => ParamType::Integer,
                     _ => ParamType::Real,
                 };
-                let names = self.ident_list()?;
+                let names = self.parse_var_entry_list()?;
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Var { ty, names })
             }
@@ -584,10 +611,11 @@ impl Parser<'_> {
                 self.skip_balanced_parens()?;
                 self.parse_stmt()
             }
-            // A block-local variable declaration, `real x, y;` / `integer i;`.
+            // A block-local variable declaration, `real x, y;` / `integer i;`, or array
+            // declaration, `real out_val[0:15];` (§ array variables).
             Some(Token::Real) | Some(Token::Integer) => {
                 self.pos += 1; // base type (not retained)
-                let names = self.ident_list()?;
+                let names = self.parse_var_entry_list()?;
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::VarDecl { names })
             }
@@ -628,10 +656,14 @@ impl Parser<'_> {
             }
             Some(Token::Ident(_)) => {
                 let lhs = self.expect_ident()?;
+                // `lhs[index] = rhs;` assigns one element of an array variable (§ array
+                // variables); `index` must be a compile-time-constant or genvar expression,
+                // checked at elaboration.
+                let index = self.parse_optional_index()?;
                 self.eat(&Token::Assign)?;
                 let rhs = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Assign { lhs, rhs })
+                Ok(Stmt::Assign { lhs, index, rhs })
             }
             Some(&Token::Keyword(kw)) => match kw.as_str() {
                 "while" => self.parse_while(),
@@ -767,7 +799,11 @@ impl Parser<'_> {
         let lhs = self.expect_ident()?;
         self.eat(&Token::Assign)?;
         let rhs = self.parse_expr()?;
-        Ok(Stmt::Assign { lhs, rhs })
+        Ok(Stmt::Assign {
+            lhs,
+            index: None,
+            rhs,
+        })
     }
 
     /// Parse an access function application `V(a[, b])` / `I(a[, b])`.
@@ -876,6 +912,17 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(self.push(ExprAst::Str(s)))
             }
+            // `real(expr)` / `integer(expr)`: type-cast call expressions, distinct from `real`/
+            // `integer` the declaration keywords — e.g. `digital = integer(v * scale);`. Same
+            // dedicated tokens, disambiguated purely by the following `(`, exactly like `V`/`I`
+            // access vs. an ordinary identifier below.
+            Some(Token::Real) | Some(Token::Integer) if self.nth(1) == Some(&Token::LParen) => {
+                let name = match self.peek() {
+                    Some(Token::Integer) => "integer".to_string(),
+                    _ => "real".to_string(),
+                };
+                self.parse_call(name)
+            }
             Some(Token::Ident(name)) => {
                 let name = name.clone();
                 if self.nth(1) == Some(&Token::LParen) {
@@ -885,6 +932,15 @@ impl Parser<'_> {
                     } else {
                         self.parse_call(name)
                     }
+                } else if self.nth(1) == Some(&Token::LBracket) {
+                    // `name[index]`: one element of an array variable (§ array variables), not
+                    // a call — distinguished from a scalar reference purely by the following
+                    // `[`, same disambiguation style as the call-vs-reference check above.
+                    self.pos += 1;
+                    let index = self
+                        .parse_optional_index()?
+                        .expect("just checked LBracket is present");
+                    Ok(self.push(ExprAst::IndexedIdent(name, index)))
                 } else {
                     self.pos += 1;
                     Ok(self.push(ExprAst::Ident(name)))
@@ -1195,6 +1251,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn real_and_integer_parse_as_cast_calls_when_followed_by_paren() {
+        // `real(x)`/`integer(x)` in expression position are type-cast calls, distinct from the
+        // `real`/`integer` declaration keywords (a bare `real x, y;` still declares variables —
+        // see `module_level_variable_declarations`).
+        let m = parse_src("module t(); parameter real X = integer(2.5) + real(1); endmodule");
+        let default = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { default, .. } => Some(*default),
+                _ => None,
+            })
+            .unwrap();
+        match m.expr(default) {
+            ExprAst::Binary(BinOp::Add, l, r) => {
+                assert!(matches!(m.expr(*l), ExprAst::Call { name, .. } if name == "integer"));
+                assert!(matches!(m.expr(*r), ExprAst::Call { name, .. } if name == "real"));
+            }
+            other => panic!("expected Add at the root, got {other:?}"),
+        }
+    }
+
     /// Pull the analog block's statement list out of a parsed module.
     fn analog_body(m: &ModuleAst) -> Vec<Stmt> {
         m.items
@@ -1377,13 +1456,64 @@ mod tests {
             .items
             .iter()
             .filter_map(|it| match it {
-                Item::Var { ty, names } => Some((*ty, names.clone())),
+                Item::Var { ty, names } => {
+                    let names: Vec<String> = names.iter().map(|e| e.name.clone()).collect();
+                    Some((*ty, names))
+                }
                 _ => None,
             })
             .collect();
         assert_eq!(vars.len(), 2);
         assert_eq!(vars[0], (ParamType::Real, vec!["q".into(), "v".into()]));
         assert_eq!(vars[1], (ParamType::Integer, vec!["i".into()]));
+    }
+
+    #[test]
+    fn array_variable_declaration_parses() {
+        // `real out_val[0:15], tmp;` — mixed array and scalar in one declaration, matching the
+        // real corpus idiom (`external/verilogaLib-master/adc_16bit_ideal.va`).
+        let m = parse_src("module t(); real out_val[0:15], tmp; endmodule");
+        let names = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Var { names, .. } => Some(names.clone()),
+                _ => None,
+            })
+            .expect("var item");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].name, "out_val");
+        assert!(names[0].range.is_some());
+        assert_eq!(names[1].name, "tmp");
+        assert!(names[1].range.is_none());
+    }
+
+    #[test]
+    fn indexed_assignment_and_read_parse() {
+        let m = parse_src(
+            "module t(); real out_val[0:15]; integer i; \
+             analog begin out_val[i] = 1.0; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Assign { lhs, index, .. } => {
+                assert_eq!(lhs, "out_val");
+                assert!(index.is_some());
+            }
+            other => panic!("expected an indexed assignment, got {other:?}"),
+        }
+
+        let m = parse_src(
+            "module t(); real out_val[0:15]; electrical a; integer j; \
+             analog begin I(a) <+ out_val[j]; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Contribute { value, .. } => {
+                assert!(
+                    matches!(m.expr(*value), ExprAst::IndexedIdent(name, _) if name == "out_val")
+                );
+            }
+            other => panic!("expected a contribution, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1512,7 +1642,8 @@ mod tests {
         let body = analog_body(&m);
         match &body[0] {
             Stmt::VarDecl { names } => {
-                assert_eq!(names, &vec!["x".to_string(), "y".to_string()]);
+                let names: Vec<String> = names.iter().map(|e| e.name.clone()).collect();
+                assert_eq!(names, vec!["x".to_string(), "y".to_string()]);
             }
             other => panic!("expected a local declaration, got {other:?}"),
         }

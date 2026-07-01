@@ -109,6 +109,19 @@ pub struct NetDecl {
     pub range: Option<(ExprRef, ExprRef)>,
 }
 
+/// One name in a `real`/`integer` variable declaration list (module-level or block-local),
+/// with its own optional array range — the same shape as [`NetDecl`], for the same reason
+/// (`real out_val[0:15], tmp;` mixes an array name with a plain scalar one, just like a net
+/// declaration can).
+#[derive(Clone, Debug)]
+pub struct VarEntry {
+    /// The variable name.
+    pub name: String,
+    /// The declared array size, `[msb:lsb]`, if this name is an array variable. `None` for an
+    /// ordinary scalar variable.
+    pub range: Option<(ExprRef, ExprRef)>,
+}
+
 /// A parameter's `from` value range, e.g. `from (0:inf)` or `from [0:c0)`.
 ///
 /// `exclude` clauses (single values or ranges) are parsed but not represented here — v0 keeps
@@ -162,12 +175,14 @@ pub enum Item {
     Analog(Stmt),
     /// An analog function definition, `analog function real f; … endfunction`.
     Function(AnalogFunction),
-    /// A module-level variable declaration, `real q, v;` / `integer i;`.
+    /// A module-level variable declaration, `real q, v;` / `integer i;`, or an array-variable
+    /// declaration, `real out_val[0:15];` (§ array variables — indexed like a vector net, by a
+    /// compile-time-constant or genvar expression; there is no runtime-indexed array support).
     Var {
         /// Declared base type (`real`/`integer`).
         ty: ParamType,
-        /// Declared variable names.
-        names: Vec<String>,
+        /// Declared variable names, each with its own optional array range.
+        names: Vec<VarEntry>,
     },
     /// A named branch declaration, `branch (a, b) br1, br2;` (one terminal = node-to-reference).
     Branch {
@@ -235,11 +250,12 @@ pub struct CaseArm {
 pub enum Stmt {
     /// A `begin … end` block.
     Block(Vec<Stmt>),
-    /// A block-local variable declaration, `real x, y;` / `integer i;`. Carries no value; it
-    /// only introduces variable names (the base type is not retained).
+    /// A block-local variable declaration, `real x, y;` / `integer i;`, or array-variable
+    /// declaration, `real out_val[0:15];` (§ array variables). Carries no value; it only
+    /// introduces variable (or array) names (the base type is not retained).
     VarDecl {
-        /// Declared variable names.
-        names: Vec<String>,
+        /// Declared variable names, each with its own optional array range.
+        names: Vec<VarEntry>,
     },
     /// A system-task call statement, e.g. `$strobe("…", a, b);` or `$finish;`. v0 treats
     /// these as no-ops (no output side effects in a DC solve).
@@ -256,10 +272,15 @@ pub enum Stmt {
         /// The contributed value.
         value: ExprRef,
     },
-    /// A procedural assignment: `lhs = rhs;`.
+    /// A procedural assignment: `lhs = rhs;`, or an array-element assignment,
+    /// `lhs[index] = rhs;` (§ array variables).
     Assign {
         /// Assigned variable name.
         lhs: String,
+        /// The array index, if `lhs` is an array-variable element rather than a plain scalar.
+        /// Must be a compile-time-constant or genvar expression — checked at elaboration, not
+        /// here (mirroring [`NetArg::index`]).
+        index: Option<ExprRef>,
         /// Right-hand-side expression.
         rhs: ExprRef,
     },
@@ -313,8 +334,12 @@ pub enum Stmt {
 pub enum ExprAst {
     /// Numeric literal (already scaled; `inf` becomes `f64::INFINITY`).
     Number(f64),
-    /// A bare identifier: a parameter or variable reference (resolved at elaboration).
+    /// A bare identifier: a parameter, variable, or genvar reference (resolved at elaboration).
     Ident(String),
+    /// An indexed identifier, `name[index]`: one element of an array variable (§ array
+    /// variables). `index` must be a compile-time-constant or genvar expression — checked at
+    /// elaboration, not here.
+    IndexedIdent(String, ExprRef),
     /// A system function call with the `$` stripped, e.g. `$vt`, `$temperature`,
     /// `$simparam("gmin", 0)`. `args` is empty for the zero-argument forms.
     SysFunc {

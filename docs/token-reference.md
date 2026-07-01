@@ -467,18 +467,36 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 - **Declaration and Assignment**: `real name, name, ...;` / `integer name, name, ...;` at module
   scope (`Item::Var`) or block scope (`Stmt::VarDecl`); also the optional base-type prefix on a
   `parameter`/`localparam` (defaults to `real` if omitted) and an `analog function`'s
-  return-type prefix.
-- **Expressions and Evaluation**: Declaring a name introduces it into scope with no initial
-  value; it becomes assignable via `=`. The type itself is parsed and then *discarded* — v0
-  performs no integer-vs-real type checking or truncation (a stated `va-ir` limitation).
-- **Structural and Analog Usage**: Both module-level (`real x;`) and analog-block-local
-  (`real x;` inside `begin...end`) declarations are legal and treated identically by
-  elaboration (a block-local declaration just registers the same kind of `VarId`).
-- **Comparison with Traditional Constructs**: Reads exactly like a C `double`/`int` declaration,
-  but v0's "declared type is parsed and dropped" behavior means it behaves more like a
-  dynamically-typed language's variable declaration (Python's bare `x = 0`) than like C's
-  statically-checked one — a real, if narrow, gap from full Verilog-A's actual `integer`
-  truncation-on-assignment semantics.
+  return-type prefix. Any name in the list may carry its own `[msb:lsb]` array range
+  (`real out_val[0:15], tmp;`, § array variables, Part 2 §2.2b) — found directly in the
+  `verilogaLib` corpus.
+  **Separately**, `real(expr)`/`integer(expr)` — the same dedicated tokens, but immediately
+  followed by `(` — are type-cast *call* expressions, not a declaration at all (e.g.
+  `digital = integer((V(in)/vref) * (1 << N));`); the parser disambiguates purely on the
+  following `(`, the same way it disambiguates `V`/`I` access-function calls from ordinary
+  identifiers.
+- **Expressions and Evaluation**: Declaring a scalar name introduces it into scope with no
+  initial value; it becomes assignable via `=`. The type itself is parsed and then *discarded*
+  for a scalar — v0 performs no integer-vs-real type checking or truncation (a stated
+  limitation) — but an *array* declaration's range is genuinely load-bearing: it's
+  const-evaluated and interns one `VarId` per index, named `"name[k]"`, exactly mirroring how a
+  vector net expands (§2.18). `real(x)` casts fold to `x` unchanged (every value here is already
+  `f64` — a complete no-op); `integer(x)` rounds to nearest (`Builtin::Round`), matching
+  Verilog's real-to-integer *assignment* conversion rule — not `int()`'s truncate-toward-zero.
+- **Structural and Analog Usage**: Module-level (`real x;`, `real out_val[0:15];`) and
+  analog-block-local (`real x;` inside `begin...end`) *scalar* declarations are both legal and
+  treated identically by elaboration (registering the same kind of `VarId`). An *array*
+  declaration is module-scope only — a block-local one is rejected with a specific error, since
+  by the time the analog-block pass runs there's nowhere sound left to register an array's
+  worth of nodes into (§2.2b).
+- **Comparison with Traditional Constructs**: A scalar declaration reads exactly like a C
+  `double`/`int` declaration, but v0's "declared type is parsed and dropped" behavior means it
+  behaves more like a dynamically-typed language's variable declaration (Python's bare `x = 0`)
+  than like C's statically-checked one. The array form is closer to a C array declaration
+  (`double out_val[16];`), restricted to a compile-time-constant or genvar index — see §2.18's
+  vector-net comparison, which applies identically here. `real(x)`/`integer(x)` are C-style
+  casts, but as genuine callable functions rather than a `(double)x`-style unary operator —
+  closer to C++'s `static_cast<int>(x)` in that sense.
 
 ### `Genvar`
 
@@ -1126,6 +1144,44 @@ depends on surrounding context), organized by what they do rather than by a sing
   array declaration (`double bus[4];`), except the "array" here is a bus of physical nodes, not
   storage. The mixed prefix/suffix-with-override grammar has no clean C parallel (closest: a C
   declaration list where each declarator can independently be a pointer/array, `int *a, b[4];`).
+
+## 2.2b Array variable declaration & indexed access (`real out_val[0:15]`, `out_val[i]`)
+
+The `real`/`integer` counterpart of §2.2/§2.18's vector nets, added once the real corpus
+(`external/verilogaLib-master/adc_16bit_ideal.va`/`dac_16bit_ideal.va`) needed it: `digital =
+integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = high; ... end`.
+
+- **Purpose and Static Nature**: The *declaration* is elaboration-only (interning one `VarId`
+  per index, exactly like a vector net interns one `NodeId` per index). An *access*'s index
+  must be elaboration-time-constant or genvar-derived — there is no runtime-indexed array/memory
+  concept anywhere in this IR (unlike full Verilog-A/digital Verilog's `reg [7:0] mem [0:255];`,
+  which genuinely is indexable by an arbitrary runtime value). Reading/writing the *resolved*
+  element, once its `VarId` is known, is simulation-time like any other variable.
+- **Declaration and Assignment**: `real|integer name[msb:lsb], name2, ...;` — only the
+  per-identifier suffix form (§2.2's `NetDecl`-style prefix-range form doesn't apply to
+  `real`/`integer`, which have no bit-width concept to prefix). `name[index_expr] = rhs;`
+  assigns one element (`Stmt::Assign.index: Option<ExprRef>`); `name[index_expr]` reads one
+  (`ExprAst::IndexedIdent`) — both share the AST-level index-parsing helper vector-net access
+  uses (`parse_optional_index`).
+- **Expressions and Evaluation**: `index_expr` is evaluated by `const_eval_int` and
+  bounds-checked against the array's declared `(lo, hi)`, identically to a vector net's index
+  (`resolve_var_array_index`, the `VarId` counterpart of `resolve_net_arg`). Critically, this
+  means a genuinely dynamic index — an ordinary runtime `integer` loop variable, say — is
+  rejected with `const_eval`'s existing "`{name}` is not a compile-time constant in this
+  context" message, for free: no separate "is this actually constant" check was needed, because
+  the same evaluator that resolves a vector-net index or a genvar loop bound already enforces it.
+- **Structural and Analog Usage**: Declaration is module-level only (`Item::Var`); a block-local
+  attempt (`Stmt::VarDecl`) is rejected with a specific error — by the time the analog-block
+  pass runs, module-level declarations are already finalized, so there is nowhere sound left to
+  register an array's nodes into. Indexed access (read or write) is analog-block only, typically
+  inside a genvar-driven `for` (§2.14) — the direct real-corpus idiom above.
+- **Comparison with Traditional Constructs**: Same comparison as §2.18's vector nets — a C array
+  restricted to a `constexpr`/genvar-derived index. The gap from a *true* Verilog-A array
+  variable (which does allow a runtime index, like a C array or a digital `reg` memory) is the
+  same gap noted for vector nets: this project's `VarId`/`NodeId` model has no
+  runtime-indexable-storage concept at all, so the constant/genvar-only restriction is a
+  necessary simplification here, not a faithful implementation of the full language — recorded
+  as a backlog item in `roadmap.md`, not silently passed off as complete.
 
 ## 2.3 Direction declaration
 

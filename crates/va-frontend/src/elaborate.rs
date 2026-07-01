@@ -80,6 +80,7 @@ pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
         genvars: std::collections::HashSet::new(),
         genvar_env: HashMap::new(),
         vectors: HashMap::new(),
+        var_arrays: HashMap::new(),
     };
     e.run()?;
     Ok(e.out)
@@ -110,6 +111,11 @@ struct Elaborator<'a> {
     /// Declared vector nets' inclusive `(lo, hi)` index range, keyed by base name (§ vector
     /// nets). A vector net `bus` interns one [`NodeId`] per index as `bus[k]`.
     vectors: HashMap<String, (i64, i64)>,
+    /// Declared array variables' inclusive `(lo, hi)` index range, keyed by base name (§ array
+    /// variables) — the `VarId` counterpart of `vectors` above. An array `out_val` interns one
+    /// [`VarId`] per index as `out_val[k]`; only a compile-time-constant or genvar index is
+    /// supported (there is no runtime-indexed array/memory concept in this IR).
+    var_arrays: HashMap<String, (i64, i64)>,
 }
 
 impl Elaborator<'_> {
@@ -121,31 +127,65 @@ impl Elaborator<'_> {
         self.resolve_ports()?;
         self.collect_branches()?;
         self.collect_functions()?;
-        self.collect_var_decls();
-        self.collect_vars();
+        self.collect_var_decls()?;
+        self.collect_vars()?;
         self.lower_analog()?;
         Ok(())
     }
 
-    /// Register explicitly declared module-level variables (`real q, v;`). The base type is
-    /// not retained — the IR has no variable type and treats every value as `f64`. Assignment
-    /// targets in the analog block are still auto-registered by [`Self::collect_vars`]; this
-    /// pass just lets a variable be declared before (or without) being assigned.
-    fn collect_var_decls(&mut self) {
+    /// Register explicitly declared module-level variables (`real q, v;`) and array variables
+    /// (`real out_val[0:15];`, § array variables). The base type is not retained — the IR has
+    /// no variable type and treats every value as `f64`. Assignment targets in the analog block
+    /// are still auto-registered by [`Self::collect_vars`]; this pass just lets a variable be
+    /// declared before (or without) being assigned, and is the only place an array variable can
+    /// be declared at all (block-local array declarations are rejected — see
+    /// [`Self::collect_vars_stmt`]).
+    fn collect_var_decls(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
         for item in &ast.items {
             if let Item::Var { names, .. } = item {
-                for name in names {
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        self.vars.entry(name.clone())
-                    {
-                        let id = VarId(self.out.vars.len() as u32);
-                        self.out.vars.push(VarDecl { name: name.clone() });
-                        slot.insert(id);
-                    }
+                for entry in names {
+                    self.declare_var_entry(entry)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Register one variable-declaration entry: a plain scalar, or (if it carries a range) an
+    /// array — interning one [`VarId`] per index, named `"name[k]"`, exactly mirroring how
+    /// [`Self::collect_nodes`] expands a vector net.
+    fn declare_var_entry(&mut self, entry: &ast::VarEntry) -> Result<(), FrontendError> {
+        match entry.range {
+            None => {
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    self.vars.entry(entry.name.clone())
+                {
+                    let id = VarId(self.out.vars.len() as u32);
+                    self.out.vars.push(VarDecl {
+                        name: entry.name.clone(),
+                    });
+                    slot.insert(id);
+                }
+            }
+            Some((msb, lsb)) => {
+                let msb = self.const_eval_int(msb, "array variable range bound")?;
+                let lsb = self.const_eval_int(lsb, "array variable range bound")?;
+                let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
+                for k in lo..=hi {
+                    let key = format!("{}[{k}]", entry.name);
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        self.vars.entry(key.clone())
+                    {
+                        let id = VarId(self.out.vars.len() as u32);
+                        self.out.vars.push(VarDecl { name: key });
+                        slot.insert(id);
+                    }
+                }
+                self.var_arrays.insert(entry.name.clone(), (lo, hi));
+            }
+        }
+        Ok(())
     }
 
     /// Push a fresh local variable and return its id.
@@ -415,6 +455,9 @@ impl Elaborator<'_> {
             ExprAst::Probe(_) => Err(elab(
                 "a branch probe is not constant in a parameter context".to_string(),
             )),
+            ExprAst::IndexedIdent(name, _) => Err(elab(format!(
+                "array variable `{name}` is not constant in a parameter context"
+            ))),
         }
     }
 
@@ -430,14 +473,15 @@ impl Elaborator<'_> {
 
     // --- pass 3: variables -----------------------------------------------------------
 
-    fn collect_vars(&mut self) {
+    fn collect_vars(&mut self) -> Result<(), FrontendError> {
         // Borrow the AST through a copy of the shared reference so we can mutate `self`.
         let items = self.ast;
         for item in &items.items {
             if let Item::Analog(stmt) = item {
-                self.collect_vars_stmt(stmt);
+                self.collect_vars_stmt(stmt)?;
             }
         }
+        Ok(())
     }
 
     /// Register `name` as a local variable unless it is already a parameter, known variable,
@@ -457,38 +501,79 @@ impl Elaborator<'_> {
         }
     }
 
-    fn collect_vars_stmt(&mut self, stmt: &Stmt) {
+    fn collect_vars_stmt(&mut self, stmt: &Stmt) -> Result<(), FrontendError> {
         match stmt {
-            Stmt::Assign { lhs, .. } => self.register_var(lhs),
-            Stmt::VarDecl { names } => {
-                for name in names {
-                    self.register_var(name);
+            // An indexed assignment target (`out_val[i] = ...;`) must already be declared as
+            // an array variable via `Item::Var` (§ array variables) — nothing to register here.
+            Stmt::Assign { lhs, index, .. } => {
+                if index.is_none() {
+                    self.register_var(lhs);
                 }
+                Ok(())
             }
-            Stmt::Block(body) => body.iter().for_each(|s| self.collect_vars_stmt(s)),
+            Stmt::VarDecl { names } => {
+                for entry in names {
+                    // Array variables are elaboration-only in the sense that their whole size
+                    // must be known up front (§ array variables); `Item::Var`'s module-scope
+                    // pass already ran by the time this (analog-block) pass runs, so a
+                    // block-local array range has nowhere sound to be declared into.
+                    if entry.range.is_some() {
+                        return Err(elab(format!(
+                            "array variable `{}` must be declared at module scope, not inside \
+                             the analog block (block-local array variables are not yet \
+                             supported)",
+                            entry.name
+                        )));
+                    }
+                    self.register_var(&entry.name);
+                }
+                Ok(())
+            }
+            Stmt::Block(body) => {
+                for s in body {
+                    self.collect_vars_stmt(s)?;
+                }
+                Ok(())
+            }
             Stmt::If { then_, else_, .. } => {
-                then_.iter().for_each(|s| self.collect_vars_stmt(s));
-                else_.iter().for_each(|s| self.collect_vars_stmt(s));
+                for s in then_ {
+                    self.collect_vars_stmt(s)?;
+                }
+                for s in else_ {
+                    self.collect_vars_stmt(s)?;
+                }
+                Ok(())
             }
             Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
-                body.iter().for_each(|s| self.collect_vars_stmt(s));
+                for s in body {
+                    self.collect_vars_stmt(s)?;
+                }
+                Ok(())
             }
             Stmt::For {
                 init, step, body, ..
             } => {
-                self.collect_vars_stmt(init);
-                self.collect_vars_stmt(step);
-                body.iter().for_each(|s| self.collect_vars_stmt(s));
+                self.collect_vars_stmt(init)?;
+                self.collect_vars_stmt(step)?;
+                for s in body {
+                    self.collect_vars_stmt(s)?;
+                }
+                Ok(())
             }
             Stmt::Case { arms, default, .. } => {
                 for arm in arms {
-                    arm.body.iter().for_each(|s| self.collect_vars_stmt(s));
+                    for s in &arm.body {
+                        self.collect_vars_stmt(s)?;
+                    }
                 }
                 if let Some(body) = default {
-                    body.iter().for_each(|s| self.collect_vars_stmt(s));
+                    for s in body {
+                        self.collect_vars_stmt(s)?;
+                    }
                 }
+                Ok(())
             }
-            Stmt::Contribute { .. } | Stmt::Task { .. } => {}
+            Stmt::Contribute { .. } | Stmt::Task { .. } => Ok(()),
         }
     }
 
@@ -531,7 +616,7 @@ impl Elaborator<'_> {
                 let value = self.lower_expr(*value)?;
                 Ok(va_ir::Stmt::Contribute { target, value })
             }
-            Stmt::Assign { lhs, rhs } => {
+            Stmt::Assign { lhs, index, rhs } => {
                 // Restricted assignment (§ generate loops): a genvar may only be written by
                 // the header of the `for` loop it drives, which `Stmt::For` below intercepts
                 // and unrolls directly — it never reaches this generic path. Any other
@@ -543,10 +628,15 @@ impl Elaborator<'_> {
                          it drives (restricted assignment)"
                     )));
                 }
-                let id = *self
-                    .vars
-                    .get(lhs)
-                    .ok_or_else(|| elab(format!("assignment to unknown variable `{lhs}`")))?;
+                let id = match index {
+                    // `lhs[index] = rhs;`: one element of an array variable (§ array
+                    // variables), constant/genvar-indexed only.
+                    Some(idx_expr) => self.resolve_var_array_index(lhs, *idx_expr)?,
+                    None => *self
+                        .vars
+                        .get(lhs)
+                        .ok_or_else(|| elab(format!("assignment to unknown variable `{lhs}`")))?,
+                };
                 let rhs = self.lower_expr(*rhs)?;
                 Ok(va_ir::Stmt::Assign { lhs: id, rhs })
             }
@@ -577,7 +667,10 @@ impl Elaborator<'_> {
                 // reaches the runtime `va_ir::Stmt::For` path below, which is why analog
                 // operators (`ddt`/`idt`) are legal inside it despite being forbidden in an
                 // ordinary runtime loop.
-                if let Stmt::Assign { lhs, rhs: init_rhs } = init.as_ref() {
+                if let Stmt::Assign {
+                    lhs, rhs: init_rhs, ..
+                } = init.as_ref()
+                {
                     if self.genvars.contains(lhs) {
                         return self.lower_generate_for(lhs, *init_rhs, *cond, step, body);
                     }
@@ -650,7 +743,7 @@ impl Elaborator<'_> {
             )));
         }
         let step_rhs = match step {
-            Stmt::Assign { lhs, rhs } if lhs == genvar => *rhs,
+            Stmt::Assign { lhs, rhs, .. } if lhs == genvar => *rhs,
             _ => {
                 return Err(elab(format!(
                     "genvar `{genvar}`'s `for` step must reassign `{genvar}` itself \
@@ -707,6 +800,12 @@ impl Elaborator<'_> {
                 } else {
                     return Err(elab(format!("unknown identifier `{name}`")));
                 }
+            }
+            // `name[index]`: one element of an array variable (§ array variables), read via
+            // the same constant/genvar-indexed resolution as an assignment target.
+            ExprAst::IndexedIdent(name, index) => {
+                let id = self.resolve_var_array_index(name, *index)?;
+                Expr::Var(id)
             }
             ExprAst::SysFunc { name, args } if name == "simparam" => {
                 // `$simparam(param_name [, default])`: the queried parameter is always unknown
@@ -790,6 +889,15 @@ impl Elaborator<'_> {
                 let value = *args
                     .first()
                     .ok_or_else(|| elab(format!("`{name}` requires at least a value argument")))?;
+                return self.lower_expr(value);
+            }
+            // `real(expr)` is a type-cast call, not the declaration keyword (that's `Item::Var`/
+            // `Stmt::VarDecl` — a different grammar production entirely). Every value in this
+            // project is already `f64`, so it's a complete no-op: fold transparently to `expr`.
+            ExprAst::Call { name, args } if name == "real" => {
+                let value = *args
+                    .first()
+                    .ok_or_else(|| elab("`real` requires an argument".to_string()))?;
                 return self.lower_expr(value);
             }
             ExprAst::Call { name, args } => {
@@ -920,6 +1028,35 @@ impl Elaborator<'_> {
         }
     }
 
+    /// Resolve one element of an array variable (§ array variables) to its [`VarId`] — the
+    /// `VarId` counterpart of [`Self::resolve_net_arg`]'s vector-net indexing. `index_expr`
+    /// must be a compile-time-constant or genvar expression: `const_eval_int` naturally rejects
+    /// a genuinely runtime index (an ordinary loop variable, say) with "not a compile-time
+    /// constant in this context" — there is no separate check needed for that restriction.
+    fn resolve_var_array_index(
+        &mut self,
+        name: &str,
+        index_expr: ExprRef,
+    ) -> Result<VarId, FrontendError> {
+        let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
+            elab(format!(
+                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
+            ))
+        })?;
+        let idx = self.const_eval_int(index_expr, "array variable index")?;
+        if idx < lo || idx > hi {
+            return Err(elab(format!(
+                "index {idx} is out of `{name}`'s declared range [{lo}:{hi}]"
+            )));
+        }
+        let key = format!("{name}[{idx}]");
+        self.vars.get(&key).copied().ok_or_else(|| {
+            elab(format!(
+                "internal error: array variable node `{key}` was not interned"
+            ))
+        })
+    }
+
     /// The implicit global reference node, created on first single-terminal access.
     fn reference_node(&mut self) -> NodeId {
         if let Some(id) = self.ground {
@@ -943,7 +1080,7 @@ fn collect_assign_targets(stmts: &[Stmt], out: &mut Vec<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Assign { lhs, .. } => out.push(lhs.clone()),
-            Stmt::VarDecl { names } => out.extend(names.iter().cloned()),
+            Stmt::VarDecl { names } => out.extend(names.iter().map(|entry| entry.name.clone())),
             Stmt::Block(body) => collect_assign_targets(body, out),
             Stmt::If { then_, else_, .. } => {
                 collect_assign_targets(then_, out);
@@ -1038,6 +1175,11 @@ fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
         "floor" => Builtin::Floor,
         "ceil" => Builtin::Ceil,
         "round" => Builtin::Round,
+        // `integer(x)` is the type-cast call form (not the `integer` declaration keyword — a
+        // different grammar production entirely). It matches Verilog's real-to-integer
+        // assignment conversion rule (round to nearest, not truncate), so it shares `round`'s
+        // builtin rather than `int`'s.
+        "integer" => Builtin::Round,
         "int" => Builtin::Int,
         "pow" => Builtin::Pow,
         "hypot" => Builtin::Hypot,
@@ -1117,7 +1259,7 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
         "abs" => arg1()?.abs(),
         "floor" => arg1()?.floor(),
         "ceil" => arg1()?.ceil(),
-        "round" => arg1()?.round(),
+        "round" | "integer" => arg1()?.round(),
         "int" => arg1()?.trunc(),
         "sin" => arg1()?.sin(),
         "cos" => arg1()?.cos(),
@@ -1301,6 +1443,31 @@ mod tests {
         );
         // 3 + 2 + 3 + (-2) = 6
         assert_eq!(m.params[0].default, 6.0);
+    }
+
+    #[test]
+    fn real_and_integer_cast_calls_are_distinct_from_the_declaration_keywords() {
+        // `real(expr)`/`integer(expr)` are type-cast *calls* (a different grammar production
+        // from the `real`/`integer` declaration keywords) — the real corpus idiom
+        // `digital = integer((V(in)/vref) * (1 << N));` (`external/verilogaLib-master/
+        // adc_16bit_ideal.va`). `real(x)` is a complete no-op (every value here is already an
+        // `f64`); `integer(x)` rounds to nearest, matching Verilog's real-to-integer assignment
+        // conversion rule (not `int()`'s truncate-toward-zero).
+        let m = elaborate_src(
+            "module t(); integer digital; electrical a; \
+             analog begin digital = integer(2.5); I(a) <+ real(digital); end endmodule",
+        );
+        assert_eq!(m.params.len(), 0);
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::Round, _))));
+
+        // Const-folded in a parameter context: integer(2.5) rounds to 3.0, not 2.0.
+        let m = elaborate_src(
+            "module t(); parameter real X = integer(2.5); electrical a; analog begin I(a) <+ X; end endmodule",
+        );
+        assert_eq!(m.params[0].default, 3.0);
     }
 
     #[test]
@@ -1725,6 +1892,100 @@ mod tests {
         let toks = lex(src).expect("lex");
         let ast = parse(&toks).expect("parse");
         assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn array_variable_write_and_read_with_constant_index() {
+        // `out_val[2] = 5.0; I(a) <+ out_val[2];` — a literal (compile-time-constant) index
+        // resolves to the same `VarId` on both the write and the read.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; real out_val[0:15]; \
+             analog begin out_val[2] = 5.0; I(a, b) <+ out_val[2]; end endmodule",
+        );
+        let write_id = match &m.analog[0] {
+            va_ir::Stmt::Assign { lhs, .. } => *lhs,
+            other => panic!("expected an assignment, got {other:?}"),
+        };
+        let read_id = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => match m.expr(*value) {
+                va_ir::Expr::Var(id) => *id,
+                other => panic!("expected Expr::Var, got {other:?}"),
+            },
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert_eq!(write_id, read_id);
+        assert_eq!(m.vars[write_id.0 as usize].name, "out_val[2]");
+    }
+
+    #[test]
+    fn array_variable_indexed_by_genvar_in_a_generate_for() {
+        // The direct real-corpus idiom (`external/verilogaLib-master/*_ideal.va`): a
+        // genvar-driven loop writing/reading successive array-variable elements.
+        let m = elaborate_src(
+            "module t(a); electrical a; real out_val[0:2]; genvar i; \
+             analog begin \
+               for (i = 0; i < 3; i = i + 1) begin \
+                 out_val[i] = i; \
+               end \
+               I(a) <+ out_val[0] + out_val[1] + out_val[2]; \
+             end endmodule",
+        );
+        // The genvar-for unrolled to 3 flat assignments (Stmt::Block), then the contribution.
+        assert_eq!(m.analog.len(), 2);
+        match &m.analog[0] {
+            va_ir::Stmt::Block(stmts) => {
+                assert_eq!(stmts.len(), 3);
+                assert!(stmts
+                    .iter()
+                    .all(|s| matches!(s, va_ir::Stmt::Assign { .. })));
+            }
+            other => panic!("expected the unrolled block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_variable_out_of_range_index_is_rejected() {
+        let src = "module t(); real out_val[0:15]; \
+                   analog begin out_val[16] = 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn array_variable_runtime_index_is_rejected_with_a_clear_error() {
+        // The real-corpus gap this was written against: `out_val[j]` where `j` is an ordinary
+        // *runtime* `integer` (not a genvar or a constant) has no sound compile-time resolution
+        // in this IR — `const_eval_int` rejects it the same way it would reject any other
+        // non-constant expression in this context, giving a specific, honest error rather than
+        // silently doing the wrong thing.
+        let src = "module t(a); electrical a; real out_val[0:15]; integer j; \
+                   analog begin j = 3; I(a) <+ out_val[j]; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("compile-time constant"),
+                "expected a compile-time-constant-specific message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_local_array_variable_is_rejected() {
+        // Array variables must be declared at module scope (§ array variables); a block-local
+        // one has nowhere sound to register into and is rejected with a specific message.
+        let src = "module t(); analog begin real out_val[0:15]; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("module scope"),
+                "expected a module-scope-specific message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
     }
 
     #[test]

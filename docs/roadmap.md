@@ -85,28 +85,31 @@ with both the shared-prefix and per-identifier-suffix range syntax
 `input`/`output` site), though vector ports themselves still give an honest "not yet supported"
 error rather than working end-to-end; the full bitwise/shift operator family (`&`, `|`, `^`,
 `^~`/`~^`, `~`, `<<`, `>>`) with correct Verilog operator-precedence, wired through `va-ir` and
-`va-codegen`'s AD (zero-gradient, like the comparison operators). 7/11 real corpus files now
-pass the frontend end-to-end (`ekv3.va`/`ctle.va` fail on preprocessor macro gaps unrelated to
-grammar; `adc_16bit_ideal.va`/`dac_16bit_ideal.va` on the two items below).
+`va-codegen`'s AD (zero-gradient, like the comparison operators); **array variables**
+(`real out_val[0:15];`, `out_val[i]`) with a constant/genvar-indexed element resolution that
+mirrors vector nets exactly (`token-reference.md` §2.2b) — including a genuinely
+runtime-indexed access (an ordinary loop variable, not a genvar) being rejected with a specific,
+honest "not a compile-time constant" error rather than a raw parse failure, closing that half of
+the backlog item below without needing an Interface α change; `real(expr)`/`integer(expr)`
+type-cast *calls*, distinct from the declaration keywords of the same spelling
+(`digital = integer(v * scale);`, real-to-integer rounding semantics, not `int()`'s truncation).
+7/11 real corpus files now pass the frontend end-to-end (`ekv3.va`/`ctle.va` fail on
+preprocessor macro gaps unrelated to grammar; `adc_16bit_ideal.va`/`dac_16bit_ideal.va` now fail
+*only* on the vector-port gap below — everything else in both files parses and elaborates).
 
 **Backlog, prioritized** (highest-value/most-tractable first):
 
-1. **Runtime-indexed array variables** — `real out_val[0:15];` then `out_val[j]` where `j` is
-   an *ordinary* runtime `integer`, not a genvar (seen directly in
-   `external/verilogaLib-master/adc_16bit_ideal.va`/`dac_16bit_ideal.va`). Declaration parsing
-   is the easy part (mirrors §2.2's per-identifier vector-net range exactly). The real blocker:
-   `va_ir::VarId` is a scalar slot — there is no runtime-indexable storage concept in the IR at
-   all (unlike a vector *net*, which sidesteps this because its index must be genvar/constant
-   and so is fully resolved away at elaboration). A **constant/genvar-indexed** array variable
-   can reuse the vector-net trick (N separate `VarId`s, `"name[k]"`) with no IR change; a
-   **runtime**-indexed one needs a genuine new `Expr`/state-storage concept — an Interface α
-   change (§6), out of scope for a quick pass. Do the constant/genvar-indexed half first (cheap,
-   consistent with existing patterns) and give a clear, specific error for the runtime-indexed
-   case (matching the vector-port precedent), rather than leaving today's raw parse error.
-2. **Vector ports** — the other half of the `dac_16bit_ideal.va`/`adc_16bit_ideal.va` gap
-   (`token-reference.md` §2.18's "known gap" note). Needs `va_ir::Module::ports` to represent
-   "this port is N nodes," plus a `va-netlist` multi-terminal wiring convention. Interface α
-   change (§6) — coordinate before touching `va-ir`.
+1. **Vector ports** — now the *sole* remaining blocker for both
+   `dac_16bit_ideal.va`/`adc_16bit_ideal.va` (`token-reference.md` §2.18's "known gap" note).
+   Needs `va_ir::Module::ports` to represent "this port is N nodes," plus a `va-netlist`
+   multi-terminal wiring convention. Interface α change (§6) — coordinate before touching
+   `va-ir`.
+2. **Runtime-indexed array variables** — the residual half of the array-variables work above:
+   `out_val[j]` where `j` is a genuinely dynamic runtime value (not a genvar or a constant) has
+   no sound resolution in this IR at all, since `va_ir::VarId` is a scalar slot with no
+   runtime-indexable-storage concept. Needs a genuine new `Expr`/state-storage concept —
+   Interface α change (§6). Not currently blocking any known corpus file (every real usage seen
+   so far indexes by a genvar), so lower urgency than it might look.
 3. **Custom `discipline`/`nature` declarations** — today's `discipline...enddiscipline`/
    `nature...endnature` is skipped wholesale (`token-reference.md` §1.5); real models sometimes
    declare disciplines beyond the hardcoded `electrical`/`thermal`, which lines up directly with
