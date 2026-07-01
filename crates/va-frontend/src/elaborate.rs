@@ -758,6 +758,17 @@ impl Elaborator<'_> {
             {
                 Expr::Const(0.0)
             }
+            // `transition(value, delay, rise_time, fall_time)` smooths a stepped waveform with
+            // finite delay/rise/fall times — a genuinely time-domain (transient) construct. v0
+            // is DC-only, and a transition filter settles to its input value in steady state,
+            // so it folds transparently to `value`; `delay`/`rise_time`/`fall_time` are parsed
+            // but never evaluated (same treatment as the noise-source builtins above).
+            ExprAst::Call { name, args } if name == "transition" => {
+                let value = *args.first().ok_or_else(|| {
+                    elab("`transition` requires at least a value argument".to_string())
+                })?;
+                return self.lower_expr(value);
+            }
             ExprAst::Call { name, args } => {
                 let mut ids = Vec::with_capacity(args.len());
                 for &a in args {
@@ -1360,6 +1371,27 @@ mod tests {
 
         // `$simparam` with no default is an error (unknown parameter).
         let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin") * V(a, b); end endmodule"#;
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn transition_folds_to_its_value_argument() {
+        // `transition(V(a,b), td, tr, tf)` settles to its input in DC steady state, so it
+        // folds transparently to `V(a,b)` — no `Call` node survives into the IR at all (the
+        // only call in this source was `transition` itself), and `td`/`tr` are never even
+        // lowered.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; parameter real td = 1n; parameter real tr = 1n; \
+             analog begin I(a, b) <+ transition(V(a, b), td, tr); end endmodule",
+        );
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
+        assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+
+        // No value argument at all is an error.
+        let src =
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ transition(); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks).expect("parse");
         assert!(elaborate(&ast).is_err());

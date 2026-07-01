@@ -25,30 +25,27 @@ Each entry follows the same five-part structure:
 The Verilog-AMS LRM's own Annex B ("List of keywords") lists a larger reserved-word set (around
 257 words, including SystemVerilog-configuration keywords like `config`/`liblist`/`connectmodule`
 that Annex C.16 explicitly excludes from the Verilog-A subset) than this project's
-`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (172 words). That's expected and correct —
+`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (180 words). That's expected and correct —
 `va-frontend` targets "single-module compact models" (`CLAUDE.md` §1), so words meaningful only
 to full Verilog-AMS hierarchy, configuration, and digital timing checks are outside the declared
-subset by design, not by oversight. Three discrepancies are worth flagging as genuine, narrow
-gaps (not fixed by this document — it only reports what exists):
+subset by design, not by oversight. The LRM's own Annex B (VAMS-LRM-2.4, p.380–382, Table B.1)
+does list a further eleven words as reserved that the smaller source `keywords.rs`'s "166
+reserved words" note was originally keyed to did not (plausibly `OVI_VerilogA.pdf`, the original
+Verilog-A-only LRM, predating Verilog-AMS's generate/genvar/localparam additions) —
+`aliasparam`/`genvar`/`endgenerate` (added in earlier work on this project), and, as of this
+pass, `localparam`/`electrical`/`thermal` (each already had a dedicated `Token` variant — so was
+reserved *in effect*, since `logos` matches a dedicated token unconditionally — but was missing
+from `RESERVED_WORDS` itself, so the `keywords.rs`-level completeness test
+(`every_reserved_word_is_reserved`) didn't exercise it) and the math builtins
+`floor`/`ceil`/`round`/`int`/`limexp` (each a real, working call-expression builtin, but
+previously unreserved — inconsistent with every other math builtin here, e.g. `exp`/`sqrt`/`ddt`,
+which *is* reserved). All eleven are now listed, closing that gap.
 
-- `localparam`, `electrical`, and `thermal` each have a dedicated `Token` variant in the lexer
-  (so they are reserved *in effect* — `logos` matches the dedicated token unconditionally) but
-  are **not** listed in `RESERVED_WORDS`. The `keywords.rs`-level completeness test
-  (`every_reserved_word_is_reserved`) therefore doesn't exercise them, and the module doc
-  comment's list of "dedicated tokens that also appear in the table" omits them.
-  `genvar`/`aliasparam`/`endgenerate` had the same kind of gap and were added in earlier work on
-  this project; these three are the same class of gap, left open.
-- `floor`, `ceil`, `round`, `int`, and `limexp` are real, working call-expression builtins (see
-  §1.5) but are **not** reserved words at all — a user could declare `real floor;` and shadow
-  the name (harmless in practice, since a call `floor(x)` and a bare reference `floor` are
-  disambiguated by the trailing `(`, but inconsistent with how every other math builtin, e.g.
-  `exp`/`sqrt`/`ddt`, *is* reserved).
-- The LRM's own Annex B (VAMS-LRM-2.4, p.380–382, Table B.1) does list `genvar`, `endgenerate`,
-  `aliasparam`, `localparam`, `floor`, `ceil`, and `limexp` as reserved — so the project's
-  "the source document's prose states 166 reserved words" note in `keywords.rs` is evidently
-  keyed to a smaller/older source list (plausibly `OVI_VerilogA.pdf`, the original Verilog-A-only
-  LRM predating Verilog-AMS's generate/genvar/localparam additions), not to `VAMS-LRM-2-4.pdf`'s
-  Annex B directly.
+A second gap this document surfaced and that has since been fixed: `transition` (§1.5) used to
+parse as an ordinary call expression but fail at elaboration with "unknown function" — confirmed
+live at the time by `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va`. It now
+folds to its `value` argument (the only sound answer under v0's DC-only model — see §1.5's
+`Transition` entry for why), and that file now passes the frontend end to end.
 
 ---
 
@@ -360,10 +357,10 @@ class of lexemes.
 
 These 21 words each get their own `Token` variant (matched unconditionally by `logos`, ahead of
 the generic `Keyword` fallback) because the grammar dispatches on them directly and repeatedly.
-Eighteen of them (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `real`,
-`integer`, `genvar`, `input`, `output`, `inout`, `if`, `else`, `from`, `exclude`, `inf`,
-`ground`) are also listed in `RESERVED_WORDS`; `localparam`, `electrical`, and `thermal` are
-not (the gap noted above).
+All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localparam`, `real`,
+`integer`, `genvar`, `input`, `output`, `inout`, `electrical`, `thermal`, `if`, `else`, `from`,
+`exclude`, `inf`, `ground`) are now also listed in `RESERVED_WORDS` (`localparam`/`electrical`/
+`thermal` were the gap noted above, closed by this pass).
 
 ### `Module` / `EndModule`
 
@@ -686,7 +683,7 @@ including the ones with no implemented behavior at all.
   all per LRM Annex C.7 ("casex and casez are not supported in Verilog-A") — so their absence
   from this project's grammar (§1.6) is spec-correct, not a gap.
 
-### Math builtins (`abs`, `acos`, `acosh`, `asin`, `asinh`, `atan`, `atan2`, `atanh`, `cos`, `cosh`, `exp`, `hypot`, `ln`, `log`, `max`, `min`, `pow`, `sin`, `sinh`, `sqrt`, `tan`, `tanh`)
+### Math builtins (`abs`, `acos`, `acosh`, `asin`, `asinh`, `atan`, `atan2`, `atanh`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `hypot`, `int`, `limexp`, `ln`, `log`, `max`, `min`, `pow`, `round`, `sin`, `sinh`, `sqrt`, `tan`, `tanh`)
 
 - **Purpose and Static Nature**: Dual — usable both in dynamic analog expressions (evaluated,
   with derivatives taken, every Newton iteration) and in compile-time-constant contexts
@@ -695,7 +692,11 @@ including the ones with no implemented behavior at all.
   compile-time fold).
 - **Declaration and Assignment**: Never declared — predefined; called as `name(args)`, one or
   two real-valued arguments depending on the function (`atan2`/`hypot`/`max`/`min`/`pow` take
-  two, the rest take one).
+  two, the rest take one). `floor`/`ceil`/`round`/`int` implement the four standard rounding
+  modes (toward −∞, toward +∞, nearest, toward zero); `limexp` is exactly `exp` under the hood
+  in this project (no actual numerical limiting is modeled — a stated simplification, since it's
+  documented as a Newton-convergence aid whose *value* and *derivative* this project treats as
+  plain `exp`).
 - **Expressions and Evaluation**: In dynamic context, `va-codegen`'s automatic differentiation
   is expected to differentiate these (per `CLAUDE.md` §5, validated against finite differences);
   in const context, `eval_const_call` computes the same function numerically once, no
@@ -703,10 +704,12 @@ including the ones with no implemented behavior at all.
 - **Structural and Analog Usage**: Analog-block (dynamic use) and module-level parameter/genvar
   declarations (static use) alike.
 - **Comparison with Traditional Constructs**: Direct analogues of C's `<math.h>` (`exp`, `log`,
-  `sqrt`, `pow`, `hypot`, `sin`/`cos`/`tan` and their inverse/hyperbolic forms, `atan2`) plus
-  `min`/`max` (not in C89's `<math.h>`, but common library/language extensions since). Unlike
-  C's math functions, these are reserved words here, not ordinary library identifiers — see
-  §1.7 for the `floor`/`ceil`/`round`/`int`/`limexp` exception.
+  `sqrt`, `pow`, `hypot`, `floor`, `ceil`, `round`, `sin`/`cos`/`tan` and their inverse/hyperbolic
+  forms, `atan2`) plus `min`/`max` (not in C89's `<math.h>`, but common library/language
+  extensions since). Unlike C's math functions — never keywords there — every one of these,
+  including `floor`/`ceil`/`round`/`int`/`limexp`, is a reserved word here (see §1.6's master
+  table; before this pass, those five were implemented but not reserved, letting a user shadow
+  the name — a gap this document found and this pass closed).
 
 ### `Ddt` / `Idt`
 
@@ -779,6 +782,32 @@ including the ones with no implemented behavior at all.
 - **Comparison with Traditional Constructs**: No general-purpose-language analogue — a
   stochastic-process source is intrinsic to circuit-noise analysis.
 
+### `Transition`
+
+- **Purpose and Static Nature**: A genuinely time-domain analog operator in full Verilog-AMS —
+  it smooths a stepped/discontinuous `value` with finite delay/rise/fall times, which requires
+  tracking *when* `value` last changed. v0 is DC-only (no time axis to delay/slew through), and
+  a transition filter settles to its input in steady state, so it folds transparently to its
+  `value` argument at elaboration — fixed in this pass (`Elaborator::lower_expr`'s dedicated
+  `transition` arm, checked before the generic call path). This was previously unimplemented: it
+  parsed as an ordinary call but failed at elaboration with "unknown function `transition`" —
+  confirmed live by `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va`, which
+  now passes the frontend end to end.
+- **Declaration and Assignment**: Called as `transition(value, delay[, rise_time[,
+  fall_time]])` — `value` is required, the rest optional.
+- **Expressions and Evaluation**: Only `value` is lowered and returned as-is (the same `ExprId`
+  it would have produced if written bare, with no wrapper node at all); `delay`/`rise_time`/
+  `fall_time` are read from the AST only to check `value` is present, never evaluated — an empty
+  argument list is a hard error. This is the correct DC answer, not just a convenient one: at a
+  fixed operating point there is no waveform history for a delay/slew filter to act on, so its
+  output *is* its input.
+- **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
+  right-hand side or an intermediate variable assignment.
+- **Comparison with Traditional Constructs**: No C/digital-Verilog analogue (a continuous-time
+  slew/delay filter needs a time axis neither has). Once `va-transient` exists, `transition`
+  would need real handling there (it isn't just constant-folded away in a time-stepping solve) —
+  this DC-only fold is a stated, deliberate simplification, not a permanent design decision.
+
 ### `Discipline` / `Nature` / `Enddiscipline` / `Endnature`
 
 - **Purpose and Static Nature**: Recognized-and-discarded, not modeled at all. v0 hardcodes
@@ -835,6 +864,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `bufif1` | Reserved, no grammar production (tristate buffer, active-high enable) | N/A | N/A | Digital gate level only | No C analogue |
 | `case` | Simulation-time control flow, §1.5 | `case (sel) labels: body ... endcase` | Dynamic selector/labels | Analog-block only | C `switch` (no fallthrough semantics carried over — each arm is its own body) |
 | `casex` | **Not part of Verilog-A at all** (LRM Annex C.7: "casex and casez are not supported in Verilog-A") — reserved, no grammar production, correctly so | N/A | N/A | N/A | Digital Verilog's don't-care-match `switch`; no C analogue |
+| `ceil` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `ceil(x)` call | Round toward +∞ | Analog expr / const context | C `ceil()` |
 | `casez` | Same as `casex` — explicitly excluded from Verilog-A by the LRM itself | N/A | N/A | N/A | Same as `casex` |
 | `cmos` | Reserved, no grammar production (CMOS transmission-gate switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `cos` | Dynamic/static dual, §1.5 | `cos(x)` call | Cosine | Analog expr / const context | C `cos()` |
@@ -850,6 +880,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `discipline` | Recognized-and-discarded, §1.5 | `discipline name ... enddiscipline` | N/A | Module preamble | Closest to a C `struct`/unit-of-measure definition |
 | `discontinuity` | Reserved, no grammar production (`discontinuity(order);` hints the solver about a non-smooth point) | N/A | N/A | Would be analog-block only | No C analogue (a numerical-solver hint) |
 | `edge` | Parses as a call (`edge(expr)`) if written bare; realistically only ever appears inside a discarded `@(...)` | Digital-style edge-detection function | Rejected at elaboration if reached | Analog-block only (event control) | Closest to a rising/falling-edge interrupt trigger; no C analogue |
+| `electrical` | Dedicated token, §1.4 | — | — | — | — |
 | `else` | Dedicated token, §1.4 | — | — | — | — |
 | `end` | Dedicated token, §1.4 | — | — | — | — |
 | `endcase` | Case-block terminator, §1.5 | Closes `case...endcase` | N/A | Analog-block only | C `switch`'s closing `}` |
@@ -867,6 +898,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `exp` | Dynamic/static dual, §1.5 | `exp(x)` call | Exponential | Analog expr / const context | C `exp()` |
 | `final_step` | Reserved, no grammar production as a bare word outside `@()`; realistically only appears inside the discarded `@(final_step)` | Global analog event: fires once at analysis end | N/A | Analog-block only (event control) | No C analogue (closest: an `atexit()` hook) |
 | `flicker_noise` | Folds to constant `0.0`, §1.5 | `flicker_noise(pwr, exp[, "name"])` call | Const-folded to `0.0` | Analog-block only | No general-purpose analogue |
+| `floor` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `floor(x)` call | Round toward −∞ | Analog expr / const context | C `floor()` |
 | `flow` | Same as `abstol` (nature attribute, skipped) | Nature attribute naming the flow quantity | Never individually inspected | N/A (module preamble) | Names the conserved "current-like" quantity of a discipline; no C analogue |
 | `for` | Simulation-time (or elaboration-time when genvar-driven), §1.5/Part 2 §2.14 | `for (init; cond; step) body` | Dynamic, or const-evaluated if genvar-driven | Analog-block only | C `for` — with the added genvar-unrolling mode C has no concept of |
 | `force` | Reserved, no grammar production (digital procedural force-a-net) | N/A | N/A | Digital procedural only | No C analogue |
@@ -889,6 +921,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `initial_step` | Reserved, no grammar production as a bare word outside `@()`; realistically only appears inside the discarded `@(initial_step)` | Global analog event: fires once at analysis start | N/A | Analog-block only (event control) | No C analogue (closest: a one-time setup routine) |
 | `inout` | Dedicated token, §1.4 | — | — | — | — |
 | `input` | Dedicated token, §1.4 | — | — | — | — |
+| `int` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `int(x)` call | Truncate toward zero | Analog expr / const context | C's `(int)` cast, but as a genuine callable function |
 | `integer` | Dedicated token, §1.4 | — | — | — | — |
 | `join` | Reserved, no grammar production (closes a digital `fork...join` block) | N/A | N/A | Digital procedural only | No C analogue |
 | `laplace_nd` | Parses as a call (`laplace_nd(in, num[, den])`); elaboration has no builtin → `unknown function` | Laplace-domain transfer-function filter, numerator/denominator coefficient form | Rejected at elaboration today | Analog-block only, signal-flow filter | No C analogue (a continuous-time transfer function) |
@@ -897,7 +930,9 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `laplace_zp` | Same family, Z-domain pole/zero form | Z-domain (discrete) filter | Rejected at elaboration today | Analog-block only | Same as `laplace_zd` |
 | `large` | Reserved, no grammar production (net-strength charge-storage keyword, `trireg`-adjacent) | N/A | N/A | Digital net-strength only | No C analogue |
 | `last_crossing` | Parses as a call (`last_crossing(expr, dir)`); elaboration has no builtin → `unknown function` | Returns the simulation time of the last zero-crossing of `expr` | Rejected at elaboration today | Analog-block only | No C analogue |
+| `limexp` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7); folds to plain `exp` | `limexp(x)` call | Exponential (no limiting modeled) | Analog expr / const context | A numerically-limited `exp` Newton-convergence aid; no C analogue |
 | `ln` | Dynamic/static dual, §1.5 | `ln(x)` call | Natural log | Analog expr / const context | C `log()` (note the naming swap vs. `log`/`log10` below) |
+| `localparam` | Dedicated token, §1.4 | — | — | — | — |
 | `log` | Dynamic/static dual, §1.5 | `log(x)` call | Base-10 log | Analog expr / const context | C `log10()` |
 | `macromodule` | Reserved, no grammar production (a `module` synonym some tools use for the top-level design unit) | N/A | N/A | Structural, same role as `module` | No C analogue |
 | `max` | Dynamic/static dual, §1.5 | `max(x, y)` call | Maximum | Analog expr / const context | C's `fmax()`/a `max` macro |
@@ -932,6 +967,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `release` | Reserved, no grammar production (undoes a `force`) | N/A | N/A | Digital procedural only | No C analogue |
 | `repeat` | Simulation-time control flow, §1.5 | `repeat (count) body` | Dynamic count | Analog-block only | `for (int i=0;i<n;i++)` minus the explicit loop variable |
 | `rnmos` | Reserved, no grammar production (resistive NMOS switch) | N/A | N/A | Digital/switch-level only | No C analogue |
+| `round` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `round(x)` call | Round to nearest | Analog expr / const context | C99 `round()` |
 | `rpmos` | Reserved, no grammar production (resistive PMOS switch) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `rtran` | Reserved, no grammar production (resistive bidirectional pass switch) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `rtranif0` | Reserved, no grammar production (resistive bidirectional pass switch, active-low enable) | N/A | N/A | Digital/switch-level only | No C analogue |
@@ -953,12 +989,13 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `tanh` | Dynamic/static dual, §1.5 | `tanh(x)` call | Hyperbolic tangent | Analog expr / const context | C `tanh()` |
 | `task` | Reserved, no grammar production (opens a digital `task...endtask` definition) | N/A | N/A | Digital procedural only | Closest to a non-pure C function (may have side effects, consume simulation time) |
 | `temperature` | Bare form has no grammar production, §1.5 `Vt`/`Temperature` | — | — | — | — |
+| `thermal` | Dedicated token, §1.4 | — | — | — | — |
 | `time` | Reserved, no grammar production (digital 64-bit simulation-time variable type) | N/A | N/A | Digital procedural only | Closest to C's `time_t` |
 | `timer` | Parses as a call (`timer(start[, period])`) if written bare; realistically only appears inside the discarded `@(timer(...))` | Fires at a specified absolute/periodic simulation time | Rejected at elaboration if reached | Analog-block only (event control) | Closest to a POSIX interval timer/`setitimer` |
 | `tran` | Reserved, no grammar production (bidirectional pass-switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif0` | Reserved, no grammar production (bidirectional pass switch, active-low enable) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif1` | Reserved, no grammar production (bidirectional pass switch, active-high enable) | N/A | N/A | Digital/switch-level only | No C analogue |
-| `transition` | Parses as a call (`transition(value, td[, tr[, tf]])`); elaboration has no builtin → `unknown function` (confirmed live: `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va` fails exactly here) | Smooths a discontinuous waveform with finite rise/fall times | Rejected at elaboration today | Analog-block only, signal-flow filter | No C analogue |
+| `transition` | Folds to its `value` argument (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
 | `tri` | Reserved, no grammar production (default-strength tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `tri0` | Reserved, no grammar production (net type: pulls to 0 when undriven) | N/A | N/A | Digital structural only | No C analogue |
 | `tri1` | Reserved, no grammar production (net type: pulls to 1 when undriven) | N/A | N/A | Digital structural only | No C analogue |
@@ -983,31 +1020,20 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `zi_zd` | Same family as `laplace_zd`/`zi_nd`, Z-domain-input numerator/denominator form | Z-domain IIR filter variant | Rejected at elaboration today | Analog-block only | Same as `zi_nd` |
 | `zi_zp` | Same family, Z-domain-input pole/zero form | Z-domain IIR filter variant | Rejected at elaboration today | Analog-block only | Same as `zi_nd` |
 
-## 1.7 Non-reserved but implemented builtin names
+## 1.7 `floor`/`ceil`/`round`/`int`/`limexp` — formerly non-reserved (fixed)
 
 `floor`, `ceil`, `round`, `int`, and `limexp` are real, working call-expression builtins
 (`call_builtin` maps them to `Builtin::Floor/Ceil/Round/Int`, and `limexp` to `Builtin::Exp` —
 `limexp` is documented as a numerically-limited exponential used as a Newton-convergence aid,
-whose *value* and *derivative* this project models as plain `exp`) — but, per the gap noted at
-the top of this document, none of the five is in `RESERVED_WORDS`. They lex as ordinary `Ident`
-and are only routed to a call because the parser's rule is purely syntactic ("an `Ident`
-immediately followed by `(`, and not `V`/`I`, is a call" — Part 2 §2.20), not because the name is
-reserved.
-
-- **Purpose and Static Nature**: Same dynamic/static dual as the reserved math builtins (§1.5).
-- **Declaration and Assignment**: Never declared; called as `floor(x)`/`ceil(x)`/`round(x)`/
-  `int(x)`/`limexp(x)`.
-- **Expressions and Evaluation**: `floor`/`ceil`/`round`/`int` implement the four standard
-  rounding modes (toward −∞, toward +∞, nearest, toward zero); `limexp` is exactly `exp` under
-  the hood in this project (no actual limiting is modeled — a stated simplification).
-- **Structural and Analog Usage**: Analog expressions and const contexts alike, same as the
-  reserved math builtins.
-- **Comparison with Traditional Constructs**: Direct analogues of C's `<math.h>` `floor`/`ceil`/
-  `round`/`trunc`-as-`int` (with the caveat that C's `int()` isn't a function name at all — it's
-  a cast — whereas Verilog-A's `int()` genuinely is a callable builtin). Being non-reserved here
-  is actually *more* C-like than the reserved math builtins are (C's math functions are never
-  keywords either) — the inconsistency is with this project's own `exp`/`sqrt`/`ddt`-are-reserved
-  precedent, not with C.
+whose *value* and *derivative* this project models as plain `exp`). Until this pass, none of the
+five was in `RESERVED_WORDS`, even though every other math builtin here (`exp`, `sqrt`, `ddt`,
+…) is reserved — a user could declare `real floor;` and shadow the name. All five are now
+reserved words with a dedicated `#[token(..., kw)]` entry in the lexer, folded into the "Math
+builtins" deep dive in §1.5 (and the master table in §1.6) rather than treated separately here,
+since their behavior is now identical in kind to every other math builtin: reserved, callable as
+`name(args)`, differentiated dynamically or const-folded statically by the same
+`call_builtin`/`eval_const_call` tables. The one remaining asymmetry with C's `<math.h>` (whose
+functions are never keywords) is a Verilog-A-wide convention this project follows, not a gap.
 
 ---
 
@@ -1284,11 +1310,13 @@ as an ordinary loop.
 
 - Covered fully in Part 1 §1.5 (`Discipline`/`Nature`/`Enddiscipline`/`Endnature`).
 
-## 2.26 Non-reserved builtin call names (`floor`, `ceil`, `round`, `int`, `limexp`)
+## 2.26 Math builtin call names (`floor`, `ceil`, `round`, `int`, `limexp`, and the rest)
 
-- Covered fully in Part 1 §1.7. The parser-level point worth restating here: these reach
-  `call_builtin` through exactly the same "unreserved `Ident` immediately followed by `(`"
-  path as a user-defined function call — the parser does not distinguish "known builtin name"
-  from "user function name" at all; that classification happens entirely in elaboration
+- Now-reserved words, covered fully in Part 1 §1.5's "Math builtins" entry and §1.7's fix note.
+  The parser-level point worth restating here: a builtin call reaches `call_builtin` through the
+  same "an `Ident`/reserved word immediately followed by `(`, and not `V`/`I`, is a call" path
+  as a user-defined function call — the parser does not distinguish "known builtin name" from
+  "user function name" at all; that classification happens entirely in elaboration
   (`lower_expr`'s `ExprAst::Call` arm checks the user-function table first, falling back to
-  `call_builtin`).
+  `call_builtin`). This is unaffected by whether the name happens to be reserved — reservation
+  only changes whether the *bare* (non-call) form is a legal identifier.

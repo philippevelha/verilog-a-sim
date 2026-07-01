@@ -16,13 +16,17 @@
 //! # Note on the count
 //!
 //! The source document's prose states 166 reserved words, but its table lists 169 distinct
-//! lowercase words. We recognise all 169 listed words, plus `aliasparam`, `genvar`, and
-//! `endgenerate`: the Annex D table omits all three, but each is a real grammar production
+//! lowercase words. We recognise all 169 listed words, plus eleven more that the table omits
+//! but that the Accellera Verilog-AMS LRM (v2.4.0, Annex B) does reserve, are real grammar
+//! productions, and appear in the compact-model corpus: `aliasparam`, `genvar`, `endgenerate`
 //! (`aliasparam_declaration`, `genvar_declaration`, the `generate`/`endgenerate` bracket around
-//! a `loop_generate_construct`) seen in the compact-model corpus (`genvar i;` guards a
-//! hand-unrolled generate loop in more than one zoo model). A lexer that reserves a superset is
-//! conservative (it only forbids a few extra identifiers) and none of the surplus words collide
-//! with the model zoo.
+//! a `loop_generate_construct` — `genvar i;` guards a hand-unrolled generate loop in more than
+//! one zoo model), `localparam`, `electrical`, `thermal` (each already has a dedicated
+//! [`crate::lexer::Token`] variant, but had been missing from this table), and the math
+//! builtins `floor`, `ceil`, `round`, `int`, `limexp` (each a working call-expression builtin
+//! in `crate::elaborate`'s `call_builtin`/`eval_const_call`, but previously left unreserved — meaning, inconsistently with every other math builtin here, a user could shadow
+//! the name). A lexer that reserves a superset is conservative (it only forbids a few extra
+//! identifiers) and none of the surplus words collide with the model zoo.
 
 /// A Verilog-A/AMS reserved word carried generically by the lexer.
 ///
@@ -64,10 +68,11 @@ impl std::fmt::Display for Keyword {
 /// Every reserved word in the Verilog-A/AMS keyword list (LRM Annex D), in document order.
 ///
 /// See the module docs for the 166-vs-169 count caveat. Words that also have a dedicated
-/// [`crate::lexer::Token`] variant (`analog`, `begin`, `else`, `end`, `endmodule`,
-/// `exclude`, `from`, `ground`, `if`, `inf`, `inout`, `input`, `integer`, `module`,
-/// `output`, `parameter`, `real`) appear here for completeness but are tokenized directly.
-pub const RESERVED_WORDS: [&str; 172] = [
+/// [`crate::lexer::Token`] variant (`analog`, `begin`, `electrical`, `else`, `end`,
+/// `endmodule`, `exclude`, `from`, `genvar`, `ground`, `if`, `inf`, `inout`, `input`,
+/// `integer`, `localparam`, `module`, `output`, `parameter`, `real`, `thermal`) appear here for
+/// completeness but are tokenized directly.
+pub const RESERVED_WORDS: [&str; 180] = [
     "abs",
     "abstol",
     "access",
@@ -94,6 +99,7 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "case",
     "casex",
     "casez",
+    "ceil",
     "cmos",
     "cos",
     "cosh",
@@ -108,6 +114,7 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "discipline",
     "discontinuity",
     "edge",
+    "electrical",
     "else",
     "end",
     "endcase",
@@ -125,6 +132,7 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "exp",
     "final_step",
     "flicker_noise",
+    "floor",
     "flow",
     "for",
     "force",
@@ -147,6 +155,7 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "initial_step",
     "inout",
     "input",
+    "int",
     "integer",
     "join",
     "laplace_nd",
@@ -155,7 +164,9 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "laplace_zp",
     "large",
     "last_crossing",
+    "limexp",
     "ln",
+    "localparam",
     "log",
     "macromodule",
     "max",
@@ -190,6 +201,7 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "release",
     "repeat",
     "rnmos",
+    "round",
     "rpmos",
     "rtran",
     "rtranif0",
@@ -211,6 +223,7 @@ pub const RESERVED_WORDS: [&str; 172] = [
     "tanh",
     "task",
     "temperature",
+    "thermal",
     "time",
     "timer",
     "tran",
