@@ -32,6 +32,9 @@ the compiler team. Both teams target the same trait.
 ## Data flow
 
 1. **`va-frontend`** lexes/parses/elaborates Verilog-A into a `va-ir::Module` (Interface α).
+   `token-reference.md` is the token-by-token/construct-by-construct reference for this
+   crate — what each lexer token and parser construct means, whether it's resolved at
+   elaboration or simulation time, and how it's implemented (or, honestly, not yet).
 2. **`va-codegen`** lowers the IR and differentiates it (forward-mode AD) into a
    `va-abi::ModelInstance`.
 3. **`va-netlist`** parses the circuit deck and wires devices to global unknown indices,

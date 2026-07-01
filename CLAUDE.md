@@ -84,6 +84,13 @@ are listed and are enforced by what each `Cargo.toml` declares — keep them hon
 `va-ir` and `va-abi` are **leaf crates with no internal dependencies** — that is what makes
 them safe shared contracts. Do not add internal deps to them.
 
+`docs/token-reference.md` is the reference document for `va-frontend` (T1): every lexer
+token and every parser construct, one by one, with its elaboration-vs-simulation-time status,
+declaration grammar, evaluation rules, analog-vs-structural usage, and nearest
+digital-Verilog/C analogue, grounded against the LRMs in `references/`. Consult it — and keep
+it in sync — whenever you add, change, or reason about how a token or grammar construct should
+be implemented.
+
 Full file tree the bootstrap must produce:
 
 ```
@@ -102,7 +109,8 @@ verilog-a-sim/
 │   ├── architecture.md
 │   ├── interfaces.md          # the RATIFIED §4 contracts; freeze at kickoff
 │   ├── thesis-map.md          # crate ↔ thesis ↔ owner ↔ fallback
-│   └── validation.md          # metrics, tolerances, the model zoo
+│   ├── validation.md          # metrics, tolerances, the model zoo
+│   └── token-reference.md     # T1: every lexer token & parser construct, one by one
 ├── crates/
 │   ├── va-ir/{Cargo.toml, src/lib.rs}
 │   ├── va-abi/
