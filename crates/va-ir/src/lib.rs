@@ -216,6 +216,9 @@ pub enum UnOp {
     Neg,
     /// Logical negation.
     Not,
+    /// Bitwise NOT (`~x`), on the operand truncated to an integer. Zero-gradient (it has no
+    /// continuous derivative), like the comparison operators below.
+    BitNot,
 }
 
 /// Binary operators.
@@ -247,6 +250,21 @@ pub enum BinOp {
     And,
     /// Logical OR (`||`): `1.0` iff either operand is non-zero.
     Or,
+    /// Bitwise AND (`&`), on both operands truncated to integers. Zero-gradient, like the
+    /// comparison operators above — these are integer/discrete operations with no continuous
+    /// derivative.
+    BitAnd,
+    /// Bitwise OR (`|`).
+    BitOr,
+    /// Bitwise XOR (`^`).
+    BitXor,
+    /// Bitwise XNOR (`^~`/`~^`).
+    BitXnor,
+    /// Left shift (`<<`), on both operands truncated to integers.
+    Shl,
+    /// Right shift (`>>`), on both operands truncated to integers. Logical (zero-fill) — this
+    /// project has no signed/unsigned integer distinction to make an arithmetic shift matter.
+    Shr,
 }
 
 /// Built-in and system functions recognized by the IR.

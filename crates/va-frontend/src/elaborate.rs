@@ -230,33 +230,29 @@ impl Elaborator<'_> {
 
     fn collect_nodes(&mut self) -> Result<(), FrontendError> {
         for item in &self.ast.items {
-            if let Item::Net {
-                discipline,
-                range,
-                nets,
-            } = item
-            {
+            if let Item::Net { discipline, nets } = item {
                 let disc = match discipline {
                     ast::Discipline::Electrical => Discipline::Electrical,
                     ast::Discipline::Thermal => Discipline::Thermal,
                 };
-                match range {
-                    None => {
-                        for name in nets {
-                            self.intern_node(name, disc);
+                // Each name carries its own optional range — `electrical [0:w-1] in;` and
+                // `electrical in[`W-1:0], out;` both reach here as one `NetDecl` per name, the
+                // prefix-vs-suffix distinction already resolved by the parser (§2.2).
+                for net in nets {
+                    match net.range {
+                        None => {
+                            self.intern_node(&net.name, disc);
                         }
-                    }
-                    // A vector net, `electrical [msb:lsb] bus;`, interns one node per index
-                    // (§ vector nets); a branch access later selects one by a genvar expression.
-                    Some((msb, lsb)) => {
-                        let msb = self.const_eval_int(*msb, "vector net range bound")?;
-                        let lsb = self.const_eval_int(*lsb, "vector net range bound")?;
-                        let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
-                        for name in nets {
+                        // A vector net interns one node per index (§ vector nets); a branch
+                        // access later selects one by a genvar expression.
+                        Some((msb, lsb)) => {
+                            let msb = self.const_eval_int(msb, "vector net range bound")?;
+                            let lsb = self.const_eval_int(lsb, "vector net range bound")?;
+                            let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
                             for k in lo..=hi {
-                                self.intern_node(&format!("{name}[{k}]"), disc);
+                                self.intern_node(&format!("{}[{k}]", net.name), disc);
                             }
-                            self.vectors.insert(name.clone(), (lo, hi));
+                            self.vectors.insert(net.name.clone(), (lo, hi));
                         }
                     }
                 }
@@ -282,6 +278,18 @@ impl Elaborator<'_> {
         for port in &self.ast.ports {
             match self.nodes.get(port) {
                 Some(id) => self.out.ports.push(*id),
+                None if self.vectors.contains_key(port) => {
+                    // The port was declared as a vector net (`electrical [msb:lsb] {port};`),
+                    // which is parsed and elaborated fine internally (§ vector nets), but
+                    // `va_ir::Module::ports` is one `NodeId` per port — there is no vector-port
+                    // representation yet, and no netlist-side wiring convention for one either
+                    // (`va-netlist` doesn't parse multi-terminal port connections). A stated
+                    // limitation, not silently ignored.
+                    return Err(elab(format!(
+                        "port `{port}` is a vector net; vector ports are not yet supported \
+                         (only its indexed nodes, e.g. `{port}[0]`, are usable internally)"
+                    )));
+                }
                 None => {
                     return Err(elab(format!(
                         "port `{port}` has no discipline declaration (e.g. `electrical {port};`)"
@@ -379,6 +387,7 @@ impl Elaborator<'_> {
                 Ok(match op {
                     ast::UnOp::Neg => -v,
                     ast::UnOp::Not => bool_to_f64(v == 0.0),
+                    ast::UnOp::BitNot => !to_i64(v) as f64,
                 })
             }
             ExprAst::Binary(op, l, rhs) => {
@@ -716,6 +725,16 @@ impl Elaborator<'_> {
                     }
                 }
             }
+            // `$abstime` is the absolute simulation time. v0 is DC-only (no time axis at all —
+            // there is no transient solve for a "current time" to advance through), and a DC
+            // operating point is conventionally evaluated at t=0, so it folds to a constant 0.0
+            // rather than being rejected as unknown.
+            ExprAst::SysFunc { name, args } if name == "abstime" => {
+                if !args.is_empty() {
+                    return Err(elab("`$abstime` takes no arguments".to_string()));
+                }
+                Expr::Const(0.0)
+            }
             ExprAst::SysFunc { name, args } => {
                 let builtin = sysfunc_builtin(name)?;
                 let mut ids = Vec::with_capacity(args.len());
@@ -748,25 +767,29 @@ impl Elaborator<'_> {
                 let active = self.analysis_matches(args)?;
                 Expr::Const(if active { 1.0 } else { 0.0 })
             }
-            // Small-signal noise sources contribute nothing to a DC operating point; fold to
-            // zero (their string label and arguments are not evaluated).
+            // Small-signal noise sources and `ac_stim` (an AC-only stimulus) contribute nothing
+            // to a DC operating point; fold to zero (their string label and arguments are not
+            // evaluated). `bound_step` is a transient-timestep hint with no DC meaning at all —
+            // same fold, on the rare chance it appears in expression position rather than as
+            // the bare statement `parse_bound_step_stmt` already handles (see `crate::parser`).
             ExprAst::Call { name, .. }
                 if matches!(
                     name.as_str(),
-                    "white_noise" | "flicker_noise" | "noise_table"
+                    "white_noise" | "flicker_noise" | "noise_table" | "ac_stim" | "bound_step"
                 ) =>
             {
                 Expr::Const(0.0)
             }
-            // `transition(value, delay, rise_time, fall_time)` smooths a stepped waveform with
-            // finite delay/rise/fall times — a genuinely time-domain (transient) construct. v0
-            // is DC-only, and a transition filter settles to its input value in steady state,
-            // so it folds transparently to `value`; `delay`/`rise_time`/`fall_time` are parsed
-            // but never evaluated (same treatment as the noise-source builtins above).
-            ExprAst::Call { name, args } if name == "transition" => {
-                let value = *args.first().ok_or_else(|| {
-                    elab("`transition` requires at least a value argument".to_string())
-                })?;
+            // `transition(value, delay, rise_time, fall_time)` and `slew(value, pos_rate,
+            // neg_rate)` both smooth/limit a signal over time — genuinely time-domain
+            // (transient) constructs. v0 is DC-only, and both settle to their input value in
+            // steady state (there is no rate-of-change or delay history at a fixed operating
+            // point), so they fold transparently to `value`; the rest of the arguments are
+            // parsed but never evaluated (same treatment as the noise-source builtins above).
+            ExprAst::Call { name, args } if matches!(name.as_str(), "transition" | "slew") => {
+                let value = *args
+                    .first()
+                    .ok_or_else(|| elab(format!("`{name}` requires at least a value argument")))?;
                 return self.lower_expr(value);
             }
             ExprAst::Call { name, args } => {
@@ -786,6 +809,7 @@ impl Elaborator<'_> {
                 let op = match op {
                     ast::UnOp::Neg => va_ir::UnOp::Neg,
                     ast::UnOp::Not => va_ir::UnOp::Not,
+                    ast::UnOp::BitNot => va_ir::UnOp::BitNot,
                 };
                 Expr::Unary(op, inner)
             }
@@ -956,6 +980,14 @@ fn bool_to_f64(b: bool) -> f64 {
     }
 }
 
+/// Truncate a value to its integer representation for a bitwise/shift operator. Verilog-A has
+/// no bit-vector type — every value here is `f64` — so a bitwise op just operates on the
+/// value's truncated `i64` representation, matching how `int()` (§1.5) already bridges
+/// float/integer elsewhere in this project.
+fn to_i64(v: f64) -> i64 {
+    v.trunc() as i64
+}
+
 /// Map a range bound value to an optional inclusive bound; an infinite bound is unbounded.
 fn bound(v: f64) -> Option<f64> {
     if v.is_infinite() {
@@ -983,6 +1015,12 @@ fn map_binop(op: ast::BinOp) -> va_ir::BinOp {
         A::Ne => B::Ne,
         A::And => B::And,
         A::Or => B::Or,
+        A::BitAnd => B::BitAnd,
+        A::BitOr => B::BitOr,
+        A::BitXor => B::BitXor,
+        A::BitXnor => B::BitXnor,
+        A::Shl => B::Shl,
+        A::Shr => B::Shr,
     }
 }
 
@@ -1050,6 +1088,12 @@ fn eval_binop(op: ast::BinOp, a: f64, b: f64) -> f64 {
         Ne => bool_to_f64(a != b),
         And => bool_to_f64(a != 0.0 && b != 0.0),
         Or => bool_to_f64(a != 0.0 || b != 0.0),
+        BitAnd => (to_i64(a) & to_i64(b)) as f64,
+        BitOr => (to_i64(a) | to_i64(b)) as f64,
+        BitXor => (to_i64(a) ^ to_i64(b)) as f64,
+        BitXnor => !(to_i64(a) ^ to_i64(b)) as f64,
+        Shl => to_i64(a).wrapping_shl(to_i64(b) as u32) as f64,
+        Shr => (to_i64(a) as u64).wrapping_shr(to_i64(b) as u32) as f64,
     }
 }
 
@@ -1209,6 +1253,24 @@ mod tests {
 
         // `$temperature` takes no arguments.
         let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $temperature(V(a, b)); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn abstime_folds_to_zero() {
+        // v0 has no time axis; a DC operating point is conventionally t=0.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + $abstime; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+
+        // `$abstime` takes no arguments.
+        let src =
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $abstime(1); end endmodule";
         let ast = parse(&lex(src).expect("lex")).expect("parse");
         assert!(elaborate(&ast).is_err());
     }
@@ -1398,6 +1460,41 @@ mod tests {
     }
 
     #[test]
+    fn slew_folds_to_its_value_argument() {
+        // `slew(V(a,b), rate)` has no rate-of-change to limit at a fixed DC operating point, so
+        // it folds transparently to `V(a,b)`, same treatment as `transition`.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; parameter real rate = 1e6; \
+             analog begin I(a, b) <+ slew(V(a, b), rate); end endmodule",
+        );
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
+        assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+    }
+
+    #[test]
+    fn ac_stim_and_bound_step_fold_to_zero() {
+        // `ac_stim` only contributes during AC analysis (v0 is DC-only); `bound_step` is a
+        // transient-timestep hint with no DC meaning. Both fold to a constant zero in
+        // expression position.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; \
+             analog begin I(a, b) <+ ac_stim(1.0, 0.0) + V(a, b); end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+
+        // `bound_step(step);` as a bare statement is a documented no-op.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; \
+             analog begin bound_step(1n); I(a, b) <+ V(a, b); end endmodule",
+        );
+        assert_eq!(m.analog.len(), 2);
+        assert!(matches!(m.analog[0], va_ir::Stmt::Block(ref b) if b.is_empty()));
+    }
+
+    #[test]
     fn analysis_folds_to_dc_constant() {
         // `analysis("static")` is true in DC → folds to 1.0; `analysis("tran")` → 0.0.
         let m = elaborate_src(
@@ -1439,6 +1536,37 @@ mod tests {
             .exprs
             .iter()
             .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Ne, _, _))));
+    }
+
+    #[test]
+    fn bitwise_operators_fold_and_lower() {
+        // Const-folded in a parameter: (6 & 3) | (1 << 2) = 2 | 4 = 6.
+        let m = elaborate_src(
+            "module t(); parameter integer X = (6 & 3) | (1 << 2); electrical a; \
+             analog begin I(a) <+ X; end endmodule",
+        );
+        assert_eq!(m.params[0].default, 6.0);
+
+        // `~0` (bitwise NOT of 0, all bits set) is a huge value, not 1.0 (which `!` would give).
+        let m = elaborate_src(
+            "module t(); parameter integer X = ~0; electrical a; analog begin I(a) <+ X; end endmodule",
+        );
+        assert_eq!(m.params[0].default, !0i64 as f64);
+
+        // Lowered in the analog block to the corresponding IR BinOp/UnOp, matching the real
+        // corpus idiom `(digital >> i) & 1`.
+        let m = elaborate_src(
+            "module t(); integer digital, i, bit_i; electrical a; \
+             analog begin bit_i = (digital >> i) & 1; I(a) <+ bit_i; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Shr, _, _))));
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::BitAnd, _, _))));
     }
 
     #[test]
@@ -1647,5 +1775,24 @@ mod tests {
         let toks = lex(src).expect("lex");
         let ast = parse(&toks).expect("parse");
         assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn vector_port_gives_a_clear_error_not_a_generic_one() {
+        // The port parses fine (§ vector nets), but `va_ir::Module::ports` has no vector-port
+        // representation yet — a stated limitation, surfaced with a specific message rather
+        // than the generic "no discipline declaration" one (which would be misleading: the
+        // port *does* have a discipline, just as a vector).
+        let src = "module dac(out, bus); output out; input [3:0] bus; \
+                   electrical out; electrical [3:0] bus; analog begin end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("vector"),
+                "expected a vector-port-specific message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
     }
 }

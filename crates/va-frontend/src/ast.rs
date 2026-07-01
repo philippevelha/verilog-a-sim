@@ -98,6 +98,17 @@ pub struct NetArg {
     pub index: Option<ExprRef>,
 }
 
+/// One net name in an [`Item::Net`] declaration list, with its own optional vector range
+/// (`bus[3:0]`) — independent of any shared prefix range on the declaration itself.
+#[derive(Clone, Debug)]
+pub struct NetDecl {
+    /// The net name.
+    pub name: String,
+    /// The declared vector width, `[msb:lsb]`, if this name is a vector net. `None` for an
+    /// ordinary scalar net.
+    pub range: Option<(ExprRef, ExprRef)>,
+}
+
 /// A parameter's `from` value range, e.g. `from (0:inf)` or `from [0:c0)`.
 ///
 /// `exclude` clauses (single values or ranges) are parsed but not represented here — v0 keeps
@@ -124,17 +135,17 @@ pub enum Item {
         /// The declared net names.
         nets: Vec<String>,
     },
-    /// A discipline declaration, `electrical p, n;`, or a vector net declaration,
-    /// `electrical [3:0] bus;` (§ vector nets — every name in `nets` becomes a bus of nodes
-    /// spanning `range`, indexed by a genvar expression in a branch access).
+    /// A discipline declaration, `electrical p, n;`, or a vector net declaration — either a
+    /// shared prefix range, `electrical [3:0] bus;`, or a per-identifier suffix range,
+    /// `electrical bus[3:0], p;` (both forms appear in real Verilog-A; the parser applies a
+    /// prefix range as the default for any name in the list that doesn't specify its own). A
+    /// vector name becomes a bus of nodes spanning its range, indexed by a genvar expression in
+    /// a branch access (§ vector nets).
     Net {
         /// The discipline keyword.
         discipline: Discipline,
-        /// The declared vector width, `[msb:lsb]`, if this is a vector net declaration.
-        /// `None` for an ordinary scalar net.
-        range: Option<(ExprRef, ExprRef)>,
-        /// The declared net names.
-        nets: Vec<String>,
+        /// The declared nets, each with its own optional vector range.
+        nets: Vec<NetDecl>,
     },
     /// A parameter declaration, `parameter real R = 1000 from (0:inf);`.
     Param {
@@ -346,6 +357,8 @@ pub enum UnOp {
     Neg,
     /// Logical negation, `!x`.
     Not,
+    /// Bitwise NOT, `~x` (distinct from `!x`; operates on the truncated integer value).
+    BitNot,
 }
 
 /// Binary operators. Richer than [`va_ir::BinOp`]; elaboration maps or rejects the extras.
@@ -377,4 +390,16 @@ pub enum BinOp {
     And,
     /// `||`.
     Or,
+    /// `&`, bitwise AND (distinct from `&&`).
+    BitAnd,
+    /// `|`, bitwise OR (distinct from `||`).
+    BitOr,
+    /// `^`, bitwise XOR.
+    BitXor,
+    /// `^~`/`~^`, bitwise XNOR.
+    BitXnor,
+    /// `<<`, left shift.
+    Shl,
+    /// `>>`, right shift (logical — this project has no signed/unsigned integer distinction).
+    Shr,
 }

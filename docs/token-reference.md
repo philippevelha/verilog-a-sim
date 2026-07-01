@@ -123,8 +123,10 @@ class of lexemes.
 - **Expressions and Evaluation**: `$vt`/`$vt(T)` and `$temperature` are the only ones
   elaboration actually turns into IR (`Builtin::Vt`, `Builtin::Temperature`); `$simparam` folds
   to its `default` argument (or errors, matching the LRM's behavior for an unknown simulator
-  parameter with no default — v0 has no simulator-parameter store at all); anything else
-  reachable as a `Stmt::Task` (`$strobe`, `$finish`, …) is parsed but elaborates to a no-op.
+  parameter with no default — v0 has no simulator-parameter store at all); `$abstime` (the
+  absolute simulation time) folds to a constant `0.0`, since v0 has no time axis at all and a DC
+  operating point is conventionally t=0; anything else reachable as a `Stmt::Task` (`$strobe`,
+  `$finish`, …) is parsed but elaborates to a no-op.
 - **Structural and Analog Usage**: Analog-block only — `$vt`/`$temperature`/`$simparam` appear
   in expressions, `$strobe`-class calls are statements. None of these are meaningful at module
   (structural) scope.
@@ -238,11 +240,36 @@ class of lexemes.
   modeled — there's no side-effecting operand in a pure analog expression for short-circuiting
   to matter to).
 - **Structural and Analog Usage**: Identical everywhere.
-- **Comparison with Traditional Constructs**: Same operators as C; note this project deliberately
-  does *not* implement Verilog's separate bitwise operators (`&`, `|`, `^`, `~`, `^~`) — real
-  numbers have no bit pattern to operate on in this subset, another Annex-C-flavored
-  simplification (bitwise ops are meaningful on Verilog's 4-state `reg`/`wire`, not on
-  Verilog-A's `real`).
+- **Comparison with Traditional Constructs**: Same operators as C. See `Shl`/`Shr`/`Amp`/`Pipe`/
+  `Caret`/`CaretTilde`/`Tilde` below for the separate bitwise family (`&`, `|`, `^`, `^~`/`~^`,
+  `~`) and shifts (`<<`, `>>`) — distinct tokens from these logical ones, added in a later pass
+  once real corpus code (`(digital >> i) & 1`, an integer-accumulator idiom) needed them.
+
+### `Shl` (`<<`), `Shr` (`>>`), `Amp` (`&`), `Pipe` (`|`), `Caret` (`^`), `CaretTilde` (`^~`/`~^`), and unary `Tilde` (`~`)
+
+- **Purpose and Static Nature**: Structural; static (const-evaluable in a parameter default or
+  genvar loop header, e.g. `parameter integer mask = (1 << width) - 1;`) or dynamic per operand,
+  exactly like the arithmetic operators.
+- **Declaration and Assignment**: N/A.
+- **Expressions and Evaluation**: There is no bit-vector type in this project — every value is
+  `f64` — so each of these truncates its operand(s) to `i64` (`to_i64`, shared with `int()`/
+  `floor()`'s float↔integer bridging elsewhere), performs the bitwise/shift operation, and casts
+  the result back to `f64`. `>>` is a *logical* (zero-fill) shift — this project has no signed/
+  unsigned integer distinction to make an arithmetic shift matter. `^~` and `~^` are accepted as
+  two spellings of the same XNOR operator (`BinOp::BitXnor`), matching the LRM. Both the dynamic
+  path (`va-codegen`'s AD) and the constant-folding path (`Elaborator::const_eval`/`eval_binop`)
+  treat these as **zero-gradient** where AD is concerned — like the comparison operators, a
+  bitwise/shift result has no continuous derivative, so `va-codegen` returns `Dual::constant(...)`
+  for them rather than attempting to differentiate through a bit pattern.
+- **Structural and Analog Usage**: Identical everywhere expressions appear, including parameter
+  defaults/ranges and genvar loop headers (both const-evaluated).
+- **Comparison with Traditional Constructs**: Same operators, precedence, and (for `>>`)
+  logical-shift semantics as C on an unsigned type. Operator precedence follows Verilog's own
+  table (IEEE 1364 Table 5-4) rather than C's — notably, in both languages shifts bind *looser*
+  than `+`/`-` but *tighter* than relational operators, and `&`/`^`/`|` sit between `&&` and
+  `==` (loosest to tightest: `||` < `&&` < `|` < `^`/`^~` < `&` < `==`/`!=` < `<`/`<=`/`>`/`>=` <
+  `<<`/`>>` < `+`/`-` < `*`/`/` < unary < `**`) — this project's `binop_binding` table matches it
+  exactly now that these are implemented.
 
 ## 1.3 Punctuation
 
@@ -768,45 +795,66 @@ including the ones with no implemented behavior at all.
   analyses — a fresh elaboration would be needed per analysis type in a hypothetical future
   where v0 supports more than DC.
 
-### `White_noise` / `Flicker_noise` / `Noise_table`
+### `White_noise` / `Flicker_noise` / `Noise_table` / `Ac_stim`
 
-- **Purpose and Static Nature**: Simulation-time noise sources in full Verilog-AMS (feeding a
-  noise-analysis PSD computation); folded to a compile-time `0.0` here, since v0 has no noise
-  analysis at all (`va-acnoise` is the stretch-goal crate for that).
+- **Purpose and Static Nature**: Simulation-time in full Verilog-AMS — the three noise sources
+  feed a noise-analysis PSD computation, and `ac_stim` contributes a stimulus only during AC
+  analysis. v0 has neither noise analysis nor AC analysis (`va-acnoise` is the stretch-goal crate
+  for both), so all four fold to a compile-time `0.0`: correct, not just convenient, since none
+  of them has any effect on a DC operating point regardless.
 - **Declaration and Assignment**: Called as `white_noise(pwr[, "name"])` /
-  `flicker_noise(pwr, exp[, "name"])` / `noise_table(...)`.
+  `flicker_noise(pwr, exp[, "name"])` / `noise_table(...)` / `ac_stim([mag[, phase[, type]]])`.
 - **Expressions and Evaluation**: Elaborated to `Expr::Const(0.0)` unconditionally — their
   string label and numeric arguments are parsed but never evaluated.
 - **Structural and Analog Usage**: Analog-block only (they appear on the right-hand side of a
-  `<+` contribution, contributing zero noise power under v0's DC-only model).
+  `<+` contribution, contributing zero under v0's DC-only model).
 - **Comparison with Traditional Constructs**: No general-purpose-language analogue — a
-  stochastic-process source is intrinsic to circuit-noise analysis.
+  stochastic-process source or a frequency-domain stimulus is intrinsic to circuit noise/AC
+  analysis.
 
-### `Transition`
+### `Transition` / `Slew`
 
-- **Purpose and Static Nature**: A genuinely time-domain analog operator in full Verilog-AMS —
-  it smooths a stepped/discontinuous `value` with finite delay/rise/fall times, which requires
-  tracking *when* `value` last changed. v0 is DC-only (no time axis to delay/slew through), and
-  a transition filter settles to its input in steady state, so it folds transparently to its
-  `value` argument at elaboration — fixed in this pass (`Elaborator::lower_expr`'s dedicated
-  `transition` arm, checked before the generic call path). This was previously unimplemented: it
-  parsed as an ordinary call but failed at elaboration with "unknown function `transition`" —
-  confirmed live by `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va`, which
-  now passes the frontend end to end.
+- **Purpose and Static Nature**: Genuinely time-domain analog operators in full Verilog-AMS —
+  `transition` smooths a stepped/discontinuous `value` with finite delay/rise/fall times,
+  `slew` rate-limits `value`'s rate of change; both require tracking *when*/*how fast* `value`
+  last changed. v0 is DC-only (no time axis to delay/slew through), and both filters settle to
+  their input in steady state (there is no rate-of-change or delay history at a fixed operating
+  point), so both fold transparently to their `value` argument at elaboration
+  (`Elaborator::lower_expr`'s dedicated arm, checked before the generic call path). `transition`
+  was previously unimplemented: it parsed as an ordinary call but failed at elaboration with
+  "unknown function `transition`" — confirmed live by `va-cli check` on
+  `external/verilogaLib-master/comparator_dynamic.va`, which now passes the frontend end to end.
+  `slew` got the identical fix in the same pass, by inspection rather than by hitting it in the
+  corpus.
 - **Declaration and Assignment**: Called as `transition(value, delay[, rise_time[,
-  fall_time]])` — `value` is required, the rest optional.
+  fall_time]])` / `slew(value, pos_rate[, neg_rate])` — `value` is required, the rest optional.
 - **Expressions and Evaluation**: Only `value` is lowered and returned as-is (the same `ExprId`
-  it would have produced if written bare, with no wrapper node at all); `delay`/`rise_time`/
-  `fall_time` are read from the AST only to check `value` is present, never evaluated — an empty
-  argument list is a hard error. This is the correct DC answer, not just a convenient one: at a
-  fixed operating point there is no waveform history for a delay/slew filter to act on, so its
-  output *is* its input.
+  it would have produced if written bare, with no wrapper node at all); the remaining arguments
+  are read from the AST only to check `value` is present, never evaluated — an empty argument
+  list is a hard error.
 - **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
   right-hand side or an intermediate variable assignment.
 - **Comparison with Traditional Constructs**: No C/digital-Verilog analogue (a continuous-time
-  slew/delay filter needs a time axis neither has). Once `va-transient` exists, `transition`
-  would need real handling there (it isn't just constant-folded away in a time-stepping solve) —
-  this DC-only fold is a stated, deliberate simplification, not a permanent design decision.
+  slew/delay filter needs a time axis neither has). Once `va-transient` exists, both would need
+  real handling there (they aren't just constant-folded away in a time-stepping solve) — this
+  DC-only fold is a stated, deliberate simplification, not a permanent design decision.
+
+### `Bound_step`
+
+- **Purpose and Static Nature**: A transient-timestep hint in full Verilog-AMS (requests the
+  simulator not step past a given interval, so it can resolve a known-fast event); has no
+  meaning at all under v0's DC-only model (there is no timestep to bound), so it's a documented
+  no-op rather than an error.
+- **Declaration and Assignment**: Used as a bare statement, `bound_step(step);` — like a
+  system-task call, not a value (`parse_stmt`'s dedicated `"bound_step"` arm parses it the same
+  way `$strobe(...)` is parsed, producing a `Stmt::Task`, which already elaborates to a no-op).
+  If it somehow appears in expression position instead, it also folds to `Expr::Const(0.0)`
+  (grouped with the noise-source builtins in `lower_expr`) rather than erroring.
+- **Expressions and Evaluation**: The step argument is parsed but never evaluated.
+- **Structural and Analog Usage**: Analog-block only, transient-specific.
+- **Comparison with Traditional Constructs**: No general-purpose analogue — closest is a
+  scheduler hint (e.g. a cooperative-multitasking `yield`), except this one bounds a numerical
+  integrator's step size rather than yielding control.
 
 ### `Discipline` / `Nature` / `Enddiscipline` / `Endnature`
 
@@ -844,7 +892,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `access` | Same as `abstol` | Nature attribute `access = fn_name;` | Never individually inspected | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |
 | `acosh` | Dynamic/static dual, §1.5 | `acosh(x)` call | Inverse hyperbolic cosine | Analog expr / const context | C99 `acosh()` |
-| `ac_stim` | Parses as a call (`ac_stim(mag[, phase[, type]])`); elaboration has no builtin for it → `unknown function` | AC-analysis stimulus specification (LRM §6.11-ish) | Rejected at elaboration today | Would be analog-block-only (AC analysis) | No analogue — AC-analysis is out of v0's DC-only scope (`CLAUDE.md` §1's "stretch") |
+| `ac_stim` | Folds to constant `0.0` (fixed — see §1.5); contributes nothing at DC regardless | `ac_stim(mag[, phase[, type]])` call | Const-folded to `0.0` | Analog-block only (AC analysis) | No analogue — AC-analysis is out of v0's DC-only scope (`CLAUDE.md` §1's "stretch") |
 | `aliasparam` | Elaboration-only, see §1.5 `Aliasparam` | `aliasparam name = target;` | Name resolution only | Module-level | C reference/alias |
 | `always` | Reserved, no grammar production — v0 has only the single `analog` block, no digital `always` | N/A | N/A | N/A | Digital Verilog's continuously-re-triggered procedural block; no direct C equivalent |
 | `analog` | Dedicated token, §1.4 | — | — | — | — |
@@ -857,7 +905,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `atan2` | Dynamic/static dual, §1.5 | `atan2(y, x)` call | Two-argument arctangent | Analog expr / const context | C `atan2()` |
 | `atanh` | Dynamic/static dual, §1.5 | `atanh(x)` call | Inverse hyperbolic tangent | Analog expr / const context | C99 `atanh()` |
 | `begin` | Dedicated token, §1.4 | — | — | — | — |
-| `bound_step` | Parses as a call (`bound_step(step)`); elaboration has no builtin → `unknown function` | Requests a maximum transient timestep (LRM §6.7-ish) | Rejected at elaboration today | Analog-block only, transient-specific | No analogue — timestep control is a transient-analysis concept `va-transient` doesn't expose to source yet |
+| `bound_step` | A documented no-op (fixed — see §1.5); has no meaning under v0's DC-only model | `bound_step(step);` as a bare statement (parses like a system-task call) | Step argument parsed, never evaluated | Analog-block only, transient-specific | No analogue — timestep control is a transient-analysis concept `va-transient` doesn't expose to source yet |
 | `branch` | Elaboration-only, see §1.5 `Branch` | `branch (a[,b]) name,...;` | Name/pair resolution | Module-level declaration; analog-block use | Named alias for a recurring access-function pair |
 | `buf` | Reserved, no grammar production (digital buffer gate primitive) | N/A | N/A | Digital gate level only | No C analogue (has real propagation delay) |
 | `bufif0` | Reserved, no grammar production (tristate buffer, active-low enable) | N/A | N/A | Digital gate level only | No C analogue |
@@ -975,7 +1023,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `scalared` | Reserved, no grammar production (net-vector storage-layout hint) | N/A | N/A | Digital structural only | No C analogue |
 | `sin` | Dynamic/static dual, §1.5 | `sin(x)` call | Sine | Analog expr / const context | C `sin()` |
 | `sinh` | Dynamic/static dual, §1.5 | `sinh(x)` call | Hyperbolic sine | Analog expr / const context | C `sinh()` |
-| `slew` | Parses as a call (`slew(expr, pos_rate[, neg_rate])`); elaboration has no builtin → `unknown function` | Slew-rate-limiting waveform filter | Rejected at elaboration today | Analog-block only, signal-flow filter | No C analogue |
+| `slew` | Folds to its `value` argument (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
 | `small` | Reserved, no grammar production (net-strength charge-storage keyword) | N/A | N/A | Digital net-strength only | No C analogue |
 | `specify` | Reserved, no grammar production (opens a timing-check block, paired with `endspecify`) | N/A | N/A | Digital timing-check only | No C analogue |
 | `specparam` | Reserved, no grammar production (a parameter usable only inside a `specify` block) | N/A | N/A | Digital timing-check only | No C analogue |
@@ -1059,22 +1107,38 @@ depends on surrounding context), organized by what they do rather than by a sing
 
 - **Purpose and Static Nature**: Elaboration-only — resolves a name (or, for a vector net, a
   contiguous run of names) to one or more fixed `NodeId`s.
-- **Declaration and Assignment**: `electrical|thermal [ msb : lsb ] name, name, ... ;`. The
-  bracketed range is optional; when present, `msb`/`lsb` are const-evaluated
-  (`const_eval_int`) and every name gets one interned node per index in `min(msb,lsb)
-  ..= max(msb,lsb)`, named `"base[k]"` internally.
+- **Declaration and Assignment**: `electrical|thermal [ msb : lsb ] name [ [ msb : lsb ] ], name
+  [ [ msb : lsb ] ], ... ;` — real Verilog-A uses two different spellings for a vector net's
+  width, and this grammar accepts both: a shared **prefix** range before the whole name list
+  (`electrical [0:width-1] in;`, the LRM's own DAC example) and a per-name **suffix** range
+  (`` electrical in[`W-1:0], out; ``, seen directly in the `verilogaLib` corpus). Each name may
+  carry its own suffix range, which overrides the prefix default for that name only — so
+  `electrical [3:0] a, b[7:0], c;` declares `a`/`c` as 4-bit vectors and `b` as an 8-bit one.
+  When a range (either form) is present, `msb`/`lsb` are const-evaluated (`const_eval_int`) and
+  the name gets one interned node per index in `min(msb,lsb) ..= max(msb,lsb)`, named
+  `"base[k]"` internally.
 - **Expressions and Evaluation**: The range bounds may reference an already-declared parameter
-  (LRM's own DAC example does exactly this: `input [0:width-1] in;`) — which is why
-  `Elaborator::run` const-evaluates parameters *before* collecting nodes.
+  (the DAC example again: `input [0:width-1] in;`) — which is why `Elaborator::run`
+  const-evaluates parameters *before* collecting nodes.
 - **Structural and Analog Usage**: Module-level only; the resulting node(s) are read from the
   analog block through §2.17's access-function grammar.
 - **Comparison with Traditional Constructs**: The vector form is the Verilog-A analogue of a C
   array declaration (`double bus[4];`), except the "array" here is a bus of physical nodes, not
-  storage.
+  storage. The mixed prefix/suffix-with-override grammar has no clean C parallel (closest: a C
+  declaration list where each declarator can independently be a pointer/array, `int *a, b[4];`).
 
 ## 2.3 Direction declaration
 
-- Covered fully in Part 1 §1.4 (`Input`/`Output`/`Inout`) — the grammar itself is just
+- A port's direction (`input`/`output`/`inout`) may repeat a vector net's `[msb:lsb]` width at
+  the direction-declaration site too (again, the LRM's own DAC example: `input [0:width-1] in;`
+  alongside the matching `electrical [0:width-1] in;`). This is parsed and discarded — purely
+  informational here, since the real range comes from the paired net declaration (§2.2) — so
+  real-world vector-port headers now parse instead of failing on the bracket. What still doesn't
+  work is the port *itself* being a vector: `va_ir::Module::ports` is one `NodeId` per port, with
+  no vector-port representation and no `va-netlist` wiring convention for one, so elaboration
+  rejects a vector port with a specific, honest error (`resolve_ports`) rather than silently
+  doing the wrong thing — see §2.18's "known gap" note.
+- Otherwise covered fully in Part 1 §1.4 (`Input`/`Output`/`Inout`) — the grammar itself is just
   `direction name, ... ;`, with no additional production beyond the token dispatch.
 
 ## 2.4 Parameter/localparam declaration
@@ -1256,6 +1320,15 @@ as an ordinary loop.
 - **Comparison with Traditional Constructs**: A C array subscript, restricted to a
   compile-time-constant (or genvar-derived) index — closer to a C array indexed only by
   `constexpr`/template-parameter values than to ordinary runtime C indexing.
+- **Known gap — vector ports**: a vector *net* works fully as described above; a vector *port*
+  (the same net also listed in the module's port list) does not, and gives a specific error
+  rather than silently doing the wrong thing (`resolve_ports`: `"port \`{name}\` is a vector
+  net; vector ports are not yet supported"`). The blocker is `va_ir::Module::ports: Vec<NodeId>`
+  — one node per port, with no representation for "this port is actually N nodes" — and there is
+  no `va-netlist` wiring convention for a multi-terminal port connection either. Fixing this
+  properly is an Interface α change (§6), not a `va-frontend`-only fix; real corpus files hit
+  this directly (`external/verilogaLib-master/dac_16bit_ideal.va`,
+  `external/verilogaLib-master/adc_16bit_ideal.va` both declare a vector I/O port).
 
 ## 2.19 Event control (`@(...)`)
 

@@ -333,6 +333,9 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             Ok(match op {
                 UnOp::Neg => d.neg(),
                 UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0), count),
+                // Bitwise NOT, like the comparison/logical operators above, is an integer
+                // operation with no continuous derivative — zero-gradient.
+                UnOp::BitNot => Dual::constant(!to_i64(d.value) as f64, count),
             })
         }
         Expr::Binary(op, l, r) => {
@@ -352,6 +355,22 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 BinOp::Ne => Dual::constant(bool_to_f64(a.value != b.value), count),
                 BinOp::And => Dual::constant(bool_to_f64(a.value != 0.0 && b.value != 0.0), count),
                 BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0), count),
+                // Bitwise/shift operators are integer operations with no continuous derivative,
+                // same treatment as the comparison operators above: zero-gradient.
+                BinOp::BitAnd => Dual::constant((to_i64(a.value) & to_i64(b.value)) as f64, count),
+                BinOp::BitOr => Dual::constant((to_i64(a.value) | to_i64(b.value)) as f64, count),
+                BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64, count),
+                BinOp::BitXnor => {
+                    Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64, count)
+                }
+                BinOp::Shl => Dual::constant(
+                    to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64,
+                    count,
+                ),
+                BinOp::Shr => Dual::constant(
+                    (to_i64(a.value) as u64).wrapping_shr(to_i64(b.value) as u32) as f64,
+                    count,
+                ),
             })
         }
         Expr::Call(builtin, args) => eval_call(ctx, *builtin, args),
@@ -434,6 +453,13 @@ fn bool_to_f64(b: bool) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Truncate a value to its integer representation for a bitwise/shift operator — mirrors
+/// `va-frontend::elaborate`'s constant-folding treatment of the same operators (there is no
+/// bit-vector type in this project; every value is `f64`).
+fn to_i64(v: f64) -> i64 {
+    v.trunc() as i64
 }
 
 #[cfg(test)]

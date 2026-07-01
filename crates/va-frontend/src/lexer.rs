@@ -349,6 +349,28 @@ pub enum Token {
     /// `||`.
     #[token("||")]
     OrOr,
+    /// `<<`, left shift.
+    #[token("<<")]
+    Shl,
+    /// `>>`, right shift.
+    #[token(">>")]
+    Shr,
+    /// `&`, bitwise AND (distinct from `&&`, logical AND).
+    #[token("&")]
+    Amp,
+    /// `|`, bitwise OR (distinct from `||`, logical OR).
+    #[token("|")]
+    Pipe,
+    /// `^`, bitwise XOR.
+    #[token("^")]
+    Caret,
+    /// `^~` or `~^`, bitwise XNOR (both spellings are the same operator).
+    #[token("^~")]
+    #[token("~^")]
+    CaretTilde,
+    /// `~`, bitwise NOT (unary; distinct from `!`, logical NOT).
+    #[token("~")]
+    Tilde,
 
     // --- punctuation ------------------------------------------------------------------
     /// `(`.

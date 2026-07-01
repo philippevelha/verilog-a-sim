@@ -33,7 +33,7 @@
 
 use crate::ast::{
     Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
-    FuncArg, Item, ModuleAst, NetArg, ParamType, Range, Stmt, UnOp,
+    FuncArg, Item, ModuleAst, NetArg, NetDecl, ParamType, Range, Stmt, UnOp,
 };
 use crate::lexer::Token;
 use crate::FrontendError;
@@ -175,6 +175,31 @@ impl Parser<'_> {
         Ok(NetArg { name, index })
     }
 
+    /// Parse an optional `[msb:lsb]` bracket, e.g. a vector net/port's declared width.
+    fn parse_bracket_range(&mut self) -> Result<Option<(ExprRef, ExprRef)>, FrontendError> {
+        if !self.at(&Token::LBracket) {
+            return Ok(None);
+        }
+        self.pos += 1;
+        let msb = self.parse_expr()?;
+        self.eat(&Token::Colon)?;
+        let lsb = self.parse_expr()?;
+        self.eat(&Token::RBracket)?;
+        Ok(Some((msb, lsb)))
+    }
+
+    /// Parse one entry of a net-declaration list: a name, optionally followed by its own
+    /// `[msb:lsb]` range suffix; falls back to `default_range` (the declaration's shared prefix
+    /// range, if any) when the name has no suffix of its own.
+    fn parse_net_decl(
+        &mut self,
+        default_range: Option<(ExprRef, ExprRef)>,
+    ) -> Result<NetDecl, FrontendError> {
+        let name = self.expect_ident()?;
+        let range = self.parse_bracket_range()?.or(default_range);
+        Ok(NetDecl { name, range })
+    }
+
     fn push(&mut self, e: ExprAst) -> ExprRef {
         let r = ExprRef(self.exprs.len() as u32);
         self.exprs.push(e);
@@ -263,6 +288,11 @@ impl Parser<'_> {
                     Some(Token::Output) => Direction::Output,
                     _ => Direction::Inout,
                 };
+                // A vector port repeats its `[msb:lsb]` width here too (e.g. the LRM's own DAC
+                // example: `input [0:width-1] in;` alongside `electrical [0:width-1] in;`) — the
+                // real vector range comes from the paired discipline declaration (§2.2), so this
+                // one is parsed and discarded; it's purely informational at the direction site.
+                self.parse_bracket_range()?;
                 let nets = self.ident_list()?;
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Direction { dir, nets })
@@ -272,25 +302,19 @@ impl Parser<'_> {
                     Some(Token::Electrical) => Discipline::Electrical,
                     _ => Discipline::Thermal,
                 };
-                // An optional `[msb:lsb]` makes every name in the list a vector net (a bus of
-                // nodes), indexed by a genvar expression in a branch access.
-                let range = if self.at(&Token::LBracket) {
+                // A `[msb:lsb]` before the name list is a *default* vector range; each name may
+                // also carry its own range suffix (`bus[3:0]`), overriding the default for that
+                // name only — both forms appear in real Verilog-A (e.g. `electrical [0:w-1]
+                // in;` vs. `electrical in[`W-1:0], out;`). Either way, a vector name becomes a
+                // bus of nodes, indexed by a genvar expression in a branch access.
+                let default_range = self.parse_bracket_range()?;
+                let mut nets = vec![self.parse_net_decl(default_range)?];
+                while self.at(&Token::Comma) {
                     self.pos += 1;
-                    let msb = self.parse_expr()?;
-                    self.eat(&Token::Colon)?;
-                    let lsb = self.parse_expr()?;
-                    self.eat(&Token::RBracket)?;
-                    Some((msb, lsb))
-                } else {
-                    None
-                };
-                let nets = self.ident_list()?;
+                    nets.push(self.parse_net_decl(default_range)?);
+                }
                 self.eat(&Token::Semicolon)?;
-                Ok(Item::Net {
-                    discipline,
-                    range,
-                    nets,
-                })
+                Ok(Item::Net { discipline, nets })
             }
             Some(Token::Parameter) | Some(Token::LocalParam) => self.parse_param(),
             // A bare `real`/`integer` at module scope declares variables (a `parameter`
@@ -615,6 +639,22 @@ impl Parser<'_> {
                 "for" => self.parse_for(),
                 "case" => self.parse_case(),
                 "generate" => Ok(Stmt::Block(self.parse_generate()?)),
+                // `bound_step(step);` is a transient-timestep hint, used as a bare statement
+                // (like a system-task call) rather than a value — parsed the same way, and
+                // elaborated as a no-op (`Stmt::Task`'s existing treatment).
+                "bound_step" => {
+                    self.pos += 1;
+                    let args = if self.at(&Token::LParen) {
+                        self.parse_call_args()?
+                    } else {
+                        Vec::new()
+                    };
+                    self.eat(&Token::Semicolon)?;
+                    Ok(Stmt::Task {
+                        name: "bound_step".to_string(),
+                        args,
+                    })
+                }
                 other => self.err(format!(
                     "reserved word `{other}` begins a construct outside the v0 subset"
                 )),
@@ -794,6 +834,11 @@ impl Parser<'_> {
                 let e = self.parse_unary()?;
                 Ok(self.push(ExprAst::Unary(UnOp::Not, e)))
             }
+            Some(Token::Tilde) => {
+                self.pos += 1;
+                let e = self.parse_unary()?;
+                Ok(self.push(ExprAst::Unary(UnOp::BitNot, e)))
+            }
             _ => self.parse_primary(),
         }
     }
@@ -892,21 +937,31 @@ fn is_access(name: &str) -> bool {
 
 /// Map an operator token to `(op, left_bp, right_bp)`. Higher binding power binds tighter;
 /// `**` is right-associative (`right_bp < left_bp`).
+/// Binding powers follow the standard Verilog operator-precedence table (IEEE 1364 Table 5-4),
+/// loosest to tightest: `||` < `&&` < `|` < `^`/`^~` < `&` < `==`/`!=` < relational < shifts <
+/// `+`/`-` < `*`/`/` < unary < `**`. `**` is right-associative (its `rbp` is lower than its
+/// `lbp`); every other binary operator here is left-associative.
 fn binop_binding(t: &Token) -> Option<(BinOp, u8, u8)> {
     Some(match t {
         Token::OrOr => (BinOp::Or, 1, 2),
         Token::AndAnd => (BinOp::And, 3, 4),
-        Token::EqEq => (BinOp::Eq, 5, 6),
-        Token::NotEq => (BinOp::Ne, 5, 6),
-        Token::Lt => (BinOp::Lt, 7, 8),
-        Token::Le => (BinOp::Le, 7, 8),
-        Token::Gt => (BinOp::Gt, 7, 8),
-        Token::Ge => (BinOp::Ge, 7, 8),
-        Token::Plus => (BinOp::Add, 9, 10),
-        Token::Minus => (BinOp::Sub, 9, 10),
-        Token::Star => (BinOp::Mul, 11, 12),
-        Token::Slash => (BinOp::Div, 11, 12),
-        Token::StarStar => (BinOp::Pow, 14, 13),
+        Token::Pipe => (BinOp::BitOr, 5, 6),
+        Token::Caret => (BinOp::BitXor, 7, 8),
+        Token::CaretTilde => (BinOp::BitXnor, 7, 8),
+        Token::Amp => (BinOp::BitAnd, 9, 10),
+        Token::EqEq => (BinOp::Eq, 11, 12),
+        Token::NotEq => (BinOp::Ne, 11, 12),
+        Token::Lt => (BinOp::Lt, 13, 14),
+        Token::Le => (BinOp::Le, 13, 14),
+        Token::Gt => (BinOp::Gt, 13, 14),
+        Token::Ge => (BinOp::Ge, 13, 14),
+        Token::Shl => (BinOp::Shl, 15, 16),
+        Token::Shr => (BinOp::Shr, 15, 16),
+        Token::Plus => (BinOp::Add, 17, 18),
+        Token::Minus => (BinOp::Sub, 17, 18),
+        Token::Star => (BinOp::Mul, 19, 20),
+        Token::Slash => (BinOp::Div, 19, 20),
+        Token::StarStar => (BinOp::Pow, 23, 22),
         _ => return None,
     })
 }
@@ -1035,6 +1090,44 @@ mod tests {
     }
 
     #[test]
+    fn bitwise_and_shift_precedence_and_parsing() {
+        // `1 << i & 1` ==> BitAnd(Shl(1, i), 1): shift binds tighter than `&` (Verilog's
+        // operator-precedence table, IEEE 1364 Table 5-4), matching the corpus idiom
+        // `(digital >> i) & 1`.
+        let m = parse_src("module t(); parameter integer X = 1 << i & 1; endmodule");
+        let default = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { default, .. } => Some(*default),
+                _ => None,
+            })
+            .unwrap();
+        match m.expr(default) {
+            ExprAst::Binary(BinOp::BitAnd, l, r) => {
+                assert!(matches!(m.expr(*l), ExprAst::Binary(BinOp::Shl, _, _)));
+                assert!(matches!(m.expr(*r), ExprAst::Number(v) if *v == 1.0));
+            }
+            other => panic!("expected BitAnd at the root, got {other:?}"),
+        }
+
+        // `|`, `^`/`^~`, and unary `~` all parse too.
+        let m = parse_src("module t(); parameter integer X = (a | b) ^ (c ^~ d) & ~e; endmodule");
+        let default = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Param { default, .. } => Some(*default),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            m.expr(default),
+            ExprAst::Binary(BinOp::BitXor, ..)
+        ));
+    }
+
+    #[test]
     fn ternary_parses_and_is_right_associative() {
         // `1 + 2 > 0 ? 10 : 20 ? 30 : 40` ==> Cond(1+2>0, 10, Cond(20, 30, 40)).
         let m =
@@ -1150,17 +1243,54 @@ mod tests {
 
     #[test]
     fn vector_net_declaration_parses() {
+        // Shared prefix range: `electrical [3:0] bus;`.
         let m = parse_src("module t(); electrical [3:0] bus; endmodule");
-        let (range, nets) = m
+        let nets = m
             .items
             .iter()
             .find_map(|it| match it {
-                Item::Net { range, nets, .. } => Some((*range, nets.clone())),
+                Item::Net { nets, .. } => Some(nets.clone()),
                 _ => None,
             })
             .expect("net item");
-        assert!(range.is_some(), "a bracketed `[3:0]` should record a range");
-        assert_eq!(nets, vec!["bus".to_string()]);
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].name, "bus");
+        assert!(
+            nets[0].range.is_some(),
+            "a bracketed `[3:0]` should record a range"
+        );
+
+        // Per-identifier suffix range, mixed with a plain scalar name in the same declaration:
+        // `electrical bus[3:0], p;`.
+        let m = parse_src("module t(); electrical bus[3:0], p; endmodule");
+        let nets = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Net { nets, .. } => Some(nets.clone()),
+                _ => None,
+            })
+            .expect("net item");
+        assert_eq!(nets.len(), 2);
+        assert_eq!(nets[0].name, "bus");
+        assert!(nets[0].range.is_some());
+        assert_eq!(nets[1].name, "p");
+        assert!(nets[1].range.is_none());
+    }
+
+    #[test]
+    fn vector_port_direction_bracket_is_accepted() {
+        // The LRM's own DAC example: `input [0:width-1] in;` alongside a matching vector net
+        // declaration. The bracket is parsed (and discarded — the net declaration carries the
+        // real range) so this no longer fails to parse.
+        let m = parse_src(
+            "module dac(out, in); output out; input [0:7] in; \
+             electrical out; electrical [0:7] in; endmodule",
+        );
+        assert!(m
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Direction { nets, .. } if nets == &["in".to_string()])));
     }
 
     #[test]
@@ -1355,6 +1485,22 @@ mod tests {
                 assert!(matches!(m.expr(args[0]), ExprAst::Str(s) if s == "v=%E"));
             }
             other => panic!("expected a system-task statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_step_statement_parses() {
+        // `bound_step(step);` is a bare statement (a transient-timestep hint), not a value —
+        // parsed the same way as a system-task call.
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin bound_step(1n); I(a, b) <+ 0.0; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Task { name, args } => {
+                assert_eq!(name, "bound_step");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected a bound_step statement, got {other:?}"),
         }
     }
 
