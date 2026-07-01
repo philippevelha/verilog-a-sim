@@ -5,12 +5,18 @@
 //!
 //! # Passes
 //!
-//! 1. **Nodes** — intern every net declared with a discipline; resolve the port list.
-//! 2. **Parameters** — const-evaluate each default and range bound into `f64`.
-//! 3. **Variables** — register explicitly declared module variables (`real q, v;`), then
-//!    every remaining assignment target, as local variables.
-//! 4. **Lowering** — translate the analog block's expressions and statements, creating
-//!    branches on demand as branch accesses are resolved.
+//! 1. **Parameters** — const-evaluate each default and range bound into `f64` (run first so a
+//!    vector net's `[msb:lsb]` range may reference one).
+//! 2. **Genvars** — register every declared `genvar` name, before variables are collected, so a
+//!    genvar's loop header is never mistaken for a real analog variable.
+//! 3. **Nodes** — intern every net declared with a discipline (expanding a vector net's
+//!    `[msb:lsb]` range into one node per index); resolve the port list.
+//! 4. **Variables** — register explicitly declared module variables (`real q, v;`), then
+//!    every remaining assignment target (skipping genvars), as local variables.
+//! 5. **Lowering** — translate the analog block's expressions and statements, creating
+//!    branches on demand as branch accesses are resolved. A `for` loop whose header assigns a
+//!    genvar is fully unrolled here into a flat [`va_ir::Stmt::Block`] (§ generate loops) —
+//!    every other `for` lowers to a runtime [`va_ir::Stmt::For`] as before.
 //!
 //! # Limitations
 //!
@@ -31,6 +37,18 @@
 //!   parameters; forward references to a function defined later in source are unsupported and
 //!   resolve as an unknown function. Note that back-ends need not consume these yet —
 //!   `va-codegen` v0 still rejects them during its own lowering.
+//! - `genvar`/`generate` loops (§ generate loops): a `for` loop drives elaboration-time
+//!   unrolling only when its header assigns a declared genvar; `init`/`cond`/`step` must be
+//!   compile-time constant (literals, parameters, other genvars — same rule as parameter
+//!   ranges) and `step` must reassign the same genvar (restricted assignment). Unrolling caps
+//!   at 10,000 iterations to turn a malformed loop into a clear error rather than a hang.
+//!   Nested loops may not reuse an already-bound genvar name (its "implicit localparam" would
+//!   collide); sibling (non-nested) loops may reuse a name freely.
+//! - Vector nets (§ vector nets) are internally just one ordinary [`NodeId`] per declared
+//!   index, named `base[k]`; there is no separate IR concept for a bus. A vector element must
+//!   be indexed (`V(bus[0])`, never bare `V(bus)`), and the index is bounds-checked against the
+//!   declared `[msb:lsb]` range. Vector ports are not supported (a port name maps to exactly
+//!   one node).
 
 use std::collections::HashMap;
 
@@ -59,6 +77,9 @@ pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
         branches: HashMap::new(),
         named_branches: HashMap::new(),
         ground: None,
+        genvars: std::collections::HashSet::new(),
+        genvar_env: HashMap::new(),
+        vectors: HashMap::new(),
     };
     e.run()?;
     Ok(e.out)
@@ -78,14 +99,27 @@ struct Elaborator<'a> {
     /// Named branches declared with `branch (a, b) name;`, resolved to their [`BranchId`].
     named_branches: HashMap<String, BranchId>,
     ground: Option<NodeId>,
+    /// Declared `genvar` names (§ generate loops). A genvar never becomes an IR variable — it
+    /// exists only as a constant bound in [`Self::genvar_env`] while its driving `for` loop is
+    /// unrolled at elaboration (it does not exist at simulation time).
+    genvars: std::collections::HashSet<String>,
+    /// The genvar → current-value bindings in effect while unrolling a generate loop. Nested
+    /// loops over distinct genvars stack (each key is inserted/removed independently); a loop
+    /// re-entering its own still-bound genvar (nested reuse of the same name) is rejected.
+    genvar_env: HashMap<String, i64>,
+    /// Declared vector nets' inclusive `(lo, hi)` index range, keyed by base name (§ vector
+    /// nets). A vector net `bus` interns one [`NodeId`] per index as `bus[k]`.
+    vectors: HashMap<String, (i64, i64)>,
 }
 
 impl Elaborator<'_> {
     fn run(&mut self) -> Result<(), FrontendError> {
+        // Parameters first: a vector net's `[msb:lsb]` range may reference one (§ vector nets).
+        self.collect_params()?;
+        self.collect_genvars();
         self.collect_nodes()?;
         self.resolve_ports()?;
         self.collect_branches()?;
-        self.collect_params()?;
         self.collect_functions()?;
         self.collect_var_decls();
         self.collect_vars();
@@ -179,17 +213,52 @@ impl Elaborator<'_> {
         Ok(())
     }
 
+    /// Register every declared `genvar` name (§ generate loops). Must run before variables are
+    /// collected, so a genvar's assignment-looking loop header is never mistaken for a real
+    /// analog variable (see [`Self::register_var`]).
+    fn collect_genvars(&mut self) {
+        for item in &self.ast.items {
+            if let Item::Genvar { names } = item {
+                for name in names {
+                    self.genvars.insert(name.clone());
+                }
+            }
+        }
+    }
+
     // --- pass 1: nodes ---------------------------------------------------------------
 
     fn collect_nodes(&mut self) -> Result<(), FrontendError> {
         for item in &self.ast.items {
-            if let Item::Net { discipline, nets } = item {
+            if let Item::Net {
+                discipline,
+                range,
+                nets,
+            } = item
+            {
                 let disc = match discipline {
                     ast::Discipline::Electrical => Discipline::Electrical,
                     ast::Discipline::Thermal => Discipline::Thermal,
                 };
-                for name in nets {
-                    self.intern_node(name, disc);
+                match range {
+                    None => {
+                        for name in nets {
+                            self.intern_node(name, disc);
+                        }
+                    }
+                    // A vector net, `electrical [msb:lsb] bus;`, interns one node per index
+                    // (§ vector nets); a branch access later selects one by a genvar expression.
+                    Some((msb, lsb)) => {
+                        let msb = self.const_eval_int(*msb, "vector net range bound")?;
+                        let lsb = self.const_eval_int(*lsb, "vector net range bound")?;
+                        let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
+                        for name in nets {
+                            for k in lo..=hi {
+                                self.intern_node(&format!("{name}[{k}]"), disc);
+                            }
+                            self.vectors.insert(name.clone(), (lo, hi));
+                        }
+                    }
                 }
             }
         }
@@ -286,15 +355,25 @@ impl Elaborator<'_> {
         Ok(())
     }
 
-    /// Fold a constant expression to its `f64` value. Parameter context only.
+    /// Fold a constant expression to its `f64` value: a parameter default/range bound, a
+    /// vector net's range bound, or a genvar loop header (§ generate loops) — anywhere the LRM
+    /// requires a value fixed at elaboration. A bound genvar (see [`Self::genvar_env`]) counts
+    /// as constant here, matching the rule that a genvar expression may reference other
+    /// genvars as well as literals and parameters.
     fn const_eval(&self, r: ExprRef) -> Result<f64, FrontendError> {
         match self.ast.expr(r) {
             ExprAst::Number(n) => Ok(*n),
-            ExprAst::Ident(name) => self.param_vals.get(name).copied().ok_or_else(|| {
-                elab(format!(
-                    "`{name}` is not a compile-time constant in this context"
-                ))
-            }),
+            ExprAst::Ident(name) => {
+                if let Some(v) = self.genvar_env.get(name) {
+                    Ok(*v as f64)
+                } else {
+                    self.param_vals.get(name).copied().ok_or_else(|| {
+                        elab(format!(
+                            "`{name}` is not a compile-time constant in this context"
+                        ))
+                    })
+                }
+            }
             ExprAst::Unary(op, e) => {
                 let v = self.const_eval(*e)?;
                 Ok(match op {
@@ -330,6 +409,16 @@ impl Elaborator<'_> {
         }
     }
 
+    /// [`Self::const_eval`], then require the result to be (nearly) integral — genvars, vector
+    /// net range bounds, and vector indices are all integers per the LRM.
+    fn const_eval_int(&self, r: ExprRef, what: &str) -> Result<i64, FrontendError> {
+        let v = self.const_eval(r)?;
+        if (v - v.round()).abs() > 1e-9 {
+            return Err(elab(format!("{what} must be an integer, got {v}")));
+        }
+        Ok(v.round() as i64)
+    }
+
     // --- pass 3: variables -----------------------------------------------------------
 
     fn collect_vars(&mut self) {
@@ -342,8 +431,14 @@ impl Elaborator<'_> {
         }
     }
 
-    /// Register `name` as a local variable unless it is already a parameter or known variable.
+    /// Register `name` as a local variable unless it is already a parameter, known variable,
+    /// or a genvar. A genvar (§ generate loops) never becomes an IR variable — it is folded to
+    /// a constant wherever it is read, and its only "assignment" is the header of the `for`
+    /// loop it drives, which elaboration unrolls rather than lowering as a normal assignment.
     fn register_var(&mut self, name: &str) {
+        if self.genvars.contains(name) {
+            return;
+        }
         if !self.params.contains_key(name) && !self.vars.contains_key(name) {
             let id = VarId(self.out.vars.len() as u32);
             self.out.vars.push(VarDecl {
@@ -428,6 +523,17 @@ impl Elaborator<'_> {
                 Ok(va_ir::Stmt::Contribute { target, value })
             }
             Stmt::Assign { lhs, rhs } => {
+                // Restricted assignment (§ generate loops): a genvar may only be written by
+                // the header of the `for` loop it drives, which `Stmt::For` below intercepts
+                // and unrolls directly — it never reaches this generic path. Any other
+                // assignment to a genvar name (elsewhere in the body, or as an ordinary
+                // `for`/`while` control variable) is rejected here.
+                if self.genvars.contains(lhs) {
+                    return Err(elab(format!(
+                        "genvar `{lhs}` may only be assigned in the header of the `for` loop \
+                         it drives (restricted assignment)"
+                    )));
+                }
                 let id = *self
                     .vars
                     .get(lhs)
@@ -457,6 +563,16 @@ impl Elaborator<'_> {
                 step,
                 body,
             } => {
+                // A `for` whose header assigns a declared genvar is a generate loop (§ generate
+                // loops): fully unrolled here, at elaboration, into a flat `Block` — it never
+                // reaches the runtime `va_ir::Stmt::For` path below, which is why analog
+                // operators (`ddt`/`idt`) are legal inside it despite being forbidden in an
+                // ordinary runtime loop.
+                if let Stmt::Assign { lhs, rhs: init_rhs } = init.as_ref() {
+                    if self.genvars.contains(lhs) {
+                        return self.lower_generate_for(lhs, *init_rhs, *cond, step, body);
+                    }
+                }
                 let init = Box::new(self.lower_stmt(init)?);
                 let cond = self.lower_expr(*cond)?;
                 let step = Box::new(self.lower_stmt(step)?);
@@ -504,6 +620,66 @@ impl Elaborator<'_> {
         Ok(out)
     }
 
+    /// Unroll a genvar-controlled `for` loop (§ generate loops) into a flat [`va_ir::Stmt`]
+    /// sequence: `init`/`cond`/`step` must be static (literals, parameters, other genvars —
+    /// [`Self::const_eval`] rejects anything else), and `step` must reassign the same genvar
+    /// (the LRM's restricted-assignment rule). Each iteration lowers `body` with `genvar` bound
+    /// to its current value — read through [`Self::const_eval`]/[`Self::lower_expr`] — which
+    /// doubles as the "implicit localparam" the LRM says each generated scope carries.
+    fn lower_generate_for(
+        &mut self,
+        genvar: &str,
+        init_rhs: ExprRef,
+        cond: ExprRef,
+        step: &Stmt,
+        body: &[Stmt],
+    ) -> Result<va_ir::Stmt, FrontendError> {
+        if self.genvar_env.contains_key(genvar) {
+            return Err(elab(format!(
+                "nested generate loop reuses genvar `{genvar}`; a genvar's implicit localparam \
+                 cannot be redeclared while its enclosing loop is still active"
+            )));
+        }
+        let step_rhs = match step {
+            Stmt::Assign { lhs, rhs } if lhs == genvar => *rhs,
+            _ => {
+                return Err(elab(format!(
+                    "genvar `{genvar}`'s `for` step must reassign `{genvar}` itself \
+                     (restricted assignment: a genvar may only be written by its own loop \
+                     header)"
+                )))
+            }
+        };
+
+        // A pathologically malformed step/condition (e.g. a step that never advances toward
+        // the bound) would otherwise unroll forever; this is generous for any real ladder
+        // network while still catching that case with a clear error instead of hanging.
+        const MAX_ITERATIONS: usize = 10_000;
+
+        let mut value = self.const_eval_int(init_rhs, "genvar initial value")?;
+        let mut out = Vec::new();
+        let mut iterations = 0usize;
+        loop {
+            self.genvar_env.insert(genvar.to_string(), value);
+            let keep_going = self.const_eval(cond)? != 0.0;
+            if !keep_going {
+                self.genvar_env.remove(genvar);
+                break;
+            }
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                self.genvar_env.remove(genvar);
+                return Err(elab(format!(
+                    "generate loop over genvar `{genvar}` did not terminate within \
+                     {MAX_ITERATIONS} iterations"
+                )));
+            }
+            out.extend(self.lower_stmts(body)?);
+            value = self.const_eval_int(step_rhs, "genvar step value")?;
+        }
+        Ok(va_ir::Stmt::Block(out))
+    }
+
     fn lower_expr(&mut self, r: ExprRef) -> Result<ExprId, FrontendError> {
         // `self.ast` is a shared reference; copy it locally so the read borrow is of the
         // external `ModuleAst`, not of `self`, leaving `self` free to mutate.
@@ -511,7 +687,11 @@ impl Elaborator<'_> {
         let expr = match ast.expr(r) {
             ExprAst::Number(n) => Expr::Const(*n),
             ExprAst::Ident(name) => {
-                if let Some(p) = self.params.get(name) {
+                // A genvar bound by an enclosing generate loop (§ generate loops) reads as the
+                // constant it is currently unrolled to — it never becomes a `Var`/`Param`.
+                if let Some(v) = self.genvar_env.get(name) {
+                    Expr::Const(*v as f64)
+                } else if let Some(p) = self.params.get(name) {
                     Expr::Param(*p)
                 } else if let Some(v) = self.vars.get(name) {
                     Expr::Var(*v)
@@ -641,22 +821,16 @@ impl Elaborator<'_> {
         Ok(Access { kind, branch })
     }
 
-    fn resolve_branch(&mut self, args: &[String]) -> Result<BranchId, FrontendError> {
-        // A single argument may be a declared branch name (e.g. `V(br_rseries)`).
-        if args.len() == 1 {
-            if let Some(id) = self.named_branches.get(&args[0]) {
+    fn resolve_branch(&mut self, args: &[ast::NetArg]) -> Result<BranchId, FrontendError> {
+        // A single unindexed argument may be a declared branch name (e.g. `V(br_rseries)`).
+        if args.len() == 1 && args[0].index.is_none() {
+            if let Some(id) = self.named_branches.get(&args[0].name) {
                 return Ok(*id);
             }
         }
-        let p = *self
-            .nodes
-            .get(&args[0])
-            .ok_or_else(|| elab(format!("unknown net `{}` in branch access", args[0])))?;
+        let p = self.resolve_net_arg(&args[0])?;
         let n = if args.len() >= 2 {
-            *self
-                .nodes
-                .get(&args[1])
-                .ok_or_else(|| elab(format!("unknown net `{}` in branch access", args[1])))?
+            self.resolve_net_arg(&args[1])?
         } else {
             self.reference_node()
         };
@@ -668,6 +842,47 @@ impl Elaborator<'_> {
         self.out.branches.push(Branch { p, n });
         self.branches.insert(key, id);
         Ok(id)
+    }
+
+    /// Resolve one [`ast::NetArg`] terminal to its [`NodeId`]: a plain net name, or one element
+    /// of a vector net selected by a genvar expression (§ vector nets), bounds-checked against
+    /// its declared `[msb:lsb]` range.
+    fn resolve_net_arg(&mut self, arg: &ast::NetArg) -> Result<NodeId, FrontendError> {
+        match arg.index {
+            None => {
+                if self.vectors.contains_key(&arg.name) {
+                    return Err(elab(format!(
+                        "`{}` is a vector net; an access must index it, e.g. `V({}[0])`",
+                        arg.name, arg.name
+                    )));
+                }
+                self.nodes
+                    .get(&arg.name)
+                    .copied()
+                    .ok_or_else(|| elab(format!("unknown net `{}` in branch access", arg.name)))
+            }
+            Some(idx_expr) => {
+                let (lo, hi) = *self.vectors.get(&arg.name).ok_or_else(|| {
+                    elab(format!(
+                        "`{}` is not a vector net (no bracketed `[msb:lsb]` range declared)",
+                        arg.name
+                    ))
+                })?;
+                let idx = self.const_eval_int(idx_expr, "vector index")?;
+                if idx < lo || idx > hi {
+                    return Err(elab(format!(
+                        "index {idx} is out of `{}`'s declared range [{lo}:{hi}]",
+                        arg.name
+                    )));
+                }
+                let key = format!("{}[{idx}]", arg.name);
+                self.nodes.get(&key).copied().ok_or_else(|| {
+                    elab(format!(
+                        "internal error: vector node `{key}` was not interned"
+                    ))
+                })
+            }
+        }
     }
 
     /// The implicit global reference node, created on first single-terminal access.
@@ -1232,6 +1447,124 @@ mod tests {
             }
             other => panic!("expected a lowered for-loop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn generate_for_unrolls_a_vector_ladder() {
+        // A 4-node bus (`bus[0..3]`) with a genvar-driven generate loop contributing across
+        // each adjacent pair — the compact-model ladder-network pattern genvar exists for.
+        let src = "module ladder(p, n); inout p, n; electrical p, n; electrical [3:0] bus; \
+                   genvar i; parameter real R = 250; \
+                   analog begin \
+                     for (i = 0; i < 3; i = i + 1) begin \
+                       I(bus[i], bus[i+1]) <+ V(bus[i], bus[i+1]) / R; \
+                     end \
+                   end endmodule";
+        let m = elaborate_src(src);
+        // p, n, bus[0..3]: 6 nodes total.
+        assert_eq!(m.nodes.len(), 6);
+        // The genvar-for is fully unrolled at elaboration: it never reaches the IR as a
+        // `va_ir::Stmt::For` — only the flat block of unrolled contributions does.
+        match &m.analog[0] {
+            va_ir::Stmt::Block(stmts) => {
+                assert_eq!(stmts.len(), 3);
+                assert!(stmts
+                    .iter()
+                    .all(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
+            }
+            other => panic!("expected the unrolled block, got {other:?}"),
+        }
+        assert_eq!(m.branches.len(), 3);
+    }
+
+    #[test]
+    fn analog_operator_is_legal_inside_generate_for() {
+        // Rule: unlike an ordinary runtime loop, a genvar-driven loop is unrolled at
+        // elaboration, so `ddt` inside it is just `ddt` in three separate, already-distinct
+        // pieces of straight-line code — no special-casing needed once it is unrolled.
+        let src = "module t(); electrical [1:0] bus; genvar i; parameter real cap = 1e-12; \
+                   analog begin \
+                     for (i = 0; i < 2; i = i + 1) begin \
+                       I(bus[i]) <+ ddt(cap * V(bus[i])); \
+                     end \
+                   end endmodule";
+        let m = elaborate_src(src);
+        match &m.analog[0] {
+            va_ir::Stmt::Block(stmts) => {
+                assert_eq!(stmts.len(), 2);
+                assert!(stmts
+                    .iter()
+                    .all(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
+            }
+            other => panic!("expected the unrolled block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn genvar_assignment_outside_loop_header_is_rejected() {
+        let src = "module t(); genvar i; analog begin i = 5; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn genvar_step_must_reassign_the_same_genvar() {
+        let src = "module t(); genvar i; integer j; \
+                   analog begin generate for (i = 0; i < 2; j = j + 1) begin end endgenerate end \
+                   endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn nested_generate_loop_reusing_genvar_name_is_rejected() {
+        let src = "module t(); genvar i; real acc; \
+                   analog begin \
+                     generate for (i = 0; i < 2; i = i + 1) begin \
+                       generate for (i = 0; i < 2; i = i + 1) begin \
+                         acc = i; \
+                       end endgenerate \
+                     end endgenerate \
+                   end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn genvar_loop_bound_must_be_static() {
+        let src = "module t(); electrical p; genvar i; \
+                   analog begin generate for (i = 0; V(p) > 0; i = i + 1) begin end endgenerate end \
+                   endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn vector_index_out_of_range_is_rejected() {
+        let src = "module t(); electrical [1:0] bus; analog begin I(bus[5]) <+ 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn accessing_vector_net_without_index_is_rejected() {
+        let src = "module t(); electrical [1:0] bus; analog begin I(bus) <+ 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn indexing_a_non_vector_net_is_rejected() {
+        let src = "module t(); electrical p; analog begin I(p[0]) <+ 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

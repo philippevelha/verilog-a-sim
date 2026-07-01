@@ -180,6 +180,7 @@ pub enum Token {
     #[token("endcase", kw)]
     #[token("enddiscipline", kw)]
     #[token("endfunction", kw)]
+    #[token("endgenerate", kw)]
     #[token("endnature", kw)]
     #[token("endprimitive", kw)]
     #[token("endspecify", kw)]

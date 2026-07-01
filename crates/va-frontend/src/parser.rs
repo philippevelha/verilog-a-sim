@@ -5,9 +5,14 @@
 //! are skipped — v0 has no preprocessor.
 //!
 //! Beyond `if`/`else`, the parser accepts the analog control-flow statements `while`, `for`,
-//! `repeat`, and `case`, and `analog function` definitions. These are surfaced in the AST but
-//! cannot yet be lowered into the frozen v0 IR (only `if`/`else` and module-level statements
-//! are lowered); elaboration rejects them with a clear error. See [`crate::elaborate`].
+//! `repeat`, and `case`, and `analog function` definitions. `genvar` declarations and vector
+//! (bus) net declarations (`electrical [msb:lsb] name;`) are accepted too; a branch access may
+//! index into a vector net (`V(bus[i])`). None of this carries generate/vector-specific syntax
+//! of its own beyond what is described below — a `generate`/`endgenerate` bracket around a
+//! `for` is accepted but parses exactly like `begin`/`end` (no semantics attach to the
+//! keywords themselves); whether a given `for`'s loop variable is a genvar (and so gets fully
+//! unrolled at elaboration instead of becoming a runtime loop) is entirely an elaboration-time
+//! decision. See [`crate::elaborate`].
 //!
 //! # Limitations
 //!
@@ -22,10 +27,13 @@
 //! - Event control `@(event) stmt` is parsed but the trigger is discarded — the controlled
 //!   statement runs unconditionally. This matches DC operating-point semantics (`initial_step`
 //!   setup runs once regardless); proper event scheduling is a transient-analysis concern.
+//! - Vector nets are one-dimensional and scalar-typed (no vector ports, no multi-dimensional
+//!   buses); `generate`/`genvar` are elaboration-only, module-scoped, and analog-block-only —
+//!   there is no structural (module-item-level) generate, and no multi-instance hierarchy.
 
 use crate::ast::{
     Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
-    FuncArg, Item, ModuleAst, ParamType, Range, Stmt, UnOp,
+    FuncArg, Item, ModuleAst, NetArg, ParamType, Range, Stmt, UnOp,
 };
 use crate::lexer::Token;
 use crate::FrontendError;
@@ -151,6 +159,22 @@ impl Parser<'_> {
         Ok(names)
     }
 
+    /// Parse a single net terminal: a plain net name, or one element of a vector net selected
+    /// by a bracketed index expression (`bus[i]`). The index, when present, must be a genvar
+    /// expression — checked at elaboration, not here.
+    fn parse_net_arg(&mut self) -> Result<NetArg, FrontendError> {
+        let name = self.expect_ident()?;
+        let index = if self.at(&Token::LBracket) {
+            self.pos += 1;
+            let idx = self.parse_expr()?;
+            self.eat(&Token::RBracket)?;
+            Some(idx)
+        } else {
+            None
+        };
+        Ok(NetArg { name, index })
+    }
+
     fn push(&mut self, e: ExprAst) -> ExprRef {
         let r = ExprRef(self.exprs.len() as u32);
         self.exprs.push(e);
@@ -248,9 +272,25 @@ impl Parser<'_> {
                     Some(Token::Electrical) => Discipline::Electrical,
                     _ => Discipline::Thermal,
                 };
+                // An optional `[msb:lsb]` makes every name in the list a vector net (a bus of
+                // nodes), indexed by a genvar expression in a branch access.
+                let range = if self.at(&Token::LBracket) {
+                    self.pos += 1;
+                    let msb = self.parse_expr()?;
+                    self.eat(&Token::Colon)?;
+                    let lsb = self.parse_expr()?;
+                    self.eat(&Token::RBracket)?;
+                    Some((msb, lsb))
+                } else {
+                    None
+                };
                 let nets = self.ident_list()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Item::Net { discipline, nets })
+                Ok(Item::Net {
+                    discipline,
+                    range,
+                    nets,
+                })
             }
             Some(Token::Parameter) | Some(Token::LocalParam) => self.parse_param(),
             // A bare `real`/`integer` at module scope declares variables (a `parameter`
@@ -264,17 +304,14 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Var { ty, names })
             }
-            // `genvar i;` declares a generate-loop index. v0 does not unroll `generate`
-            // blocks, so it is lowered to a plain integer variable — enough to let models
-            // that declare (but do not actually generate-unroll) a genvar parse cleanly.
+            // `genvar i;` declares a generate-loop index (§ generate loops). Unlike `integer`,
+            // a genvar is never a runtime variable: it is only ever bound to a constant while
+            // elaboration unrolls the `for` loop it drives (see `crate::elaborate`).
             Some(Token::Genvar) => {
                 self.pos += 1;
                 let names = self.ident_list()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Item::Var {
-                    ty: ParamType::Integer,
-                    names,
-                })
+                Ok(Item::Genvar { names })
             }
             Some(Token::Keyword(kw)) if kw.as_str() == "branch" => self.parse_branch_decl(),
             Some(Token::Keyword(kw)) if kw.as_str() == "aliasparam" => self.parse_aliasparam_decl(),
@@ -430,10 +467,10 @@ impl Parser<'_> {
     fn parse_branch_decl(&mut self) -> Result<Item, FrontendError> {
         self.eat_keyword("branch")?;
         self.eat(&Token::LParen)?;
-        let mut terminals = vec![self.expect_ident()?];
+        let mut terminals = vec![self.parse_net_arg()?];
         if self.at(&Token::Comma) {
             self.pos += 1;
-            terminals.push(self.expect_ident()?);
+            terminals.push(self.parse_net_arg()?);
         }
         self.eat(&Token::RParen)?;
         let names = self.ident_list()?;
@@ -577,12 +614,30 @@ impl Parser<'_> {
                 "repeat" => self.parse_repeat(),
                 "for" => self.parse_for(),
                 "case" => self.parse_case(),
+                "generate" => Ok(Stmt::Block(self.parse_generate()?)),
                 other => self.err(format!(
                     "reserved word `{other}` begins a construct outside the v0 subset"
                 )),
             },
             _ => self.err("expected a statement".to_string()),
         }
+    }
+
+    /// Parse `generate … endgenerate`. The bracket keywords carry no semantics of their own in
+    /// v0 — a `generate`-wrapped `for` over a `genvar` is recognised and fully unrolled purely
+    /// by elaboration (see `crate::elaborate`), so this just behaves like `begin … end` and
+    /// returns its contained statements for the caller to normalise.
+    fn parse_generate(&mut self) -> Result<Vec<Stmt>, FrontendError> {
+        self.eat_keyword("generate")?;
+        let mut stmts = Vec::new();
+        while !self.at_keyword("endgenerate") {
+            if self.peek().is_none() {
+                return self.err("unexpected end of input before `endgenerate`".to_string());
+            }
+            stmts.push(self.parse_stmt()?);
+        }
+        self.eat_keyword("endgenerate")?;
+        Ok(stmts)
     }
 
     /// Parse `while (cond) body`.
@@ -684,10 +739,10 @@ impl Parser<'_> {
         };
         self.pos += 1;
         self.eat(&Token::LParen)?;
-        let mut args = vec![self.expect_ident()?];
+        let mut args = vec![self.parse_net_arg()?];
         if self.at(&Token::Comma) {
             self.pos += 1;
-            args.push(self.expect_ident()?);
+            args.push(self.parse_net_arg()?);
         }
         self.eat(&Token::RParen)?;
         Ok(Access { kind, args })
@@ -902,7 +957,9 @@ mod tests {
         match &analog[0] {
             Stmt::Contribute { target, value } => {
                 assert_eq!(target.kind, AccessKind::Flow);
-                assert_eq!(target.args, vec!["p", "n"]);
+                assert_eq!(target.args[0].name, "p");
+                assert_eq!(target.args[1].name, "n");
+                assert!(target.args.iter().all(|a| a.index.is_none()));
                 assert!(matches!(m.expr(*value), ExprAst::Binary(BinOp::Div, _, _)));
             }
             other => panic!("expected a contribution, got {other:?}"),
@@ -1092,6 +1149,55 @@ mod tests {
     }
 
     #[test]
+    fn vector_net_declaration_parses() {
+        let m = parse_src("module t(); electrical [3:0] bus; endmodule");
+        let (range, nets) = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Net { range, nets, .. } => Some((*range, nets.clone())),
+                _ => None,
+            })
+            .expect("net item");
+        assert!(range.is_some(), "a bracketed `[3:0]` should record a range");
+        assert_eq!(nets, vec!["bus".to_string()]);
+    }
+
+    #[test]
+    fn indexed_access_parses() {
+        let m = parse_src(
+            "module t(); electrical [3:0] bus; electrical gnd; \
+             analog begin I(bus[i], gnd) <+ 1.0; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Contribute { target, .. } => {
+                assert_eq!(target.args[0].name, "bus");
+                assert!(target.args[0].index.is_some());
+                assert_eq!(target.args[1].name, "gnd");
+                assert!(target.args[1].index.is_none());
+            }
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_endgenerate_wrapper_parses_transparently() {
+        // The `generate`/`endgenerate` bracket carries no grammar of its own in v0 — it just
+        // exposes the `for` loop inside, exactly as `begin`/`end` would.
+        let m = parse_src(
+            "module t(); genvar i; \
+             analog begin generate for (i = 0; i < 3; i = i + 1) x = i; endgenerate end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Block(stmts) => {
+                assert_eq!(stmts.len(), 1);
+                assert!(matches!(stmts[0], Stmt::For { .. }));
+            }
+            other => panic!("expected the generate wrapper's block, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn case_with_default_parses() {
         let m = parse_src(
             "module t(); electrical a; analog begin case (sel) 0, 1: x = 1; 2: x = 2; default: x = 0; endcase end endmodule",
@@ -1151,14 +1257,12 @@ mod tests {
     }
 
     #[test]
-    fn genvar_parses_like_integer() {
-        // v0 does not unroll `generate` blocks, so `genvar i;` just introduces an integer
-        // variable — enough for models that declare one without using it (see the corpus).
+    fn genvar_declaration_parses() {
         let m = parse_src("module t(); genvar i; endmodule");
-        assert!(m.items.iter().any(|it| matches!(
-            it,
-            Item::Var { ty, names } if *ty == ParamType::Integer && names == &["i".to_string()]
-        )));
+        assert!(m
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Genvar { names } if names == &["i".to_string()])));
     }
 
     #[test]
@@ -1284,7 +1388,8 @@ mod tests {
                 _ => None,
             })
             .expect("branch item");
-        assert_eq!(terminals, vec!["a".to_string(), "b".to_string()]);
+        let terminal_names: Vec<_> = terminals.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(terminal_names, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(names, vec!["br1".to_string(), "br2".to_string()]);
     }
 

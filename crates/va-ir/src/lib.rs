@@ -16,8 +16,12 @@
 //! This is the v0 contract. It models a single module with electrical/thermal disciplines,
 //! `<+` contributions, `ddt`/`idt`, ranged parameters, the full set of analog control-flow
 //! statements (`if`/`else`, `while`, `for`, `repeat`, `case`), and user-defined analog
-//! functions ([`Function`], [`Expr::CallUser`]). Multi-module hierarchy, generate loops, and
-//! the full LRM are explicitly out of scope.
+//! functions ([`Function`], [`Expr::CallUser`]). Multi-module hierarchy is explicitly out of
+//! scope. `genvar`/`generate` loops and vector (bus) nets are supported in source, but are
+//! elaboration-only (`va-frontend` fully unrolls a `generate for` and resolves every vector
+//! index to a concrete [`NodeId`] before handoff) — this IR never represents a generate loop
+//! or a vector net directly, only the flattened [`Stmt`]s and scalar [`NodeDecl`]s it expands
+//! to. That keeps this contract unchanged by that support.
 //!
 //! Note that *modeling* a construct in the IR does not imply every back-end consumes it yet:
 //! `va-codegen` v0, for example, still rejects loops/case/user-functions during its own

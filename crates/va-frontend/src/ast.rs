@@ -77,13 +77,25 @@ pub enum AccessKind {
     Flow,
 }
 
-/// A branch access: an access function applied to one or two net names.
+/// A branch access: an access function applied to one or two net terminals.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Access {
     /// Potential or flow.
     pub kind: AccessKind,
     /// One net (node-to-reference) or two (explicit branch terminals).
-    pub args: Vec<String>,
+    pub args: Vec<NetArg>,
+}
+
+/// A single net terminal in an [`Access`] or `branch` declaration: a plain net name, or a
+/// vector element selected by a bracketed index (`bus[i]`). The index, when present, must be
+/// a genvar expression — resolved to a constant node at elaboration (§ vector nets).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetArg {
+    /// The net (or vector net) name.
+    pub name: String,
+    /// The bracketed index expression, if this terminal selects one element of a vector net
+    /// declared with a range (e.g. `electrical [3:0] bus;`).
+    pub index: Option<ExprRef>,
 }
 
 /// A parameter's `from` value range, e.g. `from (0:inf)` or `from [0:c0)`.
@@ -112,10 +124,15 @@ pub enum Item {
         /// The declared net names.
         nets: Vec<String>,
     },
-    /// A discipline declaration, `electrical p, n;`.
+    /// A discipline declaration, `electrical p, n;`, or a vector net declaration,
+    /// `electrical [3:0] bus;` (§ vector nets — every name in `nets` becomes a bus of nodes
+    /// spanning `range`, indexed by a genvar expression in a branch access).
     Net {
         /// The discipline keyword.
         discipline: Discipline,
+        /// The declared vector width, `[msb:lsb]`, if this is a vector net declaration.
+        /// `None` for an ordinary scalar net.
+        range: Option<(ExprRef, ExprRef)>,
         /// The declared net names.
         nets: Vec<String>,
     },
@@ -143,8 +160,8 @@ pub enum Item {
     },
     /// A named branch declaration, `branch (a, b) br1, br2;` (one terminal = node-to-reference).
     Branch {
-        /// The one or two terminal net names.
-        terminals: Vec<String>,
+        /// The one or two terminal nets.
+        terminals: Vec<NetArg>,
         /// The declared branch names (all aliasing the same terminals).
         names: Vec<String>,
     },
@@ -156,6 +173,14 @@ pub enum Item {
         name: String,
         /// The name of the parameter it aliases.
         target: String,
+    },
+    /// A `genvar` declaration, `genvar list_of_genvar_identifiers;`. Genvars exist only during
+    /// elaboration (§ generate loops): they may only be assigned inside the control header of
+    /// a `for` loop they drive, and that loop is fully unrolled — never emitted as a runtime
+    /// [`Stmt::For`] — so analog operators (`ddt`/`idt`) are legal inside it.
+    Genvar {
+        /// The declared genvar names.
+        names: Vec<String>,
     },
 }
 
