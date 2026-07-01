@@ -406,7 +406,15 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
         Builtin::Asinh => arg(0)?.asinh(),
         Builtin::Acosh => arg(0)?.acosh(),
         Builtin::Atanh => arg(0)?.atanh(),
-        Builtin::Vt => Dual::constant(ctx.vt, count),
+        // `$vt` is the thermal voltage `kT/q` at the ambient temperature; `$vt(T)` evaluates it
+        // at the given absolute temperature `T` (kelvin). The two share `k/q`, recovered as
+        // `ctx.vt / ctx.temp`, so `$vt` and `$vt(ctx.temp)` agree exactly. `T` may depend on
+        // unknowns (e.g. a self-heating thermal node), so the argument's gradient is carried
+        // through via `scale`.
+        Builtin::Vt => match args.first() {
+            Some(_) => arg(0)?.scale(ctx.vt / ctx.temp),
+            None => Dual::constant(ctx.vt, count),
+        },
         Builtin::Temperature => Dual::constant(ctx.temp, count),
         Builtin::Ddt | Builtin::Idt => {
             return Err(unsupported(
@@ -483,6 +491,79 @@ mod tests {
                 "{name}: analytic {analytic} vs fd {fd}"
             );
         }
+    }
+
+    #[test]
+    fn vt_no_arg_is_ambient_thermal_voltage() {
+        use va_ir::{Builtin, Expr, Module};
+
+        // `$vt` with no argument evaluates to `ctx.vt`, gradient zero.
+        let mut m = Module::new("vt");
+        let vt = m.push_expr(Expr::Call(Builtin::Vt, vec![]));
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &[],
+            terminals: &[],
+            vt: 0.025_852,
+            temp: 300.0,
+        };
+        let d = eval(&ctx, vt).unwrap();
+        assert!((d.value - 0.025_852).abs() < 1e-12);
+        assert!(d.grad.is_empty());
+    }
+
+    #[test]
+    fn vt_of_temperature_scales_and_carries_gradient() {
+        use va_ir::{Access, AccessKind, Branch, Builtin, Expr, Module, NodeDecl, NodeId};
+
+        // `$vt(T)` with `T = V(t, gnd)`: value `k/q * T`, gradient `k/q` w.r.t. the node.
+        let mut m = Module::new("vt_t");
+        // Two nodes: slot 0 is the thermal node `t`, slot 1 is ground.
+        m.nodes.push(NodeDecl {
+            name: "t".into(),
+            discipline: va_ir::Discipline::Thermal,
+        });
+        m.nodes.push(NodeDecl {
+            name: "gnd".into(),
+            discipline: va_ir::Discipline::Thermal,
+        });
+        m.branches.push(Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        });
+        let temp_probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: va_ir::BranchId(0),
+        }));
+        let vt = m.push_expr(Expr::Call(Builtin::Vt, vec![temp_probe]));
+
+        let (vt_ref, temp_ref) = (0.025_852_f64, 300.0_f64);
+        let k_over_q = vt_ref / temp_ref;
+        // Node `t` held at 350 K; ground slot maps out of range (reads 0).
+        let x = [350.0];
+        let terminals = [0usize, usize::MAX];
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &x,
+            terminals: &terminals,
+            vt: vt_ref,
+            temp: temp_ref,
+        };
+        let d = eval(&ctx, vt).unwrap();
+        assert!((d.value - k_over_q * 350.0).abs() < 1e-12);
+        // d($vt(T))/dV(t) = k/q; the ground slot is out of range so contributes no gradient.
+        assert!((d.grad[0] - k_over_q).abs() < 1e-12);
+
+        // Cross-check against a central finite difference (§5).
+        let h = 1e-3;
+        let f = |t: f64| k_over_q * t;
+        let fd = (f(350.0 + h) - f(350.0 - h)) / (2.0 * h);
+        assert!((d.grad[0] - fd).abs() < 1e-9);
+
+        // `$vt($temperature)` must agree with the no-arg `$vt` at the ambient temperature.
+        assert!((k_over_q * temp_ref - vt_ref).abs() < 1e-12);
     }
 
     #[test]

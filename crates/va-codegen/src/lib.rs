@@ -16,7 +16,9 @@
 //!   whose nodes are exactly their ports, so `terminals` is the port→global map; modules with
 //!   internal unknowns are out of scope.
 //! - Only flow contributions; no `if`/`else`, no local variables (see [`lower`]).
-//! - `$vt`/`$temperature` evaluate to fixed room-temperature constants ([`VT`], [`TEMP`]).
+//! - `$vt`/`$temperature` evaluate at the fixed ambient point ([`VT`], [`TEMP`]); `$vt(T)`
+//!   evaluates the thermal voltage at the given absolute temperature `T`, carrying `T`'s
+//!   gradient (e.g. a self-heating thermal node).
 
 #![forbid(unsafe_code)]
 
