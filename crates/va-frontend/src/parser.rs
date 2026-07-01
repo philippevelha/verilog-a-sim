@@ -252,7 +252,7 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Net { discipline, nets })
             }
-            Some(Token::Parameter) => self.parse_param(),
+            Some(Token::Parameter) | Some(Token::LocalParam) => self.parse_param(),
             // A bare `real`/`integer` at module scope declares variables (a `parameter`
             // declaration starts with `parameter`, and an `analog function` with `analog`).
             Some(Token::Real) | Some(Token::Integer) => {
@@ -279,8 +279,15 @@ impl Parser<'_> {
         }
     }
 
+    /// Parse a `parameter` or `localparam` declaration. v0 does not model instance-parameter
+    /// overrides at all (`va-netlist` has no by-name override path), so a `localparam`'s only
+    /// observable difference from `parameter` — that it cannot be overridden — is moot here;
+    /// both lower to the same [`Item::Param`].
     fn parse_param(&mut self) -> Result<Item, FrontendError> {
-        self.eat(&Token::Parameter)?;
+        match self.peek() {
+            Some(Token::Parameter) | Some(Token::LocalParam) => self.pos += 1,
+            _ => return self.err("expected `parameter` or `localparam`".to_string()),
+        }
         let ty = match self.peek() {
             Some(Token::Real) => {
                 self.pos += 1;
@@ -1170,6 +1177,16 @@ mod tests {
             })
             .expect("a from range");
         assert!(range.lo_inclusive && range.hi_inclusive);
+    }
+
+    #[test]
+    fn localparam_parses_like_parameter() {
+        // `localparam` shares `parameter`'s grammar; v0 lowers both to the same `Item::Param`
+        // since there is no instance-parameter-override path to distinguish them against.
+        let m = parse_src("module t(); localparam real TN = 2; endmodule");
+        assert!(m.items.iter().any(
+            |it| matches!(it, Item::Param { name, default, .. } if name == "TN" && matches!(m.expr(*default), ExprAst::Number(n) if *n == 2.0))
+        ));
     }
 
     #[test]
