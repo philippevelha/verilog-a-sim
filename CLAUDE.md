@@ -13,21 +13,38 @@
 
 ## 1. What this project is — and is NOT
 
-We are building a **complete pipeline ** simulator:
+We are building a **complete pipeline** simulator:
 
-- **In scope:** a defined subset of the Verilog-A LRM (single-module compact models;
-  electrical + thermal disciplines; `<+` contributions; `ddt`/`idt`; `if/else`; analog
-  functions; parameters with ranges), DC operating point + sweep, transient, and
-  (stretch) AC + noise. A handful of validated models. Dense → simple sparse solve.
-  Basic convergence aids. multi-physics implementation governed by disciplines optical, thermal, mechanical, etc
+- **Language scope (updated — no longer a narrowed subset):** the **full Verilog-A
+  language** — the complete lexer/parser keyword dictionary and grammar the LRM defines for
+  Verilog-A (Annex C, "Analog language subset"), not an arbitrarily reduced slice of it. That
+  means: multi-module hierarchy and instantiation (Annex C.8), the full discipline/nature
+  system (not just `electrical`/`thermal`), `<+` contributions, `ddt`/`idt`, the complete
+  analog control-flow set (`if/else`, `while`, `for`, `repeat`, `case`), `analog function`s,
+  ranged parameters, `genvar`/`generate` loops, vector (bus) nets, and every Annex B keyword
+  the LRM reserves for Verilog-A. Annex C itself already excludes `casex`/`casez`, the
+  `===`/`!==` case-equality operators, `wreal`, discrete-domain nets, and digital
+  events/behavior from Verilog-A — those stay out of scope because the *language* excludes
+  them, not because we've narrowed it further ourselves. `docs/token-reference.md` is the
+  living, token-by-token record of where the implementation stands against this target —
+  update it as coverage grows; a token/construct isn't "done" until that doc and the code
+  agree.
+- **Analysis scope (unchanged):** DC operating point + sweep, transient, and (stretch) AC +
+  noise. A handful of validated models. Dense → simple sparse solve. Basic convergence aids.
+  Multi-physics implementation governed by disciplines: optical, thermal, mechanical, etc.
 
-
-"Done" means: **the declared subset works end-to-end and is validated against a reference
-simulator (ngspice) to stated tolerances.** Scope creep past the declared subset is the
-primary failure mode — resist it.
+"Done" for the language front end means: **the full Verilog-A grammar and keyword dictionary
+lexes, parses, and elaborates** — pursued incrementally and validated construct by construct
+(§7's bring-up ladder, `docs/token-reference.md`'s coverage), not declared complete before
+it's real. "Done" for an analysis still means it's validated against a reference simulator
+(ngspice) to stated tolerances. Scope creep *beyond* Verilog-A itself — into Verilog-AMS-only
+hierarchy/configuration constructs (`config`, `paramset`, `connectmodule`, …) or the
+digital-only constructs Annex C already excludes — remains the failure mode to resist; within
+Verilog-A, the goal is now completeness, not a further-reduced slice of it.
 
 Every public item carries an honest caveat about its limitations. We prefer incremental,
-verification-driven work with explicit model-limitation notes over silent breadth.
+verification-driven work with explicit model-limitation notes over silent breadth: grow
+toward full-language coverage one validated construct at a time.
 
 ---
 
