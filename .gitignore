@@ -14,3 +14,8 @@ Cargo.lock.orig
 *~
 .DS_Store
 Thumbs.db
+
+# Third-party Verilog-A corpus (untracked scratch space, not part of the model zoo) and
+# working notes.
+/external/
+/docs/notes.txt
