@@ -843,6 +843,95 @@ impl Elaborator<'_> {
                 }
                 Expr::Const(0.0)
             }
+            // `$mfactor` is the instance multiplicity factor (device paralleling count, the
+            // conventional `m=` netlist parameter). v0 has no netlist-driven instance
+            // parameters at all yet, so every instance behaves as if `m` were left at its LRM
+            // default of 1.
+            ExprAst::SysFunc { name, args } if name == "mfactor" => {
+                if !args.is_empty() {
+                    return Err(elab("`$mfactor` takes no arguments".to_string()));
+                }
+                Expr::Const(1.0)
+            }
+            // `$param_given(name)` asks whether `name` was explicitly set by the instantiating
+            // netlist, as opposed to left at its declared default. `name` is a parameter-name
+            // reference, not a value expression — read directly off the AST rather than lowered
+            // (mirrors `$simparam`'s unevaluated name argument above). v0's pipeline has no
+            // netlist-driven parameter overrides yet (`va-netlist` doesn't wire instance
+            // parameters into elaboration), so no parameter is ever "given": every instance
+            // always sees every parameter at its default, making `false` the honest answer in
+            // every case rather than an approximation of a case that could go the other way.
+            ExprAst::SysFunc { name, args } if name == "param_given" => {
+                let &[param_ref] = args.as_slice() else {
+                    return Err(elab(
+                        "`$param_given` takes exactly one argument: a parameter name".to_string(),
+                    ));
+                };
+                let param_name = match ast.expr(param_ref) {
+                    ExprAst::Ident(n) => n,
+                    _ => {
+                        return Err(elab(
+                            "`$param_given`'s argument must be a bare parameter name".to_string(),
+                        ))
+                    }
+                };
+                if !self.params.contains_key(param_name) {
+                    return Err(elab(format!(
+                        "`$param_given` names `{param_name}`, which is not a declared parameter \
+                         of this module"
+                    )));
+                }
+                Expr::Const(0.0)
+            }
+            // `$port_connected(name)` asks whether the named port has a real connection in the
+            // instantiating netlist — the standard idiom for an optional terminal (e.g. a
+            // self-heating `dt` thermal port), `if ($port_connected(dt) == 0) begin ... end`.
+            // Like `$param_given`, `name` is a port-name reference read directly off the AST,
+            // not a value expression to lower. v0 has no netlist-driven instantiation, so no
+            // port can be connected by one; folding to `false` is the honest answer for the same
+            // reason as `$param_given` above, and matches the corpus's dominant usage (guarding
+            // an optional port's absence).
+            ExprAst::SysFunc { name, args } if name == "port_connected" => {
+                let &[port_ref] = args.as_slice() else {
+                    return Err(elab(
+                        "`$port_connected` takes exactly one argument: a port name".to_string(),
+                    ));
+                };
+                let port_name = match ast.expr(port_ref) {
+                    ExprAst::Ident(n) => n,
+                    _ => {
+                        return Err(elab(
+                            "`$port_connected`'s argument must be a bare port name".to_string(),
+                        ))
+                    }
+                };
+                if !self.ast.ports.iter().any(|p| p == port_name) {
+                    return Err(elab(format!(
+                        "`$port_connected` names `{port_name}`, which is not a declared port of \
+                         this module"
+                    )));
+                }
+                Expr::Const(0.0)
+            }
+            // `$limit(access, "function_name"[, args...])` is a Newton convergence aid (LRM
+            // §4.5.14): it bounds how much `access`'s value is allowed to move from its
+            // previous-iteration value, using the named limiting algorithm (e.g. `"pnjlim"`, the
+            // classic SPICE junction-voltage limiter). A converged Newton solve is a fixed point
+            // of the *unlimited* equations — the limiter only reshapes the iteration path toward
+            // that fixed point, never the fixed point itself — so `$limit` folds transparently
+            // to its first argument's value, exactly like `transition`/`slew` below. This
+            // project's stateless `ModelInstance::load` ABI has no previous-iteration history to
+            // limit against in the first place (`va-core/src/convergence.rs` ships the `pnjlim`
+            // algorithm itself as a tested helper, not yet wired into the Newton loop for this
+            // reason — see `docs/roadmap.md`), so there is no alternative reading available even
+            // if one were wanted. The function-name string and any trailing algorithm-parameter
+            // arguments are parsed but never evaluated.
+            ExprAst::SysFunc { name, args } if name == "limit" => {
+                let value = *args.first().ok_or_else(|| {
+                    elab("`$limit` requires at least an access argument".to_string())
+                })?;
+                return self.lower_expr(value);
+            }
             ExprAst::SysFunc { name, args } => {
                 let builtin = sysfunc_builtin(name)?;
                 let mut ids = Vec::with_capacity(args.len());
@@ -1464,6 +1553,73 @@ mod tests {
         // `$abstime` takes no arguments.
         let src =
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ $abstime(1); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn mfactor_folds_to_one() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; parameter real r = 1; analog begin I(a, b) <+ $mfactor * V(a, b) / r; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 1.0)));
+
+        let src =
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $mfactor(1); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn param_given_folds_to_false_and_validates_the_name() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0)) I(a, b) <+ V(a, b); else I(a, b) <+ 2.0 * V(a, b); end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+
+        // Names an undeclared parameter.
+        let src = "module t(a, b); electrical a, b; analog begin if ($param_given(nope)) I(a, b) <+ V(a, b); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+
+        // Not a bare identifier.
+        let src = "module t(a, b); electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0 + 1)) I(a, b) <+ V(a, b); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn port_connected_folds_to_false_and_validates_the_name() {
+        let m = elaborate_src(
+            "module t(a, b, dt); electrical a, b; thermal dt; analog begin if ($port_connected(dt) == 0) I(a, b) <+ V(a, b); else I(a, b) <+ 0; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+
+        // Names an undeclared port.
+        let src = "module t(a, b); electrical a, b; analog begin if ($port_connected(nope)) I(a, b) <+ V(a, b); end endmodule";
+        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn limit_folds_to_its_first_argument() {
+        let m = elaborate_src(
+            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $limit(V(a, b), "pnjlim", 0.5, 1.0); end endmodule"#,
+        );
+        // No trace of the limiting-function name/args survives lowering; the probe access does.
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
+
+        let src =
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $limit(); end endmodule";
         let ast = parse(&lex(src).expect("lex")).expect("parse");
         assert!(elaborate(&ast).is_err());
     }

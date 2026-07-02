@@ -138,11 +138,23 @@ class of lexemes.
   to its `default` argument (or errors, matching the LRM's behavior for an unknown simulator
   parameter with no default — v0 has no simulator-parameter store at all); `$abstime` (the
   absolute simulation time) folds to a constant `0.0`, since v0 has no time axis at all and a DC
-  operating point is conventionally t=0; anything else reachable as a `Stmt::Task` (`$strobe`,
-  `$finish`, …) is parsed but elaborates to a no-op.
-- **Structural and Analog Usage**: Analog-block only — `$vt`/`$temperature`/`$simparam` appear
-  in expressions, `$strobe`-class calls are statements. None of these are meaningful at module
-  (structural) scope.
+  operating point is conventionally t=0; `$mfactor` (the instance multiplicity/`m=` factor)
+  folds to `1.0`, its LRM default, since v0 has no netlist-driven instance parameters to override
+  it; `$param_given(name)`/`$port_connected(name)` both fold to `0.0`/false — `name` is read
+  directly off the AST as a bare parameter/port-name reference (validated against the module's
+  own declarations, but never lowered as a value expression), and since v0's pipeline has no
+  netlist-driven instantiation at all, no parameter is ever explicitly overridden and no optional
+  port is ever connected, making `false` the honest answer in every case rather than an
+  approximation; `$limit(access, "fn_name"[, args...])` (a Newton convergence aid, LRM §4.5.14)
+  folds transparently to its first argument's value — a converged Newton solve is a fixed point
+  of the *unlimited* equations, so the limiter changes only the iteration path toward that point,
+  never the point itself, and this project's stateless `ModelInstance::load` ABI has no
+  previous-iteration history to limit against in the first place (see `va-core/src/convergence.rs`
+  and `docs/roadmap.md`); anything else reachable as a `Stmt::Task` (`$strobe`, `$finish`, …) is
+  parsed but elaborates to a no-op.
+- **Structural and Analog Usage**: Analog-block only — `$vt`/`$temperature`/`$simparam`/
+  `$mfactor`/`$param_given`/`$port_connected`/`$limit` appear in expressions, `$strobe`-class
+  calls are statements. None of these are meaningful at module (structural) scope.
 - **Comparison with Traditional Constructs**: The closest C analogue is a compiler
   intrinsic/builtin (`__builtin_...`) or an environment query (`getenv`) — a name that isn't a
   user function but is still called with ordinary call syntax. Digital Verilog's `$display`

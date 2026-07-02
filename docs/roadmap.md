@@ -84,7 +84,7 @@ Of the 118, roughly 20 are auxiliary include fragments (`*MacrosAndDefines*.va`,
 `constants.vams`, `disciplines.vams`, `ekv3_*_def*.va`, …) never meant to compile standalone —
 `va-cli check` naively tries anyway, so their "failures" are a scan artifact, not a language
 gap; don't read the raw pass count as a language-completeness percentage without excluding
-them. As of this pass: **44/118 pass outright**, with the remainder split across real,
+them. As of this pass: **56/118 pass outright**, with the remainder split across real,
 now-categorized gaps below and the ~20 expected fragment failures.
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
@@ -114,34 +114,46 @@ analog partial-derivative operator (LRM §4.5.13) — lowered to `Expr::Ddx` (In
 `va-codegen` by reading the AD gradient component already carried at the probed node, exactly
 as the LRM's own VCCS and diode worked examples require (both now regression tests, the latter
 cross-checked against a central finite difference); confirmed needed by 10+ corpus files
-(BSIM4/6/BULK, MVSG) and part of what moved the pass count from 34 to 44.
+(BSIM4/6/BULK, MVSG) and part of what moved the pass count from 34 to 44; and
+**`$param_given(name)`/`$port_connected(name)`/`$mfactor`/`$limit`** — `$mfactor` (the
+instance `m=` multiplicity factor) folds to its LRM default `1.0`; `$param_given`/
+`$port_connected` fold to `false` (their argument is a bare parameter/port-name reference,
+validated against the module's own declarations but never lowered as a value — v0's pipeline
+has no netlist-driven instantiation, so no parameter is ever explicitly overridden and no
+optional port is ever connected, making `false` the honest answer rather than an approximation);
+`$limit(access, "fn_name", ...)` (a Newton convergence aid, LRM §4.5.14) folds transparently to
+`access`'s value, since a converged solve is a fixed point of the *unlimited* equations and the
+stateless `ModelInstance::load` ABI has no previous-iteration history to limit against regardless
+(`token-reference.md`'s `SysFunc` entry). Part of what moved the pass count from 44 to 56
+(BSIM6.1.1/bsimbulk*/asmhemt/asmhemt101_0/fbh_hbt-2_3 and others).
 
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
-1. **`$param_given(name)`/`$port_connected(name)`/`$mfactor`/`$limit`** — system functions
-   confirmed needed by BSIM6.1.1/bsimbulk*/hisimsotb/vbic_1p3 (`$param_given`),
-   asmhemt/asmhemt101_0 (`$port_connected`), and fbh_hbt-2_3 (`$limit`). All are meaningful only
-   relative to a netlist instantiation (`$param_given`/`$port_connected` query how the
-   instantiating netlist called the model) or a Newton-convergence aid (`$limit`) v0 doesn't
-   implement; each needs its own honest DC-only answer worked out (e.g. `$param_given` could
-   plausibly always fold to `0`/false, since v0's netlist path never distinguishes "explicitly
-   set" from "defaulted" — needs checking against how each model actually uses the result before
-   picking a fold).
+1. **Custom `discipline`/`nature` declarations** — `port \`X\` has no discipline declaration`
+   is now the single biggest failure bucket (8 files: the PSP102/103/104 family,
+   `L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`). Today's `discipline...enddiscipline`/
+   `nature...endnature` is skipped wholesale (`token-reference.md` §1.5); these models declare a
+   port under a custom discipline (not the hardcoded `electrical`/`thermal`), and
+   `resolve_ports`/`collect_nodes` only recognize those two. Lines up directly with `CLAUDE.md`
+   §1's own multi-physics goal ("disciplines optical, thermal, mechanical, etc"). Likely doesn't
+   need an `va-ir` change — nodes under a custom discipline can just carry `Discipline::Other`,
+   already in the IR — but does need the `discipline` declaration actually parsed (today it's
+   skipped) so the elaborator knows the name exists. Also the only way to recognize an
+   access-function name beyond the hardcoded `V`/`I`/`Temp`/`Pwr` (§2.17) — a custom nature's own
+   `access` name needs the nature's declaration parsed to know what to look for.
 2. **Runtime-indexed vector-net/array-variable access** — `out[j]`/`out_val[j]` where `j` is a
    genuinely dynamic runtime value (not a genvar or a constant) has no sound resolution in this
    IR at all: `va_ir::NodeId`/`VarId` are scalar slots with no runtime-indexable-storage
    concept. Confirmed as the sole remaining blocker for both
    `adc_16bit_ideal.va`/`dac_16bit_ideal.va` now that vector ports work. Needs a genuine new
    `Expr`/state-storage concept — Interface α change (§6).
-3. **Custom `discipline`/`nature` declarations** — today's `discipline...enddiscipline`/
-   `nature...endnature` is skipped wholesale (`token-reference.md` §1.5); real models sometimes
-   declare disciplines beyond the hardcoded `electrical`/`thermal`, which lines up directly with
-   `CLAUDE.md` §1's own multi-physics goal ("disciplines optical, thermal, mechanical, etc").
-   Likely doesn't need an `va-ir` change — nodes under a custom discipline can just carry
-   `Discipline::Other`, already in the IR. Also the only way to recognize an access-function
-   name beyond the hardcoded `V`/`I`/`Temp`/`Pwr` (§2.17) — a custom nature's own `access` name
-   needs the nature's declaration actually parsed to know what to look for.
+3. **`$simparam` in a parameter-default context** — `bsim6.0.va`/`bsimbulk.va`/`bsimbulk107.va`
+   default a parameter directly from `$simparam(...)`; today's elaborator only allows `$simparam`
+   in the (dynamic) analog block, rejecting it as "not constant in a parameter context" when it
+   appears in a parameter default's constant-folding path. Since v0 has no simulator-parameter
+   store regardless, the same "fold to the `default` argument, or error if none" treatment
+   `lower_expr` already gives it just needs to also be reachable from `const_eval`.
 4. **Multi-module hierarchy / instantiation** (LRM Annex C.8) — the single biggest remaining
    "full Verilog-A" gap. Large: touches `va-ir` (Interface α), `va-codegen`, and `va-netlist`
    together. Not attempted yet; needs its own kickoff-style design pass (§6), not an incremental
@@ -160,6 +172,9 @@ cross-checked against a central finite difference); confirmed needed by 10+ corp
    as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
    priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
    artifact).
+8. **`absdelay`** — a time-domain delay operator (`fbh_hbt-2_1.va`), same DC-steady-state-fold
+   family as `transition`/`slew`/`$limit` (settles to its input value with no delay history at a
+   fixed operating point); low file count (1) so low priority, but cheap once picked up.
 
 **Permanently out of scope, not a backlog item** (LRM Annex C.7: "No digital behavior or
 events are supported in Verilog-A" — these are excluded from Verilog-A *itself*, not narrowed
