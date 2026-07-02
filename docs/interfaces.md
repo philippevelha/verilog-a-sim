@@ -25,7 +25,7 @@ Arena/index representation is mandatory (§5). Expressions and statements are st
 
 pub struct Module {
     pub name: String,
-    pub ports: Vec<NodeId>,
+    pub ports: Vec<Vec<NodeId>>,  // one entry per declared port; >1 NodeId for a vector port
     pub nodes: Vec<NodeDecl>,
     pub branches: Vec<Branch>,
     pub params: Vec<Param>,
@@ -43,6 +43,7 @@ pub enum Expr {
     Call(Builtin, Vec<ExprId>),    // exp, ln, ddt, idt, $vt, $temperature, ...
     CallUser(FuncId, Vec<ExprId>), // user-defined analog function call
     Select(ExprId, ExprId, ExprId),// ternary cond ? then : else
+    Ddx(ExprId, Access),           // ddx(expr, probe): partial derivative w.r.t. probe's node
 }
 
 pub enum Stmt {

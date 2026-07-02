@@ -314,28 +314,37 @@ impl Elaborator<'_> {
         id
     }
 
+    /// Resolve each declared port name to its underlying node(s) — one for a scalar port, or
+    /// the vector's full, ascending-index-order node list for a vector port (`electrical
+    /// [msb:lsb] {port};`, § vector nets). `Module::ports` is `Vec<Vec<NodeId>>` precisely so a
+    /// vector port doesn't need special-casing here beyond "how many nodes did this name
+    /// resolve to." Note the list is always lowest-index-first regardless of whether the
+    /// source wrote `[msb:lsb]` or `[lsb:msb]` — the original declared direction isn't tracked
+    /// (only the normalized `(lo, hi)` bound is, matching how the vector's nodes are already
+    /// interned in `collect_nodes`), a stated simplification for a wiring convention
+    /// (`va-netlist`) that doesn't exist yet to have an opinion on connection order.
     fn resolve_ports(&mut self) -> Result<(), FrontendError> {
         for port in &self.ast.ports {
-            match self.nodes.get(port) {
-                Some(id) => self.out.ports.push(*id),
-                None if self.vectors.contains_key(port) => {
-                    // The port was declared as a vector net (`electrical [msb:lsb] {port};`),
-                    // which is parsed and elaborated fine internally (§ vector nets), but
-                    // `va_ir::Module::ports` is one `NodeId` per port — there is no vector-port
-                    // representation yet, and no netlist-side wiring convention for one either
-                    // (`va-netlist` doesn't parse multi-terminal port connections). A stated
-                    // limitation, not silently ignored.
-                    return Err(elab(format!(
-                        "port `{port}` is a vector net; vector ports are not yet supported \
-                         (only its indexed nodes, e.g. `{port}[0]`, are usable internally)"
-                    )));
-                }
-                None => {
-                    return Err(elab(format!(
-                        "port `{port}` has no discipline declaration (e.g. `electrical {port};`)"
-                    )))
-                }
+            if let Some(id) = self.nodes.get(port) {
+                self.out.ports.push(vec![*id]);
+                continue;
             }
+            if let Some(&(lo, hi)) = self.vectors.get(port) {
+                let mut ids = Vec::with_capacity((hi - lo + 1) as usize);
+                for k in lo..=hi {
+                    let key = format!("{port}[{k}]");
+                    ids.push(*self.nodes.get(&key).ok_or_else(|| {
+                        elab(format!(
+                            "internal error: vector port node `{key}` was not interned"
+                        ))
+                    })?);
+                }
+                self.out.ports.push(ids);
+                continue;
+            }
+            return Err(elab(format!(
+                "port `{port}` has no discipline declaration (e.g. `electrical {port};`)"
+            )));
         }
         Ok(())
     }
@@ -900,6 +909,46 @@ impl Elaborator<'_> {
                     .ok_or_else(|| elab("`real` requires an argument".to_string()))?;
                 return self.lower_expr(value);
             }
+            // `ddx(expr, probe)` is the analog partial-derivative operator (LRM §4.5.13):
+            // "the partial derivative of its first argument with respect to the unknown
+            // indicated by the second argument, holding all other unknowns fixed." `probe`
+            // must itself be a potential-probe access (`V(p, n)`/`Temp(p, n)`) — it identifies
+            // *which* unknown to differentiate against, so it's classified here rather than
+            // lowered as an ordinary value-producing sub-expression (the same "elaboration
+            // classifies, parsing stays generic" split used for `transition`/`real` above).
+            ExprAst::Call { name, args } if name == "ddx" => {
+                let (expr_arg, probe_arg) = match (args.first(), args.get(1), args.len()) {
+                    (Some(&e), Some(&p), 2) => (e, p),
+                    _ => {
+                        return Err(elab(
+                            "`ddx` takes exactly two arguments: an expression and a \
+                             potential-probe access, e.g. `ddx(I(br), V(p, n))`"
+                                .to_string(),
+                        ))
+                    }
+                };
+                let access = match ast.expr(probe_arg) {
+                    ExprAst::Probe(access) if access.kind == ast::AccessKind::Potential => access,
+                    ExprAst::Probe(_) => {
+                        return Err(elab(
+                            "`ddx(..., I(...))` is not supported: differentiating with respect \
+                             to a branch current needs flow probes to be independent unknowns, \
+                             which they are not in this codegen"
+                                .to_string(),
+                        ))
+                    }
+                    _ => {
+                        return Err(elab(
+                            "`ddx`'s second argument must be a potential-probe access, e.g. \
+                             `V(p, n)`"
+                                .to_string(),
+                        ))
+                    }
+                };
+                let inner = self.lower_expr(expr_arg)?;
+                let ir_access = self.lower_access(access)?;
+                Expr::Ddx(inner, ir_access)
+            }
             ExprAst::Call { name, args } => {
                 let mut ids = Vec::with_capacity(args.len());
                 for &a in args {
@@ -1143,6 +1192,7 @@ fn map_binop(op: ast::BinOp) -> va_ir::BinOp {
         A::Sub => B::Sub,
         A::Mul => B::Mul,
         A::Div => B::Div,
+        A::Mod => B::Mod,
         A::Pow => B::Pow,
         A::Lt => B::Lt,
         A::Le => B::Le,
@@ -1221,6 +1271,7 @@ fn eval_binop(op: ast::BinOp, a: f64, b: f64) -> f64 {
         Sub => a - b,
         Mul => a * b,
         Div => a / b,
+        Mod => a % b,
         Pow => a.powf(b),
         Lt => bool_to_f64(a < b),
         Le => bool_to_f64(a <= b),
@@ -1556,6 +1607,30 @@ mod tests {
     }
 
     #[test]
+    fn temp_and_pwr_are_thermal_access_functions() {
+        // `Temp`/`Pwr` are the thermal discipline's standard potential/flow access-function
+        // names (from `disciplines.vams`), distinct from `V`/`I` — the real corpus idiom
+        // `Temp(dt) <+ 0.0; Pwr(rth) <+ ...;` (external/asmhemt.va and others).
+        let m = elaborate_src(
+            "module t(); thermal dt; branch (dt) rth; \
+             analog begin Temp(dt) <+ 300.0; Pwr(rth) <+ Temp(dt) / 100.0; end endmodule",
+        );
+        assert_eq!(m.analog.len(), 2);
+        match &m.analog[0] {
+            va_ir::Stmt::Contribute { target, .. } => {
+                assert_eq!(target.kind, va_ir::AccessKind::Potential)
+            }
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+        match &m.analog[1] {
+            va_ir::Stmt::Contribute { target, .. } => {
+                assert_eq!(target.kind, va_ir::AccessKind::Flow)
+            }
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn named_branch_resolves_and_coincides_with_positional() {
         // `V(br)`/`I(br)` and `V(a,b)` all refer to the one declared branch.
         let src = "module t(a, b); electrical a, b; branch (a, b) br; analog begin I(br) <+ V(a, b); end endmodule";
@@ -1703,6 +1778,87 @@ mod tests {
             .exprs
             .iter()
             .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Ne, _, _))));
+    }
+
+    #[test]
+    fn ddx_lowers_to_expr_ddx() {
+        // The LRM's own diode example (§4.5.13): `gdio = ddx(idio, V(a));`.
+        let m = elaborate_src(
+            "module diode(a, c); inout a, c; electrical a, c; parameter real IS = 1e-14; \
+             real idio, gdio; \
+             analog begin idio = IS * (exp(V(a,c) / $vt) - 1); gdio = ddx(idio, V(a)); \
+             I(a,c) <+ idio; end endmodule",
+        );
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Ddx(..))));
+    }
+
+    #[test]
+    fn ddx_rejects_malformed_arguments() {
+        // Wrong arity.
+        let src = "module t(a); electrical a; analog begin I(a) <+ ddx(V(a)); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+
+        // Second argument isn't a probe at all.
+        let src = "module t(a); electrical a; analog begin I(a) <+ ddx(V(a), 1.0); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+
+        // Second argument is a flow probe, not a potential one — not supported (flow probes
+        // aren't independent unknowns in this codegen).
+        let src = "module t(a, b); electrical a, b; \
+                   analog begin I(a,b) <+ ddx(V(a,b), I(a,b)); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("flow"),
+                "expected a flow-probe-specific message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modulus_folds_and_lowers() {
+        // Real corpus idiom: `if ((nf%2) != 0) begin ... end` (a `` `define `` macro in
+        // external/bsim4.va), an even/odd parity check.
+        let m = elaborate_src(
+            "module t(); parameter integer X = 7 % 3; electrical a; \
+             analog begin I(a) <+ X; end endmodule",
+        );
+        assert_eq!(m.params[0].default, 1.0);
+
+        let m = elaborate_src(
+            "module t(); integer nf; electrical a; \
+             analog begin I(a) <+ nf % 2; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Mod, _, _))));
+    }
+
+    #[test]
+    fn vt_and_temperature_are_ordinary_identifiers() {
+        // `vt`/`temperature` are no longer reserved (§1.5 `Vt`/`Temperature`): the real corpus
+        // idiom `real vt; vt = $vt(Tj);` (caching the thermal-voltage value under its
+        // conventional name, seen directly in external/igbt3.va) now elaborates — a bare `vt`
+        // and the `$vt` system function coexist without conflict.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; real vt, temperature; \
+             analog begin vt = $vt; temperature = $temperature; I(a, b) <+ vt + temperature; end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::Vt, _))));
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::Temperature, _))));
     }
 
     #[test]
@@ -2039,21 +2195,37 @@ mod tests {
     }
 
     #[test]
-    fn vector_port_gives_a_clear_error_not_a_generic_one() {
-        // The port parses fine (§ vector nets), but `va_ir::Module::ports` has no vector-port
-        // representation yet — a stated limitation, surfaced with a specific message rather
-        // than the generic "no discipline declaration" one (which would be misleading: the
-        // port *does* have a discipline, just as a vector).
-        let src = "module dac(out, bus); output out; input [3:0] bus; \
-                   electrical out; electrical [3:0] bus; analog begin end endmodule";
-        let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
-        match elaborate(&ast) {
-            Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("vector"),
-                "expected a vector-port-specific message, got: {msg}"
-            ),
-            other => panic!("expected an elaboration error, got {other:?}"),
-        }
+    fn vector_port_resolves_to_its_full_node_list() {
+        // `Module::ports` is `Vec<Vec<NodeId>>` precisely so a vector port (declared like any
+        // other vector net, § vector nets) resolves to all of its constituent nodes, in
+        // ascending index order, rather than being rejected. `out` is an ordinary scalar port
+        // (a one-element list); `bus` is a 4-element vector port.
+        let m = elaborate_src(
+            "module dac(out, bus); output out; input [3:0] bus; \
+             electrical out; electrical [3:0] bus; analog begin end endmodule",
+        );
+        assert_eq!(m.ports.len(), 2, "two declared ports, regardless of width");
+        assert_eq!(m.ports[0].len(), 1, "`out` is scalar");
+        assert_eq!(m.ports[1].len(), 4, "`bus` is a 4-element vector");
+
+        // The vector port's nodes are the same interned nodes a direct indexed access
+        // (`bus[0]`, `bus[1]`, …) would resolve to, in ascending order.
+        let bus0 = m
+            .nodes
+            .iter()
+            .position(|n| n.name == "bus[0]")
+            .expect("bus[0] interned");
+        let bus3 = m
+            .nodes
+            .iter()
+            .position(|n| n.name == "bus[3]")
+            .expect("bus[3] interned");
+        assert_eq!(m.ports[1][0].0 as usize, bus0);
+        assert_eq!(m.ports[1][3].0 as usize, bus3);
+
+        // Every node the module declares is reachable via `ports.iter().flatten()` too, the
+        // flattened-terminal-list view a future netlist wiring convention would use.
+        let flattened: Vec<_> = m.ports.iter().flatten().collect();
+        assert_eq!(flattened.len(), 5);
     }
 }

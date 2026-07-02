@@ -11,6 +11,27 @@
 > `?:` (only the taken branch is evaluated; its gradient flows through), and the logical/
 > inequality `BinOp`s `Ne`/`And`/`Or` (boolean-valued `0.0`/`1.0`, zero gradient). Added the
 > rounding `Builtin`s `Floor`/`Ceil`/`Round`/`Int` (piecewise constant, zero gradient).
+>
+> Revised 2026-07-01 (§6, missed at the time — recorded here retroactively): added the
+> bitwise/shift `BinOp`s `BitAnd`/`BitOr`/`BitXor`/`BitXnor`/`Shl`/`Shr` and `UnOp::BitNot`,
+> each truncating its operand(s) to `i64` (no bit-vector type in this IR) and, in
+> `va-codegen`'s AD, zero-gradient like the comparison/logical operators.
+>
+> Revised 2026-07-02 (§6): `Module.ports` reshaped from `Vec<NodeId>` to `Vec<Vec<NodeId>>` —
+> one entry per declared port, holding >1 `NodeId` (ascending index order) for a vector port
+> (`electrical [msb:lsb] name;` on a port net). Closes the "vector ports" backlog item in
+> `../roadmap.md`. `va-codegen` did not read `Module.ports` in its actual lowering path (only
+> `module.nodes.len()` via the `terminals` argument to `build_instance`), so this was a
+> low-blast-radius change — only three `va-codegen` test fixtures needed updating.
+>
+> Revised 2026-07-02 (§6, later same day): added `Expr::Ddx(ExprId, Access)`, the analog
+> partial-derivative operator (LRM §4.5.13). Confirmed needed by 10+ real corpus files on first
+> attempt (the entire PSP102 MOSFET family, MVSG, JFET, MOSVAR); implemented exactly per the
+> LRM's own worked examples, not approximated — `va-codegen`'s forward-mode `Dual` already
+> carries a full per-node gradient, so `ddx(expr, V(p, n))` is just "read the gradient
+> component at node `p`'s slot," with no new numerical method needed. The `Access` is carried
+> structurally rather than as another `ExprId`, since it names *which* unknown to differentiate
+> against and is never itself evaluated to a value.
 
 ## 1. Role
 
@@ -49,7 +70,8 @@ helpers) without restructuring it. The shape:
 ```
 Module
 ├── name:      String
-├── ports:     Vec<NodeId>          // indices into nodes, in declaration order
+├── ports:     Vec<Vec<NodeId>>     // one entry per declared port, in declaration order;
+│                                   // >1 NodeId (ascending index order) for a vector port
 ├── nodes:     Vec<NodeDecl>        // { name, discipline }
 ├── branches:  Vec<Branch>          // { p: NodeId, n: NodeId }
 ├── params:    Vec<Param>           // { name, default, min?, max? }
@@ -62,8 +84,11 @@ Module
 - **Handles** (`NodeId`, `ParamId`, `ExprId`, `BranchId`, `VarId`, `FuncId`) are `Copy`
   newtypes over `u32`. They are positions in the correspondingly-named `Vec`.
 - **`Expr`** is an arena node: `Const`, `Param`, `Var`, `Probe(Access)`, `Unary`, `Binary`,
-  `Call(Builtin, …)`, `CallUser(FuncId, …)`, `Select(cond, then, else)` (the ternary `?:`).
-  Children are `ExprId`s — never `Box`, never `&`.
+  `Call(Builtin, …)`, `CallUser(FuncId, …)`, `Select(cond, then, else)` (the ternary `?:`),
+  `Ddx(ExprId, Access)` (`ddx(expr, probe)`, the analog partial-derivative operator — `Access`
+  is carried directly, not as another `ExprId`, since it names which unknown to differentiate
+  against rather than being evaluated to a value). Children are `ExprId`s — never `Box`, never
+  `&`.
 - **`Stmt`** is `Contribute { target, value }` (`<+`), `If`, `Assign { lhs, rhs }`, `Block`,
   and the analog control-flow forms `While`, `For`, `Repeat`, `Case` (with `CaseArm`).
   Control flow nests via owned `Vec<Stmt>`; `For` boxes its single `init`/`step` statements
@@ -87,8 +112,12 @@ consumer may rely on them without re-checking.
    smaller `ExprId` than itself is *not* required, but the arena **must** be a DAG (no
    cycle). Codegen relies on being able to evaluate/differentiate each node from its
    children.
-3. **Ports are nodes.** Every `NodeId` in `ports` is a valid index into `nodes`. Ports come
-   first in declaration order; internal nodes follow.
+3. **Ports are nodes.** Every `NodeId` in every `ports` entry is a valid index into `nodes`.
+   Ports come first in declaration order; internal nodes follow. A port entry with more than
+   one `NodeId` is a vector port; its nodes are listed in ascending declared-index order
+   (`bus[0]`, `bus[1]`, …), independent of whether the source wrote `[msb:lsb]` or `[lsb:msb]`
+   — the original direction is not tracked, since no consumer has an opinion on connection
+   order yet (`va-netlist` doesn't parse multi-terminal port connections at all).
 4. **Branch endpoints exist.** For every `Branch`, `p` and `n` are valid `NodeId`s. `p == n`
    is illegal (a zero-span branch has no meaning).
 5. **Discipline agreement.** The two nodes of a branch share a compatible `Discipline`
@@ -111,6 +140,11 @@ consumer may rely on them without re-checking.
     count equals the callee's `args.len()`. A function's `args`/`ret`/local `VarId`s are valid
     indices into `vars`. Functions are pure and non-recursive (no `CallUser` to itself or a
     cycle); the frontend resolves calls in source order, so the call graph is a DAG.
+11. **`Ddx`'s `Access` is a valid potential probe.** `Expr::Ddx(_, access)`'s `access.branch` is
+    a valid `BranchId` (as any `Access` must be), and `access.kind == AccessKind::Potential` —
+    the frontend never emits a flow-kind `Ddx` (v0 codegen has no independent unknown for a
+    branch current to differentiate against; the frontend rejects `ddx(..., I(...))` before it
+    would reach this bridge).
 
 > These invariants are the draft acceptance criteria for `va-frontend`'s elaboration output
 > and should become a `va-ir::validate(&Module) -> Result<(), IrError>` checker (open item,
@@ -142,7 +176,8 @@ m.nodes = vec![
     NodeDecl { name: "p".into(), discipline: Discipline::Electrical },
     NodeDecl { name: "n".into(), discipline: Discipline::Electrical },
 ];
-m.ports = vec![p, n];
+m.ports = vec![vec![p], vec![n]];             // two scalar ports; a vector port would list
+                                               // all of its NodeIds in one inner Vec instead
 m.branches = vec![Branch { p, n }];                       // BranchId(0)
 m.params  = vec![Param { name: "R".into(), default: 1e3, min: Some(0.0), max: None }];
 

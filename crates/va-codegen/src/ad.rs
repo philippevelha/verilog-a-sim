@@ -346,6 +346,10 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 BinOp::Sub => a.sub(&b),
                 BinOp::Mul => a.mul(&b),
                 BinOp::Div => a.div(&b),
+                // Modulus is genuinely discontinuous (it jumps at every multiple of `b`), so —
+                // like the bitwise/comparison operators below — it's zero-gradient in AD rather
+                // than attempting an analytic derivative.
+                BinOp::Mod => Dual::constant(a.value % b.value, count),
                 BinOp::Pow => a.powf(&b),
                 BinOp::Lt => Dual::constant(bool_to_f64(a.value < b.value), count),
                 BinOp::Le => Dual::constant(bool_to_f64(a.value <= b.value), count),
@@ -385,6 +389,22 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             } else {
                 eval(ctx, *else_)
             }
+        }
+        // `ddx(expr, V(p, n))`: the forward-mode `Dual` for `expr` already carries exactly the
+        // partial derivative w.r.t. every node's raw potential (that's what a `Probe` seeds:
+        // `grad[p] += 1.0`, per node, independent of any other node) — so `ddx`'s answer is
+        // simply the gradient component at the probe's positive-terminal slot. The reference
+        // terminal `n` doesn't change the answer (see `va-ir::Expr::Ddx`'s doc comment): it's
+        // part of how the probe is *spelled*, not part of what's being differentiated w.r.t.
+        // A node the expression never touched naturally reads back `0.0`, matching the LRM's
+        // "if the expression does not depend explicitly on the unknown, ddx() returns zero."
+        // The result itself is treated as a constant (zero further gradient) — second
+        // derivatives are out of scope for this single-pass AD.
+        Expr::Ddx(inner, access) => {
+            let d = eval(ctx, *inner)?;
+            let br = ctx.module.branches[access.branch.0 as usize];
+            let p = br.p.0 as usize;
+            Ok(Dual::constant(d.grad.get(p).copied().unwrap_or(0.0), count))
         }
     }
 }
@@ -590,6 +610,143 @@ mod tests {
 
         // `$vt($temperature)` must agree with the no-arg `$vt` at the ambient temperature.
         assert!((k_over_q * temp_ref - vt_ref).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ddx_matches_the_lrm_vccs_example() {
+        use va_ir::{
+            Access, AccessKind, Branch, BranchId, Discipline, Expr, Module, NodeDecl, NodeId,
+        };
+
+        // The LRM's own worked example (§4.5.13, "vccs"): with `vin = V(pin,nin)`,
+        //   one       = ddx(vin, V(pin))  == 1
+        //   minusone  = ddx(vin, V(nin))  == -1
+        //   zero      = ddx(vin, V(pout)) == 0   (vin doesn't depend on pout)
+        let mut m = Module::new("vccs");
+        for name in ["pout", "nout", "pin", "nin", "gnd"] {
+            m.nodes.push(NodeDecl {
+                name: name.into(),
+                discipline: Discipline::Electrical,
+            });
+        }
+        let (pout, pin, nin, gnd) = (NodeId(0), NodeId(2), NodeId(3), NodeId(4));
+        m.branches.push(Branch { p: pin, n: nin }); // BranchId(0): vin = V(pin, nin)
+        m.branches.push(Branch { p: pin, n: gnd }); // BranchId(1): V(pin)
+        m.branches.push(Branch { p: nin, n: gnd }); // BranchId(2): V(nin)
+        m.branches.push(Branch { p: pout, n: gnd }); // BranchId(3): V(pout)
+
+        let vin = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let one = m.push_expr(Expr::Ddx(
+            vin,
+            Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(1),
+            },
+        ));
+        let minusone = m.push_expr(Expr::Ddx(
+            vin,
+            Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(2),
+            },
+        ));
+        let zero = m.push_expr(Expr::Ddx(
+            vin,
+            Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(3),
+            },
+        ));
+
+        let terminals = [0usize, 1, 2, 3, 4];
+        let x = [0.0, 0.0, 3.0, 1.0, 0.0]; // pin=3V, nin=1V (so vin=2V), everything else 0
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &x,
+            terminals: &terminals,
+            vt: 0.0,
+            temp: 0.0,
+        };
+
+        assert_eq!(eval(&ctx, vin).unwrap().value, 2.0);
+        assert_eq!(eval(&ctx, one).unwrap().value, 1.0);
+        assert_eq!(eval(&ctx, minusone).unwrap().value, -1.0);
+        assert_eq!(eval(&ctx, zero).unwrap().value, 0.0);
+        // ddx's result is a constant as far as further differentiation is concerned.
+        assert!(eval(&ctx, one).unwrap().grad.iter().all(|&g| g == 0.0));
+    }
+
+    #[test]
+    fn ddx_of_diode_conductance_matches_finite_difference() {
+        use va_ir::{
+            Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, Module, NodeDecl,
+            NodeId,
+        };
+
+        // The LRM's other worked example (§4.5.13, "diode"):
+        //   idio = IS * (limexp(V(a,c)/$vt) - 1); gdio = ddx(idio, V(a));
+        // `gdio` should be the diode's small-signal conductance at the operating point,
+        // cross-checked against a central finite difference on `idio` itself (§5).
+        fn idio_at(is: f64, vt: f64, va: f64) -> f64 {
+            is * ((va / vt).exp() - 1.0)
+        }
+
+        let mut m = Module::new("diode");
+        m.nodes.push(NodeDecl {
+            name: "a".into(),
+            discipline: Discipline::Electrical,
+        });
+        m.nodes.push(NodeDecl {
+            name: "c".into(),
+            discipline: Discipline::Electrical,
+        });
+        let (a, c) = (NodeId(0), NodeId(1));
+        m.branches.push(Branch { p: a, n: c }); // BranchId(0): V(a,c)
+        m.branches.push(Branch { p: a, n: c }); // BranchId(1): V(a) -- c doubles as reference
+
+        let is = 1e-14_f64;
+        let vt = 0.025_852_f64;
+        let vac = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let is_e = m.push_expr(Expr::Const(is));
+        let vt_e = m.push_expr(Expr::Call(Builtin::Vt, vec![]));
+        let ratio = m.push_expr(Expr::Binary(va_ir::BinOp::Div, vac, vt_e));
+        let expv = m.push_expr(Expr::Call(Builtin::Exp, vec![ratio]));
+        let one = m.push_expr(Expr::Const(1.0));
+        let em1 = m.push_expr(Expr::Binary(va_ir::BinOp::Sub, expv, one));
+        let idio = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, is_e, em1));
+        let gdio = m.push_expr(Expr::Ddx(
+            idio,
+            Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(1),
+            },
+        ));
+
+        let terminals = [0usize, 1];
+        let x = [0.6, 0.0]; // V(a,c) = 0.6 V
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &x,
+            terminals: &terminals,
+            vt,
+            temp: 300.0,
+        };
+        let analytic = eval(&ctx, gdio).unwrap().value;
+
+        let h = 1e-6;
+        let fd = (idio_at(is, vt, 0.6 + h) - idio_at(is, vt, 0.6 - h)) / (2.0 * h);
+        assert!(
+            (analytic - fd).abs() < 1e-6 * fd.abs().max(1.0),
+            "analytic {analytic} vs fd {fd}"
+        );
     }
 
     #[test]

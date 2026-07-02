@@ -27,6 +27,15 @@
 //! in `crate::elaborate`'s `call_builtin`/`eval_const_call`, but previously left unreserved — meaning, inconsistently with every other math builtin here, a user could shadow
 //! the name). A lexer that reserves a superset is conservative (it only forbids a few extra
 //! identifiers) and none of the surplus words collide with the model zoo.
+//!
+//! One pair of words went the other way: `vt` and `temperature`, though listed in Annex B,
+//! are **not** reserved here. Their only real grammar production is the `$`-prefixed system
+//! function (`$vt`, `$temperature` — a [`crate::lexer::Token::SysFunc`], an entirely separate
+//! lexer path unaffected by this table); the bare word has no grammar production consuming it
+//! at all. Reserving it anyway was pure downside with no benefit — confirmed against a broad
+//! real-model corpus, where `real vt;`/`vt = $vt(...)` (caching the thermal-voltage value
+//! under its conventional name) is common enough to be the single most common reservation
+//! conflict found.
 
 /// A Verilog-A/AMS reserved word carried generically by the lexer.
 ///
@@ -72,7 +81,7 @@ impl std::fmt::Display for Keyword {
 /// `endmodule`, `exclude`, `from`, `genvar`, `ground`, `if`, `inf`, `inout`, `input`,
 /// `integer`, `localparam`, `module`, `output`, `parameter`, `real`, `thermal`) appear here for
 /// completeness but are tokenized directly.
-pub const RESERVED_WORDS: [&str; 180] = [
+pub const RESERVED_WORDS: [&str; 179] = [
     "abs",
     "abstol",
     "access",
@@ -106,6 +115,7 @@ pub const RESERVED_WORDS: [&str; 180] = [
     "cross",
     "ddt",
     "ddt_nature",
+    "ddx",
     "deassign",
     "default",
     "defparam",
@@ -222,7 +232,6 @@ pub const RESERVED_WORDS: [&str; 180] = [
     "tan",
     "tanh",
     "task",
-    "temperature",
     "thermal",
     "time",
     "timer",
@@ -238,7 +247,6 @@ pub const RESERVED_WORDS: [&str; 180] = [
     "trireg",
     "units",
     "vectored",
-    "vt",
     "wait",
     "wand",
     "weak0",

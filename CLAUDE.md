@@ -175,7 +175,7 @@ Arena/index representation is mandatory (see §5). Expressions and statements ar
 
 pub struct Module {
     pub name: String,
-    pub ports: Vec<NodeId>,
+    pub ports: Vec<Vec<NodeId>>,  // one entry per declared port; >1 NodeId for a vector port
     pub nodes: Vec<NodeDecl>,
     pub branches: Vec<Branch>,
     pub params: Vec<Param>,

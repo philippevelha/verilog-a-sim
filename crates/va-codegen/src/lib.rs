@@ -211,7 +211,7 @@ mod tests {
                 discipline: Discipline::Electrical,
             },
         ];
-        m.ports = vec![NodeId(0), NodeId(1)];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
         m.branches = vec![Branch {
             p: NodeId(0),
             n: NodeId(1),
@@ -252,7 +252,7 @@ mod tests {
                 discipline: Discipline::Electrical,
             },
         ];
-        m.ports = vec![NodeId(0), NodeId(1)];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
         m.branches = vec![Branch {
             p: NodeId(0),
             n: NodeId(1),
@@ -294,7 +294,7 @@ mod tests {
                 discipline: Discipline::Electrical,
             },
         ];
-        m.ports = vec![NodeId(0), NodeId(1)];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
         m.branches = vec![Branch {
             p: NodeId(0),
             n: NodeId(1),

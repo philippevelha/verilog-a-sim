@@ -170,6 +170,7 @@ pub enum Token {
     #[token("cross", kw)]
     #[token("ddt", kw)]
     #[token("ddt_nature", kw)]
+    #[token("ddx", kw)]
     #[token("deassign", kw)]
     #[token("default", kw)]
     #[token("defparam", kw)]
@@ -268,7 +269,6 @@ pub enum Token {
     #[token("tan", kw)]
     #[token("tanh", kw)]
     #[token("task", kw)]
-    #[token("temperature", kw)]
     #[token("time", kw)]
     #[token("timer", kw)]
     #[token("tran", kw)]
@@ -283,7 +283,6 @@ pub enum Token {
     #[token("trireg", kw)]
     #[token("units", kw)]
     #[token("vectored", kw)]
-    #[token("vt", kw)]
     #[token("wait", kw)]
     #[token("wand", kw)]
     #[token("weak0", kw)]
@@ -322,6 +321,9 @@ pub enum Token {
     /// `/`.
     #[token("/")]
     Slash,
+    /// `%`, modulus.
+    #[token("%")]
+    Percent,
     /// `==`.
     #[token("==")]
     EqEq,

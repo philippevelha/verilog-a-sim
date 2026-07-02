@@ -397,6 +397,8 @@ pub enum BinOp {
     Mul,
     /// `/`.
     Div,
+    /// `%`, modulus (same sign as the dividend, matching Rust's/C's `%`).
+    Mod,
     /// `**`.
     Pow,
     /// `<`.

@@ -21,7 +21,10 @@
 //! - Parameter ranges accept mixed inclusive/exclusive delimiters — `[`/`]` (inclusive) and
 //!   `(`/`)` (exclusive) in any combination, e.g. `from [0:inf)`. The inclusive/exclusive
 //!   flags are recorded in the AST but dropped by elaboration (see [`crate::elaborate`]).
-//! - Access functions are limited to `V` and `I`; other natures are out of scope for v0.
+//! - Access functions are limited to the standard `disciplines.vams` names — `V`/`I`
+//!   (electrical) and `Temp`/`Pwr` (thermal); a custom discipline/nature's own `access` name is
+//!   out of scope for v0 (that needs real discipline/nature declarations, which are still
+//!   skipped wholesale).
 //! - Analog functions retain argument directions and body only; argument/local *types*
 //!   (`real x;`) are parsed and discarded.
 //! - Event control `@(event) stmt` is parsed but the trigger is discarded — the controlled
@@ -808,11 +811,15 @@ impl Parser<'_> {
 
     /// Parse an access function application `V(a[, b])` / `I(a[, b])`.
     fn parse_access(&mut self) -> Result<Access, FrontendError> {
-        let kind = match self.peek() {
-            Some(Token::Ident(n)) if n == "V" => AccessKind::Potential,
-            Some(Token::Ident(n)) if n == "I" => AccessKind::Flow,
-            _ => return self.err("expected an access function `V` or `I`".to_string()),
-        };
+        let kind =
+            match self.peek() {
+                Some(Token::Ident(n)) if n == "V" || n == "Temp" => AccessKind::Potential,
+                Some(Token::Ident(n)) if n == "I" || n == "Pwr" => AccessKind::Flow,
+                _ => return self.err(
+                    "expected an access function (`V`/`Temp` for potential, `I`/`Pwr` for flow)"
+                        .to_string(),
+                ),
+            };
         self.pos += 1;
         self.eat(&Token::LParen)?;
         let mut args = vec![self.parse_net_arg()?];
@@ -987,15 +994,22 @@ impl Parser<'_> {
 }
 
 /// Whether `name` is a branch access function recognised by v0 (`V` or `I`).
+/// Whether `name` is a recognized access function. `V`/`I` are the electrical discipline's
+/// standard potential/flow names; `Temp`/`Pwr` are the thermal discipline's — both pairs come
+/// from the standard `disciplines.vams` header nearly every real Verilog-A model includes, not
+/// from this project's own choice of spelling. A *custom* discipline/nature's own `access`
+/// name (an arbitrary user-chosen identifier) is not recognized — that needs the
+/// discipline/nature declarations this project still skips wholesale (a stated limitation; see
+/// `crate::elaborate`'s `Discipline`/`Nature` handling).
 fn is_access(name: &str) -> bool {
-    name == "V" || name == "I"
+    matches!(name, "V" | "I" | "Temp" | "Pwr")
 }
 
 /// Map an operator token to `(op, left_bp, right_bp)`. Higher binding power binds tighter;
 /// `**` is right-associative (`right_bp < left_bp`).
 /// Binding powers follow the standard Verilog operator-precedence table (IEEE 1364 Table 5-4),
 /// loosest to tightest: `||` < `&&` < `|` < `^`/`^~` < `&` < `==`/`!=` < relational < shifts <
-/// `+`/`-` < `*`/`/` < unary < `**`. `**` is right-associative (its `rbp` is lower than its
+/// `+`/`-` < `*`/`/`/`%` < unary < `**`. `**` is right-associative (its `rbp` is lower than its
 /// `lbp`); every other binary operator here is left-associative.
 fn binop_binding(t: &Token) -> Option<(BinOp, u8, u8)> {
     Some(match t {
@@ -1017,6 +1031,7 @@ fn binop_binding(t: &Token) -> Option<(BinOp, u8, u8)> {
         Token::Minus => (BinOp::Sub, 17, 18),
         Token::Star => (BinOp::Mul, 19, 20),
         Token::Slash => (BinOp::Div, 19, 20),
+        Token::Percent => (BinOp::Mod, 19, 20),
         Token::StarStar => (BinOp::Pow, 23, 22),
         _ => return None,
     })

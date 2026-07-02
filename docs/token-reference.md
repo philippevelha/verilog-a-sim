@@ -25,7 +25,7 @@ Each entry follows the same five-part structure:
 The Verilog-AMS LRM's own Annex B ("List of keywords") lists a larger reserved-word set (around
 257 words, including SystemVerilog-configuration keywords like `config`/`liblist`/`connectmodule`
 that Annex C.16 explicitly excludes from the Verilog-A subset) than this project's
-`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (180 words). That's expected and correct —
+`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (179 words). That's expected and correct —
 `va-frontend` targets "single-module compact models" (`CLAUDE.md` §1), so words meaningful only
 to full Verilog-AMS hierarchy, configuration, and digital timing checks are outside the declared
 subset by design, not by oversight. The LRM's own Annex B (VAMS-LRM-2.4, p.380–382, Table B.1)
@@ -39,13 +39,26 @@ from `RESERVED_WORDS` itself, so the `keywords.rs`-level completeness test
 (`every_reserved_word_is_reserved`) didn't exercise it) and the math builtins
 `floor`/`ceil`/`round`/`int`/`limexp` (each a real, working call-expression builtin, but
 previously unreserved — inconsistent with every other math builtin here, e.g. `exp`/`sqrt`/`ddt`,
-which *is* reserved). All eleven are now listed, closing that gap.
+which *is* reserved). All eleven were added, then two of them — `vt`/`temperature` — were
+**removed again**: unlike every other word in that batch, neither has a grammar production for
+its bare (non-`$`) form at all, and a broad corpus scan (`external/`, ~118 files including
+BSIM/HiSIM/HICUM/EKV/VBIC/PSP-family industry compact models, not just the small hand-picked
+set used earlier) turned up real models declaring a plain `vt` variable, which the reservation
+broke for no benefit (see §1.5's `Vt`/`Temperature` entry). Net effect: 169 + 11 − 2 = 178.
 
-A second gap this document surfaced and that has since been fixed: `transition` (§1.5) used to
+Other gaps this document surfaced and that have since been fixed: `transition` (§1.5) used to
 parse as an ordinary call expression but fail at elaboration with "unknown function" — confirmed
-live at the time by `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va`. It now
-folds to its `value` argument (the only sound answer under v0's DC-only model — see §1.5's
-`Transition` entry for why), and that file now passes the frontend end to end.
+live at the time by `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va` — now
+folds to its `value` argument (the only sound answer under v0's DC-only model). Access functions
+were limited to `V`/`I`; `Temp`/`Pwr` (the thermal discipline's standard names from
+`disciplines.vams`, §2.17) are now recognized too, fixing a parse failure in a dozen real corpus
+models that contribute to a `thermal` branch. `%` (modulus) was entirely unlexed; it's now
+`BinOp::Mod` (§1.2), fixing another batch of BSIM-family files that use it for parity checks
+(`nf % 2`). `ddx` was entirely unrecognized ("unknown function"); it's now reserved (it's a
+genuine Annex B word this table had missed until a corpus scan surfaced it) and lowers to a new
+`va_ir::Expr::Ddx` (§1.5) — the only genuinely new *IR* construct among this batch of fixes,
+implemented exactly per the LRM's own worked examples rather than approximated, since
+`va-codegen`'s forward-mode AD already carries everything `ddx` needs.
 
 ---
 
@@ -192,17 +205,25 @@ class of lexemes.
   Verilog's blocking assignment — replaces, doesn't accumulate. See `Contribute` above for the
   contrast that actually matters in this language.
 
-### `Plus` (`+`), `Minus` (`-`), `Star` (`*`), `Slash` (`/`)
+### `Plus` (`+`), `Minus` (`-`), `Star` (`*`), `Slash` (`/`), `Percent` (`%`)
 
 - **Purpose and Static Nature**: Purely structural (arithmetic) — static or dynamic depending
   entirely on their operands; the operator itself carries no timing.
 - **Declaration and Assignment**: N/A.
 - **Expressions and Evaluation**: Standard left-associative binary arithmetic (`BinOp::Add/Sub/
-  Mul/Div`), plus `Minus`/`Plus` double as unary prefix operators (`UnOp::Neg`; unary `+` is a
-  parsed-and-discarded no-op). Both const-foldable (used in parameter-range/genvar
-  const-evaluation) and runtime-evaluable (used in `<+`/`=` right-hand sides).
+  Mul/Div/Mod`), plus `Minus`/`Plus` double as unary prefix operators (`UnOp::Neg`; unary `+` is
+  a parsed-and-discarded no-op). All const-foldable (used in parameter-range/genvar
+  const-evaluation) and runtime-evaluable (used in `<+`/`=` right-hand sides). `%` (modulus)
+  takes its sign from the dividend, matching Rust's/C's `%` (`self.const_eval`/`eval_binop` just
+  reuse Rust's `%` on `f64` directly); in `va-codegen`'s AD it's zero-gradient like the bitwise
+  operators, since it's genuinely discontinuous (jumps at every multiple of the divisor) rather
+  than smoothly differentiable.
 - **Structural and Analog Usage**: Identical everywhere expressions appear.
-- **Comparison with Traditional Constructs**: Same as C/digital Verilog, no surprises.
+- **Comparison with Traditional Constructs**: Same as C/digital Verilog, no surprises — `%` in
+  particular matches C's semantics (not Python's, which takes the sign of the *divisor*
+  instead). Confirmed needed by a real corpus scan: BSIM4/BSIM6/BSIMBULK's
+  `` `define BSIM4NumFingerDiff(...) if ((nf%2) != 0) ... `` macro (an even/odd finger-count
+  check) was an outright lex error before this was added.
 
 ### `StarStar` (`**`)
 
@@ -636,7 +657,7 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 Every other reserved word lexes as `Token::Keyword(Keyword)`, a payload the parser inspects by
 string (`at_keyword`/`eat_keyword`, or the `Some(&Token::Keyword(kw)) => match kw.as_str()
 {...}` dispatch in `parse_stmt`). The words below are the ones with real, working
-grammar/elaboration behavior; §1.6 gives the master table covering every one of the 172 words,
+grammar/elaboration behavior; §1.6 gives the master table covering every one of the 179 words,
 including the ones with no implemented behavior at all.
 
 ### `Branch`
@@ -779,21 +800,69 @@ including the ones with no implemented behavior at all.
   derivative/integral-with-memory operator is intrinsic to continuous-time analog simulation and
   has no discrete-time or general-purpose-language analogue.
 
-### `Vt` / `Temperature`
+### `Ddx`
 
-- **Purpose and Static Nature**: Simulation-time environment queries, but only reachable through
-  the `$`-prefixed `SysFunc` token (`$vt`, `$vt(T)`, `$temperature`) — the *bare* reserved words
-  `vt`/`temperature` (no `$`) have no grammar production consuming them at all. They are
-  reserved purely to keep the name available/consistent with the `$`-form and to match the
-  LRM's Annex B table; a bare `vt`/`temperature` in source is simply a reserved-word-in-expression
-  parse error today.
-- **Declaration and Assignment**: N/A for the bare form (see `SysFunc` in §1.1 for the real
-  grammar).
-- **Expressions and Evaluation**: N/A for the bare form.
-- **Structural and Analog Usage**: N/A for the bare form.
-- **Comparison with Traditional Constructs**: The bare-word reservation without a corresponding
-  grammar rule is analogous to a C compiler reserving `__reserved_for_future_use` — present to
-  prevent a name collision, not because anything currently consumes it.
+- **Purpose and Static Nature**: Simulation-time analog operator (LRM §4.5.13, "The ddx
+  operator") that returns the *symbolic* partial derivative of its first argument with respect
+  to the unknown a potential-probe access identifies — `ddx(expr, V(p, n))` is
+  `∂expr/∂V(p,n)`, evaluated at the current operating point. It is stateless (unlike
+  `ddt`/`idt`), but like them it must be re-evaluated every Newton iteration since the
+  derivative's *value* depends on the current solution point even though the differentiation
+  itself is exact/symbolic rather than a numeric finite-difference approximation. This project's
+  forward-mode AD engine (`va-codegen/src/ad.rs`) already tracks a per-node-slot gradient
+  alongside every `Dual` value it computes, so `ddx` costs nothing extra to implement correctly:
+  the operator is exactly "read the gradient component already sitting at the probed node,"
+  never a separate differentiation pass.
+- **Declaration and Assignment**: Called as `ddx(expr, V(p, n))`, exactly two arguments — an
+  arbitrary analog expression, and a potential-probe access (`V(p)`/`V(p,n)` or a
+  discipline-appropriate equivalent) naming the unknown to differentiate against. The LRM also
+  permits `I(branch)` as the second argument in principle, but this codegen's flow probes are
+  not independent unknowns (currents are solved-for quantities derived from other unknowns, not
+  free variables with their own AD gradient slot), so `ddx(..., I(...))` is rejected with an
+  explicit elaboration error rather than silently producing a wrong (always-zero) answer — an
+  honest scope caveat per CLAUDE.md §1, not a silent gap.
+- **Expressions and Evaluation**: Lowered to `Expr::Ddx(ExprId, Access)` (Interface α, added
+  2026-07-02 — see `docs/bridges/interface-alpha-ir.md`). The elaborator validates the second
+  argument is syntactically a `Probe(Access)` of `AccessKind::Potential` before constructing the
+  node; `va-codegen`'s `eval` evaluates the first argument to a full `Dual`, then reads
+  `d.grad[p]` where `p` is the probed branch's positive node's local slot (`0.0` if that node
+  never entered the expression's dependency set — a legitimate zero-derivative answer, not a
+  missing-value error). Validated directly against the LRM's own worked examples: the §4.5.13
+  VCCS example (`ddx(vin, V(pin)) == 1`, `ddx(vin, V(nin)) == -1`, `ddx(vin, V(pout)) == 0`) and
+  the LRM's diode conductance example, the latter additionally cross-checked against a central
+  finite difference per CLAUDE.md §5's AD-validation rule.
+- **Structural and Analog Usage**: Analog-block only, like every other analog operator — never
+  legal in a parameter default, genvar loop header, or outside an `analog` block.
+- **Comparison with Traditional Constructs**: No C/digital-Verilog equivalent — symbolic
+  differentiation with respect to a live simulation unknown (rather than a syntactic
+  sub-expression, as in a CAS) is intrinsic to analog device-model construction (e.g. building
+  a small-signal transconductance directly from a large-signal current expression) and has no
+  discrete-time or general-purpose-language analogue.
+
+### `Vt` / `Temperature` — not reserved (fixed)
+
+- **Purpose and Static Nature**: Simulation-time environment queries, reachable only through
+  the `$`-prefixed `SysFunc` token (`$vt`, `$vt(T)`, `$temperature` — see §1.1's `SysFunc`
+  entry for the real grammar). `vt`/`temperature` are *not* reserved words in this project,
+  even though Annex B lists them: the bare word (no `$`) has no grammar production consuming it
+  at all, so reserving it was pure downside with no benefit. This was tried the other way first
+  (both were reserved for a time) and reverted once a broad real-model corpus scan turned up
+  `real vt; vt = $vt(...);` — caching the thermal-voltage value under its conventional plain
+  name — as the single most common reservation conflict in that corpus (confirmed directly in
+  `external/igbt3.va`).
+- **Declaration and Assignment**: Freely usable as an ordinary parameter/variable/genvar/net
+  name, exactly like any other identifier — `real vt, temperature;` declares two ordinary
+  variables.
+- **Expressions and Evaluation**: A bare `vt`/`temperature` reference resolves like any other
+  identifier (parameter, then variable, then error if unknown) — there is no special-casing at
+  all; the name is not privileged or shadowed by the `$`-prefixed system functions, which live
+  in an entirely separate lexical channel (`Token::SysFunc`, not `Token::Ident`/`Token::Keyword`)
+  and never collide with a same-spelled bare identifier.
+- **Structural and Analog Usage**: Anywhere an ordinary identifier is legal.
+- **Comparison with Traditional Constructs**: This is exactly the situation C/C++ handle by
+  putting library names in a separate namespace or requiring a prefix (`std::`, `errno` vs.
+  `EINVAL`) rather than reserving the bare word — `$vt` already *is* that prefix, so reserving
+  the unprefixed `vt` on top of it added a second layer of protection nothing needed.
 
 ### `Analysis`
 
@@ -897,7 +966,7 @@ including the ones with no implemented behavior at all.
 
 ## 1.6 Master table — every reserved word
 
-Every one of the 172 words in `RESERVED_WORDS`, alphabetically, each addressed against all five
+Every one of the 179 words in `RESERVED_WORDS`, alphabetically, each addressed against all five
 questions. Words with a full write-up above are cross-referenced rather than repeated; the
 remaining ~110 words — almost entirely digital-Verilog gate primitives, net-strength/charge
 keywords, specify-block/task/event keywords, and signal-processing transform names — get their
@@ -938,6 +1007,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `cross` | Parses as a call (`cross(expr, dir[, ...])`) if written bare; its one real usage, `@(cross(...))`, is discarded wholesale by v0's `skip_balanced_parens` before it's ever parsed as an expression | Zero-crossing event detector (LRM §5.7ish) | Neither path currently evaluates its arguments | Analog-block only (event control) | No C analogue (continuous zero-crossing detection needs the solver's own state) |
 | `ddt` | Analog operator with internal state, §1.5 `Ddt`/`Idt` | `ddt(expr)` | Time derivative | Analog-block only | No C/digital-Verilog analogue |
 | `ddt_nature` | Same as `abstol` (nature attribute, skipped) | Nature attribute `ddt_nature = other_nature;` | Never individually inspected | N/A (module preamble) | Binds a nature to its time-derivative counterpart; no C analogue |
+| `ddx` | Simulation-time symbolic derivative, §1.5 `Ddx` | `ddx(expr, V(p, n))` call | Lowers to `Expr::Ddx`; codegen reads the AD gradient at node `p` | Analog-block only | No C/digital-Verilog analogue |
 | `deassign` | Reserved, no grammar production (digital procedural-continuous-assignment release) | N/A | N/A | Digital only | No C analogue |
 | `default` | Case-arm keyword, §1.5 | `default[:] body` inside `case...endcase` | Dynamic body | Analog-block only | C `switch`'s `default:` |
 | `defparam` | Reserved, no grammar production (digital hierarchical parameter override) | N/A | N/A | Structural/hierarchy only; this project has no instantiation hierarchy to override into | No C analogue |
@@ -1054,7 +1124,6 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `tan` | Dynamic/static dual, §1.5 | `tan(x)` call | Tangent | Analog expr / const context | C `tan()` |
 | `tanh` | Dynamic/static dual, §1.5 | `tanh(x)` call | Hyperbolic tangent | Analog expr / const context | C `tanh()` |
 | `task` | Reserved, no grammar production (opens a digital `task...endtask` definition) | N/A | N/A | Digital procedural only | Closest to a non-pure C function (may have side effects, consume simulation time) |
-| `temperature` | Bare form has no grammar production, §1.5 `Vt`/`Temperature` | — | — | — | — |
 | `thermal` | Dedicated token, §1.4 | — | — | — | — |
 | `time` | Reserved, no grammar production (digital 64-bit simulation-time variable type) | N/A | N/A | Digital procedural only | Closest to C's `time_t` |
 | `timer` | Parses as a call (`timer(start[, period])`) if written bare; realistically only appears inside the discarded `@(timer(...))` | Fires at a specified absolute/periodic simulation time | Rejected at elaboration if reached | Analog-block only (event control) | Closest to a POSIX interval timer/`setitimer` |
@@ -1070,7 +1139,6 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `trireg` | Reserved, no grammar production (charge-storage net type, paired with `small`/`medium`/`large`) | N/A | N/A | Digital structural only | Closest to a C `static` variable retaining its last value, but modeling analog charge decay |
 | `units` | Same as `abstol` (nature attribute, skipped) | Nature attribute `units = "V";` | Never individually inspected | N/A (module preamble) | No C analogue |
 | `vectored` | Reserved, no grammar production (net-vector storage-layout hint, pairs with `scalared`) | N/A | N/A | Digital structural only | No C analogue |
-| `vt` | Bare form has no grammar production, §1.5 `Vt`/`Temperature` | — | — | — | — |
 | `wait` | Reserved, no grammar production (digital procedural block-until-condition) | N/A | N/A | Digital procedural only | Closest to a condition-variable `wait()`, but simulation-scheduled |
 | `wand` | Reserved, no grammar production (wired-AND net type) | N/A | N/A | Digital structural only | No C analogue |
 | `weak0` | Reserved, no grammar production (net strength: weak drive to 0) | N/A | N/A | Digital net-strength only | No C analogue |
@@ -1181,7 +1249,12 @@ integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = h
   same gap noted for vector nets: this project's `VarId`/`NodeId` model has no
   runtime-indexable-storage concept at all, so the constant/genvar-only restriction is a
   necessary simplification here, not a faithful implementation of the full language — recorded
-  as a backlog item in `roadmap.md`, not silently passed off as complete.
+  as a backlog item in `roadmap.md`, not silently passed off as complete. Confirmed live by the
+  real corpus once vector *ports* started resolving (§2.18): both
+  `dac_16bit_ideal.va`/`adc_16bit_ideal.va` index their vector nets/arrays with a plain
+  `integer` loop variable (not a `genvar`), so both still fail — now specifically on "`i` is not
+  a compile-time constant in this context" — which is the honest error this design promised,
+  not a silent wrong answer.
 
 ## 2.3 Direction declaration
 
@@ -1331,27 +1404,41 @@ as an ordinary loop.
 
 - Covered fully in Part 1 §1.5 (`While`/`Repeat`/`For`/`Case`/`Endcase`/`Default`).
 
-## 2.17 Access-function calls: `V(...)` / `I(...)`
+## 2.17 Access-function calls: `V(...)`/`I(...)` (electrical), `Temp(...)`/`Pwr(...)` (thermal)
 
 - **Purpose and Static Nature**: Simulation-time — a probe (`Expr::Probe`, read) or contribution
   target (`Stmt::Contribute`, write) against a specific branch, re-evaluated every solve
   iteration.
-- **Declaration and Assignment**: N/A (these are uses, not declarations) — but note `V`/`I` are
-  themselves ordinary identifiers, not reserved words (LRM §5.5: nature access-function names
-  are the discipline's, not the language's, keywords — `V`/`I` are simply the electrical
-  discipline's conventional potential/flow access names). The parser recognizes them
-  contextually: `is_access(name)` checks the literal string `"V"`/`"I"` when an `Ident` is
-  immediately followed by `(`.
-- **Expressions and Evaluation**: `V(a)` / `I(a)` (implicit reference/ground terminal) or
-  `V(a, b)` / `I(a, b)` (explicit two-terminal branch) or `V(name)` / `I(name)` where `name` is
-  a `branch`-declared alias — all three resolve, via `resolve_branch`/`resolve_net_arg`, to the
-  same interned `BranchId` a structurally-equivalent access would produce. Each argument is now
-  a `NetArg` (§2.18), so either terminal may be a vector-net element (`V(bus[i], gnd)`).
+- **Declaration and Assignment**: N/A (these are uses, not declarations) — but note none of
+  `V`/`I`/`Temp`/`Pwr` are reserved words in this project (LRM §5.5: nature access-function
+  names are the *discipline's*, not the language's, keywords). `V`/`I` are the electrical
+  discipline's conventional potential/flow names; `Temp`/`Pwr` are the thermal discipline's —
+  both pairs come from the standard `disciplines.vams` header nearly every real model includes.
+  The parser recognizes all four contextually: `is_access(name)` checks the literal string
+  against that fixed set when an `Ident` is immediately followed by `(`. A *custom*
+  discipline/nature's own `access` name (an arbitrary user-chosen identifier declared inside a
+  `nature...endnature` body) is not recognized — real discipline/nature declarations are still
+  skipped wholesale (§1.5's `Discipline`/`Nature` entry), so there is nothing to look the name
+  up against. This was found and fixed against the broad `external/` corpus scan: about a dozen
+  real models (`asmhemt.va`, `epfl_hemt.va`, `fbh_hbt-2_3.va`, `BSIM6.1.1.va`,
+  `bsimbulk*.va`, `mvsg_cmc_*.va`, `vbic_1p3.va`, `hisimsotb.va`, …) contribute to a `thermal`
+  branch via `Temp(dt) <+ ...;`/`Pwr(rth) <+ ...;`, which previously mis-parsed as a bare
+  assignment target immediately followed by `(` — "expected `=`, found `(`".
+- **Expressions and Evaluation**: `V(a)`/`Temp(a)` (implicit reference/ground terminal) or
+  `V(a, b)`/`Temp(a, b)` (explicit two-terminal branch) or `V(name)`/`Temp(name)` where `name`
+  is a `branch`-declared alias (and likewise for `I`/`Pwr`) — all resolve, via
+  `resolve_branch`/`resolve_net_arg`, to the same interned `BranchId` a structurally-equivalent
+  access would produce; the IR's `AccessKind::Potential`/`Flow` doesn't distinguish *which*
+  surface spelling was used, since both pairs mean the same conserved-quantity role regardless
+  of discipline. Each argument is a `NetArg` (§2.18), so any terminal may be a vector-net
+  element (`V(bus[i], gnd)`).
 - **Structural and Analog Usage**: Analog-block only.
 - **Comparison with Traditional Constructs**: No general-purpose-language analogue for the
-  *access-function* concept itself (a name whose meaning — voltage vs. current — is bound to the
-  discipline of the nets it's applied to, not to a fixed type signature). The closest structural
-  parallel is operator overloading resolved by argument type.
+  *access-function* concept itself (a name whose meaning — voltage vs. current, or temperature
+  vs. power — is bound to the discipline of the nets it's applied to, not to a fixed type
+  signature). The closest structural parallel is operator overloading resolved by argument
+  type — or, for the `V`-vs-`Temp` naming split specifically, function overloading by a
+  caller-chosen "unit family" rather than by argument type.
 
 ## 2.18 Vector net declaration & indexed access (`bus[i]`)
 
@@ -1376,15 +1463,18 @@ as an ordinary loop.
 - **Comparison with Traditional Constructs**: A C array subscript, restricted to a
   compile-time-constant (or genvar-derived) index — closer to a C array indexed only by
   `constexpr`/template-parameter values than to ordinary runtime C indexing.
-- **Known gap — vector ports**: a vector *net* works fully as described above; a vector *port*
-  (the same net also listed in the module's port list) does not, and gives a specific error
-  rather than silently doing the wrong thing (`resolve_ports`: `"port \`{name}\` is a vector
-  net; vector ports are not yet supported"`). The blocker is `va_ir::Module::ports: Vec<NodeId>`
-  — one node per port, with no representation for "this port is actually N nodes" — and there is
-  no `va-netlist` wiring convention for a multi-terminal port connection either. Fixing this
-  properly is an Interface α change (§6), not a `va-frontend`-only fix; real corpus files hit
-  this directly (`external/verilogaLib-master/dac_16bit_ideal.va`,
-  `external/verilogaLib-master/adc_16bit_ideal.va` both declare a vector I/O port).
+- **Vector ports (fixed)**: a vector *net* also listed in the module's port list now resolves
+  fully — `va_ir::Module::ports` is `Vec<Vec<NodeId>>` (an Interface α change, §6), one entry
+  per declared port, holding all of a vector port's nodes (ascending index order) rather than
+  just one. `resolve_ports` no longer special-cases this at all: it pushes `vec![id]` for a
+  scalar port or the vector's full node list for a wide one, uniformly. `va-codegen` didn't
+  actually read `Module.ports` in its real lowering path (only `module.nodes.len()` via
+  `build_instance`'s `terminals` argument), so this was low-blast-radius — three test fixtures
+  needed a one-line update, nothing else. Real corpus files exercise this directly
+  (`external/verilogaLib-master/dac_16bit_ideal.va`/`adc_16bit_ideal.va`, both declaring a
+  vector I/O port) — both now get past port resolution entirely and fail later, on the
+  runtime-indexed-access limitation below (which affects vector-net indexing exactly the same
+  way it affects array-variable indexing, §2.2b).
 
 ## 2.19 Event control (`@(...)`)
 

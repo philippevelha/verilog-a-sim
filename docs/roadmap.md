@@ -71,9 +71,21 @@ netlist driver (that is T6).
 Per the updated `CLAUDE.md` §1, `va-frontend` now targets the **complete Verilog-A language**
 (LRM Annex C), not the previously-declared "single-module compact models" slice.
 `docs/token-reference.md` is the living, token-by-token coverage record — this section is the
-prioritized backlog against it, re-derived by running `va-cli check` over the real-world
-`external/verilogaLib-master/` corpus (11 files) and `external/ekv3.va` rather than guessing at
-what's missing.
+prioritized backlog against it.
+
+**Corpus baseline.** Coverage work is re-derived by running `va-cli check` over real models,
+not by guessing what's missing. Early passes under-sampled this — only
+`external/verilogaLib-master/` (11 files) plus `external/ekv3.va` — which both overstated the
+pass rate and missed real gaps those 12 files don't happen to exercise. The actual corpus is
+the **whole `external/` tree, ~118 `.va`/`.vams` files**: real industry-standard compact models
+(BSIM3/4/6/CMG/SOI/BULK, HiSIM/HiSIM-HV/SOI, HICUM L0/L2, PSP, EKV, VBIC, MOSVAR, JFET, MVSG,
+ASM-HEMT, and more), plus their shared headers/macro-definition/nature-definition fragments.
+Of the 118, roughly 20 are auxiliary include fragments (`*MacrosAndDefines*.va`,
+`constants.vams`, `disciplines.vams`, `ekv3_*_def*.va`, …) never meant to compile standalone —
+`va-cli check` naively tries anyway, so their "failures" are a scan artifact, not a language
+gap; don't read the raw pass count as a language-completeness percentage without excluding
+them. As of this pass: **44/118 pass outright**, with the remainder split across real,
+now-categorized gaps below and the ~20 expected fragment failures.
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
 itself flagged): `genvar`/`generate` loops and vector nets (elaboration-time unrolling); the
@@ -81,45 +93,62 @@ three reserved-word gaps (`localparam`/`electrical`/`thermal`, `floor`/`ceil`/`r
 `limexp`); `transition`, `slew`, `ac_stim`, `bound_step` (all fold soundly under v0's DC-only
 model — see `token-reference.md` §1.5); `$abstime` (folds to `0.0`); vector net declarations
 with both the shared-prefix and per-identifier-suffix range syntax
-(`` electrical in[`W-1:0], out; ``); vector-port *declarations* now parse (the bracket at the
-`input`/`output` site), though vector ports themselves still give an honest "not yet supported"
-error rather than working end-to-end; the full bitwise/shift operator family (`&`, `|`, `^`,
+(`` electrical in[`W-1:0], out; ``); the full bitwise/shift operator family (`&`, `|`, `^`,
 `^~`/`~^`, `~`, `<<`, `>>`) with correct Verilog operator-precedence, wired through `va-ir` and
 `va-codegen`'s AD (zero-gradient, like the comparison operators); **array variables**
 (`real out_val[0:15];`, `out_val[i]`) with a constant/genvar-indexed element resolution that
-mirrors vector nets exactly (`token-reference.md` §2.2b) — including a genuinely
-runtime-indexed access (an ordinary loop variable, not a genvar) being rejected with a specific,
-honest "not a compile-time constant" error rather than a raw parse failure, closing that half of
-the backlog item below without needing an Interface α change; `real(expr)`/`integer(expr)`
+mirrors vector nets exactly (`token-reference.md` §2.2b); `real(expr)`/`integer(expr)`
 type-cast *calls*, distinct from the declaration keywords of the same spelling
-(`digital = integer(v * scale);`, real-to-integer rounding semantics, not `int()`'s truncation).
-7/11 real corpus files now pass the frontend end-to-end (`ekv3.va`/`ctle.va` fail on
-preprocessor macro gaps unrelated to grammar; `adc_16bit_ideal.va`/`dac_16bit_ideal.va` now fail
-*only* on the vector-port gap below — everything else in both files parses and elaborates).
+(`digital = integer(v * scale);`, real-to-integer rounding semantics, not `int()`'s truncation);
+**vector ports** — `va_ir::Module::ports` reshaped from `Vec<NodeId>` to `Vec<Vec<NodeId>>`
+(Interface α change, §6 — see `../bridges/interface-alpha-ir.md`'s 2026-07-02 revision), so a
+port declared with a `[msb:lsb]` range resolves to all of its nodes instead of erroring;
+`%` (modulus, `BinOp::Mod`, zero-gradient in AD like the bitwise family); `vt`/`temperature`
+**un-reserved** again — real models very commonly declare a plain `vt` variable
+(`external/igbt3.va`), and the bare word had no grammar production to justify reserving it in
+the first place; `Temp`/`Pwr` recognized as the thermal discipline's access functions
+alongside `V`/`I` (`disciplines.vams`'s standard names), fixing about a dozen files that
+contribute to a `thermal` branch (`token-reference.md` §2.17); and **`ddx(expr, probe)`**, the
+analog partial-derivative operator (LRM §4.5.13) — lowered to `Expr::Ddx` (Interface α change,
+§6 — see `../bridges/interface-alpha-ir.md`'s 2026-07-02 revision) and evaluated in
+`va-codegen` by reading the AD gradient component already carried at the probed node, exactly
+as the LRM's own VCCS and diode worked examples require (both now regression tests, the latter
+cross-checked against a central finite difference); confirmed needed by 10+ corpus files
+(BSIM4/6/BULK, MVSG) and part of what moved the pass count from 34 to 44.
 
-**Backlog, prioritized** (highest-value/most-tractable first):
+**Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
+118-file corpus):
 
-1. **Vector ports** — now the *sole* remaining blocker for both
-   `dac_16bit_ideal.va`/`adc_16bit_ideal.va` (`token-reference.md` §2.18's "known gap" note).
-   Needs `va_ir::Module::ports` to represent "this port is N nodes," plus a `va-netlist`
-   multi-terminal wiring convention. Interface α change (§6) — coordinate before touching
-   `va-ir`.
-2. **Runtime-indexed array variables** — the residual half of the array-variables work above:
-   `out_val[j]` where `j` is a genuinely dynamic runtime value (not a genvar or a constant) has
-   no sound resolution in this IR at all, since `va_ir::VarId` is a scalar slot with no
-   runtime-indexable-storage concept. Needs a genuine new `Expr`/state-storage concept —
-   Interface α change (§6). Not currently blocking any known corpus file (every real usage seen
-   so far indexes by a genvar), so lower urgency than it might look.
+1. **`$param_given(name)`/`$port_connected(name)`/`$mfactor`/`$limit`** — system functions
+   confirmed needed by BSIM6.1.1/bsimbulk*/hisimsotb/vbic_1p3 (`$param_given`),
+   asmhemt/asmhemt101_0 (`$port_connected`), and fbh_hbt-2_3 (`$limit`). All are meaningful only
+   relative to a netlist instantiation (`$param_given`/`$port_connected` query how the
+   instantiating netlist called the model) or a Newton-convergence aid (`$limit`) v0 doesn't
+   implement; each needs its own honest DC-only answer worked out (e.g. `$param_given` could
+   plausibly always fold to `0`/false, since v0's netlist path never distinguishes "explicitly
+   set" from "defaulted" — needs checking against how each model actually uses the result before
+   picking a fold).
+2. **Runtime-indexed vector-net/array-variable access** — `out[j]`/`out_val[j]` where `j` is a
+   genuinely dynamic runtime value (not a genvar or a constant) has no sound resolution in this
+   IR at all: `va_ir::NodeId`/`VarId` are scalar slots with no runtime-indexable-storage
+   concept. Confirmed as the sole remaining blocker for both
+   `adc_16bit_ideal.va`/`dac_16bit_ideal.va` now that vector ports work. Needs a genuine new
+   `Expr`/state-storage concept — Interface α change (§6).
 3. **Custom `discipline`/`nature` declarations** — today's `discipline...enddiscipline`/
    `nature...endnature` is skipped wholesale (`token-reference.md` §1.5); real models sometimes
    declare disciplines beyond the hardcoded `electrical`/`thermal`, which lines up directly with
    `CLAUDE.md` §1's own multi-physics goal ("disciplines optical, thermal, mechanical, etc").
    Likely doesn't need an `va-ir` change — nodes under a custom discipline can just carry
-   `Discipline::Other`, already in the IR.
+   `Discipline::Other`, already in the IR. Also the only way to recognize an access-function
+   name beyond the hardcoded `V`/`I`/`Temp`/`Pwr` (§2.17) — a custom nature's own `access` name
+   needs the nature's declaration actually parsed to know what to look for.
 4. **Multi-module hierarchy / instantiation** (LRM Annex C.8) — the single biggest remaining
    "full Verilog-A" gap. Large: touches `va-ir` (Interface α), `va-codegen`, and `va-netlist`
    together. Not attempted yet; needs its own kickoff-style design pass (§6), not an incremental
-   patch.
+   patch. Note `va-netlist` also has no wiring convention yet for a multi-terminal *port*
+   connection — relevant once something downstream actually needs to instantiate a module with
+   a vector port, which nothing does yet (`Module.ports` is populated correctly, but unread by
+   `va-codegen`/`va-cli`'s real paths).
 5. **Laplace/Z-domain filters** (`laplace_nd`/`np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) — blocked
    on array/list-literal expression syntax (`{1, 2, 3}`), which the grammar doesn't have at all
    yet; a DC answer (the filter's gain at s=0/z=1, from the coefficient arrays) is sound once
@@ -127,6 +156,10 @@ preprocessor macro gaps unrelated to grammar; `adc_16bit_ideal.va`/`dac_16bit_id
 6. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
    semantics) — cannot be soundly approximated at DC the way `transition`/`slew` can (their
    whole purpose is time history); genuinely blocked on `va-transient` existing.
+7. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
+   as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
+   priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
+   artifact).
 
 **Permanently out of scope, not a backlog item** (LRM Annex C.7: "No digital behavior or
 events are supported in Verilog-A" — these are excluded from Verilog-A *itself*, not narrowed
@@ -134,6 +167,15 @@ further by this project): gate/switch-level primitives (`and`/`nand`/`nmos`/`buf
 strength/charge-storage keywords (`strong0`/`trireg`/`highz0`/…), and digital procedural/timing
 constructs (`always`/`initial`/`fork`/`join`/`task`/`wait`/`specify`/`casex`/`casez`/…). See
 `token-reference.md` §1.6 for the full, word-by-word accounting.
+
+**Not chased, unclear if real**: `external/hicumL0_v2p0p0.va` and its siblings (6 HICUM/L0
+files) contain `IB = I(<b>);` — literal angle brackets around the terminal name, inside an
+`` `ifdef PORT_CURR `` block that *is* active (`PORT_CURR` is `` `define ``d at the top of the
+file). This isn't recognizable Verilog-A syntax under any reading found so far; before writing
+a parser rule for it, worth checking the model's own upstream source/changelog (it's guarded by
+`CALC_OP`/`OP_STATIC`, an operating-point-debug-only code path) for whether this is a
+known-broken construct in the CMC release itself rather than something this project should
+parse.
 
 ---
 

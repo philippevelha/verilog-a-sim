@@ -66,8 +66,13 @@ pub struct FuncId(pub u32);
 pub struct Module {
     /// Module name as written in source.
     pub name: String,
-    /// Ports, in declaration order. Each indexes into [`Self::nodes`].
-    pub ports: Vec<NodeId>,
+    /// Ports, in declaration order. Each port is one or more [`NodeId`]s indexing into
+    /// [`Self::nodes`] — one for an ordinary scalar port, `N` (in ascending index order) for a
+    /// vector port declared with a `[msb:lsb]` range. A consumer that only cares about the
+    /// flat, ordered terminal list (e.g. wiring a netlist device's connections) can
+    /// `ports.iter().flatten()`; one that cares which nodes belong to which declared port
+    /// needs the grouping, which is why this isn't simply `Vec<NodeId>`.
+    pub ports: Vec<Vec<NodeId>>,
     /// All declared nodes (ports + internal nodes).
     pub nodes: Vec<NodeDecl>,
     /// Branches between node pairs.
@@ -207,6 +212,16 @@ pub enum Expr {
     /// Only the selected branch is evaluated, so an unselected branch may be undefined at the
     /// current point (e.g. `x > 0 ? ln(x) : 0`).
     Select(ExprId, ExprId, ExprId),
+    /// `ddx(expr, probe)`: the partial derivative of `expr` with respect to the unknown
+    /// `probe` identifies (a node's potential, per the LRM), holding every other unknown fixed
+    /// and evaluated at the current operating point. `probe` is carried structurally (not as
+    /// another `ExprId`) — it names *which* unknown to differentiate against, it is never
+    /// itself evaluated to a value. Only a potential access (`AccessKind::Potential`) is
+    /// meaningful here: differentiating with respect to a branch *flow* would need flow probes
+    /// to be independent unknowns, which they are not in this codegen (a stated limitation —
+    /// `va-codegen` rejects `probe.kind == Flow`). The result is treated as having zero further
+    /// gradient (second derivatives are out of scope for this forward-mode, single-pass AD).
+    Ddx(ExprId, Access),
 }
 
 /// Unary operators.
@@ -232,6 +247,9 @@ pub enum BinOp {
     Mul,
     /// Division.
     Div,
+    /// Modulus (`%`), same sign as the dividend. Zero-gradient in AD, like the bitwise/
+    /// comparison operators — a genuinely discontinuous, non-differentiable operation.
+    Mod,
     /// Exponentiation (`**`).
     Pow,
     /// Less-than comparison.
