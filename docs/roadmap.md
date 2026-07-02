@@ -84,8 +84,14 @@ Of the 118, roughly 20 are auxiliary include fragments (`*MacrosAndDefines*.va`,
 `constants.vams`, `disciplines.vams`, `ekv3_*_def*.va`, …) never meant to compile standalone —
 `va-cli check` naively tries anyway, so their "failures" are a scan artifact, not a language
 gap; don't read the raw pass count as a language-completeness percentage without excluding
-them. As of this pass: **56/118 pass outright**, with the remainder split across real,
-now-categorized gaps below and the ~20 expected fragment failures.
+them. A second, distinct artifact category (8 more files, found this pass — see "Not chased,
+unclear if real" below): top-level `.va` files whose module body was itself split into a sibling
+`` `include ``d file that the corpus snapshot never shipped (the PSP102/103/104 family,
+`L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`) — these fail with a misleading "port has no
+discipline declaration" (an empty module body, not a language gap) and are excluded from the
+gap accounting below for the same reason as the ~20 fragments. As of this pass: **61/118 pass
+outright**, with the remainder split across real, now-categorized gaps below and the ~28
+expected non-language-gap failures.
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
 itself flagged): `genvar`/`generate` loops and vector nets (elaboration-time unrolling); the
@@ -125,56 +131,58 @@ optional port is ever connected, making `false` the honest answer rather than an
 `access`'s value, since a converged solve is a fixed point of the *unlimited* equations and the
 stateless `ModelInstance::load` ABI has no previous-iteration history to limit against regardless
 (`token-reference.md`'s `SysFunc` entry). Part of what moved the pass count from 44 to 56
-(BSIM6.1.1/bsimbulk*/asmhemt/asmhemt101_0/fbh_hbt-2_3 and others).
+(BSIM6.1.1/bsimbulk*/asmhemt/asmhemt101_0/fbh_hbt-2_3 and others); and **`$simparam` folding
+inside a parameter default**, not just the analog block — `const_eval` (the separate,
+non-mutating evaluator behind parameter defaults/ranges/genvar bounds) gets the same
+"fold to the `default` argument, or error if none" treatment `lower_expr` already had, fixing
+`bsim6.0.va`/`bsimbulk.va`/`bsimbulk107.va` (`parameter real GMIN = $simparam("gmin", ...);`)
+and moving the pass count from 56 to 59; and **runtime-indexed vector-net/array-variable
+access** — `out[j]`/`out_val[j]` where `j` is a genuinely dynamic runtime value (an ordinary
+loop variable, not a genvar or a constant). Turned out *not* to need the `va-ir` interface
+change the previous pass had speculated: since `V(...)`/`I(...)` still ultimately resolve to a
+fixed `BranchId`/`VarId` at elaboration, a runtime index instead expands into an
+elaboration-time chain over every statically-known candidate index — a nested `Expr::Select` of
+`Expr::Probe`s for a probe *read*, an if/else-if chain of `Stmt::Contribute`/`Stmt::Assign` for
+a contribution *target*/array-variable *write* — guarded by an `index == k` equality check per
+arm, which is sound precisely because the array/vector's range is always static even when the
+selecting index isn't (`token-reference.md` §2.2b/§2.18). No `va-ir` change at all: both
+`Expr::Select` and `Stmt::If` already existed. Closes the sole remaining blocker for both
+`adc_16bit_ideal.va`/`dac_16bit_ideal.va`, moving the pass count from 59 to 61.
 
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
-1. **Custom `discipline`/`nature` declarations** — `port \`X\` has no discipline declaration`
-   is now the single biggest failure bucket (8 files: the PSP102/103/104 family,
-   `L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`). Today's `discipline...enddiscipline`/
-   `nature...endnature` is skipped wholesale (`token-reference.md` §1.5); these models declare a
-   port under a custom discipline (not the hardcoded `electrical`/`thermal`), and
-   `resolve_ports`/`collect_nodes` only recognize those two. Lines up directly with `CLAUDE.md`
-   §1's own multi-physics goal ("disciplines optical, thermal, mechanical, etc"). Likely doesn't
-   need an `va-ir` change — nodes under a custom discipline can just carry `Discipline::Other`,
-   already in the IR — but does need the `discipline` declaration actually parsed (today it's
-   skipped) so the elaborator knows the name exists. Also the only way to recognize an
-   access-function name beyond the hardcoded `V`/`I`/`Temp`/`Pwr` (§2.17) — a custom nature's own
-   `access` name needs the nature's declaration parsed to know what to look for.
-2. **Runtime-indexed vector-net/array-variable access** — `out[j]`/`out_val[j]` where `j` is a
-   genuinely dynamic runtime value (not a genvar or a constant) has no sound resolution in this
-   IR at all: `va_ir::NodeId`/`VarId` are scalar slots with no runtime-indexable-storage
-   concept. Confirmed as the sole remaining blocker for both
-   `adc_16bit_ideal.va`/`dac_16bit_ideal.va` now that vector ports work. Needs a genuine new
-   `Expr`/state-storage concept — Interface α change (§6).
-3. **`$simparam` in a parameter-default context** — `bsim6.0.va`/`bsimbulk.va`/`bsimbulk107.va`
-   default a parameter directly from `$simparam(...)`; today's elaborator only allows `$simparam`
-   in the (dynamic) analog block, rejecting it as "not constant in a parameter context" when it
-   appears in a parameter default's constant-folding path. Since v0 has no simulator-parameter
-   store regardless, the same "fold to the `default` argument, or error if none" treatment
-   `lower_expr` already gives it just needs to also be reachable from `const_eval`.
-4. **Multi-module hierarchy / instantiation** (LRM Annex C.8) — the single biggest remaining
+1. **Multi-module hierarchy / instantiation** (LRM Annex C.8) — the single biggest remaining
    "full Verilog-A" gap. Large: touches `va-ir` (Interface α), `va-codegen`, and `va-netlist`
    together. Not attempted yet; needs its own kickoff-style design pass (§6), not an incremental
    patch. Note `va-netlist` also has no wiring convention yet for a multi-terminal *port*
    connection — relevant once something downstream actually needs to instantiate a module with
    a vector port, which nothing does yet (`Module.ports` is populated correctly, but unread by
    `va-codegen`/`va-cli`'s real paths).
-5. **Laplace/Z-domain filters** (`laplace_nd`/`np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) — blocked
+2. **Laplace/Z-domain filters** (`laplace_nd`/`np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) — blocked
    on array/list-literal expression syntax (`{1, 2, 3}`), which the grammar doesn't have at all
    yet; a DC answer (the filter's gain at s=0/z=1, from the coefficient arrays) is sound once
    that syntax exists. Do the array-literal grammar work once, then revisit.
-6. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
+3. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
    semantics) — cannot be soundly approximated at DC the way `transition`/`slew` can (their
    whole purpose is time history); genuinely blocked on `va-transient` existing.
-7. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
+4. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
    as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
    priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
    artifact).
-8. **`absdelay`** — a time-domain delay operator (`fbh_hbt-2_1.va`), same DC-steady-state-fold
+5. **`absdelay`** — a time-domain delay operator (`fbh_hbt-2_1.va`), same DC-steady-state-fold
    family as `transition`/`slew`/`$limit` (settles to its input value with no delay history at a
    fixed operating point); low file count (1) so low priority, but cheap once picked up.
+6. **Custom `discipline`/`nature` declarations** — not corpus-motivated right now (see below:
+   the 8 files that looked like they needed this turned out to be an unrelated corpus artifact),
+   but still lines up directly with `CLAUDE.md` §1's own multi-physics goal ("disciplines
+   optical, thermal, mechanical, etc") and is worth doing eventually. Today's
+   `discipline...enddiscipline`/`nature...endnature` is skipped wholesale
+   (`token-reference.md` §1.5). Likely doesn't need an `va-ir` change — nodes under a custom
+   discipline can just carry `Discipline::Other`, already in the IR — but does need the
+   `discipline` declaration actually parsed so the elaborator knows the name exists, and is also
+   the only way to recognize an access-function name beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
+   (§2.17).
 
 **Permanently out of scope, not a backlog item** (LRM Annex C.7: "No digital behavior or
 events are supported in Verilog-A" — these are excluded from Verilog-A *itself*, not narrowed
@@ -191,6 +199,19 @@ a parser rule for it, worth checking the model's own upstream source/changelog (
 `CALC_OP`/`OP_STATIC`, an operating-point-debug-only code path) for whether this is a
 known-broken construct in the CMC release itself rather than something this project should
 parse.
+
+**Corpus artifact, not a language gap** (found chasing what first looked like the discipline/
+nature gap above): the PSP102/103/104 family, `L_UTSOI_102[_nqs]`, and `r2_cmc`/`r2_et_cmc` (8
+files) each declare their module header, then `` `include `` a sibling file
+(`PSP103_module.include`, `L_UTSOI_102_module.include`, `r2_cmc_body.include`, …) for the
+*entire* body — every net/branch/analog-block statement lives there, not in the top-level `.va`
+file. None of those sibling files exist anywhere in this `external/` snapshot (confirmed by
+`find`), so the preprocessor's "unresolved include is skipped" behavior (correct — matches how a
+real toolchain would report a missing file, not a parse error) leaves an effectively empty
+module body. The elaborator then reports the first port it can't resolve as "no discipline
+declaration," which reads exactly like a custom-discipline gap but isn't one — verified by
+checking that no `discipline`/`nature` keyword appears anywhere in these 8 files at all. Nothing
+to fix here; treat like the ~20 known auxiliary fragments.
 
 ---
 

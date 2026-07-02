@@ -47,8 +47,15 @@
 //! - Vector nets (§ vector nets) are internally just one ordinary [`NodeId`] per declared
 //!   index, named `base[k]`; there is no separate IR concept for a bus. A vector element must
 //!   be indexed (`V(bus[0])`, never bare `V(bus)`), and the index is bounds-checked against the
-//!   declared `[msb:lsb]` range. Vector ports are not supported (a port name maps to exactly
-//!   one node).
+//!   declared `[msb:lsb]` range. A vector-typed port resolves to the full node list
+//!   (`Module::ports: Vec<Vec<NodeId>>`).
+//! - Vector nets and array variables (§ array variables) both support a genuinely runtime
+//!   index (an ordinary loop variable, not just a genvar/constant) via elaboration-time
+//!   unrolling into a `Select`/`If` chain over every declared index, guarded by an equality
+//!   check — see `dynamic_terminal_range`/`lower_probe_expr`/`unroll_indexed_contribute` and
+//!   `lower_indexed_var_read`/`lower_indexed_var_write`. There is still no
+//!   runtime-indexable-*storage* concept in the IR; a runtime index outside the declared range
+//!   at simulation time silently resolves to the chain's last arm rather than erroring.
 
 use std::collections::HashMap;
 
@@ -86,6 +93,20 @@ pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
     Ok(e.out)
 }
 
+/// A single vector-net terminal (of a `V(...)`/`I(...)` access) whose index is present but not
+/// compile-time-constant — the input to the § dynamic vector-net/array-variable indexing
+/// expansion (`Elaborator::lower_probe_expr`/`unroll_indexed_contribute`). `lo`/`hi` is the
+/// vector's own declared range, looked up once by [`Elaborator::dynamic_terminal_range`] so
+/// callers don't have to re-look it up.
+struct DynamicTerminal {
+    /// 0 for the first (`p`) terminal, 1 for the second (`n`).
+    pos: usize,
+    name: String,
+    idx_expr: ExprRef,
+    lo: i64,
+    hi: i64,
+}
+
 struct Elaborator<'a> {
     ast: &'a ModuleAst,
     out: Module,
@@ -113,8 +134,10 @@ struct Elaborator<'a> {
     vectors: HashMap<String, (i64, i64)>,
     /// Declared array variables' inclusive `(lo, hi)` index range, keyed by base name (§ array
     /// variables) — the `VarId` counterpart of `vectors` above. An array `out_val` interns one
-    /// [`VarId`] per index as `out_val[k]`; only a compile-time-constant or genvar index is
-    /// supported (there is no runtime-indexed array/memory concept in this IR).
+    /// [`VarId`] per index as `out_val[k]`. A compile-time-constant or genvar index resolves
+    /// directly; a genuinely runtime index (§ dynamic vector-net/array-variable indexing) is
+    /// unrolled into a `Select`/`If` chain over every declared `k`, since there is still no
+    /// runtime-indexable-storage concept in the IR itself.
     var_arrays: HashMap<String, (i64, i64)>,
 }
 
@@ -455,6 +478,20 @@ impl Elaborator<'_> {
                     self.const_eval(*else_)
                 }
             }
+            // `$simparam("name", default)` folds to `default` here exactly as `lower_expr`
+            // folds it in the analog block (v0 has no simulator-parameter store, so the queried
+            // name is never actually looked up) — a parameter default is just as legitimate a
+            // place for this idiom as an ordinary expression (`external/bsim6.0.va`:
+            // `parameter real GMIN = $simparam("gmin", 1.0e-15);`). Without a default it's still
+            // an error, matching the LRM's behavior for an unknown simulator parameter.
+            ExprAst::SysFunc { name, args } if name == "simparam" => match args.get(1) {
+                Some(&default) => self.const_eval(default),
+                None => Err(elab(
+                    "$simparam without a default: the parameter is unknown in v0 (no simulator \
+                     parameters)"
+                        .to_string(),
+                )),
+            },
             ExprAst::SysFunc { name, .. } => Err(elab(format!(
                 "system function `${name}` is not constant in a parameter context"
             ))),
@@ -621,9 +658,28 @@ impl Elaborator<'_> {
             // System tasks (`$strobe`, `$finish`, …) have no effect on a DC solve.
             Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
             Stmt::Contribute { target, value } => {
-                let target = self.lower_access(target)?;
-                let value = self.lower_expr(*value)?;
-                Ok(va_ir::Stmt::Contribute { target, value })
+                // Constant/genvar-indexed terminals (or none at all) resolve straight to a
+                // single fixed branch, as always. A runtime-indexed vector-net terminal
+                // (§ dynamic vector-net/array-variable indexing) has no single `BranchId` to
+                // contribute to, so it's unrolled into an if/else-if chain instead — one
+                // `Stmt::Contribute` per declared index, guarded by `index == k`.
+                match self.dynamic_terminal_range(&target.args)? {
+                    None => {
+                        let t = self.lower_access(target)?;
+                        let v = self.lower_expr(*value)?;
+                        Ok(va_ir::Stmt::Contribute {
+                            target: t,
+                            value: v,
+                        })
+                    }
+                    Some(dyn_term) => {
+                        let kind = match target.kind {
+                            ast::AccessKind::Potential => AccessKind::Potential,
+                            ast::AccessKind::Flow => AccessKind::Flow,
+                        };
+                        self.unroll_indexed_contribute(kind, dyn_term, &target.args, *value)
+                    }
+                }
             }
             Stmt::Assign { lhs, index, rhs } => {
                 // Restricted assignment (§ generate loops): a genvar may only be written by
@@ -637,17 +693,27 @@ impl Elaborator<'_> {
                          it drives (restricted assignment)"
                     )));
                 }
-                let id = match index {
+                match index {
                     // `lhs[index] = rhs;`: one element of an array variable (§ array
-                    // variables), constant/genvar-indexed only.
-                    Some(idx_expr) => self.resolve_var_array_index(lhs, *idx_expr)?,
-                    None => *self
-                        .vars
-                        .get(lhs)
-                        .ok_or_else(|| elab(format!("assignment to unknown variable `{lhs}`")))?,
-                };
-                let rhs = self.lower_expr(*rhs)?;
-                Ok(va_ir::Stmt::Assign { lhs: id, rhs })
+                    // variables). A runtime index (§ dynamic vector-net/array-variable
+                    // indexing) can't resolve to a single `VarId`, so it unrolls into an
+                    // if/else-if chain instead — see `lower_indexed_var_write`.
+                    Some(idx_expr) if self.const_eval(*idx_expr).is_err() => {
+                        self.lower_indexed_var_write(lhs, *idx_expr, *rhs)
+                    }
+                    Some(idx_expr) => {
+                        let id = self.resolve_var_array_index(lhs, *idx_expr)?;
+                        let rhs = self.lower_expr(*rhs)?;
+                        Ok(va_ir::Stmt::Assign { lhs: id, rhs })
+                    }
+                    None => {
+                        let id = *self.vars.get(lhs).ok_or_else(|| {
+                            elab(format!("assignment to unknown variable `{lhs}`"))
+                        })?;
+                        let rhs = self.lower_expr(*rhs)?;
+                        Ok(va_ir::Stmt::Assign { lhs: id, rhs })
+                    }
+                }
             }
             Stmt::If { cond, then_, else_ } => {
                 let cond = self.lower_expr(*cond)?;
@@ -810,12 +876,10 @@ impl Elaborator<'_> {
                     return Err(elab(format!("unknown identifier `{name}`")));
                 }
             }
-            // `name[index]`: one element of an array variable (§ array variables), read via
-            // the same constant/genvar-indexed resolution as an assignment target.
-            ExprAst::IndexedIdent(name, index) => {
-                let id = self.resolve_var_array_index(name, *index)?;
-                Expr::Var(id)
-            }
+            // `name[index]`: one element of an array variable (§ array variables). Constant/
+            // genvar indices resolve directly; a runtime index (§ dynamic vector-net/array-
+            // variable indexing) expands into a `Select` chain — see `lower_indexed_var_read`.
+            ExprAst::IndexedIdent(name, index) => return self.lower_indexed_var_read(name, *index),
             ExprAst::SysFunc { name, args } if name == "simparam" => {
                 // `$simparam(param_name [, default])`: the queried parameter is always unknown
                 // in v0 (no simulator parameter store), so the call returns the `default`
@@ -957,7 +1021,7 @@ impl Elaborator<'_> {
                     "a string literal is only valid as a system-task argument".to_string(),
                 ))
             }
-            ExprAst::Probe(access) => Expr::Probe(self.lower_access(access)?),
+            ExprAst::Probe(access) => return self.lower_probe_expr(access),
             ExprAst::Call { name, args } if name == "analysis" => {
                 // `analysis("name", …)` queries the current analysis. v0 is DC-only, so it
                 // folds to a constant: true for the DC/operating-point phases.
@@ -1115,19 +1179,32 @@ impl Elaborator<'_> {
         } else {
             self.reference_node()
         };
+        Ok(self.intern_branch(p, n))
+    }
+
+    /// Intern (or look up) the branch between an already-resolved terminal pair. Extracted out
+    /// of [`Self::resolve_branch`] so a runtime-indexed vector-net access (§ dynamic vector-net
+    /// indexing) can build one branch per candidate index of its expansion chain without
+    /// re-deriving `p`/`n` from an `ast::NetArg` each time.
+    fn intern_branch(&mut self, p: NodeId, n: NodeId) -> BranchId {
         let key = (p.0, n.0);
         if let Some(id) = self.branches.get(&key) {
-            return Ok(*id);
+            return *id;
         }
         let id = BranchId(self.out.branches.len() as u32);
         self.out.branches.push(Branch { p, n });
         self.branches.insert(key, id);
-        Ok(id)
+        id
     }
 
     /// Resolve one [`ast::NetArg`] terminal to its [`NodeId`]: a plain net name, or one element
-    /// of a vector net selected by a genvar expression (§ vector nets), bounds-checked against
-    /// its declared `[msb:lsb]` range.
+    /// of a vector net selected by a compile-time-constant or genvar expression (§ vector
+    /// nets), bounds-checked against its declared `[msb:lsb]` range. A genuinely runtime index
+    /// (§ dynamic vector-net/array-variable indexing) is not resolvable to a single `NodeId`
+    /// here at all — that case is detected earlier, by [`Self::dynamic_terminal_range`], and
+    /// routed to [`Self::lower_probe_expr`]/[`Self::unroll_indexed_contribute`] instead, which
+    /// call [`Self::resolve_vector_node_at`] (this method's constant-index tail, factored out)
+    /// once per candidate index rather than once for a single statically-known one.
     fn resolve_net_arg(&mut self, arg: &ast::NetArg) -> Result<NodeId, FrontendError> {
         match arg.index {
             None => {
@@ -1143,45 +1220,238 @@ impl Elaborator<'_> {
                     .ok_or_else(|| elab(format!("unknown net `{}` in branch access", arg.name)))
             }
             Some(idx_expr) => {
-                let (lo, hi) = *self.vectors.get(&arg.name).ok_or_else(|| {
-                    elab(format!(
-                        "`{}` is not a vector net (no bracketed `[msb:lsb]` range declared)",
-                        arg.name
-                    ))
-                })?;
                 let idx = self.const_eval_int(idx_expr, "vector index")?;
-                if idx < lo || idx > hi {
-                    return Err(elab(format!(
-                        "index {idx} is out of `{}`'s declared range [{lo}:{hi}]",
-                        arg.name
-                    )));
-                }
-                let key = format!("{}[{idx}]", arg.name);
-                self.nodes.get(&key).copied().ok_or_else(|| {
-                    elab(format!(
-                        "internal error: vector node `{key}` was not interned"
-                    ))
-                })
+                self.resolve_vector_node_at(&arg.name, idx)
             }
         }
     }
 
+    /// Resolve one already-known index `idx` of a declared vector net `name` to its [`NodeId`],
+    /// bounds-checked against the vector's declared range. The constant-index tail of
+    /// [`Self::resolve_net_arg`], factored out so a runtime-indexed access's expansion chain
+    /// (§ dynamic vector-net/array-variable indexing) can resolve each concrete candidate index
+    /// without an `ExprRef` for a literal — there is none, since a literal loop index doesn't
+    /// come from the source AST.
+    fn resolve_vector_node_at(&self, name: &str, idx: i64) -> Result<NodeId, FrontendError> {
+        let (lo, hi) = *self.vectors.get(name).ok_or_else(|| {
+            elab(format!(
+                "`{name}` is not a vector net (no bracketed `[msb:lsb]` range declared)"
+            ))
+        })?;
+        if idx < lo || idx > hi {
+            return Err(elab(format!(
+                "index {idx} is out of `{name}`'s declared range [{lo}:{hi}]"
+            )));
+        }
+        let key = format!("{name}[{idx}]");
+        self.nodes.get(&key).copied().ok_or_else(|| {
+            elab(format!(
+                "internal error: vector node `{key}` was not interned"
+            ))
+        })
+    }
+
+    /// If `args` has exactly one terminal whose base name is a declared vector net and whose
+    /// index expression is present but not a compile-time constant (an ordinary runtime
+    /// variable, e.g. an `integer` loop counter — confirmed needed by
+    /// `adc_16bit_ideal.va`/`dac_16bit_ideal.va`'s bit-serialization loops), return it. Returns
+    /// `Ok(None)` for the ordinary case (every index constant-resolvable, or no index at all),
+    /// which the caller falls through to the existing `resolve_branch`/`lower_access` path for
+    /// unchanged. A *second* dynamically-indexed terminal in the same access (`V(a[i], b[j])`
+    /// with both `i`/`j` runtime) is left to `resolve_net_arg`'s ordinary error path rather than
+    /// expanded into an O(range²) chain here — not evidenced anywhere in the corpus, and
+    /// CLAUDE.md's scope discipline argues against building for a case nothing needs yet.
+    fn dynamic_terminal_range(
+        &self,
+        args: &[ast::NetArg],
+    ) -> Result<Option<DynamicTerminal>, FrontendError> {
+        for (pos, arg) in args.iter().enumerate() {
+            if let Some(idx_expr) = arg.index {
+                if self.const_eval(idx_expr).is_err() {
+                    let (lo, hi) = *self.vectors.get(&arg.name).ok_or_else(|| {
+                        elab(format!(
+                            "`{}` is not a vector net (no bracketed `[msb:lsb]` range declared)",
+                            arg.name
+                        ))
+                    })?;
+                    return Ok(Some(DynamicTerminal {
+                        pos,
+                        name: arg.name.clone(),
+                        idx_expr,
+                        lo,
+                        hi,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Lower a `V(...)`/`I(...)` probe to an `Expr`. The common case (every terminal's index,
+    /// if any, is compile-time-constant/genvar) resolves directly to a single `Expr::Probe` via
+    /// `lower_access`. When exactly one terminal is a vector-net access indexed by a genuinely
+    /// runtime expression, there is no single `BranchId` to probe — a branch is a fixed `(p, n)`
+    /// pair resolved once at elaboration — so this expands into a nested `Expr::Select` chain
+    /// instead, one arm per declared index of the vector, guarded by `index == k`, each arm
+    /// probing the concrete branch for that index. The LRM requires a vector net's *declared
+    /// range* to be static, not that the selecting index be — nothing here contradicts that.
+    /// The statement-level sibling of this (a runtime-indexed *contribution target*, which
+    /// can't be an expression at all) is [`Self::unroll_indexed_contribute`].
+    ///
+    /// **Limitation**: the chain's final (unconditional) arm is index `hi`. A runtime index
+    /// that falls outside the vector's declared range at simulation time silently resolves to
+    /// that arm rather than erroring — there is no runtime-error concept in this IR/ABI. Every
+    /// corpus model driving this path bounds its loop to the array's own declared range, so the
+    /// fallback arm is never actually reached in practice.
+    fn lower_probe_expr(&mut self, access: &ast::Access) -> Result<ExprId, FrontendError> {
+        let Some(dyn_term) = self.dynamic_terminal_range(&access.args)? else {
+            let a = self.lower_access(access)?;
+            return Ok(self.out.push_expr(Expr::Probe(a)));
+        };
+        let DynamicTerminal {
+            pos,
+            name,
+            idx_expr,
+            lo,
+            hi,
+        } = dyn_term;
+        let kind = match access.kind {
+            ast::AccessKind::Potential => AccessKind::Potential,
+            ast::AccessKind::Flow => AccessKind::Flow,
+        };
+        let idx = self.lower_expr(idx_expr)?;
+        let other = if access.args.len() >= 2 {
+            Some(self.resolve_net_arg(&access.args[1 - pos])?)
+        } else {
+            None
+        };
+        let mut chain: Option<ExprId> = None;
+        for k in (lo..=hi).rev() {
+            let node_k = self.resolve_vector_node_at(&name, k)?;
+            let (p, n) = if pos == 0 {
+                let n = match other {
+                    Some(n) => n,
+                    None => self.reference_node(),
+                };
+                (node_k, n)
+            } else {
+                (
+                    other.expect("a dynamically-indexed second terminal implies a first one"),
+                    node_k,
+                )
+            };
+            let branch = self.intern_branch(p, n);
+            let probe = self.out.push_expr(Expr::Probe(Access { kind, branch }));
+            chain = Some(match chain {
+                None => probe,
+                Some(rest) => {
+                    let k_const = self.out.push_expr(Expr::Const(k as f64));
+                    let cond = self
+                        .out
+                        .push_expr(Expr::Binary(va_ir::BinOp::Eq, idx, k_const));
+                    self.out.push_expr(Expr::Select(cond, probe, rest))
+                }
+            });
+        }
+        Ok(chain.expect("a declared vector net's range is always non-empty"))
+    }
+
+    /// Statement-level sibling of [`Self::lower_probe_expr`]: `V(vec[j]) <+ value;` where `j`
+    /// is a genuinely runtime expression expands into an if/else-if chain, one
+    /// `Stmt::Contribute` per declared index of the vector, guarded by `j == k`. `value` is
+    /// lowered once, up front, and the resulting `ExprId` is shared across every arm — safe
+    /// because it's a pure arena reference, not a re-evaluation, and (if `value` itself reads
+    /// the same runtime index, as `out_val[j]` does in `adc_16bit_ideal.va`) it stays
+    /// self-consistent with the guard: the same `j` value that selects an arm here has already
+    /// selected the matching arm of `value`'s own `Expr::Select` chain.
+    fn unroll_indexed_contribute(
+        &mut self,
+        kind: AccessKind,
+        dyn_term: DynamicTerminal,
+        args: &[ast::NetArg],
+        value: ExprRef,
+    ) -> Result<va_ir::Stmt, FrontendError> {
+        let DynamicTerminal {
+            pos,
+            name,
+            idx_expr,
+            lo,
+            hi,
+        } = dyn_term;
+        let name = name.as_str();
+        let idx = self.lower_expr(idx_expr)?;
+        let value = self.lower_expr(value)?;
+        let other = if args.len() >= 2 {
+            Some(self.resolve_net_arg(&args[1 - pos])?)
+        } else {
+            None
+        };
+        let mut chain: Option<va_ir::Stmt> = None;
+        for k in (lo..=hi).rev() {
+            let node_k = self.resolve_vector_node_at(name, k)?;
+            let (p, n) = if pos == 0 {
+                let n = match other {
+                    Some(n) => n,
+                    None => self.reference_node(),
+                };
+                (node_k, n)
+            } else {
+                (
+                    other.expect("a dynamically-indexed second terminal implies a first one"),
+                    node_k,
+                )
+            };
+            let branch = self.intern_branch(p, n);
+            let contribute = va_ir::Stmt::Contribute {
+                target: Access { kind, branch },
+                value,
+            };
+            chain = Some(match chain {
+                None => contribute,
+                Some(rest) => {
+                    let k_const = self.out.push_expr(Expr::Const(k as f64));
+                    let cond = self
+                        .out
+                        .push_expr(Expr::Binary(va_ir::BinOp::Eq, idx, k_const));
+                    va_ir::Stmt::If {
+                        cond,
+                        then_: vec![contribute],
+                        else_: vec![rest],
+                    }
+                }
+            });
+        }
+        Ok(chain.expect("a declared vector net's range is always non-empty"))
+    }
+
     /// Resolve one element of an array variable (§ array variables) to its [`VarId`] — the
     /// `VarId` counterpart of [`Self::resolve_net_arg`]'s vector-net indexing. `index_expr`
-    /// must be a compile-time-constant or genvar expression: `const_eval_int` naturally rejects
-    /// a genuinely runtime index (an ordinary loop variable, say) with "not a compile-time
-    /// constant in this context" — there is no separate check needed for that restriction.
+    /// must be a compile-time-constant or genvar expression; a genuinely runtime index
+    /// (§ dynamic vector-net/array-variable indexing) is not resolvable to a single `VarId`
+    /// here — that case is detected earlier and routed to
+    /// [`Self::lower_indexed_var_read`]/[`Self::lower_indexed_var_write`] instead, which call
+    /// [`Self::resolve_array_var_at`] (this method's constant-index tail, factored out) once
+    /// per candidate index.
     fn resolve_var_array_index(
         &mut self,
         name: &str,
         index_expr: ExprRef,
     ) -> Result<VarId, FrontendError> {
+        let idx = self.const_eval_int(index_expr, "array variable index")?;
+        self.resolve_array_var_at(name, idx)
+    }
+
+    /// Resolve one already-known index `idx` of a declared array variable `name` to its
+    /// [`VarId`], bounds-checked against the array's declared range. The constant-index tail of
+    /// [`Self::resolve_var_array_index`], factored out for the same reason as
+    /// [`Self::resolve_vector_node_at`] is: a runtime-indexed expansion chain needs to resolve
+    /// several concrete literal indices, none of which have an `ExprRef` of their own.
+    fn resolve_array_var_at(&self, name: &str, idx: i64) -> Result<VarId, FrontendError> {
         let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
             elab(format!(
                 "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
             ))
         })?;
-        let idx = self.const_eval_int(index_expr, "array variable index")?;
         if idx < lo || idx > hi {
             return Err(elab(format!(
                 "index {idx} is out of `{name}`'s declared range [{lo}:{hi}]"
@@ -1193,6 +1463,90 @@ impl Elaborator<'_> {
                 "internal error: array variable node `{key}` was not interned"
             ))
         })
+    }
+
+    /// Lower `name[index]` (one element of an array variable, § array variables) to an
+    /// `Expr`. The common case (`index` compile-time-constant/genvar) resolves directly to the
+    /// concrete element's `Expr::Var`. When `index` is a genuinely runtime expression (an
+    /// ordinary `integer` loop counter, say — confirmed needed by
+    /// `adc_16bit_ideal.va`/`dac_16bit_ideal.va`), there is no single `VarId` to read at
+    /// elaboration time; expand into a nested `Expr::Select` chain instead, one arm per
+    /// declared index, guarded by `index == k` — the expression-level sibling of
+    /// [`Self::lower_indexed_var_write`]'s statement-level `If` chain, and structurally
+    /// identical to [`Self::lower_probe_expr`]'s (same fallback-arm limitation: an
+    /// out-of-declared-range runtime index resolves to the `hi` arm rather than erroring, since
+    /// there is no runtime-error concept in this IR/ABI).
+    fn lower_indexed_var_read(
+        &mut self,
+        name: &str,
+        index_expr: ExprRef,
+    ) -> Result<ExprId, FrontendError> {
+        if self.const_eval(index_expr).is_ok() {
+            let id = self.resolve_var_array_index(name, index_expr)?;
+            return Ok(self.out.push_expr(Expr::Var(id)));
+        }
+        let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
+            elab(format!(
+                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
+            ))
+        })?;
+        let idx = self.lower_expr(index_expr)?;
+        let mut chain: Option<ExprId> = None;
+        for k in (lo..=hi).rev() {
+            let id = self.resolve_array_var_at(name, k)?;
+            let read = self.out.push_expr(Expr::Var(id));
+            chain = Some(match chain {
+                None => read,
+                Some(rest) => {
+                    let k_const = self.out.push_expr(Expr::Const(k as f64));
+                    let cond = self
+                        .out
+                        .push_expr(Expr::Binary(va_ir::BinOp::Eq, idx, k_const));
+                    self.out.push_expr(Expr::Select(cond, read, rest))
+                }
+            });
+        }
+        Ok(chain.expect("a declared array variable's range is always non-empty"))
+    }
+
+    /// Statement-level sibling of [`Self::lower_indexed_var_read`]: `name[index] = rhs;` where
+    /// `index` is a genuinely runtime expression expands into an if/else-if chain, one
+    /// `Stmt::Assign` per declared index, guarded by `index == k`. `rhs` is lowered once, up
+    /// front, and shared across every arm (same reasoning as
+    /// [`Self::unroll_indexed_contribute`]'s shared `value`).
+    fn lower_indexed_var_write(
+        &mut self,
+        name: &str,
+        index_expr: ExprRef,
+        rhs: ExprRef,
+    ) -> Result<va_ir::Stmt, FrontendError> {
+        let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
+            elab(format!(
+                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
+            ))
+        })?;
+        let idx = self.lower_expr(index_expr)?;
+        let rhs = self.lower_expr(rhs)?;
+        let mut chain: Option<va_ir::Stmt> = None;
+        for k in (lo..=hi).rev() {
+            let id = self.resolve_array_var_at(name, k)?;
+            let assign = va_ir::Stmt::Assign { lhs: id, rhs };
+            chain = Some(match chain {
+                None => assign,
+                Some(rest) => {
+                    let k_const = self.out.push_expr(Expr::Const(k as f64));
+                    let cond = self
+                        .out
+                        .push_expr(Expr::Binary(va_ir::BinOp::Eq, idx, k_const));
+                    va_ir::Stmt::If {
+                        cond,
+                        then_: vec![assign],
+                        else_: vec![rest],
+                    }
+                }
+            });
+        }
+        Ok(chain.expect("a declared array variable's range is always non-empty"))
     }
 
     /// The implicit global reference node, created on first single-terminal access.
@@ -1837,6 +2191,26 @@ mod tests {
     }
 
     #[test]
+    fn simparam_folds_to_default_in_a_parameter_default_too() {
+        // `external/bsim6.0.va`: `parameter real GMIN = $simparam("gmin", 1.0e-15);` — the same
+        // fold `$simparam` gets in the analog block must also work in a parameter's own default
+        // expression, which is evaluated by the separate, non-mutating `const_eval`.
+        let m = elaborate_src(
+            r#"module t(a, b); parameter real GMIN = $simparam("gmin", 1.0e-15); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#,
+        );
+        assert!(m
+            .params
+            .iter()
+            .any(|p| p.name == "GMIN" && p.default == 1.0e-15));
+
+        // Without a default, still an error in a parameter context too.
+        let src = r#"module t(a, b); parameter real GMIN = $simparam("gmin"); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#;
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
     fn transition_folds_to_its_value_argument() {
         // `transition(V(a,b), td, tr, tf)` settles to its input in DC steady state, so it
         // folds transparently to `V(a,b)` — no `Call` node survives into the IR at all (the
@@ -2265,22 +2639,79 @@ mod tests {
     }
 
     #[test]
-    fn array_variable_runtime_index_is_rejected_with_a_clear_error() {
-        // The real-corpus gap this was written against: `out_val[j]` where `j` is an ordinary
-        // *runtime* `integer` (not a genvar or a constant) has no sound compile-time resolution
-        // in this IR — `const_eval_int` rejects it the same way it would reject any other
-        // non-constant expression in this context, giving a specific, honest error rather than
-        // silently doing the wrong thing.
-        let src = "module t(a); electrical a; real out_val[0:15]; integer j; \
+    fn array_variable_runtime_index_expands_to_a_select_chain() {
+        // § dynamic vector-net/array-variable indexing: `out_val[j]` where `j` is an ordinary
+        // *runtime* `integer` (not a genvar or a constant) has no single `VarId` to read at
+        // elaboration time, so it expands into a nested `Expr::Select` chain, one arm per
+        // declared index of the array, guarded by `j == k` — the real-corpus idiom this closes
+        // (`external/verilogaLib-master/adc_16bit_ideal.va`'s bit-serialization loop).
+        let src = "module t(a); electrical a; real out_val[0:3]; integer j; \
                    analog begin j = 3; I(a) <+ out_val[j]; end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks).expect("parse");
-        match elaborate(&ast) {
-            Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("compile-time constant"),
-                "expected a compile-time-constant-specific message, got: {msg}"
-            ),
-            other => panic!("expected an elaboration error, got {other:?}"),
+        let m = elaborate(&ast).expect("elaborates");
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(m.expr(value), va_ir::Expr::Select(_, _, _)));
+        // Every one of the array's 4 declared elements is read somewhere in the chain (the
+        // chain also reads `j` itself, once, as each arm's comparison target — filter by name
+        // rather than raw count).
+        let read_names: std::collections::HashSet<_> = m
+            .exprs
+            .iter()
+            .filter_map(|e| match e {
+                va_ir::Expr::Var(id) => Some(m.vars[id.0 as usize].name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for k in 0..4 {
+            assert!(
+                read_names.contains(format!("out_val[{k}]").as_str()),
+                "missing read of out_val[{k}] in {read_names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn array_variable_runtime_write_expands_to_an_if_chain() {
+        // Statement-level sibling of the read case: `out_val[j] = v;` with a runtime `j`
+        // expands into an if/else-if chain, one `Stmt::Assign` per declared index.
+        let m = elaborate_src(
+            "module t(a); electrical a; real out_val[0:3]; integer j; \
+             analog begin j = 2; out_val[j] = 5.0; I(a) <+ out_val[0]; end endmodule",
+        );
+        match &m.analog[1] {
+            va_ir::Stmt::If { then_, else_, .. } => {
+                assert!(matches!(then_.as_slice(), [va_ir::Stmt::Assign { .. }]));
+                assert!(matches!(else_.as_slice(), [va_ir::Stmt::If { .. }]));
+            }
+            other => panic!("expected an if/else-if chain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vector_net_runtime_index_probe_expands_to_a_select_chain() {
+        // The other half of the same real-corpus gap: `V(in[i])`/`V(out[j]) <+ ...` with a
+        // runtime index (`external/verilogaLib-master/dac_16bit_ideal.va`,
+        // `adc_16bit_ideal.va`). A probe read expands into nested `Select`s of `Probe`s; a
+        // contribution target expands into an if/else-if chain of `Contribute`s.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b, bus[0:1]; integer i; \
+             analog begin i = 1; I(a, b) <+ V(bus[i]); V(bus[i]) <+ V(a, b); end endmodule",
+        );
+        let read_value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(m.expr(read_value), va_ir::Expr::Select(_, _, _)));
+        match &m.analog[2] {
+            va_ir::Stmt::If { then_, else_, .. } => {
+                assert!(matches!(then_.as_slice(), [va_ir::Stmt::Contribute { .. }]));
+                assert!(matches!(else_.as_slice(), [va_ir::Stmt::Contribute { .. }]));
+            }
+            other => panic!("expected an if/else-if chain, got {other:?}"),
         }
     }
 

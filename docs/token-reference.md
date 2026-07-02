@@ -151,10 +151,16 @@ class of lexemes.
   never the point itself, and this project's stateless `ModelInstance::load` ABI has no
   previous-iteration history to limit against in the first place (see `va-core/src/convergence.rs`
   and `docs/roadmap.md`); anything else reachable as a `Stmt::Task` (`$strobe`, `$finish`, …) is
-  parsed but elaborates to a no-op.
+  parsed but elaborates to a no-op. `$simparam` gets its default-argument fold in *two* places,
+  not one: `lower_expr` (the dynamic analog-block path) and the separate, non-mutating
+  `const_eval` (the parameter-default/range/genvar-bound constant-folding path) — a real model
+  can default a parameter directly from `$simparam` (`external/bsim6.0.va`:
+  `parameter real GMIN = $simparam("gmin", 1.0e-15);`), and the two evaluators don't share code,
+  so the fold has to be taught to both explicitly.
 - **Structural and Analog Usage**: Analog-block only — `$vt`/`$temperature`/`$simparam`/
   `$mfactor`/`$param_given`/`$port_connected`/`$limit` appear in expressions, `$strobe`-class
-  calls are statements. None of these are meaningful at module (structural) scope.
+  calls are statements. `$simparam` is the one exception to "analog-block only": it is also legal
+  (and, per the corpus, common) in a parameter's own default expression.
 - **Comparison with Traditional Constructs**: The closest C analogue is a compiler
   intrinsic/builtin (`__builtin_...`) or an environment query (`getenv`) — a name that isn't a
   user function but is still called with ordinary call syntax. Digital Verilog's `$display`
@@ -1232,41 +1238,53 @@ The `real`/`integer` counterpart of §2.2/§2.18's vector nets, added once the r
 integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = high; ... end`.
 
 - **Purpose and Static Nature**: The *declaration* is elaboration-only (interning one `VarId`
-  per index, exactly like a vector net interns one `NodeId` per index). An *access*'s index
-  must be elaboration-time-constant or genvar-derived — there is no runtime-indexed array/memory
-  concept anywhere in this IR (unlike full Verilog-A/digital Verilog's `reg [7:0] mem [0:255];`,
-  which genuinely is indexable by an arbitrary runtime value). Reading/writing the *resolved*
-  element, once its `VarId` is known, is simulation-time like any other variable.
+  per index, exactly like a vector net interns one `NodeId` per index). An access's index is
+  either elaboration-time-constant/genvar-derived (resolves directly to that one `VarId`,
+  simulation-time-dynamic only in the ordinary "which value does the variable hold" sense) or a
+  genuinely runtime expression (§ dynamic vector-net/array-variable indexing, fixed
+  2026-07-02) — the direct real-corpus idiom above (`digital = integer(...); for (i=0; i<N;
+  i=i+1) begin ... out_val[i] = ...; end`) uses an ordinary `integer` loop variable, not a
+  `genvar`. There is still no runtime-indexable-*storage* concept in the IR itself (unlike full
+  Verilog-A/digital Verilog's `reg [7:0] mem [0:255];`) — a runtime index is instead resolved by
+  *elaboration-time unrolling into every statically-known candidate*, guarded by an equality
+  check against the actual runtime value, which is sound precisely because the array's range is
+  always static.
 - **Declaration and Assignment**: `real|integer name[msb:lsb], name2, ...;` — only the
   per-identifier suffix form (§2.2's `NetDecl`-style prefix-range form doesn't apply to
   `real`/`integer`, which have no bit-width concept to prefix). `name[index_expr] = rhs;`
   assigns one element (`Stmt::Assign.index: Option<ExprRef>`); `name[index_expr]` reads one
   (`ExprAst::IndexedIdent`) — both share the AST-level index-parsing helper vector-net access
   uses (`parse_optional_index`).
-- **Expressions and Evaluation**: `index_expr` is evaluated by `const_eval_int` and
-  bounds-checked against the array's declared `(lo, hi)`, identically to a vector net's index
-  (`resolve_var_array_index`, the `VarId` counterpart of `resolve_net_arg`). Critically, this
-  means a genuinely dynamic index — an ordinary runtime `integer` loop variable, say — is
-  rejected with `const_eval`'s existing "`{name}` is not a compile-time constant in this
-  context" message, for free: no separate "is this actually constant" check was needed, because
-  the same evaluator that resolves a vector-net index or a genvar loop bound already enforces it.
+- **Expressions and Evaluation**: A constant/genvar index is evaluated by `const_eval_int` and
+  bounds-checked against the array's declared `(lo, hi)` (`resolve_var_array_index`, thinly
+  wrapping `resolve_array_var_at`, the constant-index tail also used by the runtime-index path
+  below). A genuinely runtime index — detected by probing `const_eval(index_expr)` and checking
+  whether it errors, *without* propagating that error — routes instead to
+  `lower_indexed_var_read`/`lower_indexed_var_write`: a **read** (`out_val[j]` in an expression)
+  expands into a nested `Expr::Select` chain, one arm per declared index `k`, each guarded by
+  `j == k`, bottoming out at the unconditional `hi` arm; a **write** (`out_val[j] = rhs;`)
+  expands the same way into an if/else-if chain of `Stmt::Assign`s. `rhs`/the read index are each
+  lowered exactly once and the resulting `ExprId` shared across every arm — not re-lowered per
+  arm — so the expansion costs `O(range)` arena nodes, not `O(range)` re-evaluations of a
+  possibly-expensive sub-expression. **Limitation**: a runtime index outside the array's declared
+  range at simulation time silently resolves to the `hi` arm rather than erroring — there is no
+  runtime-error concept in this IR/ABI; every corpus model driving this path bounds its own loop
+  to the array's declared range, so the fallback is never actually reached in practice.
 - **Structural and Analog Usage**: Declaration is module-level only (`Item::Var`); a block-local
   attempt (`Stmt::VarDecl`) is rejected with a specific error — by the time the analog-block
   pass runs, module-level declarations are already finalized, so there is nowhere sound left to
-  register an array's nodes into. Indexed access (read or write) is analog-block only, typically
-  inside a genvar-driven `for` (§2.14) — the direct real-corpus idiom above.
-- **Comparison with Traditional Constructs**: Same comparison as §2.18's vector nets — a C array
-  restricted to a `constexpr`/genvar-derived index. The gap from a *true* Verilog-A array
-  variable (which does allow a runtime index, like a C array or a digital `reg` memory) is the
-  same gap noted for vector nets: this project's `VarId`/`NodeId` model has no
-  runtime-indexable-storage concept at all, so the constant/genvar-only restriction is a
-  necessary simplification here, not a faithful implementation of the full language — recorded
-  as a backlog item in `roadmap.md`, not silently passed off as complete. Confirmed live by the
-  real corpus once vector *ports* started resolving (§2.18): both
+  register an array's nodes into. Indexed access (read or write) is analog-block only, whether
+  behind a genvar-driven `for` (§2.14, constant path) or an ordinary runtime `for`/`while`
+  (dynamic path).
+- **Comparison with Traditional Constructs**: The constant/genvar path is a C array restricted
+  to a `constexpr`/genvar-derived index. The runtime path has no direct C analogue — it isn't a
+  runtime-indexed array read at all under the hood, but a compile-time-unrolled `switch`/chained
+  `if` over every statically-known index, closer to how a C compiler might *implement* a small,
+  bounded-range switch than to how a programmer would *write* one; a real Verilog-A/digital
+  `reg`-memory read is a single indexed load, not an unrolled comparison chain. Confirmed live
+  by the real corpus once vector *ports* started resolving (§2.18): both
   `dac_16bit_ideal.va`/`adc_16bit_ideal.va` index their vector nets/arrays with a plain
-  `integer` loop variable (not a `genvar`), so both still fail — now specifically on "`i` is not
-  a compile-time constant in this context" — which is the honest error this design promised,
-  not a silent wrong answer.
+  `integer` loop variable, and both now elaborate cleanly end to end.
 
 ## 2.3 Direction declaration
 
@@ -1274,11 +1292,10 @@ integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = h
   the direction-declaration site too (again, the LRM's own DAC example: `input [0:width-1] in;`
   alongside the matching `electrical [0:width-1] in;`). This is parsed and discarded — purely
   informational here, since the real range comes from the paired net declaration (§2.2) — so
-  real-world vector-port headers now parse instead of failing on the bracket. What still doesn't
-  work is the port *itself* being a vector: `va_ir::Module::ports` is one `NodeId` per port, with
-  no vector-port representation and no `va-netlist` wiring convention for one, so elaboration
-  rejects a vector port with a specific, honest error (`resolve_ports`) rather than silently
-  doing the wrong thing — see §2.18's "known gap" note.
+  real-world vector-port headers now parse instead of failing on the bracket. The port *itself*
+  being a vector is fully supported (fixed 2026-07-02): `va_ir::Module::ports` is
+  `Vec<Vec<NodeId>>`, one entry per declared port, holding all of a wide port's nodes — see
+  §2.18's "Vector ports (fixed)" note for the full account.
 - Otherwise covered fully in Part 1 §1.4 (`Input`/`Output`/`Inout`) — the grammar itself is just
   `direction name, ... ;`, with no additional production beyond the token dispatch.
 
@@ -1454,27 +1471,41 @@ as an ordinary loop.
 
 ## 2.18 Vector net declaration & indexed access (`bus[i]`)
 
-- **Purpose and Static Nature**: The *declaration* is elaboration-only (interning nodes); an
-  *access*'s index must itself be elaboration-time-constant (LRM §5.5.2: "The index must be a
-  constant expression, though it may include genvar variables") even though the access itself
-  (which node's voltage/current) is a simulation-time read/write.
+- **Purpose and Static Nature**: The *declaration* is elaboration-only (interning nodes). An
+  *access*'s index is either elaboration-time-constant/genvar-derived (LRM §5.5.2's baseline:
+  "The index must be a constant expression, though it may include genvar variables") or a
+  genuinely runtime expression (§ dynamic vector-net/array-variable indexing, fixed
+  2026-07-02) — the access itself (which node's voltage/current) is always a simulation-time
+  read/write regardless of which kind of index selected it.
 - **Declaration and Assignment**: `electrical|thermal [msb:lsb] name;` (§2.2) declares the
   vector; `V(name[index_expr])` / `I(name[index_expr])` (or a bare `name[index_expr]` as either
   terminal of a two-terminal access) reads/writes one element. `NetArg { name, index:
   Option<ExprRef> }` is the AST representation shared by both branch-declaration terminals and
   access-function arguments.
-- **Expressions and Evaluation**: `index_expr` is evaluated by `const_eval_int` (requiring an
-  exactly-integral result, within `1e-9`) and bounds-checked against the vector's declared
-  `(lo, hi)` — an out-of-range or non-integral index is a hard elaboration error, not a runtime
-  condition. Attempting to access a declared vector net *without* an index, or to index a net
-  that was never declared as a vector, are both separately rejected with a specific message
-  (`resolve_net_arg`).
+- **Expressions and Evaluation**: A constant/genvar index is evaluated by `const_eval_int`
+  (requiring an exactly-integral result, within `1e-9`) and bounds-checked against the vector's
+  declared `(lo, hi)` (`resolve_net_arg`, thinly wrapping `resolve_vector_node_at`) — an
+  out-of-range or non-integral *constant* index is a hard elaboration error. A genuinely runtime
+  index is detected up front (`dynamic_terminal_range`, probing `const_eval` without propagating
+  its error) and handled entirely differently, since a `V(...)`/`I(...)` access ultimately
+  resolves to one fixed `BranchId` and there is no way for a single branch to "be" a runtime
+  choice among several: a probe **read** (`lower_probe_expr`) expands into a nested
+  `Expr::Select` chain of `Expr::Probe`s, one arm per declared index of the vector, guarded by
+  `index == k`; a **contribution target** (`unroll_indexed_contribute`) — which can't be an
+  expression at all, since `Stmt::Contribute`'s target is a fixed `Access` — expands the same way
+  into an if/else-if chain of `Stmt::Contribute`s instead. Both are structurally identical to
+  §2.2b's array-variable expansion (same shared-`ExprId`, same `hi`-arm-is-the-fallback
+  limitation for an out-of-range runtime index). Attempting to access a declared vector net
+  *without* an index, or to index a net that was never declared as a vector, are both still
+  separately rejected with a specific message.
 - **Structural and Analog Usage**: Declaration is module-level; indexed access is analog-block
-  only (typically inside a genvar-driven `for`, per §2.14, though a plain literal index like
-  `V(bus[2])` needs no genvar at all).
-- **Comparison with Traditional Constructs**: A C array subscript, restricted to a
-  compile-time-constant (or genvar-derived) index — closer to a C array indexed only by
-  `constexpr`/template-parameter values than to ordinary runtime C indexing.
+  only, whether behind a genvar-driven `for` (§2.14, constant path), a plain literal index like
+  `V(bus[2])` (needs no genvar at all), or an ordinary runtime `for`/`while` (dynamic path).
+- **Comparison with Traditional Constructs**: The constant/genvar path is a C array subscript
+  restricted to a `constexpr`/genvar-derived index. The runtime path — like §2.2b's array
+  variables — has no direct C analogue: it's a compile-time-unrolled chain over every
+  statically-known index rather than a single indexed load, since this project's `NodeId` model
+  has no runtime-indexable-storage concept to begin with.
 - **Vector ports (fixed)**: a vector *net* also listed in the module's port list now resolves
   fully — `va_ir::Module::ports` is `Vec<Vec<NodeId>>` (an Interface α change, §6), one entry
   per declared port, holding all of a vector port's nodes (ascending index order) rather than
@@ -1484,9 +1515,8 @@ as an ordinary loop.
   `build_instance`'s `terminals` argument), so this was low-blast-radius — three test fixtures
   needed a one-line update, nothing else. Real corpus files exercise this directly
   (`external/verilogaLib-master/dac_16bit_ideal.va`/`adc_16bit_ideal.va`, both declaring a
-  vector I/O port) — both now get past port resolution entirely and fail later, on the
-  runtime-indexed-access limitation below (which affects vector-net indexing exactly the same
-  way it affects array-variable indexing, §2.2b).
+  vector I/O port and both indexing it with a plain runtime `integer`, not a `genvar`) — both
+  now elaborate cleanly end to end, since the runtime-indexing gap above closed.
 
 ## 2.19 Event control (`@(...)`)
 
