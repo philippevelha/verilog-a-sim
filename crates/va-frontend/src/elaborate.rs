@@ -56,6 +56,19 @@
 //!   `lower_indexed_var_read`/`lower_indexed_var_write`. There is still no
 //!   runtime-indexable-*storage* concept in the IR; a runtime index outside the declared range
 //!   at simulation time silently resolves to the chain's last arm rather than erroring.
+//! - **Module instantiation** (§ module instantiation, LRM Annex C.8): [`Item::Instance`] is
+//!   resolved entirely here, not in the IR — [`elaborate_with_library`] recursively elaborates
+//!   the referenced submodule (as if it were standalone, with any `#(...)` overrides baked into
+//!   its parameter defaults) and `Elaborator::merge_submodule` inlines the result's arenas
+//!   into the instantiating module's own, aliasing the submodule's port nodes to whatever node
+//!   the parent wired them to. `va_ir::Module` therefore never represents hierarchy — one flat
+//!   module is still the only IR shape, matching its own doc comment. Scalar port connections
+//!   only (no vector-port fan-out); no module-item-level `generate` around instances. **A
+//!   submodule's own implicit ground** (interned by `Elaborator::reference_node` for
+//!   single-terminal `V(p)` shorthand) is *not* unified with the parent's or a sibling
+//!   instance's ground, since each submodule elaborates in its own arena — a model that needs
+//!   the true circuit reference node from inside a submodule must declare an explicit port for
+//!   it and have the instantiating parent wire that port to real ground, like any other port.
 
 use std::collections::HashMap;
 
@@ -66,15 +79,44 @@ use va_ir::{
     Function, Module, NodeDecl, NodeId, Param, ParamId, VarDecl, VarId,
 };
 
-/// Elaborate a parsed module into the IR.
+/// Elaborate a parsed module into the IR, with no submodule library — any [`Item::Instance`]
+/// it contains fails to resolve. Equivalent to [`elaborate_with_library`] with `ast` as its own
+/// sole library entry.
 ///
 /// # Errors
 ///
 /// Returns [`FrontendError::Elaborate`] on unresolved names, non-constant parameter
 /// expressions, or constructs outside the v0 subset.
 pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
+    elaborate_with_library(ast, std::slice::from_ref(ast))
+}
+
+/// Elaborate `ast` with `library` (every module parsed from the same compilation unit,
+/// including `ast` itself) available to resolve its [`Item::Instance`]s against (§ module
+/// instantiation). This is the entry point multi-module callers
+/// ([`crate::compile_with_includes`]) use, once per module in a file.
+///
+/// # Errors
+///
+/// As [`elaborate`], plus an unknown instantiated module name or an instantiation cycle.
+pub fn elaborate_with_library(
+    ast: &ModuleAst,
+    library: &[ModuleAst],
+) -> Result<Module, FrontendError> {
+    elaborate_inner(ast, library, &[], &HashMap::new())
+}
+
+fn elaborate_inner(
+    ast: &ModuleAst,
+    library: &[ModuleAst],
+    stack: &[String],
+    param_overrides: &HashMap<String, f64>,
+) -> Result<Module, FrontendError> {
     let mut e = Elaborator {
         ast,
+        library,
+        stack,
+        param_overrides,
         out: Module::new(&ast.name),
         nodes: HashMap::new(),
         params: HashMap::new(),
@@ -109,6 +151,16 @@ struct DynamicTerminal {
 
 struct Elaborator<'a> {
     ast: &'a ModuleAst,
+    /// Every module parsed from the same compilation unit (including `ast` itself), used to
+    /// resolve [`Item::Instance`] references (§ module instantiation).
+    library: &'a [ModuleAst],
+    /// Names of modules currently being elaborated further up the instantiation chain (parent,
+    /// grandparent, …), for cycle detection — does not include `ast.name` itself.
+    stack: &'a [String],
+    /// Parameter-name → overridden value, supplied by the instantiating parent's `#(...)` list
+    /// (empty when elaborating a top-level module). Consulted by [`Self::collect_params`] in
+    /// place of the AST default when present.
+    param_overrides: &'a HashMap<String, f64>,
     out: Module,
     nodes: HashMap<String, NodeId>,
     params: HashMap<String, ParamId>,
@@ -152,6 +204,10 @@ impl Elaborator<'_> {
         self.collect_functions()?;
         self.collect_var_decls()?;
         self.collect_vars()?;
+        // Every parent-scope naming environment (nodes, params, genvars, vars, branches,
+        // functions) is fully populated by this point, regardless of source order — so
+        // instances may freely appear before or after the parent constructs they connect to.
+        self.collect_instances()?;
         self.lower_analog()?;
         Ok(())
     }
@@ -392,6 +448,10 @@ impl Elaborator<'_> {
 
     // --- pass 2: parameters ----------------------------------------------------------
 
+    /// Resolve every declared parameter's value: the instantiating parent's `#(...)` override
+    /// (via [`Self::param_overrides`]) when present, else the AST default (§ module
+    /// instantiation) — either way validated against the declared `from` range, so an override
+    /// is held to the same bound as an ordinary default.
     fn collect_params(&mut self) -> Result<(), FrontendError> {
         for item in &self.ast.items {
             match item {
@@ -401,11 +461,28 @@ impl Elaborator<'_> {
                     range,
                     ..
                 } => {
-                    let default_val = self.const_eval(*default)?;
                     let (min, max) = match range {
                         Some(r) => (bound(self.const_eval(r.lo)?), bound(self.const_eval(r.hi)?)),
                         None => (None, None),
                     };
+                    let default_val = match self.param_overrides.get(name) {
+                        Some(&v) => v,
+                        None => self.const_eval(*default)?,
+                    };
+                    if let Some(min) = min {
+                        if default_val < min {
+                            return Err(elab(format!(
+                                "parameter `{name}` value {default_val} is below its declared minimum {min}"
+                            )));
+                        }
+                    }
+                    if let Some(max) = max {
+                        if default_val > max {
+                            return Err(elab(format!(
+                                "parameter `{name}` value {default_val} is above its declared maximum {max}"
+                            )));
+                        }
+                    }
                     let id = ParamId(self.out.params.len() as u32);
                     self.out.params.push(Param {
                         name: name.clone(),
@@ -1558,12 +1635,332 @@ impl Elaborator<'_> {
         self.ground = Some(id);
         id
     }
+
+    // --- pass: module instantiation (§ module instantiation) --------------------------
+
+    /// Resolve every [`Item::Instance`] in this module: recursively elaborate the referenced
+    /// submodule and inline it into `self.out` (see [`Self::inline_instance`]).
+    fn collect_instances(&mut self) -> Result<(), FrontendError> {
+        let mut seen_names = std::collections::HashSet::new();
+        for item in &self.ast.items {
+            if let Item::Instance {
+                module,
+                name,
+                params,
+                connections,
+            } = item
+            {
+                if !seen_names.insert(name.clone()) {
+                    return Err(elab(format!("duplicate instance name `{name}`")));
+                }
+                self.inline_instance(module, name, params, connections)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Elaborate `module_name` (from [`Self::library`]) as an independent module — with
+    /// `param_overrides` evaluated in *this* module's scope substituted for its parameter
+    /// defaults — then inline the result into `self.out` under the hierarchical namespace
+    /// `inst_name` (§ module instantiation).
+    fn inline_instance(
+        &mut self,
+        module_name: &str,
+        inst_name: &str,
+        param_overrides: &[(String, ExprRef)],
+        connections: &[ast::PortConn],
+    ) -> Result<(), FrontendError> {
+        if module_name == self.ast.name || self.stack.iter().any(|s| s == module_name) {
+            let mut chain: Vec<&str> = self.stack.iter().map(String::as_str).collect();
+            chain.push(&self.ast.name);
+            return Err(elab(format!(
+                "instantiation cycle: `{module_name}` (instantiated as `{inst_name}` inside \
+                 `{}`) already appears in the elaboration chain: {}",
+                self.ast.name,
+                chain.join(" -> ")
+            )));
+        }
+        let sub_ast = self
+            .library
+            .iter()
+            .find(|m| m.name == module_name)
+            .ok_or_else(|| {
+                elab(format!(
+                    "instance `{inst_name}` references unknown module `{module_name}` (no sibling \
+                 `module {module_name} ... endmodule` in this compilation unit)"
+                ))
+            })?;
+
+        let mut overrides: HashMap<String, f64> = HashMap::new();
+        for (pname, expr) in param_overrides {
+            overrides.insert(pname.clone(), self.const_eval(*expr)?);
+        }
+        for pname in overrides.keys() {
+            if !sub_ast
+                .items
+                .iter()
+                .any(|it| matches!(it, Item::Param { name, .. } if name == pname))
+            {
+                return Err(elab(format!(
+                    "instance `{inst_name}` overrides unknown parameter `{pname}` of module \
+                     `{module_name}`"
+                )));
+            }
+        }
+
+        let mut child_stack: Vec<String> = self.stack.to_vec();
+        child_stack.push(self.ast.name.clone());
+        let sub = elaborate_inner(sub_ast, self.library, &child_stack, &overrides)?;
+
+        if sub.ports.iter().any(|p| p.len() != 1) {
+            return Err(elab(format!(
+                "instance `{inst_name}` of `{module_name}`: vector port connections are not \
+                 supported (v1 scope limit)"
+            )));
+        }
+        if connections.len() != sub.ports.len() {
+            return Err(elab(format!(
+                "instance `{inst_name}` of `{module_name}` connects {} port(s), but the module \
+                 declares {}",
+                connections.len(),
+                sub.ports.len()
+            )));
+        }
+
+        let all_positional = connections
+            .iter()
+            .all(|c| matches!(c, ast::PortConn::Positional(_)));
+        let all_named = connections
+            .iter()
+            .all(|c| matches!(c, ast::PortConn::Named { .. }));
+        if !all_positional && !all_named {
+            return Err(elab(format!(
+                "instance `{inst_name}`: cannot mix positional and named port connections"
+            )));
+        }
+
+        let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
+        if all_positional {
+            for (i, conn) in connections.iter().enumerate() {
+                let ast::PortConn::Positional(net_arg) = conn else {
+                    unreachable!()
+                };
+                let parent_node = self.resolve_net_arg(net_arg)?;
+                node_map.insert(sub.ports[i][0], parent_node);
+            }
+        } else {
+            let mut covered = vec![false; sub_ast.ports.len()];
+            for conn in connections {
+                let ast::PortConn::Named { port, net } = conn else {
+                    unreachable!()
+                };
+                let idx = sub_ast
+                    .ports
+                    .iter()
+                    .position(|p| p == port)
+                    .ok_or_else(|| {
+                        elab(format!(
+                            "instance `{inst_name}` of `{module_name}`: no port named `{port}`"
+                        ))
+                    })?;
+                if covered[idx] {
+                    return Err(elab(format!(
+                        "instance `{inst_name}` of `{module_name}`: port `{port}` connected \
+                         more than once"
+                    )));
+                }
+                covered[idx] = true;
+                let parent_node = self.resolve_net_arg(net)?;
+                node_map.insert(sub.ports[idx][0], parent_node);
+            }
+        }
+
+        self.merge_submodule(inst_name, sub, node_map);
+        Ok(())
+    }
+
+    /// Inline an already-elaborated submodule's arenas into `self.out`: port nodes alias
+    /// whatever parent node `node_map` resolved them to; every other node, branch, var,
+    /// function, and expression is copied in with its embedded indices remapped, namespaced
+    /// `"{inst_name}.{name}"` where it carries a name (§ module instantiation). IR arenas are
+    /// strictly append-only — every `Expr`/`Stmt` only ever references an earlier index — so a
+    /// single forward pass per arena, building an old→new index table as it goes, needs no
+    /// fixup pass. The submodule's whole inlined analog body is pushed as one
+    /// [`va_ir::Stmt::Block`], grouped per instance for readability.
+    fn merge_submodule(&mut self, inst_name: &str, sub: Module, node_map: HashMap<NodeId, NodeId>) {
+        let mut node_off: Vec<NodeId> = Vec::with_capacity(sub.nodes.len());
+        for (i, decl) in sub.nodes.iter().enumerate() {
+            let id = NodeId(i as u32);
+            if let Some(&parent_id) = node_map.get(&id) {
+                node_off.push(parent_id);
+            } else {
+                let new_id = NodeId(self.out.nodes.len() as u32);
+                self.out.nodes.push(NodeDecl {
+                    name: format!("{inst_name}.{}", decl.name),
+                    discipline: decl.discipline,
+                });
+                node_off.push(new_id);
+            }
+        }
+
+        let branch_off: Vec<BranchId> = sub
+            .branches
+            .iter()
+            .map(|b| self.intern_branch(node_off[b.p.0 as usize], node_off[b.n.0 as usize]))
+            .collect();
+
+        let var_off: Vec<VarId> = sub
+            .vars
+            .iter()
+            .map(|v| self.new_var(&format!("{inst_name}.{}", v.name)))
+            .collect();
+
+        let func_base = self.out.functions.len() as u32;
+        let func_off: Vec<FuncId> = (0..sub.functions.len())
+            .map(|i| FuncId(func_base + i as u32))
+            .collect();
+
+        let mut expr_off: Vec<ExprId> = Vec::with_capacity(sub.exprs.len());
+        for e in &sub.exprs {
+            let remapped = remap_expr(e, &sub, &branch_off, &var_off, &func_off, &expr_off);
+            expr_off.push(self.out.push_expr(remapped));
+        }
+
+        for f in &sub.functions {
+            self.out.functions.push(Function {
+                name: format!("{inst_name}.{}", f.name),
+                args: f.args.iter().map(|v| var_off[v.0 as usize]).collect(),
+                ret: var_off[f.ret.0 as usize],
+                body: f
+                    .body
+                    .iter()
+                    .map(|s| remap_stmt(s, &branch_off, &var_off, &expr_off))
+                    .collect(),
+            });
+        }
+
+        let inlined: Vec<va_ir::Stmt> = sub
+            .analog
+            .iter()
+            .map(|s| remap_stmt(s, &branch_off, &var_off, &expr_off))
+            .collect();
+        self.out.analog.push(va_ir::Stmt::Block(inlined));
+    }
 }
 
 // --- free helpers --------------------------------------------------------------------
 
 fn elab(msg: String) -> FrontendError {
     FrontendError::Elaborate(msg)
+}
+
+/// Remap an already-elaborated submodule expression's embedded indices into the parent's
+/// arenas (§ module instantiation, [`Elaborator::merge_submodule`]). `Expr::Param` collapses to
+/// `Expr::Const` using the submodule's own (override-applied) resolved value: parameters are
+/// compile-time constants, so they are never themselves copied into the parent's `params`
+/// arena — only their baked-in value survives.
+fn remap_expr(
+    e: &Expr,
+    sub: &Module,
+    branch_off: &[BranchId],
+    var_off: &[VarId],
+    func_off: &[FuncId],
+    expr_off: &[ExprId],
+) -> Expr {
+    match e {
+        Expr::Const(v) => Expr::Const(*v),
+        Expr::Param(pid) => Expr::Const(sub.params[pid.0 as usize].default),
+        Expr::Var(vid) => Expr::Var(var_off[vid.0 as usize]),
+        Expr::Probe(a) => Expr::Probe(remap_access(a, branch_off)),
+        Expr::Unary(op, a) => Expr::Unary(*op, expr_off[a.0 as usize]),
+        Expr::Binary(op, a, b) => Expr::Binary(*op, expr_off[a.0 as usize], expr_off[b.0 as usize]),
+        Expr::Call(b, args) => {
+            Expr::Call(*b, args.iter().map(|a| expr_off[a.0 as usize]).collect())
+        }
+        Expr::CallUser(fid, args) => Expr::CallUser(
+            func_off[fid.0 as usize],
+            args.iter().map(|a| expr_off[a.0 as usize]).collect(),
+        ),
+        Expr::Select(c, t, f) => Expr::Select(
+            expr_off[c.0 as usize],
+            expr_off[t.0 as usize],
+            expr_off[f.0 as usize],
+        ),
+        Expr::Ddx(a, acc) => Expr::Ddx(expr_off[a.0 as usize], remap_access(acc, branch_off)),
+    }
+}
+
+/// Remap an [`Access`]'s [`BranchId`] into the parent's branch arena.
+fn remap_access(a: &Access, branch_off: &[BranchId]) -> Access {
+    Access {
+        kind: a.kind,
+        branch: branch_off[a.branch.0 as usize],
+    }
+}
+
+/// Remap an already-elaborated submodule statement's embedded indices into the parent's
+/// arenas, recursing through nested control flow (see [`remap_expr`]).
+fn remap_stmt(
+    s: &va_ir::Stmt,
+    branch_off: &[BranchId],
+    var_off: &[VarId],
+    expr_off: &[ExprId],
+) -> va_ir::Stmt {
+    let recurse = |body: &[va_ir::Stmt]| -> Vec<va_ir::Stmt> {
+        body.iter()
+            .map(|s| remap_stmt(s, branch_off, var_off, expr_off))
+            .collect()
+    };
+    match s {
+        va_ir::Stmt::Contribute { target, value } => va_ir::Stmt::Contribute {
+            target: remap_access(target, branch_off),
+            value: expr_off[value.0 as usize],
+        },
+        va_ir::Stmt::If { cond, then_, else_ } => va_ir::Stmt::If {
+            cond: expr_off[cond.0 as usize],
+            then_: recurse(then_),
+            else_: recurse(else_),
+        },
+        va_ir::Stmt::Assign { lhs, rhs } => va_ir::Stmt::Assign {
+            lhs: var_off[lhs.0 as usize],
+            rhs: expr_off[rhs.0 as usize],
+        },
+        va_ir::Stmt::Block(body) => va_ir::Stmt::Block(recurse(body)),
+        va_ir::Stmt::While { cond, body } => va_ir::Stmt::While {
+            cond: expr_off[cond.0 as usize],
+            body: recurse(body),
+        },
+        va_ir::Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => va_ir::Stmt::For {
+            init: Box::new(remap_stmt(init, branch_off, var_off, expr_off)),
+            cond: expr_off[cond.0 as usize],
+            step: Box::new(remap_stmt(step, branch_off, var_off, expr_off)),
+            body: recurse(body),
+        },
+        va_ir::Stmt::Repeat { count, body } => va_ir::Stmt::Repeat {
+            count: expr_off[count.0 as usize],
+            body: recurse(body),
+        },
+        va_ir::Stmt::Case {
+            selector,
+            arms,
+            default,
+        } => va_ir::Stmt::Case {
+            selector: expr_off[selector.0 as usize],
+            arms: arms
+                .iter()
+                .map(|arm| CaseArm {
+                    labels: arm.labels.iter().map(|l| expr_off[l.0 as usize]).collect(),
+                    body: recurse(&arm.body),
+                })
+                .collect(),
+            default: recurse(default),
+        },
+    }
 }
 
 /// Collect every assignment-target name in a statement list (recursing through control flow),
@@ -1798,8 +2195,21 @@ mod tests {
 
     fn elaborate_src(src: &str) -> Module {
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let asts = parse(&toks).expect("parse");
+        let ast = asts.into_iter().next().expect("at least one module");
         elaborate(&ast).expect("elaborate")
+    }
+
+    /// Elaborate `top` (by name) from a multi-module source, with every module in `src`
+    /// available as its submodule library (§ module instantiation).
+    fn elaborate_top(src: &str, top: &str) -> Module {
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let ast = asts
+            .iter()
+            .find(|m| m.name == top)
+            .unwrap_or_else(|| panic!("top module `{top}` present"));
+        elaborate_with_library(ast, &asts).expect("elaborate")
     }
 
     #[test]
@@ -1851,7 +2261,11 @@ mod tests {
         let src = "module t(a, b); electrical a, b; \
                    aliasparam alias = nope; \
                    analog begin I(a, b) <+ V(a, b); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -1884,12 +2298,20 @@ mod tests {
 
         // `$vt` with more than one argument is a arity error.
         let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $vt(V(a, b), 1.0); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
 
         // `$temperature` takes no arguments.
         let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $temperature(V(a, b)); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -1907,7 +2329,11 @@ mod tests {
         // `$abstime` takes no arguments.
         let src =
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ $abstime(1); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -1923,7 +2349,11 @@ mod tests {
 
         let src =
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ $mfactor(1); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -1939,12 +2369,20 @@ mod tests {
 
         // Names an undeclared parameter.
         let src = "module t(a, b); electrical a, b; analog begin if ($param_given(nope)) I(a, b) <+ V(a, b); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
 
         // Not a bare identifier.
         let src = "module t(a, b); electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0 + 1)) I(a, b) <+ V(a, b); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -1960,7 +2398,11 @@ mod tests {
 
         // Names an undeclared port.
         let src = "module t(a, b); electrical a, b; analog begin if ($port_connected(nope)) I(a, b) <+ V(a, b); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -1974,7 +2416,11 @@ mod tests {
 
         let src =
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ $limit(); end endmodule";
-        let ast = parse(&lex(src).expect("lex")).expect("parse");
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2098,7 +2544,11 @@ mod tests {
         let src =
             r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ "oops"; end endmodule"#;
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2186,7 +2636,11 @@ mod tests {
         // `$simparam` with no default is an error (unknown parameter).
         let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin") * V(a, b); end endmodule"#;
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2206,7 +2660,11 @@ mod tests {
         // Without a default, still an error in a parameter context too.
         let src = r#"module t(a, b); parameter real GMIN = $simparam("gmin"); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#;
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2227,7 +2685,11 @@ mod tests {
         let src =
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ transition(); end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2327,13 +2789,21 @@ mod tests {
         // Wrong arity.
         let src = "module t(a); electrical a; analog begin I(a) <+ ddx(V(a)); end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
 
         // Second argument isn't a probe at all.
         let src = "module t(a); electrical a; analog begin I(a) <+ ddx(V(a), 1.0); end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
 
         // Second argument is a flow probe, not a potential one — not supported (flow probes
@@ -2341,7 +2811,11 @@ mod tests {
         let src = "module t(a, b); electrical a, b; \
                    analog begin I(a,b) <+ ddx(V(a,b), I(a,b)); end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
                 msg.contains("flow"),
@@ -2440,7 +2914,11 @@ mod tests {
     fn unknown_identifier_is_rejected() {
         let src = "module t(); electrical a; analog begin I(a) <+ Z; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         let err = elaborate(&ast).unwrap_err();
         assert!(matches!(err, FrontendError::Elaborate(_)));
     }
@@ -2517,7 +2995,11 @@ mod tests {
     fn genvar_assignment_outside_loop_header_is_rejected() {
         let src = "module t(); genvar i; analog begin i = 5; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2527,7 +3009,11 @@ mod tests {
                    analog begin generate for (i = 0; i < 2; j = j + 1) begin end endgenerate end \
                    endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2542,7 +3028,11 @@ mod tests {
                      end endgenerate \
                    end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2552,7 +3042,11 @@ mod tests {
                    analog begin generate for (i = 0; V(p) > 0; i = i + 1) begin end endgenerate end \
                    endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2560,7 +3054,11 @@ mod tests {
     fn vector_index_out_of_range_is_rejected() {
         let src = "module t(); electrical [1:0] bus; analog begin I(bus[5]) <+ 1.0; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2568,7 +3066,11 @@ mod tests {
     fn accessing_vector_net_without_index_is_rejected() {
         let src = "module t(); electrical [1:0] bus; analog begin I(bus) <+ 1.0; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2576,7 +3078,11 @@ mod tests {
     fn indexing_a_non_vector_net_is_rejected() {
         let src = "module t(); electrical p; analog begin I(p[0]) <+ 1.0; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2634,7 +3140,11 @@ mod tests {
         let src = "module t(); real out_val[0:15]; \
                    analog begin out_val[16] = 1.0; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2648,7 +3158,11 @@ mod tests {
         let src = "module t(a); electrical a; real out_val[0:3]; integer j; \
                    analog begin j = 3; I(a) <+ out_val[j]; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         let m = elaborate(&ast).expect("elaborates");
         let value = match &m.analog[1] {
             va_ir::Stmt::Contribute { value, .. } => *value,
@@ -2721,7 +3235,11 @@ mod tests {
         // one has nowhere sound to register into and is rejected with a specific message.
         let src = "module t(); analog begin real out_val[0:15]; end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
                 msg.contains("module scope"),
@@ -2769,7 +3287,11 @@ mod tests {
         let src =
             "module t(p, n); electrical p, n; analog begin I(p, n) <+ nope(V(p, n)); end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2777,7 +3299,11 @@ mod tests {
     fn port_without_discipline_is_rejected() {
         let src = "module t(p); inout p; analog begin end endmodule";
         let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
         assert!(elaborate(&ast).is_err());
     }
 
@@ -2814,5 +3340,148 @@ mod tests {
         // flattened-terminal-list view a future netlist wiring convention would use.
         let flattened: Vec<_> = m.ports.iter().flatten().collect();
         assert_eq!(flattened.len(), 5);
+    }
+
+    // --- module instantiation (§ module instantiation) --------------------------------
+
+    const LEG: &str = "module leg(p, n); electrical p, n; parameter real r = 1000; \
+                        analog I(p, n) <+ V(p, n) / r; endmodule ";
+
+    #[test]
+    fn instance_flattens_ports_by_position() {
+        let src = format!("{LEG} module top(a, b); electrical a, b; leg l1(a, b); endmodule");
+        let m = elaborate_top(&src, "top");
+        // `leg`'s two ports both alias an already-declared parent node, so no new node is
+        // created for the instance — `top` still has exactly its own two declared nodes.
+        assert_eq!(m.nodes.len(), 2);
+        assert_eq!(m.branches.len(), 1, "leg's (p, n) branch unifies to (a, b)");
+        assert!(
+            m.params.is_empty(),
+            "leg's parameter is baked into a constant, not copied into top's params"
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, Expr::Const(v) if *v == 1000.0)));
+    }
+
+    #[test]
+    fn instance_shares_a_parent_declared_internal_node() {
+        let src = format!(
+            "{LEG} module divider(a, b, mid); electrical a, b, mid; \
+             leg l1(a, mid); leg l2(mid, b); endmodule"
+        );
+        let m = elaborate_top(&src, "divider");
+        // `mid` is declared directly by `divider`, so both instances alias it rather than
+        // each getting their own copy — three nodes total (a, b, mid), two branches.
+        assert_eq!(m.nodes.len(), 3);
+        assert_eq!(m.branches.len(), 2);
+    }
+
+    #[test]
+    fn instance_param_override_bakes_in_constant() {
+        let src =
+            format!("{LEG} module top(a, b); electrical a, b; leg #(.r(2000)) l1(a, b); endmodule");
+        let m = elaborate_top(&src, "top");
+        assert!(
+            m.exprs
+                .iter()
+                .any(|e| matches!(e, Expr::Const(v) if *v == 2000.0)),
+            "override value must be baked in"
+        );
+        assert!(
+            !m.exprs
+                .iter()
+                .any(|e| matches!(e, Expr::Const(v) if *v == 1000.0)),
+            "the un-overridden default must not leak through"
+        );
+    }
+
+    #[test]
+    fn named_connections_are_order_independent() {
+        let src =
+            format!("{LEG} module top(a, b); electrical a, b; leg l1(.n(b), .p(a)); endmodule");
+        let m = elaborate_top(&src, "top");
+        assert_eq!(m.nodes.len(), 2);
+        assert_eq!(m.branches.len(), 1);
+    }
+
+    #[test]
+    fn unknown_module_reference_errors() {
+        let src = "module top(a, b); electrical a, b; nope n1(a, b); endmodule";
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        assert!(elaborate_with_library(&asts[0], &asts).is_err());
+    }
+
+    #[test]
+    fn self_instantiation_is_a_cycle_error() {
+        let src = "module top(a, b); electrical a, b; top t1(a, b); endmodule";
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        assert!(elaborate_with_library(&asts[0], &asts).is_err());
+    }
+
+    #[test]
+    fn transitive_instantiation_cycle_errors() {
+        let src = "module a_mod(p, n); electrical p, n; b_mod b1(p, n); endmodule \
+                   module b_mod(p, n); electrical p, n; a_mod a1(p, n); endmodule";
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let a = asts
+            .iter()
+            .find(|m| m.name == "a_mod")
+            .expect("a_mod present");
+        assert!(elaborate_with_library(a, &asts).is_err());
+    }
+
+    #[test]
+    fn mismatched_port_count_errors() {
+        let src = format!("{LEG} module top(a); electrical a; leg l1(a); endmodule");
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let top = asts.iter().find(|m| m.name == "top").expect("top present");
+        assert!(elaborate_with_library(top, &asts).is_err());
+    }
+
+    #[test]
+    fn unknown_named_port_errors() {
+        let src =
+            format!("{LEG} module top(a, b); electrical a, b; leg l1(.p(a), .bogus(b)); endmodule");
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let top = asts.iter().find(|m| m.name == "top").expect("top present");
+        assert!(elaborate_with_library(top, &asts).is_err());
+    }
+
+    #[test]
+    fn mixed_positional_and_named_connections_errors() {
+        let src = format!("{LEG} module top(a, b); electrical a, b; leg l1(a, .n(b)); endmodule");
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let top = asts.iter().find(|m| m.name == "top").expect("top present");
+        assert!(elaborate_with_library(top, &asts).is_err());
+    }
+
+    #[test]
+    fn unknown_param_override_errors() {
+        let src = format!(
+            "{LEG} module top(a, b); electrical a, b; leg #(.bogus(1.0)) l1(a, b); endmodule"
+        );
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let top = asts.iter().find(|m| m.name == "top").expect("top present");
+        assert!(elaborate_with_library(top, &asts).is_err());
+    }
+
+    #[test]
+    fn duplicate_instance_name_errors() {
+        let src = format!(
+            "{LEG} module top(a, b); electrical a, b; leg l1(a, b); leg l1(a, b); endmodule"
+        );
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let top = asts.iter().find(|m| m.name == "top").expect("top present");
+        assert!(elaborate_with_library(top, &asts).is_err());
     }
 }

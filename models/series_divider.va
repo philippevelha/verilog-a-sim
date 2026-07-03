@@ -1,0 +1,13 @@
+// Two `leg` instances in series between `a` and `b`, sharing the internal node `mid` that
+// `series_divider` itself declares — the module-instantiation bring-up fixture (§ module
+// instantiation): one positional connection, one named, plus a parameter override. Acts as a
+// plain 2r series resistance between `a` and `b` when both legs share the default `r`.
+`include "leg.va"
+
+module series_divider(a, b);
+    inout a, b;
+    electrical a, b, mid;
+
+    leg l1(a, mid);
+    leg #(.r(1000.0)) l2(.p(mid), .n(b));
+endmodule

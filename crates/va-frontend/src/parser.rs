@@ -1,8 +1,10 @@
 //! Parser: token stream → surface [`crate::ast::ModuleAst`].
 //!
 //! A hand-written recursive-descent parser for the §1 subset, with a precedence-climbing
-//! expression parser. It parses exactly one `module`. Compiler directives (`` `include ``)
-//! are skipped — v0 has no preprocessor.
+//! expression parser. [`parse`] parses every `module...endmodule` in the token stream (a
+//! source file may define several modules — e.g. a subcircuit plus a top module — that
+//! reference each other via [`Item::Instance`], § module instantiation). Compiler directives
+//! (`` `include ``) are skipped — v0 has no preprocessor.
 //!
 //! Beyond `if`/`else`, the parser accepts the analog control-flow statements `while`, `for`,
 //! `repeat`, and `case`, and `analog function` definitions. `genvar` declarations and vector
@@ -32,27 +34,44 @@
 //!   setup runs once regardless); proper event scheduling is a transient-analysis concern.
 //! - Vector nets are one-dimensional and scalar-typed (no vector ports, no multi-dimensional
 //!   buses); `generate`/`genvar` are elaboration-only, module-scoped, and analog-block-only —
-//!   there is no structural (module-item-level) generate, and no multi-instance hierarchy.
+//!   there is no structural (module-item-level) generate (so no genvar-driven *array* of
+//!   instances — a plain [`Item::Instance`] is always exactly one instance).
+//! - A module instantiation's port connections may be all-positional or all-named
+//!   (`.port(net)`), never mixed — the parser accepts either shape uniformly and leaves
+//!   rejecting a mix, and any other per-instance validation (port count, vector ports, unknown
+//!   parameter overrides), to elaboration (see [`crate::elaborate`]).
 
 use crate::ast::{
     Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
-    FuncArg, Item, ModuleAst, NetArg, NetDecl, ParamType, Range, Stmt, UnOp, VarEntry,
+    FuncArg, Item, ModuleAst, NetArg, NetDecl, ParamType, PortConn, Range, Stmt, UnOp, VarEntry,
 };
 use crate::lexer::Token;
 use crate::FrontendError;
 
-/// Parse a token stream into a single module AST.
+/// Parse a token stream into every module it defines, in source order.
 ///
 /// # Errors
 ///
-/// Returns [`FrontendError::Parse`] on unexpected or missing tokens.
-pub fn parse(tokens: &[Token]) -> Result<ModuleAst, FrontendError> {
+/// Returns [`FrontendError::Parse`] on unexpected or missing tokens, or if the stream defines
+/// no module at all.
+pub fn parse(tokens: &[Token]) -> Result<Vec<ModuleAst>, FrontendError> {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
         exprs: Vec::new(),
     };
-    p.parse_module()
+    let mut modules = Vec::new();
+    loop {
+        p.skip_directives();
+        if p.peek().is_none() {
+            break;
+        }
+        modules.push(p.parse_module()?);
+    }
+    if modules.is_empty() {
+        return p.err("expected at least one `module ... endmodule`".to_string());
+    }
+    Ok(modules)
 }
 
 struct Parser<'a> {
@@ -378,7 +397,89 @@ impl Parser<'_> {
                 let body = self.parse_block_or_single()?;
                 Ok(Item::Analog(Stmt::Block(body)))
             }
+            // Every other item production starts with a dedicated keyword/type token above,
+            // so a bare leading identifier is unambiguously a module instantiation (§ module
+            // instantiation), `module_name inst_name(...);` / `module_name #(...) inst_name(...);`.
+            Some(Token::Ident(name)) => {
+                let module = name.clone();
+                self.parse_instance(module)
+            }
             _ => self.err("expected a declaration or `analog` block".to_string()),
+        }
+    }
+
+    /// Parse a module instantiation, `module #(.p(expr), ...) name(conn, ...);`. `module` is
+    /// the already-peeked (but not yet consumed) instantiated-module name.
+    fn parse_instance(&mut self, module: String) -> Result<Item, FrontendError> {
+        self.pos += 1; // consume the module-name identifier
+        let params = self.parse_optional_param_overrides()?;
+        let name = self.expect_ident()?;
+        self.eat(&Token::LParen)?;
+        let connections = self.parse_port_conn_list()?;
+        self.eat(&Token::RParen)?;
+        self.eat(&Token::Semicolon)?;
+        Ok(Item::Instance {
+            module,
+            name,
+            params,
+            connections,
+        })
+    }
+
+    /// Parse an optional `#(.name(expr), ...)` parameter-override list.
+    fn parse_optional_param_overrides(&mut self) -> Result<Vec<(String, ExprRef)>, FrontendError> {
+        if !self.at(&Token::Hash) {
+            return Ok(Vec::new());
+        }
+        self.pos += 1;
+        self.eat(&Token::LParen)?;
+        let mut overrides = Vec::new();
+        if !self.at(&Token::RParen) {
+            overrides.push(self.parse_param_override()?);
+            while self.at(&Token::Comma) {
+                self.pos += 1;
+                overrides.push(self.parse_param_override()?);
+            }
+        }
+        self.eat(&Token::RParen)?;
+        Ok(overrides)
+    }
+
+    /// Parse one `.name(expr)` entry of a parameter-override list.
+    fn parse_param_override(&mut self) -> Result<(String, ExprRef), FrontendError> {
+        self.eat(&Token::Dot)?;
+        let name = self.expect_ident()?;
+        self.eat(&Token::LParen)?;
+        let value = self.parse_expr()?;
+        self.eat(&Token::RParen)?;
+        Ok((name, value))
+    }
+
+    /// Parse a (possibly empty) comma-separated list of instance port connections.
+    fn parse_port_conn_list(&mut self) -> Result<Vec<PortConn>, FrontendError> {
+        let mut conns = Vec::new();
+        if self.at(&Token::RParen) {
+            return Ok(conns);
+        }
+        conns.push(self.parse_port_conn()?);
+        while self.at(&Token::Comma) {
+            self.pos += 1;
+            conns.push(self.parse_port_conn()?);
+        }
+        Ok(conns)
+    }
+
+    /// Parse one port connection: `.port(net)` (named) or a bare `net` (positional).
+    fn parse_port_conn(&mut self) -> Result<PortConn, FrontendError> {
+        if self.at(&Token::Dot) {
+            self.pos += 1;
+            let port = self.expect_ident()?;
+            self.eat(&Token::LParen)?;
+            let net = self.parse_net_arg()?;
+            self.eat(&Token::RParen)?;
+            Ok(PortConn::Named { port, net })
+        } else {
+            Ok(PortConn::Positional(self.parse_net_arg()?))
         }
     }
 
@@ -1044,7 +1145,11 @@ mod tests {
 
     fn parse_src(src: &str) -> ModuleAst {
         let toks = lex(src).expect("lex");
-        parse(&toks).expect("parse")
+        parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module")
     }
 
     #[test]
@@ -1689,5 +1794,92 @@ mod tests {
     fn missing_semicolon_is_an_error() {
         let toks = lex("module t(); parameter real X = 1 endmodule").expect("lex");
         assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn instance_with_positional_ports_parses() {
+        let m = parse_src("module top(a, b); electrical a, b; resistor r1(a, b); endmodule");
+        match &m.items[1] {
+            Item::Instance {
+                module,
+                name,
+                params,
+                connections,
+            } => {
+                assert_eq!(module, "resistor");
+                assert_eq!(name, "r1");
+                assert!(params.is_empty());
+                assert_eq!(connections.len(), 2);
+                for (conn, expected) in connections.iter().zip(["a", "b"]) {
+                    match conn {
+                        PortConn::Positional(net) => assert_eq!(net.name, expected),
+                        other => panic!("expected a positional connection, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected an instance item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_with_named_ports_and_param_override_parses() {
+        let m = parse_src(
+            "module top(vin, vout, gnd); electrical vin, vout, gnd; \
+             divider #(.gain(2.0)) d1(.out(vout), .in(vin), .gnd(gnd)); endmodule",
+        );
+        match &m.items[1] {
+            Item::Instance {
+                module,
+                name,
+                params,
+                connections,
+            } => {
+                assert_eq!(module, "divider");
+                assert_eq!(name, "d1");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].0, "gain");
+                assert_eq!(connections.len(), 3);
+                let ports: Vec<&str> = connections
+                    .iter()
+                    .map(|c| match c {
+                        PortConn::Named { port, .. } => port.as_str(),
+                        other => panic!("expected a named connection, got {other:?}"),
+                    })
+                    .collect();
+                // Named connections may appear out of the submodule's declared port order.
+                assert_eq!(ports, vec!["out", "in", "gnd"]);
+            }
+            other => panic!("expected an instance item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_modules_in_one_file_both_parse() {
+        let toks = lex(
+            "module leg(p, n); electrical p, n; parameter real r = 1000; \
+             analog I(p, n) <+ V(p, n) / r; endmodule \
+             module top(a, b); electrical a, b; leg l1(a, b); endmodule",
+        )
+        .expect("lex");
+        let modules = parse(&toks).expect("parse");
+        assert_eq!(modules.len(), 2);
+        assert_eq!(modules[0].name, "leg");
+        assert_eq!(modules[1].name, "top");
+    }
+
+    #[test]
+    fn mixed_positional_and_named_connections_parse_but_flagged_later() {
+        // The grammar itself doesn't distinguish; rejecting a mix is elaboration's job.
+        let m = parse_src(
+            "module top(a, b, c); electrical a, b, c; \
+             three_port t1(a, .p2(b), .p3(c)); endmodule",
+        );
+        match &m.items[1] {
+            Item::Instance { connections, .. } => {
+                assert!(matches!(connections[0], PortConn::Positional(_)));
+                assert!(matches!(connections[1], PortConn::Named { .. }));
+            }
+            other => panic!("expected an instance item, got {other:?}"),
+        }
     }
 }

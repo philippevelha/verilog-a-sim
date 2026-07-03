@@ -1,0 +1,13 @@
+// A 2-port linear resistor, used standalone or as `series_divider.va`'s building block via
+// `include (§ module instantiation bring-up fixture).
+`include "disciplines.vams"
+
+module leg(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1000.0 from (0:inf);   // resistance, ohms
+
+    analog begin
+        I(p, n) <+ V(p, n) / r;
+    end
+endmodule

@@ -1,0 +1,8 @@
+* Hierarchical resistor divider -- module-instantiation bring-up fixture.
+* Vin --[series_divider: two 1k legs in series = 2k]-- mid --[R2: 1k]-- gnd, driven by 1 V DC.
+* Expected DC: V(mid) = Vin * R2/(R_series+R2) = 1.0 * 1k/3k = 1/3 V.
+V1 in  gnd  DC 1.0
+D1 in  mid  series_divider
+R1 mid gnd  1000
+.op
+.end

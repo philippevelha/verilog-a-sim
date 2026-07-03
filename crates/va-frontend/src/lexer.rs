@@ -405,6 +405,10 @@ pub enum Token {
     /// `.`.
     #[token(".")]
     Dot,
+    /// `#` — opens an instance parameter-override list, `#(.name(value), ...)` (LRM Annex
+    /// C.8's module-instantiation syntax).
+    #[token("#")]
+    Hash,
 }
 
 /// Map a matched reserved-word lexeme to its [`Keyword`].
@@ -639,6 +643,23 @@ mod tests {
     }
 
     #[test]
+    fn hash_lexes() {
+        assert_eq!(
+            lex_ok("#(.gain(2.0))"),
+            vec![
+                Token::Hash,
+                Token::LParen,
+                Token::Dot,
+                Token::Ident("gain".into()),
+                Token::LParen,
+                Token::Number(2.0),
+                Token::RParen,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
     fn brackets_lex() {
         assert_eq!(
             lex_ok("[ 0 : 1 ]"),
@@ -666,7 +687,7 @@ mod tests {
 
     #[test]
     fn unexpected_character_reports_offset() {
-        let err = lex("R = #").unwrap_err();
+        let err = lex("R = {").unwrap_err();
         match err {
             FrontendError::Lex { offset, .. } => assert_eq!(offset, 4),
             other => panic!("expected lex error, got {other:?}"),

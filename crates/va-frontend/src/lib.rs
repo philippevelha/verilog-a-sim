@@ -36,11 +36,20 @@ pub enum FrontendError {
     Elaborate(String),
 }
 
-/// Compile Verilog-A `source` into an elaborated [`va_ir::Module`], with no `` `include ``
-/// search path (unresolved includes are skipped — the standard disciplines are built in).
+/// The result of compiling a source file: one elaborated [`va_ir::Module`] per `module` the
+/// file defines, each already flattened against every sibling module in the file as its
+/// submodule library (§ module instantiation) — so any [`ast::Item::Instance`] anywhere in the
+/// file resolves, regardless of which module ends up used as a device model.
+pub struct CompiledDesign {
+    /// One elaborated module per source `module`, in source order.
+    pub modules: Vec<va_ir::Module>,
+}
+
+/// Compile Verilog-A `source` into a [`CompiledDesign`], with no `` `include `` search path
+/// (unresolved includes are skipped — the standard disciplines are built in).
 ///
 /// The crate's front door: preprocess → lex → parse → elaborate.
-pub fn compile(source: &str) -> Result<va_ir::Module, FrontendError> {
+pub fn compile(source: &str) -> Result<CompiledDesign, FrontendError> {
     compile_with_includes(source, &[])
 }
 
@@ -49,11 +58,15 @@ pub fn compile(source: &str) -> Result<va_ir::Module, FrontendError> {
 pub fn compile_with_includes(
     source: &str,
     include_dirs: &[PathBuf],
-) -> Result<va_ir::Module, FrontendError> {
+) -> Result<CompiledDesign, FrontendError> {
     let expanded = preprocess::preprocess(source, include_dirs)?;
     let tokens = lexer::lex(&expanded)?;
-    let ast = parser::parse(&tokens)?;
-    elaborate::elaborate(&ast)
+    let asts = parser::parse(&tokens)?;
+    let mut modules = Vec::with_capacity(asts.len());
+    for ast in &asts {
+        modules.push(elaborate::elaborate_with_library(ast, &asts)?);
+    }
+    Ok(CompiledDesign { modules })
 }
 
 #[cfg(test)]
@@ -61,7 +74,8 @@ mod tests {
     #[test]
     fn elaborates_resistor_model() {
         let src = include_str!("../../../models/resistor.va");
-        let module = super::compile(src).expect("resistor.va should elaborate");
-        assert_eq!(module.name, "resistor");
+        let design = super::compile(src).expect("resistor.va should elaborate");
+        assert_eq!(design.modules.len(), 1);
+        assert_eq!(design.modules[0].name, "resistor");
     }
 }

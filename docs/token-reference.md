@@ -408,16 +408,39 @@ class of lexemes.
 
 ### `Dot` (`.`)
 
-- **Purpose and Static Nature**: Lexed but not consumed by any v0 grammar production.
-- **Declaration and Assignment**: In full Verilog(-AMS), used for named port connections in an
-  instantiation (`.p(node_a)`) — module instantiation itself is out of this project's declared
-  subset (single-module compact models), so `.` currently has no parser rule that reaches it;
-  any occurrence is presently a parse error via the default "expected a statement"/"expected an
-  expression" fallback.
-- **Expressions and Evaluation**: N/A today.
-- **Structural and Analog Usage**: N/A today.
-- **Comparison with Traditional Constructs**: In C, `.` is struct member access — no analogue
-  exists in this subset (no struct/record type).
+- **Purpose and Static Nature**: Elaboration-only — a purely syntactic marker; it never itself
+  reaches the IR.
+- **Declaration and Assignment**: Two grammar productions consume it (§ module instantiation,
+  Annex C.8), both inside an `Item::Instance`: a named port connection, `.port(net)`
+  (`parse_port_conn`), and a `#(...)` parameter override's `.name(expr)` entries
+  (`parse_param_override`). Outside those two positions `.` still has no grammar rule and
+  remains a parse error via the default "expected a statement"/"expected an expression"
+  fallback — there is no struct/record member access in this subset.
+- **Expressions and Evaluation**: N/A — a delimiter, not an expression.
+- **Structural and Analog Usage**: Module-item level only (inside an instantiation's port-
+  connection or parameter-override list).
+- **Comparison with Traditional Constructs**: In C, `.` is struct member access; here its two
+  uses are closer to Ada/VHDL-style named association (`port => net`) — binding an actual by
+  the formal's declared name rather than by position.
+
+### `Hash` (`#`)
+
+- **Purpose and Static Nature**: Elaboration-only. Introduces a module instantiation's
+  parameter-override list (§ module instantiation, §2.1b) — the values it carries must be
+  const-evaluable in the instantiating module's own scope.
+- **Declaration and Assignment**: `module_name # ( .param_name ( expr ) , ... ) inst_name (
+  ... ) ;` — `parse_optional_param_overrides`, called from `parse_instance` right after the
+  instantiated module's name. Absent entirely when a module is instantiated with no overrides
+  (every parameter keeps its own default).
+- **Expressions and Evaluation**: Each `.param_name(expr)` is parsed like a named port
+  connection's `.port(net)` (both use `Dot`), but with an arbitrary expression instead of a
+  `NetArg` in parentheses — const-evaluated by the parent (`Elaborator::const_eval`) at
+  elaboration, not left as a runtime expression.
+- **Structural and Analog Usage**: Module-item level only, immediately following an
+  instantiation's module name.
+- **Comparison with Traditional Constructs**: The direct digital-Verilog/SystemVerilog
+  analogue — `#(.WIDTH(8))` instance parameterization is the same idiom under the same
+  punctuation. No C analogue (C has no notion of a parameterized, reusable structural unit).
 
 ## 1.4 Dedicated structural keyword tokens
 
@@ -430,17 +453,24 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 
 ### `Module` / `EndModule`
 
-- **Purpose and Static Nature**: Purely structural — brackets the entire elaborated unit;
-  carries no per-instance runtime state itself.
+- **Purpose and Static Nature**: Purely structural — brackets one elaborated unit; carries no
+  per-instance runtime state itself. Multiple `module...endmodule` blocks in one source unit
+  are now expected, not exceptional (§ module instantiation): a file may define a subcircuit
+  alongside the top module that instantiates it.
 - **Declaration and Assignment**: `module name ( port_list ) ; ... endmodule` (LRM §6, "Hierar-
-  chical structures"; `parse_module`). v0 parses exactly one module per source unit — no nested
-  or multiple modules.
+  chical structures"; `parse_module`). `parser::parse` loops `parse_module` until the token
+  stream is exhausted, returning every module the source defines, in source order (`Vec
+  <ModuleAst>`) — no change to `parse_module` itself was needed, since it already drained its
+  own expression arena per call.
 - **Expressions and Evaluation**: N/A — pure structure.
 - **Structural and Analog Usage**: Module-level only; this *is* the module-level scope.
 - **Comparison with Traditional Constructs**: A C translation unit is the loose analogue
-  (top-level container); a digital-Verilog `module`/`endmodule` is the direct one, except this
-  project doesn't support module *instantiation* (one module containing another) — "single-
-  module compact models" (`CLAUDE.md` §1) is a hard scope boundary, not a stepping stone.
+  (top-level container, potentially defining several things); a digital-Verilog `module`/
+  `endmodule` is the direct one, including module *instantiation* (one module containing
+  another, `Item::Instance` — § module instantiation) — resolved entirely by
+  `crate::elaborate` recursively elaborating and inlining the referenced submodule into the
+  instantiating module's own IR arenas, so `va_ir::Module` itself never represents hierarchy;
+  one flat module remains the only IR shape Interface α defines.
 
 ### `Analog`
 
@@ -574,9 +604,13 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   per-instance scope object.
 - **Comparison with Traditional Constructs**: Digital Verilog and SystemVerilog use `genvar`
   purely to instantiate an *array of module instances* at elaboration (`generate for (i=0;
-  i<N; i=i+1) my_mod inst(...);`) — this project has no module instantiation at all, so its
-  only use here is the "unroll analog code, indexing a signal vector" half of the LRM's genvar
-  story. The nearest C/C++ analogue is a compile-time-unrolled loop (`#pragma unroll`, or a C++
+  i<N; i=i+1) my_mod inst(...);`). This project does support module instantiation (§ module
+  instantiation, `Item::Instance`), but not yet a module-item-level `generate`/`endgenerate`
+  wrapping one — `generate` remains analog-block-scoped only (a stated v1 limitation, not a
+  hard boundary like the rest of this entry), so a genvar-driven *array* of instances isn't
+  expressible yet; a plain `Item::Instance` is always exactly one instance. Its only use here
+  is still the "unroll analog code, indexing a signal vector" half of the LRM's genvar story.
+  The nearest C/C++ analogue is a compile-time-unrolled loop (`#pragma unroll`, or a C++
   `template <int I>` recursion) — an index that exists purely to shape the generated code, never
   present as a runtime value, which is exactly genvar's "static nature."
 
@@ -1028,7 +1062,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `ddx` | Simulation-time symbolic derivative, §1.5 `Ddx` | `ddx(expr, V(p, n))` call | Lowers to `Expr::Ddx`; codegen reads the AD gradient at node `p` | Analog-block only | No C/digital-Verilog analogue |
 | `deassign` | Reserved, no grammar production (digital procedural-continuous-assignment release) | N/A | N/A | Digital only | No C analogue |
 | `default` | Case-arm keyword, §1.5 | `default[:] body` inside `case...endcase` | Dynamic body | Analog-block only | C `switch`'s `default:` |
-| `defparam` | Reserved, no grammar production (digital hierarchical parameter override) | N/A | N/A | Structural/hierarchy only; this project has no instantiation hierarchy to override into | No C analogue |
+| `defparam` | Reserved, no grammar production (digital hierarchical parameter override by path, e.g. `defparam top.sub.R = 2k;`) | N/A | N/A | Structural/hierarchy only; module instantiation exists now (§ module instantiation), but only its own `#(.name(expr))` override syntax at the instantiation site — a separate, deprecated *post-hoc*-by-hierarchical-path override mechanism like `defparam` remains unimplemented | No C analogue |
 | `delay` | Reserved, no grammar production (specify-block path delay) | N/A | N/A | Specify-block (timing-check) only | No C analogue |
 | `disable` | Reserved, no grammar production (digital named-block/task abort) | N/A | N/A | Digital procedural only | Loosely C's `goto`-out-of-block, but scoped to a named block/task |
 | `discipline` | Recognized-and-discarded, §1.5 | `discipline name ... enddiscipline` | N/A | Module preamble | Closest to a C `struct`/unit-of-measure definition |
@@ -1196,16 +1230,67 @@ depends on surrounding context), organized by what they do rather than by a sing
 
 ## 2.1 Module declaration & port list
 
-- **Purpose and Static Nature**: Purely structural; parsed once, produces the top-level
-  `ModuleAst`.
+- **Purpose and Static Nature**: Purely structural; parsed once per module, contributing one
+  `ModuleAst` to `parser::parse`'s returned list (a source unit may define several — § module
+  instantiation).
 - **Declaration and Assignment**: `module name ( port_name, ... ) ; items... endmodule`
-  (`parse_module`). Ports are bare names here — direction/discipline are separate declarations
-  elsewhere in the item list, matched by name at elaboration (`resolve_ports`).
+  (`parse_module`, looped by `parser::parse` until the token stream is exhausted). Ports are
+  bare names here — direction/discipline are separate declarations elsewhere in the item list,
+  matched by name at elaboration (`resolve_ports`).
 - **Expressions and Evaluation**: N/A.
-- **Structural and Analog Usage**: The entire module-level scope, containing every other item
-  and exactly one `analog` block.
-- **Comparison with Traditional Constructs**: A digital-Verilog `module`, minus instantiation of
-  other modules.
+- **Structural and Analog Usage**: The entire module-level scope, containing every other item,
+  at most one `analog` block (a module composed purely of instantiated submodules may have
+  none at all), and zero or more `Item::Instance`s (§2.1b).
+- **Comparison with Traditional Constructs**: A digital-Verilog `module`, including
+  instantiation of other modules (§2.1b) — unlike the rest of this table, no longer a stated
+  scope boundary.
+
+## 2.1b Module instantiation (`resistor r1(p, n);`, LRM Annex C.8)
+
+- **Purpose and Static Nature**: The *declaration* (which module, which instance name, which
+  parameter overrides, which port connections) is elaboration-only — fully resolved by
+  recursively elaborating the referenced submodule and inlining its arenas into the
+  instantiating module's own (`Elaborator::collect_instances`/`inline_instance`/
+  `merge_submodule`, `crates/va-frontend/src/elaborate.rs`). The inlined analog behavior itself
+  is, as always, simulation-time.
+- **Declaration and Assignment**: `module_name [ # ( .param_name ( expr ) , ... ) ] inst_name (
+  conn, ... ) ;`, where each `conn` is either a bare net (positional, bound to the submodule's
+  ports in declaration order) or `.port_name ( net )` (named, bound by name in any order) —
+  `Item::Instance { module, name, params, connections }`, `ast::PortConn::{Positional,
+  Named}`. A leading bare identifier at item level is unambiguous: every other item production
+  starts with a dedicated keyword/type token, so `parse_item` routes any `Ident` straight to
+  `parse_instance`. Connections must be all-positional or all-named (parses either way; a mix
+  is rejected at elaboration, not by the grammar).
+- **Expressions and Evaluation**: A `#(...)` override's `expr` is const-evaluated
+  (`const_eval`) in the *instantiating* module's own scope (it may reference the parent's own
+  parameters/genvars) before being substituted for the submodule's corresponding parameter
+  default — validated against that parameter's declared `from` range exactly as an ordinary
+  default is. The submodule is then elaborated as if standalone; its parameters never survive
+  as `va_ir::Param`s in the parent — every `Expr::Param` reference inside its copied body
+  collapses to `Expr::Const` using the already-resolved value, since a Verilog-A parameter is
+  a compile-time constant either way. A port connection's net is resolved in the parent's own
+  scope (`resolve_net_arg` — an ordinary net, or one constant/genvar-indexed vector-net
+  element) and aliased directly to the submodule's corresponding port node; every other node,
+  branch, variable, and function the submodule declares is copied into the parent's arenas,
+  namespaced `"{inst_name}.{name}"` to avoid colliding with a same-named parent declaration
+  (impossible anyway, since Verilog-A identifiers can't contain `.`).
+- **Structural and Analog Usage**: Module-item level, exactly like a net or parameter
+  declaration — never inside an `analog` block. A cycle (a module instantiating itself,
+  directly or transitively) and an unknown module/port/parameter-override name are all
+  elaboration errors (`FrontendError::Elaborate`), not silently accepted.
+- **Comparison with Traditional Constructs**: A digital-Verilog module instantiation, resolved
+  the way an aggressively-inlining compiler would rather than the way a hardware elaborator
+  keeps hierarchy: `va_ir::Module` never gains a hierarchy concept of its own (Interface α is
+  unchanged by this — see `docs/interfaces.md`'s note), so `va-codegen`/`va-core`/`va-abi`
+  still only ever see one flat module, exactly as before. **Stated v1 limits**: scalar port
+  connections only (no vector-port fan-out to a submodule); no module-item-level
+  `generate`/`endgenerate` around an instance (so no genvar-driven *array* of instances — see
+  §1.4 `Genvar`'s and §2.14's comparison notes); and a submodule's own implicit ground (from a
+  single-terminal `V(p)` shorthand, `Elaborator::reference_node`) is *not* unified with the
+  parent's or a sibling instance's ground, since each submodule elaborates in its own arena — a
+  model that needs the true circuit reference node from inside a submodule must declare an
+  explicit port for it and have the instantiating parent wire that port to real ground, like
+  any other port.
 
 ## 2.2 Net/discipline declaration (with optional vector range)
 
@@ -1417,9 +1502,11 @@ as an ordinary loop.
   compile-time-unrolled loop — C++'s `template <int I>` recursion, or a `#pragma unroll` hint —
   where the loop index is baked into the generated code and never exists as a runtime value.
   Digital Verilog/SystemVerilog's `genvar` is more commonly used to instantiate an *array of
-  module instances*; this project has no module instantiation, so its genvar support covers only
-  the "unroll analog code, indexing a signal vector" half of the LRM's full genvar story (see
-  Part 1 §1.4 `Genvar`'s comparison note).
+  module instances* — module instantiation itself exists now (§ module instantiation), but only
+  as a single, ungenerated `Item::Instance`; a module-item-level `generate`/`endgenerate`
+  wrapping one (needed for a genvar-indexed *array* of instances) is not yet supported, so
+  genvar support still covers only the "unroll analog code, indexing a signal vector" half of
+  the LRM's full genvar story (see Part 1 §1.4 `Genvar`'s comparison note).
 
 ## 2.15 `generate`/`endgenerate` wrapper
 

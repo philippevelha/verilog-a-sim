@@ -1,8 +1,10 @@
 //! Surface AST: the parser's output, before elaboration into [`va_ir`].
 //!
-//! The AST is a faithful, sugar-preserving tree of one `module`. Elaboration
-//! ([`crate::elaborate`]) resolves names, assigns IR arena indices, and lowers it into the
-//! frozen IR (Interface α).
+//! The AST is a faithful, sugar-preserving tree of one `module` — [`crate::parser::parse`]
+//! returns one [`ModuleAst`] per `module...endmodule` a source unit defines, since a file may
+//! define several that reference each other via [`Item::Instance`] (§ module instantiation).
+//! Elaboration ([`crate::elaborate`]) resolves names, assigns IR arena indices, recursively
+//! inlines any instantiated submodule, and lowers the result into the frozen IR (Interface α).
 //!
 //! # Representation (§5)
 //!
@@ -207,6 +209,43 @@ pub enum Item {
     Genvar {
         /// The declared genvar names.
         names: Vec<String>,
+    },
+    /// A module instantiation, `resistor r1(p, n);` or
+    /// `divider #(.gain(2.0)) d1(.in(vin), .out(vo));` (LRM Annex C.8). Resolved entirely at
+    /// elaboration by recursively elaborating the referenced module and inlining it into the
+    /// instantiating module's own IR arenas (§ module instantiation) — there is no IR-level
+    /// hierarchy construct; `va_ir::Module` stays a single flat module.
+    Instance {
+        /// The instantiated module's name.
+        module: String,
+        /// The instance name — no runtime identity survives elaboration; used only for
+        /// diagnostics and as the hierarchical namespace prefix for any of the submodule's
+        /// nodes/vars/functions not unified with a parent net via a port connection.
+        name: String,
+        /// `#(.name(expr), ...)` parameter overrides, empty if absent. Each `expr` is
+        /// evaluated in the *instantiating* module's scope (it may reference the parent's own
+        /// parameters/genvars) before being substituted for the submodule's corresponding
+        /// parameter default.
+        params: Vec<(String, ExprRef)>,
+        /// Port connections, in source order. Either all [`PortConn::Positional`] (bound to
+        /// the submodule's ports in declaration order) or all [`PortConn::Named`] (bound by
+        /// port name, in any order) — mixing the two parses fine but is rejected at
+        /// elaboration.
+        connections: Vec<PortConn>,
+    },
+}
+
+/// One port connection in an [`Item::Instance`].
+#[derive(Clone, Debug)]
+pub enum PortConn {
+    /// A positional connection: binds to the submodule's ports in declaration order.
+    Positional(NetArg),
+    /// A named connection, `.port(net)`: binds one net to one submodule port by name.
+    Named {
+        /// The submodule's port name.
+        port: String,
+        /// The net wired to it.
+        net: NetArg,
     },
 }
 

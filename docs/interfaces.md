@@ -71,6 +71,15 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > compiling. The `Box<Stmt>` in `For` is a finite-size tree node, not a shared graph, so it
 > respects the §5 arena rule.
 
+> **Not a §6 change: module instantiation (Annex C.8).** `va-frontend` now supports
+> `Item::Instance` (`resistor r1(p, n);`, `#(...)` overrides, named `.port(net)` connections —
+> see `docs/token-reference.md` §2.1b). It does **not** appear here because it never touches
+> this contract: the elaborator resolves a whole instantiation hierarchy by recursively
+> elaborating each referenced submodule and inlining its arenas into the instantiating
+> module's own, entirely inside `va-frontend`, before Interface α's boundary. `Module` above is
+> still exactly what `va-codegen`/`va-core`/`va-abi` receive — one flat module, no hierarchy
+> concept, unchanged in shape. Hierarchy is a `va-frontend`-internal concern, not an IR one.
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models

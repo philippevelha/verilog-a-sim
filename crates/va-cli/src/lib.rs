@@ -22,7 +22,7 @@ use va_abi::reference::{diode::VT_300K, Capacitor, Diode, Resistor, VSource};
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
-use va_ir::Module;
+use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
 
 /// Which analysis to run for a `sim` invocation.
@@ -62,18 +62,20 @@ pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result
                 .parent()
                 .map(|p| vec![p.to_path_buf()])
                 .unwrap_or_default();
-            let module = va_frontend::compile_with_includes(&src, &include_dirs)
+            let design = va_frontend::compile_with_includes(&src, &include_dirs)
                 .with_context(|| format!("compiling Verilog-A model {path}"))?;
-            eprintln!(
-                "[va-cli] compiled Verilog-A model `{}` from {path}",
-                module.name
-            );
-            Some(module)
+            for module in &design.modules {
+                eprintln!(
+                    "[va-cli] compiled Verilog-A module `{}` from {path}",
+                    module.name
+                );
+            }
+            design.modules
         }
-        None => None,
+        None => Vec::new(),
     };
 
-    let op = solve_dc(&net, compiled.as_ref())?;
+    let op = solve_dc(&net, &compiled)?;
     report(&net, &op.x);
     Ok(())
 }
@@ -171,29 +173,35 @@ fn check_one(path: &str, scan_root: &std::path::Path) -> bool {
             return false;
         }
     };
-    let ast = match va_frontend::parser::parse(&tokens) {
+    let asts = match va_frontend::parser::parse(&tokens) {
         Ok(a) => a,
         Err(e) => {
             println!("  [parse] {path}: {e}");
             return false;
         }
     };
-    match va_frontend::elaborate::elaborate(&ast) {
-        Ok(m) => {
-            println!(
-                "  [ok   ] {path}: module `{}` ({} nodes, {} params, {} funcs)",
-                m.name,
-                m.nodes.len(),
-                m.params.len(),
-                m.functions.len()
-            );
-            true
-        }
-        Err(e) => {
-            println!("  [elab ] {path}: {e}");
-            false
+    // Elaborate every module the file defines (each against the full sibling list, so an
+    // `Item::Instance` anywhere in the file resolves), since a file may define a subcircuit
+    // plus a top module rather than exactly one (§ module instantiation).
+    let mut all_ok = true;
+    for ast in &asts {
+        match va_frontend::elaborate::elaborate_with_library(ast, &asts) {
+            Ok(m) => {
+                println!(
+                    "  [ok   ] {path}: module `{}` ({} nodes, {} params, {} funcs)",
+                    m.name,
+                    m.nodes.len(),
+                    m.params.len(),
+                    m.functions.len()
+                );
+            }
+            Err(e) => {
+                println!("  [elab ] {path}: module `{}`: {e}", ast.name);
+                all_ok = false;
+            }
         }
     }
+    all_ok
 }
 
 /// Reject analyses v0 does not implement (anything but DC).
@@ -210,19 +218,25 @@ fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
     Ok(())
 }
 
-/// Build every device instance and solve the DC operating point.
-fn solve_dc(net: &Netlist, compiled: Option<&Module>) -> Result<va_core::dc::OperatingPoint> {
+/// Build every device instance and solve the DC operating point. `compiled` is every module
+/// compiled from the `--model` file (possibly several, if it defines a subcircuit alongside a
+/// top module — § module instantiation); a device is matched against whichever one shares its
+/// model name.
+fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
     let n_nodes = net.node_order.len();
-    let n_vsrc = net.devices.iter().filter(|d| d.model == "vsource").count();
-    let dim = n_nodes + n_vsrc;
 
-    // Voltage sources take branch-current unknowns after the node unknowns.
-    let mut next_branch = n_nodes;
+    // Voltage sources take branch-current unknowns after the node unknowns; a flattened
+    // compiled module's internal (non-port) nodes need global unknowns too (§ module
+    // instantiation — `va-codegen::build_instance` requires one global index per IR node, not
+    // just per port). Both draw from this single shared counter, so `dim` is only known once
+    // every instance has claimed what it needs.
+    let mut next_unknown = n_nodes;
     let mut instances: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
     for dev in &net.devices {
-        let inst = build_instance(dev, compiled, &mut next_branch)?;
+        let inst = build_instance(dev, compiled, &mut next_unknown)?;
         instances.push(inst);
     }
+    let dim = next_unknown;
 
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
@@ -232,15 +246,15 @@ fn solve_dc(net: &Netlist, compiled: Option<&Module>) -> Result<va_core::dc::Ope
 /// Verilog-A model and falling back to the reference primitives.
 fn build_instance(
     dev: &Device,
-    compiled: Option<&Module>,
-    next_branch: &mut usize,
+    compiled: &[Module],
+    next_unknown: &mut usize,
 ) -> Result<Box<dyn ModelInstance>> {
     let p = dev.terminals[0];
     let n = dev.terminals[1];
 
     if dev.model == "vsource" {
-        let branch = *next_branch;
-        *next_branch += 1;
+        let branch = *next_unknown;
+        *next_unknown += 1;
         return Ok(Box::new(VSource::new(
             p,
             n,
@@ -250,10 +264,8 @@ fn build_instance(
     }
 
     // Use the compiled Verilog-A model when its name matches the device's model.
-    if let Some(module) = compiled {
-        if module.name == dev.model {
-            return build_from_model(module, dev.value, &dev.terminals);
-        }
+    if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
+        return build_from_model(module, dev.value, &dev.terminals, next_unknown);
     }
 
     reference_instance(dev)
@@ -261,17 +273,45 @@ fn build_instance(
 
 /// Build a device instance from a compiled IR module, overriding the model's first parameter
 /// with the device's scalar value (the SPICE convention: an `R`/`C` line's value sets the
-/// model's primary parameter).
+/// model's primary parameter). Each of `module`'s port nodes is assigned the netlist terminal
+/// it connects to; any other node (e.g. an internal node a flattened submodule instance
+/// introduced, § module instantiation) claims a fresh global unknown from `next_unknown`.
 fn build_from_model(
     module: &Module,
     value: Option<f64>,
     terminals: &[usize],
+    next_unknown: &mut usize,
 ) -> Result<Box<dyn ModelInstance>> {
     let mut m = module.clone();
     if let (Some(v), Some(param)) = (value, m.params.first_mut()) {
         param.default = v;
     }
-    va_codegen::build_instance(&m, terminals)
+
+    let port_nodes: Vec<NodeId> = m.ports.iter().flatten().copied().collect();
+    if port_nodes.len() != terminals.len() {
+        bail!(
+            "model `{}` declares {} port node(s), device connects {}",
+            m.name,
+            port_nodes.len(),
+            terminals.len()
+        );
+    }
+    let mut assigned: Vec<Option<usize>> = vec![None; m.nodes.len()];
+    for (nid, &g) in port_nodes.iter().zip(terminals) {
+        assigned[nid.0 as usize] = Some(g);
+    }
+    let full: Vec<usize> = assigned
+        .into_iter()
+        .map(|slot| {
+            slot.unwrap_or_else(|| {
+                let g = *next_unknown;
+                *next_unknown += 1;
+                g
+            })
+        })
+        .collect();
+
+    va_codegen::build_instance(&m, &full)
         .with_context(|| format!("generating instance for model `{}`", module.name))
 }
 
@@ -323,7 +363,7 @@ mod tests {
 
     /// End-to-end DC: parse the divider deck, build reference instances, solve.
     /// V(in) = 1 V, V(mid) = Vin·R2/(R1+R2) = 0.5 V.
-    fn solve_divider(compiled: Option<&Module>) -> va_core::dc::OperatingPoint {
+    fn solve_divider(compiled: &[Module]) -> va_core::dc::OperatingPoint {
         let deck = include_str!("../../../circuits/divider.net");
         let net = va_netlist::parser::parse(deck).expect("parse divider");
         solve_dc(&net, compiled).expect("solve divider")
@@ -331,7 +371,7 @@ mod tests {
 
     #[test]
     fn divider_solves_with_reference_models() {
-        let op = solve_divider(None);
+        let op = solve_divider(&[]);
         let in_idx = 0; // node_order: in, mid
         let mid_idx = 1;
         assert!(
@@ -350,10 +390,51 @@ mod tests {
     fn divider_solves_through_codegen_pipeline() {
         // Compile the real resistor.va and use the generated model for the R devices.
         let src = include_str!("../../../models/resistor.va");
-        let module = va_frontend::compile(src).expect("compile resistor.va");
-        assert_eq!(module.name, "resistor");
-        let op = solve_divider(Some(&module));
+        let design = va_frontend::compile(src).expect("compile resistor.va");
+        assert_eq!(design.modules.len(), 1);
+        assert_eq!(design.modules[0].name, "resistor");
+        let op = solve_divider(&design.modules);
         assert!((op.x[1] - 0.5).abs() < 1e-9, "V(mid) = {}", op.x[1]);
+    }
+
+    /// End-to-end DC through module instantiation (§ module instantiation): `series_divider`
+    /// (two `leg` instances in series, sharing a parent-declared internal node, one connected
+    /// positionally and one by name with a parameter override — see `models/series_divider.va`)
+    /// is compiled and used as a single 2 kΩ device between the source and the outer divider's
+    /// mid node, in series with a plain 1 kΩ resistor. No mocking: this drives the real
+    /// frontend → codegen → core pipeline exactly as `divider_solves_through_codegen_pipeline`
+    /// does, just with a hierarchical model.
+    /// V(mid) = Vin * R2/(R_series + R2) = 1.0 * 1000/(2000 + 1000) = 1/3 V.
+    #[test]
+    fn hierarchical_divider_solves_through_codegen_pipeline() {
+        let src = include_str!("../../../models/series_divider.va");
+        let include_dirs = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))];
+        let design = va_frontend::compile_with_includes(src, &include_dirs)
+            .expect("compile series_divider.va");
+        assert_eq!(
+            design.modules.len(),
+            2,
+            "leg.va's `leg` plus `series_divider`"
+        );
+        assert!(design.modules.iter().any(|m| m.name == "series_divider"));
+
+        let deck = include_str!("../../../circuits/hier_divider.net");
+        let net = va_netlist::parser::parse(deck).expect("parse hier_divider");
+        let op = solve_dc(&net, &design.modules).expect("solve hier_divider");
+
+        let mid_idx = net
+            .node_order
+            .iter()
+            .position(|n| n == "mid")
+            .expect("mid node");
+        assert!(
+            (op.x[mid_idx] - 1.0 / 3.0).abs() < 1e-9,
+            "V(mid) = {}",
+            op.x[mid_idx]
+        );
     }
 
     #[test]
