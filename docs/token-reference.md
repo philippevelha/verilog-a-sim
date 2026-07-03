@@ -25,7 +25,8 @@ Each entry follows the same five-part structure:
 The Verilog-AMS LRM's own Annex B ("List of keywords") lists a larger reserved-word set (around
 257 words, including SystemVerilog-configuration keywords like `config`/`liblist`/`connectmodule`
 that Annex C.16 explicitly excludes from the Verilog-A subset) than this project's
-`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (179 words). That's expected and correct —
+`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (182 words, as of the discipline/nature
+parsing pass adding `discrete`/`domain`/`continuous` — previously 179). That's expected and correct —
 `va-frontend` targets "single-module compact models" (`CLAUDE.md` §1), so words meaningful only
 to full Verilog-AMS hierarchy, configuration, and digital timing checks are outside the declared
 subset by design, not by oversight. The LRM's own Annex B (VAMS-LRM-2.4, p.380–382, Table B.1)
@@ -638,10 +639,14 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   branches carry, but the declaration itself has no runtime value.
 - **Declaration and Assignment**: `electrical name, ...;` / `thermal name, ...;`, optionally
   preceded by a `[msb:lsb]` vector-width bracket (declaring a bus of nodes rather than one
-  scalar node — see Part 2 §2.18). Unlike the general LRM, which lets a user `discipline`
-  declaration bind arbitrary natures, v0 hardcodes exactly these two disciplines as built-ins
-  (a stated limitation — user `discipline...enddiscipline`/`nature...endnature` blocks are
-  parsed only enough to be skipped, never modeled; see §1.5's `discipline`/`nature` entries).
+  scalar node — see Part 2 §2.18). `discipline`/`nature` blocks are now genuinely parsed (§1.5's
+  `discipline`/`nature` entries, § module preamble discipline/nature parsing), but a net
+  *declaration* still only accepts these two dedicated keyword tokens — a custom parsed
+  discipline can't yet be used to declare a net (a stated v1 limitation; see `docs/roadmap.md`).
+  What the parsing *does* unlock is access-function recognition (§2.17): any access name a
+  parsed discipline binds becomes usable on a net regardless of that net's own declared
+  discipline, matching how this project already treats access names as purely name-based, not
+  type-checked against the declaring net.
 - **Expressions and Evaluation**: N/A — pure declaration; the discipline is looked up once
   (`collect_nodes`) and attached to each interned `NodeId`.
 - **Structural and Analog Usage**: Module-level declaration; referenced from the analog block
@@ -709,7 +714,7 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 Every other reserved word lexes as `Token::Keyword(Keyword)`, a payload the parser inspects by
 string (`at_keyword`/`eat_keyword`, or the `Some(&Token::Keyword(kw)) => match kw.as_str()
 {...}` dispatch in `parse_stmt`). The words below are the ones with real, working
-grammar/elaboration behavior; §1.6 gives the master table covering every one of the 179 words,
+grammar/elaboration behavior; §1.6 gives the master table covering every one of the 182 words,
 including the ones with no implemented behavior at all.
 
 ### `Branch`
@@ -997,28 +1002,46 @@ including the ones with no implemented behavior at all.
 
 ### `Discipline` / `Nature` / `Enddiscipline` / `Endnature`
 
-- **Purpose and Static Nature**: Recognized-and-discarded, not modeled at all. v0 hardcodes
-  exactly the `electrical`/`thermal` disciplines as built-ins (see the `Electrical`/`Thermal`
-  entry above); a user `discipline...enddiscipline`/`nature...endnature` block — the kind an
-  expanded `disciplines.vams`/`constants.vams` include produces — is skipped wholesale
-  (`skip_preamble`/`skip_block_until`) before the `module` keyword is even reached.
-- **Declaration and Assignment**: `discipline name ... enddiscipline` / `nature name ...
-  endnature` (LRM §4, defining a discipline's potential/flow natures and a nature's `abstol`/
-  `units`/`access`/`ddt_nature`/`idt_nature` attributes) — parsed only as an opaque token span
-  to be discarded, never as individual attribute declarations.
-- **Expressions and Evaluation**: N/A — the block's *contents* (every reserved word that would
-  only ever appear inside one, e.g. `abstol`, `access`, `units`, `potential`, `flow`,
-  `ddt_nature`, `idt_nature`, `domain`) are consumed blindly by `skip_block_until`'s
-  token-counting loop and never individually inspected.
-- **Structural and Analog Usage**: Would be module-preamble-level if modeled; today only ever
-  appears (and is only ever skipped) before the `module` keyword.
+- **Purpose and Static Nature**: Elaboration-only — fully parsed (§ module preamble
+  discipline/nature parsing) into a small in-`va-frontend` table
+  (`disciplines::{NatureDecl, DisciplineDecl}`), not merely recognized-and-discarded. Runs
+  before every `module` in the token stream (`Parser::parse_preamble`, called from
+  `parse_module`), so blocks interleaved between modules — or an expanded
+  `` `include "disciplines.vams" `` preceding just the first — are all reached the same way.
+- **Declaration and Assignment**: `discipline name [;] ... enddiscipline` / `nature name [;]
+  ... endnature` (LRM §4). The `;` after the name is optional — both the canonical
+  `disciplines.vams` (semicolon) and the real `external/ekv3_natures.va` (no semicolon) shapes
+  parse. A nature's body is `units = "...";`/`access = Name;`/`abstol = value;`/
+  `idt_nature = Other;`/`ddt_nature = Other;`; a discipline's is `potential Nature;`/
+  `flow Nature;`/`domain discrete|continuous;`. An unrecognized attribute keyword inside either
+  body is a hard parse error — the LRM's attribute set is fixed, not user-extensible, matching
+  every other unknown-construct error in this parser.
+- **Expressions and Evaluation**: `units`/`abstol`/`idt_nature`/`ddt_nature` are parsed but
+  currently **unused metadata** — no `va-core` convergence or unit-checking code consults them
+  yet (like `ast::Range`'s inclusive/exclusive flags). `abstol`'s value is read as a plain
+  (optionally negated) numeric literal when the source writes one; a more complex expression
+  (`abstol = 2*1e-6;`) still parses (its tokens are consumed via the ordinary expression parser)
+  but its value is dropped rather than rejected. The one attribute with a *real* effect is a
+  nature's `access` name, once a `discipline` block binds that nature as its `potential`/`flow`
+  nature: `Parser::register_access` then adds that access name to the recognized set
+  (`Parser::known_access`) — additively, on top of the always-on `V`/`I`/`Temp`/`Pwr` baseline,
+  which stays recognized regardless of whether any block was ever parsed. See §2.17.
+- **Structural and Analog Usage**: Module-preamble-level — before, or interleaved between, the
+  modules in a compilation unit; never inside a module or an `analog` block.
 - **Comparison with Traditional Constructs**: A discipline/nature pair is the closest thing this
   language has to a C `struct`/units-of-measure system (binding a physical unit and tolerance to
   a signal type) — no C construct maps onto it directly.
+- **A real grammar collision worth noting**: the standard header itself declares
+  `discipline electrical; ... enddiscipline` and `discipline thermal; ... enddiscipline` —
+  i.e. a discipline's own *name* is literally `electrical`/`thermal`, which this project already
+  lexes as its own dedicated `Token::Electrical`/`Token::Thermal` (for net declarations), not as
+  `Token::Ident`. `Parser::expect_discipline_or_nature_name` accepts either spelling for a
+  discipline/nature's declared name specifically because of this — an ordinary `expect_ident`
+  would reject the very file that motivated this whole feature.
 
 ## 1.6 Master table — every reserved word
 
-Every one of the 179 words in `RESERVED_WORDS`, alphabetically, each addressed against all five
+Every one of the 182 words in `RESERVED_WORDS`, alphabetically, each addressed against all five
 questions. Words with a full write-up above are cross-referenced rather than repeated; the
 remaining ~110 words — almost entirely digital-Verilog gate primitives, net-strength/charge
 keywords, specify-block/task/event keywords, and signal-processing transform names — get their
@@ -1027,8 +1050,8 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | Token | Purpose & Static Nature | Declaration & Assignment | Expressions & Evaluation | Structural & Analog Usage | Comparison with Traditional Constructs |
 |---|---|---|---|---|---|
 | `abs` | Dynamic/static dual, see §1.5 Math builtins | `abs(x)` call | Absolute value, both paths | Analog expr / const context | C `fabs()`/`abs()` |
-| `abstol` | N/A — only ever inside a skipped `nature` block (§1.5 `Nature`) | Nature attribute `abstol = expr;` | Never individually inspected | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
-| `access` | Same as `abstol` | Nature attribute `access = fn_name;` | Never individually inspected | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
+| `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`), unused metadata | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
+| `access` | Parsed into `NatureDecl::access` (§1.5), widens the recognized access-function set once bound by a `discipline` | Nature attribute `access = fn_name;` | Read as a plain identifier; has a real effect (§2.17) once a `discipline` binds this nature as `potential`/`flow` | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |
 | `acosh` | Dynamic/static dual, §1.5 | `acosh(x)` call | Inverse hyperbolic cosine | Analog expr / const context | C99 `acosh()` |
 | `ac_stim` | Folds to constant `0.0` (fixed — see §1.5); contributes nothing at DC regardless | `ac_stim(mag[, phase[, type]])` call | Const-folded to `0.0` | Analog-block only (AC analysis) | No analogue — AC-analysis is out of v0's DC-only scope (`CLAUDE.md` §1's "stretch") |
@@ -1054,29 +1077,32 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `ceil` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `ceil(x)` call | Round toward +∞ | Analog expr / const context | C `ceil()` |
 | `casez` | Same as `casex` — explicitly excluded from Verilog-A by the LRM itself | N/A | N/A | N/A | Same as `casex` |
 | `cmos` | Reserved, no grammar production (CMOS transmission-gate switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
+| `continuous` | A discipline's `domain continuous;` attribute value (§1.5), fully parsed — the LRM default, so rarely written explicitly | `domain continuous;` inside a `discipline` body | Parsed into `DisciplineDecl::domain` (`DomainKind::Continuous`), unused metadata | Module preamble | No C analogue |
 | `cos` | Dynamic/static dual, §1.5 | `cos(x)` call | Cosine | Analog expr / const context | C `cos()` |
 | `cosh` | Dynamic/static dual, §1.5 | `cosh(x)` call | Hyperbolic cosine | Analog expr / const context | C `cosh()` |
 | `cross` | Parses as a call (`cross(expr, dir[, ...])`) if written bare; its one real usage, `@(cross(...))`, is discarded wholesale by v0's `skip_balanced_parens` before it's ever parsed as an expression | Zero-crossing event detector (LRM §5.7ish) | Neither path currently evaluates its arguments | Analog-block only (event control) | No C analogue (continuous zero-crossing detection needs the solver's own state) |
 | `ddt` | Analog operator with internal state, §1.5 `Ddt`/`Idt` | `ddt(expr)` | Time derivative | Analog-block only | No C/digital-Verilog analogue |
-| `ddt_nature` | Same as `abstol` (nature attribute, skipped) | Nature attribute `ddt_nature = other_nature;` | Never individually inspected | N/A (module preamble) | Binds a nature to its time-derivative counterpart; no C analogue |
+| `ddt_nature` | Parsed into `NatureDecl::ddt_nature` (§1.5), unused metadata | Nature attribute `ddt_nature = other_nature;` | Read as a plain identifier, not yet consulted by anything | N/A (module preamble) | Binds a nature to its time-derivative counterpart; no C analogue |
 | `ddx` | Simulation-time symbolic derivative, §1.5 `Ddx` | `ddx(expr, V(p, n))` call | Lowers to `Expr::Ddx`; codegen reads the AD gradient at node `p` | Analog-block only | No C/digital-Verilog analogue |
 | `deassign` | Reserved, no grammar production (digital procedural-continuous-assignment release) | N/A | N/A | Digital only | No C analogue |
 | `default` | Case-arm keyword, §1.5 | `default[:] body` inside `case...endcase` | Dynamic body | Analog-block only | C `switch`'s `default:` |
 | `defparam` | Reserved, no grammar production (digital hierarchical parameter override by path, e.g. `defparam top.sub.R = 2k;`) | N/A | N/A | Structural/hierarchy only; module instantiation exists now (§ module instantiation), but only its own `#(.name(expr))` override syntax at the instantiation site — a separate, deprecated *post-hoc*-by-hierarchical-path override mechanism like `defparam` remains unimplemented | No C analogue |
 | `delay` | Reserved, no grammar production (specify-block path delay) | N/A | N/A | Specify-block (timing-check) only | No C analogue |
 | `disable` | Reserved, no grammar production (digital named-block/task abort) | N/A | N/A | Digital procedural only | Loosely C's `goto`-out-of-block, but scoped to a named block/task |
-| `discipline` | Recognized-and-discarded, §1.5 | `discipline name ... enddiscipline` | N/A | Module preamble | Closest to a C `struct`/unit-of-measure definition |
+| `discipline` | Genuinely parsed into `DisciplineDecl` (§1.5, `Parser::parse_discipline`) | `discipline name [;] ... enddiscipline` | Its `potential`/`flow`/`domain` attributes are all parsed (§1.5) | Module preamble | Closest to a C `struct`/unit-of-measure definition |
 | `discontinuity` | Reserved, no grammar production (`discontinuity(order);` hints the solver about a non-smooth point) | N/A | N/A | Would be analog-block only | No C analogue (a numerical-solver hint) |
+| `discrete` | A discipline's `domain discrete;` attribute value (§1.5), fully parsed | `domain discrete;` inside a `discipline` body | Parsed into `DisciplineDecl::domain` (`DomainKind::Discrete`), unused metadata | Module preamble | No C analogue |
+| `domain` | A discipline attribute keyword (§1.5), fully parsed | `domain discrete\|continuous;` inside a `discipline` body | Parsed into `DisciplineDecl::domain`, unused metadata | Module preamble | No C analogue |
 | `edge` | Parses as a call (`edge(expr)`) if written bare; realistically only ever appears inside a discarded `@(...)` | Digital-style edge-detection function | Rejected at elaboration if reached | Analog-block only (event control) | Closest to a rising/falling-edge interrupt trigger; no C analogue |
 | `electrical` | Dedicated token, §1.4 | — | — | — | — |
 | `else` | Dedicated token, §1.4 | — | — | — | — |
 | `end` | Dedicated token, §1.4 | — | — | — | — |
 | `endcase` | Case-block terminator, §1.5 | Closes `case...endcase` | N/A | Analog-block only | C `switch`'s closing `}` |
-| `enddiscipline` | Recognized-and-discarded, §1.5 | Closes `discipline...enddiscipline` | N/A | Module preamble | — |
+| `enddiscipline` | Genuinely recognized as the block terminator (§1.5, `Parser::parse_discipline`) | Closes `discipline...enddiscipline` | N/A | Module preamble | — |
 | `endfunction` | Function-definition terminator, §1.5 | Closes `analog function...endfunction` | N/A | Module-level | C function's closing `}` |
 | `endgenerate` | Syntactic bracket only, §1.5 `Generate`/`Endgenerate` | Closes `generate...endgenerate` | N/A | Analog-block only | No C analogue |
 | `endmodule` | Dedicated token, §1.4 | — | — | — | — |
-| `endnature` | Recognized-and-discarded, §1.5 | Closes `nature...endnature` | N/A | Module preamble | — |
+| `endnature` | Genuinely recognized as the block terminator (§1.5, `Parser::parse_nature`) | Closes `nature...endnature` | N/A | Module preamble | — |
 | `endprimitive` | Reserved, no grammar production (closes a UDP — user-defined gate primitive — definition) | N/A | N/A | Digital structural only | No C analogue |
 | `endspecify` | Reserved, no grammar production (closes a `specify...endspecify` timing block) | N/A | N/A | Digital timing-check only | No C analogue |
 | `endtable` | Reserved, no grammar production (closes a UDP truth-`table...endtable`) | N/A | N/A | Digital structural only | Closest to a C `switch`/lookup-table, but declarative and gate-level |
@@ -1087,7 +1113,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `final_step` | Reserved, no grammar production as a bare word outside `@()`; realistically only appears inside the discarded `@(final_step)` | Global analog event: fires once at analysis end | N/A | Analog-block only (event control) | No C analogue (closest: an `atexit()` hook) |
 | `flicker_noise` | Folds to constant `0.0`, §1.5 | `flicker_noise(pwr, exp[, "name"])` call | Const-folded to `0.0` | Analog-block only | No general-purpose analogue |
 | `floor` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `floor(x)` call | Round toward −∞ | Analog expr / const context | C `floor()` |
-| `flow` | Same as `abstol` (nature attribute, skipped) | Nature attribute naming the flow quantity | Never individually inspected | N/A (module preamble) | Names the conserved "current-like" quantity of a discipline; no C analogue |
+| `flow` | A discipline attribute keyword (§1.5), fully parsed and given real effect | `flow Nature;` inside a `discipline` body | Parsed into `DisciplineDecl::flow`; also calls `Parser::register_access` (§2.17), binding that nature's `access` name as a recognized `Flow`-kind access function | Module preamble | Names the conserved "current-like" quantity of a discipline; no C analogue |
 | `for` | Simulation-time (or elaboration-time when genvar-driven), §1.5/Part 2 §2.14 | `for (init; cond; step) body` | Dynamic, or const-evaluated if genvar-driven | Analog-block only | C `for` — with the added genvar-unrolling mode C has no concept of |
 | `force` | Reserved, no grammar production (digital procedural force-a-net) | N/A | N/A | Digital procedural only | No C analogue |
 | `forever` | Reserved, no grammar production (digital unconditional loop) | N/A | N/A | Digital procedural only | C's `for(;;)`/`while(1)` |
@@ -1101,7 +1127,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `highz1` | Reserved, no grammar production (net strength: high-impedance driving 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `hypot` | Dynamic/static dual, §1.5 | `hypot(x, y)` call | `sqrt(x²+y²)` | Analog expr / const context | C99 `hypot()` |
 | `idt` | Analog operator with internal state, §1.5 | `idt(expr)` | Time integral | Analog-block only | No C/digital-Verilog analogue |
-| `idt_nature` | Same as `ddt_nature` (nature attribute, skipped) | Nature attribute `idt_nature = other_nature;` | Never individually inspected | N/A (module preamble) | No C analogue |
+| `idt_nature` | Same as `ddt_nature` (nature attribute, parsed but unused) | Nature attribute `idt_nature = other_nature;` | Read as a plain identifier, not yet consulted by anything | N/A (module preamble) | No C analogue |
 | `if` | Dedicated token, §1.4 | — | — | — | — |
 | `ifnone` | Reserved, no grammar production (specify-block conditional-path fallback) | N/A | N/A | Specify-block (timing-check) only | No C analogue |
 | `inf` | Dedicated token, §1.4 | — | — | — | — |
@@ -1128,7 +1154,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `min` | Dynamic/static dual, §1.5 | `min(x, y)` call | Minimum | Analog expr / const context | C's `fmin()`/a `min` macro |
 | `module` | Dedicated token, §1.4 | — | — | — | — |
 | `nand` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a && b)`, minus gate timing |
-| `nature` | Recognized-and-discarded, §1.5 | `nature name ... endnature` | N/A | Module preamble | Closest to a C units-of-measure/tolerance struct |
+| `nature` | Genuinely parsed into `NatureDecl` (§1.5, `Parser::parse_nature`) | `nature name [;] ... endnature` | Its `units`/`access`/`abstol`/`idt_nature`/`ddt_nature` attributes are all parsed (§1.5) | Module preamble | Closest to a C units-of-measure/tolerance struct |
 | `negedge` | Reserved, no grammar production as a bare word outside `@()`; would appear as `@(negedge sig)`, itself discarded wholesale | Digital falling-edge event trigger | N/A | Digital event control only | No C analogue |
 | `nmos` | Reserved, no grammar production (NMOS switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `noise_table` | Folds to constant `0.0`, §1.5 | `noise_table(table_or_array[, "name"])` call | Const-folded to `0.0` | Analog-block only | No general-purpose analogue |
@@ -1141,7 +1167,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `parameter` | Dedicated token, §1.4 | — | — | — | — |
 | `pmos` | Reserved, no grammar production (PMOS switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `posedge` | Reserved, no grammar production as a bare word outside `@()`; would appear as `@(posedge sig)`, itself discarded wholesale | Digital rising-edge event trigger | N/A | Digital event control only | No C analogue |
-| `potential` | Same as `abstol` (nature attribute, skipped) | Nature attribute naming the potential quantity | Never individually inspected | N/A (module preamble) | Names the conserved "voltage-like" quantity of a discipline; no C analogue |
+| `potential` | A discipline attribute keyword (§1.5), fully parsed and given real effect | `potential Nature;` inside a `discipline` body | Parsed into `DisciplineDecl::potential`; also calls `Parser::register_access` (§2.17), binding that nature's `access` name as a recognized `Potential`-kind access function | Module preamble | Names the conserved "voltage-like" quantity of a discipline; no C analogue |
 | `pow` | Dynamic/static dual, §1.5 | `pow(x, y)` call | Power | Analog expr / const context | C `pow()` |
 | `primitive` | Reserved, no grammar production (opens a UDP definition, paired with `endprimitive`) | N/A | N/A | Digital structural only | No C analogue |
 | `pull0` | Reserved, no grammar production (net strength: resistive pull to 0) | N/A | N/A | Digital net-strength only | No C analogue |
@@ -1189,7 +1215,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `triand` | Reserved, no grammar production (wired-AND tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `trior` | Reserved, no grammar production (wired-OR tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `trireg` | Reserved, no grammar production (charge-storage net type, paired with `small`/`medium`/`large`) | N/A | N/A | Digital structural only | Closest to a C `static` variable retaining its last value, but modeling analog charge decay |
-| `units` | Same as `abstol` (nature attribute, skipped) | Nature attribute `units = "V";` | Never individually inspected | N/A (module preamble) | No C analogue |
+| `units` | Parsed into `NatureDecl::units` (§1.5), unused metadata | Nature attribute `units = "V";` | Read as a string literal via `Parser::expect_string`, not yet consulted by anything | N/A (module preamble) | No C analogue |
 | `vectored` | Reserved, no grammar production (net-vector storage-layout hint, pairs with `scalared`) | N/A | N/A | Digital structural only | No C analogue |
 | `wait` | Reserved, no grammar production (digital procedural block-until-condition) | N/A | N/A | Digital procedural only | Closest to a condition-variable `wait()`, but simulation-scheduled |
 | `wand` | Reserved, no grammar production (wired-AND net type) | N/A | N/A | Digital structural only | No C analogue |
@@ -1520,7 +1546,7 @@ as an ordinary loop.
 
 - Covered fully in Part 1 §1.5 (`While`/`Repeat`/`For`/`Case`/`Endcase`/`Default`).
 
-## 2.17 Access-function calls: `V(...)`/`I(...)` (electrical), `Temp(...)`/`Pwr(...)` (thermal)
+## 2.17 Access-function calls: `V(...)`/`I(...)` (electrical), `Temp(...)`/`Pwr(...)` (thermal), and beyond
 
 - **Purpose and Static Nature**: Simulation-time — a probe (`Expr::Probe`, read) or contribution
   target (`Stmt::Contribute`, write) against a specific branch, re-evaluated every solve
@@ -1529,17 +1555,22 @@ as an ordinary loop.
   `V`/`I`/`Temp`/`Pwr` are reserved words in this project (LRM §5.5: nature access-function
   names are the *discipline's*, not the language's, keywords). `V`/`I` are the electrical
   discipline's conventional potential/flow names; `Temp`/`Pwr` are the thermal discipline's —
-  both pairs come from the standard `disciplines.vams` header nearly every real model includes.
-  The parser recognizes all four contextually: `is_access(name)` checks the literal string
-  against that fixed set when an `Ident` is immediately followed by `(`. A *custom*
-  discipline/nature's own `access` name (an arbitrary user-chosen identifier declared inside a
-  `nature...endnature` body) is not recognized — real discipline/nature declarations are still
-  skipped wholesale (§1.5's `Discipline`/`Nature` entry), so there is nothing to look the name
-  up against. This was found and fixed against the broad `external/` corpus scan: about a dozen
-  real models (`asmhemt.va`, `epfl_hemt.va`, `fbh_hbt-2_3.va`, `BSIM6.1.1.va`,
-  `bsimbulk*.va`, `mvsg_cmc_*.va`, `vbic_1p3.va`, `hisimsotb.va`, …) contribute to a `thermal`
-  branch via `Temp(dt) <+ ...;`/`Pwr(rth) <+ ...;`, which previously mis-parsed as a bare
-  assignment target immediately followed by `(` — "expected `=`, found `(`".
+  both pairs come from the standard `disciplines.vams` header nearly every real model includes,
+  and stay recognized regardless of whether any discipline/nature block is ever parsed
+  (`Parser::known_access`'s always-on baseline, seeded in `parse`). **Beyond that baseline**
+  (§ module preamble discipline/nature parsing, § 1.5's `Discipline`/`Nature` entry): any access
+  name a genuinely parsed `discipline` block binds — via `potential Nature;`/`flow Nature;`,
+  where `Nature`'s own `access = Name;` attribute names the function — is recognized too,
+  additively (`Parser::register_access`). Recognition is purely name-based, not checked against
+  the discipline of the net the access is actually applied to (consistent with how `V`/`I` were
+  already recognized regardless of a net's declared discipline) — so, matching real-world loose
+  usage, an access name from one discipline's nature can be, and in practice sometimes is, used
+  directly on an `electrical`-declared net. This was originally found and fixed (for just
+  `Temp`/`Pwr`) against the broad `external/` corpus scan: about a dozen real models
+  (`asmhemt.va`, `epfl_hemt.va`, `fbh_hbt-2_3.va`, `BSIM6.1.1.va`, `bsimbulk*.va`,
+  `mvsg_cmc_*.va`, `vbic_1p3.va`, `hisimsotb.va`, …) contribute to a `thermal` branch via
+  `Temp(dt) <+ ...;`/`Pwr(rth) <+ ...;`, which previously mis-parsed as a bare assignment target
+  immediately followed by `(` — "expected `=`, found `(`".
 - **Expressions and Evaluation**: `V(a)`/`Temp(a)` (implicit reference/ground terminal) or
   `V(a, b)`/`Temp(a, b)` (explicit two-terminal branch) or `V(name)`/`Temp(name)` where `name`
   is a `branch`-declared alias (and likewise for `I`/`Pwr`) — all resolve, via
@@ -1654,9 +1685,12 @@ as an ordinary loop.
 
 - Covered fully in Part 1 §1.1 (`Number`, `Str`).
 
-## 2.25 Preamble discipline/nature block skipping
+## 2.25 Preamble discipline/nature block parsing
 
-- Covered fully in Part 1 §1.5 (`Discipline`/`Nature`/`Enddiscipline`/`Endnature`).
+- Covered fully in Part 1 §1.5 (`Discipline`/`Nature`/`Enddiscipline`/`Endnature`) and §2.17
+  (the access-function recognition it feeds). No longer a skip: `Parser::parse_preamble` (was
+  `skip_preamble`) genuinely parses each block into `disciplines::{NatureDecl, DisciplineDecl}`,
+  registered in `Parser::natures`/`Parser::disciplines`.
 
 ## 2.26 Math builtin call names (`floor`, `ceil`, `round`, `int`, `limexp`, and the rest)
 

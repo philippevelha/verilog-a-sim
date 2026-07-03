@@ -80,6 +80,17 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > still exactly what `va-codegen`/`va-core`/`va-abi` receive — one flat module, no hierarchy
 > concept, unchanged in shape. Hierarchy is a `va-frontend`-internal concern, not an IR one.
 
+> **Not a §6 change: discipline/nature declarations.** `discipline...enddiscipline`/
+> `nature...endnature` blocks are now genuinely parsed (`docs/token-reference.md` §1.5, §2.17,
+> §2.25) into a small `va-frontend`-internal table (`disciplines::{NatureDecl,
+> DisciplineDecl}`), instead of discarded as an opaque token span. This doesn't touch Interface
+> α either: net *declarations* still only accept the `electrical`/`thermal` keyword tokens
+> (unchanged `ast::Discipline`/`va_ir::Discipline`), so `Module`/`NodeDecl` are exactly as
+> before — `va_ir::Discipline::Other` still exists as a forward-looking placeholder, still
+> never constructed. The only real effect is parser-internal: a parsed discipline's bound
+> nature `access` names widen `Parser::known_access` beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
+> baseline, additively.
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models

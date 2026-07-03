@@ -23,10 +23,13 @@
 //! - Parameter ranges accept mixed inclusive/exclusive delimiters — `[`/`]` (inclusive) and
 //!   `(`/`)` (exclusive) in any combination, e.g. `from [0:inf)`. The inclusive/exclusive
 //!   flags are recorded in the AST but dropped by elaboration (see [`crate::elaborate`]).
-//! - Access functions are limited to the standard `disciplines.vams` names — `V`/`I`
-//!   (electrical) and `Temp`/`Pwr` (thermal); a custom discipline/nature's own `access` name is
-//!   out of scope for v0 (that needs real discipline/nature declarations, which are still
-//!   skipped wholesale).
+//! - `V`/`I` (electrical) and `Temp`/`Pwr` (thermal) are always recognized access-function
+//!   names, regardless of whether any `discipline`/`nature` block was parsed. Beyond that
+//!   baseline, an access name is recognized once a parsed `discipline` block binds it as a
+//!   `potential`/`flow` nature (§ module preamble discipline/nature parsing,
+//!   `Parser::known_access`) — additively, never removing the baseline. Net *declarations*
+//!   still only accept the `electrical`/`thermal` keywords (a stated v1 limitation; see
+//!   `docs/roadmap.md`).
 //! - Analog functions retain argument directions and body only; argument/local *types*
 //!   (`real x;`) are parsed and discarded.
 //! - Event control `@(event) stmt` is parsed but the trigger is discarded — the controlled
@@ -41,10 +44,13 @@
 //!   rejecting a mix, and any other per-instance validation (port count, vector ports, unknown
 //!   parameter overrides), to elaboration (see [`crate::elaborate`]).
 
+use std::collections::HashMap;
+
 use crate::ast::{
     Access, AccessKind, AnalogFunction, BinOp, CaseArm, Direction, Discipline, ExprAst, ExprRef,
     FuncArg, Item, ModuleAst, NetArg, NetDecl, ParamType, PortConn, Range, Stmt, UnOp, VarEntry,
 };
+use crate::disciplines::{DisciplineDecl, DomainKind, NatureDecl};
 use crate::lexer::Token;
 use crate::FrontendError;
 
@@ -55,10 +61,22 @@ use crate::FrontendError;
 /// Returns [`FrontendError::Parse`] on unexpected or missing tokens, or if the stream defines
 /// no module at all.
 pub fn parse(tokens: &[Token]) -> Result<Vec<ModuleAst>, FrontendError> {
+    // The always-on access-function baseline (§ module preamble discipline/nature parsing):
+    // recognized regardless of whether any `discipline`/`nature` block is ever parsed, so a
+    // file with no preamble at all still recognizes the standard electrical/thermal names.
+    let mut known_access = HashMap::new();
+    known_access.insert("V".to_string(), AccessKind::Potential);
+    known_access.insert("Temp".to_string(), AccessKind::Potential);
+    known_access.insert("I".to_string(), AccessKind::Flow);
+    known_access.insert("Pwr".to_string(), AccessKind::Flow);
+
     let mut p = Parser {
         toks: tokens,
         pos: 0,
         exprs: Vec::new(),
+        natures: HashMap::new(),
+        disciplines: HashMap::new(),
+        known_access,
     };
     let mut modules = Vec::new();
     loop {
@@ -78,6 +96,20 @@ struct Parser<'a> {
     toks: &'a [Token],
     pos: usize,
     exprs: Vec<ExprAst>,
+    /// Parsed `nature ... endnature` blocks, keyed by name (§ module preamble discipline/nature
+    /// parsing).
+    natures: HashMap<String, NatureDecl>,
+    /// Parsed `discipline ... enddiscipline` blocks, keyed by name.
+    disciplines: HashMap<String, DisciplineDecl>,
+    /// Recognized access-function name → its potential/flow classification. Seeded with the
+    /// always-on `V`/`I`/`Temp`/`Pwr` baseline in [`parse`], then extended additively as a
+    /// discipline binds one of `self.natures`'s access names as its `potential`/`flow` nature
+    /// (`Parser::register_access`). Consulted by `is_access`/`parse_access` — this is a rare
+    /// case in this codebase where the parser itself needs a small symbol table: unlike every
+    /// other name (params, vars, functions), access-name recognition must happen at *parse*
+    /// time, since it decides which `Stmt`/`ExprAst` variant to build in the first place, not
+    /// just how a name later resolves at elaboration.
+    known_access: HashMap<String, AccessKind>,
 }
 
 impl Parser<'_> {
@@ -265,37 +297,204 @@ impl Parser<'_> {
         }
     }
 
-    /// Skip directives and top-level `discipline …  enddiscipline` / `nature … endnature`
-    /// blocks (e.g. from an expanded `disciplines.vams`) that precede the module. v0 models
-    /// disciplines natively, so these declarations are ignored.
-    fn skip_preamble(&mut self) {
+    /// Parse directives and top-level `discipline ... enddiscipline` / `nature ...
+    /// endnature` blocks (e.g. from an expanded `disciplines.vams`) that precede a module,
+    /// registering each in [`Self::natures`]/[`Self::disciplines`] and widening
+    /// [`Self::known_access`] as a discipline binds a nature's access name (§ module preamble
+    /// discipline/nature parsing). Runs before *every* module in the token stream (called from
+    /// [`Self::parse_module`]), so blocks interleaved between modules are reached too.
+    fn parse_preamble(&mut self) -> Result<(), FrontendError> {
         loop {
             self.skip_directives();
             if self.at_keyword("discipline") {
-                self.skip_block_until("enddiscipline");
+                self.parse_discipline()?;
             } else if self.at_keyword("nature") {
-                self.skip_block_until("endnature");
+                self.parse_nature()?;
             } else {
                 break;
             }
         }
+        Ok(())
     }
 
-    /// Consume tokens up to and including the reserved word `end` (e.g. `enddiscipline`).
-    fn skip_block_until(&mut self, end: &str) {
-        while let Some(tok) = self.peek() {
-            let done = matches!(tok, Token::Keyword(kw) if kw.as_str() == end);
+    /// Consume a token if present; a no-op otherwise. Used to tolerate the real-world grammar
+    /// variant (seen in `external/ekv3_natures.va`) that omits the `;` after a
+    /// `discipline`/`nature` block's name.
+    fn eat_optional(&mut self, t: &Token) -> bool {
+        if self.at(t) {
             self.pos += 1;
-            if done {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Expect a string literal, e.g. a `nature` block's `units = "...";` value.
+    fn expect_string(&mut self) -> Result<String, FrontendError> {
+        match self.peek() {
+            Some(Token::Str(s)) => {
+                let s = s.clone();
+                self.pos += 1;
+                Ok(s)
+            }
+            _ => self.err("expected a string literal".to_string()),
+        }
+    }
+
+    /// Parse a `nature` attribute's value when it's expected to be a plain (optionally
+    /// negated) numeric literal, e.g. `abstol = 1e-12;`. Returns `Some(value)` only when the
+    /// value is *exactly* `[-]NUMBER` immediately followed by `;` — anything else (e.g.
+    /// `abstol = 2*1e-6;`) falls back to [`Self::parse_expr`] (consuming the expression's
+    /// tokens so the surrounding grammar still parses) and returns `None`. `abstol` is
+    /// parsed-but-unused metadata (like `ast::Range`'s inclusive/exclusive flags), so a
+    /// non-literal value is dropped rather than rejected.
+    fn parse_literal_f64_opt(&mut self) -> Result<Option<f64>, FrontendError> {
+        let negate = matches!(self.peek(), Some(Token::Minus));
+        let num_at = if negate { 1 } else { 0 };
+        if let Some(Token::Number(n)) = self.nth(num_at) {
+            if self.nth(num_at + 1) == Some(&Token::Semicolon) {
+                let n = *n;
+                self.pos += num_at + 1;
+                return Ok(Some(if negate { -n } else { n }));
+            }
+        }
+        self.parse_expr()?;
+        Ok(None)
+    }
+
+    /// Parse a `discipline`/`nature` block's own declared name. Almost always a generic
+    /// identifier, but the standard `disciplines.vams` header itself names a discipline
+    /// `electrical`/`thermal` — words this project already lexes as its own dedicated
+    /// `Token::Electrical`/`Token::Thermal` net-declaration tokens, not `Token::Ident` — so
+    /// this must accept those two spellings too.
+    fn expect_discipline_or_nature_name(&mut self) -> Result<String, FrontendError> {
+        match self.peek() {
+            Some(Token::Electrical) => {
+                self.pos += 1;
+                Ok("electrical".to_string())
+            }
+            Some(Token::Thermal) => {
+                self.pos += 1;
+                Ok("thermal".to_string())
+            }
+            _ => self.expect_ident(),
+        }
+    }
+
+    /// Parse one `nature ... endnature` block (LRM §4), registering it in [`Self::natures`].
+    fn parse_nature(&mut self) -> Result<(), FrontendError> {
+        self.eat_keyword("nature")?;
+        let name = self.expect_discipline_or_nature_name()?;
+        self.eat_optional(&Token::Semicolon);
+        let mut decl = NatureDecl {
+            name: name.clone(),
+            ..Default::default()
+        };
+        loop {
+            if self.at_keyword("endnature") {
                 break;
             }
+            if self.peek().is_none() {
+                return self.err("unexpected end of input inside `nature...endnature`".to_string());
+            }
+            if self.at_keyword("units") {
+                self.pos += 1;
+                self.eat(&Token::Assign)?;
+                decl.units = Some(self.expect_string()?);
+                self.eat(&Token::Semicolon)?;
+            } else if self.at_keyword("access") {
+                self.pos += 1;
+                self.eat(&Token::Assign)?;
+                decl.access = Some(self.expect_ident()?);
+                self.eat(&Token::Semicolon)?;
+            } else if self.at_keyword("abstol") {
+                self.pos += 1;
+                self.eat(&Token::Assign)?;
+                decl.abstol = self.parse_literal_f64_opt()?;
+                self.eat(&Token::Semicolon)?;
+            } else if self.at_keyword("idt_nature") {
+                self.pos += 1;
+                self.eat(&Token::Assign)?;
+                decl.idt_nature = Some(self.expect_ident()?);
+                self.eat(&Token::Semicolon)?;
+            } else if self.at_keyword("ddt_nature") {
+                self.pos += 1;
+                self.eat(&Token::Assign)?;
+                decl.ddt_nature = Some(self.expect_ident()?);
+                self.eat(&Token::Semicolon)?;
+            } else {
+                return self.err(format!("unknown `nature` attribute {:?}", self.peek()));
+            }
+        }
+        self.eat_keyword("endnature")?;
+        self.natures.insert(name, decl);
+        Ok(())
+    }
+
+    /// Parse one `discipline ... enddiscipline` block (LRM §4), registering it in
+    /// [`Self::disciplines`] and widening [`Self::known_access`] via [`Self::register_access`].
+    fn parse_discipline(&mut self) -> Result<(), FrontendError> {
+        self.eat_keyword("discipline")?;
+        let name = self.expect_discipline_or_nature_name()?;
+        self.eat_optional(&Token::Semicolon);
+        let mut decl = DisciplineDecl {
+            name: name.clone(),
+            ..Default::default()
+        };
+        loop {
+            if self.at_keyword("enddiscipline") {
+                break;
+            }
+            if self.peek().is_none() {
+                return self.err(
+                    "unexpected end of input inside `discipline...enddiscipline`".to_string(),
+                );
+            }
+            if self.at_keyword("potential") {
+                self.pos += 1;
+                let nature = self.expect_ident()?;
+                self.eat(&Token::Semicolon)?;
+                self.register_access(&nature, AccessKind::Potential);
+                decl.potential = Some(nature);
+            } else if self.at_keyword("flow") {
+                self.pos += 1;
+                let nature = self.expect_ident()?;
+                self.eat(&Token::Semicolon)?;
+                self.register_access(&nature, AccessKind::Flow);
+                decl.flow = Some(nature);
+            } else if self.at_keyword("domain") {
+                self.pos += 1;
+                decl.domain = Some(if self.at_keyword("discrete") {
+                    self.pos += 1;
+                    DomainKind::Discrete
+                } else {
+                    self.eat_keyword("continuous")?;
+                    DomainKind::Continuous
+                });
+                self.eat(&Token::Semicolon)?;
+            } else {
+                return self.err(format!("unknown `discipline` attribute {:?}", self.peek()));
+            }
+        }
+        self.eat_keyword("enddiscipline")?;
+        self.disciplines.insert(name, decl);
+        Ok(())
+    }
+
+    /// Additively widen [`Self::known_access`]: if `nature_name` is an already-parsed nature
+    /// with an `access` name, that name becomes recognized as `kind`. A discipline
+    /// forward-referencing a not-yet-parsed nature (never seen in the real corpus) is a
+    /// silent no-op here, not an error — best-effort, matching the overall additive framing.
+    fn register_access(&mut self, nature_name: &str, kind: AccessKind) {
+        if let Some(access_name) = self.natures.get(nature_name).and_then(|n| n.access.clone()) {
+            self.known_access.insert(access_name, kind);
         }
     }
 
     // --- module --------------------------------------------------------------------
 
     fn parse_module(&mut self) -> Result<ModuleAst, FrontendError> {
-        self.skip_preamble();
+        self.parse_preamble()?;
         self.eat(&Token::Module)?;
         let name = self.expect_ident()?;
 
@@ -751,7 +950,9 @@ impl Parser<'_> {
             }
             // `V(...) <+ ...` / `I(...) <+ ...` is a contribution; a bare `name = ...` is an
             // assignment. Both start with an identifier, so disambiguate on the lookahead.
-            Some(Token::Ident(name)) if is_access(name) && self.nth(1) == Some(&Token::LParen) => {
+            Some(Token::Ident(name))
+                if self.is_access(name) && self.nth(1) == Some(&Token::LParen) =>
+            {
                 let target = self.parse_access()?;
                 self.eat(&Token::Contribute)?;
                 let value = self.parse_expr()?;
@@ -910,17 +1111,23 @@ impl Parser<'_> {
         })
     }
 
-    /// Parse an access function application `V(a[, b])` / `I(a[, b])`.
+    /// Whether `name` is a recognized access-function name (§ module preamble discipline/nature
+    /// parsing) — the always-on `V`/`I`/`Temp`/`Pwr` baseline, plus anything a parsed
+    /// `discipline` block has additively registered.
+    fn is_access(&self, name: &str) -> bool {
+        self.known_access.contains_key(name)
+    }
+
+    /// Parse an access function application `V(a[, b])` / `I(a[, b])` (or any other name
+    /// [`Self::is_access`] recognizes).
     fn parse_access(&mut self) -> Result<Access, FrontendError> {
-        let kind =
-            match self.peek() {
-                Some(Token::Ident(n)) if n == "V" || n == "Temp" => AccessKind::Potential,
-                Some(Token::Ident(n)) if n == "I" || n == "Pwr" => AccessKind::Flow,
-                _ => return self.err(
-                    "expected an access function (`V`/`Temp` for potential, `I`/`Pwr` for flow)"
-                        .to_string(),
-                ),
-            };
+        let name = match self.peek() {
+            Some(Token::Ident(n)) => n.clone(),
+            _ => return self.err("expected an access function".to_string()),
+        };
+        let kind = *self.known_access.get(&name).ok_or_else(|| {
+            FrontendError::Parse(format!("`{name}` is not a recognized access function"))
+        })?;
         self.pos += 1;
         self.eat(&Token::LParen)?;
         let mut args = vec![self.parse_net_arg()?];
@@ -1034,7 +1241,7 @@ impl Parser<'_> {
             Some(Token::Ident(name)) => {
                 let name = name.clone();
                 if self.nth(1) == Some(&Token::LParen) {
-                    if is_access(&name) {
+                    if self.is_access(&name) {
                         let access = self.parse_access()?;
                         Ok(self.push(ExprAst::Probe(access)))
                     } else {
@@ -1092,18 +1299,6 @@ impl Parser<'_> {
         self.eat(&Token::RParen)?;
         Ok(args)
     }
-}
-
-/// Whether `name` is a branch access function recognised by v0 (`V` or `I`).
-/// Whether `name` is a recognized access function. `V`/`I` are the electrical discipline's
-/// standard potential/flow names; `Temp`/`Pwr` are the thermal discipline's — both pairs come
-/// from the standard `disciplines.vams` header nearly every real Verilog-A model includes, not
-/// from this project's own choice of spelling. A *custom* discipline/nature's own `access`
-/// name (an arbitrary user-chosen identifier) is not recognized — that needs the
-/// discipline/nature declarations this project still skips wholesale (a stated limitation; see
-/// `crate::elaborate`'s `Discipline`/`Nature` handling).
-fn is_access(name: &str) -> bool {
-    matches!(name, "V" | "I" | "Temp" | "Pwr")
 }
 
 /// Map an operator token to `(op, left_bp, right_bp)`. Higher binding power binds tighter;
@@ -1881,5 +2076,128 @@ mod tests {
             }
             other => panic!("expected an instance item, got {other:?}"),
         }
+    }
+
+    // --- discipline/nature preamble parsing (§ module preamble discipline/nature parsing) ---
+
+    /// Build a bare `Parser` over `toks`, seeded with the same always-on access baseline
+    /// [`parse`] uses, for tests that need to inspect [`Parser::natures`]/
+    /// [`Parser::disciplines`]/[`Parser::known_access`] directly (not reachable through the
+    /// public [`parse`]/[`parse_src`] API, which only returns the finished `ModuleAst`s).
+    fn make_parser(toks: &[Token]) -> Parser<'_> {
+        let mut known_access = HashMap::new();
+        known_access.insert("V".to_string(), AccessKind::Potential);
+        known_access.insert("Temp".to_string(), AccessKind::Potential);
+        known_access.insert("I".to_string(), AccessKind::Flow);
+        known_access.insert("Pwr".to_string(), AccessKind::Flow);
+        Parser {
+            toks,
+            pos: 0,
+            exprs: Vec::new(),
+            natures: HashMap::new(),
+            disciplines: HashMap::new(),
+            known_access,
+        }
+    }
+
+    #[test]
+    fn discipline_and_nature_parse_accellera_style() {
+        // The exact `external/disciplines.vams` shape: a `;` after every discipline/nature name.
+        let src = "nature Current; units = \"A\"; access = I; idt_nature = Charge; \
+                    abstol = 1e-12; endnature \
+                    nature Voltage; units = \"V\"; access = V; endnature \
+                    discipline electrical; potential Voltage; flow Current; enddiscipline \
+                    module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+        let toks = lex(src).expect("lex");
+        let mut p = make_parser(&toks);
+        p.parse_preamble().expect("parse preamble");
+        assert_eq!(p.known_access.get("V"), Some(&AccessKind::Potential));
+        assert_eq!(p.known_access.get("I"), Some(&AccessKind::Flow));
+        let current = p.natures.get("Current").expect("Current nature parsed");
+        assert_eq!(current.access.as_deref(), Some("I"));
+        assert_eq!(current.abstol, Some(1e-12));
+        assert_eq!(current.idt_nature.as_deref(), Some("Charge"));
+        let electrical = p
+            .disciplines
+            .get("electrical")
+            .expect("electrical discipline parsed");
+        assert_eq!(electrical.potential.as_deref(), Some("Voltage"));
+        assert_eq!(electrical.flow.as_deref(), Some("Current"));
+        // The module that follows must still parse fine, `V`/`I` intact.
+        let m = p.parse_module().expect("parse module");
+        assert_eq!(m.name, "t");
+    }
+
+    #[test]
+    fn discipline_and_nature_parse_no_semicolon_style() {
+        // The exact `external/ekv3_natures.va` shape: no `;` after the discipline/nature name.
+        let src = "nature Current\n units = \"A\";\n access = I;\n endnature \
+                    nature Voltage\n units = \"V\";\n access = V;\n endnature \
+                    discipline electrical\n potential Voltage;\n flow Current;\n enddiscipline \
+                    module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+        let toks = lex(src).expect("lex");
+        let mut p = make_parser(&toks);
+        p.parse_preamble().expect("parse preamble");
+        assert!(p.natures.contains_key("Current"));
+        assert!(p.disciplines.contains_key("electrical"));
+        let m = p.parse_module().expect("parse module");
+        assert_eq!(m.name, "t");
+    }
+
+    #[test]
+    fn custom_access_name_recognized_after_discipline_block() {
+        // Before this discipline/nature block is parsed, `MMF` is not a recognized access
+        // function at all — `MMF(a, b) <+ ...;` would previously mis-parse.
+        let m = parse_src(
+            "nature Magneto_Motive_Force; units = \"A*turn\"; access = MMF; endnature \
+             discipline magnetic; potential Magneto_Motive_Force; enddiscipline \
+             module t(a, b); electrical a, b; analog MMF(a, b) <+ 0.0; endmodule",
+        );
+        assert_eq!(m.name, "t");
+        assert!(matches!(analog_body(&m)[0], Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn bare_v_i_recognized_with_no_discipline_block_at_all() {
+        // No preamble whatsoever: the always-on baseline alone must still be enough.
+        let m = parse_src("module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule");
+        assert!(matches!(analog_body(&m)[0], Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn domain_discrete_and_continuous_parse() {
+        let toks = lex("discipline logic; domain discrete; enddiscipline \
+             discipline wire_like; domain continuous; enddiscipline \
+             module t(); endmodule")
+        .expect("lex");
+        let mut p = make_parser(&toks);
+        p.parse_preamble().expect("parse preamble");
+        assert_eq!(
+            p.disciplines.get("logic").and_then(|d| d.domain),
+            Some(DomainKind::Discrete)
+        );
+        assert_eq!(
+            p.disciplines.get("wire_like").and_then(|d| d.domain),
+            Some(DomainKind::Continuous)
+        );
+    }
+
+    #[test]
+    fn nature_abstol_non_literal_is_dropped_not_an_error() {
+        let toks = lex("nature Current; access = I; abstol = 2*1e-6; endnature \
+             module t(); endmodule")
+        .expect("lex");
+        let mut p = make_parser(&toks);
+        p.parse_preamble().expect("parse preamble");
+        assert_eq!(p.natures.get("Current").and_then(|n| n.abstol), None);
+    }
+
+    #[test]
+    fn unknown_discipline_attribute_is_a_parse_error() {
+        let toks =
+            lex("discipline electrical; bogus_attr Voltage; enddiscipline module t(); endmodule")
+                .expect("lex");
+        let mut p = make_parser(&toks);
+        assert!(p.parse_preamble().is_err());
     }
 }

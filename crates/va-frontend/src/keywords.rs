@@ -36,6 +36,13 @@
 //! real-model corpus, where `real vt;`/`vt = $vt(...)` (caching the thermal-voltage value
 //! under its conventional name) is common enough to be the single most common reservation
 //! conflict found.
+//!
+//! `discrete`/`domain` (a `discipline` body's `domain discrete;`/`domain continuous;`
+//! attribute, § module preamble discipline/nature parsing) were added in the same pass real
+//! discipline/nature parsing landed — like `localparam`/`electrical`/`thermal` above, each has
+//! a real grammar production (inside a `discipline...enddiscipline` body) and was simply
+//! missing from this table until then. `continuous` was added alongside them for the same
+//! reason, even though `domain continuous;` is the LRM's default and so rarely written out.
 
 /// A Verilog-A/AMS reserved word carried generically by the lexer.
 ///
@@ -81,7 +88,7 @@ impl std::fmt::Display for Keyword {
 /// `endmodule`, `exclude`, `from`, `genvar`, `ground`, `if`, `inf`, `inout`, `input`,
 /// `integer`, `localparam`, `module`, `output`, `parameter`, `real`, `thermal`) appear here for
 /// completeness but are tokenized directly.
-pub const RESERVED_WORDS: [&str; 179] = [
+pub const RESERVED_WORDS: [&str; 182] = [
     "abs",
     "abstol",
     "access",
@@ -110,6 +117,7 @@ pub const RESERVED_WORDS: [&str; 179] = [
     "casez",
     "ceil",
     "cmos",
+    "continuous",
     "cos",
     "cosh",
     "cross",
@@ -123,6 +131,8 @@ pub const RESERVED_WORDS: [&str; 179] = [
     "disable",
     "discipline",
     "discontinuity",
+    "discrete",
+    "domain",
     "edge",
     "electrical",
     "else",

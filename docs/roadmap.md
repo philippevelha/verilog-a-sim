@@ -147,42 +147,62 @@ a contribution *target*/array-variable *write* — guarded by an `index == k` eq
 arm, which is sound precisely because the array/vector's range is always static even when the
 selecting index isn't (`token-reference.md` §2.2b/§2.18). No `va-ir` change at all: both
 `Expr::Select` and `Stmt::If` already existed. Closes the sole remaining blocker for both
-`adc_16bit_ideal.va`/`dac_16bit_ideal.va`, moving the pass count from 59 to 61.
+`adc_16bit_ideal.va`/`dac_16bit_ideal.va`, moving the pass count from 59 to 61. **Module
+instantiation** (LRM Annex C.8, `resistor r1(p, n);` / `divider #(.gain(2.0)) d1(.in(a),
+.out(b));`) — previously the single biggest remaining "full Verilog-A" gap, now closed:
+`va-frontend` parses every module a file defines and recursively elaborates+inlines an
+`Item::Instance`'s referenced submodule into the instantiating module's own IR arenas, entirely
+inside `va-frontend` — no `va-ir`/`va-codegen`/`va-core` change at all (`docs/interfaces.md`
+records why). Scalar port connections only, no module-item-level `generate` around an instance
+(no genvar-driven *array* of instances) yet — both stated v1 limits, not silent gaps. And
+**discipline/nature declarations** — `discipline...enddiscipline`/`nature...endnature` (the
+kind `` `include "disciplines.vams" `` expands to) are now genuinely parsed into a small
+in-`va-frontend` table (`disciplines.rs`), instead of discarded as an opaque token span. This
+widens the recognized access-function name set beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
+baseline — any access name a parsed discipline binds (e.g. `Q`, `Phi`, `MMF` from the real
+corpus's magnetic/kinematic/rotational discipline families) is recognized too, additively, so
+the baseline itself never regresses. Net *declarations* still only accept the
+`electrical`/`thermal` keywords — a stated v1 limit (see the backlog below), not corpus-tested
+against any real file (none in `external/` declares a net with a custom discipline).
 
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
-1. **Multi-module hierarchy / instantiation** (LRM Annex C.8) — the single biggest remaining
-   "full Verilog-A" gap. Large: touches `va-ir` (Interface α), `va-codegen`, and `va-netlist`
-   together. Not attempted yet; needs its own kickoff-style design pass (§6), not an incremental
-   patch. Note `va-netlist` also has no wiring convention yet for a multi-terminal *port*
-   connection — relevant once something downstream actually needs to instantiate a module with
-   a vector port, which nothing does yet (`Module.ports` is populated correctly, but unread by
-   `va-codegen`/`va-cli`'s real paths).
-2. **Laplace/Z-domain filters** (`laplace_nd`/`np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) — blocked
+1. **Laplace/Z-domain filters** (`laplace_nd`/`np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) — blocked
    on array/list-literal expression syntax (`{1, 2, 3}`), which the grammar doesn't have at all
    yet; a DC answer (the filter's gain at s=0/z=1, from the coefficient arrays) is sound once
    that syntax exists. Do the array-literal grammar work once, then revisit.
-3. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
+2. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
    semantics) — cannot be soundly approximated at DC the way `transition`/`slew` can (their
    whole purpose is time history); genuinely blocked on `va-transient` existing.
-4. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
+3. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
    as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
    priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
    artifact).
-5. **`absdelay`** — a time-domain delay operator (`fbh_hbt-2_1.va`), same DC-steady-state-fold
+4. **`absdelay`** — a time-domain delay operator (`fbh_hbt-2_1.va`), same DC-steady-state-fold
    family as `transition`/`slew`/`$limit` (settles to its input value with no delay history at a
    fixed operating point); low file count (1) so low priority, but cheap once picked up.
-6. **Custom `discipline`/`nature` declarations** — not corpus-motivated right now (see below:
-   the 8 files that looked like they needed this turned out to be an unrelated corpus artifact),
-   but still lines up directly with `CLAUDE.md` §1's own multi-physics goal ("disciplines
-   optical, thermal, mechanical, etc") and is worth doing eventually. Today's
-   `discipline...enddiscipline`/`nature...endnature` is skipped wholesale
-   (`token-reference.md` §1.5). Likely doesn't need an `va-ir` change — nodes under a custom
-   discipline can just carry `Discipline::Other`, already in the IR — but does need the
-   `discipline` declaration actually parsed so the elaborator knows the name exists, and is also
-   the only way to recognize an access-function name beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
-   (§2.17).
+5. **Custom-discipline net declarations** — a net can still only be declared `electrical`/
+   `thermal` (dedicated keyword tokens); accepting an arbitrary parsed-discipline identifier
+   (`optical p1, p2;`) needs new lookahead disambiguation against module instantiation's "a bare
+   leading `Ident` at item level → `parse_instance`" rule (e.g. `Ident Ident (` = instance vs.
+   `Ident Ident ,`/`;`/`[` = net declaration). Zero real-world need found in `external/`, so not
+   urgent, but the natural next step toward `CLAUDE.md` §1's multi-physics goal ("disciplines
+   optical, thermal, mechanical, etc") — `va_ir::Discipline::Other` already exists in the IR for
+   exactly this, still never constructed.
+6. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
+   `idt_nature`/`ddt_nature` are parsed and stored (`disciplines.rs::NatureDecl`) but never read
+   by `va-core` or elaboration; a real per-discipline `abstol` could feed `convergence.rs`'s
+   `gmin`/damping aids once a net's discipline round-trips that far.
+7. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
+   access's implicit "gnd" second terminal is hardcoded `Discipline::Electrical` regardless of
+   the access's own discipline (e.g. a bare `Temp(dt)` still resolves against an
+   electrical-tagged reference node); pre-existing, not introduced by the discipline/nature
+   pass, and not fixable without per-access discipline tracking that doesn't exist even for
+   electrical/thermal today.
+8. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
+   production in `parse_item` at all; the implicit "gnd" node (`reference_node`, above) is the
+   only reference-node convention this project has.
 
 **Permanently out of scope, not a backlog item** (LRM Annex C.7: "No digital behavior or
 events are supported in Verilog-A" — these are excluded from Verilog-A *itself*, not narrowed

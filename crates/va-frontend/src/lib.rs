@@ -10,6 +10,7 @@
 #![recursion_limit = "512"]
 
 pub mod ast;
+pub mod disciplines;
 pub mod elaborate;
 pub mod keywords;
 pub mod lexer;

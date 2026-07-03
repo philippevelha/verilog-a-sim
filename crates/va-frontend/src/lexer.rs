@@ -165,6 +165,7 @@ pub enum Token {
     #[token("casez", kw)]
     #[token("ceil", kw)]
     #[token("cmos", kw)]
+    #[token("continuous", kw)]
     #[token("cos", kw)]
     #[token("cosh", kw)]
     #[token("cross", kw)]
@@ -178,6 +179,8 @@ pub enum Token {
     #[token("disable", kw)]
     #[token("discipline", kw)]
     #[token("discontinuity", kw)]
+    #[token("discrete", kw)]
+    #[token("domain", kw)]
     #[token("edge", kw)]
     #[token("endcase", kw)]
     #[token("enddiscipline", kw)]
@@ -496,6 +499,18 @@ mod tests {
         assert_eq!(
             lex_ok("module modules"),
             vec![Token::Module, Token::Ident("modules".into()),]
+        );
+    }
+
+    #[test]
+    fn domain_discrete_continuous_lex_as_keywords() {
+        assert_eq!(
+            lex_ok("domain discrete continuous"),
+            vec![
+                Token::Keyword(crate::keywords::Keyword::from_ident("domain").unwrap()),
+                Token::Keyword(crate::keywords::Keyword::from_ident("discrete").unwrap()),
+                Token::Keyword(crate::keywords::Keyword::from_ident("continuous").unwrap()),
+            ]
         );
     }
 
