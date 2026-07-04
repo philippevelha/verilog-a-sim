@@ -251,6 +251,64 @@ mod tests {
     }
 
     #[test]
+    fn gmin_stepping_converges_a_circuit_plain_newton_cannot() {
+        // The demo circuit `docs/roadmap.md`'s T3.3 flagged as missing: one that genuinely
+        // *needs* gmin stepping, not just tolerates it. 20 diodes in series behind a 10 Ω
+        // resistor, driven at 20 V from a cold (zero) start: a real, physically sane operating
+        // point exists (~0.81 V/diode, ~0.38 A), but plain Newton's log-ramp junction limiting
+        // walks the chain's *internal* node voltages there one node at a time with no other
+        // conductance path to keep them in check, and some node's voltage crosses into the
+        // exponential's `f64` overflow range en route -- a genuine `Err(Singular)` from a
+        // non-finite Jacobian entry, confirmed independent of iteration budget (still fails at
+        // `max_iters: 2000`, ~13x this test's default). `gmin` stepping's early, well-
+        // conditioned stages (a competing shunt conductance to ground at every node) keep the
+        // whole chain in range long enough to land near the true operating point before the
+        // final, unshunted stage — which then only needs a handful of iterations to finish.
+        let n_diodes = 20;
+        let branch = n_diodes + 1;
+        let dim = branch + 1;
+        let vs = VSource::new(0, GROUND, branch, 20.0);
+        let r = Resistor::new(0, 1, 10.0);
+        let mut diodes = Vec::new();
+        for i in 1..n_diodes {
+            diodes.push(Diode::new(i, i + 1, 1e-14, 1.0, VT_300K));
+        }
+        diodes.push(Diode::new(n_diodes, GROUND, 1e-14, 1.0, VT_300K));
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs, &r];
+        insts.extend(diodes.iter().map(|d| d as &dyn ModelInstance));
+
+        // Not just this test's default iteration budget: plain Newton stays singular even
+        // given a very generous one, proving this isn't a "just needs more iterations" case.
+        let cfg_no_gmin = NewtonConfig {
+            max_iters: 2000,
+            ..NewtonConfig::default()
+        };
+        assert!(
+            matches!(solve(&insts, dim, cfg_no_gmin), Err(CoreError::Singular)),
+            "expected plain Newton to hit overflow regardless of iteration budget"
+        );
+
+        let cfg_with_gmin = NewtonConfig {
+            max_iters: 150,
+            gmin_steps: 30,
+            ..NewtonConfig::default()
+        };
+        let x = solve(&insts, dim, cfg_with_gmin).expect("gmin stepping converges");
+
+        // KCL: the same current flows through the resistor, the first diode, and the source
+        // branch (a single series loop).
+        let i_r = (x[0] - x[1]) / 10.0;
+        let vd0 = x[1] - x[2];
+        let i_d0 = diodes[0].current(vd0);
+        assert!((i_r - i_d0).abs() < 1e-6, "KCL imbalance: {i_r} vs {i_d0}");
+        assert!(
+            (x[branch].abs() - i_r).abs() < 1e-6,
+            "branch current mismatch: {} vs {i_r}",
+            x[branch]
+        );
+    }
+
+    #[test]
     fn reports_non_convergence() {
         // One iteration is not enough for a nonlinear solve from the zero guess.
         let vs = VSource::new(0, GROUND, 2, 1.0);

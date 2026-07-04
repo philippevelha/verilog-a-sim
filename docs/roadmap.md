@@ -484,9 +484,17 @@ the reference models.
 > changes of its own. `NewtonConfig::gmin_steps` (default `0`, off) drives it; two new tests
 > confirm the divider/diode-clamp circuits still solve to the same answer with it enabled, in
 > particular that the VSource branch survives intact (`gmin_stepping_does_not_corrupt_the_
-> vsource_branch`). *Outstanding:* rung-2 gate vs golden (T6); `t3-core/03-nonlinear-dc.qmd`;
-> a demo circuit that genuinely *needs* `gmin` to converge (today's zoo converges fine without
-> it — the mechanism is proven sound, not yet proven necessary).
+> vsource_branch`). **A genuine needs-`gmin` demo now exists too**
+> (`gmin_stepping_converges_a_circuit_plain_newton_cannot`): 20 diodes in series behind a 10 Ω
+> resistor at 20 V, cold-started at zero. A real operating point exists (~0.81 V/diode,
+> ~0.38 A), but plain Newton's per-unknown log-ramp limiting walks the chain's internal node
+> voltages there one at a time with no competing conductance to keep them in check, and some
+> node's voltage crosses into the exponential's `f64` overflow range en route — a genuine
+> `Err(Singular)` from a non-finite Jacobian entry, confirmed independent of iteration budget
+> (still fails at `max_iters: 2000`). `gmin` stepping's early, well-conditioned stages keep the
+> whole chain in range long enough to land near the true point before the final, unshunted
+> stage finishes it off in a handful of iterations. *Outstanding:* rung-2 gate vs golden (T6);
+> `t3-core/03-nonlinear-dc.qmd`.
 
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
   stepping, source stepping, damping) in `convergence.rs`.
