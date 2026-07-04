@@ -36,10 +36,11 @@ Unlike `va-ir`/`va-abi` it is not a leaf (it depends on `va-abi`), so it still p
   footnote above) — its remaining work (sparse solve, golden-vs-ngspice validation once T6
   lands, and the `t3-core/*.qmd` tutorials) proceeds as a staff-owned maintenance backlog,
   tracked in `roadmap.md`'s T3 section, rather than a thesis deliverable with its own defense.
-  Junction limiting (`convergence.rs`'s `limit_junction`) is now wired into the Newton loop
-  (2026-07-04); `gmin` stepping is still not, and genuinely can't be without an Interface β
-  change to tag which unknowns are nodes vs. branch-current constraints (see `roadmap.md`'s
-  T3.3 for why).
+  Junction limiting (`convergence.rs`'s `limit_junction`) and `gmin` stepping
+  (`gmin_for_step`/`NewtonConfig::gmin_steps`) are both now wired into the Newton loop
+  (2026-07-04) — the latter via a small, additive Interface β change (`ModelInstance::
+  unknown_kind`, a default method, `docs/interfaces.md`) so no existing implementor needed
+  updating. See `roadmap.md`'s T3.3 for the full account.
 - Staff `va-harness`/`va-cli` (T6) first among the remaining student theses — the shared
   substrate everyone else's demo depends on.
 - `va-codegen`'s AD (T2) is the highest-risk, highest-value crate — strongest student.

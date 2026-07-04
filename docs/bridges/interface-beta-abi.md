@@ -31,8 +31,16 @@ team. The reference models are also the fixtures the AD-generated models are dif
 Authoritative source: `crates/va-abi/src/instance.rs` and `stamps.rs`.
 
 ```rust
+pub enum UnknownKind {
+    Node,   // a KCL current-sum row — safe for gmin stepping to shunt to ground
+    Branch, // a constraint row (e.g. a source's V(p)-V(n)=value) — gmin must never touch this
+}
+
 pub trait ModelInstance {
     fn unknowns(&self) -> &[usize];                       // global indices touched
+    fn unknown_kind(&self, i: usize) -> UnknownKind {      // default method, §6 2026-07-04
+        UnknownKind::Node
+    }
     fn load(&self, x: &[f64], sink: &mut dyn StampSink);  // evaluate at x → stamps
 }
 
@@ -72,25 +80,33 @@ fixed at construction; `unknowns()` reports the set, and `x[idx]` reads a termin
 3. **Accumulation, not assignment.** Every sink method **adds** to what is there. A model may
    stamp the same `(row, col)` more than once in a single `load`; the sink sums. Consumers
    zero the system before each `load` sweep, never the model.
+4. **`unknown_kind` classifies the *row*, not the physical quantity.** (Added 2026-07-04, §6.)
+   `UnknownKind::Node` means `unknowns()[i]`'s residual row is a KCL current-sum — the total
+   stamped current into it must be zero at the solution. `UnknownKind::Branch` means the row
+   enforces some other equation (a source's `V(p) − V(n) = value`, or any future constraint
+   row) and is never a current sum. Only the instance that stamps a row's defining equation
+   can know which it is, so this is per-instance, not derivable from the global index alone.
+   The default (`Node`) is correct for every two-terminal resistive/charge-storage device;
+   `VSource` is the only reference model that overrides it today, for its own branch index.
 
 ### 4.2 The `load` contract
 
-4. **Purity.** `load` is a pure function of `(self, x)`. No interior mutability, no I/O, no
+5. **Purity.** `load` is a pure function of `(self, x)`. No interior mutability, no I/O, no
    RNG, no dependence on call order. Calling it twice with the same `x` produces identical
    stamps. (This is what lets Newton, AC, and finite-difference checks call it freely.)
-5. **Sign convention.** `residual(row, value)` is **current flowing into node `row`** (KCL
+6. **Sign convention.** `residual(row, value)` is **current flowing into node `row`** (KCL
    residual). For the reference resistor at 2 V across 1 kΩ, `residual[0] = +2e-3` A. The
    Newton update solves `J Δx = −residual`; the sign here must match that.
-6. **Jacobian is exact.** `jacobian(row, col, ·)` is `∂residual[row]/∂x[col]`, analytically
+7. **Jacobian is exact.** `jacobian(row, col, ·)` is `∂residual[row]/∂x[col]`, analytically
    correct — not a secant or numerical estimate. This is enforced by the §5 house rule:
    every differentiated model has a test asserting analytic vs central-difference agreement.
    A wrong Jacobian silently destroys Newton convergence, so this is non-negotiable.
-7. **Charge channel is optional but consistent.** A memoryless device (resistor, ideal
+8. **Charge channel is optional but consistent.** A memoryless device (resistor, ideal
    diode DC) stamps nothing on the charge channel. A storage device (capacitor) stamps
    `charge`/`dcharge` with the **same** sign and index conventions as the resistive channel,
    and `dcharge(row,col)` = `∂Q[row]/∂x[col]`. DC consumers ignore both; they must still be
    correct for transient.
-8. **No panics on valid input.** Per §5, library `load` returns by stamping; it must not
+9. **No panics on valid input.** Per §5, library `load` returns by stamping; it must not
    `panic!`/`unwrap`/`expect`. Degenerate device parameters (e.g. `R = 0`) are the
    producer's responsibility to guard at construction, returning a `Result`, not to blow up
    inside `load`.
@@ -165,5 +181,10 @@ a new sub-trait when the addition is optional (e.g. a future small-signal noise 
       solves `J·dx = −residual` (`newton.rs`), and `va-codegen`'s generated models reproduce
       `va-abi`'s reference stamps, so both producers agree. **Still open:** a single shared
       test fixture both crates import, rather than parallel checks.
+- [x] **Done (2026-07-04): `unknown_kind`/`UnknownKind`**, added as a default method exactly
+      per this section's own "prefer a default method" guidance — every existing implementor
+      (`va-abi::reference`'s two-terminal models, every `va-codegen`-generated model) kept
+      compiling unchanged; only `VSource` needed an override. Unblocks `va-core`'s `gmin`
+      stepping (`docs/roadmap.md`'s T3.3).
 - [ ] Decide how AC small-signal noise sources attach — extra channel vs separate trait.
 - [ ] Specify the `Result`-returning constructor pattern for degenerate parameters.

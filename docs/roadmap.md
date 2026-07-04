@@ -429,9 +429,10 @@ matches the code verbatim.
 > `CLAUDE.md` §3's footnote for the full reasoning. What remains below (sparse solve, the
 > golden-vs-ngspice gate, and the `t3-core/*.qmd` tutorials) now proceeds as a staff-owned
 > maintenance backlog rather than a thesis with its own defense — it is not blocking, and not
-> urgent relative to the theses that are staffed. **Update (2026-07-04):** junction limiting is
-> now wired into the Newton loop (see T3.3) — see `convergence.rs`'s module doc comment for why
-> `gmin` stepping still isn't and what it would actually take.
+> urgent relative to the theses that are staffed. **Update (2026-07-04):** junction limiting
+> *and* `gmin` stepping are now both wired into the Newton loop (see T3.3), the latter via a
+> small, additive Interface β change (`docs/interfaces.md`, `docs/bridges/interface-beta-abi.md`
+> §8) — see `convergence.rs`'s module doc comment for the full account.
 
 **Formerly:** critical path, staff first, reliable student (§10).
 **Fallback (moot now — no student assigned):** a study of MNA + Newton + convergence aids on
@@ -472,13 +473,20 @@ the reference models.
 > `va-core` has no way to tell which unknowns are real junction voltages (see
 > `convergence.rs`'s module doc comment) — all 16 `va-core` tests still pass with it on by
 > default, including the resistor-divider/diode-clamp tests to their original tight
-> tolerances. `gmin_for_step` is still **not** wired in, and this time for a hard reason, not
-> a deferred one: gmin shunts a conductance from every *node* to ground, but a
-> branch-current unknown's row (e.g. `VSource`'s `V(p)−V(n)=value` constraint) isn't a node
-> equation and would be silently corrupted by the same shunt. `va-core` has no per-unknown
-> node-vs-branch-constraint tag to apply it selectively — that needs an Interface β change
-> (`CLAUDE.md` §6), not a same-crate fix. *Outstanding:* rung-2 gate vs golden (T6); the
-> Interface β tag needed for `gmin`; `t3-core/03-nonlinear-dc.qmd`.
+> tolerances. **`gmin_for_step` is now wired in too**, via the small Interface β change this
+> genuinely needed: `va_abi::ModelInstance::unknown_kind` (default `Node`, a new `Branch` case
+> `VSource` overrides for its own branch-current index) lets `mna::classify_unknowns` build a
+> per-unknown map that `mna::System::shunt_gmin` uses to shunt only `Node` rows — never a
+> branch-current constraint row like `VSource`'s `V(p)−V(n)=value`, which a naive "shunt every
+> row" implementation would have silently corrupted. Added as a **default trait method** (§6,
+> `docs/interfaces.md`), so every existing `ModelInstance` — including every `va-codegen`-
+> generated model, which only ever declares node unknowns today — kept compiling with no
+> changes of its own. `NewtonConfig::gmin_steps` (default `0`, off) drives it; two new tests
+> confirm the divider/diode-clamp circuits still solve to the same answer with it enabled, in
+> particular that the VSource branch survives intact (`gmin_stepping_does_not_corrupt_the_
+> vsource_branch`). *Outstanding:* rung-2 gate vs golden (T6); `t3-core/03-nonlinear-dc.qmd`;
+> a demo circuit that genuinely *needs* `gmin` to converge (today's zoo converges fine without
+> it — the mechanism is proven sound, not yet proven necessary).
 
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
   stepping, source stepping, damping) in `convergence.rs`.

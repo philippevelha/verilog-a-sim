@@ -231,9 +231,17 @@ pub trait StampSink {
 }
 
 // va-abi/src/instance.rs
+pub enum UnknownKind {
+    Node,   // a KCL current-sum row; safe for a `gmin`-style shunt to ground
+    Branch, // a constraint row (e.g. a source's V(p)-V(n)=value); never shunt this
+}
+
 pub trait ModelInstance {
     /// Global unknown indices this instance contributes to (nodes + internal unknowns).
     fn unknowns(&self) -> &[usize];
+    /// Structural kind of `unknowns()[i]`. Default `Node`; override only if this instance
+    /// introduces its own constraint row (§6 change, 2026-07-04 — see `docs/interfaces.md`).
+    fn unknown_kind(&self, i: usize) -> UnknownKind { UnknownKind::Node }
     /// Evaluate at solution vector `x`; emit residual + Jacobian (+ charge in transient).
     fn load(&self, x: &[f64], sink: &mut dyn StampSink);
 }

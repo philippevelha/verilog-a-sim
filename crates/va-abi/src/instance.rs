@@ -2,6 +2,27 @@
 
 use crate::stamps::StampSink;
 
+/// The structural role of one entry in [`ModelInstance::unknowns`], distinguishing a KCL
+/// node from a constraint row — needed by convergence aids (e.g. `va-core`'s `gmin` stepping)
+/// that must only ever touch the former.
+///
+/// This is **not** about physical quantity (volts vs. amps) — it's about what kind of
+/// equation the unknown's residual *row* represents, since that's what determines whether
+/// shunting a conductance to ground at that row is a sound homotopy aid or a corrupted
+/// constraint. Node-vs-branch is invisible from a global index alone: it depends on which
+/// equation was stamped into that row, which only the instance that owns the row knows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnknownKind {
+    /// A potential (node) unknown. Its residual row is a KCL current-sum — the sum of every
+    /// stamped current into that node must be zero at the solution. Safe to shunt with a
+    /// `gmin`-style conductance to ground.
+    Node,
+    /// A branch-current or other constraint-row unknown. Its residual row enforces some other
+    /// equation entirely (e.g. an ideal voltage source's `V(p) − V(n) = value`), not a KCL sum.
+    /// A `gmin` shunt at this row would corrupt that constraint, not aid convergence.
+    Branch,
+}
+
 /// A loadable model instance: a concrete device wired to specific global unknown indices.
 ///
 /// Implementations are produced two ways and are interchangeable to `va-core`:
@@ -13,6 +34,20 @@ pub trait ModelInstance {
     /// The order is the instance's own local convention; the values are positions in the
     /// global solution vector `x` passed to [`Self::load`].
     fn unknowns(&self) -> &[usize];
+
+    /// The [`UnknownKind`] of `unknowns()[i]` — i.e. `i` indexes into the *position* within
+    /// this instance's own `unknowns()` list, not a global index.
+    ///
+    /// Default: [`UnknownKind::Node`], correct for every two-terminal resistive/charge-storage
+    /// device (the common case — a resistor, capacitor, or diode never introduces a row that
+    /// isn't a KCL node sum). Override this only for an instance that introduces its own
+    /// constraint row, the way [`crate::reference::VSource`] does for its branch current
+    /// (§4/§6 additive change — added without breaking any existing implementor, exactly the
+    /// "prefer a default method" guidance in `docs/bridges/interface-beta-abi.md`).
+    fn unknown_kind(&self, i: usize) -> UnknownKind {
+        let _ = i;
+        UnknownKind::Node
+    }
 
     /// Evaluate the model at solution vector `x` and emit its contributions into `sink`.
     ///

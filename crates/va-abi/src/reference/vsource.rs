@@ -1,6 +1,6 @@
 //! Ideal DC voltage source reference primitive.
 
-use crate::instance::ModelInstance;
+use crate::instance::{ModelInstance, UnknownKind};
 use crate::stamps::StampSink;
 
 /// An ideal voltage source `V(p) − V(n) = value`, in the standard MNA branch-current
@@ -38,6 +38,17 @@ impl ModelInstance for VSource {
         &self.terminals
     }
 
+    fn unknown_kind(&self, i: usize) -> UnknownKind {
+        // terminals = [p, n, branch] — p/n are ordinary nodes shared with whatever else
+        // touches them; `branch` is this source's own constraint row (`V(p)-V(n)=value`),
+        // never a KCL sum, so `gmin` must never shunt it.
+        if i == 2 {
+            UnknownKind::Branch
+        } else {
+            UnknownKind::Node
+        }
+    }
+
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
         let [p, n, b] = self.terminals;
         let vp = x.get(p).copied().unwrap_or(0.0);
@@ -54,5 +65,18 @@ impl ModelInstance for VSource {
         sink.residual(n, -ib);
         sink.jacobian(p, b, 1.0);
         sink.jacobian(n, b, -1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_branch_current_is_a_constraint_row() {
+        let vs = VSource::new(0, 1, 2, 5.0);
+        assert_eq!(vs.unknown_kind(0), UnknownKind::Node);
+        assert_eq!(vs.unknown_kind(1), UnknownKind::Node);
+        assert_eq!(vs.unknown_kind(2), UnknownKind::Branch);
     }
 }

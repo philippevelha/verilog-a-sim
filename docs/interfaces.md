@@ -107,9 +107,16 @@ pub trait StampSink {
 }
 
 // va-abi/src/instance.rs
+pub enum UnknownKind {
+    Node,   // a KCL current-sum row; safe for `gmin` to shunt to ground
+    Branch, // a constraint row (e.g. a source's V(p)-V(n)=value); never shunt this
+}
+
 pub trait ModelInstance {
     /// Global unknown indices this instance contributes to (nodes + internal unknowns).
     fn unknowns(&self) -> &[usize];
+    /// Structural kind of `unknowns()[i]`. Default `UnknownKind::Node`.
+    fn unknown_kind(&self, i: usize) -> UnknownKind { UnknownKind::Node }
     /// Evaluate at solution vector `x`; emit residual + Jacobian (+ charge in transient).
     fn load(&self, x: &[f64], sink: &mut dyn StampSink);
 }
@@ -117,3 +124,15 @@ pub trait ModelInstance {
 
 `va-abi` ships **working** `resistor`, `capacitor`, and `diode` reference models against this
 trait at bootstrap, so `va-core` has something real to solve on commit #1.
+
+> **Revision (§6 change, 2026-07-04):** added `UnknownKind` and `ModelInstance::unknown_kind`,
+> a **default trait method** (`docs/bridges/interface-beta-abi.md` §8's own recommendation for
+> an optional addition), so every existing implementor — `va-abi::reference`'s `Resistor`/
+> `Capacitor`/`Diode`, and every `va-codegen`-generated model — kept compiling unchanged.
+> `va_abi::reference::VSource` overrides it for its branch-current unknown (`Branch`, everything
+> else `Node`). This unblocks `va-core`'s `gmin`-stepping convergence aid
+> (`crate::mna::classify_unknowns`/`System::shunt_gmin`, `NewtonConfig::gmin_steps`): it needs
+> to know which rows are KCL sums (safe to shunt a conductance to ground) versus constraint
+> rows like a source's `V(p) − V(n) = value` (which shunting would silently corrupt) — see
+> `docs/roadmap.md`'s T3.3 for the full account of why this was previously listed as
+> blocked on exactly this change.

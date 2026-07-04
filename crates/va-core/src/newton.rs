@@ -6,9 +6,15 @@
 //! `abstol` or every *applied* update component is within `reltol·|x| + abstol`. For a linear
 //! circuit with limiting off this lands in two iterations; for smooth nonlinear devices Newton
 //! converges quadratically near the solution.
+//!
+//! [`solve`] also drives an optional outer `gmin`-stepping homotopy (`NewtonConfig::gmin_steps`)
+//! around the inner iteration: each stage re-solves with [`crate::mna::System::shunt_gmin`]
+//! adding a decreasing conductance ([`crate::convergence::gmin_for_step`]) to every
+//! [`va_abi::UnknownKind::Node`] row, warm-starting from the previous stage's solution, ending
+//! on an unshunted (`gmin = 0`) solve of the real circuit.
 
 use crate::{convergence, linsolve, mna, CoreError};
-use va_abi::ModelInstance;
+use va_abi::{ModelInstance, UnknownKind};
 
 /// Tunable Newton iteration controls.
 #[derive(Clone, Copy, Debug)]
@@ -26,6 +32,13 @@ pub struct NewtonConfig {
     /// were never exponential to begin with, since `va-core` has no way to tell those apart
     /// from real junction voltages (see `convergence`'s module doc comment). Default `true`.
     pub limit_junctions: bool,
+    /// Number of geometric `gmin`-stepping homotopy stages to ramp through before the final,
+    /// unshunted solve (see [`crate::convergence::gmin_for_step`]). `0` (the default) disables
+    /// `gmin` stepping entirely — a single ordinary solve, identical to every prior release's
+    /// behavior. Only ever shunts [`va_abi::UnknownKind::Node`] rows (never a branch-current
+    /// constraint row — see [`crate::mna::System::shunt_gmin`]), so it's safe to enable on any
+    /// circuit, including ones with ideal sources.
+    pub gmin_steps: usize,
 }
 
 impl Default for NewtonConfig {
@@ -35,6 +48,7 @@ impl Default for NewtonConfig {
             abstol: 1e-12,
             reltol: 1e-9,
             limit_junctions: true,
+            gmin_steps: 0,
         }
     }
 }
@@ -42,26 +56,60 @@ impl Default for NewtonConfig {
 /// Solve `f(x) = 0` for the given `instances` by Newton iteration, returning the solution
 /// vector of length `dim`. The initial guess is the zero vector.
 ///
+/// If `cfg.gmin_steps > 0`, wraps the inner iteration in a `gmin`-stepping homotopy (see this
+/// module's doc comment): each stage warm-starts from the previous stage's solution, ending on
+/// an unshunted solve of the real circuit. With `cfg.gmin_steps == 0` this is exactly one
+/// inner solve from the zero vector — identical to every prior release's behavior.
+///
 /// # Errors
 ///
-/// [`CoreError::NoConvergence`] if the iteration budget is exhausted, or
+/// [`CoreError::NoConvergence`] if the iteration budget is exhausted at any stage, or
 /// [`CoreError::Singular`] if a Jacobian factorization fails.
 pub fn solve(
     instances: &[&dyn ModelInstance],
     dim: usize,
     cfg: NewtonConfig,
 ) -> Result<Vec<f64>, CoreError> {
-    let mut x = vec![0.0; dim];
     if dim == 0 {
-        return Ok(x);
+        return Ok(Vec::new());
     }
 
+    // Only classify unknowns when gmin stepping is actually in play — `shunt_gmin` is a no-op
+    // at `gmin == 0`, but building the classification is pointless work otherwise.
+    let kinds = if cfg.gmin_steps > 0 {
+        mna::classify_unknowns(instances, dim)
+    } else {
+        vec![UnknownKind::Node; dim]
+    };
+
+    let mut x = vec![0.0; dim];
+    // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
+    // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
+    for step in 0..=cfg.gmin_steps {
+        let gmin = convergence::gmin_for_step(step, cfg.gmin_steps);
+        x = solve_from(x, instances, dim, cfg, gmin, &kinds)?;
+    }
+    Ok(x)
+}
+
+/// The inner Newton iteration, starting from `x0` and shunting `gmin` onto every `Node`-kind
+/// row each iteration (see [`mna::System::shunt_gmin`]). [`solve`] is `gmin_steps + 1` calls to
+/// this, chained by warm-starting each stage's `x0` from the previous stage's solution.
+fn solve_from(
+    mut x: Vec<f64>,
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    gmin: f64,
+    kinds: &[UnknownKind],
+) -> Result<Vec<f64>, CoreError> {
     let vt = convergence::VT_300K;
     let vcrit = convergence::default_vcrit(vt);
 
     let mut last_residual = f64::INFINITY;
     for _ in 0..cfg.max_iters {
-        let sys = mna::assemble(instances, &x, dim);
+        let mut sys = mna::assemble(instances, &x, dim);
+        sys.shunt_gmin(&x, gmin, kinds);
         let residual_norm = inf_norm(&sys.residual);
 
         // Solve J · dx = −f.
@@ -146,6 +194,56 @@ mod tests {
         let i_d = d.current(vd);
         assert!(
             (i_r - i_d).abs() < 1e-9,
+            "KCL imbalance: {} vs {}",
+            i_r,
+            i_d
+        );
+    }
+
+    #[test]
+    fn gmin_stepping_does_not_corrupt_the_vsource_branch() {
+        // The exact regression this is here to prevent: a naive "shunt every row" gmin
+        // implementation would add a conductance to the VSource's branch-current row too,
+        // corrupting its `V(p)-V(n)=value` constraint and giving a wrong answer. With
+        // `classify_unknowns` tagging that row `Branch`, the divider must still solve to the
+        // same exact midpoint gmin stepping on or off.
+        let vs = VSource::new(0, GROUND, 2, 2.0);
+        let r1 = Resistor::new(0, 1, 1000.0);
+        let r2 = Resistor::new(1, GROUND, 1000.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r1, &r2];
+
+        let cfg = NewtonConfig {
+            gmin_steps: 8,
+            ..NewtonConfig::default()
+        };
+        let x = solve(&insts, 3, cfg).expect("converges");
+        assert!((x[0] - 2.0).abs() < 1e-6, "node0 = {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-6, "midpoint = {}", x[1]);
+        assert!((x[2].abs() - 1e-3).abs() < 1e-9, "i = {}", x[2]);
+    }
+
+    #[test]
+    fn gmin_stepping_still_converges_the_diode_clamp() {
+        let vs = VSource::new(0, GROUND, 2, 1.0);
+        let r = Resistor::new(0, 1, 1000.0);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_300K);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
+
+        let cfg = NewtonConfig {
+            gmin_steps: 8,
+            ..NewtonConfig::default()
+        };
+        let x = solve(&insts, 3, cfg).expect("converges");
+
+        let vd = x[1];
+        assert!(
+            (0.4..0.75).contains(&vd),
+            "diode voltage out of range: {vd}"
+        );
+        let i_r = (x[0] - vd) / 1000.0;
+        let i_d = d.current(vd);
+        assert!(
+            (i_r - i_d).abs() < 1e-6,
             "KCL imbalance: {} vs {}",
             i_r,
             i_d

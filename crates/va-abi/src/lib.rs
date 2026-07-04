@@ -20,7 +20,7 @@ pub mod instance;
 pub mod reference;
 pub mod stamps;
 
-pub use instance::ModelInstance;
+pub use instance::{ModelInstance, UnknownKind};
 pub use stamps::StampSink;
 
 #[cfg(test)]

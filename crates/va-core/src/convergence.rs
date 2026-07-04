@@ -22,14 +22,16 @@
 //! unknown numerically large enough to cross [`default_vcrit`]'s threshold) — disable via
 //! `NewtonConfig::limit_junctions = false` if that matters more than the diode/BJT robustness.
 //!
-//! **`gmin_for_step` is still *not* wired in**, and not just because nobody's gotten to it:
-//! gmin shunts a conductance from every circuit *node* to ground, but MNA's branch-current
-//! unknowns (e.g. `va_abi::reference::VSource`'s current, whose row enforces the constraint
-//! `V(p) − V(n) = value`, not a KCL sum) would be silently corrupted by the same shunt — it's
-//! not a node equation to begin with. `va-core`'s `ModelInstance`/`StampSink` ABI has no
-//! per-unknown "node vs. branch-constraint" tag today, so there's no way to apply gmin only
-//! where it's sound. Wiring it in for real needs that tag added to Interface β — a
-//! coordinated interface change (`CLAUDE.md` §6), not a same-crate fix.
+//! **`gmin_for_step` is now wired in too (2026-07-04)**, via the Interface β change this
+//! blocker actually called for: `va_abi::ModelInstance::unknown_kind` (default
+//! `va_abi::UnknownKind::Node`, overridden by `va_abi::reference::VSource` for its branch-
+//! current row) lets [`crate::mna::classify_unknowns`] build a per-unknown map that
+//! [`crate::mna::System::shunt_gmin`] uses to shunt only `Node` rows, never a branch-
+//! constraint row like `VSource`'s `V(p) − V(n) = value`. `NewtonConfig::gmin_steps` (default
+//! `0`, off) drives the outer homotopy in [`crate::newton::solve`]. Added as a default trait
+//! method (`docs/bridges/interface-beta-abi.md` §8's own advice) so every existing
+//! `ModelInstance` — including every `va-codegen`-generated model, which only ever declares
+//! node unknowns today — kept compiling unchanged.
 
 /// Limit the change in a p–n junction voltage between Newton iterations (`pnjlim`-style),
 /// returning the limited new voltage. Prevents the diode exponential from overflowing by
