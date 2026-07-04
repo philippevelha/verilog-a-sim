@@ -1130,6 +1130,16 @@ impl Elaborator<'_> {
                     .ok_or_else(|| elab(format!("`{name}` requires at least a value argument")))?;
                 return self.lower_expr(value);
             }
+            // `absdelay(value, delay[, max_delay])` (LRM §4.5.9) delays `value` by a fixed
+            // time — again genuinely time-domain, and again settles to its undelayed input in
+            // DC steady state (no delay history exists at a fixed operating point), so it folds
+            // like `transition`/`slew` above: `delay`/`max_delay` are parsed but never evaluated.
+            ExprAst::Call { name, args } if name == "absdelay" => {
+                let value = *args.first().ok_or_else(|| {
+                    elab("`absdelay` requires at least a value and a delay argument".to_string())
+                })?;
+                return self.lower_expr(value);
+            }
             // `real(expr)` is a type-cast call, not the declaration keyword (that's `Item::Var`/
             // `Stmt::VarDecl` — a different grammar production entirely). Every value in this
             // project is already `f64`, so it's a complete no-op: fold transparently to `expr`.
@@ -2703,6 +2713,29 @@ mod tests {
         );
         assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
         assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+    }
+
+    #[test]
+    fn absdelay_folds_to_its_value_argument() {
+        // `absdelay(V(a,b), td)` settles to its undelayed input in DC steady state, same
+        // treatment as `transition`/`slew` — no `Call` node survives, and `td` is never lowered.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; parameter real td = 1n; \
+             analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule",
+        );
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
+        assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+
+        // No value argument at all is an error.
+        let src =
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ absdelay(); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

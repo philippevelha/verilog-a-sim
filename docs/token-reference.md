@@ -983,6 +983,28 @@ including the ones with no implemented behavior at all.
   real handling there (they aren't just constant-folded away in a time-stepping solve) — this
   DC-only fold is a stated, deliberate simplification, not a permanent design decision.
 
+### `Absdelay`
+
+- **Purpose and Static Nature**: A genuinely time-domain analog operator in full Verilog-AMS
+  (LRM §4.5.9): `absdelay(value, delay[, max_delay])` delays `value` by a fixed time `delay`,
+  tracking *when* `value` last changed the same way `transition`/`slew` do. v0 is DC-only (no
+  time axis to delay through), and the filter settles to its undelayed input in steady state (no
+  delay history exists at a fixed operating point), so it folds transparently to its `value`
+  argument at elaboration — identical treatment to `Transition`/`Slew` above, in the same
+  `Elaborator::lower_expr` arm family. Previously unimplemented: parsed as an ordinary call but
+  failed at elaboration with "unknown function `absdelay`" — confirmed live by `va-cli check` on
+  `external/fbh_hbt-2_1.va`, which now passes the frontend end to end.
+- **Declaration and Assignment**: Called as `absdelay(value, delay[, max_delay])` — `value` is
+  required, `delay`/`max_delay` optional/parsed but unused.
+- **Expressions and Evaluation**: Only `value` is lowered and returned as-is (no wrapper node);
+  `delay`/`max_delay` are read from the AST only to check `value` is present, never evaluated —
+  an empty argument list is a hard error.
+- **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
+  right-hand side.
+- **Comparison with Traditional Constructs**: No C/digital-Verilog analogue. Once `va-transient`
+  exists, this would need real time-delay handling rather than a constant fold — a stated,
+  deliberate v0 simplification, not a permanent design decision.
+
 ### `Bound_step`
 
 - **Purpose and Static Nature**: A transient-timestep hint in full Verilog-AMS (requests the
@@ -1050,6 +1072,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | Token | Purpose & Static Nature | Declaration & Assignment | Expressions & Evaluation | Structural & Analog Usage | Comparison with Traditional Constructs |
 |---|---|---|---|---|---|
 | `abs` | Dynamic/static dual, see §1.5 Math builtins | `abs(x)` call | Absolute value, both paths | Analog expr / const context | C `fabs()`/`abs()` |
+| `absdelay` | Folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
 | `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`), unused metadata | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
 | `access` | Parsed into `NatureDecl::access` (§1.5), widens the recognized access-function set once bound by a `discipline` | Nature attribute `access = fn_name;` | Read as a plain identifier; has a real effect (§2.17) once a `discipline` binds this nature as `potential`/`flow` | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |

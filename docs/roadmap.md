@@ -42,9 +42,9 @@ shared, demoable milestone that several theses light up at once.
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
 | T2.2 — lowering | IR → `ModelInstance`; generated resistor/diode reproduce the reference stamps | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
-| T3.1 — MNA & dense solve | `assemble` + `faer` LU solve with singularity detection | 🟢 |
-| T3.2 — Newton & divider | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
-| T3.3 — nonlinear DC & sweep | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
+| T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
+| T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
+| T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
 | T4 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
@@ -89,7 +89,7 @@ unclear if real" below): top-level `.va` files whose module body was itself spli
 `` `include ``d file that the corpus snapshot never shipped (the PSP102/103/104 family,
 `L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`) — these fail with a misleading "port has no
 discipline declaration" (an empty module body, not a language gap) and are excluded from the
-gap accounting below for the same reason as the ~20 fragments. As of this pass: **61/118 pass
+gap accounting below for the same reason as the ~20 fragments. As of this pass: **62/118 pass
 outright**, with the remainder split across real, now-categorized gaps below and the ~28
 expected non-language-gap failures.
 
@@ -163,7 +163,12 @@ baseline — any access name a parsed discipline binds (e.g. `Q`, `Phi`, `MMF` f
 corpus's magnetic/kinematic/rotational discipline families) is recognized too, additively, so
 the baseline itself never regresses. Net *declarations* still only accept the
 `electrical`/`thermal` keywords — a stated v1 limit (see the backlog below), not corpus-tested
-against any real file (none in `external/` declares a net with a custom discipline).
+against any real file (none in `external/` declares a net with a custom discipline). And
+**`absdelay(value, delay[, max_delay])`** (LRM §4.5.9) — same DC-steady-state-fold family as
+`transition`/`slew`/`$limit`: settles to its undelayed `value` with no delay history at a fixed
+operating point, so it folds transparently at elaboration exactly like those (`delay`/
+`max_delay` parsed, never evaluated). Closes `external/fbh_hbt-2_1.va`, moving the pass count
+from 61 to 62.
 
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
@@ -179,10 +184,7 @@ against any real file (none in `external/` declares a net with a custom discipli
    as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
    priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
    artifact).
-4. **`absdelay`** — a time-domain delay operator (`fbh_hbt-2_1.va`), same DC-steady-state-fold
-   family as `transition`/`slew`/`$limit` (settles to its input value with no delay history at a
-   fixed operating point); low file count (1) so low priority, but cheap once picked up.
-5. **Custom-discipline net declarations** — a net can still only be declared `electrical`/
+4. **Custom-discipline net declarations** — a net can still only be declared `electrical`/
    `thermal` (dedicated keyword tokens); accepting an arbitrary parsed-discipline identifier
    (`optical p1, p2;`) needs new lookahead disambiguation against module instantiation's "a bare
    leading `Ident` at item level → `parse_instance`" rule (e.g. `Ident Ident (` = instance vs.
@@ -190,17 +192,17 @@ against any real file (none in `external/` declares a net with a custom discipli
    urgent, but the natural next step toward `CLAUDE.md` §1's multi-physics goal ("disciplines
    optical, thermal, mechanical, etc") — `va_ir::Discipline::Other` already exists in the IR for
    exactly this, still never constructed.
-6. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
+5. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
    `idt_nature`/`ddt_nature` are parsed and stored (`disciplines.rs::NatureDecl`) but never read
    by `va-core` or elaboration; a real per-discipline `abstol` could feed `convergence.rs`'s
    `gmin`/damping aids once a net's discipline round-trips that far.
-7. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
+6. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
    access's implicit "gnd" second terminal is hardcoded `Discipline::Electrical` regardless of
    the access's own discipline (e.g. a bare `Temp(dt)` still resolves against an
    electrical-tagged reference node); pre-existing, not introduced by the discipline/nature
    pass, and not fixable without per-access discipline tracking that doesn't exist even for
    electrical/thermal today.
-8. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
+7. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
    production in `parse_item` at all; the implicit "gnd" node (`reference_node`, above) is the
    only reference-node convention this project has.
 
@@ -271,6 +273,16 @@ docs/tutorials/
   block, or a shelled-out `cargo run -p va-cli -- …` whose output (a sweep, a waveform, a
   convergence trace) is captured and plotted in the document. A tutorial that cannot be
   re-run to reproduce its figures has rotted.
+- **Plotting: `plotters`, not a Python/R plotting stack.** I–V curves, transient waveforms,
+  and sim-vs-golden overlays are rendered with the `plotters` crate (SVG backend only — skip
+  the bitmap backend, which pulls in font-rasterization deps for no benefit here) rather than
+  shelling out to matplotlib/ggplot from the `.qmd`. This keeps the pure-Rust, no-native-deps
+  posture (`CLAUDE.md` §5) intact end to end, including in the tutorials. It lives in `va-cli`
+  and `va-harness` (T6 already owns both, so no cross-crate/interface change): a `--plot
+  out.svg` flag on `sim`/`sweep` and on `va-harness`'s golden comparison emits an SVG that the
+  `.qmd` embeds as a plain markdown image. Not wired up yet — `va-transient` (T4) is still a
+  stub, so there's no waveform to plot; add the `plotters` dependency when T4.1 lands its
+  first RC transient (ladder rung 3), rather than speculatively now.
 - **Standard skeleton** for each tutorial: *Goal* (one sentence) → *Where it fits* (the §2
   pipeline diagram, the relevant box highlighted) → *The idea* (theory, the equations, the
   design choice) → *The code* (the public API the student built, with the doc-comment
@@ -408,8 +420,20 @@ matches the code verbatim.
 
 ## T3 — `va-core` (MNA assembly · Newton · linear solve · convergence, DC)
 
-**Critical path — staff first, reliable student (§10).**
-**Fallback:** a study of MNA + Newton + convergence aids on the reference models.
+> **Staffing update (2026-07-04): reclassified as staff-maintained shared infrastructure, not
+> a student thesis.** No T3 student was found. Of the fallback options considered — scoping T3
+> down to a smaller thesis, folding it into T2/T6, or treating it like `va-ir`/`va-abi` — we
+> picked the last: the phases below were already 🟢 code-complete (MNA, Newton, dense solve, DC
+> sweep, tested against analytic values) *before* the staffing gap became apparent, so the risk
+> this decision is retiring was already retired. See `docs/thesis-map.md`'s staffing notes and
+> `CLAUDE.md` §3's footnote for the full reasoning. What remains below (sparse solve, wiring the
+> existing `convergence.rs` aids, the golden-vs-ngspice gate, and the `t3-core/*.qmd` tutorials)
+> now proceeds as a staff-owned maintenance backlog rather than a thesis with its own defense —
+> it is not blocking, and not urgent relative to the theses that are staffed.
+
+**Formerly:** critical path, staff first, reliable student (§10).
+**Fallback (moot now — no student assigned):** a study of MNA + Newton + convergence aids on
+the reference models.
 
 ### Phase T3.1 — MNA assembly & dense linear solve
 > **Status: 🟢 code complete** — `va-core/src/mna.rs` `assemble` walks instances into the

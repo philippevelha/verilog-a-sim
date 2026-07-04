@@ -73,30 +73,45 @@ build hinges on these interfaces being defined first and never casually changed.
 ```
 
 **The load-bearing invariant:** `va-core` depends on `va-abi` (Interface β) and **nothing
-else**. It is validated against the hand-written reference models in `va-abi`, so the core
-team is never blocked waiting on the compiler team. Both teams target the same trait.
+else**. It is validated against the hand-written reference models in `va-abi`, so downstream
+theses are never blocked waiting on the frontend/codegen theses. `va-core` itself ships as
+**staff-maintained shared infrastructure, not a student thesis** (§3, §10) — precisely because
+this invariant lets it be built and validated in isolation, it doesn't need a dedicated owner
+for T4/T5/T6 to build on top of it.
 
 ---
 
 ## 3. Workspace layout & crate ownership
 
 Crate boundaries **are** thesis boundaries. A student owns a crate; they do not edit other
-crates except via a coordinated interface change (see §6). Allowed internal dependencies
-are listed and are enforced by what each `Cargo.toml` declares — keep them honest.
+crates except via a coordinated interface change (see §6). `va-core` is the one exception:
+it is **staff-maintained shared infrastructure, not a student thesis** (staffing decision,
+2026-07-04 — no T3 student was found; see `docs/thesis-map.md`'s staffing notes and
+`docs/roadmap.md`'s T3 section for the reasoning and the resulting maintenance backlog).
+Allowed internal dependencies are listed and are enforced by what each `Cargo.toml`
+declares — keep them honest.
 
-| Crate           | Thesis | Owns                                              | May depend on (internal)     |
-|-----------------|--------|---------------------------------------------------|------------------------------|
-| `va-ir`         | shared | Interface α: elaborated IR data types             | — (leaf)                     |
-| `va-abi`        | shared | Interface β: `ModelInstance`/`StampSink` + ref models | — (leaf)                 |
-| `va-frontend`   | T1     | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`                      |
-| `va-codegen`    | T2     | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`            |
-| `va-core`       | T3     | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`                  |
-| `va-transient`  | T4     | integration, timestep/LTE, events                 | `va-core`, `va-abi`          |
-| `va-acnoise`    | T5     | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`          |
-| `va-netlist`    | T6     | circuit-level netlist parser                      | `va-abi`                     |
-| `va-cli`        | T6     | binary front-door wiring the pipeline             | all                          |
-| `va-harness`    | T6     | golden-reference validation + metrics             | `va-cli`                     |
-| `xtask`         | infra  | dev automation (`cargo xtask ...`)                | (dev-only)                   |
+| Crate           | Thesis  | Owns                                              | May depend on (internal)     |
+|-----------------|---------|----------------------------------------------------|------------------------------|
+| `va-ir`         | shared  | Interface α: elaborated IR data types             | — (leaf)                     |
+| `va-abi`        | shared  | Interface β: `ModelInstance`/`StampSink` + ref models | — (leaf)                 |
+| `va-frontend`   | T1      | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`                      |
+| `va-codegen`    | T2      | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`            |
+| `va-core`       | shared* | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`                  |
+| `va-transient`  | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`          |
+| `va-acnoise`    | T5      | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`          |
+| `va-netlist`    | T6      | circuit-level netlist parser                      | `va-abi`                     |
+| `va-cli`        | T6      | binary front-door wiring the pipeline             | all                          |
+| `va-harness`    | T6      | golden-reference validation + metrics             | `va-cli`                     |
+| `xtask`         | infra   | dev automation (`cargo xtask ...`)                | (dev-only)                   |
+
+\* `va-core` was originally advertised as T3, a student thesis; it is reclassified here as
+staff-maintained shared infrastructure because the core mechanics (MNA/Newton/dense-solve/DC
+sweep) were already implemented and green before a T3 student was found, which made "staff
+maintains it like `va-ir`/`va-abi`" strictly less risky than leaving it unowned or forcing a
+thesis around what's left (sparse solve, wiring the existing convergence aids, golden
+validation). It is **not** a leaf like `va-ir`/`va-abi` — it still depends on `va-abi` — the
+`shared` label here means "staff-owned," not "no internal dependencies."
 
 `va-ir` and `va-abi` are **leaf crates with no internal dependencies** — that is what makes
 them safe shared contracts. Do not add internal deps to them.
@@ -355,11 +370,15 @@ ownership table with real names once students are assigned.
 
 ## 10. For the supervisor (delete or keep)
 
-- Staff `va-core` (T3) and `va-harness`/`va-cli` (T6) first and with reliable students;
-  they are the critical path and the shared substrate respectively.
+- `va-core` (formerly T3) is now staff-maintained shared infrastructure, not a student
+  thesis — see §3's footnote and `docs/thesis-map.md`'s staffing notes. Staff
+  `va-harness`/`va-cli` (T6) first among the *remaining* student theses; it's the shared
+  substrate everyone else's demo depends on.
 - `va-codegen`'s AD (T2) is the highest-risk, highest-value crate — strongest student.
 - Each thesis has a "a rigorous report is itself the thesis" fallback; record it in
   `docs/thesis-map.md` at kickoff so nobody's defense depends on a sibling shipping.
+  (`va-core` is the exception this rule no longer applies to, per the point above — there is
+  no student defense riding on it, only ongoing staff maintenance.)
 - The whole program lives or dies on §4 being ratified and frozen before the topics are
   advertised. Do that meeting first.
 
