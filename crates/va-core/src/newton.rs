@@ -1,12 +1,13 @@
 //! Newton–Raphson iteration driver.
 //!
 //! Each iteration assembles the MNA system at the current `x`, solves `J · dx = −f`, and
-//! updates `x += dx`. Convergence is declared when either the residual is below `abstol` or
-//! every update component is within `reltol·|x| + abstol`. For a linear circuit this lands
-//! in two iterations; for smooth nonlinear devices Newton converges quadratically near the
-//! solution.
+//! updates `x += dx` (optionally clamped by [`crate::convergence::limit_junction`] — see
+//! `NewtonConfig::limit_junctions`). Convergence is declared when either the residual is below
+//! `abstol` or every *applied* update component is within `reltol·|x| + abstol`. For a linear
+//! circuit with limiting off this lands in two iterations; for smooth nonlinear devices Newton
+//! converges quadratically near the solution.
 
-use crate::{linsolve, mna, CoreError};
+use crate::{convergence, linsolve, mna, CoreError};
 use va_abi::ModelInstance;
 
 /// Tunable Newton iteration controls.
@@ -18,6 +19,13 @@ pub struct NewtonConfig {
     pub abstol: f64,
     /// Relative update tolerance for convergence.
     pub reltol: f64,
+    /// Clamp each iteration's proposed update with [`crate::convergence::limit_junction`],
+    /// using [`crate::convergence::VT_300K`]/[`crate::convergence::default_vcrit`] as a
+    /// blanket (not per-device) threshold. Keeps stiff exponential devices (diodes, BJTs) from
+    /// overflowing on a cold start; the tradeoff is it can slow convergence on unknowns that
+    /// were never exponential to begin with, since `va-core` has no way to tell those apart
+    /// from real junction voltages (see `convergence`'s module doc comment). Default `true`.
+    pub limit_junctions: bool,
 }
 
 impl Default for NewtonConfig {
@@ -26,6 +34,7 @@ impl Default for NewtonConfig {
             max_iters: 100,
             abstol: 1e-12,
             reltol: 1e-9,
+            limit_junctions: true,
         }
     }
 }
@@ -47,6 +56,9 @@ pub fn solve(
         return Ok(x);
     }
 
+    let vt = convergence::VT_300K;
+    let vcrit = convergence::default_vcrit(vt);
+
     let mut last_residual = f64::INFINITY;
     for _ in 0..cfg.max_iters {
         let sys = mna::assemble(instances, &x, dim);
@@ -58,8 +70,17 @@ pub fn solve(
 
         let mut update_small = true;
         for i in 0..dim {
-            x[i] += dx[i];
-            if dx[i].abs() > cfg.reltol * x[i].abs() + cfg.abstol {
+            let vold = x[i];
+            let vnew_raw = vold + dx[i];
+            let vnew = if cfg.limit_junctions {
+                convergence::limit_junction(vnew_raw, vold, vt, vcrit)
+            } else {
+                vnew_raw
+            };
+            x[i] = vnew;
+
+            let applied = vnew - vold;
+            if applied.abs() > cfg.reltol * vnew.abs() + cfg.abstol {
                 update_small = false;
             }
         }

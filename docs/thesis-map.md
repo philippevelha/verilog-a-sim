@@ -33,10 +33,13 @@ Unlike `va-ir`/`va-abi` it is not a leaf (it depends on `va-abi`), so it still p
 ## Staffing notes (§10)
 
 - `va-core` is staff-maintained shared infrastructure, not a student thesis (see the table
-  footnote above) — its remaining work (sparse solve, wiring the already-written
-  `convergence.rs` aids into the Newton loop, golden-vs-ngspice validation once T6 lands, and
-  the `t3-core/*.qmd` tutorials) proceeds as a staff-owned maintenance backlog, tracked in
-  `roadmap.md`'s T3 section, rather than a thesis deliverable with its own defense.
+  footnote above) — its remaining work (sparse solve, golden-vs-ngspice validation once T6
+  lands, and the `t3-core/*.qmd` tutorials) proceeds as a staff-owned maintenance backlog,
+  tracked in `roadmap.md`'s T3 section, rather than a thesis deliverable with its own defense.
+  Junction limiting (`convergence.rs`'s `limit_junction`) is now wired into the Newton loop
+  (2026-07-04); `gmin` stepping is still not, and genuinely can't be without an Interface β
+  change to tag which unknowns are nodes vs. branch-current constraints (see `roadmap.md`'s
+  T3.3 for why).
 - Staff `va-harness`/`va-cli` (T6) first among the remaining student theses — the shared
   substrate everyone else's demo depends on.
 - `va-codegen`'s AD (T2) is the highest-risk, highest-value crate — strongest student.

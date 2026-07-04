@@ -426,10 +426,12 @@ matches the code verbatim.
 > picked the last: the phases below were already 🟢 code-complete (MNA, Newton, dense solve, DC
 > sweep, tested against analytic values) *before* the staffing gap became apparent, so the risk
 > this decision is retiring was already retired. See `docs/thesis-map.md`'s staffing notes and
-> `CLAUDE.md` §3's footnote for the full reasoning. What remains below (sparse solve, wiring the
-> existing `convergence.rs` aids, the golden-vs-ngspice gate, and the `t3-core/*.qmd` tutorials)
-> now proceeds as a staff-owned maintenance backlog rather than a thesis with its own defense —
-> it is not blocking, and not urgent relative to the theses that are staffed.
+> `CLAUDE.md` §3's footnote for the full reasoning. What remains below (sparse solve, the
+> golden-vs-ngspice gate, and the `t3-core/*.qmd` tutorials) now proceeds as a staff-owned
+> maintenance backlog rather than a thesis with its own defense — it is not blocking, and not
+> urgent relative to the theses that are staffed. **Update (2026-07-04):** junction limiting is
+> now wired into the Newton loop (see T3.3) — see `convergence.rs`'s module doc comment for why
+> `gmin` stepping still isn't and what it would actually take.
 
 **Formerly:** critical path, staff first, reliable student (§10).
 **Fallback (moot now — no student assigned):** a study of MNA + Newton + convergence aids on
@@ -461,10 +463,22 @@ the reference models.
 ### Phase T3.3 — Nonlinear DC, sweeps & convergence aids
 > **Status: 🟢 code complete (harness gate pending)** — nonlinear Newton converges on a
 > diode–resistor clamp from the zero guess (KCL balances < 1e-9); `dc.rs` provides
-> `operating_point` + `sweep`. `convergence.rs` ships `pnjlim`-style junction limiting and a
-> geometric `gmin` schedule as **tested helpers**, not yet wired into the loop (limiting needs
-> per-device state the stateless ABI doesn't carry). *Outstanding:* rung-2 gate vs golden
-> (T6); wiring the aids into a homotopy loop; `t3-core/03-nonlinear-dc.qmd`.
+> `operating_point` + `sweep`. `convergence.rs` ships `pnjlim`-style junction limiting
+> (`limit_junction`, plus `default_vcrit`) and a geometric `gmin` schedule (`gmin_for_step`).
+> **2026-07-04: junction limiting is now wired into `newton::solve`**
+> (`NewtonConfig::limit_junctions`, default on) — the earlier "needs per-device state" blocker
+> didn't actually hold (the loop already has both the pre- and post-update value for every
+> unknown); it's applied as a blanket per-unknown clamp instead of a per-junction one, since
+> `va-core` has no way to tell which unknowns are real junction voltages (see
+> `convergence.rs`'s module doc comment) — all 16 `va-core` tests still pass with it on by
+> default, including the resistor-divider/diode-clamp tests to their original tight
+> tolerances. `gmin_for_step` is still **not** wired in, and this time for a hard reason, not
+> a deferred one: gmin shunts a conductance from every *node* to ground, but a
+> branch-current unknown's row (e.g. `VSource`'s `V(p)−V(n)=value` constraint) isn't a node
+> equation and would be silently corrupted by the same shunt. `va-core` has no per-unknown
+> node-vs-branch-constraint tag to apply it selectively — that needs an Interface β change
+> (`CLAUDE.md` §6), not a same-crate fix. *Outstanding:* rung-2 gate vs golden (T6); the
+> Interface β tag needed for `gmin`; `t3-core/03-nonlinear-dc.qmd`.
 
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
   stepping, source stepping, damping) in `convergence.rs`.
