@@ -45,7 +45,8 @@ shared, demoable milestone that several theses light up at once.
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
-| T4 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
+| T4.1 — fixed-step integration | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1%; 6 tests | 🟢 |
+| T4.2 · T4.3 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -510,6 +511,26 @@ the reference models.
 **Fallback:** a report on integration methods + LTE timestep control.
 
 ### Phase T4.1 — Fixed-step integration & the RC rung
+> **Status: 🟢 code complete (harness gate pending)** — `integrator.rs` implements both
+> `Method::BackwardEuler` and `Method::Trapezoidal` as a single companion-model abstraction:
+> both discretizations reduce to the same per-iteration nodal equation
+> `residual(x) + coeff·charge(x) + offset = 0` (`Companion::backward_euler`/`::trapezoidal`
+> just derive `coeff`/`offset` differently from history), so `newton_step` — otherwise a copy
+> of `va-core`'s DC Newton loop, reusing `va_core::linsolve::solve_dense` and
+> `va_core::convergence::limit_junction` directly — needs no per-method branching at all.
+> Assembly uses `va_abi::stamps::DenseStamp` directly (captures `charge`/`dcharge`, unlike
+> `va-core::mna::System`, which intentionally drops them for DC) rather than anything from
+> `va-core`'s own `mna.rs`. `run()` takes an explicit initial condition `x0` (the caller's
+> job — typically a DC operating point, or, as in the RC test, a deliberately different one
+> to observe a charging transient) and integrates at a fixed `cfg.tstep`. `Method::Gear`
+> returns `TransientError::UnsupportedMethod`, never silently falls back. 6 tests: an RC
+> charging curve (`R=1kΩ`, `C=1µF`, capacitor started at 0 V) matches the analytic
+> `V(t)=Vs·(1−e^{−t/RC})` to <1% at `dt=RC/100`; a same-`dt` comparison confirms trapezoidal's
+> second-order error beats backward Euler's first-order error at a coarser `dt=RC/10`; plus
+> the unsupported-method, empty-circuit, and error-propagation edge cases.
+> *Outstanding:* rung-3 gate is vs **ngspice golden via `va-harness`** — awaits T6; currently
+> checked against the analytic RC solution. `t4-transient/01-integration.qmd`.
+
 - Companion-model the charge channel; implement an implicit integrator (backward Euler →
   trapezoidal) in `integrator.rs`; fixed timestep first.
 - **Validation gate (ladder rung 3):** RC transient waveform RMS ≤ 1e-3 vs golden.
@@ -589,7 +610,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 |------|--------------------|-----------|--------------------------|-------------------------------|--------|
 | 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | solves analytically in `va-core`; **harness/CLI gate pending T6** |
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | pieces work in isolation (frontend, codegen, nonlinear DC); not yet wired or golden-gated |
-| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | charge channel ready (T2.3); needs T4 |
+| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | solves to the analytic charging curve in `va-transient`; **harness/CLI gate pending T6** |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | ⬜ |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ |

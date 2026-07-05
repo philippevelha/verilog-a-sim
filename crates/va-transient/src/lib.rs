@@ -21,4 +21,7 @@ pub enum TransientError {
     /// A per-step Newton solve failed.
     #[error(transparent)]
     Core(#[from] va_core::CoreError),
+    /// The requested integration method has no companion-model implementation yet.
+    #[error("integration method {method:?} is not yet implemented")]
+    UnsupportedMethod { method: integrator::Method },
 }
