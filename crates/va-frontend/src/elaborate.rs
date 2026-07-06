@@ -75,8 +75,8 @@ use std::collections::HashMap;
 use crate::ast::{self, ExprAst, ExprRef, Item, ModuleAst, Stmt};
 use crate::FrontendError;
 use va_ir::{
-    Access, AccessKind, Branch, BranchId, Builtin, CaseArm, Discipline, Expr, ExprId, FuncId,
-    Function, Module, NodeDecl, NodeId, Param, ParamId, VarDecl, VarId,
+    Access, AccessKind, ArgDir, Branch, BranchId, Builtin, CaseArm, Discipline, Expr, ExprId,
+    FuncId, Function, Module, NodeDecl, NodeId, Param, ParamId, VarDecl, VarId,
 };
 
 /// Elaborate a parsed module into the IR, with no submodule library — any [`Item::Instance`]
@@ -296,10 +296,16 @@ impl Elaborator<'_> {
             local.insert(f.name.clone(), ret);
 
             let mut args = Vec::with_capacity(f.args.len());
+            let mut arg_dirs = Vec::with_capacity(f.args.len());
             for a in &f.args {
                 let id = self.new_var(&a.name);
                 local.insert(a.name.clone(), id);
                 args.push(id);
+                arg_dirs.push(match a.dir {
+                    ast::Direction::Input => ArgDir::Input,
+                    ast::Direction::Output => ArgDir::Output,
+                    ast::Direction::Inout => ArgDir::Inout,
+                });
             }
 
             let mut targets = Vec::new();
@@ -324,6 +330,7 @@ impl Elaborator<'_> {
             self.out.functions.push(Function {
                 name: f.name.clone(),
                 args,
+                arg_dirs,
                 ret,
                 body,
             });
@@ -1840,6 +1847,7 @@ impl Elaborator<'_> {
             self.out.functions.push(Function {
                 name: format!("{inst_name}.{}", f.name),
                 args: f.args.iter().map(|v| var_off[v.0 as usize]).collect(),
+                arg_dirs: f.arg_dirs.clone(),
                 ret: var_off[f.ret.0 as usize],
                 body: f
                     .body

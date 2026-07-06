@@ -702,14 +702,38 @@ matches the code verbatim.
 > charge channel entirely) — no corpus file surveyed feeds such a probe back into anything
 > electrical, only diagnostic output, so this wasn't worth a second, charge-aware equation.
 >
-> Re-scanned again: **59/115 pass frontend+codegen, up from 56** (+3:
-> `asmhemt.va`/`asmhemt101_0.va`/`diode_basic.va`). *Outstanding:* `verilogaLib-master/ohmmeter.va`
-> needs a *different*, harder feature — `I(iprobe)` there is a single-terminal implicit-ground
-> probe (not the same branch as the explicit `V(dutm,iprobe)<+0` contribution), whose value can
-> only be derived from a genuine node-KCL sum across every other branch touching that node, not
-> from any one branch's own contribution — not attempted this round; plus the non-path-sensitive
-> variable-read-before-assignment gap (2 files, see above). Full committed sweep;
-> `t2-codegen/02-lowering.qmd`.
+> Re-scanned again: 59/115 pass frontend+codegen, up from 56 (+3:
+> `asmhemt.va`/`asmhemt101_0.va`/`diode_basic.va`).
+>
+> **A user-defined analog function's `output`/`inout` arguments are now honored** — the
+> non-path-sensitive "variable read before assignment" gap left over from earlier rounds
+> (`mvsg_cmc_1.1.1.va`'s `qgsrs`, `mvsg_cmc_2.1.0.va`'s `cofsmt`) turned out to be this, not a
+> path-sensitivity problem at all: both are `output`-direction arguments
+> (`mvsg_cmc_*.va`'s `calc_iq`/`calc_capt`: `output idsout,qgsout,...; input vgsin,vdsin,...;`),
+> passed as a never-otherwise-assigned actual argument (`idsrs = calc_iq(idsrs, qgsrs, ...);` —
+> only `idsrs` is bound by the outer assignment; `qgsrs` and the other six outputs are pure
+> write-only results, read only through the call's own write-back). `va-frontend` already parsed
+> argument direction (`ast::FuncArg::dir`) but elaboration discarded it, binding every argument as
+> a plain input with no way to write a result back to the caller — a genuine Interface α gap, not
+> a `va-codegen`-local one. `va_ir::Function` gained `arg_dirs: Vec<ArgDir>` (`ArgDir` =
+> `Input`/`Output`/`Inout`, same length/order as `args` — `docs/interfaces.md`, §6-revised);
+> `va-codegen`'s `call_function` now binds an `Input`/`Inout` argument's caller-side value in as
+> before, but for `Output`/`Inout` also writes the parameter's *final* binding back into the
+> caller's own variable after the call — enforced to be a plain `Expr::Var` (the LRM's own
+> restriction on output/inout actual arguments; anything else is rejected, since there'd be
+> nowhere to write the result). An `Output`-only argument starts genuinely unassigned inside the
+> function (no silent default), so a body that reads one before writing it is still correctly
+> rejected, not silently miscomputed. Additive: every existing `Function` construction site
+> needed only `arg_dirs: vec![ArgDir::Input; args.len()]`, an exact behavioral no-op.
+>
+> Re-scanned again: **61/115 pass frontend+codegen, up from 59** (+2: both `mvsg_cmc_*.va`
+> files — the entire non-path-sensitive variable-read-before-assignment bucket closed in one
+> shot, since it was never actually that). *Outstanding:* `verilogaLib-master/ohmmeter.va` alone
+> — `I(iprobe)` there is a single-terminal implicit-ground probe (not the same branch as the
+> explicit `V(dutm,iprobe)<+0` contribution), whose value can only be derived from a genuine
+> node-KCL sum across every other branch touching that node, not from any one branch's own
+> contribution — not attempted, a different and harder feature than anything in this or the
+> preceding two rounds. Full committed sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

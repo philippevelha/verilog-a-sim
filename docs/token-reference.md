@@ -1471,13 +1471,21 @@ integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = h
   name,...;]... [real|integer name,...;]... body-statements... endfunction`. The function name
   doubles as its implicit return variable (assigned inside the body, read by the caller) — a
   Verilog-A-specific convention with no `return` keyword at all.
-- **Expressions and Evaluation**: Argument *directions* and the body are retained; argument/
-  local *type* declarations (`real x;`) are parsed and discarded (v0 has no per-variable type
-  distinction, as noted in §1.4). A call (`CallUser(FuncId, args)`) binds `args` positionally to
-  the function's own private variable scope — it may read module parameters but not module
-  analog variables, and a forward reference to a function defined later in the same file
-  resolves as unknown (no forward-reference support, consistent with `aliasparam`/parameter
-  handling).
+- **Expressions and Evaluation**: Argument *directions* and the body are retained — all the way
+  through to `va-codegen` now (`va_ir::Function::arg_dirs`, one `ArgDir` per `args` entry,
+  §6-revised into Interface α; `docs/interfaces.md`); argument/local *type* declarations
+  (`real x;`) are parsed and discarded (v0 has no per-variable type distinction, as noted in
+  §1.4). A call (`CallUser(FuncId, args)`) binds `args` positionally to the function's own
+  private variable scope — it may read module parameters but not module analog variables, and a
+  forward reference to a function defined later in the same file resolves as unknown (no
+  forward-reference support, consistent with `aliasparam`/parameter handling). An `input`
+  argument's caller-side expression is read in as the initial binding, same as any argument
+  always was; an `output`/`inout` argument instead (or additionally) writes the function's
+  *final* binding back into the caller's own variable once the call returns — a real idiom for a
+  function that computes several results at once (`mvsg_cmc_*.va`'s `calc_iq`/`calc_capt`),
+  which the LRM restricts to a plain-variable actual argument (never a general expression, since
+  there'd be nowhere to write the result), enforced by `va-codegen` rather than at elaboration
+  time.
 - **Structural and Analog Usage**: Declared at module scope (an `Item`, sitting alongside
   `Item::Analog`); called only from inside an analog block (or from another already-defined
   function).

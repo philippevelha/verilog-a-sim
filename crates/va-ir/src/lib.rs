@@ -399,18 +399,39 @@ pub struct CaseArm {
     pub body: Vec<Stmt>,
 }
 
+/// Argument-passing direction for an analog function's formal parameter (the LRM's
+/// `input`/`output`/`inout` on a function argument declaration). Only `Input` reads the caller's
+/// actual-argument expression in as the parameter's initial value; `Output`/`Inout` instead write
+/// the parameter's *final* binding back into the caller's own variable once the call returns —
+/// see [`Function::arg_dirs`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ArgDir {
+    /// The caller's value flows in; nothing flows back out.
+    Input,
+    /// Nothing flows in (the parameter starts unassigned, exactly as if freshly declared inside
+    /// the function with no initializer); the function's final binding flows back out to the
+    /// caller's variable.
+    Output,
+    /// The caller's value flows in as the initial binding, *and* the function's final binding
+    /// flows back out — both halves of `Input`/`Output` at once.
+    Inout,
+}
+
 /// A user-defined analog function (`analog function`).
 ///
 /// Verilog-A analog functions are pure and non-recursive. The function name doubles as the
 /// return variable in source; here [`Self::ret`] names that variable. Arguments and locals
 /// live in [`Module::vars`]; [`Self::args`] lists the arguments in declaration order, bound
-/// positionally from a [`Expr::CallUser`]'s argument expressions.
+/// positionally from a [`Expr::CallUser`]'s argument expressions, with [`Self::arg_dirs`] (same
+/// length and order) recording each one's passing direction.
 #[derive(Clone, Debug)]
 pub struct Function {
     /// Function name as written in source.
     pub name: String,
     /// Argument variables, in declaration order.
     pub args: Vec<VarId>,
+    /// Each entry in [`Self::args`]'s passing direction, same length and order.
+    pub arg_dirs: Vec<ArgDir>,
     /// The return variable (named after the function in source).
     pub ret: VarId,
     /// Body statements; they assign to `ret`/locals and read `args`.
@@ -450,6 +471,7 @@ mod tests {
         m.functions.push(Function {
             name: "sq".into(),
             args: vec![x],
+            arg_dirs: vec![ArgDir::Input],
             ret: sq,
             body: vec![Stmt::Assign {
                 lhs: sq,

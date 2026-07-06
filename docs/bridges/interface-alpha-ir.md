@@ -32,6 +32,14 @@
 > component at node `p`'s slot," with no new numerical method needed. The `Access` is carried
 > structurally rather than as another `ExprId`, since it names *which* unknown to differentiate
 > against and is never itself evaluated to a value.
+>
+> Revised 2026-07-06 (§6): added `Function::arg_dirs: Vec<ArgDir>` (`ArgDir` = `Input`/`Output`/
+> `Inout`), recording the LRM's argument-direction qualifiers — previously parsed by
+> `va-frontend` (`ast::FuncArg::dir`) but dropped during elaboration, so an `output`/`inout`
+> argument's result had nowhere to go. Confirmed needed by `mvsg_cmc_1.1.1.va`/
+> `mvsg_cmc_2.1.0.va`'s `calc_iq`/`calc_capt` idiom (a function computing several results at
+> once). Additive: every existing `Function` construction site only needed
+> `arg_dirs: vec![ArgDir::Input; args.len()]`, an exact behavioral no-op.
 
 ## 1. Role
 
@@ -93,9 +101,14 @@ Module
   and the analog control-flow forms `While`, `For`, `Repeat`, `Case` (with `CaseArm`).
   Control flow nests via owned `Vec<Stmt>`; `For` boxes its single `init`/`step` statements
   (a finite-size tree node, not a shared graph), so the §5 arena rule still holds.
-- **`Function`** = `{ name, args: Vec<VarId>, ret: VarId, body: Vec<Stmt> }`. A function's
-  arguments, return variable, and locals all live in `Module.vars`; `CallUser` binds the
-  argument expressions positionally to `args`.
+- **`Function`** = `{ name, args: Vec<VarId>, arg_dirs: Vec<ArgDir>, ret: VarId, body: Vec<Stmt>
+  }`, where `ArgDir` is `Input`/`Output`/`Inout` (the LRM's argument-direction qualifiers),
+  same length and order as `args`. A function's arguments, return variable, and locals all
+  live in `Module.vars`; `CallUser` binds the argument expressions positionally to `args` — an
+  `Input`/`Inout` argument's caller-side expression is read in as the initial value, and an
+  `Output`/`Inout` argument's final binding is written back to the caller's own variable once
+  the call returns (which the LRM restricts an `output`/`inout` actual argument to being in the
+  first place: a plain variable, never a general expression).
 - **`Access`** = `{ kind: AccessKind, branch: BranchId }`, where `AccessKind` is `Potential`
   (`V(b)`) or `Flow` (`I(b)`). It is used both as a probe (`Expr::Probe`) and as a
   contribution target (`Stmt::Contribute`).

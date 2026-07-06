@@ -608,6 +608,19 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
 /// and the variable environment `ctx` already carries. A function's own arguments/locals/return
 /// variable are ordinary globally-unique `VarId`s in `ctx.module.vars` (not a separate stack
 /// frame), so nested or repeated calls never alias each other's bindings.
+///
+/// An `output`/`inout` argument (`func.arg_dirs`) is handled specially — real compact models use
+/// this for a function that computes several results at once (`mvsg_cmc_*.va`'s `calc_iq`:
+/// `output idsout,qgsout,...; input vgsin,vdsin,...;`, called as
+/// `idsrs = calc_iq(idsrs, qgsrs, qgdrs, ..., vgsrs, vdsrs, ...);` — only `idsrs` is bound by the
+/// outer assignment; the rest are pure write-only results, never read again by name anywhere in
+/// the corpus files surveyed). `Input` binds the caller's evaluated actual argument in as usual;
+/// `Output` binds *nothing* in (the parameter starts genuinely unassigned, same as any other
+/// local variable would, so the function reading it before writing is correctly rejected, not
+/// silently defaulted); `Inout` does both. After the body runs, every `Output`/`Inout` argument's
+/// *final* binding is written back into the caller's own variable — which the LRM restricts an
+/// output/inout actual argument to being in the first place, enforced here as a plain
+/// [`Expr::Var`] check (anything else is rejected: there would be nowhere to write the result).
 fn call_function(ctx: &Ctx, func: &Function, args: &[ExprId]) -> Result<Dual, CodegenError> {
     if func.args.len() != args.len() {
         return Err(unsupported(&format!(
@@ -617,12 +630,32 @@ fn call_function(ctx: &Ctx, func: &Function, args: &[ExprId]) -> Result<Dual, Co
             func.args.len()
         )));
     }
-    for (&param, &arg_expr) in func.args.iter().zip(args) {
-        let d = eval(ctx, arg_expr)?;
-        ctx.set_var(param, d);
+    for i in 0..func.args.len() {
+        let (param, arg_expr, dir) = (func.args[i], args[i], func.arg_dirs[i]);
+        if dir != va_ir::ArgDir::Input && !matches!(ctx.module.expr(arg_expr), Expr::Var(_)) {
+            return Err(unsupported(&format!(
+                "function `{}`'s output/inout argument #{i} must be a plain variable",
+                func.name
+            )));
+        }
+        if dir != va_ir::ArgDir::Output {
+            let d = eval(ctx, arg_expr)?;
+            ctx.set_var(param, d);
+        }
     }
     exec_stmts(ctx, &func.body)?;
-    ctx.get_var(func.ret)
+    let ret = ctx.get_var(func.ret)?;
+    for i in 0..func.args.len() {
+        let (param, arg_expr, dir) = (func.args[i], args[i], func.arg_dirs[i]);
+        if dir != va_ir::ArgDir::Input {
+            let Expr::Var(caller_var) = ctx.module.expr(arg_expr) else {
+                unreachable!("checked above before the body ran");
+            };
+            let final_val = ctx.get_var(param)?;
+            ctx.set_var(*caller_var, final_val);
+        }
+    }
+    Ok(ret)
 }
 
 fn exec_stmts(ctx: &Ctx, stmts: &[Stmt]) -> Result<(), CodegenError> {

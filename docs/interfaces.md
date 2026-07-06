@@ -58,7 +58,8 @@ pub enum Stmt {
 }
 
 // CaseArm { labels: Vec<ExprId>, body: Vec<Stmt> }
-// Function { name: String, args: Vec<VarId>, ret: VarId, body: Vec<Stmt> }
+// Function { name: String, args: Vec<VarId>, arg_dirs: Vec<ArgDir>, ret: VarId, body: Vec<Stmt> }
+// ArgDir { Input, Output, Inout }  // LRM `input`/`output`/`inout` on a function argument
 ```
 
 The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discipline`,
@@ -90,6 +91,20 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > never constructed. The only real effect is parser-internal: a parsed discipline's bound
 > nature `access` names widen `Parser::known_access` beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
 > baseline, additively.
+
+> **Revision (§6 change, 2026-07-06):** added `Function::arg_dirs: Vec<ArgDir>` (`ArgDir` a new
+> three-variant enum: `Input`/`Output`/`Inout`), same length and order as `Function::args`,
+> recording the LRM's `input`/`output`/`inout` direction on each analog function argument —
+> previously parsed by `va-frontend` (`ast::FuncArg::dir`) but discarded during elaboration,
+> which bound every argument as a plain input with no way to write a result back to the caller.
+> Real compact models use `output`/`inout` arguments for a function that computes several
+> results at once (`mvsg_cmc_*.va`'s `calc_iq`/`calc_capt`); `va-codegen`'s `call_function`
+> reads this to decide whether to bind the caller's actual-argument value in before running the
+> body (`Input`/`Inout`) and/or write the parameter's final binding back into the caller's own
+> variable after (`Output`/`Inout` — enforced to be a plain `Expr::Var`, per the LRM's own
+> restriction on output/inout actual arguments). Additive and backward compatible: every existing
+> `Function` construction site needed only `arg_dirs: vec![ArgDir::Input; args.len()]` added,
+> preserving its exact prior behavior.
 
 ## Interface β — model instance ABI (`va-abi`)
 

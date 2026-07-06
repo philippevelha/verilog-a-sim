@@ -2403,6 +2403,7 @@ mod tests {
         m.functions.push(Function {
             name: "sq".into(),
             args: vec![VarId(0)],
+            arg_dirs: vec![va_ir::ArgDir::Input],
             ret: VarId(1),
             body: vec![Stmt::Assign {
                 lhs: VarId(1),
@@ -2457,6 +2458,302 @@ mod tests {
         );
     }
 
+    /// `mvsg_cmc_*.va`'s real `calc_iq`/`calc_capt` shape in miniature: `analog function real
+    /// calc_sq_and_cube; output cubeout; input x; begin cubeout=x*x*x;
+    /// calc_sq_and_cube=x*x; end endfunction`, called as
+    /// `sq_result = calc_sq_and_cube(cube_result, V(p,n));` -- `cube_result` is never assigned
+    /// before the call (exactly `mvsg_cmc_1.1.1.va`'s `qgsrs`/`cofsmt` pattern: a pure
+    /// write-only result, read only through the call's own write-back, never via the outer
+    /// assignment at all).
+    fn output_arg_function_ir() -> Module {
+        let mut m = Module::new("output_arg_func");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        // Function scope: VarId(0)=cubeout (output), VarId(1)=x (input), VarId(2)=the
+        // function's own return variable.
+        // Module scope: VarId(3)=sq_result, VarId(4)=cube_result.
+        m.vars = vec![
+            VarDecl {
+                name: "cubeout".into(),
+            },
+            VarDecl { name: "x".into() },
+            VarDecl {
+                name: "calc_sq_and_cube".into(),
+            },
+            VarDecl {
+                name: "sq_result".into(),
+            },
+            VarDecl {
+                name: "cube_result".into(),
+            },
+        ];
+        let (cubeout, x, ret, sq_result, cube_result) =
+            (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+
+        let x1 = m.push_expr(Expr::Var(x));
+        let x2 = m.push_expr(Expr::Var(x));
+        let x3 = m.push_expr(Expr::Var(x));
+        let xx = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, x1, x2));
+        let xxx = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, xx, x3));
+        let x4 = m.push_expr(Expr::Var(x));
+        let x5 = m.push_expr(Expr::Var(x));
+        let xsq = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, x4, x5));
+        m.functions.push(Function {
+            name: "calc_sq_and_cube".into(),
+            args: vec![cubeout, x],
+            arg_dirs: vec![va_ir::ArgDir::Output, va_ir::ArgDir::Input],
+            ret,
+            body: vec![
+                Stmt::Assign {
+                    lhs: cubeout,
+                    rhs: xxx,
+                },
+                Stmt::Assign { lhs: ret, rhs: xsq },
+            ],
+        });
+
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let cube_result_ref = m.push_expr(Expr::Var(cube_result));
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![cube_result_ref, vpn]));
+        let sq_read = m.push_expr(Expr::Var(sq_result));
+        let cube_read = m.push_expr(Expr::Var(cube_result));
+        let total = m.push_expr(Expr::Binary(va_ir::BinOp::Add, sq_read, cube_read));
+
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: sq_result,
+                rhs: call,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: total,
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn output_argument_write_back_and_the_ordinary_return_value_both_work() {
+        let inst = build_instance(&output_arg_function_ir(), &[0, 1], &mut 2).unwrap();
+        let v = 2.0;
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+
+        // I = sq_result + cube_result = v^2 + v^3.
+        let expected_i = v * v + v * v * v;
+        assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-9);
+        // dI/dv = 2v + 3v^2, through *both* the ordinary return value and the output argument's
+        // write-back -- both must carry a correct gradient, not just a correct value.
+        let expected_grad = 2.0 * v + 3.0 * v * v;
+        assert!((sink.jac(0, 0) - expected_grad).abs() / expected_grad < 1e-9);
+
+        let h = 1e-6;
+        let residual_at = |v: f64| {
+            let mut s = DenseStamp::new(2);
+            inst.load(&[v, 0.0], &mut s);
+            s.residual[0]
+        };
+        let fd = (residual_at(v + h) - residual_at(v - h)) / (2.0 * h);
+        assert!(
+            (sink.jac(0, 0) - fd).abs() < 1e-6,
+            "{} vs {}",
+            sink.jac(0, 0),
+            fd
+        );
+    }
+
+    /// `inout` reads the caller's current value in *and* writes the final value back:
+    /// `analog function real bump; inout counter; input delta; begin counter=counter+delta;
+    /// bump=counter; end endfunction`, called from a module that first sets its own `counter`
+    /// variable to a known value, calls `bump(counter, delta)` (discarding the ordinary return
+    /// value), then contributes `counter` -- now updated by the call's write-back -- afterward.
+    fn inout_arg_function_ir(delta: f64) -> Module {
+        let mut m = Module::new("inout_arg_func");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "delta".into(),
+            default: delta,
+            min: None,
+            max: None,
+        }];
+        // Function scope: VarId(0)=counter (inout), VarId(1)=delta_in (input), VarId(2)=ret.
+        // Module scope: VarId(3)=counter_outer (the caller's own variable), VarId(4)=discarded
+        // return-value binding.
+        m.vars = vec![
+            VarDecl {
+                name: "counter".into(),
+            },
+            VarDecl {
+                name: "delta_in".into(),
+            },
+            VarDecl {
+                name: "bump".into(),
+            },
+            VarDecl {
+                name: "counter_outer".into(),
+            },
+            VarDecl {
+                name: "scratch".into(),
+            },
+        ];
+        let (counter, delta_in, ret, counter_outer, scratch) =
+            (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+
+        let counter_read = m.push_expr(Expr::Var(counter));
+        let delta_read = m.push_expr(Expr::Var(delta_in));
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, counter_read, delta_read));
+        let counter_read2 = m.push_expr(Expr::Var(counter));
+        m.functions.push(Function {
+            name: "bump".into(),
+            args: vec![counter, delta_in],
+            arg_dirs: vec![va_ir::ArgDir::Inout, va_ir::ArgDir::Input],
+            ret,
+            body: vec![
+                Stmt::Assign {
+                    lhs: counter,
+                    rhs: sum,
+                },
+                Stmt::Assign {
+                    lhs: ret,
+                    rhs: counter_read2,
+                },
+            ],
+        });
+
+        let initial = m.push_expr(Expr::Const(10.0));
+        let delta_param = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let counter_outer_ref = m.push_expr(Expr::Var(counter_outer));
+        let call = m.push_expr(Expr::CallUser(
+            FuncId(0),
+            vec![counter_outer_ref, delta_param],
+        ));
+        let counter_outer_read = m.push_expr(Expr::Var(counter_outer));
+
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: counter_outer,
+                rhs: initial,
+            },
+            Stmt::Assign {
+                lhs: scratch,
+                rhs: call,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: counter_outer_read,
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn inout_argument_reads_the_initial_value_in_and_writes_the_final_value_back() {
+        let delta = 1.5;
+        let inst = build_instance(&inout_arg_function_ir(delta), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[0.0, 0.0], &mut sink);
+        // counter_outer starts at 10.0, `bump` adds `delta` and writes the sum back.
+        assert!((sink.residual[0] - (10.0 + delta)).abs() < 1e-9);
+        // The contributed value came from `counter_outer` (a constant, not a node voltage), so
+        // it carries no gradient at all.
+        assert_eq!(sink.jac(0, 0), 0.0);
+    }
+
+    /// The LRM restricts an `output`/`inout` actual argument to a plain variable (there must be
+    /// somewhere to write the result back to); passing an arbitrary expression instead must be
+    /// rejected, not silently ignored or miscomputed.
+    #[test]
+    fn output_argument_that_is_not_a_plain_variable_is_rejected() {
+        let mut m = Module::new("bad_output_arg");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "out".into() }, VarDecl { name: "f".into() }];
+        let (out, ret) = (VarId(0), VarId(1));
+
+        let one = m.push_expr(Expr::Const(1.0));
+        m.functions.push(Function {
+            name: "f".into(),
+            args: vec![out],
+            arg_dirs: vec![va_ir::ArgDir::Output],
+            ret,
+            body: vec![
+                Stmt::Assign { lhs: out, rhs: one },
+                Stmt::Assign { lhs: ret, rhs: one },
+            ],
+        });
+
+        // The actual argument is `2*V(p,n)`, not a plain variable.
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let two = m.push_expr(Expr::Const(2.0));
+        let bad_arg = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, two, vpn));
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![bad_arg]));
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: call,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
     /// A function whose body region-selects like a real compact model's utility routine would:
     /// `if (x>0) ret=<bad, unassigned read>; else ret=x;`. At the all-zero validate point
     /// `x=0`, a real call would take the `else` arm -- proving `build_instance` still catches
@@ -2508,6 +2805,7 @@ mod tests {
         m.functions.push(Function {
             name: "myfunc".into(),
             args: vec![VarId(0)],
+            arg_dirs: vec![va_ir::ArgDir::Input],
             ret: VarId(1),
             body: vec![Stmt::If {
                 cond,
@@ -2561,6 +2859,7 @@ mod tests {
         m.functions.push(Function {
             name: "sq".into(),
             args: vec![VarId(0)],
+            arg_dirs: vec![va_ir::ArgDir::Input],
             ret: VarId(1),
             body: vec![Stmt::Assign {
                 lhs: VarId(1),
@@ -2608,6 +2907,7 @@ mod tests {
         m.functions.push(Function {
             name: "bad".into(),
             args: vec![VarId(0)],
+            arg_dirs: vec![va_ir::ArgDir::Input],
             ret: VarId(1),
             body: vec![Stmt::Contribute {
                 target: Access {
