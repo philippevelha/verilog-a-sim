@@ -46,10 +46,10 @@ shared, demoable milestone that several theses light up at once.
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
-| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; 9 tests | 🟢 |
+| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; 16 tests | 🟢 |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
 | T6.1 — netlist parser | R/C/D/V elements, dot-cards incl. `.tran` timing; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
-| T6.2 — CLI wiring (DC + transient) | `va-cli sim` drives frontend→codegen→core for DC and frontend→codegen→transient for `.tran`, both through real reference/generated/hierarchical models | 🟢 |
+| T6.2 — CLI wiring (DC + transient) | `va-cli sim` drives DC and `.tran` (incl. `SIN`-sourced circuits like the rectifier) through the real pipeline | 🟢 |
 | T5 · T6.3 | crate stubs only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
@@ -566,9 +566,17 @@ the reference models.
 > decisions come from the same symmetric embedded-pair estimate regardless of which method is
 > "primary," a real, documented property of this design, not a bug; plus the underflow,
 > unsupported-method, empty-circuit, and error-propagation edge cases.
-> *Outstanding:* rung-4 gate vs golden (T6, needs a diode model in the loop — not yet tried
-> here, only the linear RC circuit); a rigorous divided-difference LTE estimator to replace
-> the embedded-pair heuristic; `t4-transient/02-lte-timestep.qmd`.
+> **2026-07-06: the rectifier itself now runs, through the real CLI pipeline** — see T6.2's
+> update and rung 4 below. That needed one more piece not in scope when this phase's status
+> was first written: `va_abi::ModelInstance::load` has no time parameter (Interface β's "no
+> time, no frequency on the bridge" — `docs/bridges/interface-beta-abi.md` §7), so a genuinely
+> time-varying source (`SIN(...)`, not a constant `DC` value) can't be expressed as a normal
+> stateful-free instance. `integrator::run_dynamic` is the fix: it rebuilds a caller-supplied
+> subset of devices fresh at every step attempt (the value baked in fresh each time), while
+> everything else in the circuit stays a fixed, borrowed instance exactly as before —
+> `va-cli`'s `build_instances_split` is the one caller that needs this today.
+> *Outstanding:* a rigorous divided-difference LTE estimator to replace the embedded-pair
+> heuristic; `t4-transient/02-lte-timestep.qmd`.
 
 - Local truncation error estimate driving adaptive step size; step accept/reject logic.
 - **Validation gate (ladder rung 4):** diode rectifier transient RMS ≤ 1e-3 vs golden.
@@ -657,13 +665,24 @@ methodology + metrics report vs ngspice.
 > primitives for unmatched devices, then `va-core::dc::operating_point` solves it.
 > **2026-07-06: transient is wired too** — `va-cli sim <deck> --tran` runs the same device-
 > building path through `va_transient::integrator::run` over the deck's `.tran` window,
-> reported via a new `report_transient`. Always starts from the zero vector: v0 has no `.ic`/
-> `UIC` support and no time-varying source model (`va_abi::reference::VSource` is a constant DC
-> value only), so a deck's constant source plus a cold start *is* the step response — the only
-> shape a DC-only source could produce, and exactly what `circuits/rc_step.net` (a step
-> voltage into an R/C) exercises: `cargo run -p va-cli -- sim circuits/rc_step.net --tran`
-> matches the analytic
-> `V(t)=Vs·(1−e^{−t/RC})` closely (e.g. 4.966 V vs analytic 4.9663 V at `t=5·RC`).
+> reported via a new `report_transient`. Always starts from the zero vector (v0 has no `.ic`/
+> `UIC` support): for a plain `DC`-valued source that cold start plus the constant source *is*
+> the step response — exactly what `circuits/rc_step.net` (a step voltage into an R/C)
+> exercises: `cargo run -p va-cli -- sim circuits/rc_step.net --tran` matches the analytic
+> `V(t)=Vs·(1−e^{−t/RC})` closely (4.966 V vs analytic 4.9663 V at `t=5·RC`).
+> **Same day, second update: `SIN(...)` sources are wired too** — `va-netlist` now retains a
+> `V` line's full `(offset, amplitude, freq)`, not just the DC offset it collapses to for a DC
+> solve, as `Device::waveform`. `va-cli`'s new `build_instances_split` separates a
+> waveform-carrying `vsource` from every other (fixed) device, and `solve_transient` hands it
+> to the new `va_transient::integrator::run_dynamic` (see T4.2), which rebuilds that one
+> source fresh at each step from the waveform instead of the fixed-instance path everything
+> else uses — needed because Interface β has no time parameter for a device to read a
+> waveform from directly (§7, T4.2's update above). Verified against
+> `circuits/rectifier.net`: `cargo run -p va-cli -- sim circuits/rectifier.net --tran`
+> produces a textbook half-wave-rectified, RC-filtered waveform — `V(out)` never follows
+> `V(in)`'s swing to −5 V, peaks near 4.3 V (5 V minus a silicon diode drop), and shows the
+> expected ripple decay between cycles, all driven through the real frontend/netlist/core/
+> transient pipeline, no golden reference needed to see it's doing the right thing.
 > `xtask gen-golden`/`xtask validate` remain unimplemented (T6.3/`xtask` territory).
 > *Outstanding:* `t6-integration/02-cli.qmd`.
 
@@ -692,7 +711,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | `cargo run -p va-cli -- sim circuits/divider.net` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | pieces work in isolation (frontend, codegen, nonlinear DC); not yet wired or golden-gated |
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | `cargo run -p va-cli -- sim circuits/rc_step.net --tran` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
-| 4    | diode rectifier    | transient | T4                       | T4.2                          | ⬜ |
+| 4    | diode rectifier    | transient | T4                       | T4.2                          | `cargo run -p va-cli -- sim circuits/rectifier.net --tran` produces a correct half-wave-rectified/RC-filtered waveform; **golden gate pending `va-harness` (T6.3)** |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ **blocked**: needs a gain-capable device; the model zoo is entirely passive (see T4.3) |
 

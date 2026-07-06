@@ -9,11 +9,16 @@
 //! # Limitations
 //!
 //! - Inductors, controlled sources, subcircuits (`X`), and `.model` cards are not parsed.
-//! - A `V` source accepts `DC <value>` or `SIN(off amp freq …)`; for the latter the DC
-//!   offset becomes the source's DC value (what a DC operating point needs). Other transient
-//!   waveforms are not parsed.
+//! - A `V` source accepts `DC <value>` or `SIN(off amp freq …)`. The latter's offset becomes
+//!   the DC value (what a DC operating point needs) *and* its full `(offset, amplitude, freq)`
+//!   is retained as [`crate::Device::waveform`] for a transient run to reproduce the actual
+//!   time dependence — `va_abi::ModelInstance::load` has no time parameter (Interface β has no
+//!   room for one — see `docs/bridges/interface-beta-abi.md` §7), so a transient consumer
+//!   reconstructs a fresh, differently-valued source each step instead
+//!   (`va_transient::integrator::run_dynamic`). SPICE's optional trailing `SIN` parameters
+//!   (delay, damping, phase) are not parsed.
 
-use crate::{AnalysisCard, Device, Netlist, NetlistError};
+use crate::{AnalysisCard, Device, Netlist, NetlistError, Waveform};
 use va_abi::reference::GROUND;
 
 /// Parse a netlist deck into a [`Netlist`].
@@ -112,6 +117,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 model: model.to_string(),
                 terminals: vec![p, n],
                 value: Some(value),
+                waveform: None,
             })
         }
         'D' => {
@@ -124,6 +130,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 model: toks[3].to_string(),
                 terminals: vec![p, n],
                 value: None,
+                waveform: None,
             })
         }
         'V' => {
@@ -131,11 +138,13 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
             let p = intern(net, toks[1]);
             let n = intern(net, toks[2]);
             let value = parse_source_value(&toks[3..]);
+            let waveform = parse_source_waveform(&toks[3..]);
             Ok(Device {
                 name,
                 model: "vsource".to_string(),
                 terminals: vec![p, n],
                 value: Some(value),
+                waveform,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -179,6 +188,27 @@ fn parse_source_value(rest: &[&str]) -> f64 {
             parse_value(inner).unwrap_or(0.0)
         }
         Some(t) => parse_value(t).unwrap_or(0.0),
+    }
+}
+
+/// Parse a `SIN(offset amplitude freq …)` source's full waveform, or `None` for anything else
+/// (`DC <value>`, a bare number, or a malformed `SIN(...)` missing one of the first three
+/// values — the DC-only fallback in [`parse_source_value`] already covers that case).
+fn parse_source_waveform(rest: &[&str]) -> Option<Waveform> {
+    let first = rest.first()?;
+    if !first.to_ascii_uppercase().starts_with("SIN") {
+        return None;
+    }
+    let joined = rest.join(" ");
+    let inner = joined.split(['(', ')']).nth(1)?;
+    let nums: Vec<f64> = inner.split_whitespace().filter_map(parse_value).collect();
+    match nums.as_slice() {
+        [offset, amplitude, freq, ..] => Some(Waveform::Sin {
+            offset: *offset,
+            amplitude: *amplitude,
+            freq: *freq,
+        }),
+        _ => None,
     }
 }
 

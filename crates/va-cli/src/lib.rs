@@ -16,19 +16,25 @@
 //!
 //! DC (`.op`) and transient (`.tran <tstep> <tstop>`) are implemented; AC decks are rejected
 //! with a clear message. Transient always starts from the zero vector — v0 has no `.ic`/`UIC`
-//! support and no time-varying source model (`va_abi::reference::VSource` is a constant DC
-//! value only), so a deck's constant source combined with a cold start *is* the step response:
-//! there's no other transient shape a DC-only source could produce.
+//! support. A `V` source with a bare `DC <value>` combined with that cold start *is* the step
+//! response — the only shape a constant source could produce. A `V` source with a `SIN(...)`
+//! waveform is genuinely time-varying: since `va_abi::ModelInstance::load` has no time
+//! parameter (Interface β has no room for one — `docs/bridges/interface-beta-abi.md` §7), it
+//! is reconstructed fresh every step with the value at that step's time baked in
+//! (`va_transient::integrator::run_dynamic`), rather than the fixed-`VSource` path every other
+//! device uses.
 
 #![forbid(unsafe_code)]
 
 use anyhow::{bail, Context, Result};
+use std::f64::consts::PI;
 use va_abi::reference::{diode::VT_300K, Capacitor, Diode, Resistor, VSource};
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
+use va_transient::events::EventQueue;
 use va_transient::integrator::{Method, TranConfig, Waveform};
 
 /// Which analysis to run for a `sim` invocation.
@@ -265,19 +271,62 @@ fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::Operating
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
 }
 
+/// One `vsource` device's `(p, n, branch)` global indices plus the waveform it should be
+/// rebuilt from at each transient step (see [`build_instances_split`]).
+type TimeVaryingSource = (usize, usize, usize, va_netlist::Waveform);
+
+/// [`build_instances_split`]'s return: fixed device instances, time-varying source specs, and
+/// the total unknown count.
+type SplitInstances = (Vec<Box<dyn ModelInstance>>, Vec<TimeVaryingSource>, usize);
+
+/// Like [`build_instances`], but splits out any `vsource` device with a `SIN` waveform into
+/// its own list rather than baking a fixed DC value into it, since a transient run needs to
+/// reconstruct it fresh each step (this module's doc comment). Returns `(fixed, time_varying,
+/// dim)`: `time_varying` entries are `(p, n, branch, waveform)` — the same stable global
+/// indices a plain DC-valued `VSource` would have claimed, just not yet turned into one. `dim`
+/// and every other device's assigned indices are identical to what [`build_instances`] would
+/// produce for the same netlist (each vsource device claims exactly one unknown either way).
+fn build_instances_split(net: &Netlist, compiled: &[Module]) -> Result<SplitInstances> {
+    let mut next_unknown = net.node_order.len();
+    let mut fixed: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
+    let mut time_varying = Vec::new();
+
+    for dev in &net.devices {
+        if dev.model == "vsource" {
+            if let Some(waveform) = dev.waveform {
+                let branch = next_unknown;
+                next_unknown += 1;
+                time_varying.push((dev.terminals[0], dev.terminals[1], branch, waveform));
+                continue;
+            }
+        }
+        fixed.push(build_instance(dev, compiled, &mut next_unknown)?);
+    }
+    Ok((fixed, time_varying, next_unknown))
+}
+
+/// Evaluate a parsed source waveform at time `t`.
+fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
+    match waveform {
+        va_netlist::Waveform::Sin {
+            offset,
+            amplitude,
+            freq,
+        } => offset + amplitude * (2.0 * PI * freq * t).sin(),
+    }
+}
+
 /// Build every device instance and integrate the transient response over the deck's
 /// `.tran <tstep> <tstop>` window.
 ///
-/// Always starts from the zero vector (see this module's doc comment on why that's the right
-/// default given v0 has no time-varying source model): a plain DC-valued source combined with
-/// a cold start *is* the step response there's anything interesting to observe at all.
+/// Always starts from the zero vector — v0 has no `.ic`/`UIC` support (this module's doc
+/// comment). For a deck with no time-varying source this is the ordinary fixed-instance path
+/// ([`va_transient::integrator::run`]); a `SIN`-sourced deck instead rebuilds that source fresh
+/// every step via [`va_transient::integrator::run_dynamic`].
 fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
-    let (instances, dim) = build_instances(net, compiled)?;
-    let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let (tstep, tstop) = net
         .tran
         .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
-
     let cfg = TranConfig {
         tstart: 0.0,
         tstop,
@@ -287,8 +336,26 @@ fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
         lte_reltol: 1e-3,
         lte_abstol: 1e-6,
     };
-    va_transient::integrator::run(&refs, dim, vec![0.0; dim], cfg)
-        .context("transient integration failed")
+
+    let (fixed, time_varying, dim) = build_instances_split(net, compiled)?;
+    let x0 = vec![0.0; dim];
+    let refs: Vec<&dyn ModelInstance> = fixed.iter().map(|b| b.as_ref()).collect();
+
+    if time_varying.is_empty() {
+        return va_transient::integrator::run(&refs, dim, x0, cfg)
+            .context("transient integration failed");
+    }
+
+    va_transient::integrator::run_dynamic(dim, x0, cfg, &EventQueue::new(), &refs, |t| {
+        time_varying
+            .iter()
+            .map(|&(p, n, branch, waveform)| {
+                Box::new(VSource::new(p, n, branch, waveform_value(waveform, t)))
+                    as Box<dyn ModelInstance>
+            })
+            .collect()
+    })
+    .context("transient integration failed")
 }
 
 /// Turn one parsed [`Device`] into a loadable instance, preferring a matching compiled
@@ -549,6 +616,55 @@ mod tests {
         assert!(
             (v_final - vs).abs() / vs < 1e-2,
             "should have settled near Vs: {v_final}"
+        );
+    }
+
+    /// End-to-end half-wave rectifier through the real pipeline, from `circuits/rectifier.net`
+    /// (a 1 kHz/5 V `SIN` source, a diode, and an RC load) — exactly what
+    /// `va-cli sim circuits/rectifier.net --tran` runs. Rectification is checked qualitatively
+    /// (no golden reference exists yet — that's `va-harness`, still `todo!()`): the diode
+    /// should keep `out` from ever following `in`'s negative excursions, and the output should
+    /// reach close to the input's peak minus a silicon diode drop.
+    #[test]
+    fn rectifier_solves_through_the_real_pipeline() {
+        let deck = include_str!("../../../circuits/rectifier.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rectifier");
+        assert_eq!(net.analysis, AnalysisCard::Tran);
+        gate_analysis(&net, Analysis::Transient).expect("transient analysis is accepted");
+
+        // Confirm this deck actually exercises the time-varying path being tested.
+        let v1 = net.devices.iter().find(|d| d.name == "V1").unwrap();
+        assert!(matches!(
+            v1.waveform,
+            Some(va_netlist::Waveform::Sin { .. })
+        ));
+
+        let wf = solve_transient(&net, &[]).expect("integrates");
+        let in_idx = net.node_order.iter().position(|n| n == "in").unwrap();
+        let out_idx = net.node_order.iter().position(|n| n == "out").unwrap();
+
+        let in_min = wf.x.iter().map(|x| x[in_idx]).fold(f64::INFINITY, f64::min);
+        let out_min =
+            wf.x.iter()
+                .map(|x| x[out_idx])
+                .fold(f64::INFINITY, f64::min);
+        let out_max =
+            wf.x.iter()
+                .map(|x| x[out_idx])
+                .fold(f64::NEG_INFINITY, f64::max);
+
+        // The source genuinely swings negative (proves the SIN waveform is really driving the
+        // circuit, not silently stuck at its DC offset of 0 V).
+        assert!(in_min < -4.0, "V(in) should swing well negative: {in_min}");
+        // The diode blocks it: `out` never follows, staying close to (well above) zero.
+        assert!(
+            out_min > -0.1,
+            "half-wave rectifier output went negative: {out_min}"
+        );
+        // The output reaches near the input's peak (5 V) minus a silicon diode drop.
+        assert!(
+            (3.5..5.0).contains(&out_max),
+            "V(out) peak out of range: {out_max}"
         );
     }
 }

@@ -73,13 +73,34 @@ pub struct Device {
     /// Terminal node indices in port order ([`va_abi::reference::GROUND`] for the reference).
     pub terminals: Vec<usize>,
     /// Primary scalar value (resistance, capacitance, source DC value, …), if the line
-    /// carries one.
+    /// carries one. For a source with a [`Self::waveform`], this is still that waveform's
+    /// DC/offset value — what a DC operating-point solve needs regardless of the full
+    /// time-domain shape.
     pub value: Option<f64>,
+    /// The full time-domain waveform a `V` line specifies, if it's more than a bare DC value
+    /// (e.g. `SIN(...)`). `None` for a plain `DC <value>`/bare-number source, or for any
+    /// non-source device.
+    pub waveform: Option<Waveform>,
+}
+
+/// A time-domain source waveform beyond a bare DC value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Waveform {
+    /// `SIN(offset amplitude freq)`: `v(t) = offset + amplitude·sin(2π·freq·t)`. Delay/damping/
+    /// phase (SPICE's optional trailing `SIN` parameters) are not parsed in v0.
+    Sin {
+        /// DC offset (V).
+        offset: f64,
+        /// Peak amplitude above/below the offset (V).
+        amplitude: f64,
+        /// Frequency (Hz).
+        freq: f64,
+    },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parser::parse, AnalysisCard};
+    use super::{parser::parse, AnalysisCard, Waveform};
     use va_abi::reference::GROUND;
 
     #[test]
@@ -124,6 +145,22 @@ mod tests {
         let (tstep, tstop) = net.tran.expect("tran timing");
         assert!((tstep - 10e-6).abs() < 1e-15, "tstep = {tstep}");
         assert!((tstop - 5e-3).abs() < 1e-15, "tstop = {tstop}");
+
+        // `V1 in gnd SIN(0 5 1k)`.
+        let v1 = net.devices.iter().find(|d| d.name == "V1").unwrap();
+        assert_eq!(v1.value, Some(0.0));
+        match v1.waveform {
+            Some(Waveform::Sin {
+                offset,
+                amplitude,
+                freq,
+            }) => {
+                assert!((offset - 0.0).abs() < 1e-12);
+                assert!((amplitude - 5.0).abs() < 1e-12);
+                assert!((freq - 1000.0).abs() < 1e-9);
+            }
+            other => panic!("expected a Sin waveform, got {other:?}"),
+        }
     }
 
     #[test]
