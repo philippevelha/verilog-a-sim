@@ -40,7 +40,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity; 6 tests | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; the three zoo models elaborate end-to-end; 6 tests | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt`; 44/115 real corpus files pass frontend+codegen (a nested, non-top-level `ddt`/`idt` still the top blocker, now for narrower reasons) | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients); 50/115 real corpus files pass frontend+codegen | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
@@ -406,18 +406,18 @@ matches the code verbatim.
 > resistor reproduces `va-abi`'s hand-checked stamp; diode matches analytic current +
 > conductance; **§5 AD-vs-FD milestone green**.
 >
-> **Corpus baseline (2026-07-13), the T2 analogue of T1's `token-reference.md` tracking**:
+> **Corpus baseline (2026-07-14), the T2 analogue of T1's `token-reference.md` tracking**:
 > passing the *frontend* (T1, `docs/token-reference.md`'s domain) and passing *codegen* —
 > actually buildable into a `ModelInstance`, i.e. actually simulatable — are different bars,
 > and only the first was ever measured against the real, recursively-scanned 115-file
 > `external/` corpus. Scanning the second (`va_codegen::build_instance` on every module that
-> already elaborates): of the 62 that pass the frontend, **44 now also pass codegen** (up from
-> 40). Of the 18 that don't: a nested (non-top-level) `ddt`/`idt` (14, still the top blocker,
-> but for narrower reasons now — see below), a branch's flow probe with no potential
-> contribution of its own (2, `diode_basic.va`/`verilogaLib-master/ohmmeter.va` — a stated v0
-> scope edge), and a local-variable read before assignment (2, `mvsg_cmc_*.va` — unchanged from
-> the prior baseline, still out of this round's scope). **4 net new files** pass versus the
-> prior baseline.
+> already elaborates): of the 62 that pass the frontend, **50 now also pass codegen** (up from
+> 44). Of the 12 that don't: a nested (non-top-level) `ddt`/`idt` (6, down from 14 — see below
+> for what's left), a branch's flow probe with no potential contribution of its own (4, up from
+> 2 — `asmhemt.va`/`asmhemt101_0.va` newly re-attributed here now that their `ddt`-scaling
+> blocker is fixed, not a regression), and a local-variable read before assignment (2,
+> `mvsg_cmc_*.va` — unchanged, still out of this round's scope). **6 net new files** pass versus
+> the prior baseline.
 >
 > **`if`/`else` is now lowered** (previously the single biggest codegen blocker — 35 of the 43
 > non-frontend-clean-but-codegen-failing files as of the prior baseline; the fix removed that
@@ -579,10 +579,11 @@ matches the code verbatim.
 > by `va-transient`'s integrator via one time-stepping coefficient per row, to also carry a
 > per-term, model-supplied coefficient — a `va_abi`/`va_transient` interface change, out of
 > scope here). So `lower::is_param_only` recursively proves a coefficient is built from nothing
-> but `Const`/`Param` and pure arithmetic/builtin combinations of those before
-> `lower::charge_term_shape` will fold it in at all; anything else (a node/branch probe, a local
-> variable, a function call) falls back to the exact same rejection an unscaled nested `ddt`
-> already got, rather than risk a silently wrong Jacobian. `lower::ChargeTerm` (replacing the
+> but `Const`/`Param` and pure arithmetic/builtin combinations of those (later extended to
+> provably parameter-only local variables too — see below) before `lower::charge_term_shape`
+> will fold it in at all; anything else (a node/branch probe, a function call) falls back to the
+> exact same rejection an unscaled nested `ddt` already got, rather than risk a silently wrong
+> Jacobian. `lower::ChargeTerm` (replacing the
 > reused `Term` type for the charge channel specifically) carries the coefficient expression and
 > whether it divides; `GeneratedModel::sum_charge_terms` evaluates it once per stamp and scales
 > the `ddt` argument's `Dual` by its plain value — exact, not an approximation, precisely because
@@ -592,13 +593,41 @@ matches the code verbatim.
 > (§5's charge-channel analogue); and, proving the safety check actually bites rather than just
 > being documented, the same shape with the coefficient replaced by the branch's own voltage (a
 > genuinely `x`-dependent "coefficient") — still rejected, exactly like before.
-> *Outstanding:* the remaining nested-`ddt`/`idt` files need either a local-variable-derived
-> (not directly parameter-only) coefficient, `` `ddt` ``-result-through-a-local-variable
-> indirection (`real dqdt; dqdt=ddt(q); I<+dqdt+…;`, seen in two files specifically to dodge
-> this project's own `if`/`case` `ddt`-placement history), or `idt` support outright (needs its
-> own auxiliary accumulator unknown, architecturally distinct from a branch-current unknown) —
-> none attempted this round; plus the non-path-sensitive variable-read-before-assignment gap
-> surfaced by 2 files (see above). Full committed sweep; `t2-codegen/02-lowering.qmd`.
+>
+> **A `ddt`-scaling coefficient can now be a local variable, too** (previously rejected outright
+> — a follow-up investigation into the remaining 14 nested-`ddt` files found this the dominant
+> remaining cause: `bsimbulk.va`'s `devsign*ddt(...)`, `bsim4.va`'s `BSIM4type*ddt(...)`,
+> `asmhemt.va`'s `ct*ddt(...)`, all scaling coefficients assigned via `if`/`else` rather than
+> read directly off a bare parameter). The same correctness constraint applies — the coefficient
+> must be provably `x`-independent — so `lower::param_only_vars` computes, once per module, the
+> set of local variables where **every** `Stmt::Assign` to them anywhere in the analog block
+> assigns a parameter-only expression, to a fixed point (so a short dependency chain like `a=W/L;
+> b=a*2;` is still recognised — `b` only counts once `a` already does). This is deliberately the
+> same eager, non-path-sensitive over-approximation character as the `if`/`else`-validation split
+> elsewhere in this crate: sound (an accepted variable really is parameter-only on every path
+> that could reach it) but not complete (one that's parameter-only on the specific path a given
+> `ddt` site cares about, but genuinely `x`-dependent on some unrelated path, still stays
+> rejected) — and, crucially, the *guard* of an `if` assigning the coefficient doesn't matter,
+> only what actually gets assigned in every arm (`asmhemt.va`'s `if (V(g)>voff) ct=ctrap3; else
+> ct=1.0e-9;` guards on a node voltage but assigns only parameter-only values either way, and is
+> correctly accepted). `lower::is_param_only` gained an `Expr::Var` case consulting this set.
+> Regression-tested: the real `devsign`/`ct` `if`/`else`-assigned-coefficient idiom, checked at
+> operating points that take *both* branches of the guard; a two-variable dependency chain
+> (`a=W/L; b=a*2;`) proving the fixed point actually propagates transitively rather than only
+> recognizing a variable assigned directly from a bare `Const`/`Param`; and, proving the
+> soundness check still bites, a variable assigned a parameter-only value in one arm but the
+> branch voltage itself in the other — still rejected, since not *every* assignment is
+> parameter-only.
+> *Outstanding:* the remaining 6 nested-`ddt`/`idt` files need either `` `ddt` ``-result-through-
+> a-local-variable indirection (`real dqdt; dqdt=ddt(q); I<+dqdt+…;`, `angelov_gan.va`/
+> `hisim2.va`, specifically to dodge this project's own `if`/`case` `ddt`-placement history), a
+> `ddt` nested two multiplications deep (`ekv26.va`'s `ddt(qjd)*TYPE*M`, parsing as
+> `(ddt(qjd)*TYPE)*M` — outside what `charge_term_shape` inspects, which only looks at the
+> immediate operands of the outermost `Mul`/`Div`), or `idt` support outright (needs its own
+> auxiliary accumulator unknown, architecturally distinct from a branch-current unknown, since
+> its value depends on the entire history of its argument, not just the current unknowns) — none
+> attempted this round; plus the non-path-sensitive variable-read-before-assignment gap surfaced
+> by 2 files (see above). Full committed sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

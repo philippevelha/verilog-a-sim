@@ -75,17 +75,29 @@
 //! this "coefficient times a time-derivative" shape in every single one of a batch of
 //! previously-blocked real compact models, e.g. `bsim4.va`'s `I(gi,si) <+ BSIM4type *
 //! ddt(qgate);`, a polarity-selection parameter scaling a charge term). The coefficient must be
-//! **provably parameter-only** ([`is_param_only`]) — built from nothing but `Const`/`Param` and
-//! pure arithmetic/builtin combinations of those, never a node/branch probe, local variable, or
-//! function call — because `coeff(x) * dQ/dt` only equals `d(coeff*Q)/dt` (letting it fold into
-//! the ordinary charge channel) when `coeff` doesn't itself depend on the unknowns `x`; this
-//! project's `va_abi::StampSink` charge channel has no way to express the general product-rule
-//! case where it does (that would need the whole companion-model discretization, currently
-//! owned entirely by `va-transient`'s integrator via a single per-row time-stepping
-//! coefficient, to also carry a per-term, model-supplied coefficient — a `va_abi`/`va_transient`
-//! interface change, not a `va-codegen`-local one). `ddt` still may not appear nested any other
-//! way (inside a ternary, as another builtin's argument, etc.) — none of those shapes turned up
-//! anywhere in the same survey, so there was nothing concrete to scope a fix against.
+//! **provably parameter-only** ([`is_param_only`]) — built from nothing but `Const`/`Param`,
+//! pure arithmetic/builtin combinations of those, and (recursively) other provably parameter-only
+//! *local variables* ([`param_only_vars`]) — never a node/branch probe or function call — because
+//! `coeff(x) * dQ/dt` only equals `d(coeff*Q)/dt` (letting it fold into the ordinary charge
+//! channel) when `coeff` doesn't itself depend on the unknowns `x`; this project's
+//! `va_abi::StampSink` charge channel has no way to express the general product-rule case where
+//! it does (that would need the whole companion-model discretization, currently owned entirely
+//! by `va-transient`'s integrator via a single per-row time-stepping coefficient, to also carry a
+//! per-term, model-supplied coefficient — a `va_abi`/`va_transient` interface change, not a
+//! `va-codegen`-local one). A local variable counts as parameter-only when **every**
+//! `Stmt::Assign` to it anywhere in the analog block assigns a parameter-only expression — real
+//! models commonly compute a polarity/sign flag once from a parameter comparison (`if (TYPE ==
+//! \`ntype) devsign = 1; else devsign = -1;`, `bsimbulk.va`) or guard it behind an `x`-dependent
+//! *condition* while every *assigned value* stays parameter-only (`asmhemt.va`'s `if (V(g) >
+//! voff) ct = ctrap3; else ct = 1.0e-9;` — the guard reading a node voltage doesn't matter, only
+//! what actually gets assigned does) — this is an eager, non-path-sensitive over-approximation
+//! (same character as the `if`/`else`-validation split elsewhere in this crate): it's sound
+//! (every accepted variable really is parameter-only on every path that could reach it) but not
+//! complete (a variable that's parameter-only on the *specific* path relevant to one `ddt` site
+//! but genuinely `x`-dependent on some unrelated path stays rejected). `ddt` still may not appear
+//! nested any other way (inside a ternary, as another builtin's argument, chained through more
+//! than one multiplication, etc.) — none of those shapes turned up anywhere in the same survey,
+//! so there was nothing concrete to scope a fix against.
 //!
 //! # Limitations
 //!
@@ -105,7 +117,7 @@
 //! module's statement-level extraction of the *analog block* (see `crate::ad::call_function`).
 
 use crate::CodegenError;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use va_ir::{AccessKind, BinOp, BranchId, Builtin, Expr, ExprId, Module, Stmt, UnOp, VarId};
 
 /// One additive term of a contribution: a signed expression handle.
@@ -283,6 +295,7 @@ pub struct Lowered {
 /// (user-defined functions, malformed `ddt`).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let (flow_branches, potential_branches) = branch_kinds(&module.analog);
+    let param_only = param_only_vars(module, &module.analog);
 
     let mut branch_currents = Vec::new();
     let mut slot_of_branch = HashMap::new();
@@ -302,7 +315,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
 
     let mut stmts = Vec::new();
     for stmt in &module.analog {
-        lower_stmt(module, stmt, &slot_of_branch, &mut stmts)?;
+        lower_stmt(module, stmt, &slot_of_branch, &param_only, &mut stmts)?;
     }
     Ok(Lowered {
         n_unknowns: next_slot,
@@ -367,6 +380,7 @@ fn lower_stmt(
     module: &Module,
     stmt: &Stmt,
     slot_of_branch: &HashMap<u32, usize>,
+    param_only: &HashSet<u32>,
     out: &mut Vec<LoweredStmt>,
 ) -> Result<(), CodegenError> {
     match stmt {
@@ -379,7 +393,7 @@ fn lower_stmt(
             let mut resistive = Vec::new();
             let mut charge = Vec::new();
             for term in terms {
-                match charge_term_shape(module, term.expr)? {
+                match charge_term_shape(module, term.expr, param_only)? {
                     Some((expr, coeff, coeff_is_divisor)) => charge.push(ChargeTerm {
                         sign: term.sign,
                         expr,
@@ -413,18 +427,18 @@ fn lower_stmt(
         }
         Stmt::Block(body) => {
             for s in body {
-                lower_stmt(module, s, slot_of_branch, out)?;
+                lower_stmt(module, s, slot_of_branch, param_only, out)?;
             }
             Ok(())
         }
         Stmt::If { cond, then_, else_ } => {
             let mut then_lowered = Vec::new();
             for s in then_ {
-                lower_stmt(module, s, slot_of_branch, &mut then_lowered)?;
+                lower_stmt(module, s, slot_of_branch, param_only, &mut then_lowered)?;
             }
             let mut else_lowered = Vec::new();
             for s in else_ {
-                lower_stmt(module, s, slot_of_branch, &mut else_lowered)?;
+                lower_stmt(module, s, slot_of_branch, param_only, &mut else_lowered)?;
             }
             out.push(LoweredStmt::If {
                 cond: *cond,
@@ -436,7 +450,7 @@ fn lower_stmt(
         Stmt::While { cond, body } => {
             let mut body_lowered = Vec::new();
             for s in body {
-                lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+                lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
             }
             out.push(LoweredStmt::While {
                 cond: *cond,
@@ -451,12 +465,12 @@ fn lower_stmt(
             body,
         } => {
             let mut init_lowered = Vec::new();
-            lower_stmt(module, init, slot_of_branch, &mut init_lowered)?;
+            lower_stmt(module, init, slot_of_branch, param_only, &mut init_lowered)?;
             let mut step_lowered = Vec::new();
-            lower_stmt(module, step, slot_of_branch, &mut step_lowered)?;
+            lower_stmt(module, step, slot_of_branch, param_only, &mut step_lowered)?;
             let mut body_lowered = Vec::new();
             for s in body {
-                lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+                lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
             }
             out.push(LoweredStmt::For {
                 init: init_lowered,
@@ -469,7 +483,7 @@ fn lower_stmt(
         Stmt::Repeat { count, body } => {
             let mut body_lowered = Vec::new();
             for s in body {
-                lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+                lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
             }
             out.push(LoweredStmt::Repeat {
                 count: *count,
@@ -486,7 +500,7 @@ fn lower_stmt(
             for arm in arms {
                 let mut body_lowered = Vec::new();
                 for s in &arm.body {
-                    lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+                    lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
                 }
                 lowered_arms.push(LoweredCaseArm {
                     labels: arm.labels.clone(),
@@ -495,7 +509,7 @@ fn lower_stmt(
             }
             let mut default_lowered = Vec::new();
             for s in default {
-                lower_stmt(module, s, slot_of_branch, &mut default_lowered)?;
+                lower_stmt(module, s, slot_of_branch, param_only, &mut default_lowered)?;
             }
             out.push(LoweredStmt::Case {
                 selector: *selector,
@@ -527,24 +541,26 @@ fn collect_terms(module: &Module, expr: ExprId, sign: f64, out: &mut Vec<Term>) 
 }
 
 /// If `expr` is `ddt(arg)`, `coeff*ddt(arg)`, `ddt(arg)*coeff`, or `ddt(arg)/coeff` (with `coeff`
-/// [`is_param_only`]), return `(arg, coeff, coeff_is_divisor)`. Returns `Ok(None)` for anything
-/// else — including a syntactically-plausible `coeff*ddt(arg)` whose `coeff` fails the
-/// parameter-only check, which falls back to being treated as an ordinary resistive term (and
-/// is rejected later, when `ad::eval` actually tries to evaluate the still-nested `ddt` call, by
-/// the same `CodegenError::Unsupported` this returned `None` to avoid pre-empting here).
+/// [`is_param_only`] given `param_only`), return `(arg, coeff, coeff_is_divisor)`. Returns
+/// `Ok(None)` for anything else — including a syntactically-plausible `coeff*ddt(arg)` whose
+/// `coeff` fails the parameter-only check, which falls back to being treated as an ordinary
+/// resistive term (and is rejected later, when `ad::eval` actually tries to evaluate the
+/// still-nested `ddt` call, by the same `CodegenError::Unsupported` this returned `None` to
+/// avoid pre-empting here).
 fn charge_term_shape(
     module: &Module,
     expr: ExprId,
+    param_only: &HashSet<u32>,
 ) -> Result<Option<(ExprId, Option<ExprId>, bool)>, CodegenError> {
     match module.expr(expr) {
         Expr::Call(Builtin::Ddt, _) => Ok(ddt_arg(module, expr)?.map(|arg| (arg, None, false))),
         Expr::Binary(BinOp::Mul, l, r) => {
             if let Some(arg) = ddt_arg(module, *l)? {
-                if is_param_only(module, *r) {
+                if is_param_only(module, *r, param_only) {
                     return Ok(Some((arg, Some(*r), false)));
                 }
             } else if let Some(arg) = ddt_arg(module, *r)? {
-                if is_param_only(module, *l) {
+                if is_param_only(module, *l, param_only) {
                     return Ok(Some((arg, Some(*l), false)));
                 }
             }
@@ -552,7 +568,7 @@ fn charge_term_shape(
         }
         Expr::Binary(BinOp::Div, l, r) => {
             if let Some(arg) = ddt_arg(module, *l)? {
-                if is_param_only(module, *r) {
+                if is_param_only(module, *r, param_only) {
                     return Ok(Some((arg, Some(*r), true)));
                 }
             }
@@ -573,19 +589,88 @@ fn ddt_arg(module: &Module, expr: ExprId) -> Result<Option<ExprId>, CodegenError
 }
 
 /// Whether `expr` is provably independent of every unknown (node voltage, branch current, and
-/// local variable) — built from nothing but `Const`/`Param` and pure arithmetic/builtin
-/// combinations of those. See this module's doc comment for why [`charge_term_shape`] requires
+/// local variable) — built from nothing but `Const`/`Param`, pure arithmetic/builtin
+/// combinations of those, and a local variable (by `VarId.0`) present in `param_only` (see
+/// [`param_only_vars`]). See this module's doc comment for why [`charge_term_shape`] requires
 /// this of a `ddt` scaling coefficient.
-fn is_param_only(module: &Module, expr: ExprId) -> bool {
+fn is_param_only(module: &Module, expr: ExprId, param_only: &HashSet<u32>) -> bool {
     match module.expr(expr) {
         Expr::Const(_) | Expr::Param(_) => true,
-        Expr::Unary(_, e) => is_param_only(module, *e),
-        Expr::Binary(_, l, r) => is_param_only(module, *l) && is_param_only(module, *r),
+        Expr::Var(id) => param_only.contains(&id.0),
+        Expr::Unary(_, e) => is_param_only(module, *e, param_only),
+        Expr::Binary(_, l, r) => {
+            is_param_only(module, *l, param_only) && is_param_only(module, *r, param_only)
+        }
         Expr::Call(builtin, args) => {
             !matches!(builtin, Builtin::Ddt | Builtin::Idt)
-                && args.iter().all(|&a| is_param_only(module, a))
+                && args.iter().all(|&a| is_param_only(module, a, param_only))
         }
         _ => false,
+    }
+}
+
+/// Compute the set of local variables (by `VarId.0`) that are *provably* parameter-only: every
+/// `Stmt::Assign` to them anywhere in `stmts` (recursing into every nested construct, same as
+/// [`collect_branch_kinds`]) assigns a [`is_param_only`] expression, checked to a fixed point so
+/// a short dependency chain (`a=W/L; b=a*2;`) is still recognised — a variable only counts once
+/// every variable *it* depends on has already been confirmed. See this module's doc comment for
+/// why this is a sound but incomplete (non-path-sensitive) over-approximation.
+fn param_only_vars(module: &Module, stmts: &[Stmt]) -> HashSet<u32> {
+    let mut assigns = Vec::new();
+    collect_assigns(stmts, &mut assigns);
+    let assigned_vars: BTreeSet<u32> = assigns.iter().map(|&(v, _)| v).collect();
+
+    let mut known: HashSet<u32> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for &var in &assigned_vars {
+            if known.contains(&var) {
+                continue;
+            }
+            let all_param_only = assigns
+                .iter()
+                .filter(|&&(v, _)| v == var)
+                .all(|&(_, rhs)| is_param_only(module, rhs, &known));
+            if all_param_only {
+                known.insert(var);
+                changed = true;
+            }
+        }
+        if !changed {
+            return known;
+        }
+    }
+}
+
+fn collect_assigns(stmts: &[Stmt], out: &mut Vec<(u32, ExprId)>) {
+    for stmt in stmts {
+        collect_assigns_one(stmt, out);
+    }
+}
+
+fn collect_assigns_one(stmt: &Stmt, out: &mut Vec<(u32, ExprId)>) {
+    match stmt {
+        Stmt::Assign { lhs, rhs } => out.push((lhs.0, *rhs)),
+        Stmt::Block(body) => collect_assigns(body, out),
+        Stmt::If { then_, else_, .. } => {
+            collect_assigns(then_, out);
+            collect_assigns(else_, out);
+        }
+        Stmt::While { body, .. } | Stmt::Repeat { body, .. } => collect_assigns(body, out),
+        Stmt::For {
+            init, step, body, ..
+        } => {
+            collect_assigns_one(init, out);
+            collect_assigns_one(step, out);
+            collect_assigns(body, out);
+        }
+        Stmt::Case { arms, default, .. } => {
+            for arm in arms {
+                collect_assigns(&arm.body, out);
+            }
+            collect_assigns(default, out);
+        }
+        Stmt::Contribute { .. } => {}
     }
 }
 

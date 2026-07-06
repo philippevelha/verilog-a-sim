@@ -2319,4 +2319,268 @@ mod tests {
             Err(CodegenError::Unsupported(_))
         ));
     }
+
+    /// The real `devsign`/`ct` idiom (`bsimbulk.va`: `if (TYPE==\`ntype) devsign=1; else
+    /// devsign=-1;` then `I(sbulk,si) <+ devsign*ddt(...)`; `asmhemt.va`: `if (V(g)>voff)
+    /// ct=ctrap3; else ct=1.0e-9;` then `I(trap1) <+ ct*ddt(V(trap1));`) -- a local variable
+    /// scaling a `ddt` term, assigned via `if`/`else` where *every* assigned value is
+    /// parameter-only even though the guard condition itself reads the branch voltage. The
+    /// guard doesn't matter; only what actually gets assigned does.
+    fn if_assigned_coefficient_ddt_ir(c0: f64) -> Module {
+        let mut m = Module::new("if_assigned_coeff_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "c0".into(),
+            default: c0,
+            min: Some(0.0),
+            max: None,
+        }];
+        // VarId(0) = `devsign`.
+        m.vars = vec![VarDecl {
+            name: "devsign".into(),
+        }];
+
+        let v_guard = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v_guard, zero));
+        let one = m.push_expr(Expr::Const(1.0));
+        let minus_one = m.push_expr(Expr::Const(-1.0));
+        let if_stmt = Stmt::If {
+            cond,
+            then_: vec![Stmt::Assign {
+                lhs: VarId(0),
+                rhs: one,
+            }],
+            else_: vec![Stmt::Assign {
+                lhs: VarId(0),
+                rhs: minus_one,
+            }],
+        };
+
+        let devsign = m.push_expr(Expr::Var(VarId(0)));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0_e, v));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, devsign, ddt_q));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        };
+
+        m.analog = vec![if_stmt, contribute];
+        m
+    }
+
+    #[test]
+    fn if_assigned_local_variable_coefficient_scales_ddt_in_both_regions() {
+        let c0 = 1e-12;
+        let inst = build_instance(&if_assigned_coefficient_ddt_ir(c0), &[0, 1], &mut 2).unwrap();
+
+        // V > 0: devsign = 1.
+        let v = 3.0;
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+        assert!((sink.charge[0] - c0 * v).abs() / (c0 * v) < 1e-9);
+        assert!((sink.dcharge[0] - c0).abs() / c0 < 1e-9);
+
+        // V < 0: devsign = -1.
+        let v = -3.0;
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+        let expected_q = -c0 * v;
+        assert!((sink.charge[0] - expected_q).abs() / expected_q.abs() < 1e-9);
+        assert!((sink.dcharge[0] + c0).abs() / c0 < 1e-9);
+    }
+
+    /// `a = W/L; b = a*2; I(p,n) <+ b*ddt(q);` -- a short parameter-only dependency chain
+    /// through two local variables, proving [`lower::param_only_vars`]'s fixed point actually
+    /// propagates transitively rather than only recognizing a variable assigned directly from a
+    /// bare `Const`/`Param`.
+    #[test]
+    fn a_transitive_chain_of_parameter_only_variables_scales_ddt() {
+        let mut m = Module::new("chained_coeff_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        let (w, l, c0) = (2.0, 4.0, 1e-12);
+        m.params = vec![
+            Param {
+                name: "w".into(),
+                default: w,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "l".into(),
+                default: l,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "c0".into(),
+                default: c0,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+        // VarId(0) = `a`, VarId(1) = `b`.
+        m.vars = vec![VarDecl { name: "a".into() }, VarDecl { name: "b".into() }];
+
+        let w_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let l_e = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let w_over_l = m.push_expr(Expr::Binary(va_ir::BinOp::Div, w_e, l_e));
+        let a_assign = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: w_over_l,
+        };
+
+        let a_read = m.push_expr(Expr::Var(VarId(0)));
+        let two = m.push_expr(Expr::Const(2.0));
+        let a_times_2 = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, a_read, two));
+        let b_assign = Stmt::Assign {
+            lhs: VarId(1),
+            rhs: a_times_2,
+        };
+
+        let b_read = m.push_expr(Expr::Var(VarId(1)));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0_e = m.push_expr(Expr::Param(va_ir::ParamId(2)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0_e, v));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, b_read, ddt_q));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        };
+
+        m.analog = vec![a_assign, b_assign, contribute];
+
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
+        let v = 3.0;
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+        let b_value = (w / l) * 2.0;
+        let expected_q = b_value * c0 * v;
+        assert!((sink.charge[0] - expected_q).abs() / expected_q < 1e-9);
+        let expected_dq = b_value * c0;
+        assert!((sink.dcharge[0] - expected_dq).abs() / expected_dq < 1e-9);
+    }
+
+    /// A local variable assigned a parameter-only value in one arm but the branch voltage
+    /// itself in the other (`if (cond) ct=c0; else ct=V(p,n);`) must still be rejected as a
+    /// `ddt` coefficient -- not *every* assignment is parameter-only, so folding it in would be
+    /// unsound on whichever path takes the `else` arm.
+    #[test]
+    fn a_variable_only_sometimes_assigned_a_parameter_only_value_is_still_rejected() {
+        let mut m = Module::new("unsound_coeff_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "c0".into(),
+            default: 1e-12,
+            min: Some(0.0),
+            max: None,
+        }];
+        m.vars = vec![VarDecl { name: "ct".into() }];
+
+        let v_guard = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v_guard, zero));
+        let c0_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let v_else = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let if_stmt = Stmt::If {
+            cond,
+            then_: vec![Stmt::Assign {
+                lhs: VarId(0),
+                rhs: c0_e,
+            }],
+            else_: vec![Stmt::Assign {
+                lhs: VarId(0),
+                rhs: v_else, // not parameter-only!
+            }],
+        };
+
+        let ct_read = m.push_expr(Expr::Var(VarId(0)));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let ddt_v = m.push_expr(Expr::Call(Builtin::Ddt, vec![v]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, ct_read, ddt_v));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        };
+
+        m.analog = vec![if_stmt, contribute];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
 }
