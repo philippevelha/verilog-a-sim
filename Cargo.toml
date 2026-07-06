@@ -14,6 +14,10 @@ faer = "0.22"
 thiserror = "2"
 logos = "0.15"
 anyhow = "1"
+# SVG backend only (`default-features = false`): keeps the pure-Rust, no-native-deps posture
+# (§5) — the bitmap backend pulls in font-rasterization deps for no benefit here. Decision
+# recorded in docs/roadmap.md's Quarto-tutorials conventions.
+plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
 
 # Internal crates (path deps), referenced by sibling crates per the §3 table.
 va-ir = { path = "crates/va-ir" }

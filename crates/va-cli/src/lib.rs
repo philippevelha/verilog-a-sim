@@ -26,6 +26,8 @@
 
 #![forbid(unsafe_code)]
 
+mod plot;
+
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
 use va_abi::reference::{diode::VT_300K, Capacitor, Diode, Resistor, VSource};
@@ -58,12 +60,23 @@ pub enum Analysis {
 ///
 /// Returns an error if a file cannot be read, the deck or model cannot be parsed, an
 /// unsupported analysis is requested, a device names an unknown model, or the solve diverges.
-pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result<()> {
+/// If `plot` is given, also returns an error if it names a transient run (a DC operating point
+/// is a single point, not a waveform — plotting one isn't implemented) or if writing the SVG
+/// fails.
+pub fn run_sim(
+    netlist: &str,
+    model: Option<&str>,
+    analysis: Analysis,
+    plot: Option<&str>,
+) -> Result<()> {
     let deck =
         std::fs::read_to_string(netlist).with_context(|| format!("reading netlist {netlist}"))?;
     let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {netlist}"))?;
 
     gate_analysis(&net, analysis)?;
+    if plot.is_some() && analysis != Analysis::Transient {
+        bail!("--plot only supports transient analysis in v0 (pass --tran)");
+    }
 
     let compiled = match model {
         Some(path) => {
@@ -90,6 +103,10 @@ pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result
     if analysis == Analysis::Transient {
         let wf = solve_transient(&net, &compiled)?;
         report_transient(&net, &wf);
+        if let Some(path) = plot {
+            plot::plot_transient(path, &net, &wf).with_context(|| format!("plotting to {path}"))?;
+            eprintln!("[va-cli] wrote transient plot to {path}");
+        }
     } else {
         let op = solve_dc(&net, &compiled)?;
         report(&net, &op.x);

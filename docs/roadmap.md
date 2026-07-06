@@ -282,12 +282,17 @@ docs/tutorials/
   and sim-vs-golden overlays are rendered with the `plotters` crate (SVG backend only — skip
   the bitmap backend, which pulls in font-rasterization deps for no benefit here) rather than
   shelling out to matplotlib/ggplot from the `.qmd`. This keeps the pure-Rust, no-native-deps
-  posture (`CLAUDE.md` §5) intact end to end, including in the tutorials. It lives in `va-cli`
-  and `va-harness` (T6 already owns both, so no cross-crate/interface change): a `--plot
-  out.svg` flag on `sim`/`sweep` and on `va-harness`'s golden comparison emits an SVG that the
-  `.qmd` embeds as a plain markdown image. Not wired up yet — `va-transient` (T4) is still a
-  stub, so there's no waveform to plot; add the `plotters` dependency when T4.1 lands its
-  first RC transient (ladder rung 3), rather than speculatively now.
+  posture (`CLAUDE.md` §5) intact end to end, including in the tutorials.
+  **2026-07-06: built.** `va-cli`'s new `plot.rs` module (`plotters = { default-features =
+  false, features = ["svg_backend", "line_series"] }` — confirmed zero native/`-sys`
+  dependencies pulled in) draws every node's voltage over time as an SVG line chart; a
+  `--plot <out.svg>` flag on `sim` wires it in, gated to transient runs only (a DC operating
+  point is a single point, not a waveform — plotting one isn't implemented, and asking for it
+  is a clear error rather than an empty/misleading image). `.qmd` tutorials embed the emitted
+  SVG as a plain markdown image, unchanged from the original plan. Verified against the
+  rectifier: `cargo run -p va-cli -- sim circuits/rectifier.net --tran --plot rectifier.svg`.
+  *Outstanding:* a `va-harness` golden-comparison overlay plot (needs `va-harness` itself
+  first, still `todo!()` — T6.3) and a DC sweep plot (`sim`'s DC path doesn't sweep yet either).
 - **Standard skeleton** for each tutorial: *Goal* (one sentence) → *Where it fits* (the §2
   pipeline diagram, the relevant box highlighted) → *The idea* (theory, the equations, the
   design choice) → *The code* (the public API the student built, with the doc-comment

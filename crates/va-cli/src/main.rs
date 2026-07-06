@@ -33,10 +33,11 @@ fn print_usage() {
     eprintln!(
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
-         va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran]\n    \
+         va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran] [--plot <out.svg>]\n    \
          va-cli check <model.va|dir> [more…]   Run the frontend over models, report gaps\n\n\
          FLAGS:\n    \
-         -h, --help    Print this help"
+         -h, --help    Print this help\n    \
+         --plot <out.svg>   Write an SVG plot of the transient waveform (--tran only)"
     );
 }
 
@@ -54,6 +55,7 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
     // models, so a Verilog-A model is only needed for custom devices.
     let model = parse_flag(args, "--model");
+    let plot = parse_flag(args, "--plot");
     let analysis = if args.iter().any(|a| a == "--tran") {
         Analysis::Transient
     } else if args.iter().any(|a| a == "--ac") {
@@ -66,7 +68,7 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         "[va-cli] sim netlist={netlist} model={} analysis={analysis:?}",
         model.as_deref().unwrap_or("<none>")
     );
-    run_sim(netlist, model.as_deref(), analysis)
+    run_sim(netlist, model.as_deref(), analysis, plot.as_deref())
 }
 
 /// Pull the value following `flag` out of `args`.

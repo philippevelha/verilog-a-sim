@@ -27,3 +27,4 @@ va-transient = { workspace = true }
 va-acnoise = { workspace = true }
 va-netlist = { workspace = true }
 anyhow = { workspace = true }
+plotters = { workspace = true }

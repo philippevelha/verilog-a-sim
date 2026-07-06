@@ -18,7 +18,7 @@ be outstanding — see `roadmap.md`); 🟡 partial; ⬜ stub only.
 | `va-transient` | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`      | TBD   | 🟢 BE/trapezoidal + adaptive LTE + events + time-varying sources (T4.1–T4.3; ring-oscillator rung blocked on a gain-capable model) | A report on integration methods + LTE timestep control. |
 | `va-acnoise`   | T5      | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`      | TBD   | ⬜ stub | An AC/noise-formulation report (adjoint method derivation). |
 | `va-netlist`   | T6      | circuit-level netlist parser                      | `va-abi`                 | TBD   | 🟢 R/C/D/V elements + dot-cards incl. `.tran` timing + `SIN` waveform | A netlist-format + parser design note. |
-| `va-cli`       | T6      | binary front-door wiring the pipeline             | all                      | TBD   | 🟢 `sim` drives DC and transient (incl. `SIN`-sourced circuits) through the real pipeline (golden-gen/`xtask` still stubs) | An integration/UX report on driving the pipeline. |
+| `va-cli`       | T6      | binary front-door wiring the pipeline             | all                      | TBD   | 🟢 `sim` drives DC and transient (incl. `SIN`-sourced circuits) through the real pipeline, `--plot` renders SVG waveforms (golden-gen/`xtask` still stubs) | An integration/UX report on driving the pipeline. |
 | `va-harness`   | T6      | golden-reference validation + metrics             | `va-cli`                 | TBD   | ⬜ stub (metric functions are `todo!()`; no golden data exists yet) | A validation-methodology + metrics report vs ngspice. |
 
 \* `va-core` was advertised as T3 at kickoff. No T3 student was found (as of 2026-07-04). Of
