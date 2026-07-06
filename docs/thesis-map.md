@@ -15,7 +15,7 @@ be outstanding — see `roadmap.md`); 🟡 partial; ⬜ stub only.
 | `va-frontend`  | T1      | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`                  | TBD   | 🟢 lex/parse/elaborate | A rigorous full Verilog-A grammar + parser study — see `token-reference.md` for the token-by-token reference and coverage record this thesis is built on. |
 | `va-codegen`   | T2      | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`        | TBD   | 🟢 AD + lowering + charge | An AD-for-compact-models report (forward vs reverse, FD validation). |
 | `va-core`      | shared* | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`              | staff | 🟢 MNA/Newton/DC (golden gate pending) | N/A — no student assigned; see staffing notes below. |
-| `va-transient` | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`      | TBD   | 🟢 fixed-step BE/trapezoidal (T4.1) | A report on integration methods + LTE timestep control. |
+| `va-transient` | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`      | TBD   | 🟢 BE/trapezoidal + adaptive LTE stepping (T4.1–T4.2) | A report on integration methods + LTE timestep control. |
 | `va-acnoise`   | T5      | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`      | TBD   | ⬜ stub | An AC/noise-formulation report (adjoint method derivation). |
 | `va-netlist`   | T6      | circuit-level netlist parser                      | `va-abi`                 | TBD   | ⬜ stub | A netlist-format + parser design note. |
 | `va-cli`       | T6      | binary front-door wiring the pipeline             | all                      | TBD   | ⬜ stub | An integration/UX report on driving the pipeline. |

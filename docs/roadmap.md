@@ -45,8 +45,9 @@ shared, demoable milestone that several theses light up at once.
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
-| T4.1 — fixed-step integration | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1%; 6 tests | 🟢 |
-| T4.2 · T4.3 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
+| T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
+| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; 9 tests | 🟢 |
+| T4.3 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -522,12 +523,10 @@ the reference models.
 > `va-core::mna::System`, which intentionally drops them for DC) rather than anything from
 > `va-core`'s own `mna.rs`. `run()` takes an explicit initial condition `x0` (the caller's
 > job — typically a DC operating point, or, as in the RC test, a deliberately different one
-> to observe a charging transient) and integrates at a fixed `cfg.tstep`. `Method::Gear`
-> returns `TransientError::UnsupportedMethod`, never silently falls back. 6 tests: an RC
-> charging curve (`R=1kΩ`, `C=1µF`, capacitor started at 0 V) matches the analytic
-> `V(t)=Vs·(1−e^{−t/RC})` to <1% at `dt=RC/100`; a same-`dt` comparison confirms trapezoidal's
-> second-order error beats backward Euler's first-order error at a coarser `dt=RC/10`; plus
-> the unsupported-method, empty-circuit, and error-propagation edge cases.
+> to observe a charging transient). `Method::Gear` returns `TransientError::UnsupportedMethod`,
+> never silently falls back.
+> **Superseded by T4.2 (2026-07-06): fixed-`cfg.tstep` stepping no longer exists** — `run()`
+> is adaptive now (see T4.2 below); `cfg.tstep` is the *maximum* step, not the constant one.
 > *Outstanding:* rung-3 gate is vs **ngspice golden via `va-harness`** — awaits T6; currently
 > checked against the analytic RC solution. `t4-transient/01-integration.qmd`.
 
@@ -538,6 +537,36 @@ the reference models.
   first transient waveform vs ngspice.
 
 ### Phase T4.2 — Adaptive timestep & LTE control
+> **Status: 🟢 code complete (harness gate pending)** — `run()` adapts `h` within
+> `[cfg.tstep_min, cfg.tstep]` via an **embedded-pair LTE estimate**, not a rigorous
+> divided-difference truncation-error calculation: every accepted step computes *both*
+> `BackwardEuler` and `Trapezoidal` from the same `(x_prev, h)` (one reported, one purely an
+> error reference), and their disagreement — weighted by `cfg.lte_reltol`/`cfg.lte_abstol`,
+> the same `reltol·|x|+abstol` combination `va-core`'s Newton `reltol`/`abstol` use — drives
+> accept/reject and grow/shrink (`SHRINK_FACTOR`/`GROWTH_FACTOR`, fixed multiplicative
+> constants, not a power-law order-based controller). Below `cfg.tstep_min` without meeting
+> tolerance, returns `TransientError::TimestepUnderflow` rather than silently accepting an
+> out-of-tolerance step. **A real bug found and fixed while building this:** the trapezoidal
+> companion's history term (`residual_prev − (2/h)·Q_prev`) is only valid for a row some
+> device's charge channel actually touches (a genuine state variable); applying it to a purely
+> *algebraic* row (an ordinary KCL node with no capacitor, or a branch-current constraint row)
+> injects a spurious permanent history term whenever the caller's `x0` doesn't already satisfy
+> that row's constraint exactly — an easy mistake (this module's own first test made it: a
+> placeholder `0.0` branch current inconsistent with the source's actual current at `t=0`).
+> Fixed via `classify_dynamic_rows` (computed once from `x0`'s assembled `charge`/`dcharge`,
+> not a full per-step or Interface-β-level classification — a stated, honest simplification,
+> not a fully general fix for a hypothetical nonlinear charge model that's zero exactly at
+> `x0`). 9 tests: the RC charging curve still matches analytic; accepted steps demonstrably
+> grow as the transient flattens; a tighter `lte_reltol` demonstrably needs more steps than a
+> looser one (the actual point of this phase); trapezoidal is more accurate than backward
+> Euler *at the same schedule* — not fewer steps, since both directions' accept/reject
+> decisions come from the same symmetric embedded-pair estimate regardless of which method is
+> "primary," a real, documented property of this design, not a bug; plus the underflow,
+> unsupported-method, empty-circuit, and error-propagation edge cases.
+> *Outstanding:* rung-4 gate vs golden (T6, needs a diode model in the loop — not yet tried
+> here, only the linear RC circuit); a rigorous divided-difference LTE estimator to replace
+> the embedded-pair heuristic; `t4-transient/02-lte-timestep.qmd`.
+
 - Local truncation error estimate driving adaptive step size; step accept/reject logic.
 - **Validation gate (ladder rung 4):** diode rectifier transient RMS ≤ 1e-3 vs golden.
 - **Tutorial:** `t4-transient/02-lte-timestep.qmd` — LTE estimation, the step controller, why
