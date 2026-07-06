@@ -48,6 +48,21 @@ pub const VT: f64 = 0.025_852;
 /// Ambient temperature for `$temperature`, in kelvin.
 pub const TEMP: f64 = 300.0;
 
+/// Safety cap on how many times [`GeneratedModel::run`] will iterate a `while`/`for`/`repeat`
+/// loop in a single [`ModelInstance::load`] call, before giving up rather than hanging.
+///
+/// Real compact models bound these themselves (a `while` convergence loop with an explicit
+/// `l_itmax`/`niter<=4`-style cap, a `for` loop over a `nf`-fingers parameter), so this is
+/// generous headroom above anything the corpus actually needs, not a tuned-to-the-edge limit.
+/// A loop that still hasn't terminated by this point is either a genuinely non-terminating
+/// (buggy or `x`-pathological) condition, or a `count`/`cond` this codegen subset evaluated
+/// wrong — either way, [`GeneratedModel::run`] stops and reports [`CodegenError::Unsupported`]
+/// rather than hang forever. This is the one case [`GeneratedModel::validate`] cannot rule out
+/// ahead of time (it never actually iterates a loop — see `lower`'s module doc comment), so
+/// unlike every other `CodegenError` this crate raises, it can still surface for the first time
+/// from [`ModelInstance::load`], not just from `build_instance`'s eager validation.
+pub const MAX_LOOP_ITERATIONS: usize = 1_000_000;
+
 /// Errors raised while lowering/differentiating the IR.
 #[derive(Debug, Error)]
 pub enum CodegenError {
@@ -63,6 +78,12 @@ pub enum CodegenError {
         /// Number of terminals supplied.
         got: usize,
     },
+}
+
+fn loop_iteration_cap_exceeded() -> CodegenError {
+    CodegenError::Unsupported(format!(
+        "a loop did not terminate within {MAX_LOOP_ITERATIONS} iterations"
+    ))
 }
 
 /// Compile an elaborated IR module into a loadable model instance. `terminals` must have
@@ -164,12 +185,17 @@ impl GeneratedModel {
     /// evaluates its condition and recurses into *only* the arm it selects — same "only the
     /// taken branch is ever evaluated" rule the ternary `Expr::Select` follows in `ad::eval`,
     /// and the reason this can't share a traversal with [`Self::validate_stmts`], which must
-    /// visit both arms instead (see `lower`'s module doc comment).
+    /// visit both arms instead (see `lower`'s module doc comment). `case` is the same rule
+    /// generalized to however many arms it has. A loop actually iterates here — re-evaluating
+    /// its condition/count and re-running its body for real, up to [`MAX_LOOP_ITERATIONS`] —
+    /// unlike [`Self::validate_stmts`], which only ever runs a loop body once (see `lower`'s
+    /// module doc comment for why that's still sound).
     ///
     /// Aborts the whole walk on the first error — an assignment or condition that fails
-    /// post-validation (which "cannot happen") would otherwise leave later statements reading a
-    /// stale or missing variable binding, which is worse than stopping early and leaving
-    /// whatever was already stamped as-is.
+    /// post-validation (which "cannot happen", with the sole exception of a loop exceeding
+    /// [`MAX_LOOP_ITERATIONS`] — see its doc comment) would otherwise leave later statements
+    /// reading a stale or missing variable binding, which is worse than stopping early and
+    /// leaving whatever was already stamped as-is.
     fn run(
         &self,
         ctx: &Ctx,
@@ -190,6 +216,59 @@ impl GeneratedModel {
                         else_
                     };
                     self.run(ctx, taken, sink)?;
+                }
+                LoweredStmt::Case {
+                    selector,
+                    arms,
+                    default,
+                } => {
+                    let sel = eval(ctx, *selector)?;
+                    let mut taken = default;
+                    'arms: for arm in arms {
+                        for &label in &arm.labels {
+                            if eval(ctx, label)?.value == sel.value {
+                                taken = &arm.body;
+                                break 'arms;
+                            }
+                        }
+                    }
+                    self.run(ctx, taken, sink)?;
+                }
+                LoweredStmt::While { cond, body } => {
+                    let mut iters = 0usize;
+                    while eval(ctx, *cond)?.value != 0.0 {
+                        self.run(ctx, body, sink)?;
+                        iters += 1;
+                        if iters > MAX_LOOP_ITERATIONS {
+                            return Err(loop_iteration_cap_exceeded());
+                        }
+                    }
+                }
+                LoweredStmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                } => {
+                    self.run(ctx, init, sink)?;
+                    let mut iters = 0usize;
+                    while eval(ctx, *cond)?.value != 0.0 {
+                        self.run(ctx, body, sink)?;
+                        self.run(ctx, step, sink)?;
+                        iters += 1;
+                        if iters > MAX_LOOP_ITERATIONS {
+                            return Err(loop_iteration_cap_exceeded());
+                        }
+                    }
+                }
+                LoweredStmt::Repeat { count, body } => {
+                    let n = eval(ctx, *count)?.value;
+                    if n > MAX_LOOP_ITERATIONS as f64 {
+                        return Err(loop_iteration_cap_exceeded());
+                    }
+                    for _ in 0..(n.round().max(0.0) as usize) {
+                        self.run(ctx, body, sink)?;
+                    }
                 }
             }
         }
@@ -230,6 +309,43 @@ impl GeneratedModel {
                     eval(ctx, *cond)?;
                     Self::validate_stmts(ctx, then_)?;
                     Self::validate_stmts(ctx, else_)?;
+                }
+                LoweredStmt::Case {
+                    selector,
+                    arms,
+                    default,
+                } => {
+                    eval(ctx, *selector)?;
+                    for arm in arms {
+                        for &label in &arm.labels {
+                            eval(ctx, label)?;
+                        }
+                        Self::validate_stmts(ctx, &arm.body)?;
+                    }
+                    Self::validate_stmts(ctx, default)?;
+                }
+                // Loops never actually iterate here (see `lower`'s module doc comment): running
+                // the body once already covers every statement a real iteration could execute,
+                // without needing to resolve a real trip count or risk hanging on a runaway
+                // `while` condition during eager validation.
+                LoweredStmt::While { cond, body } => {
+                    eval(ctx, *cond)?;
+                    Self::validate_stmts(ctx, body)?;
+                }
+                LoweredStmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                } => {
+                    Self::validate_stmts(ctx, init)?;
+                    eval(ctx, *cond)?;
+                    Self::validate_stmts(ctx, body)?;
+                    Self::validate_stmts(ctx, step)?;
+                }
+                LoweredStmt::Repeat { count, body } => {
+                    eval(ctx, *count)?;
+                    Self::validate_stmts(ctx, body)?;
                 }
             }
         }
@@ -1272,5 +1388,473 @@ mod tests {
         assert!((sink.residual[1] + ib).abs() < 1e-15);
         assert!((sink.jac(0, 2) - 1.0).abs() < 1e-12);
         assert!((sink.jac(1, 2) + 1.0).abs() < 1e-12);
+    }
+
+    /// `case (sel) 0: I<+g0*V; 1,2: I<+g1*V; default: I<+gdef*V;` -- a model-selection idiom
+    /// (`angelov.va`'s `case(Idsmod)`, `bsim4.va`'s `case(geo)`), structurally an n-ary `if`.
+    fn case_ir(sel: f64, g0: f64, g1: f64, gdef: f64) -> Module {
+        let mut m = Module::new("case_mod");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "sel".into(),
+                default: sel,
+                min: None,
+                max: None,
+            },
+            Param {
+                name: "g0".into(),
+                default: g0,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "g1".into(),
+                default: g1,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "gdef".into(),
+                default: gdef,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+
+        let sel_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+
+        let contribute_with = |m: &mut Module, param_idx: u32| {
+            let v = m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }));
+            let g = m.push_expr(Expr::Param(va_ir::ParamId(param_idx)));
+            let i = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, g, v));
+            vec![Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: i,
+            }]
+        };
+
+        let label0 = m.push_expr(Expr::Const(0.0));
+        let label1a = m.push_expr(Expr::Const(1.0));
+        let label1b = m.push_expr(Expr::Const(2.0));
+        let arm0_body = contribute_with(&mut m, 1);
+        let arm1_body = contribute_with(&mut m, 2);
+        let default_body = contribute_with(&mut m, 3);
+
+        m.analog = vec![Stmt::Case {
+            selector: sel_e,
+            arms: vec![
+                va_ir::CaseArm {
+                    labels: vec![label0],
+                    body: arm0_body,
+                },
+                va_ir::CaseArm {
+                    labels: vec![label1a, label1b],
+                    body: arm1_body,
+                },
+            ],
+            default: default_body,
+        }];
+        m
+    }
+
+    #[test]
+    fn case_selects_the_matching_arm_including_a_multi_label_arm() {
+        let (g0, g1, gdef) = (1e-3, 2e-3, 5e-3);
+
+        // sel=2.0 matches arm1's *second* label (1,2: ...) -- proves multi-label arms work.
+        let inst = build_instance(&case_ir(2.0, g0, g1, gdef), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[1.0, 0.0], &mut sink);
+        assert!((sink.residual[0] - g1).abs() / g1 < 1e-12);
+        assert!((sink.jac(0, 0) - g1).abs() / g1 < 1e-12);
+
+        // sel=99.0 matches nothing -- falls through to `default`.
+        let inst = build_instance(&case_ir(99.0, g0, g1, gdef), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[1.0, 0.0], &mut sink);
+        assert!((sink.residual[0] - gdef).abs() / gdef < 1e-12);
+        assert!((sink.jac(0, 0) - gdef).abs() / gdef < 1e-12);
+    }
+
+    /// `real acc; acc=0; repeat(n) acc=acc+V(p,n); I(p,n)<+acc*g;` -- accumulates `n` copies of
+    /// the branch voltage, mirroring the real `for`-loop finger-accumulation idiom
+    /// (`bsim4.va`'s `for (i=0;i<BSIM4nf;i=i+1) Inv_sa=Inv_sa+T0;`) but through `repeat`.
+    fn repeat_accumulate_ir(n: f64, g: f64) -> Module {
+        let mut m = Module::new("repeat_accum");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "acc".into() }];
+        m.params = vec![
+            Param {
+                name: "n".into(),
+                default: n,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "g".into(),
+                default: g,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+
+        let zero = m.push_expr(Expr::Const(0.0));
+        let acc_init = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: zero,
+        };
+
+        let acc_read = m.push_expr(Expr::Var(VarId(0)));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, acc_read, v));
+        let acc_update = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: sum,
+        };
+
+        let n_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let repeat_stmt = Stmt::Repeat {
+            count: n_e,
+            body: vec![acc_update],
+        };
+
+        let acc_final = m.push_expr(Expr::Var(VarId(0)));
+        let g_e = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let i_expr = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, acc_final, g_e));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: i_expr,
+        };
+
+        m.analog = vec![acc_init, repeat_stmt, contribute];
+        m
+    }
+
+    #[test]
+    fn repeat_accumulates_n_copies_of_the_branch_voltage() {
+        let (n, g, v) = (3.0, 1e-3, 2.0);
+        let inst = build_instance(&repeat_accumulate_ir(n, g), &[0, 1], &mut 2).unwrap();
+
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+        // acc after 3 iterations = 3*v; I = 3*g*v.
+        let expected_i = n * g * v;
+        assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
+        let expected_g = n * g;
+        assert!((sink.jac(0, 0) - expected_g).abs() / expected_g < 1e-12);
+
+        // §5: the gradient accumulated *through* the loop must match a central finite difference.
+        let residual_at = |v: f64| {
+            let mut s = DenseStamp::new(2);
+            inst.load(&[v, 0.0], &mut s);
+            s.residual[0]
+        };
+        let h = 1e-6;
+        let fd = (residual_at(v + h) - residual_at(v - h)) / (2.0 * h);
+        assert!(
+            (sink.jac(0, 0) - fd).abs() < 1e-6,
+            "{} vs {}",
+            sink.jac(0, 0),
+            fd
+        );
+    }
+
+    /// Same accumulation as [`repeat_accumulate_ir`], but through an explicit `for
+    /// (i=0;i<n;i=i+1)` loop with its own counter variable, to exercise `init`/`cond`/`step`.
+    fn for_accumulate_ir(n: f64, g: f64) -> Module {
+        let mut m = Module::new("for_accum");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        // VarId(0) = acc, VarId(1) = the loop counter `i`.
+        m.vars = vec![VarDecl { name: "acc".into() }, VarDecl { name: "i".into() }];
+        m.params = vec![
+            Param {
+                name: "n".into(),
+                default: n,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "g".into(),
+                default: g,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+
+        let zero = m.push_expr(Expr::Const(0.0));
+        let acc_init = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: zero,
+        };
+
+        let i_init_zero = m.push_expr(Expr::Const(0.0));
+        let init = Stmt::Assign {
+            lhs: VarId(1),
+            rhs: i_init_zero,
+        };
+
+        let i_read = m.push_expr(Expr::Var(VarId(1)));
+        let n_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Lt, i_read, n_e));
+
+        let i_read2 = m.push_expr(Expr::Var(VarId(1)));
+        let one = m.push_expr(Expr::Const(1.0));
+        let i_next = m.push_expr(Expr::Binary(va_ir::BinOp::Add, i_read2, one));
+        let step = Stmt::Assign {
+            lhs: VarId(1),
+            rhs: i_next,
+        };
+
+        let acc_read = m.push_expr(Expr::Var(VarId(0)));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, acc_read, v));
+        let acc_update = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: sum,
+        };
+
+        let for_stmt = Stmt::For {
+            init: Box::new(init),
+            cond,
+            step: Box::new(step),
+            body: vec![acc_update],
+        };
+
+        let acc_final = m.push_expr(Expr::Var(VarId(0)));
+        let g_e = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let i_expr = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, acc_final, g_e));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: i_expr,
+        };
+
+        m.analog = vec![acc_init, for_stmt, contribute];
+        m
+    }
+
+    #[test]
+    fn for_loop_accumulates_n_copies_of_the_branch_voltage() {
+        let (n, g, v) = (4.0, 2e-3, 1.5);
+        let inst = build_instance(&for_accumulate_ir(n, g), &[0, 1], &mut 2).unwrap();
+
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+        let expected_i = n * g * v;
+        assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
+        let expected_g = n * g;
+        assert!((sink.jac(0, 0) - expected_g).abs() / expected_g < 1e-12);
+    }
+
+    /// `real x; x=1.0; while (x>eps) x=x/2; I(p,n)<+x;` -- a pure local-variable computation
+    /// (no dependence on the branch voltage at all), mirroring the real bounded-convergence
+    /// idiom (`hicumL2*.va`'s `while (abs(d_Q)>=RTOLC*abs(Q_pT) && l_it<=l_itmax) ...`).
+    fn halving_while_ir(eps: f64) -> Module {
+        let mut m = Module::new("halving_while");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "x".into() }];
+        m.params = vec![Param {
+            name: "eps".into(),
+            default: eps,
+            min: Some(0.0),
+            max: None,
+        }];
+
+        let one = m.push_expr(Expr::Const(1.0));
+        let x_init = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: one,
+        };
+
+        let x_read = m.push_expr(Expr::Var(VarId(0)));
+        let eps_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, x_read, eps_e));
+
+        let x_read2 = m.push_expr(Expr::Var(VarId(0)));
+        let two = m.push_expr(Expr::Const(2.0));
+        let halved = m.push_expr(Expr::Binary(va_ir::BinOp::Div, x_read2, two));
+        let x_update = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: halved,
+        };
+
+        let while_stmt = Stmt::While {
+            cond,
+            body: vec![x_update],
+        };
+
+        let x_final = m.push_expr(Expr::Var(VarId(0)));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: x_final,
+        };
+
+        m.analog = vec![x_init, while_stmt, contribute];
+        m
+    }
+
+    #[test]
+    fn while_loop_halves_until_below_threshold() {
+        let eps = 1e-3;
+        let inst = build_instance(&halving_while_ir(eps), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[0.0, 0.0], &mut sink);
+
+        // Replicate the same loop in Rust to get the expected final `x`, rather than hardcoding
+        // a magic constant.
+        let mut expected = 1.0_f64;
+        while expected > eps {
+            expected /= 2.0;
+        }
+        assert!((sink.residual[0] - expected).abs() < 1e-15);
+        // The loop must have actually stopped -- one more halving would still be `<= eps`, so if
+        // it stopped one iteration too early or late this would catch it.
+        assert!(expected <= eps);
+        assert!(expected * 2.0 > eps);
+    }
+
+    /// A `while` condition that never becomes false. `build_instance` cannot catch this
+    /// (`validate` never actually iterates a loop -- see `lower`'s module doc comment), so this
+    /// proves the other half of that documented limitation: `load` itself must still not hang
+    /// forever, and must leave the system safely (if incompletely) stamped rather than panic.
+    #[test]
+    fn a_runaway_while_loop_is_bounded_by_the_iteration_cap_not_a_hang() {
+        let mut m = Module::new("runaway");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "x".into() }];
+
+        let zero = m.push_expr(Expr::Const(0.0));
+        let x_init = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: zero,
+        };
+
+        // Always true: 1.0 > 0.0.
+        let one_e = m.push_expr(Expr::Const(1.0));
+        let zero_e = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, one_e, zero_e));
+
+        let x_read = m.push_expr(Expr::Var(VarId(0)));
+        let one = m.push_expr(Expr::Const(1.0));
+        let x_next = m.push_expr(Expr::Binary(va_ir::BinOp::Add, x_read, one));
+        let x_update = Stmt::Assign {
+            lhs: VarId(0),
+            rhs: x_next,
+        };
+
+        let while_stmt = Stmt::While {
+            cond,
+            body: vec![x_update],
+        };
+
+        // Never reached: `run` must abort inside the while loop first.
+        let x_final = m.push_expr(Expr::Var(VarId(0)));
+        let contribute = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: x_final,
+        };
+
+        m.analog = vec![x_init, while_stmt, contribute];
+
+        // `build_instance` still succeeds: validation only runs the loop body once.
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[0.0, 0.0], &mut sink);
+        // The post-loop contribution never ran, so the residual is untouched.
+        assert_eq!(sink.residual[0], 0.0);
     }
 }

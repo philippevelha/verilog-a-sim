@@ -43,14 +43,39 @@
 //! `crate::GeneratedModel::stamp`/`finalize_mixed_branch_currents` for how that gets resolved
 //! at evaluation time instead of here.
 //!
+//! `while`/`for`/`repeat` loops and `case` statements lower too, both by generalizing patterns
+//! already established above rather than needing anything new. `case` is an n-ary `if`/`else`:
+//! [`LoweredStmt::Case`] carries every arm's labels and body plus the default body, and
+//! `crate::GeneratedModel::run`/`validate_stmts` extend the existing "run only the selected
+//! branch, validate every branch once" split to however many arms there are instead of
+//! exactly two. Loops are different in kind, not degree: `while`/`for`/`repeat` need genuine
+//! *repeated* execution at `load()` time — real compact models use them for a parameter-bounded
+//! accumulation (`for (i=0; i<nf; i=i+1) acc = acc + term;`, one term per transistor finger) or
+//! a capped Newton-style sub-iteration inside the analog block itself (`while (abs(d_Q) >= tol
+//! && iters <= max) …`), never for anything array-indexed — the frontend's own elaboration pass
+//! already expands any array/genvar indexing into an ordinary `if`/`else` chain before this IR
+//! ever exists (see `va-frontend::elaborate`'s `unroll_indexed_contribute`/
+//! `lower_indexed_var_write`), so a loop body here is just an ordinary statement sequence.
+//! `crate::GeneratedModel::run` interprets a loop for real — actually iterating, actually
+//! re-evaluating the condition/count against the current variable bindings each time, so the
+//! forward-mode AD gradient accumulates correctly across iterations exactly like any other
+//! sequence of statements would (AD doesn't know or care that a "loop" produced the sequence).
+//! A `while`/`for` loop's trip count isn't knowable in advance (its condition can depend on
+//! `x` or on state a preceding iteration computed), so `run` bounds it defensively at a fixed
+//! iteration cap — see `crate::MAX_LOOP_ITERATIONS`'s doc comment for what happens if a
+//! pathological (or genuinely non-terminating) condition exceeds it. `validate`, in contrast,
+//! never actually iterates a loop at all: it only needs to confirm every statement *inside* the
+//! body is itself evaluable, which running the body exactly once (same as any other block of
+//! statements) already establishes, without needing to resolve a real trip count or risk
+//! hanging on a runaway condition during eager validation.
+//!
 //! # Limitations
 //!
 //! - `ddt` is recognised only as a top-level additive term (optionally negated), matching how
 //!   compact models are written (`I <+ resistive + ddt(charge)`, `V <+ resistive + ddt(charge)`);
 //!   `ddt` nested inside a nonlinear function is rejected later by the AD evaluator.
-//! - Loops/`case` and user-defined analog functions in the analog block are not yet lowered.
-//!   The IR (Interface α) models these, but codegen v0 rejects them with
-//!   [`CodegenError::Unsupported`].
+//! - User-defined analog functions in the analog block are not yet lowered. The IR
+//!   (Interface α) models these, but codegen v0 rejects them with [`CodegenError::Unsupported`].
 
 use crate::CodegenError;
 use std::collections::{BTreeSet, HashMap};
@@ -142,6 +167,55 @@ pub enum LoweredStmt {
         /// Statements to run when `cond` is zero.
         else_: Vec<LoweredStmt>,
     },
+    /// `case (selector) { arms… } [default]`. `crate::GeneratedModel::run` evaluates `selector`
+    /// once, then walks only the first arm with a matching label (or `default`, if none match);
+    /// `crate::GeneratedModel::validate` walks every arm plus `default` unconditionally, the
+    /// same n-ary generalization of [`Self::If`]'s two-arm split.
+    Case {
+        /// The selector expression, evaluated once.
+        selector: ExprId,
+        /// Arms in source order; the first with a label equal to `selector`'s value wins.
+        arms: Vec<LoweredCaseArm>,
+        /// Statements to run when no arm's label matches.
+        default: Vec<LoweredStmt>,
+    },
+    /// `while (cond) { body }`. `crate::GeneratedModel::run` actually iterates (this module's
+    /// doc comment); `crate::GeneratedModel::validate` runs `body` exactly once, unconditionally.
+    While {
+        /// Re-evaluated before every iteration; the loop stops once this is zero.
+        cond: ExprId,
+        /// Statements executed once per iteration.
+        body: Vec<LoweredStmt>,
+    },
+    /// `for (init; cond; step) { body }`, same execution model as [`Self::While`] plus an
+    /// `init` run once before the first condition check and a `step` run after every iteration.
+    For {
+        /// Run exactly once, before the first `cond` check.
+        init: Vec<LoweredStmt>,
+        /// Re-evaluated before every iteration; the loop stops once this is zero.
+        cond: ExprId,
+        /// Run once after every iteration's `body`, before the next `cond` check.
+        step: Vec<LoweredStmt>,
+        /// Statements executed once per iteration.
+        body: Vec<LoweredStmt>,
+    },
+    /// `repeat (count) { body }`: `count` is evaluated once, then `body` runs that many times
+    /// (rounded to the nearest non-negative integer).
+    Repeat {
+        /// Evaluated once, before the first iteration.
+        count: ExprId,
+        /// Statements executed once per iteration.
+        body: Vec<LoweredStmt>,
+    },
+}
+
+/// One arm of a [`LoweredStmt::Case`]: label expressions and the body they select.
+#[derive(Clone, Debug)]
+pub struct LoweredCaseArm {
+    /// Label expressions compared against the selector (any match selects this arm's body).
+    pub labels: Vec<ExprId>,
+    /// Statements executed when a label matches.
+    pub body: Vec<LoweredStmt>,
 }
 
 /// A lowered, evaluable representation of a module's analog block.
@@ -163,7 +237,7 @@ pub struct Lowered {
 /// # Errors
 ///
 /// Returns [`CodegenError::Unsupported`] on IR constructs outside the codegen subset
-/// (loops/`case`, user-defined functions, malformed `ddt`).
+/// (user-defined functions, malformed `ddt`).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let (flow_branches, potential_branches) = branch_kinds(&module.analog);
 
@@ -195,10 +269,9 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
 }
 
 /// Collect the set of branch IDs targeted by a flow contribution and the set targeted by a
-/// potential contribution, anywhere in `stmts` (recursing into `if`/`else` arms and blocks —
-/// same shape `lower_stmt` itself recurses through). Loop/`case` bodies are not walked: any
-/// module containing one is rejected by `lower_stmt` regardless, so under-approximating here
-/// changes nothing about the overall `lower()` result.
+/// potential contribution, anywhere in `stmts` (recursing into every nested construct —
+/// `if`/`else`, `case`, loop bodies/init/step, blocks — the same shapes `lower_stmt` itself
+/// recurses through).
 fn branch_kinds(stmts: &[Stmt]) -> (BTreeSet<u32>, BTreeSet<u32>) {
     let mut flow = BTreeSet::new();
     let mut potential = BTreeSet::new();
@@ -208,22 +281,42 @@ fn branch_kinds(stmts: &[Stmt]) -> (BTreeSet<u32>, BTreeSet<u32>) {
 
 fn collect_branch_kinds(stmts: &[Stmt], flow: &mut BTreeSet<u32>, potential: &mut BTreeSet<u32>) {
     for stmt in stmts {
-        match stmt {
-            Stmt::Contribute { target, .. } => match target.kind {
-                AccessKind::Flow => {
-                    flow.insert(target.branch.0);
-                }
-                AccessKind::Potential => {
-                    potential.insert(target.branch.0);
-                }
-            },
-            Stmt::Block(body) => collect_branch_kinds(body, flow, potential),
-            Stmt::If { then_, else_, .. } => {
-                collect_branch_kinds(then_, flow, potential);
-                collect_branch_kinds(else_, flow, potential);
+        collect_branch_kinds_one(stmt, flow, potential);
+    }
+}
+
+fn collect_branch_kinds_one(stmt: &Stmt, flow: &mut BTreeSet<u32>, potential: &mut BTreeSet<u32>) {
+    match stmt {
+        Stmt::Contribute { target, .. } => match target.kind {
+            AccessKind::Flow => {
+                flow.insert(target.branch.0);
             }
-            _ => {}
+            AccessKind::Potential => {
+                potential.insert(target.branch.0);
+            }
+        },
+        Stmt::Block(body) => collect_branch_kinds(body, flow, potential),
+        Stmt::If { then_, else_, .. } => {
+            collect_branch_kinds(then_, flow, potential);
+            collect_branch_kinds(else_, flow, potential);
         }
+        Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+            collect_branch_kinds(body, flow, potential);
+        }
+        Stmt::For {
+            init, step, body, ..
+        } => {
+            collect_branch_kinds_one(init, flow, potential);
+            collect_branch_kinds_one(step, flow, potential);
+            collect_branch_kinds(body, flow, potential);
+        }
+        Stmt::Case { arms, default, .. } => {
+            for arm in arms {
+                collect_branch_kinds(&arm.body, flow, potential);
+            }
+            collect_branch_kinds(default, flow, potential);
+        }
+        Stmt::Assign { .. } => {}
     }
 }
 
@@ -300,9 +393,77 @@ fn lower_stmt(
             });
             Ok(())
         }
-        Stmt::While { .. } | Stmt::For { .. } | Stmt::Repeat { .. } | Stmt::Case { .. } => Err(
-            unsupported("loops and case statements are not supported in codegen v0"),
-        ),
+        Stmt::While { cond, body } => {
+            let mut body_lowered = Vec::new();
+            for s in body {
+                lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+            }
+            out.push(LoweredStmt::While {
+                cond: *cond,
+                body: body_lowered,
+            });
+            Ok(())
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            let mut init_lowered = Vec::new();
+            lower_stmt(module, init, slot_of_branch, &mut init_lowered)?;
+            let mut step_lowered = Vec::new();
+            lower_stmt(module, step, slot_of_branch, &mut step_lowered)?;
+            let mut body_lowered = Vec::new();
+            for s in body {
+                lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+            }
+            out.push(LoweredStmt::For {
+                init: init_lowered,
+                cond: *cond,
+                step: step_lowered,
+                body: body_lowered,
+            });
+            Ok(())
+        }
+        Stmt::Repeat { count, body } => {
+            let mut body_lowered = Vec::new();
+            for s in body {
+                lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+            }
+            out.push(LoweredStmt::Repeat {
+                count: *count,
+                body: body_lowered,
+            });
+            Ok(())
+        }
+        Stmt::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            let mut lowered_arms = Vec::new();
+            for arm in arms {
+                let mut body_lowered = Vec::new();
+                for s in &arm.body {
+                    lower_stmt(module, s, slot_of_branch, &mut body_lowered)?;
+                }
+                lowered_arms.push(LoweredCaseArm {
+                    labels: arm.labels.clone(),
+                    body: body_lowered,
+                });
+            }
+            let mut default_lowered = Vec::new();
+            for s in default {
+                lower_stmt(module, s, slot_of_branch, &mut default_lowered)?;
+            }
+            out.push(LoweredStmt::Case {
+                selector: *selector,
+                arms: lowered_arms,
+                default: default_lowered,
+            });
+            Ok(())
+        }
     }
 }
 

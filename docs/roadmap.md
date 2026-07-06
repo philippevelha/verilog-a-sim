@@ -40,7 +40,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity; 6 tests | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; the three zoo models elaborate end-to-end; 6 tests | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions, and branches mixing flow/potential; 31/115 real corpus files pass frontend+codegen (loops/`case` now the top blocker) | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, and `case`; 37/115 real corpus files pass frontend+codegen (user-defined analog functions now the top blocker) | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
@@ -406,22 +406,18 @@ matches the code verbatim.
 > resistor reproduces `va-abi`'s hand-checked stamp; diode matches analytic current +
 > conductance; **§5 AD-vs-FD milestone green**.
 >
-> **Corpus baseline (2026-07-10), the T2 analogue of T1's `token-reference.md` tracking**:
+> **Corpus baseline (2026-07-11), the T2 analogue of T1's `token-reference.md` tracking**:
 > passing the *frontend* (T1, `docs/token-reference.md`'s domain) and passing *codegen* —
 > actually buildable into a `ModelInstance`, i.e. actually simulatable — are different bars,
 > and only the first was ever measured against the real, recursively-scanned 115-file
 > `external/` corpus. Scanning the second (`va_codegen::build_instance` on every module that
-> already elaborates): of the 62 that pass the frontend, **31 now also pass codegen** (up from
-> 29). Of the 31 that don't: loops/`case` (19, now the top blocker — many of these files also
-> used to hit the mixing rejection first; fixing mixing just re-attributed them to their real
-> remaining blocker, not a regression), user-defined analog functions (8, same
-> re-attribution story), a nested (non-top-level) `ddt`/`idt` (3, `varistor.va` among them —
-> also re-attributed), a branch's flow probe with no potential contribution of its own (1,
-> `verilogaLib-master/ohmmeter.va` — a stated v0 scope edge, see below). Only **2 net new files**
-> pass versus the prior baseline, since most of the 22 formerly-mixing-rejected files have a
-> second, independent blocker (a loop or an analog function) elsewhere in the same module —
-> expected, and itself a useful confirmation that the corpus-scan methodology is measuring real
-> per-file status rather than double-counting a single fix's impact.
+> already elaborates): of the 62 that pass the frontend, **37 now also pass codegen** (up from
+> 31). Of the 25 that don't: user-defined analog functions (17, now the top blocker — many of
+> these files also used to hit the loop/`case` rejection first; fixing loops just re-attributed
+> them to their real remaining blocker, not a regression), a nested (non-top-level) `ddt`/`idt`
+> (7, same re-attribution story), a branch's flow probe with no potential contribution of its
+> own (1, `verilogaLib-master/ohmmeter.va` — a stated v0 scope edge). **6 net new files** pass
+> versus the prior baseline.
 >
 > **`if`/`else` is now lowered** (previously the single biggest codegen blocker — 35 of the 43
 > non-frontend-clean-but-codegen-failing files as of the prior baseline; the fix removed that
@@ -502,12 +498,48 @@ matches the code verbatim.
 > across the forced-short arm (rt=0.5, wired in series to an otherwise-floating node) the
 > floating node collapses to exactly the source's own voltage with ~0 A flowing, both via
 > Newton.
-> *Outstanding:* loops/`case` (now the clear next target) + analog functions; full committed
-> sweep; `t2-codegen/02-lowering.qmd`.
+>
+> **`while`/`for`/`repeat` loops and `case` are now lowered** (previously rejected outright —
+> 19 of the 31 non-frontend-clean-but-codegen-failing files as of the prior baseline).
+> `case` needed nothing new: it's an n-ary `if`/`else`, so `LoweredStmt::Case` just carries every
+> arm's labels/body plus a default, and `GeneratedModel::run`/`validate_stmts` extend the
+> existing "run only the selected arm, validate every arm once" split from two arms to however
+> many a `case` has. Loops are different in kind: a real corpus survey (not guessed) found `for`
+> and `repeat` almost always bound a parameter-derived trip count for a per-finger accumulation
+> (`bsim4.va`'s `for (i=0;i<nf;i=i+1) acc=acc+term;`), and `while` almost always bounds a
+> capped Newton-style convergence sub-iteration inside the analog block itself
+> (`hicumL2*.va`'s `while (abs(d_Q)>=tol && iters<=max) ...`) — never anything array-indexed,
+> since `va-frontend::elaborate` already expands array/genvar indexing into an ordinary
+> `if`/`else` chain before this IR exists, so a loop body here is just an ordinary statement
+> sequence, nothing new to support. `GeneratedModel::run` interprets a loop for real: it
+> actually iterates, re-evaluating the condition/count against the current variable bindings
+> each time, so forward-mode AD accumulates correctly across iterations exactly like any other
+> statement sequence (AD doesn't know or care a loop produced it). Since a `while`/`for`
+> condition can depend on `x` or on loop-carried state, its trip count isn't knowable in
+> advance, so `run` bounds every loop at a fixed cap (`MAX_LOOP_ITERATIONS = 1_000_000`,
+> generous headroom over anything the corpus actually needs) rather than risk hanging forever —
+> the one case `GeneratedModel::validate` cannot rule out ahead of time (see below), so unlike
+> every other `CodegenError` this crate raises, exceeding it can genuinely surface for the first
+> time from `load()`, not just from `build_instance`'s eager validation; a documented, tested
+> exception to "validated eagerly so `load` can never fail." `validate`, by contrast, never
+> actually iterates a loop at all — it runs the body exactly once (same as any other statement
+> block), which already covers every construct a real iteration could execute, without needing
+> to resolve a real trip count or risk hanging during eager validation itself. Regression-tested:
+> `case` with a multi-label arm and a `default` fallthrough (both the residual *and* Jacobian
+> checked per arm); `repeat` and an explicit `for` with its own counter variable both
+> accumulating `n` copies of the branch voltage through the loop (plus a central-finite-
+> difference check on the accumulated gradient, §5); a `while` loop halving a local variable
+> down past a threshold, checked against an independent Rust reference computation rather than
+> a hardcoded constant; and, directly proving the iteration-cap design actually works rather
+> than just being documented, a `while (1>0)` loop that never terminates — `build_instance`
+> still succeeds (validation only ran the body once), but `load()` hits the cap, aborts before
+> the statement after the loop ever runs, and returns promptly rather than hanging.
+> *Outstanding:* user-defined analog functions (now the clear next target) + a nested
+> (non-top-level) `ddt`/`idt`; full committed sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.
-- Handle `if`/`else` branches (done) and analog functions (outstanding).
+- Handle `if`/`else`, `case`, and loops (done) and analog functions (outstanding).
 - **Validation gate:** the generated diode model's stamps match `va-abi`'s hand-written
   reference diode within FD tolerance, across a voltage sweep.
 - **Tutorial:** `t2-codegen/02-lowering.qmd` — from Interface α to Interface β; generated vs
