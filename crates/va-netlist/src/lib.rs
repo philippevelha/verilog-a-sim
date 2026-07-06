@@ -55,6 +55,11 @@ pub struct Netlist {
     pub devices: Vec<Device>,
     /// The analysis requested by the deck's dot-card.
     pub analysis: AnalysisCard,
+    /// `.tran <tstep> <tstop>` timing, if a transient card was present and both values parsed.
+    /// `None` for a deck with no `.tran` card, or one whose timing tokens didn't parse — a
+    /// transient run then has nothing to go on and `va-cli` reports that clearly rather than
+    /// guessing a default.
+    pub tran: Option<(f64, f64)>,
 }
 
 /// A single parsed device line, before it is turned into a [`va_abi::ModelInstance`].
@@ -114,6 +119,17 @@ mod tests {
         let c1 = net.devices.iter().find(|d| d.name == "C1").unwrap();
         assert_eq!(c1.model, "capacitor");
         assert_eq!(c1.value, Some(1e-6));
+
+        // `.tran 10u 5m`.
+        let (tstep, tstop) = net.tran.expect("tran timing");
+        assert!((tstep - 10e-6).abs() < 1e-15, "tstep = {tstep}");
+        assert!((tstop - 5e-3).abs() < 1e-15, "tstop = {tstop}");
+    }
+
+    #[test]
+    fn a_deck_with_no_tran_card_has_no_timing() {
+        let net = parse(include_str!("../../../circuits/divider.net")).expect("parse divider");
+        assert_eq!(net.tran, None);
     }
 
     #[test]

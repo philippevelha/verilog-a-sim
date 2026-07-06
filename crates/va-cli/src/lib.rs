@@ -7,13 +7,18 @@
 //! # What v0 wires
 //!
 //! `va-netlist` parses the deck; each device becomes a [`va_abi::ModelInstance`]; `va-core`
-//! solves the DC operating point. A `--model <m.va>` is compiled through the real
-//! `va-frontend` → `va-codegen` pipeline and used for every device whose model name matches
-//! the compiled module (e.g. `resistor` devices against `resistor.va`), with the device's
-//! scalar value overriding the model's first parameter. Devices with no matching compiled
-//! model fall back to the hand-written reference primitives in `va-abi`.
+//! solves the DC operating point, or `va-transient` integrates a `.tran` deck. A
+//! `--model <m.va>` is compiled through the real `va-frontend` → `va-codegen` pipeline and
+//! used for every device whose model name matches the compiled module (e.g. `resistor`
+//! devices against `resistor.va`), with the device's scalar value overriding the model's
+//! first parameter. Devices with no matching compiled model fall back to the hand-written
+//! reference primitives in `va-abi`.
 //!
-//! Only DC (`.op`) is implemented; transient/AC decks are rejected with a clear message.
+//! DC (`.op`) and transient (`.tran <tstep> <tstop>`) are implemented; AC decks are rejected
+//! with a clear message. Transient always starts from the zero vector — v0 has no `.ic`/`UIC`
+//! support and no time-varying source model (`va_abi::reference::VSource` is a constant DC
+//! value only), so a deck's constant source combined with a cold start *is* the step response:
+//! there's no other transient shape a DC-only source could produce.
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +29,7 @@ use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
+use va_transient::integrator::{Method, TranConfig, Waveform};
 
 /// Which analysis to run for a `sim` invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -39,8 +45,8 @@ pub enum Analysis {
 
 /// Run the full pipeline for `netlist` + an optional Verilog-A `model` under `analysis`.
 ///
-/// Wires `va-frontend` → `va-codegen` → `va-netlist` → `va-core`. Prints the DC operating
-/// point (node voltages and source currents) to stdout.
+/// Wires `va-frontend` → `va-codegen` → `va-netlist` → `va-core`/`va-transient`. Prints the DC
+/// operating point (node voltages and source currents), or the transient waveform, to stdout.
 ///
 /// # Errors
 ///
@@ -75,8 +81,13 @@ pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis) -> Result
         None => Vec::new(),
     };
 
-    let op = solve_dc(&net, &compiled)?;
-    report(&net, &op.x);
+    if analysis == Analysis::Transient {
+        let wf = solve_transient(&net, &compiled)?;
+        report_transient(&net, &wf);
+    } else {
+        let op = solve_dc(&net, &compiled)?;
+        report(&net, &op.x);
+    }
     Ok(())
 }
 
@@ -204,25 +215,33 @@ fn check_one(path: &str, scan_root: &std::path::Path) -> bool {
     all_ok
 }
 
-/// Reject analyses v0 does not implement (anything but DC).
+/// Reject analyses v0 does not implement (AC), and mismatches between what the deck's own
+/// dot-card requests and what the caller asked to run.
 fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
-    if matches!(net.analysis, AnalysisCard::Tran | AnalysisCard::Ac) {
-        bail!(
-            "deck requests {:?} analysis; only DC (`.op`) is implemented in v0",
-            net.analysis
-        );
+    if net.analysis == AnalysisCard::Ac || analysis == Analysis::Ac {
+        bail!("AC analysis is not implemented in v0; only DC and transient are supported");
     }
-    if analysis != Analysis::Dc {
-        bail!("{analysis:?} analysis is not implemented in v0; only DC is supported");
+    if net.analysis == AnalysisCard::Tran && analysis != Analysis::Transient {
+        bail!("deck requests transient analysis (`.tran`); pass `--tran` to run it");
+    }
+    if analysis == Analysis::Transient && net.tran.is_none() {
+        bail!(
+            "transient analysis requested but the deck has no parseable \
+             `.tran <tstep> <tstop>` card"
+        );
     }
     Ok(())
 }
 
-/// Build every device instance and solve the DC operating point. `compiled` is every module
-/// compiled from the `--model` file (possibly several, if it defines a subcircuit alongside a
-/// top module — § module instantiation); a device is matched against whichever one shares its
-/// model name.
-fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
+/// Build every device instance, returning them alongside the total unknown count (`dim`).
+/// `compiled` is every module compiled from the `--model` file (possibly several, if it
+/// defines a subcircuit alongside a top module — § module instantiation); a device is matched
+/// against whichever one shares its model name. Shared by both DC and transient solving —
+/// building the instance set doesn't depend on which analysis will run on it.
+fn build_instances(
+    net: &Netlist,
+    compiled: &[Module],
+) -> Result<(Vec<Box<dyn ModelInstance>>, usize)> {
     let n_nodes = net.node_order.len();
 
     // Voltage sources take branch-current unknowns after the node unknowns; a flattened
@@ -236,10 +255,40 @@ fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::Operating
         let inst = build_instance(dev, compiled, &mut next_unknown)?;
         instances.push(inst);
     }
-    let dim = next_unknown;
+    Ok((instances, next_unknown))
+}
 
+/// Build every device instance and solve the DC operating point.
+fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
+    let (instances, dim) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
+}
+
+/// Build every device instance and integrate the transient response over the deck's
+/// `.tran <tstep> <tstop>` window.
+///
+/// Always starts from the zero vector (see this module's doc comment on why that's the right
+/// default given v0 has no time-varying source model): a plain DC-valued source combined with
+/// a cold start *is* the step response there's anything interesting to observe at all.
+fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
+    let (instances, dim) = build_instances(net, compiled)?;
+    let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
+    let (tstep, tstop) = net
+        .tran
+        .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
+
+    let cfg = TranConfig {
+        tstart: 0.0,
+        tstop,
+        tstep,
+        tstep_min: tstep * 1e-6,
+        method: Method::Trapezoidal,
+        lte_reltol: 1e-3,
+        lte_abstol: 1e-6,
+    };
+    va_transient::integrator::run(&refs, dim, vec![0.0; dim], cfg)
+        .context("transient integration failed")
 }
 
 /// Turn one parsed [`Device`] into a loadable instance, preferring a matching compiled
@@ -352,6 +401,24 @@ fn report(net: &Netlist, x: &[f64]) {
     }
 }
 
+/// Print the transient waveform: one line per accepted timepoint, every node's voltage.
+fn report_transient(net: &Netlist, wf: &Waveform) {
+    println!(
+        "Transient analysis ({} points, t=0 to t={:e}s):",
+        wf.t.len(),
+        wf.t.last().copied().unwrap_or(0.0)
+    );
+    for (t, x) in wf.t.iter().zip(&wf.x) {
+        let cols: Vec<String> = net
+            .node_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("V({name})={:.6}", x[i]))
+            .collect();
+        println!("  t={t:.6e}s  {}", cols.join("  "));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +509,46 @@ mod tests {
         let deck = include_str!("../../../circuits/rectifier.net");
         let net = va_netlist::parser::parse(deck).expect("parse rectifier");
         assert!(gate_analysis(&net, Analysis::Dc).is_err());
+    }
+
+    /// End-to-end transient through the real pipeline: parse `rc_step.net`, build reference
+    /// instances, integrate. V(out) = Vs·(1 − e^(−t/RC)), RC = 1 ms, matching
+    /// `va-transient`'s own analytic RC test but now driven from a netlist file exactly the
+    /// way `va-cli sim circuits/rc_step.net --tran` does.
+    #[test]
+    fn rc_step_solves_through_the_real_pipeline() {
+        let deck = include_str!("../../../circuits/rc_step.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rc_step");
+        assert_eq!(net.analysis, AnalysisCard::Tran);
+        gate_analysis(&net, Analysis::Transient).expect("transient analysis is accepted");
+
+        let wf = solve_transient(&net, &[]).expect("integrates");
+        let out_idx = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("out node");
+
+        let rc = 1e-3;
+        let vs = 5.0;
+        // Near t = RC: analytic V(out) = Vs·(1 - e^-1).
+        let (t_near_rc, v_near_rc) =
+            wf.t.iter()
+                .zip(&wf.x)
+                .map(|(&t, x)| (t, x[out_idx]))
+                .find(|&(t, _)| t >= rc)
+                .expect("a sample at or past t=RC");
+        let analytic_at_rc = vs * (1.0 - (-t_near_rc / rc).exp());
+        assert!(
+            (v_near_rc - analytic_at_rc).abs() / vs < 1e-2,
+            "V(out)={v_near_rc} at t={t_near_rc} vs analytic {analytic_at_rc}"
+        );
+
+        // By t=tstop (5 RC) it should have settled near Vs.
+        let v_final = *wf.x.last().unwrap().get(out_idx).unwrap();
+        assert!(
+            (v_final - vs).abs() / vs < 1e-2,
+            "should have settled near Vs: {v_final}"
+        );
     }
 }

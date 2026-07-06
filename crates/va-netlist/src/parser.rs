@@ -51,7 +51,8 @@ pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
 
 /// Parse a dot-card, recording the analysis it requests. Unrecognized cards are ignored.
 fn parse_card(net: &mut Netlist, body: &str) {
-    let name = body.split_whitespace().next().unwrap_or("");
+    let toks: Vec<&str> = body.split_whitespace().collect();
+    let name = toks.first().copied().unwrap_or("");
     let card = match name.to_ascii_lowercase().as_str() {
         "op" => AnalysisCard::Op,
         "dc" => AnalysisCard::Dc,
@@ -62,6 +63,16 @@ fn parse_card(net: &mut Netlist, body: &str) {
     // The first analysis card wins.
     if net.analysis == AnalysisCard::Unspecified {
         net.analysis = card;
+    }
+    // `.tran <tstep> <tstop>` — the two SPICE-standard positional values transient needs.
+    // Anything past them (a start time, `UIC`, …) isn't parsed in v0.
+    if card == AnalysisCard::Tran {
+        if let (Some(tstep), Some(tstop)) = (
+            toks.get(1).and_then(|v| parse_value(v)),
+            toks.get(2).and_then(|v| parse_value(v)),
+        ) {
+            net.tran = Some((tstep, tstop));
+        }
     }
 }
 

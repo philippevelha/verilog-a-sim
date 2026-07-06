@@ -1,0 +1,11 @@
+* RC step response — bring-up rung 3 (transient).
+* A 5 V step source into a 1 kOhm resistor and a 1 uF capacitor (RC = 1 ms).
+* v0 has no time-varying source model and no .ic/UIC support, so transient always starts
+* from x=0 -- a plain DC-valued source combined with that cold start *is* the step response.
+* Expected: V(out) climbs toward 5 V with time constant RC = 1 ms
+*   (V(out) = 5*(1 - exp(-t/RC)), e.g. ~3.16 V at t=RC=1ms).
+V1 in  gnd  DC 5
+R1 in  out  1000
+C1 out gnd  1e-6
+.tran 20u 5m
+.end

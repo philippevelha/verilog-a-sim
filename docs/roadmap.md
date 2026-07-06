@@ -48,7 +48,9 @@ shared, demoable milestone that several theses light up at once.
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; 9 tests | 🟢 |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
-| T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
+| T6.1 — netlist parser | R/C/D/V elements, dot-cards incl. `.tran` timing; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
+| T6.2 — CLI wiring (DC + transient) | `va-cli sim` drives frontend→codegen→core for DC and frontend→codegen→transient for `.tran`, both through real reference/generated/hierarchical models | 🟢 |
+| T5 · T6.3 | crate stubs only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -633,12 +635,38 @@ is the glue: it makes everyone else's work runnable and trustworthy.
 methodology + metrics report vs ngspice.
 
 ### Phase T6.1 — Netlist parser & the harness/metrics skeleton
+> **Status: 🟢 code complete (harness gate pending — see T6.3)** — `va-netlist/src/parser.rs`
+> is a real line-oriented SPICE-flavored parser: `R`/`C`/`D`/`V` elements (SI-suffixed values,
+> `k`/`meg`/`u`/`n`/`p`/…), `0`/`gnd` as the reference sentinel, and dot-cards (`.op`/`.dc`/
+> `.tran`/`.ac`). **2026-07-06: `.tran <tstep> <tstop>` timing is now captured**
+> (`Netlist::tran`), not just the card marker — needed once `va-cli` actually drives a
+> transient run (see T6.2). `va-harness`'s metric functions (`DC_REL`, `TRAN_RMS`) are declared
+> but still `todo!()` — that's the genuinely outstanding piece, tracked under T6.3, not this
+> phase. *Outstanding:* `t6-integration/01-netlist.qmd`.
+
 - Circuit-level netlist parser (`va-netlist`): elements, nodes, model bindings, analysis
   directives. Define the metric functions in `va-harness` (`DC_REL`, `TRAN_RMS`, …).
 - **Tutorial:** `t6-integration/01-netlist.qmd` — the netlist format and how a circuit maps
   onto Interface β instances.
 
 ### Phase T6.2 — CLI wiring & golden generation
+> **Status: 🟢 code complete (harness/golden-generation gate pending)** — `va-cli sim` already
+> wired DC end to end before this pass: `--model <m.va>` compiles through the real
+> `va-frontend` → `va-codegen` pipeline (including module instantiation — see
+> `hierarchical_divider_solves_through_codegen_pipeline`), falling back to `va-abi` reference
+> primitives for unmatched devices, then `va-core::dc::operating_point` solves it.
+> **2026-07-06: transient is wired too** — `va-cli sim <deck> --tran` runs the same device-
+> building path through `va_transient::integrator::run` over the deck's `.tran` window,
+> reported via a new `report_transient`. Always starts from the zero vector: v0 has no `.ic`/
+> `UIC` support and no time-varying source model (`va_abi::reference::VSource` is a constant DC
+> value only), so a deck's constant source plus a cold start *is* the step response — the only
+> shape a DC-only source could produce, and exactly what `circuits/rc_step.net` (a step
+> voltage into an R/C) exercises: `cargo run -p va-cli -- sim circuits/rc_step.net --tran`
+> matches the analytic
+> `V(t)=Vs·(1−e^{−t/RC})` closely (e.g. 4.966 V vs analytic 4.9663 V at `t=5·RC`).
+> `xtask gen-golden`/`xtask validate` remain unimplemented (T6.3/`xtask` territory).
+> *Outstanding:* `t6-integration/02-cli.qmd`.
+
 - `va-cli` wires the full pipeline (parse model → codegen → assemble → solve → report); flesh
   out `xtask gen-golden` (ngspice) and `xtask validate`.
 - **Validation gate:** `cargo run -p va-cli -- sim circuits/divider.net …` reproduces ladder
@@ -661,9 +689,9 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 
 | Rung | Circuit            | Analysis  | Lights up                | Tutorials presented           | Status |
 |------|--------------------|-----------|--------------------------|-------------------------------|--------|
-| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | solves analytically in `va-core`; **harness/CLI gate pending T6** |
+| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | `cargo run -p va-cli -- sim circuits/divider.net` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | pieces work in isolation (frontend, codegen, nonlinear DC); not yet wired or golden-gated |
-| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | solves to the analytic charging curve in `va-transient`; **harness/CLI gate pending T6** |
+| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | `cargo run -p va-cli -- sim circuits/rc_step.net --tran` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | ⬜ |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ **blocked**: needs a gain-capable device; the model zoo is entirely passive (see T4.3) |
