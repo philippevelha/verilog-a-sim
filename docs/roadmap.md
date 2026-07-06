@@ -674,11 +674,42 @@ matches the code verbatim.
 > whatever the DC operating point resolves it to, the same limitation every other reactive state in
 > this codegen already has.
 >
-> Re-scanned again: **56/115 pass frontend+codegen, up from 53** (+3 — all three PSP102 NQS
-> variants). *Outstanding:* a flow probe on a branch with no potential contribution of its own (4
-> files, pre-existing, unrelated to `ddt`/`idt`) and the non-path-sensitive
-> variable-read-before-assignment gap (2 files, see above) — the nested-`ddt`/`idt` bucket that
-> opened this round of work is now fully closed. Full committed sweep; `t2-codegen/02-lowering.qmd`.
+> Re-scanned again: 56/115 pass frontend+codegen, up from 53 (+3 — all three PSP102 NQS variants).
+> The nested-`ddt`/`idt` bucket that opened this round of work is now fully closed.
+>
+> **A purely flow-defined branch can now also be read via a bare `I(...)` probe.** Previously a
+> flow probe only resolved for a branch that also received a potential contribution somewhere
+> (the branch current's own auxiliary unknown, allocated for a completely different reason);
+> reading a branch's own current where nothing else about the branch needed one at all — real
+> models do this two ways — failed outright. `asmhemt.va`/`asmhemt101_0.va`'s
+> `idisi = I(di,si);` reads the branch's total current strictly *after* every contribution to it,
+> purely to feed an `` `OPM `` operating-point-report variable (never anything electrical).
+> `diode_basic.va`'s `Id = I(anode,cathode);` is genuinely self-referential: read *before* the
+> branch's own contribution, to compute a series-resistance voltage drop that itself determines
+> `Id` via `Im`/`Qe`/`kfwd` — a real implicit equation. Both are handled uniformly by
+> `lower::FlowCurrentAccumulator`: the branch gets its own auxiliary unknown, exactly like a
+> potential contribution's branch current, but with the *opposite* defining equation — instead of
+> constraining `V(p)-V(n)` to the contributed value, this unknown constrains *itself* to equal the
+> branch's own total resistive contribution (`GeneratedModel::stamp_flow_current_accumulators`,
+> stamped after the statement walk so every contribution to the branch has already run). The node
+> KCL injection is completely unaffected — this accumulator is a pure bookkeeping shadow of
+> a value the branch's contributions already determine, not a new physical degree of freedom.
+> Every `I(...)` read of the branch, before or after its contribution, then just reads this same
+> unknown via the *existing* flow-probe machinery, so Newton resolves the self-referential case
+> exactly like any other implicit equation, with zero special-casing at read sites.
+> *Limitation:* the defining equation only sums resistive contributions, not any `ddt`/charge term
+> also contributed to the branch (consistent with this project's DC solve already ignoring the
+> charge channel entirely) — no corpus file surveyed feeds such a probe back into anything
+> electrical, only diagnostic output, so this wasn't worth a second, charge-aware equation.
+>
+> Re-scanned again: **59/115 pass frontend+codegen, up from 56** (+3:
+> `asmhemt.va`/`asmhemt101_0.va`/`diode_basic.va`). *Outstanding:* `verilogaLib-master/ohmmeter.va`
+> needs a *different*, harder feature — `I(iprobe)` there is a single-terminal implicit-ground
+> probe (not the same branch as the explicit `V(dutm,iprobe)<+0` contribution), whose value can
+> only be derived from a genuine node-KCL sum across every other branch touching that node, not
+> from any one branch's own contribution — not attempted this round; plus the non-path-sensitive
+> variable-read-before-assignment gap (2 files, see above). Full committed sweep;
+> `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

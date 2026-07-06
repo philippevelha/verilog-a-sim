@@ -7,9 +7,11 @@
 //!
 //! The active unknowns are the node voltages plus any branch currents. A potential probe
 //! `V(p, n)` contributes `+1` in the `p` slot and `-1` in the `n` slot; a flow probe `I(...)`
-//! contributes `+1` in its branch's own current slot, if that branch has one allocated (a
-//! branch only gets one if it receives a potential contribution somewhere in the module — see
-//! `crate::lower`). Every other operator simply propagates gradients through the chain rule.
+//! contributes `+1` in its branch's own current slot, if that branch has one allocated — either
+//! because it receives a potential contribution somewhere in the module, or because it's a
+//! purely flow-defined branch that's also read via a bare `I(...)` probe somewhere (see
+//! `crate::lower::FlowCurrentAccumulator`). Every other operator simply propagates gradients
+//! through the chain rule.
 
 use crate::CodegenError;
 use std::cell::RefCell;
@@ -286,8 +288,10 @@ pub struct Ctx<'a> {
     /// [`Self::set_var`], never from within expression evaluation itself.
     pub vars: RefCell<HashMap<u32, Dual>>,
     /// Maps a branch (by `BranchId.0`) to the local terminal slot of its own auxiliary current
-    /// unknown, for every branch that receives a potential contribution somewhere in the
-    /// module (`crate::lower::Lowered::branch_currents`). A flow probe `I(...)` on a branch
+    /// unknown — populated from both `crate::lower::Lowered::branch_currents` (a branch with a
+    /// potential contribution) and `crate::lower::Lowered::flow_current_accumulators` (a purely
+    /// flow-defined branch also read via a bare `I(...)` probe); a flow probe reads the same way
+    /// regardless of which reason gave the branch its slot. A flow probe `I(...)` on a branch
     /// absent from this map has no current unknown to read and is rejected.
     pub branch_current_slots: HashMap<u32, usize>,
     /// Maps an `idt(...)` call site (by its own `ExprId.0`) to the local terminal slot of its
@@ -303,6 +307,12 @@ pub struct Ctx<'a> {
     /// consult this; a non-mixed branch never touches it (its structural stamp is instead
     /// unconditional, see `crate::lower::BranchCurrent`'s doc comment).
     pub mixed_branch_potential_used: RefCell<HashSet<usize>>,
+    /// Running per-branch sum of every flow contribution's resistive total this `load()`/
+    /// `validate()` call, keyed by `BranchId.0` — only ever populated for a branch in
+    /// `crate::lower::Lowered::flow_current_accumulators` (`crate::GeneratedModel::stamp`
+    /// populates it; `crate::GeneratedModel::stamp_flow_current_accumulators` consumes it after
+    /// the statement walk finishes). See `crate::lower::FlowCurrentAccumulator`'s doc comment.
+    pub flow_current_totals: RefCell<HashMap<u32, Dual>>,
     /// Whether this `Ctx` belongs to `crate::GeneratedModel::validate`'s dry run rather than a
     /// real `crate::GeneratedModel::load` call. Consulted only when evaluating a user-defined
     /// analog function's own internal control flow (see [`call_function`]): validating visits
@@ -324,6 +334,18 @@ impl Ctx<'_> {
         self.mixed_branch_potential_used
             .borrow_mut()
             .insert(local_slot)
+    }
+
+    /// Add `value` into the running resistive total for `branch` (by `BranchId.0`) — a branch
+    /// may receive more than one flow contribution (`crate::lower::FlowCurrentAccumulator`'s
+    /// `diode_basic.va` example has two), each folded in as it runs.
+    pub fn add_flow_current(&self, branch: u32, value: &Dual) {
+        let mut totals = self.flow_current_totals.borrow_mut();
+        let updated = match totals.get(&branch) {
+            Some(existing) => existing.add(value),
+            None => value.clone(),
+        };
+        totals.insert(branch, updated);
     }
 }
 
@@ -824,6 +846,7 @@ mod tests {
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
@@ -872,6 +895,7 @@ mod tests {
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
@@ -951,6 +975,7 @@ mod tests {
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
 
@@ -1024,6 +1049,7 @@ mod tests {
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         let analytic = eval(&ctx, gdio).unwrap().value;
@@ -1058,6 +1084,7 @@ mod tests {
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
@@ -1079,6 +1106,7 @@ mod tests {
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating: false,
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);

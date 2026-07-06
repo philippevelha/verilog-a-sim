@@ -18,8 +18,13 @@
 //!   allocated by [`build_instance`] itself from `next_unknown` (see [`lower::Lowered::branch_currents`]).
 //!   The v0 frontend emits modules whose nodes are exactly their ports, so the node prefix of
 //!   `terminals` is the port→global map; modules with internal node unknowns are out of scope.
-//! - A branch gets *either* flow or potential contributions, never both (see `lower`'s
-//!   Limitations); no loops/`case`, no user-defined analog functions (see [`lower`]).
+//! - A branch gets *either* flow or potential contributions, never both, with one exception —
+//!   a "mixed" branch gated behind mutually-exclusive `if`/`else` arms (see `lower`'s
+//!   Limitations). A purely flow-defined branch that's also read via a bare `I(...)` probe
+//!   somewhere gets its own auxiliary unknown too, same as a potential contribution's branch
+//!   current (see [`lower::FlowCurrentAccumulator`]), but only sums the branch's *resistive*
+//!   contributions — a `ddt`/charge term contributed to a self-probed branch isn't reflected in
+//!   what that probe reads back.
 //!   Local-variable assignments and `if`/`else` *are* supported: statements execute in source
 //!   order, each `Stmt::Assign` binding into [`ad::Ctx::vars`] for later statements (including
 //!   later assignments — a variable can be reassigned) to read via [`ad::Ctx::set_var`]/the
@@ -155,11 +160,20 @@ struct GeneratedModel {
 
 impl GeneratedModel {
     fn ctx<'a>(&'a self, x: &'a [f64], validating: bool) -> Ctx<'a> {
+        // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
+        // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't (and
+        // shouldn't) need to know which of the two reasons gave this branch a slot.
         let branch_current_slots = self
             .lowered
             .branch_currents
             .iter()
             .map(|bc| (bc.branch.0, bc.local_slot))
+            .chain(
+                self.lowered
+                    .flow_current_accumulators
+                    .iter()
+                    .map(|acc| (acc.branch.0, acc.local_slot)),
+            )
             .collect();
         let idt_slots = self
             .lowered
@@ -178,6 +192,7 @@ impl GeneratedModel {
             branch_current_slots,
             idt_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
             validating,
         }
     }
@@ -190,6 +205,15 @@ impl GeneratedModel {
             .iter()
             .find(|bc| bc.local_slot == local_slot)
             .is_some_and(|bc| bc.mixed)
+    }
+
+    /// Whether `branch_id` (a `BranchId.0`) is a purely flow-defined branch that's also read via
+    /// a bare `I(...)` probe somewhere in the module (see [`lower::FlowCurrentAccumulator`]).
+    fn is_self_probed_flow_branch(&self, branch_id: u32) -> bool {
+        self.lowered
+            .flow_current_accumulators
+            .iter()
+            .any(|acc| acc.branch.0 == branch_id)
     }
 
     /// Real, load-time execution: walks `stmts` in source order. An assignment evaluates its
@@ -436,6 +460,15 @@ impl GeneratedModel {
                     let Ok(i) = Self::sum_terms(ctx, &c.resistive) else {
                         return;
                     };
+                    // See `lower::FlowCurrentAccumulator`'s doc comment: a purely flow-defined
+                    // branch that's also read via a bare `I(...)` probe elsewhere needs this
+                    // contribution's resistive total folded into a running per-branch sum, so
+                    // `Self::stamp_flow_current_accumulators` can pin that branch's own auxiliary
+                    // unknown to it once every contribution to the branch has run. A no-op for
+                    // every other (the overwhelming majority of) flow branches.
+                    if self.is_self_probed_flow_branch(c.branch.0) {
+                        ctx.add_flow_current(c.branch.0, &i);
+                    }
                     sink.residual(gp, i.value);
                     sink.residual(gn, -i.value);
                     for (slot, &dg) in i.grad.iter().enumerate() {
@@ -601,6 +634,37 @@ impl GeneratedModel {
             sink.dcharge(g, g, 1.0);
         }
     }
+
+    /// Pin every self-probed flow branch's own accumulator unknown to the branch's total
+    /// resistive contribution this call (`residual = unknown - total`, `jacobian(self,self) =
+    /// 1 - d(total)/d(self)` — the last term only nonzero for `diode_basic.va`'s genuinely
+    /// self-referential case, where the branch's own current feeds into its own defining
+    /// contribution; Newton resolves the fixed point exactly like any other implicit equation).
+    /// See `lower::FlowCurrentAccumulator`'s doc comment. Runs unconditionally, once per
+    /// `load()`/`validate()` call, after [`Self::run`]/`Self::validate_stmts` — every contribution
+    /// to the branch must already have run so `ctx.flow_current_totals` holds the branch's real
+    /// total, not a partial one. A branch none of whose contributing statements ran this call
+    /// (e.g. they all sit in an untaken `if`/`case` arm) has no entry, treated as a total of zero,
+    /// same as the branch's own node injection would produce.
+    fn stamp_flow_current_accumulators(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
+        for acc in &self.lowered.flow_current_accumulators {
+            let g = self.terminals[acc.local_slot];
+            let total = ctx
+                .flow_current_totals
+                .borrow()
+                .get(&acc.branch.0)
+                .cloned()
+                .unwrap_or_else(|| Dual::constant(0.0, ctx.count()));
+            sink.residual(g, ctx.x.get(g).copied().unwrap_or(0.0) - total.value);
+            sink.jacobian(g, g, 1.0);
+            for (slot, &dg) in total.grad.iter().enumerate() {
+                if dg != 0.0 {
+                    let gk = self.terminals[slot];
+                    sink.jacobian(g, gk, -dg);
+                }
+            }
+        }
+    }
 }
 
 impl ModelInstance for GeneratedModel {
@@ -628,6 +692,9 @@ impl ModelInstance for GeneratedModel {
         // After `run`, not before: an `idt` accumulator's argument may read a local variable the
         // statement walk just bound (see `Self::stamp_idt_accumulators`'s doc comment).
         self.stamp_idt_accumulators(&ctx, sink);
+        // Also after `run`: `ctx.flow_current_totals` only holds a branch's real total once every
+        // contribution to it has run (see `Self::stamp_flow_current_accumulators`'s doc comment).
+        self.stamp_flow_current_accumulators(&ctx, sink);
     }
 }
 
@@ -1339,6 +1406,188 @@ mod tests {
         // = 0 here), but each is its own row with its own charge slot.
         assert!((sink.charge[3] - y_a).abs() < 1e-12);
         assert!((sink.charge[4] - y_b).abs() < 1e-12);
+    }
+
+    /// `asmhemt.va`'s `idisi = I(di,si);` shape: a purely flow-defined branch (`I(p,n) <+
+    /// V(p,n)/R;`) read back afterward, purely to reuse the value elsewhere (here, contributed
+    /// into a second branch's potential constraint, so the read's value is externally observable
+    /// through `DenseStamp` without needing a third mechanism).
+    #[test]
+    fn self_probed_flow_branch_reads_back_its_total_contributed_current() {
+        let mut m = Module::new("self_probed_flow");
+        for name in ["p", "n", "out", "gnd"] {
+            m.nodes.push(NodeDecl {
+                name: name.into(),
+                discipline: Discipline::Electrical,
+            });
+        }
+        m.ports = vec![
+            vec![NodeId(0)],
+            vec![NodeId(1)],
+            vec![NodeId(2)],
+            vec![NodeId(3)],
+        ];
+        m.branches = vec![
+            Branch {
+                p: NodeId(0),
+                n: NodeId(1),
+            }, // branch 0: the self-probed resistor
+            Branch {
+                p: NodeId(2),
+                n: NodeId(3),
+            }, // branch 1: exposes `idisi` via a potential contribution
+        ];
+        m.params = vec![Param {
+            name: "R".into(),
+            default: 1000.0,
+            min: Some(0.0),
+            max: None,
+        }];
+        m.vars = vec![VarDecl {
+            name: "idisi".into(),
+        }];
+        let idisi = VarId(0);
+
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let r = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let ipn = m.push_expr(Expr::Binary(va_ir::BinOp::Div, vpn, r));
+        let ipn_probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(0),
+        }));
+        let idisi_read = m.push_expr(Expr::Var(idisi));
+
+        m.analog = vec![
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: ipn,
+            },
+            Stmt::Assign {
+                lhs: idisi,
+                rhs: ipn_probe,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Potential,
+                    branch: BranchId(1),
+                },
+                value: idisi_read,
+            },
+        ];
+
+        let mut next = 4;
+        let inst = build_instance(&m, &[0, 1, 2, 3], &mut next).unwrap();
+        // branch-current slot (branch 1's constraint) -> 4; flow-current accumulator (branch 0)
+        // -> 5.
+        assert_eq!(next, 6);
+
+        let (vp, vn, vout, vgnd) = (0.6, 0.1, 0.0, 0.0);
+        let r_val = 1000.0;
+        let mut sink = DenseStamp::new(6);
+        inst.load(&[vp, vn, vout, vgnd, 0.0, 0.0], &mut sink);
+
+        // The accumulator's own row (slot 5): residual = x[5] - (vp-vn)/R; jacobian w.r.t. p/n.
+        let total = (vp - vn) / r_val;
+        assert!((sink.residual[5] - -total).abs() < 1e-9);
+        assert!((sink.jac(5, 5) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(5, 0) - -(1.0 / r_val)).abs() < 1e-12);
+        assert!((sink.jac(5, 1) - (1.0 / r_val)).abs() < 1e-12);
+
+        // Branch 1's constraint row (slot 4) reads `idisi` (= the accumulator) back correctly:
+        // residual = (vout-vgnd) - x[5].
+        assert!((sink.residual[4] - (vout - vgnd)).abs() < 1e-12);
+        assert!((sink.jac(4, 5) - -1.0).abs() < 1e-12);
+
+        // The branch's own node injection is completely unaffected: still the ordinary resistive
+        // stamp, exactly as if it were never self-probed at all.
+        assert!((sink.residual[0] - total).abs() < 1e-9);
+        assert!((sink.residual[1] - -total).abs() < 1e-9);
+    }
+
+    /// `diode_basic.va`'s real idiom: `Id = I(anode,cathode);` read *before* the contribution
+    /// that defines the branch, then fed back into that very contribution (`Id` scales a
+    /// series-resistance term) -- a genuine implicit equation, not just a sequential re-read.
+    /// `Ib`'s own row must carry the correct self-referential Jacobian entry
+    /// (`d(residual)/d(Ib) = 1 - d(total)/d(Ib)`) for Newton to actually resolve the fixed point.
+    #[test]
+    fn self_referential_flow_probe_feeds_back_into_its_own_contribution() {
+        let mut m = Module::new("self_referential_flow");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "Rs".into(),
+            default: 5.0,
+            min: Some(0.0),
+            max: None,
+        }];
+        m.vars = vec![VarDecl { name: "id".into() }];
+        let id = VarId(0);
+
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let ipn_probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(0),
+        }));
+        let rs = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let id_read = m.push_expr(Expr::Var(id));
+        let rs_id = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, rs, id_read));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Sub, vpn, rs_id));
+
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: id,
+                rhs: ipn_probe,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value,
+            },
+        ];
+
+        let mut next = 2;
+        let inst = build_instance(&m, &[0, 1], &mut next).unwrap();
+        assert_eq!(next, 3); // flow-current accumulator -> slot 2
+
+        let (vp, vn, rs_val, ib) = (0.6, 0.1, 5.0, 0.05);
+        let mut sink = DenseStamp::new(3);
+        inst.load(&[vp, vn, ib], &mut sink);
+
+        // total = (vp-vn) - Rs*ib; residual[2] = ib - total; jacobian(2,2) = 1 - (-Rs) = 1+Rs.
+        let total = (vp - vn) - rs_val * ib;
+        assert!((sink.residual[2] - (ib - total)).abs() < 1e-9);
+        assert!((sink.jac(2, 2) - (1.0 + rs_val)).abs() < 1e-12);
+        assert!((sink.jac(2, 0) - -1.0).abs() < 1e-12);
+        assert!((sink.jac(2, 1) - 1.0).abs() < 1e-12);
+
+        // The node injection uses the same self-referential total, including its Jacobian entry
+        // at the accumulator's own slot -- Newton needs this to converge on the fixed point.
+        assert!((sink.residual[0] - total).abs() < 1e-9);
+        assert!((sink.jac(0, 2) - -rs_val).abs() < 1e-12);
     }
 
     #[test]

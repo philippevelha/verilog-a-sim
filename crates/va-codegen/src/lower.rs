@@ -185,6 +185,10 @@ pub struct ChargeTerm {
 /// A single branch contribution, split into resistive and charge channels.
 #[derive(Clone, Debug)]
 pub struct Contribution {
+    /// Which branch this contribution targets — consulted only to accumulate a flow
+    /// contribution's resistive total for [`FlowCurrentAccumulator`] (see its doc comment);
+    /// otherwise `p_slot`/`n_slot`/`branch_slot` already carry everything stamping needs.
+    pub branch: BranchId,
     /// Local node slot of the branch's positive terminal.
     pub p_slot: usize,
     /// Local node slot of the branch's negative terminal.
@@ -333,11 +337,56 @@ pub struct IdtAccumulator {
     pub local_slot: usize,
 }
 
+/// A branch that is **purely flow-defined** (never receives a potential contribution — a
+/// [`BranchCurrent`]-carrying branch already has a working auxiliary current unknown, see its
+/// doc comment) but is *also* read via a bare `I(...)` probe somewhere in the module — real
+/// models do this two ways: purely as a derived/diagnostic quantity read strictly *after* every
+/// contribution to the branch (`asmhemt.va`'s `idisi = I(di,si);`, feeding only an `` `OPM ``
+/// operating-point-report variable, never anything electrical), or genuinely
+/// *self-referentially*, read *before* the contribution that defines it, to compute a value that
+/// feeds back into that very contribution (`diode_basic.va`'s `Id = I(anode,cathode);`, used to
+/// compute a series-resistance voltage drop that ultimately determines `Id` itself via
+/// `Im`/`Qe`/`kfwd` — a real implicit equation, needing simultaneous, not sequential, resolution).
+///
+/// Ordinarily a flow contribution's value is computed and injected directly into its nodes'
+/// KCL rows each time it runs, with nothing kept around to answer a later `I(...)` read (see
+/// [`Contribution::branch_slot`]'s `None` case) — that's what makes a bare `I(...)` probe on such
+/// a branch fail today. Both real shapes above are handled uniformly by giving the branch its
+/// *own* auxiliary unknown too, exactly like [`BranchCurrent`]'s, but with the opposite defining
+/// equation: instead of a constraint row forcing `V(p)-V(n)` to equal the contributed value (with
+/// the unknown injected into the node KCL rows), this unknown's own row forces *itself* to equal
+/// the branch's total **resistive** contribution (`crate::GeneratedModel::stamp_flow_current_accumulators`),
+/// while the node KCL injection stays exactly as it already was — completely unaffected, since
+/// this accumulator is a pure bookkeeping shadow of a value the branch's own contributions already
+/// determine, not a new physical degree of freedom. Every `I(...)` read of this branch (before or
+/// after its contribution, anywhere in the module) then simply reads this same unknown via the
+/// *existing* flow-probe machinery (`crate::ad::Ctx::branch_current_slots`, populated with this
+/// entry exactly like a `BranchCurrent`'s) — Newton resolves the self-referential case exactly
+/// like it resolves any other implicit equation, with no special-casing needed at read sites.
+///
+/// **Limitation:** the defining equation only sums the branch's *resistive* contributions, not
+/// any `ddt`/charge term also contributed to it — this project's DC solve already ignores the
+/// charge channel entirely (`crate::lower`'s `ddt` handling), so this is consistent there, but a
+/// transient run's `I(...)` read of a self-probed branch that also carries a `ddt` term (e.g.
+/// `diode_basic.va`'s own `I(anode,cathode) <+ Im+(ddt(Qd));`) will not reflect that charge
+/// current's contribution. No corpus file surveyed feeds such a probe back into anything
+/// electrical, only into diagnostic output, so this was not worth the added complexity of a
+/// second, charge-aware defining equation.
+#[derive(Clone, Copy, Debug)]
+pub struct FlowCurrentAccumulator {
+    /// Which branch this accumulator shadows.
+    pub branch: BranchId,
+    /// Local terminal slot (past every node, [`BranchCurrent`], and [`IdtAccumulator`] slot)
+    /// allocated for this accumulator's own unknown.
+    pub local_slot: usize,
+}
+
 /// A lowered, evaluable representation of a module's analog block.
 #[derive(Debug, Default)]
 pub struct Lowered {
     /// Total number of local unknowns: one per IR node, plus one per entry in
-    /// [`Self::branch_currents`], plus one per entry in [`Self::idt_accumulators`].
+    /// [`Self::branch_currents`], [`Self::idt_accumulators`], and
+    /// [`Self::flow_current_accumulators`].
     pub n_unknowns: usize,
     /// Statements in source order (assignments and contributions only — see Limitations).
     pub stmts: Vec<LoweredStmt>,
@@ -349,6 +398,10 @@ pub struct Lowered {
     /// encountered walking the analog block (the deterministic order their local terminal slots
     /// are allocated in, past every [`BranchCurrent`] slot).
     pub idt_accumulators: Vec<IdtAccumulator>,
+    /// One entry per purely-flow-defined branch that is also read via a bare `I(...)` probe
+    /// somewhere in the module, in ascending [`BranchId`] order (the deterministic order their
+    /// local terminal slots are allocated in, past every [`IdtAccumulator`] slot).
+    pub flow_current_accumulators: Vec<FlowCurrentAccumulator>,
 }
 
 /// Lower a module's analog block into a [`Lowered`] plan.
@@ -365,7 +418,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let mut branch_currents = Vec::new();
     let mut slot_of_branch = HashMap::new();
     let mut next_slot = module.nodes.len();
-    for id in potential_branches {
+    for &id in &potential_branches {
         let br = module.branches[id as usize];
         slot_of_branch.insert(id, next_slot);
         branch_currents.push(BranchCurrent {
@@ -400,6 +453,22 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         next_slot += 1;
     }
 
+    let mut probed_flow_branches = BTreeSet::new();
+    collect_flow_probe_branches_in_stmts(module, &module.analog, &mut probed_flow_branches);
+    let mut flow_current_accumulators = Vec::new();
+    for id in probed_flow_branches {
+        // Only a *purely* flow-defined branch needs this: one with a potential contribution
+        // anywhere already has a working `BranchCurrent` (see its doc comment), and a bare
+        // `I(...)` probe already reads that just fine via `crate::ad::Ctx::branch_current_slots`.
+        if flow_branches.contains(&id) && !potential_branches.contains(&id) {
+            flow_current_accumulators.push(FlowCurrentAccumulator {
+                branch: BranchId(id),
+                local_slot: next_slot,
+            });
+            next_slot += 1;
+        }
+    }
+
     let mut stmts = Vec::new();
     let mut ddt_vars = HashMap::new();
     for stmt in &module.analog {
@@ -417,7 +486,89 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         stmts,
         branch_currents,
         idt_accumulators,
+        flow_current_accumulators,
     })
+}
+
+/// Collect every branch targeted by a bare `I(...)` (flow) probe reachable anywhere in `stmts`,
+/// the same generic-expression-walk shape as [`collect_idt_calls_in_stmts`]/
+/// [`collect_idt_calls_in_expr`] (a flow probe, like `idt`, may appear anywhere in an expression,
+/// not just a top-level contribution term).
+fn collect_flow_probe_branches_in_stmts(module: &Module, stmts: &[Stmt], out: &mut BTreeSet<u32>) {
+    for stmt in stmts {
+        collect_flow_probe_branches_in_stmt(module, stmt, out);
+    }
+}
+
+fn collect_flow_probe_branches_in_stmt(module: &Module, stmt: &Stmt, out: &mut BTreeSet<u32>) {
+    match stmt {
+        Stmt::Contribute { value, .. } => collect_flow_probe_branches_in_expr(module, *value, out),
+        Stmt::Assign { rhs, .. } => collect_flow_probe_branches_in_expr(module, *rhs, out),
+        Stmt::Block(body) => collect_flow_probe_branches_in_stmts(module, body, out),
+        Stmt::If { cond, then_, else_ } => {
+            collect_flow_probe_branches_in_expr(module, *cond, out);
+            collect_flow_probe_branches_in_stmts(module, then_, out);
+            collect_flow_probe_branches_in_stmts(module, else_, out);
+        }
+        Stmt::While { cond, body } => {
+            collect_flow_probe_branches_in_expr(module, *cond, out);
+            collect_flow_probe_branches_in_stmts(module, body, out);
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            collect_flow_probe_branches_in_stmt(module, init, out);
+            collect_flow_probe_branches_in_expr(module, *cond, out);
+            collect_flow_probe_branches_in_stmt(module, step, out);
+            collect_flow_probe_branches_in_stmts(module, body, out);
+        }
+        Stmt::Repeat { count, body } => {
+            collect_flow_probe_branches_in_expr(module, *count, out);
+            collect_flow_probe_branches_in_stmts(module, body, out);
+        }
+        Stmt::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            collect_flow_probe_branches_in_expr(module, *selector, out);
+            for arm in arms {
+                for &label in &arm.labels {
+                    collect_flow_probe_branches_in_expr(module, label, out);
+                }
+                collect_flow_probe_branches_in_stmts(module, &arm.body, out);
+            }
+            collect_flow_probe_branches_in_stmts(module, default, out);
+        }
+    }
+}
+
+fn collect_flow_probe_branches_in_expr(module: &Module, expr: ExprId, out: &mut BTreeSet<u32>) {
+    match module.expr(expr) {
+        Expr::Probe(access) if access.kind == AccessKind::Flow => {
+            out.insert(access.branch.0);
+        }
+        Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => {}
+        Expr::Unary(_, e) => collect_flow_probe_branches_in_expr(module, *e, out),
+        Expr::Binary(_, l, r) => {
+            collect_flow_probe_branches_in_expr(module, *l, out);
+            collect_flow_probe_branches_in_expr(module, *r, out);
+        }
+        Expr::Call(_, args) | Expr::CallUser(_, args) => {
+            for &a in args {
+                collect_flow_probe_branches_in_expr(module, a, out);
+            }
+        }
+        Expr::Select(c, t, e) => {
+            collect_flow_probe_branches_in_expr(module, *c, out);
+            collect_flow_probe_branches_in_expr(module, *t, out);
+            collect_flow_probe_branches_in_expr(module, *e, out);
+        }
+        Expr::Ddx(e, _) => collect_flow_probe_branches_in_expr(module, *e, out),
+    }
 }
 
 /// Collect every `idt(...)` call site reachable anywhere in `stmts`, in source order (a given
@@ -617,6 +768,7 @@ fn lower_stmt(
             };
 
             out.push(LoweredStmt::Contribute(Contribution {
+                branch: target.branch,
                 p_slot: br.p.0 as usize,
                 n_slot: br.n.0 as usize,
                 branch_slot,
