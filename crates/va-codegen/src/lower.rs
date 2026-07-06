@@ -69,13 +69,40 @@
 //! statements) already establishes, without needing to resolve a real trip count or risk
 //! hanging on a runaway condition during eager validation.
 //!
+//! `ddt` is recognised as a top-level additive term (`I <+ resistive + ddt(charge)`), optionally
+//! negated, *and* optionally scaled by a parameter-only coefficient
+//! (`coeff*ddt(charge)`/`ddt(charge)*coeff`/`ddt(charge)/coeff` — a real corpus survey found
+//! this "coefficient times a time-derivative" shape in every single one of a batch of
+//! previously-blocked real compact models, e.g. `bsim4.va`'s `I(gi,si) <+ BSIM4type *
+//! ddt(qgate);`, a polarity-selection parameter scaling a charge term). The coefficient must be
+//! **provably parameter-only** ([`is_param_only`]) — built from nothing but `Const`/`Param` and
+//! pure arithmetic/builtin combinations of those, never a node/branch probe, local variable, or
+//! function call — because `coeff(x) * dQ/dt` only equals `d(coeff*Q)/dt` (letting it fold into
+//! the ordinary charge channel) when `coeff` doesn't itself depend on the unknowns `x`; this
+//! project's `va_abi::StampSink` charge channel has no way to express the general product-rule
+//! case where it does (that would need the whole companion-model discretization, currently
+//! owned entirely by `va-transient`'s integrator via a single per-row time-stepping
+//! coefficient, to also carry a per-term, model-supplied coefficient — a `va_abi`/`va_transient`
+//! interface change, not a `va-codegen`-local one). `ddt` still may not appear nested any other
+//! way (inside a ternary, as another builtin's argument, etc.) — none of those shapes turned up
+//! anywhere in the same survey, so there was nothing concrete to scope a fix against.
+//!
 //! # Limitations
 //!
-//! - `ddt` is recognised only as a top-level additive term (optionally negated), matching how
-//!   compact models are written (`I <+ resistive + ddt(charge)`, `V <+ resistive + ddt(charge)`);
-//!   `ddt` nested inside a nonlinear function is rejected later by the AD evaluator.
-//! - User-defined analog functions in the analog block are not yet lowered. The IR
-//!   (Interface α) models these, but codegen v0 rejects them with [`CodegenError::Unsupported`].
+//! - `idt` (the time-*integral* operator) is not lowered at all yet, top-level or otherwise —
+//!   unlike `ddt`, it doesn't fit the existing charge-channel shape at all (its value at a given
+//!   instant depends on the *entire* history of its argument, not just the current unknowns, so
+//!   it needs its own auxiliary accumulator unknown, analogous to but distinct from a potential
+//!   contribution's branch-current unknown — out of scope here).
+//! - A `ddt`/`idt` result assigned to a plain local variable and read back later
+//!   (`real dqdt; dqdt = ddt(q); I(p,n) <+ dqdt + …;` — seen in the wild specifically to work
+//!   around this project's still-`if`/`case`-restricted `ddt` placement in some real models)
+//!   is not tracked back to its defining `ddt` call; only a `<+` statement's own RHS expression
+//!   is inspected for a (possibly scaled) top-level `ddt`/`idt` shape.
+//!
+//! User-defined analog functions (`Expr::CallUser`) are handled entirely in `crate::ad` instead
+//! — a function call is an expression-level construct, so it never needs anything from this
+//! module's statement-level extraction of the *analog block* (see `crate::ad::call_function`).
 
 use crate::CodegenError;
 use std::collections::{BTreeSet, HashMap};
@@ -88,6 +115,22 @@ pub struct Term {
     pub sign: f64,
     /// The (already ddt-stripped) expression to evaluate.
     pub expr: ExprId,
+}
+
+/// One additive charge-channel term: `ddt(expr)`, optionally scaled by a parameter-only
+/// coefficient (`coeff*ddt(expr)`/`ddt(expr)*coeff`/`ddt(expr)/coeff` — see this module's doc
+/// comment for why the coefficient must be parameter-only).
+#[derive(Clone, Copy, Debug)]
+pub struct ChargeTerm {
+    /// `+1.0` or `-1.0`, accumulated from `-`/unary-negation while flattening.
+    pub sign: f64,
+    /// The `ddt` call's own argument — the quantity whose time-derivative is contributed.
+    pub expr: ExprId,
+    /// The scaling coefficient, if any (`None` for a plain, unscaled `ddt(expr)`).
+    pub coeff: Option<ExprId>,
+    /// Whether `coeff` divides (`ddt(expr)/coeff`) rather than multiplies. Meaningless when
+    /// `coeff` is `None`.
+    pub coeff_is_divisor: bool,
 }
 
 /// A single branch contribution, split into resistive and charge channels.
@@ -103,8 +146,8 @@ pub struct Contribution {
     pub branch_slot: Option<usize>,
     /// Static terms summed into the residual/Jacobian.
     pub resistive: Vec<Term>,
-    /// `ddt` arguments summed into the charge/charge-Jacobian channel.
-    pub charge: Vec<Term>,
+    /// `ddt` terms summed into the charge/charge-Jacobian channel.
+    pub charge: Vec<ChargeTerm>,
 }
 
 /// One branch that receives a potential (voltage) contribution somewhere in the module, and
@@ -336,17 +379,14 @@ fn lower_stmt(
             let mut resistive = Vec::new();
             let mut charge = Vec::new();
             for term in terms {
-                match module.expr(term.expr) {
-                    Expr::Call(Builtin::Ddt, args) => {
-                        if args.len() != 1 {
-                            return Err(unsupported("ddt expects exactly one argument"));
-                        }
-                        charge.push(Term {
-                            sign: term.sign,
-                            expr: args[0],
-                        });
-                    }
-                    _ => resistive.push(term),
+                match charge_term_shape(module, term.expr)? {
+                    Some((expr, coeff, coeff_is_divisor)) => charge.push(ChargeTerm {
+                        sign: term.sign,
+                        expr,
+                        coeff,
+                        coeff_is_divisor,
+                    }),
+                    None => resistive.push(term),
                 }
             }
 
@@ -483,6 +523,69 @@ fn collect_terms(module: &Module, expr: ExprId, sign: f64, out: &mut Vec<Term>) 
             collect_terms(module, *e, -sign, out);
         }
         _ => out.push(Term { sign, expr }),
+    }
+}
+
+/// If `expr` is `ddt(arg)`, `coeff*ddt(arg)`, `ddt(arg)*coeff`, or `ddt(arg)/coeff` (with `coeff`
+/// [`is_param_only`]), return `(arg, coeff, coeff_is_divisor)`. Returns `Ok(None)` for anything
+/// else — including a syntactically-plausible `coeff*ddt(arg)` whose `coeff` fails the
+/// parameter-only check, which falls back to being treated as an ordinary resistive term (and
+/// is rejected later, when `ad::eval` actually tries to evaluate the still-nested `ddt` call, by
+/// the same `CodegenError::Unsupported` this returned `None` to avoid pre-empting here).
+fn charge_term_shape(
+    module: &Module,
+    expr: ExprId,
+) -> Result<Option<(ExprId, Option<ExprId>, bool)>, CodegenError> {
+    match module.expr(expr) {
+        Expr::Call(Builtin::Ddt, _) => Ok(ddt_arg(module, expr)?.map(|arg| (arg, None, false))),
+        Expr::Binary(BinOp::Mul, l, r) => {
+            if let Some(arg) = ddt_arg(module, *l)? {
+                if is_param_only(module, *r) {
+                    return Ok(Some((arg, Some(*r), false)));
+                }
+            } else if let Some(arg) = ddt_arg(module, *r)? {
+                if is_param_only(module, *l) {
+                    return Ok(Some((arg, Some(*l), false)));
+                }
+            }
+            Ok(None)
+        }
+        Expr::Binary(BinOp::Div, l, r) => {
+            if let Some(arg) = ddt_arg(module, *l)? {
+                if is_param_only(module, *r) {
+                    return Ok(Some((arg, Some(*r), true)));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `Ok(Some(arg))` if `expr` is `ddt(arg)`; `Ok(None)` if `expr` isn't a `ddt` call at all;
+/// `Err` if it is one but with the wrong argument count.
+fn ddt_arg(module: &Module, expr: ExprId) -> Result<Option<ExprId>, CodegenError> {
+    match module.expr(expr) {
+        Expr::Call(Builtin::Ddt, args) if args.len() == 1 => Ok(Some(args[0])),
+        Expr::Call(Builtin::Ddt, _) => Err(unsupported("ddt expects exactly one argument")),
+        _ => Ok(None),
+    }
+}
+
+/// Whether `expr` is provably independent of every unknown (node voltage, branch current, and
+/// local variable) — built from nothing but `Const`/`Param` and pure arithmetic/builtin
+/// combinations of those. See this module's doc comment for why [`charge_term_shape`] requires
+/// this of a `ddt` scaling coefficient.
+fn is_param_only(module: &Module, expr: ExprId) -> bool {
+    match module.expr(expr) {
+        Expr::Const(_) | Expr::Param(_) => true,
+        Expr::Unary(_, e) => is_param_only(module, *e),
+        Expr::Binary(_, l, r) => is_param_only(module, *l) && is_param_only(module, *r),
+        Expr::Call(builtin, args) => {
+            !matches!(builtin, Builtin::Ddt | Builtin::Idt)
+                && args.iter().all(|&a| is_param_only(module, a))
+        }
+        _ => false,
     }
 }
 

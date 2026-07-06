@@ -302,8 +302,14 @@ impl GeneratedModel {
                     ctx.set_var(*lhs, d);
                 }
                 LoweredStmt::Contribute(c) => {
-                    for term in c.resistive.iter().chain(c.charge.iter()) {
+                    for term in &c.resistive {
                         eval(ctx, term.expr)?;
+                    }
+                    for term in &c.charge {
+                        eval(ctx, term.expr)?;
+                        if let Some(coeff) = term.coeff {
+                            eval(ctx, coeff)?;
+                        }
                     }
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
@@ -363,6 +369,28 @@ impl GeneratedModel {
         Ok(acc)
     }
 
+    /// Sum a list of signed charge terms into a single dual, applying each term's own
+    /// parameter-only scaling coefficient (if any) before accumulating — see
+    /// [`lower::ChargeTerm`]'s doc comment. `coeff`'s gradient is always exactly zero (that's
+    /// what "parameter-only" guarantees), so scaling by its plain value alone is the *exact*
+    /// derivative, not an approximation: `d(coeff*q)/dx = coeff*dq/dx` whenever `dcoeff/dx = 0`.
+    fn sum_charge_terms(ctx: &Ctx, terms: &[lower::ChargeTerm]) -> Result<Dual, CodegenError> {
+        let mut acc = Dual::constant(0.0, ctx.count());
+        for term in terms {
+            let mut d = eval(ctx, term.expr)?;
+            if let Some(coeff_expr) = term.coeff {
+                let coeff = eval(ctx, coeff_expr)?.value;
+                d = if term.coeff_is_divisor {
+                    d.scale(1.0 / coeff)
+                } else {
+                    d.scale(coeff)
+                };
+            }
+            acc = acc.add(&d.scale(term.sign));
+        }
+        Ok(acc)
+    }
+
     /// Stamp one contribution's resistive and charge channels. A flow contribution (`c.branch_slot
     /// == None`) stamps the ordinary two-terminal KCL shape at `p_slot`/`n_slot`, unchanged from
     /// before potential contributions existed — including for a mixed branch's flow arm, which
@@ -398,7 +426,7 @@ impl GeneratedModel {
                 }
 
                 if !c.charge.is_empty() {
-                    let Ok(q) = Self::sum_terms(ctx, &c.charge) else {
+                    let Ok(q) = Self::sum_charge_terms(ctx, &c.charge) else {
                         return;
                     };
                     sink.charge(gp, q.value);
@@ -438,7 +466,7 @@ impl GeneratedModel {
                 }
 
                 if !c.charge.is_empty() {
-                    let Ok(q) = Self::sum_terms(ctx, &c.charge) else {
+                    let Ok(q) = Self::sum_charge_terms(ctx, &c.charge) else {
                         return;
                     };
                     sink.charge(gb, -q.value);
@@ -2120,6 +2148,170 @@ mod tests {
                 branch: BranchId(0),
             },
             value: call,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
+    /// Which of the three real "coefficient-scaled `ddt`" syntactic shapes to build.
+    #[derive(Clone, Copy)]
+    enum ScaledDdtShape {
+        MulBefore,
+        MulAfter,
+        Div,
+    }
+
+    /// `I(p,n) <+ coeff*ddt(c0*V(p,n));` (or the `ddt(..)*coeff`/`ddt(..)/coeff` variants) --
+    /// the real "polarity/multiplicity-scaled charge term" idiom (`bsim4.va`'s `I(gi,si) <+
+    /// BSIM4type * ddt(qgate);`), with both `c0` and `coeff` as parameters (so `coeff` is
+    /// provably parameter-only and the fold into the charge channel is exact).
+    fn scaled_ddt_ir(c0: f64, coeff: f64, shape: ScaledDdtShape) -> Module {
+        let mut m = Module::new("scaled_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "c0".into(),
+                default: c0,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "coeff".into(),
+                default: coeff,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0_e, v));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let coeff_e = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+
+        let value = match shape {
+            ScaledDdtShape::MulBefore => {
+                m.push_expr(Expr::Binary(va_ir::BinOp::Mul, coeff_e, ddt_q))
+            }
+            ScaledDdtShape::MulAfter => {
+                m.push_expr(Expr::Binary(va_ir::BinOp::Mul, ddt_q, coeff_e))
+            }
+            ScaledDdtShape::Div => m.push_expr(Expr::Binary(va_ir::BinOp::Div, ddt_q, coeff_e)),
+        };
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+        m
+    }
+
+    #[test]
+    fn scaled_ddt_folds_into_the_charge_channel_all_three_shapes() {
+        let (c0, coeff, v) = (1e-12, 2.5, 3.0);
+
+        for (shape, expected_q, expected_dq) in [
+            (ScaledDdtShape::MulBefore, coeff * c0 * v, coeff * c0),
+            (ScaledDdtShape::MulAfter, coeff * c0 * v, coeff * c0),
+            (ScaledDdtShape::Div, c0 * v / coeff, c0 / coeff),
+        ] {
+            let inst = build_instance(&scaled_ddt_ir(c0, coeff, shape), &[0, 1], &mut 2).unwrap();
+            let mut sink = DenseStamp::new(2);
+            inst.load(&[v, 0.0], &mut sink);
+            assert!((sink.charge[0] - expected_q).abs() / expected_q < 1e-9);
+            assert!((sink.dcharge[0] - expected_dq).abs() / expected_dq < 1e-9);
+            // No charge should leak onto the resistive residual channel.
+            assert_eq!(sink.residual[0], 0.0);
+
+            // §5 (charge-channel analogue): the charge Jacobian must match a central finite
+            // difference on the charge value itself.
+            let charge_at = |v: f64| {
+                let mut s = DenseStamp::new(2);
+                inst.load(&[v, 0.0], &mut s);
+                s.charge[0]
+            };
+            let h = 1e-6;
+            let fd = (charge_at(v + h) - charge_at(v - h)) / (2.0 * h);
+            assert!(
+                (sink.dcharge[0] - fd).abs() < 1e-6 * expected_dq.abs(),
+                "dcharge {} vs fd {}",
+                sink.dcharge[0],
+                fd
+            );
+        }
+    }
+
+    /// `I(p,n) <+ V(p,n) * ddt(c0*V(p,n));` -- the coefficient is the branch voltage itself, not
+    /// a parameter, so `coeff(x)*dQ/dt != d(coeff*Q)/dt` in general: folding it into the charge
+    /// channel the way [`scaled_ddt_ir`] does would silently produce the wrong Jacobian. Must
+    /// stay rejected exactly like an unscaled nested `ddt` always has.
+    #[test]
+    fn a_non_parameter_coefficient_scaling_ddt_is_still_rejected() {
+        let mut m = Module::new("bad_scaled_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "c0".into(),
+            default: 1e-12,
+            min: Some(0.0),
+            max: None,
+        }];
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let v2 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0_e, v));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v2, ddt_q));
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
         }];
 
         assert!(matches!(
