@@ -149,7 +149,7 @@ struct GeneratedModel {
 }
 
 impl GeneratedModel {
-    fn ctx<'a>(&'a self, x: &'a [f64]) -> Ctx<'a> {
+    fn ctx<'a>(&'a self, x: &'a [f64], validating: bool) -> Ctx<'a> {
         let branch_current_slots = self
             .lowered
             .branch_currents
@@ -166,6 +166,7 @@ impl GeneratedModel {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
+            validating,
         }
     }
 
@@ -289,7 +290,7 @@ impl GeneratedModel {
     /// genuinely assigned in only one arm and read after the `if` would not be soundly caught
     /// here, a stated limitation, not a silent one).
     fn validate(&self) -> Result<(), CodegenError> {
-        let ctx = self.ctx(&[]);
+        let ctx = self.ctx(&[], true);
         Self::validate_stmts(&ctx, &self.lowered.stmts)
     }
 
@@ -537,7 +538,7 @@ impl ModelInstance for GeneratedModel {
     }
 
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
-        let ctx = self.ctx(x);
+        let ctx = self.ctx(x, false);
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
@@ -551,8 +552,8 @@ mod tests {
     use super::*;
     use va_abi::stamps::DenseStamp;
     use va_ir::{
-        Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, Module, NodeDecl, NodeId,
-        Param, Stmt, VarDecl, VarId,
+        Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, FuncId, Function, Module,
+        NodeDecl, NodeId, Param, Stmt, VarDecl, VarId,
     };
 
     /// Build the resistor IR: `I(p,n) <+ V(p,n) / R`, R defaulting to 1 kΩ.
@@ -1856,5 +1857,274 @@ mod tests {
         inst.load(&[0.0, 0.0], &mut sink);
         // The post-loop contribution never ran, so the residual is untouched.
         assert_eq!(sink.residual[0], 0.0);
+    }
+
+    /// `real function sq(x); sq = x*x; endfunction`, called from `I(p,n) <+ sq(V(p,n))*g;` --
+    /// the simplest real analog-function idiom (a small utility factored out of a compact
+    /// model's own expressions).
+    fn sq_function_ir(g: f64) -> Module {
+        let mut m = Module::new("sq_func");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "g".into(),
+            default: g,
+            min: Some(0.0),
+            max: None,
+        }];
+        // VarId(0) = the function's own argument `x`, VarId(1) = its return variable `sq`.
+        m.vars = vec![VarDecl { name: "x".into() }, VarDecl { name: "sq".into() }];
+
+        let x_a = m.push_expr(Expr::Var(VarId(0)));
+        let x_b = m.push_expr(Expr::Var(VarId(0)));
+        let mul = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, x_a, x_b));
+        m.functions.push(Function {
+            name: "sq".into(),
+            args: vec![VarId(0)],
+            ret: VarId(1),
+            body: vec![Stmt::Assign {
+                lhs: VarId(1),
+                rhs: mul,
+            }],
+        });
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![v]));
+        let g_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let i_expr = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, call, g_e));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: i_expr,
+        }];
+        m
+    }
+
+    #[test]
+    fn user_function_computes_its_value_and_gradient_through_the_call() {
+        let (v, g) = (3.0, 1e-3);
+        let inst = build_instance(&sq_function_ir(g), &[0, 1], &mut 2).unwrap();
+
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+        // I = g * sq(v) = g*v^2.
+        let expected_i = g * v * v;
+        assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
+        // dI/dv = g * 2v (the chain rule through the function call).
+        let expected_grad = g * 2.0 * v;
+        assert!((sink.jac(0, 0) - expected_grad).abs() / expected_grad < 1e-12);
+
+        // §5: cross-check against a central finite difference.
+        let residual_at = |v: f64| {
+            let mut s = DenseStamp::new(2);
+            inst.load(&[v, 0.0], &mut s);
+            s.residual[0]
+        };
+        let h = 1e-6;
+        let fd = (residual_at(v + h) - residual_at(v - h)) / (2.0 * h);
+        assert!(
+            (sink.jac(0, 0) - fd).abs() < 1e-6,
+            "{} vs {}",
+            sink.jac(0, 0),
+            fd
+        );
+    }
+
+    /// A function whose body region-selects like a real compact model's utility routine would:
+    /// `if (x>0) ret=<bad, unassigned read>; else ret=x;`. At the all-zero validate point
+    /// `x=0`, a real call would take the `else` arm -- proving `build_instance` still catches
+    /// the broken `then` arm requires the same "validate every arm unconditionally" split
+    /// already used for the top-level analog block, now applied *inside* a function call too.
+    #[test]
+    fn validate_catches_an_error_in_a_functions_own_untaken_arm() {
+        let mut m = Module::new("func_soundness");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        // VarId(0) = arg `x`, VarId(1) = ret `myfunc`, VarId(2) = never assigned anywhere.
+        m.vars = vec![
+            VarDecl { name: "x".into() },
+            VarDecl {
+                name: "myfunc".into(),
+            },
+            VarDecl {
+                name: "unassigned".into(),
+            },
+        ];
+
+        let x_read = m.push_expr(Expr::Var(VarId(0)));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, x_read, zero));
+        let bad_read = m.push_expr(Expr::Var(VarId(2)));
+        let then_body = vec![Stmt::Assign {
+            lhs: VarId(1),
+            rhs: bad_read,
+        }];
+        let x_read2 = m.push_expr(Expr::Var(VarId(0)));
+        let else_body = vec![Stmt::Assign {
+            lhs: VarId(1),
+            rhs: x_read2,
+        }];
+
+        m.functions.push(Function {
+            name: "myfunc".into(),
+            args: vec![VarId(0)],
+            ret: VarId(1),
+            body: vec![Stmt::If {
+                cond,
+                then_: then_body,
+                else_: else_body,
+            }],
+        });
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![v]));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: call,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_function_called_with_the_wrong_argument_count_is_rejected() {
+        let mut m = Module::new("wrong_arity");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "x".into() }, VarDecl { name: "sq".into() }];
+
+        let x_a = m.push_expr(Expr::Var(VarId(0)));
+        let x_b = m.push_expr(Expr::Var(VarId(0)));
+        let mul = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, x_a, x_b));
+        m.functions.push(Function {
+            name: "sq".into(),
+            args: vec![VarId(0)],
+            ret: VarId(1),
+            body: vec![Stmt::Assign {
+                lhs: VarId(1),
+                rhs: mul,
+            }],
+        });
+
+        // Called with zero arguments instead of the one `sq` declares.
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![]));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: call,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_contribution_inside_a_function_body_is_rejected() {
+        let mut m = Module::new("contribute_in_function");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "x".into() }, VarDecl { name: "bad".into() }];
+
+        let zero = m.push_expr(Expr::Const(0.0));
+        m.functions.push(Function {
+            name: "bad".into(),
+            args: vec![VarId(0)],
+            ret: VarId(1),
+            body: vec![Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: zero,
+            }],
+        });
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![v]));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: call,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
     }
 }

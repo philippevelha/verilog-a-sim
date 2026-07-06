@@ -14,7 +14,7 @@
 use crate::CodegenError;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use va_ir::{BinOp, Builtin, Expr, ExprId, Module, UnOp, VarId};
+use va_ir::{BinOp, Builtin, Expr, ExprId, Function, Module, Stmt, UnOp, VarId};
 
 /// A value carried with its gradient w.r.t. the active unknowns (a dual number).
 #[derive(Clone, Debug)]
@@ -297,6 +297,15 @@ pub struct Ctx<'a> {
     /// consult this; a non-mixed branch never touches it (its structural stamp is instead
     /// unconditional, see `crate::lower::BranchCurrent`'s doc comment).
     pub mixed_branch_potential_used: RefCell<HashSet<usize>>,
+    /// Whether this `Ctx` belongs to `crate::GeneratedModel::validate`'s dry run rather than a
+    /// real `crate::GeneratedModel::load` call. Consulted only when evaluating a user-defined
+    /// analog function's own internal control flow (see [`call_function`]): validating visits
+    /// every `if`/`case` arm unconditionally and never actually iterates a loop, the same
+    /// eager-but-sound over-approximation `crate::GeneratedModel::validate_stmts` already
+    /// applies to the top-level analog block, for the same reason (an arm/iteration a
+    /// particular call doesn't happen to reach could still be the one a different real
+    /// operating point's arguments select).
+    pub validating: bool,
 }
 
 impl Ctx<'_> {
@@ -353,8 +362,10 @@ impl Ctx<'_> {
 /// # Errors
 ///
 /// Returns [`CodegenError::Unsupported`] for IR constructs the v0 codegen does not evaluate in
-/// value position: flow probes, `ddt`/`idt` (handled by the lowering split, not evaluated
-/// here), user-defined functions, and a local variable read before it was ever assigned.
+/// value position: a flow probe on a branch with no potential contribution of its own,
+/// `ddt`/`idt` (handled by the lowering split, not evaluated here), a local variable read
+/// before it was ever assigned, and anything [`call_function`] rejects (a `<+` contribution
+/// inside a function body, a wrong argument count, or a runaway loop inside one).
 pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
     let count = ctx.count();
     match ctx.module.expr(expr) {
@@ -452,9 +463,10 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             })
         }
         Expr::Call(builtin, args) => eval_call(ctx, *builtin, args),
-        Expr::CallUser(..) => Err(unsupported(
-            "user-defined analog functions are not supported in codegen v0",
-        )),
+        Expr::CallUser(fid, args) => {
+            let func = &ctx.module.functions[fid.0 as usize];
+            call_function(ctx, func, args)
+        }
         // Ternary: evaluate the selector, then only the taken branch (so an unselected,
         // possibly-undefined branch is never touched). The gradient is the taken branch's.
         Expr::Select(cond, then, else_) => {
@@ -535,6 +547,159 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
             ))
         }
     })
+}
+
+/// Call a user-defined analog function: bind `args` into `func`'s own argument variables, run
+/// its body, and return the final binding of its `ret` variable.
+///
+/// Functions are pure and non-recursive (`va_ir::Function`'s doc comment) and forbid `<+`
+/// contributions in their body (an LRM rule; [`exec_stmt`] enforces it), so this needs nothing
+/// like `crate::GeneratedModel::stamp`/branch-current bookkeeping — just expression evaluation
+/// and the variable environment `ctx` already carries. A function's own arguments/locals/return
+/// variable are ordinary globally-unique `VarId`s in `ctx.module.vars` (not a separate stack
+/// frame), so nested or repeated calls never alias each other's bindings.
+fn call_function(ctx: &Ctx, func: &Function, args: &[ExprId]) -> Result<Dual, CodegenError> {
+    if func.args.len() != args.len() {
+        return Err(unsupported(&format!(
+            "function `{}` called with {} argument(s), expected {}",
+            func.name,
+            args.len(),
+            func.args.len()
+        )));
+    }
+    for (&param, &arg_expr) in func.args.iter().zip(args) {
+        let d = eval(ctx, arg_expr)?;
+        ctx.set_var(param, d);
+    }
+    exec_stmts(ctx, &func.body)?;
+    ctx.get_var(func.ret)
+}
+
+fn exec_stmts(ctx: &Ctx, stmts: &[Stmt]) -> Result<(), CodegenError> {
+    for stmt in stmts {
+        exec_stmt(ctx, stmt)?;
+    }
+    Ok(())
+}
+
+/// Execute one statement of a function body. Mirrors `crate::GeneratedModel::run`'s and
+/// `crate::GeneratedModel::validate_stmts`'s split for `if`/`case`/loops (`ctx.validating`
+/// picks which), for the exact same soundness reason: eager validation must not miss an
+/// unsupported construct hiding in an arm/iteration a particular call doesn't happen to take.
+fn exec_stmt(ctx: &Ctx, stmt: &Stmt) -> Result<(), CodegenError> {
+    match stmt {
+        Stmt::Assign { lhs, rhs } => {
+            let d = eval(ctx, *rhs)?;
+            ctx.set_var(*lhs, d);
+            Ok(())
+        }
+        Stmt::Block(body) => exec_stmts(ctx, body),
+        Stmt::If { cond, then_, else_ } => {
+            if ctx.validating {
+                eval(ctx, *cond)?;
+                exec_stmts(ctx, then_)?;
+                exec_stmts(ctx, else_)
+            } else {
+                let taken = if eval(ctx, *cond)?.value != 0.0 {
+                    then_
+                } else {
+                    else_
+                };
+                exec_stmts(ctx, taken)
+            }
+        }
+        Stmt::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            if ctx.validating {
+                eval(ctx, *selector)?;
+                for arm in arms {
+                    for &label in &arm.labels {
+                        eval(ctx, label)?;
+                    }
+                    exec_stmts(ctx, &arm.body)?;
+                }
+                exec_stmts(ctx, default)
+            } else {
+                let sel = eval(ctx, *selector)?;
+                let mut taken = default;
+                'arms: for arm in arms {
+                    for &label in &arm.labels {
+                        if eval(ctx, label)?.value == sel.value {
+                            taken = &arm.body;
+                            break 'arms;
+                        }
+                    }
+                }
+                exec_stmts(ctx, taken)
+            }
+        }
+        Stmt::While { cond, body } => {
+            if ctx.validating {
+                eval(ctx, *cond)?;
+                return exec_stmts(ctx, body);
+            }
+            let mut iters = 0usize;
+            while eval(ctx, *cond)?.value != 0.0 {
+                exec_stmts(ctx, body)?;
+                iters += 1;
+                if iters > crate::MAX_LOOP_ITERATIONS {
+                    return Err(loop_iteration_cap_exceeded());
+                }
+            }
+            Ok(())
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if ctx.validating {
+                exec_stmt(ctx, init)?;
+                eval(ctx, *cond)?;
+                exec_stmts(ctx, body)?;
+                return exec_stmt(ctx, step);
+            }
+            exec_stmt(ctx, init)?;
+            let mut iters = 0usize;
+            while eval(ctx, *cond)?.value != 0.0 {
+                exec_stmts(ctx, body)?;
+                exec_stmt(ctx, step)?;
+                iters += 1;
+                if iters > crate::MAX_LOOP_ITERATIONS {
+                    return Err(loop_iteration_cap_exceeded());
+                }
+            }
+            Ok(())
+        }
+        Stmt::Repeat { count, body } => {
+            if ctx.validating {
+                eval(ctx, *count)?;
+                return exec_stmts(ctx, body);
+            }
+            let n = eval(ctx, *count)?.value;
+            if n > crate::MAX_LOOP_ITERATIONS as f64 {
+                return Err(loop_iteration_cap_exceeded());
+            }
+            for _ in 0..(n.round().max(0.0) as usize) {
+                exec_stmts(ctx, body)?;
+            }
+            Ok(())
+        }
+        Stmt::Contribute { .. } => Err(unsupported(
+            "a `<+` contribution is not allowed inside an analog function body",
+        )),
+    }
+}
+
+fn loop_iteration_cap_exceeded() -> CodegenError {
+    CodegenError::Unsupported(format!(
+        "a loop inside a function did not terminate within {} iterations",
+        crate::MAX_LOOP_ITERATIONS
+    ))
 }
 
 fn unsupported(msg: &str) -> CodegenError {
@@ -630,6 +795,7 @@ mod tests {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - 0.025_852).abs() < 1e-12);
@@ -676,6 +842,7 @@ mod tests {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - k_over_q * 350.0).abs() < 1e-12);
@@ -753,6 +920,7 @@ mod tests {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            validating: false,
         };
 
         assert_eq!(eval(&ctx, vin).unwrap().value, 2.0);
@@ -824,6 +992,7 @@ mod tests {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            validating: false,
         };
         let analytic = eval(&ctx, gdio).unwrap().value;
 
@@ -856,6 +1025,7 @@ mod tests {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            validating: false,
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
 
@@ -875,6 +1045,7 @@ mod tests {
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            validating: false,
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);
     }
