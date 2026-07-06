@@ -8,18 +8,22 @@
 //! The generated instance reproduces, by construction, the same stamps the hand-written
 //! reference models in `va-abi` emit: a flow contribution `I(p,n) <+ value` stamps the
 //! residual `value` and its gradient as the canonical 2×2 conductance stamp, while a
-//! `ddt(q)` term stamps `q` and its gradient into the charge channel.
+//! `ddt(q)` term stamps `q` and its gradient into the charge channel. A potential contribution
+//! `V(p,n) <+ expr` stamps differently — see [`GeneratedModel::stamp_branch_currents`].
 //!
 //! # Limitations (v0)
 //!
-//! - One global unknown per IR node, supplied as `terminals`. The v0 frontend emits modules
-//!   whose nodes are exactly their ports, so `terminals` is the port→global map; modules with
-//!   internal unknowns are out of scope.
-//! - Only flow contributions; no `if`/`else`, no loops/`case`, no user-defined analog
-//!   functions (see [`lower`]). Local-variable assignments *are* supported: statements execute
-//!   in source order, each `Stmt::Assign` binding into [`ad::Ctx::vars`] for later statements
-//!   (including later assignments — a variable can be reassigned) to read via [`ad::Ctx::set_var`]/
-//!   the [`ad::eval`] `Expr::Var` case.
+//! - One global unknown per IR node, supplied as the first `module.nodes.len()` entries of
+//!   `terminals`; one further global unknown per branch with a potential contribution,
+//!   allocated by [`build_instance`] itself from `next_unknown` (see [`lower::Lowered::branch_currents`]).
+//!   The v0 frontend emits modules whose nodes are exactly their ports, so the node prefix of
+//!   `terminals` is the port→global map; modules with internal node unknowns are out of scope.
+//! - A branch gets *either* flow or potential contributions, never both (see `lower`'s
+//!   Limitations); no loops/`case`, no user-defined analog functions (see [`lower`]).
+//!   Local-variable assignments and `if`/`else` *are* supported: statements execute in source
+//!   order, each `Stmt::Assign` binding into [`ad::Ctx::vars`] for later statements (including
+//!   later assignments — a variable can be reassigned) to read via [`ad::Ctx::set_var`]/the
+//!   [`ad::eval`] `Expr::Var` case.
 //! - `$vt`/`$temperature` evaluate at the fixed ambient point ([`VT`], [`TEMP`]); `$vt(T)`
 //!   evaluates the thermal voltage at the given absolute temperature `T`, carrying `T`'s
 //!   gradient (e.g. a self-heating thermal node).
@@ -32,8 +36,9 @@ pub mod lower;
 use ad::{eval, Ctx, Dual};
 use lower::{Contribution, Lowered, LoweredStmt};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use thiserror::Error;
-use va_abi::{ModelInstance, StampSink};
+use va_abi::{ModelInstance, StampSink, UnknownKind};
 use va_ir::Module;
 
 /// Thermal voltage `kT/q` at ~300 K, in volts. Matches `va_abi::reference::diode::VT_300K`
@@ -60,8 +65,15 @@ pub enum CodegenError {
     },
 }
 
-/// Compile an elaborated IR module into a loadable model instance bound to `terminals`
-/// (the global unknown indices the instance's nodes map onto, in node order).
+/// Compile an elaborated IR module into a loadable model instance. `terminals` must have
+/// exactly `module.nodes.len()` entries — the global unknown index for each of the module's
+/// own nodes, in node order (unchanged from before potential contributions existed). If the
+/// module has one or more branches with a potential contribution, each needs its own auxiliary
+/// branch-current unknown too; `build_instance` allocates those itself from `next_unknown`
+/// (incrementing it once per such branch, in ascending `BranchId` order — see
+/// [`lower::Lowered::branch_currents`]), so the caller's own next-free-index counter (e.g.
+/// `va-cli`'s device-building loop) stays in sync without having to pre-compute how many extra
+/// unknowns a module will need.
 ///
 /// # Errors
 ///
@@ -71,6 +83,7 @@ pub enum CodegenError {
 pub fn build_instance(
     module: &Module,
     terminals: &[usize],
+    next_unknown: &mut usize,
 ) -> Result<Box<dyn ModelInstance>, CodegenError> {
     if terminals.len() != module.nodes.len() {
         return Err(CodegenError::TerminalCount {
@@ -80,11 +93,16 @@ pub fn build_instance(
     }
 
     let lowered = lower::lower(module)?;
+    let mut full = terminals.to_vec();
+    for _ in &lowered.branch_currents {
+        full.push(*next_unknown);
+        *next_unknown += 1;
+    }
     let params: Vec<f64> = module.params.iter().map(|p| p.default).collect();
 
     let model = GeneratedModel {
         module: module.clone(),
-        terminals: terminals.to_vec(),
+        terminals: full,
         params,
         lowered,
         vt: VT,
@@ -111,6 +129,12 @@ struct GeneratedModel {
 
 impl GeneratedModel {
     fn ctx<'a>(&'a self, x: &'a [f64]) -> Ctx<'a> {
+        let branch_current_slots = self
+            .lowered
+            .branch_currents
+            .iter()
+            .map(|bc| (bc.branch.0, bc.local_slot))
+            .collect();
         Ctx {
             module: &self.module,
             params: &self.params,
@@ -118,7 +142,8 @@ impl GeneratedModel {
             terminals: &self.terminals,
             vt: self.vt,
             temp: self.temp,
-            vars: RefCell::new(std::collections::HashMap::new()),
+            vars: RefCell::new(HashMap::new()),
+            branch_current_slots,
         }
     }
 
@@ -210,40 +235,107 @@ impl GeneratedModel {
         Ok(acc)
     }
 
-    /// Stamp one contribution's resistive and charge channels.
+    /// Stamp one contribution's resistive and charge channels. A flow contribution (`c.branch_slot
+    /// == None`) stamps the ordinary two-terminal KCL shape at `p_slot`/`n_slot`, unchanged from
+    /// before potential contributions existed. A potential contribution instead *subtracts* its
+    /// value/gradient from its branch's own constraint row — the structural `V(p)-V(n)` part of
+    /// that row, and the branch current's KCL injection at `p`/`n`, are stamped once per branch
+    /// by [`Self::stamp_branch_currents`], not here (see that method's doc comment for why).
     fn stamp(&self, ctx: &Ctx, c: &Contribution, sink: &mut dyn StampSink) {
-        let gp = self.terminals[c.p_slot];
-        let gn = self.terminals[c.n_slot];
+        match c.branch_slot {
+            None => {
+                let gp = self.terminals[c.p_slot];
+                let gn = self.terminals[c.n_slot];
 
-        if !c.resistive.is_empty() {
-            // Post-validation this cannot fail; bail without stamping if it ever does.
-            let Ok(i) = Self::sum_terms(ctx, &c.resistive) else {
-                return;
-            };
-            sink.residual(gp, i.value);
-            sink.residual(gn, -i.value);
-            for (slot, &dg) in i.grad.iter().enumerate() {
-                if dg != 0.0 {
-                    let gk = self.terminals[slot];
-                    sink.jacobian(gp, gk, dg);
-                    sink.jacobian(gn, gk, -dg);
+                if !c.resistive.is_empty() {
+                    // Post-validation this cannot fail; bail without stamping if it ever does.
+                    let Ok(i) = Self::sum_terms(ctx, &c.resistive) else {
+                        return;
+                    };
+                    sink.residual(gp, i.value);
+                    sink.residual(gn, -i.value);
+                    for (slot, &dg) in i.grad.iter().enumerate() {
+                        if dg != 0.0 {
+                            let gk = self.terminals[slot];
+                            sink.jacobian(gp, gk, dg);
+                            sink.jacobian(gn, gk, -dg);
+                        }
+                    }
+                }
+
+                if !c.charge.is_empty() {
+                    let Ok(q) = Self::sum_terms(ctx, &c.charge) else {
+                        return;
+                    };
+                    sink.charge(gp, q.value);
+                    sink.charge(gn, -q.value);
+                    for (slot, &dg) in q.grad.iter().enumerate() {
+                        if dg != 0.0 {
+                            let gk = self.terminals[slot];
+                            sink.dcharge(gp, gk, dg);
+                            sink.dcharge(gn, gk, -dg);
+                        }
+                    }
+                }
+            }
+            Some(local_slot) => {
+                let gb = self.terminals[local_slot];
+
+                if !c.resistive.is_empty() {
+                    let Ok(i) = Self::sum_terms(ctx, &c.resistive) else {
+                        return;
+                    };
+                    sink.residual(gb, -i.value);
+                    for (slot, &dg) in i.grad.iter().enumerate() {
+                        if dg != 0.0 {
+                            let gk = self.terminals[slot];
+                            sink.jacobian(gb, gk, -dg);
+                        }
+                    }
+                }
+
+                if !c.charge.is_empty() {
+                    let Ok(q) = Self::sum_terms(ctx, &c.charge) else {
+                        return;
+                    };
+                    sink.charge(gb, -q.value);
+                    for (slot, &dg) in q.grad.iter().enumerate() {
+                        if dg != 0.0 {
+                            let gk = self.terminals[slot];
+                            sink.dcharge(gb, gk, -dg);
+                        }
+                    }
                 }
             }
         }
+    }
 
-        if !c.charge.is_empty() {
-            let Ok(q) = Self::sum_terms(ctx, &c.charge) else {
-                return;
-            };
-            sink.charge(gp, q.value);
-            sink.charge(gn, -q.value);
-            for (slot, &dg) in q.grad.iter().enumerate() {
-                if dg != 0.0 {
-                    let gk = self.terminals[slot];
-                    sink.dcharge(gp, gk, dg);
-                    sink.dcharge(gn, gk, -dg);
-                }
-            }
+    /// Stamp the structural part of every branch that has its own auxiliary current unknown,
+    /// unconditionally and exactly once per [`ModelInstance::load`] call — see
+    /// [`lower::BranchCurrent`]'s doc comment for why this can't just live inside
+    /// [`Self::stamp`] (it must happen regardless of which, if any, `if`/`else` arm actually
+    /// contributes to the branch this call). Two things, per branch: the constraint row's own
+    /// `V(p)-V(n)` term (each executed potential-contribution statement subtracts its own
+    /// `expr` from the same row via [`Self::stamp`]), and the branch current's ordinary
+    /// two-terminal KCL injection, exactly like `va_abi::reference::VSource` stamps its own
+    /// branch current.
+    fn stamp_branch_currents(&self, x: &[f64], sink: &mut dyn StampSink) {
+        for bc in &self.lowered.branch_currents {
+            let gp = self.terminals[bc.p_slot];
+            let gn = self.terminals[bc.n_slot];
+            let gb = self.terminals[bc.local_slot];
+            let vp = x.get(gp).copied().unwrap_or(0.0);
+            let vn = x.get(gn).copied().unwrap_or(0.0);
+            let ib = x.get(gb).copied().unwrap_or(0.0);
+
+            sink.residual(gb, vp - vn);
+            sink.jacobian(gb, gp, 1.0);
+            sink.jacobian(gb, gn, -1.0);
+
+            sink.residual(gp, ib);
+            sink.residual(gn, -ib);
+            sink.jacobian(gp, gb, 1.0);
+            sink.jacobian(gn, gb, -1.0);
         }
     }
 }
@@ -253,8 +345,19 @@ impl ModelInstance for GeneratedModel {
         &self.terminals
     }
 
+    /// A branch's own auxiliary current unknown is a constraint row (`V(p)-V(n) = expr`), never
+    /// safe for `va-core`'s `gmin` homotopy to shunt — everything else is an ordinary KCL row.
+    fn unknown_kind(&self, i: usize) -> UnknownKind {
+        if i >= self.module.nodes.len() {
+            UnknownKind::Branch
+        } else {
+            UnknownKind::Node
+        }
+    }
+
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
         let ctx = self.ctx(x);
+        self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
         let _ = self.run(&ctx, &self.lowered.stmts, sink);
@@ -486,7 +589,7 @@ mod tests {
 
     #[test]
     fn local_variables_compute_a_nonlinear_charge() {
-        let inst = build_instance(&varactor_like_ir(), &[0, 1]).unwrap();
+        let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
         let v = 0.6;
         let mut sink = DenseStamp::new(1);
         inst.load(&[v], &mut sink);
@@ -513,7 +616,7 @@ mod tests {
     /// local-variable assignments must still match a central finite difference.
     #[test]
     fn ad_through_local_variables_matches_finite_difference() {
-        let inst = build_instance(&varactor_like_ir(), &[0, 1]).unwrap();
+        let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
         let charge_at = |v: f64| {
             let mut s = DenseStamp::new(1);
             inst.load(&[v], &mut s);
@@ -575,7 +678,7 @@ mod tests {
             },
         ];
 
-        let inst = build_instance(&m, &[0, 1]).unwrap();
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
         inst.load(&[0.0], &mut sink);
         assert_eq!(sink.residual[0], 2.0);
@@ -612,7 +715,7 @@ mod tests {
         }];
 
         assert!(matches!(
-            build_instance(&m, &[0, 1]),
+            build_instance(&m, &[0, 1], &mut 2),
             Err(CodegenError::Unsupported(_))
         ));
     }
@@ -695,7 +798,7 @@ mod tests {
     #[test]
     fn if_else_selects_the_conductance_for_the_operating_point() {
         let (g_pos, g_neg) = (1e-3, 5e-3);
-        let inst = build_instance(&piecewise_ir(g_pos, g_neg), &[0, 1]).unwrap();
+        let inst = build_instance(&piecewise_ir(g_pos, g_neg), &[0, 1], &mut 2).unwrap();
 
         // V(p,n) = +1 V: the `then` arm, conductance g_pos.
         let mut sink = DenseStamp::new(1);
@@ -765,7 +868,7 @@ mod tests {
 
         assert!(
             matches!(
-                build_instance(&m, &[0, 1]),
+                build_instance(&m, &[0, 1], &mut 2),
                 Err(CodegenError::Unsupported(_))
             ),
             "an error in the untaken-at-x=0 arm must still be caught eagerly"
@@ -775,7 +878,7 @@ mod tests {
     #[test]
     fn resistor_matches_reference_stamp() {
         // 1 kΩ from node 0 to ground (index 1 is out of range of a dim-1 system).
-        let inst = build_instance(&resistor_ir(), &[0, 1]).unwrap();
+        let inst = build_instance(&resistor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
         inst.load(&[2.0], &mut sink);
         // Same hand-checked values as va_abi's resistor_stamp_by_hand.
@@ -786,7 +889,7 @@ mod tests {
 
     #[test]
     fn capacitor_stamps_only_charge() {
-        let inst = build_instance(&capacitor_ir(), &[0, 1]).unwrap();
+        let inst = build_instance(&capacitor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
         inst.load(&[3.0], &mut sink);
         // Q = C*V = 1pF * 3V = 3e-12; dQ/dV = C = 1e-12. No resistive current.
@@ -797,7 +900,7 @@ mod tests {
 
     #[test]
     fn diode_current_and_conductance() {
-        let inst = build_instance(&diode_ir(), &[0, 1]).unwrap();
+        let inst = build_instance(&diode_ir(), &[0, 1], &mut 2).unwrap();
         let vd = 0.6;
         let mut sink = DenseStamp::new(1);
         inst.load(&[vd], &mut sink);
@@ -813,7 +916,7 @@ mod tests {
     /// The §5 milestone: the AD Jacobian must match a central finite difference.
     #[test]
     fn ad_matches_finite_difference() {
-        let inst = build_instance(&diode_ir(), &[0, 1]).unwrap();
+        let inst = build_instance(&diode_ir(), &[0, 1], &mut 2).unwrap();
 
         let residual_at = |vd: f64| {
             let mut s = DenseStamp::new(1);
@@ -835,12 +938,211 @@ mod tests {
 
     #[test]
     fn wrong_terminal_count_is_rejected() {
-        match build_instance(&resistor_ir(), &[0]) {
+        match build_instance(&resistor_ir(), &[0], &mut 1) {
             Err(CodegenError::TerminalCount {
                 expected: 2,
                 got: 1,
             }) => {}
             _ => panic!("expected a TerminalCount error"),
         }
+    }
+
+    /// `V(p,n) <+ I(p,n) * R;` — the "voltage in terms of own current" series-resistance idiom
+    /// that recurs across several real compact models (`diode.va`, `jfet.va`, `mosvar.va`: a
+    /// bulk/access resistance modeled as a potential contribution reading the branch's own
+    /// flow). Needs a self-referencing flow probe, which only resolves because this branch also
+    /// receives a potential contribution (see `lower`'s module doc comment).
+    fn series_resistor_ir(r: f64) -> Module {
+        let mut m = Module::new("series_r");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "r".into(),
+            default: r,
+            min: Some(0.0),
+            max: None,
+        }];
+
+        let i_probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(0),
+        }));
+        let r_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, i_probe, r_e));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            },
+            value: rhs,
+        }];
+        m
+    }
+
+    #[test]
+    fn potential_contribution_with_self_flow_probe_stamps_constraint_and_kcl() {
+        let r = 1_000.0;
+        let mut next_unknown = 2usize;
+        let inst = build_instance(&series_resistor_ir(r), &[0, 1], &mut next_unknown).unwrap();
+        // One auxiliary branch-current unknown allocated past the two node slots.
+        assert_eq!(next_unknown, 3);
+
+        let (vp, vn, ib) = (5.0, 2.0, 1e-3);
+        let mut sink = DenseStamp::new(3);
+        inst.load(&[vp, vn, ib], &mut sink);
+
+        // Constraint row (global index 2): V(p) - V(n) - I(p,n)*R = 0.
+        assert!((sink.residual[2] - (vp - vn - ib * r)).abs() < 1e-9);
+        assert!((sink.jac(2, 0) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(2, 1) + 1.0).abs() < 1e-12);
+        // d(residual)/d(Ib) = -R -- the self-referencing flow probe's own diagonal term.
+        assert!((sink.jac(2, 2) + r).abs() < 1e-9);
+
+        // The branch current's own two-terminal KCL injection at p/n.
+        assert!((sink.residual[0] - ib).abs() < 1e-15);
+        assert!((sink.residual[1] + ib).abs() < 1e-15);
+        assert!((sink.jac(0, 2) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(1, 2) + 1.0).abs() < 1e-12);
+
+        // §5: the self-referencing flow-probe gradient must match a central finite difference.
+        let residual_at = |ib: f64| {
+            let mut s = DenseStamp::new(3);
+            inst.load(&[vp, vn, ib], &mut s);
+            s.residual[2]
+        };
+        let h = 1e-6;
+        let fd = (residual_at(ib + h) - residual_at(ib - h)) / (2.0 * h);
+        let analytic = sink.jac(2, 2);
+        assert!(
+            (analytic - fd).abs() < 1e-6,
+            "analytic {analytic} vs fd {fd}"
+        );
+    }
+
+    /// `V(p,n) <+ L * ddt(I(p,n));` — an ideal inductor spelled as a potential contribution
+    /// (`external/varistor.va`'s series-inductance branch). The `ddt` term must land in the
+    /// *constraint row's* charge channel, not at `p`/`n` — a different routing than a flow
+    /// contribution's `ddt` (which stamps at the node rows).
+    fn inductor_like_ir(l: f64) -> Module {
+        let mut m = Module::new("inductor_like");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "l".into(),
+            default: l,
+            min: Some(0.0),
+            max: None,
+        }];
+
+        let i_probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(0),
+        }));
+        let l_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let arg = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, l_e, i_probe));
+        let ddt = m.push_expr(Expr::Call(Builtin::Ddt, vec![arg]));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            },
+            value: ddt,
+        }];
+        m
+    }
+
+    #[test]
+    fn ddt_inside_a_potential_contribution_stamps_the_constraint_rows_charge_channel() {
+        let l = 2.5e-9;
+        let mut next_unknown = 2usize;
+        let inst = build_instance(&inductor_like_ir(l), &[0, 1], &mut next_unknown).unwrap();
+
+        let ib = 0.4;
+        let mut sink = DenseStamp::new(3);
+        inst.load(&[0.0, 0.0, ib], &mut sink);
+
+        // The constraint row is `V(p)-V(n) - L*ddt(I(p,n)) = 0`; the structural `V(p)-V(n)`
+        // part is stamped separately (`stamp_branch_currents`), so the remaining `-L*I(p,n)`
+        // is what must land in the charge channel here, at the branch's own row (index 2), so
+        // that its time-derivative subtracts `L*dI/dt` from the row the way the LRM's inductor
+        // idiom (`V <+ L*ddt(I)`) requires.
+        assert!((sink.charge[2] + l * ib).abs() < 1e-18);
+        assert!((sink.dcharge[2 * 3 + 2] + l).abs() < 1e-18);
+        // No charge at the ordinary node rows -- this isn't a node-charge stamp.
+        assert_eq!(sink.charge[0], 0.0);
+        assert_eq!(sink.charge[1], 0.0);
+    }
+
+    /// A branch that receives *both* a flow and a potential contribution -- unsupported by
+    /// design (`lower`'s Limitations): the constraint row's shape can't depend on which kind of
+    /// contribution happened to run.
+    #[test]
+    fn mixing_flow_and_potential_contributions_on_one_branch_is_rejected() {
+        let mut m = Module::new("mixed");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+
+        let zero = m.push_expr(Expr::Const(0.0));
+        let one = m.push_expr(Expr::Const(1.0));
+        m.analog = vec![
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: zero,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Potential,
+                    branch: BranchId(0),
+                },
+                value: one,
+            },
+        ];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
     }
 }

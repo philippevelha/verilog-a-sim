@@ -1,12 +1,15 @@
 //! Forward-mode automatic differentiation over the [`va_ir`] expression arena.
 //!
 //! Evaluates an [`va_ir::ExprId`] to a [`Dual`]: its primal value paired with the partial
-//! derivatives w.r.t. the model's local unknowns (one slot per node). The gradient feeds the
-//! Jacobian stamps, so it must be exact — §5 checks it against a central finite difference.
+//! derivatives w.r.t. the model's local unknowns (one slot per node, plus one per branch with
+//! its own auxiliary current unknown — see [`Ctx::branch_current_slots`]). The gradient feeds
+//! the Jacobian stamps, so it must be exact — §5 checks it against a central finite difference.
 //!
-//! The active unknowns are the node voltages. A potential probe `V(p, n)` is the only place
-//! a derivative is *introduced*: it contributes `+1` in the `p` slot and `-1` in the `n`
-//! slot. Every other operator simply propagates gradients through the chain rule.
+//! The active unknowns are the node voltages plus any branch currents. A potential probe
+//! `V(p, n)` contributes `+1` in the `p` slot and `-1` in the `n` slot; a flow probe `I(...)`
+//! contributes `+1` in its branch's own current slot, if that branch has one allocated (a
+//! branch only gets one if it receives a potential contribution somewhere in the module — see
+//! `crate::lower`). Every other operator simply propagates gradients through the chain rule.
 
 use crate::CodegenError;
 use std::cell::RefCell;
@@ -282,6 +285,11 @@ pub struct Ctx<'a> {
     /// happen exactly once per `Stmt::Assign`, from the outer statement walk via
     /// [`Self::set_var`], never from within expression evaluation itself.
     pub vars: RefCell<HashMap<u32, Dual>>,
+    /// Maps a branch (by `BranchId.0`) to the local terminal slot of its own auxiliary current
+    /// unknown, for every branch that receives a potential contribution somewhere in the
+    /// module (`crate::lower::Lowered::branch_currents`). A flow probe `I(...)` on a branch
+    /// absent from this map has no current unknown to read and is rejected.
+    pub branch_current_slots: HashMap<u32, usize>,
 }
 
 impl Ctx<'_> {
@@ -354,9 +362,25 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 }
                 Ok(Dual { value, grad })
             }
-            va_ir::AccessKind::Flow => Err(unsupported(
-                "flow probes `I(...)` are not supported in codegen v0",
-            )),
+            va_ir::AccessKind::Flow => {
+                let slot = *ctx
+                    .branch_current_slots
+                    .get(&access.branch.0)
+                    .ok_or_else(|| {
+                        unsupported(
+                            "flow probe `I(...)` is only supported for a branch that also \
+                             receives a potential contribution somewhere in the module \
+                             (codegen v0)",
+                        )
+                    })?;
+                let g = ctx.terminals.get(slot).copied().unwrap_or(usize::MAX);
+                let value = ctx.x.get(g).copied().unwrap_or(0.0);
+                let mut grad = vec![0.0; count];
+                if slot < count {
+                    grad[slot] = 1.0;
+                }
+                Ok(Dual { value, grad })
+            }
         },
         Expr::Unary(op, e) => {
             let d = eval(ctx, *e)?;
@@ -584,6 +608,7 @@ mod tests {
             vt: 0.025_852,
             temp: 300.0,
             vars: RefCell::new(HashMap::new()),
+            branch_current_slots: HashMap::new(),
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - 0.025_852).abs() < 1e-12);
@@ -628,6 +653,7 @@ mod tests {
             vt: vt_ref,
             temp: temp_ref,
             vars: RefCell::new(HashMap::new()),
+            branch_current_slots: HashMap::new(),
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - k_over_q * 350.0).abs() < 1e-12);
@@ -703,6 +729,7 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
+            branch_current_slots: HashMap::new(),
         };
 
         assert_eq!(eval(&ctx, vin).unwrap().value, 2.0);
@@ -772,6 +799,7 @@ mod tests {
             vt,
             temp: 300.0,
             vars: RefCell::new(HashMap::new()),
+            branch_current_slots: HashMap::new(),
         };
         let analytic = eval(&ctx, gdio).unwrap().value;
 
@@ -802,6 +830,7 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
+            branch_current_slots: HashMap::new(),
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
 
@@ -819,6 +848,7 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
+            branch_current_slots: HashMap::new(),
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);
     }

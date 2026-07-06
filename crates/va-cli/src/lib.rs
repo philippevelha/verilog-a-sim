@@ -444,7 +444,7 @@ fn build_from_model(
         })
         .collect();
 
-    va_codegen::build_instance(&m, &full)
+    va_codegen::build_instance(&m, &full, next_unknown)
         .with_context(|| format!("generating instance for model `{}`", module.name))
 }
 
