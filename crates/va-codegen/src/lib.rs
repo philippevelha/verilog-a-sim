@@ -144,7 +144,18 @@ impl GeneratedModel {
             temp: self.temp,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots,
+            mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Whether the branch whose auxiliary current unknown lives at local slot `local_slot` also
+    /// receives a flow contribution somewhere in the module (see [`lower::BranchCurrent::mixed`]).
+    fn is_mixed_branch(&self, local_slot: usize) -> bool {
+        self.lowered
+            .branch_currents
+            .iter()
+            .find(|bc| bc.local_slot == local_slot)
+            .is_some_and(|bc| bc.mixed)
     }
 
     /// Real, load-time execution: walks `stmts` in source order. An assignment evaluates its
@@ -237,10 +248,16 @@ impl GeneratedModel {
 
     /// Stamp one contribution's resistive and charge channels. A flow contribution (`c.branch_slot
     /// == None`) stamps the ordinary two-terminal KCL shape at `p_slot`/`n_slot`, unchanged from
-    /// before potential contributions existed. A potential contribution instead *subtracts* its
-    /// value/gradient from its branch's own constraint row — the structural `V(p)-V(n)` part of
-    /// that row, and the branch current's KCL injection at `p`/`n`, are stamped once per branch
-    /// by [`Self::stamp_branch_currents`], not here (see that method's doc comment for why).
+    /// before potential contributions existed — including for a mixed branch's flow arm, which
+    /// needs nothing special here (see [`Self::finalize_mixed_branch_currents`] for the other
+    /// half). A potential contribution instead *subtracts* its value/gradient from its branch's
+    /// own constraint row. For a non-mixed branch that row's structural `V(p)-V(n)` part and the
+    /// branch current's KCL injection at `p`/`n` were already stamped unconditionally by
+    /// [`Self::stamp_branch_currents`]; for a **mixed** branch (`lower::BranchCurrent::mixed`)
+    /// they haven't been — this call might be the first (and possibly only) potential
+    /// contribution to run for it this `load()` call, so the structural part is stamped here
+    /// instead, lazily, exactly once (`ad::Ctx::mark_potential_used` reports whether it's the
+    /// first time).
     fn stamp(&self, ctx: &Ctx, c: &Contribution, sink: &mut dyn StampSink) {
         match c.branch_slot {
             None => {
@@ -279,6 +296,15 @@ impl GeneratedModel {
                 }
             }
             Some(local_slot) => {
+                if self.is_mixed_branch(local_slot) && ctx.mark_potential_used(local_slot) {
+                    Self::stamp_branch_current_structural(
+                        self.terminals[c.p_slot],
+                        self.terminals[c.n_slot],
+                        self.terminals[local_slot],
+                        ctx.x,
+                        sink,
+                    );
+                }
                 let gb = self.terminals[local_slot];
 
                 if !c.resistive.is_empty() {
@@ -310,32 +336,71 @@ impl GeneratedModel {
         }
     }
 
-    /// Stamp the structural part of every branch that has its own auxiliary current unknown,
-    /// unconditionally and exactly once per [`ModelInstance::load`] call — see
-    /// [`lower::BranchCurrent`]'s doc comment for why this can't just live inside
-    /// [`Self::stamp`] (it must happen regardless of which, if any, `if`/`else` arm actually
-    /// contributes to the branch this call). Two things, per branch: the constraint row's own
-    /// `V(p)-V(n)` term (each executed potential-contribution statement subtracts its own
-    /// `expr` from the same row via [`Self::stamp`]), and the branch current's ordinary
+    /// Stamp the constraint row's structural `V(p)-V(n)` term and the branch current's ordinary
     /// two-terminal KCL injection, exactly like `va_abi::reference::VSource` stamps its own
-    /// branch current.
+    /// branch current. `gp`/`gn`/`gb` are already-resolved global unknown indices.
+    fn stamp_branch_current_structural(
+        gp: usize,
+        gn: usize,
+        gb: usize,
+        x: &[f64],
+        sink: &mut dyn StampSink,
+    ) {
+        let vp = x.get(gp).copied().unwrap_or(0.0);
+        let vn = x.get(gn).copied().unwrap_or(0.0);
+        let ib = x.get(gb).copied().unwrap_or(0.0);
+
+        sink.residual(gb, vp - vn);
+        sink.jacobian(gb, gp, 1.0);
+        sink.jacobian(gb, gn, -1.0);
+
+        sink.residual(gp, ib);
+        sink.residual(gn, -ib);
+        sink.jacobian(gp, gb, 1.0);
+        sink.jacobian(gn, gb, -1.0);
+    }
+
+    /// Stamp the structural part of every **non-mixed** branch (`lower::BranchCurrent::mixed ==
+    /// false`) unconditionally and exactly once per [`ModelInstance::load`] call — see
+    /// [`lower::BranchCurrent`]'s doc comment for why this can't just live inside [`Self::stamp`]
+    /// (it must happen regardless of which, if any, `if`/`else` arm actually contributes to the
+    /// branch this call). A **mixed** branch instead gets this lazily, from [`Self::stamp`]
+    /// itself, only if a potential contribution actually runs for it this call — see
+    /// [`Self::finalize_mixed_branch_currents`] for what happens when one doesn't.
     fn stamp_branch_currents(&self, x: &[f64], sink: &mut dyn StampSink) {
         for bc in &self.lowered.branch_currents {
-            let gp = self.terminals[bc.p_slot];
-            let gn = self.terminals[bc.n_slot];
-            let gb = self.terminals[bc.local_slot];
-            let vp = x.get(gp).copied().unwrap_or(0.0);
-            let vn = x.get(gn).copied().unwrap_or(0.0);
-            let ib = x.get(gb).copied().unwrap_or(0.0);
+            if !bc.mixed {
+                Self::stamp_branch_current_structural(
+                    self.terminals[bc.p_slot],
+                    self.terminals[bc.n_slot],
+                    self.terminals[bc.local_slot],
+                    x,
+                    sink,
+                );
+            }
+        }
+    }
 
-            sink.residual(gb, vp - vn);
-            sink.jacobian(gb, gp, 1.0);
-            sink.jacobian(gb, gn, -1.0);
-
-            sink.residual(gp, ib);
-            sink.residual(gn, -ib);
-            sink.jacobian(gp, gb, 1.0);
-            sink.jacobian(gn, gb, -1.0);
+    /// After the statement walk finishes, resolve every **mixed** branch whose constraint row
+    /// [`Self::stamp`] never claimed this call (no potential contribution ran for it — the
+    /// branch's flow arm ran instead, or, in principle, neither did): its auxiliary current is
+    /// otherwise a free unknown with no equation of its own this call, which would leave the
+    /// system singular, so it's pinned to zero instead (`residual(gb, x[gb])`,
+    /// `jacobian(gb, gb, 1.0)`) — sound because a flow-mode call already injects the branch's
+    /// real current directly into `p`/`n` itself, with no need for this auxiliary unknown to
+    /// carry anything.
+    fn finalize_mixed_branch_currents(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
+        for bc in &self.lowered.branch_currents {
+            if bc.mixed
+                && !ctx
+                    .mixed_branch_potential_used
+                    .borrow()
+                    .contains(&bc.local_slot)
+            {
+                let gb = self.terminals[bc.local_slot];
+                sink.residual(gb, ctx.x.get(gb).copied().unwrap_or(0.0));
+                sink.jacobian(gb, gb, 1.0);
+            }
         }
     }
 }
@@ -361,6 +426,7 @@ impl ModelInstance for GeneratedModel {
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
         let _ = self.run(&ctx, &self.lowered.stmts, sink);
+        self.finalize_mixed_branch_currents(&ctx, sink);
     }
 }
 
@@ -1099,12 +1165,13 @@ mod tests {
         assert_eq!(sink.charge[1], 0.0);
     }
 
-    /// A branch that receives *both* a flow and a potential contribution -- unsupported by
-    /// design (`lower`'s Limitations): the constraint row's shape can't depend on which kind of
-    /// contribution happened to run.
-    #[test]
-    fn mixing_flow_and_potential_contributions_on_one_branch_is_rejected() {
-        let mut m = Module::new("mixed");
+    /// The real `` `collapsibleR `` idiom (`generalMacrosAndDefines.va`, `diode_cmc.va`): a
+    /// branch that behaves as an ordinary resistor when a *parameter* clears some threshold,
+    /// and collapses to a forced short otherwise -- `if (rt > 1.0) I(b) <+ V(b)/rt; else
+    /// V(b) <+ 0.0;`. The same branch gets a flow contribution in one arm and a potential
+    /// contribution in the other, mutually exclusively.
+    fn collapsible_r_ir(rt: f64) -> Module {
+        let mut m = Module::new("collapsible_r");
         m.nodes = vec![
             NodeDecl {
                 name: "p".into(),
@@ -1120,29 +1187,90 @@ mod tests {
             p: NodeId(0),
             n: NodeId(1),
         }];
+        m.params = vec![Param {
+            name: "rt".into(),
+            default: rt,
+            min: Some(0.0),
+            max: None,
+        }];
+
+        let rt_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let one = m.push_expr(Expr::Const(1.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, rt_e, one));
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let rt_e2 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let i_over_rt = m.push_expr(Expr::Binary(va_ir::BinOp::Div, v, rt_e2));
+        let then_ = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: i_over_rt,
+        }];
 
         let zero = m.push_expr(Expr::Const(0.0));
-        let one = m.push_expr(Expr::Const(1.0));
-        m.analog = vec![
-            Stmt::Contribute {
-                target: Access {
-                    kind: AccessKind::Flow,
-                    branch: BranchId(0),
-                },
-                value: zero,
+        let else_ = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
             },
-            Stmt::Contribute {
-                target: Access {
-                    kind: AccessKind::Potential,
-                    branch: BranchId(0),
-                },
-                value: one,
-            },
-        ];
+            value: zero,
+        }];
 
-        assert!(matches!(
-            build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
-        ));
+        m.analog = vec![Stmt::If { cond, then_, else_ }];
+        m
+    }
+
+    #[test]
+    fn collapsible_r_behaves_as_an_ordinary_resistor_above_threshold() {
+        // rt = 2000 > 1.0 -- the flow (ordinary-resistor) arm runs.
+        let rt = 2000.0;
+        let mut next_unknown = 2usize;
+        let inst = build_instance(&collapsible_r_ir(rt), &[0, 1], &mut next_unknown).unwrap();
+        assert_eq!(next_unknown, 3); // the branch still gets an aux slot -- it might need one
+
+        let (vp, vn, stray_ib) = (5.0, 2.0, 42.0);
+        let mut sink = DenseStamp::new(3);
+        inst.load(&[vp, vn, stray_ib], &mut sink);
+
+        // Ordinary resistor KCL at the nodes: I = (Vp-Vn)/rt.
+        let expected_i = (vp - vn) / rt;
+        assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
+        assert!((sink.residual[1] + expected_i).abs() / expected_i < 1e-12);
+        // No stray KCL injection from the (unused this call) auxiliary branch current.
+        assert!((sink.jac(0, 2)).abs() < 1e-15);
+        assert!((sink.jac(1, 2)).abs() < 1e-15);
+
+        // The auxiliary current is otherwise a free unknown this call -- pinned to zero rather
+        // than left unconstrained (a singular system).
+        assert!((sink.residual[2] - stray_ib).abs() < 1e-12);
+        assert!((sink.jac(2, 2) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn collapsible_r_forces_a_short_below_threshold() {
+        // rt = 0.5 <= 1.0 -- the potential (forced-short) arm runs: V(p,n) <+ 0.
+        let rt = 0.5;
+        let mut next_unknown = 2usize;
+        let inst = build_instance(&collapsible_r_ir(rt), &[0, 1], &mut next_unknown).unwrap();
+
+        let (vp, vn, ib) = (5.0, 2.0, 1e-3);
+        let mut sink = DenseStamp::new(3);
+        inst.load(&[vp, vn, ib], &mut sink);
+
+        // Constraint row: V(p) - V(n) - 0 = 0.
+        assert!((sink.residual[2] - (vp - vn)).abs() < 1e-12);
+        assert!((sink.jac(2, 0) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(2, 1) + 1.0).abs() < 1e-12);
+
+        // The branch current's own KCL injection at p/n (the short actually carries current).
+        assert!((sink.residual[0] - ib).abs() < 1e-15);
+        assert!((sink.residual[1] + ib).abs() < 1e-15);
+        assert!((sink.jac(0, 2) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(1, 2) + 1.0).abs() < 1e-12);
     }
 }

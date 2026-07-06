@@ -32,14 +32,19 @@
 //! stamps the constraint row and the branch's own KCL injection (see
 //! `crate::GeneratedModel::stamp_branch_currents`/`stamp`).
 //!
+//! A branch can receive *both* flow and potential contributions, gated by mutually-exclusive
+//! `if`/`else` arms — a real, recurring idiom (the widely-reused `` `collapsibleR `` macro,
+//! `diode_cmc.va`'s several collapsible branches): a parameter picks, once, whether the branch
+//! behaves as an ordinary current-defined element or collapses to a forced/near-zero-impedance
+//! voltage constraint. [`BranchCurrent::mixed`] flags exactly these branches; unlike a
+//! branch that only ever gets potential contributions, a mixed branch's constraint row can't be
+//! stamped unconditionally up front, because its very shape depends on which kind of
+//! contribution this particular `load()` call's control flow actually takes — see
+//! `crate::GeneratedModel::stamp`/`finalize_mixed_branch_currents` for how that gets resolved
+//! at evaluation time instead of here.
+//!
 //! # Limitations
 //!
-//! - A branch may receive *either* flow contributions or potential contributions, never both
-//!   (anywhere in the module, including mutually-exclusive `if`/`else` arms) — `lower` rejects
-//!   the mix outright. Real compact models do sometimes gate between the two per-branch by a
-//!   *parameter* (e.g. the widely-reused `` `collapsibleR `` idiom), but that needs the
-//!   constraint row itself to change shape depending on which arm ran, which this lowering
-//!   doesn't attempt; a module doing that stays [`CodegenError::Unsupported`] for now.
 //! - `ddt` is recognised only as a top-level additive term (optionally negated), matching how
 //!   compact models are written (`I <+ resistive + ddt(charge)`, `V <+ resistive + ddt(charge)`);
 //!   `ddt` nested inside a nonlinear function is rejected later by the AD evaluator.
@@ -80,14 +85,23 @@ pub struct Contribution {
 /// One branch that receives a potential (voltage) contribution somewhere in the module, and
 /// the local terminal slot allocated for its auxiliary branch-current unknown.
 ///
-/// `crate::GeneratedModel::stamp_branch_currents` stamps two things for every entry,
-/// unconditionally, exactly once per [`crate::GeneratedModel::load`] call regardless of which
-/// (if any) `if`/`else` arm actually contributes to it that call: the constraint row itself
-/// (`V(p)-V(n) = 0` structurally; each executed `V(...)<+expr` statement subtracts its own
-/// `expr` from that same row via `crate::GeneratedModel::stamp`) and the branch current's
-/// ordinary two-terminal KCL injection (`+ib` at `p`, `-ib` at `n`). A path that contributes
-/// nothing to this branch this call defaults the row to `V(p)-V(n) = 0`, matching the LRM's
-/// implicit-zero-contribution rule for an access nothing ever assigns on that path.
+/// For a **non-mixed** branch (`mixed == false`), `crate::GeneratedModel::stamp_branch_currents`
+/// stamps two things for every entry, unconditionally, exactly once per
+/// [`crate::GeneratedModel::load`] call regardless of which (if any) `if`/`else` arm actually
+/// contributes to it that call: the constraint row itself (`V(p)-V(n) = 0` structurally; each
+/// executed `V(...)<+expr` statement subtracts its own `expr` from that same row via
+/// `crate::GeneratedModel::stamp`) and the branch current's ordinary two-terminal KCL injection
+/// (`+ib` at `p`, `-ib` at `n`). A path that contributes nothing to this branch this call
+/// defaults the row to `V(p)-V(n) = 0`, matching the LRM's implicit-zero-contribution rule for
+/// an access nothing ever assigns on that path.
+///
+/// For a **mixed** branch (`mixed == true`, this module's doc comment), that unconditional
+/// up-front stamp would be wrong on a call where a flow contribution runs instead: the
+/// constraint row's very meaning depends on which kind actually executed. Its structural part
+/// is stamped lazily instead, the first time a potential contribution actually runs for it
+/// (`crate::GeneratedModel::stamp`); if none does, `crate::GeneratedModel::
+/// finalize_mixed_branch_currents` pins the otherwise-unconstrained auxiliary current to zero
+/// after the walk finishes, once it's known no potential contribution claimed the row this call.
 #[derive(Clone, Copy, Debug)]
 pub struct BranchCurrent {
     /// Which branch this auxiliary unknown belongs to.
@@ -98,6 +112,10 @@ pub struct BranchCurrent {
     pub n_slot: usize,
     /// Local terminal slot (`>= module.nodes.len()`) allocated for the branch's own current.
     pub local_slot: usize,
+    /// Whether this branch also receives a flow contribution somewhere in the module (always
+    /// in a different, mutually-exclusive `if`/`else` arm from every potential contribution to
+    /// it — see this struct's doc comment).
+    pub mixed: bool,
 }
 
 /// One executable statement in the codegen v0 subset, in source order.
@@ -144,17 +162,10 @@ pub struct Lowered {
 ///
 /// # Errors
 ///
-/// Returns [`CodegenError::Unsupported`] on IR constructs outside the codegen subset (a branch
-/// mixing flow and potential contributions, loops/`case`, user-defined functions, malformed
-/// `ddt`).
+/// Returns [`CodegenError::Unsupported`] on IR constructs outside the codegen subset
+/// (loops/`case`, user-defined functions, malformed `ddt`).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let (flow_branches, potential_branches) = branch_kinds(&module.analog);
-    if let Some(&bad) = flow_branches.intersection(&potential_branches).next() {
-        return Err(unsupported(&format!(
-            "branch #{bad} receives both a flow and a potential contribution somewhere in the \
-             module; mixing contribution kinds on one branch is not supported in codegen v0"
-        )));
-    }
 
     let mut branch_currents = Vec::new();
     let mut slot_of_branch = HashMap::new();
@@ -167,6 +178,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             p_slot: br.p.0 as usize,
             n_slot: br.n.0 as usize,
             local_slot: next_slot,
+            mixed: flow_branches.contains(&id),
         });
         next_slot += 1;
     }

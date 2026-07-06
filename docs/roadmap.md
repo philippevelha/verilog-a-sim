@@ -40,7 +40,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity; 6 tests | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; the three zoo models elaborate end-to-end; 6 tests | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, and potential (voltage) contributions; 29/115 real corpus files pass frontend+codegen (branches mixing flow/potential contributions now the top blocker) | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions, and branches mixing flow/potential; 31/115 real corpus files pass frontend+codegen (loops/`case` now the top blocker) | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
@@ -406,18 +406,22 @@ matches the code verbatim.
 > resistor reproduces `va-abi`'s hand-checked stamp; diode matches analytic current +
 > conductance; **§5 AD-vs-FD milestone green**.
 >
-> **Corpus baseline (2026-07-09), the T2 analogue of T1's `token-reference.md` tracking**:
+> **Corpus baseline (2026-07-10), the T2 analogue of T1's `token-reference.md` tracking**:
 > passing the *frontend* (T1, `docs/token-reference.md`'s domain) and passing *codegen* —
 > actually buildable into a `ModelInstance`, i.e. actually simulatable — are different bars,
 > and only the first was ever measured against the real, recursively-scanned 115-file
 > `external/` corpus. Scanning the second (`va_codegen::build_instance` on every module that
-> already elaborates): of the 62 that pass the frontend, **29 now also pass codegen** (up from
-> 22). Of the 33 that don't: a branch mixing flow and potential contributions (22, across many
-> distinct real models — the new top blocker, see below), user-defined analog functions (5),
-> loops/`case` (3, mostly already double-counted under the mixing bucket for files that have
-> both issues — the loop rejection just never gets reached first), a branch's flow probe with
-> no potential contribution of its own (1, `verilogaLib-master/ohmmeter.va` — a stated v0 scope
-> edge, see below), a nested (non-top-level) `ddt`/`idt` (1).
+> already elaborates): of the 62 that pass the frontend, **31 now also pass codegen** (up from
+> 29). Of the 31 that don't: loops/`case` (19, now the top blocker — many of these files also
+> used to hit the mixing rejection first; fixing mixing just re-attributed them to their real
+> remaining blocker, not a regression), user-defined analog functions (8, same
+> re-attribution story), a nested (non-top-level) `ddt`/`idt` (3, `varistor.va` among them —
+> also re-attributed), a branch's flow probe with no potential contribution of its own (1,
+> `verilogaLib-master/ohmmeter.va` — a stated v0 scope edge, see below). Only **2 net new files**
+> pass versus the prior baseline, since most of the 22 formerly-mixing-rejected files have a
+> second, independent blocker (a loop or an analog function) elsewhere in the same module —
+> expected, and itself a useful confirmation that the corpus-scan methodology is measuring real
+> per-file status rather than double-counting a single fix's impact.
 >
 > **`if`/`else` is now lowered** (previously the single biggest codegen blocker — 35 of the 43
 > non-frontend-clean-but-codegen-failing files as of the prior baseline; the fix removed that
@@ -462,18 +466,44 @@ matches the code verbatim.
 > I(a,b)*rs`) lower at all. `ddt` inside a potential contribution (an inductor spelled as
 > `V(p,n) <+ L*ddt(I(p,n))`, `varistor.va`'s series-inductance branch) routes to the *constraint
 > row's* charge channel rather than the node rows — a different stamp shape than a flow
-> contribution's `ddt`, regression-tested directly. **Scope decision, not a silent gap:** a
-> branch either gets flow contributions or potential contributions, never both anywhere in the
-> module (including across mutually-exclusive `if`/`else` arms) — `lower` rejects the mix
-> outright, since the constraint row's very shape would need to change depending on which kind
-> ran, which this design doesn't attempt. Real compact models do sometimes gate between the two
-> per-branch by a *parameter* (the widely-reused `` `collapsibleR `` macro, `diode_cmc.va`), so
-> this is now the corpus's largest remaining bucket (22 files) — the next target, if it's worth
-> the added row-shape complexity. Verified against a real 5 V/1 kΩ circuit through the full
-> pipeline (`va-cli sim`, not just isolated stamp assertions): the potential-contribution
-> resistor idiom converges to exactly 5 mA via Newton, alongside the reference `vsource`.
-> *Outstanding:* branches mixing flow/potential contributions (now the clear next target) +
-> loops/`case` + analog functions; full committed sweep; `t2-codegen/02-lowering.qmd`.
+> contribution's `ddt`, regression-tested directly. Verified against a real 5 V/1 kΩ circuit
+> through the full pipeline (`va-cli sim`, not just isolated stamp assertions): the
+> potential-contribution resistor idiom converges to exactly 5 mA via Newton, alongside the
+> reference `vsource`.
+>
+> **Branches mixing flow and potential contributions are now lowered too** (previously rejected
+> outright — 22 of the 33 non-frontend-clean-but-codegen-failing files as of the prior
+> baseline). Real compact models do sometimes gate between the two per-branch by a *parameter*
+> (the widely-reused `` `collapsibleR `` macro, `diode_cmc.va`'s several collapsible branches):
+> below some threshold the branch behaves as an ordinary current-defined element, above it, it
+> collapses to a forced/near-zero-impedance voltage constraint — always via mutually-exclusive
+> `if`/`else` arms. The problem an always-allocated, always-unconditionally-stamped constraint
+> row (the non-mixed design) can't handle: the row's very *shape* depends on which arm this
+> particular `load()` call's control flow actually takes, which isn't known until the statement
+> walk runs. `lower::BranchCurrent` gained a `mixed` flag (a branch is mixed if it appears in
+> both the flow-targeted and potential-targeted branch sets `lower` already collects); a
+> non-mixed branch keeps the exact unconditional-upfront-stamp code path from before (zero
+> behavior change, zero regression risk for the 29 files that already worked). A mixed branch's
+> structural `V(p)-V(n)` term and KCL injection are instead stamped *lazily*, from
+> `GeneratedModel::stamp` itself, the first time a potential contribution actually executes for
+> it this call (`ad::Ctx::mark_potential_used` reports "first time" via a per-call `HashSet`,
+> the same interior-mutability pattern `Ctx::vars` already used). If no potential contribution
+> ever claims the row this call — the flow arm ran instead, ordinary KCL stamped directly at
+> `p`/`n` as always — the auxiliary current is otherwise a free unknown with no equation of its
+> own, which would leave the system singular; `GeneratedModel::finalize_mixed_branch_currents`
+> runs once after the whole statement walk finishes and pins any such row to zero
+> (`residual(gb,x[gb])`, `jacobian(gb,gb,1.0)`), sound because the flow arm's own KCL stamp
+> already carries the branch's real current. Regression-tested with the `collapsibleR` shape
+> itself (`if (rt>1.0) I(b)<+V(b)/rt; else V(b)<+0;`), both ways: above threshold reproduces the
+> exact ordinary-resistor stamp with the auxiliary row correctly pinned and *not* leaking into
+> the node KCL rows; below threshold reproduces the forced-short constraint row and its KCL
+> injection. Also verified end-to-end (`va-cli sim`, not just stamp assertions) for both
+> regimes: a 5 V source across the ordinary-resistor arm (rt=2000) converges to exactly 2.5 mA;
+> across the forced-short arm (rt=0.5, wired in series to an otherwise-floating node) the
+> floating node collapses to exactly the source's own voltage with ~0 A flowing, both via
+> Newton.
+> *Outstanding:* loops/`case` (now the clear next target) + analog functions; full committed
+> sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

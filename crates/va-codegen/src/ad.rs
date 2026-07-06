@@ -13,7 +13,7 @@
 
 use crate::CodegenError;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use va_ir::{BinOp, Builtin, Expr, ExprId, Module, UnOp, VarId};
 
 /// A value carried with its gradient w.r.t. the active unknowns (a dual number).
@@ -290,6 +290,26 @@ pub struct Ctx<'a> {
     /// module (`crate::lower::Lowered::branch_currents`). A flow probe `I(...)` on a branch
     /// absent from this map has no current unknown to read and is rejected.
     pub branch_current_slots: HashMap<u32, usize>,
+    /// Per-`load()`-call bookkeeping for a branch that mixes flow and potential contributions
+    /// (`crate::lower::BranchCurrent::mixed`): the local slots whose constraint-row structural
+    /// stamp has already been applied *this call*, because a potential contribution has
+    /// already run for them. `crate::GeneratedModel::stamp`/`mark_potential_used` populate and
+    /// consult this; a non-mixed branch never touches it (its structural stamp is instead
+    /// unconditional, see `crate::lower::BranchCurrent`'s doc comment).
+    pub mixed_branch_potential_used: RefCell<HashSet<usize>>,
+}
+
+impl Ctx<'_> {
+    /// Record that a potential contribution just ran for the branch whose auxiliary current
+    /// unknown lives at `local_slot`. Returns `true` the first time this is called for
+    /// `local_slot` in this `Ctx`'s lifetime (i.e. this `load()`/`validate()` call) — the signal
+    /// `crate::GeneratedModel::stamp` uses to know whether it still owes that branch its
+    /// constraint row's structural (`V(p)-V(n)`) stamp.
+    pub fn mark_potential_used(&self, local_slot: usize) -> bool {
+        self.mixed_branch_potential_used
+            .borrow_mut()
+            .insert(local_slot)
+    }
 }
 
 impl Ctx<'_> {
@@ -609,6 +629,7 @@ mod tests {
             temp: 300.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - 0.025_852).abs() < 1e-12);
@@ -654,6 +675,7 @@ mod tests {
             temp: temp_ref,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - k_over_q * 350.0).abs() < 1e-12);
@@ -730,6 +752,7 @@ mod tests {
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
         };
 
         assert_eq!(eval(&ctx, vin).unwrap().value, 2.0);
@@ -800,6 +823,7 @@ mod tests {
             temp: 300.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
         };
         let analytic = eval(&ctx, gdio).unwrap().value;
 
@@ -831,6 +855,7 @@ mod tests {
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
 
@@ -849,6 +874,7 @@ mod tests {
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);
     }
