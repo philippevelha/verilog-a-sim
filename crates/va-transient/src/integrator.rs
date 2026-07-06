@@ -18,8 +18,20 @@
 //! benefit: it needed no new history-tracking infrastructure and is simple enough to verify by
 //! direct comparison against the analytic RC solution (`tests::rc_transient_matches_analytic`).
 //!
-//! Event handling (`crate::events`) isn't wired in either — no breakpoint forces a step yet.
+//! [`run_with_events`] wires `crate::events::EventQueue` in: breakpoints clamp the adaptive
+//! step so it never overshoots a forced timepoint, and crossing watches are checked against
+//! every pair of consecutive accepted points. [`run`] is a thin wrapper over it with an empty
+//! queue, kept for callers that don't need either.
+//!
+//! **Not attempted: a ring-oscillator demo (ladder rung 6).** It needs a device with gain —
+//! something that can sustain oscillation — and this project's model zoo (`va-abi::reference`:
+//! resistor, capacitor, diode, ideal source) is entirely passive. No combination of them
+//! oscillates; there is nothing this crate can add to make one work without a gain element
+//! (a controlled source or a transistor-like model) existing somewhere in the pipeline first.
+//! That is a model-zoo gap, not a `va-transient` one — flagged honestly rather than faked with
+//! an artificial "oscillator" that isn't really one.
 
+use crate::events::EventQueue;
 use crate::TransientError;
 use va_abi::stamps::DenseStamp;
 use va_abi::ModelInstance;
@@ -69,6 +81,10 @@ pub struct Waveform {
     pub t: Vec<f64>,
     /// Solution vectors, one row per time point.
     pub x: Vec<Vec<f64>>,
+    /// Detected crossings, in the order they occurred: `(watch_index, time)`, where
+    /// `watch_index` indexes the [`EventQueue::watches`] slice passed to
+    /// [`run_with_events`] (always empty for [`run`], which watches nothing).
+    pub crossings: Vec<(usize, f64)>,
 }
 
 /// The companion-model contribution a discretization scheme adds to the per-iteration nodal
@@ -250,11 +266,29 @@ fn newton_step(
 /// Integrate `instances` over `[cfg.tstart, cfg.tstop]` from initial condition `x0`, returning
 /// the sampled [`Waveform`] (including the `(tstart, x0)` point itself).
 ///
+/// Equivalent to [`run_with_events`] with an empty [`EventQueue`] (no forced breakpoints, no
+/// crossing watches) — see it for the full behavior and error conditions.
+pub fn run(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    x0: Vec<f64>,
+    cfg: TranConfig,
+) -> Result<Waveform, TransientError> {
+    run_with_events(instances, dim, x0, cfg, &EventQueue::new())
+}
+
+/// Integrate `instances` over `[cfg.tstart, cfg.tstop]` from initial condition `x0`, forcing an
+/// exact landing on every breakpoint in `events` and recording every crossing `events` watches
+/// for, in addition to everything [`run`] does.
+///
 /// `x0` is the caller's responsibility — typically a `va_core::dc::operating_point` result, or
 /// a deliberately different initial condition (e.g. a capacitor starting at 0 V to observe a
 /// charging transient). Step size adapts within `[cfg.tstep_min, cfg.tstep]` to keep the
 /// embedded-pair LTE estimate (this module's doc comment) within `cfg.lte_reltol`/
-/// `cfg.lte_abstol`.
+/// `cfg.lte_abstol`, further clamped so it never steps past the next unconsumed breakpoint.
+/// Crossings are detected between consecutive *accepted* points only (see
+/// [`crate::events::CrossingWatch`]'s doc comment on why interpolation, not a genuine re-solve
+/// at the crossing time, is enough here).
 ///
 /// # Errors
 ///
@@ -262,11 +296,12 @@ fn newton_step(
 /// [`TransientError::TimestepUnderflow`] if the LTE controller must shrink below
 /// `cfg.tstep_min` without meeting tolerance; or a propagated [`TransientError::Core`] from a
 /// per-step Newton solve that fails to converge.
-pub fn run(
+pub fn run_with_events(
     instances: &[&dyn ModelInstance],
     dim: usize,
     x0: Vec<f64>,
     cfg: TranConfig,
+    events: &EventQueue,
 ) -> Result<Waveform, TransientError> {
     if cfg.method == Method::Gear {
         return Err(TransientError::UnsupportedMethod { method: cfg.method });
@@ -275,6 +310,7 @@ pub fn run(
     let mut waveform = Waveform {
         t: vec![cfg.tstart],
         x: vec![x0.clone()],
+        crossings: Vec::new(),
     };
     if dim == 0 {
         return Ok(waveform);
@@ -292,7 +328,10 @@ pub fn run(
 
     while t < cfg.tstop {
         loop {
-            let t_next = (t + h).min(cfg.tstop);
+            let mut t_next = (t + h).min(cfg.tstop);
+            if let Some(bp) = events.next_after(t) {
+                t_next = t_next.min(bp);
+            }
             let step_h = t_next - t;
 
             let primary = Companion::for_method(cfg.method, &q_prev, &r_prev, step_h, &is_dynamic);
@@ -306,7 +345,9 @@ pub fn run(
                 lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol);
 
             if err_ratio <= 1.0 {
-                x = x_primary;
+                let x_before = std::mem::replace(&mut x, x_primary);
+                let t_before = t;
+
                 let sink = assemble(instances, &x, dim);
                 q_prev = sink.charge;
                 r_prev = sink.residual;
@@ -314,6 +355,17 @@ pub fn run(
                 t = t_next;
                 waveform.t.push(t);
                 waveform.x.push(x.clone());
+
+                for (watch_idx, watch) in events.watches().iter().enumerate() {
+                    let before = x_before[watch.unknown] - watch.threshold;
+                    let after = x[watch.unknown] - watch.threshold;
+                    if before != 0.0 && (before > 0.0) != (after > 0.0) {
+                        let frac = before / (before - after);
+                        waveform
+                            .crossings
+                            .push((watch_idx, t_before + frac * (t - t_before)));
+                    }
+                }
 
                 if err_ratio < GROWTH_ERR_THRESHOLD {
                     h = (h * GROWTH_FACTOR).min(cfg.tstep);
@@ -518,6 +570,113 @@ mod tests {
         let wf = run(&insts, 0, Vec::new(), cfg).expect("trivially ok");
         assert_eq!(wf.t, vec![0.0]);
         assert_eq!(wf.x, vec![Vec::<f64>::new()]);
+    }
+
+    #[test]
+    fn breakpoint_forces_an_exact_landing_time() {
+        // An "awkward" time that no natural adaptive step would land on by itself.
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let cfg = default_cfg(2.0 * rc, rc / 10.0, Method::BackwardEuler);
+        let awkward_t = 0.37 * rc;
+
+        let mut events = crate::events::EventQueue::new();
+        events.push_breakpoint(awkward_t);
+        let wf = run_with_events(&insts, 3, vec![5.0, 0.0, 0.0], cfg, &events).expect("integrates");
+
+        assert!(
+            wf.t.iter().any(|&t| (t - awkward_t).abs() < 1e-15),
+            "should land exactly on the breakpoint: {:?}",
+            wf.t
+        );
+    }
+
+    #[test]
+    fn breakpoint_beyond_tstop_is_never_reached() {
+        // A breakpoint past tstop shouldn't extend the run or otherwise change anything.
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let cfg = default_cfg(2.0 * rc, rc / 10.0, Method::BackwardEuler);
+
+        let mut events = crate::events::EventQueue::new();
+        events.push_breakpoint(100.0 * rc);
+        let wf = run_with_events(&insts, 3, vec![5.0, 0.0, 0.0], cfg, &events).expect("integrates");
+
+        assert!((*wf.t.last().unwrap() - 2.0 * rc).abs() < 1e-15);
+    }
+
+    #[test]
+    fn crossing_detection_matches_analytic() {
+        // V(t) = Vs·(1 − e^(−t/RC)) crosses Vs/2 at t = RC·ln(2).
+        let rc = 1e-3;
+        let vs_val = 5.0;
+        let (vs, r, c) = rc_circuit(vs_val);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let mut cfg = default_cfg(3.0 * rc, rc / 10.0, Method::BackwardEuler);
+        // Tighter than the default LTE tolerance: interpolation between two accepted points
+        // can't be more accurate than the points themselves are.
+        cfg.lte_reltol = 1e-5;
+        cfg.lte_abstol = 1e-8;
+
+        let mut events = crate::events::EventQueue::new();
+        events.push_watch(1, vs_val / 2.0);
+        let wf =
+            run_with_events(&insts, 3, vec![vs_val, 0.0, 0.0], cfg, &events).expect("integrates");
+
+        assert_eq!(wf.crossings.len(), 1, "crossings: {:?}", wf.crossings);
+        let (watch_idx, t_cross) = wf.crossings[0];
+        assert_eq!(watch_idx, 0);
+
+        let analytic_t = rc * 2.0f64.ln();
+        let rel_err = (t_cross - analytic_t).abs() / analytic_t;
+        assert!(
+            rel_err < 1e-2,
+            "crossing time {t_cross} vs analytic {analytic_t} (rel err {rel_err})"
+        );
+    }
+
+    #[test]
+    fn no_crossing_when_threshold_never_reached() {
+        let rc = 1e-3;
+        let vs_val = 5.0;
+        let (vs, r, c) = rc_circuit(vs_val);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let cfg = default_cfg(0.1 * rc, rc / 10.0, Method::BackwardEuler);
+
+        let mut events = crate::events::EventQueue::new();
+        events.push_watch(1, vs_val); // never reaches Vs within this short a run
+        let wf =
+            run_with_events(&insts, 3, vec![vs_val, 0.0, 0.0], cfg, &events).expect("integrates");
+
+        assert!(wf.crossings.is_empty());
+    }
+
+    #[test]
+    fn run_matches_run_with_events_given_an_empty_queue() {
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+
+        let wf_a = run(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            default_cfg(rc, rc / 10.0, Method::BackwardEuler),
+        )
+        .expect("integrates");
+        let wf_b = run_with_events(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            default_cfg(rc, rc / 10.0, Method::BackwardEuler),
+            &crate::events::EventQueue::new(),
+        )
+        .expect("integrates");
+
+        assert_eq!(wf_a.t, wf_b.t);
+        assert_eq!(wf_a.x, wf_b.x);
     }
 
     #[test]

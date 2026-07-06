@@ -47,7 +47,8 @@ shared, demoable milestone that several theses light up at once.
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; 9 tests | 🟢 |
-| T4.3 · T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
+| T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
+| T5 · T6 | crate stubs only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -573,6 +574,29 @@ the reference models.
   the rectifier needs it.
 
 ### Phase T4.3 — Events & breakpoints
+> **Status: 🟢 code complete (harness gate blocked — see below, not just pending)** —
+> `events::EventQueue` (already implemented, previously unwired) now genuinely drives
+> `integrator::run_with_events`: breakpoints clamp the adaptive step so it never overshoots a
+> forced timepoint (the underlying `h` schedule is untouched by the clamp, so a forced short
+> step doesn't corrupt subsequent step-size growth); `EventQueue::push_watch(unknown,
+> threshold)` registers a crossing watch, checked against every pair of consecutive *accepted*
+> points and reported via linear interpolation in the new `Waveform::crossings`. `run()` is now
+> a thin wrapper over `run_with_events` with an empty queue, so every T4.1/T4.2 test still
+> passes unchanged. 6 new tests: exact breakpoint landing (an "awkward" time no natural
+> adaptive step would hit); a breakpoint past `tstop` changing nothing; the RC charging curve's
+> crossing of `Vs/2` matches the analytic `t = RC·ln(2)`; no false crossing when the threshold
+> is never reached; `run`/`run_with_events` agree given an empty queue.
+> **Ladder rung 6 (ring oscillator) is not attempted, and not just "not yet done" —
+> structurally out of reach with the current model zoo.** An oscillator needs a device with
+> gain (something that can sustain oscillation against its own losses); `va-abi::reference`
+> is entirely passive (resistor, capacitor, diode, ideal source). No wiring inside
+> `va-transient` can make a passive-only circuit oscillate. This is a model-zoo gap (needs a
+> controlled source or a transistor-like model to exist somewhere in the pipeline first), not
+> something T4.3 itself can close — flagged honestly rather than faked with a circuit that
+> isn't really an oscillator.
+> *Outstanding:* the golden-vs-ngspice gate generally (awaits T6, and rung 6 specifically
+> awaits a gain-capable model); `t4-transient/03-events.qmd`.
+
 - Event handling / breakpoints (`events.rs`) for sources and discontinuities; ring-oscillator
   shakedown.
 - **Validation gate (ladder rung 6):** ring oscillator transient is stable and matches golden
@@ -642,7 +666,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | solves to the analytic charging curve in `va-transient`; **harness/CLI gate pending T6** |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | ⬜ |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
-| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ |
+| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ **blocked**: needs a gain-capable device; the model zoo is entirely passive (see T4.3) |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.
