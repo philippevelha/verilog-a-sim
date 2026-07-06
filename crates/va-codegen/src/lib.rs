@@ -307,7 +307,7 @@ impl GeneratedModel {
                     }
                     for term in &c.charge {
                         eval(ctx, term.expr)?;
-                        if let Some(coeff) = term.coeff {
+                        for &(coeff, _) in &term.coeffs {
                             eval(ctx, coeff)?;
                         }
                     }
@@ -370,17 +370,18 @@ impl GeneratedModel {
     }
 
     /// Sum a list of signed charge terms into a single dual, applying each term's own
-    /// parameter-only scaling coefficient (if any) before accumulating — see
-    /// [`lower::ChargeTerm`]'s doc comment. `coeff`'s gradient is always exactly zero (that's
-    /// what "parameter-only" guarantees), so scaling by its plain value alone is the *exact*
-    /// derivative, not an approximation: `d(coeff*q)/dx = coeff*dq/dx` whenever `dcoeff/dx = 0`.
+    /// parameter-only scaling coefficients (if any) before accumulating — see
+    /// [`lower::ChargeTerm`]'s doc comment. Each coefficient's gradient is always exactly zero
+    /// (that's what "parameter-only" guarantees), so scaling by its plain value alone is the
+    /// *exact* derivative, not an approximation: `d(coeff*q)/dx = coeff*dq/dx` whenever
+    /// `dcoeff/dx = 0`, and this still holds applying several such coefficients in sequence.
     fn sum_charge_terms(ctx: &Ctx, terms: &[lower::ChargeTerm]) -> Result<Dual, CodegenError> {
         let mut acc = Dual::constant(0.0, ctx.count());
         for term in terms {
             let mut d = eval(ctx, term.expr)?;
-            if let Some(coeff_expr) = term.coeff {
+            for &(coeff_expr, is_divisor) in &term.coeffs {
                 let coeff = eval(ctx, coeff_expr)?.value;
-                d = if term.coeff_is_divisor {
+                d = if is_divisor {
                     d.scale(1.0 / coeff)
                 } else {
                     d.scale(coeff)
@@ -2318,6 +2319,316 @@ mod tests {
             build_instance(&m, &[0, 1], &mut 2),
             Err(CodegenError::Unsupported(_))
         ));
+    }
+
+    /// `I(p,n) <+ ddt(c0*V(p,n))*coeff1*coeff2;` -- `ekv26.va`'s real `ddt(qjd)*TYPE*M` shape,
+    /// parsing as `(ddt(qjd)*TYPE)*M`: two parameter-only coefficients nested two multiplications
+    /// deep, outside what the single-level `charge_term_shape` used to inspect.
+    #[test]
+    fn doubly_nested_multiplication_ddt_folds_into_the_charge_channel() {
+        let mut m = Module::new("doubly_scaled_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "c0".into(),
+                default: 1e-12,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "type_".into(),
+                default: -1.0,
+                min: None,
+                max: None,
+            },
+            Param {
+                name: "m".into(),
+                default: 4.0,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+
+        let vprobe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let type_ = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let mult = m.push_expr(Expr::Param(va_ir::ParamId(2)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0, vprobe));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let ddt_type = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, ddt_q, type_));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, ddt_type, mult));
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
+        let (c0v, type_v, mv, v) = (1e-12, -1.0, 4.0, 0.7);
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+
+        let expected_q = type_v * mv * c0v * v;
+        let expected_dq = type_v * mv * c0v;
+        assert!((sink.charge[0] - expected_q).abs() / expected_q.abs() < 1e-9);
+        assert!((sink.dcharge[0] - expected_dq).abs() / expected_dq.abs() < 1e-9);
+        assert_eq!(sink.residual[0], 0.0);
+    }
+
+    /// `real t0; t0 = ddt(c0*V(p,n)); if (cond>0.0) begin I(p,n)<+V(p,n)*g+t0; end else
+    /// I(p,n)<+0.0;` -- `angelov_gan.va`'s real `T0 = ddt(Ldc*I(rf,si)); // Avoid analog operator
+    /// in if/else block` idiom: a `ddt` assigned to a local variable in a straight-line
+    /// assignment, then read back (as a bare additive term) inside a later `if`'s arm.
+    fn ddt_via_local_variable_ir(cond_positive: bool) -> Module {
+        let mut m = Module::new("ddt_via_local_var");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "c0".into(),
+                default: 1e-12,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "g".into(),
+                default: 2.0,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "cond".into(),
+                default: if cond_positive { 1.0 } else { -1.0 },
+                min: None,
+                max: None,
+            },
+        ];
+        m.vars = vec![VarDecl { name: "t0".into() }];
+        let t0_id = VarId(0);
+
+        let vprobe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let g = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let cond = m.push_expr(Expr::Param(va_ir::ParamId(2)));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond_ge = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, cond, zero));
+
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0, vprobe));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let vg = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, vprobe, g));
+        let t0_read = m.push_expr(Expr::Var(t0_id));
+        let then_value = m.push_expr(Expr::Binary(va_ir::BinOp::Add, vg, t0_read));
+        let else_value = m.push_expr(Expr::Const(0.0));
+
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: t0_id,
+                rhs: ddt_q,
+            },
+            Stmt::If {
+                cond: cond_ge,
+                then_: vec![Stmt::Contribute {
+                    target: Access {
+                        kind: AccessKind::Flow,
+                        branch: BranchId(0),
+                    },
+                    value: then_value,
+                }],
+                else_: vec![Stmt::Contribute {
+                    target: Access {
+                        kind: AccessKind::Flow,
+                        branch: BranchId(0),
+                    },
+                    value: else_value,
+                }],
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn ddt_result_assigned_to_a_local_variable_is_tracked_to_its_contribution() {
+        let inst = build_instance(&ddt_via_local_variable_ir(true), &[0, 1], &mut 2).unwrap();
+        let (c0, g, v) = (1e-12, 2.0, 0.6);
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[v, 0.0], &mut sink);
+
+        // The resistive term (`V(p,n)*g`) and the substituted `ddt(c0*V(p,n))` charge term must
+        // both land correctly, exactly as if the source had written `I(p,n) <+ V(p,n)*g +
+        // ddt(c0*V(p,n));` directly instead of through `t0`.
+        assert!(
+            (sink.residual[0] - v * g).abs() < 1e-12,
+            "{}",
+            sink.residual[0]
+        );
+        assert!((sink.charge[0] - c0 * v).abs() / (c0 * v) < 1e-9);
+        assert!((sink.dcharge[0] - c0).abs() / c0 < 1e-9);
+    }
+
+    /// The `else` arm never reads `t0` at all, so it must build and run cleanly even though `t0`
+    /// only ever holds a `ddt` shape (never a real assigned value at runtime, since that
+    /// assignment is never lowered to an ordinary `LoweredStmt::Assign` -- see `DdtVars`'s doc
+    /// comment) -- proving the substitution doesn't leak a spurious requirement onto a branch
+    /// that has no use for it.
+    #[test]
+    fn ddt_via_local_variable_else_arm_does_not_need_it() {
+        let inst = build_instance(&ddt_via_local_variable_ir(false), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[0.6, 0.0], &mut sink);
+        assert_eq!(sink.residual[0], 0.0);
+        assert_eq!(sink.charge[0], 0.0);
+    }
+
+    /// `real t0; t0 = ddt(c0*V(p,n)); if (cond>0.0) begin t0 = 5.0; end I(p,n) <+ t0;` -- `t0`
+    /// holds a `ddt` shape *before* the `if`, but only one arm reassigns it to an ordinary value,
+    /// and the read is *after* the `if` (not inside either arm). Which arm ran determines what
+    /// `t0` actually is, so `lower_stmt` must forget the pre-`if` `ddt` substitution once *any*
+    /// arm reassigns `t0` (see `invalidate_ddt_vars`) rather than keep treating the post-`if` read
+    /// as the stale `ddt` shape -- the dangerous failure mode this guards against is stamping a
+    /// plausible-looking but *wrong* charge value (as if the read had still been `ddt(c0*V(p,n))`)
+    /// regardless of which arm actually ran.
+    ///
+    /// The two cases below land on different sides of a real, pre-existing, `ddt`-unrelated gap:
+    /// `GeneratedModel::validate` visits *both* arms of an `if` unconditionally (by design, to
+    /// catch an error hiding in the untaken arm — see `lower`'s module doc comment), so it always
+    /// leaves `t0` bound by the time it reaches the post-`if` read, regardless of `cond`. When the
+    /// reassigning arm is also the one that runs for real, this happens to match — the post-`if`
+    /// read correctly sees that arm's real value. When it *isn't* (`t0` never actually gets
+    /// assigned at the real operating point, since the `ddt`-shape pre-`if` assignment is
+    /// symbolic-only — see `DdtVars`'s doc comment), `load` cannot fail loudly to report it:
+    /// [`GeneratedModel::load`] deliberately swallows a load-time error from [`GeneratedModel::run`]
+    /// (`let _ = self.run(...)`, on the documented assumption that post-validation this "cannot
+    /// happen"), so the sink is simply left unstamped rather than stamped wrong — silent, but
+    /// safe. Both outcomes are what this test locks in; neither is a regression this specific fix
+    /// introduces.
+    fn reassigned_in_one_arm_only_ir(reassigning_arm_runs: bool) -> Module {
+        let mut m = Module::new("reassigned_in_one_arm");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "c0".into(),
+                default: 1e-12,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "cond".into(),
+                default: if reassigning_arm_runs { 1.0 } else { -1.0 },
+                min: None,
+                max: None,
+            },
+        ];
+        m.vars = vec![VarDecl { name: "t0".into() }];
+        let t0_id = VarId(0);
+
+        let vprobe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let cond = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond_ge = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, cond, zero));
+
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0, vprobe));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let five = m.push_expr(Expr::Const(5.0));
+        let t0_read = m.push_expr(Expr::Var(t0_id));
+
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: t0_id,
+                rhs: ddt_q,
+            },
+            Stmt::If {
+                cond: cond_ge,
+                then_: vec![Stmt::Assign {
+                    lhs: t0_id,
+                    rhs: five,
+                }],
+                else_: vec![],
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: t0_read,
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn reassignment_in_one_arm_invalidates_the_ddt_substitution_after_the_if() {
+        // The reassigning arm ran: the post-`if` read must see the real value it set (5.0),
+        // treated as an ordinary resistive term -- not the discarded `ddt` shape (which would
+        // instead have produced a nonzero `charge[0]` here).
+        let inst = build_instance(&reassigned_in_one_arm_only_ir(true), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[0.6, 0.0], &mut sink);
+        assert_eq!(sink.residual[0], 5.0);
+        assert_eq!(sink.charge[0], 0.0);
+
+        // The reassigning arm didn't run: `t0` was never actually assigned at runtime, so `run`
+        // aborts on the first statement and `load` leaves the sink exactly as it started --
+        // stamping nothing is safe; stamping a value as though `t0` still held `ddt(c0*V(p,n))`
+        // would not have been.
+        let inst = build_instance(&reassigned_in_one_arm_only_ir(false), &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(2);
+        inst.load(&[0.6, 0.0], &mut sink);
+        assert_eq!(sink.residual[0], 0.0);
+        assert_eq!(sink.charge[0], 0.0);
     }
 
     /// The real `devsign`/`ct` idiom (`bsimbulk.va`: `if (TYPE==\`ntype) devsign=1; else

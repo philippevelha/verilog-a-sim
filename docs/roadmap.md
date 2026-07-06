@@ -618,16 +618,43 @@ matches the code verbatim.
 > soundness check still bites, a variable assigned a parameter-only value in one arm but the
 > branch voltage itself in the other — still rejected, since not *every* assignment is
 > parameter-only.
-> *Outstanding:* the remaining 6 nested-`ddt`/`idt` files need either `` `ddt` ``-result-through-
-> a-local-variable indirection (`real dqdt; dqdt=ddt(q); I<+dqdt+…;`, `angelov_gan.va`/
-> `hisim2.va`, specifically to dodge this project's own `if`/`case` `ddt`-placement history), a
-> `ddt` nested two multiplications deep (`ekv26.va`'s `ddt(qjd)*TYPE*M`, parsing as
-> `(ddt(qjd)*TYPE)*M` — outside what `charge_term_shape` inspects, which only looks at the
-> immediate operands of the outermost `Mul`/`Div`), or `idt` support outright (needs its own
-> auxiliary accumulator unknown, architecturally distinct from a branch-current unknown, since
-> its value depends on the entire history of its argument, not just the current unknowns) — none
-> attempted this round; plus the non-path-sensitive variable-read-before-assignment gap surfaced
-> by 2 files (see above). Full committed sweep; `t2-codegen/02-lowering.qmd`.
+> **`charge_term_shape` now recurses through arbitrarily many nested multiplications/divisions**
+> instead of only inspecting the immediate operands of the outermost one — `ekv26.va`'s
+> `ddt(qjd)*TYPE*M` parses as `(ddt(qjd)*TYPE)*M`, two levels deep, which the single-level version
+> couldn't see past. `ChargeTerm` changed from a single `Option<ExprId>` coefficient to a
+> `Vec<(ExprId, bool)>` of every scaling factor found, applied in sequence at evaluation time
+> (`GeneratedModel::sum_charge_terms`) — still exact, since each is independently provably
+> `x`-independent.
+>
+> **A `ddt` result assigned to a local variable and read back later is now tracked**, closing the
+> other half of the previously-`if`/`case`-restricted-placement workaround real models use —
+> `angelov_gan.va`'s `T0 = ddt(Ldc*I(rf,si)); // Avoid analog operator in if/else block` and
+> `hisim2.va`'s `I_nqs_b = ddt(...); I(int_nqs_b) <+ I_nqs_b;`. `lower::DdtVars` maps a variable to
+> its defining RHS *only* when that RHS is itself a recognized `ddt` shape; such an assignment
+> never becomes an ordinary `LoweredStmt::Assign` (there's no sound value to give it — evaluating a
+> bare `ddt(...)` outside the charge channel is exactly what this project can't do), and a later
+> bare-variable read inside a `<+` substitutes it in. This is forward and single-pass, not a full
+> reaching-definitions analysis: entering an `if`/`case`/loop body clones the map (so a definition
+> from before the construct is visible inside it — always sound, since it necessarily already ran),
+> but any variable assigned *anywhere* inside is forgotten in the outer map afterward, regardless of
+> which arm actually executes — a variable can't be soundly treated as still holding a stale `ddt`
+> shape (or any other stale value) once a branch might have overwritten it. Regression-tested
+> including the specific danger this guards against: a variable holding a `ddt` shape before an
+> `if`, reassigned to an ordinary value in only one arm, read again after the `if` — must never
+> stamp as though it were still the discarded `ddt` shape (it doesn't; worst case, when the
+> reassigning arm didn't actually run, `load` silently leaves the sink unstamped, a pre-existing
+> "cannot happen post-validation" fallback rather than a regression this fix introduces).
+>
+> Re-scanned the full external/ corpus (115 .va files, recursive): **53/115 pass frontend+codegen,
+> up from 50** (+3 net new files — `ekv26.va`, `angelov_gan.va`, `hisim2.va`, exactly the three
+> concrete shapes above). *Outstanding:* the remaining 3 nested-`ddt`/`idt` files (PSP102's NQS
+> variants — `psp102_nqs.va`/`psp102b_nqs.va`/`psp102e_nqs.va`) all need `idt` support outright
+> (`V(SPLINE1) <+ vnorm_inv * idt(-Tnorm*fk1, Qp1_0);` — a coefficient-scaled `idt` with an
+> explicit initial-condition argument), not attempted this round: it needs its own auxiliary
+> accumulator unknown, architecturally distinct from a branch-current unknown, since its value
+> depends on the entire history of its argument, not just the current unknowns; plus the
+> non-path-sensitive variable-read-before-assignment gap surfaced by 2 files (see above). Full
+> committed sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

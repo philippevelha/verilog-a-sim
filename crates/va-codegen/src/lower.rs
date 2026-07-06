@@ -94,10 +94,32 @@
 //! (same character as the `if`/`else`-validation split elsewhere in this crate): it's sound
 //! (every accepted variable really is parameter-only on every path that could reach it) but not
 //! complete (a variable that's parameter-only on the *specific* path relevant to one `ddt` site
-//! but genuinely `x`-dependent on some unrelated path stays rejected). `ddt` still may not appear
-//! nested any other way (inside a ternary, as another builtin's argument, chained through more
-//! than one multiplication, etc.) — none of those shapes turned up anywhere in the same survey,
-//! so there was nothing concrete to scope a fix against.
+//! but genuinely `x`-dependent on some unrelated path stays rejected). [`charge_term_shape`] now
+//! recurses through arbitrarily many nested multiplications/divisions rather than inspecting only
+//! the immediate operands of the outermost one — `ekv26.va`'s `ddt(qjd)*TYPE*M` parses as
+//! `(ddt(qjd)*TYPE)*M`, two levels deep, and needed exactly this. `ddt` still may not appear
+//! nested any *other* way (inside a ternary, as another builtin's argument, etc.) — none of those
+//! shapes turned up anywhere in the same survey, so there was nothing concrete to scope a fix
+//! against.
+//!
+//! A `ddt` result assigned to a plain local variable and read back later in a `<+`
+//! (`real dqdt; dqdt = ddt(q); I(p,n) <+ dqdt + …;` — seen in the wild specifically to work
+//! around this project's still-`if`/`case`-restricted `ddt` placement in some real models, e.g.
+//! `angelov_gan.va`'s `T0 = ddt(Ldc * I(rf,si)); // Avoid analog operator in if/else block`) is
+//! tracked back to its defining assignment via [`DdtVars`]: a `Stmt::Assign` whose RHS is itself
+//! a recognized `ddt` shape never becomes an ordinary [`LoweredStmt::Assign`] (there would be no
+//! sound value to assign — evaluating a bare `ddt(...)` outside the charge channel is exactly
+//! what this project cannot do) and instead records `lhs -> rhs` for the `Stmt::Contribute` arm
+//! to substitute when it later encounters a bare read of that variable as an additive term. This
+//! is forward, single-pass, and intentionally *not* a full reaching-definitions analysis: entering
+//! any branch/loop body clones the map, and the clone's mutations are discarded on exit rather
+//! than merged back, so a variable reassigned inside only one arm of an `if`/`case` (a common
+//! pattern — `T0` is reused for unrelated scratch values throughout `angelov_gan.va`) never lets
+//! a stale or wrong definition leak to code after the branch. A variable resolved this way is
+//! *only* ever substituted at a `<+` site; if it's read as an ordinary value anywhere else while
+//! still holding a `ddt` shape, lowering silently drops that read's assignment (no
+//! `LoweredStmt::Assign` was ever emitted for it) rather than miscomputing — out of scope because
+//! neither corpus file needs it, not because it would be sound to guess a value.
 //!
 //! # Limitations
 //!
@@ -105,12 +127,14 @@
 //!   unlike `ddt`, it doesn't fit the existing charge-channel shape at all (its value at a given
 //!   instant depends on the *entire* history of its argument, not just the current unknowns, so
 //!   it needs its own auxiliary accumulator unknown, analogous to but distinct from a potential
-//!   contribution's branch-current unknown — out of scope here).
-//! - A `ddt`/`idt` result assigned to a plain local variable and read back later
-//!   (`real dqdt; dqdt = ddt(q); I(p,n) <+ dqdt + …;` — seen in the wild specifically to work
-//!   around this project's still-`if`/`case`-restricted `ddt` placement in some real models)
-//!   is not tracked back to its defining `ddt` call; only a `<+` statement's own RHS expression
-//!   is inspected for a (possibly scaled) top-level `ddt`/`idt` shape.
+//!   contribution's branch-current unknown — out of scope here). `psp102`'s NQS variants
+//!   (`psp102_nqs.va`/`psp102b_nqs.va`/`psp102e_nqs.va`) are blocked on exactly this:
+//!   `V(SPLINE1) <+ vnorm_inv * idt(-Tnorm * fk1, Qp1_0);` — a coefficient-scaled `idt` with an
+//!   explicit initial-condition argument, the two-argument form the LRM defines.
+//! - The local-variable `ddt`-indirection tracking above only ever substitutes a *bare* variable
+//!   read (`Expr::Var`) that is itself one additive term; a variable read as part of a larger
+//!   sub-expression (e.g. `2*dqdt`) is not tracked back to its defining `ddt` call — no corpus
+//!   file surveyed needed that shape.
 //!
 //! User-defined analog functions (`Expr::CallUser`) are handled entirely in `crate::ad` instead
 //! — a function call is an expression-level construct, so it never needs anything from this
@@ -129,20 +153,19 @@ pub struct Term {
     pub expr: ExprId,
 }
 
-/// One additive charge-channel term: `ddt(expr)`, optionally scaled by a parameter-only
-/// coefficient (`coeff*ddt(expr)`/`ddt(expr)*coeff`/`ddt(expr)/coeff` — see this module's doc
-/// comment for why the coefficient must be parameter-only).
-#[derive(Clone, Copy, Debug)]
+/// One additive charge-channel term: `ddt(expr)`, optionally scaled by any depth of
+/// parameter-only multiplication/division (`coeff*ddt(expr)`, `ddt(expr)*coeff`,
+/// `ddt(expr)/coeff`, `coeff1*coeff2*ddt(expr)`, `(ddt(expr)*coeff1)*coeff2`, ... — see this
+/// module's doc comment for why each coefficient must be parameter-only).
+#[derive(Clone, Debug)]
 pub struct ChargeTerm {
     /// `+1.0` or `-1.0`, accumulated from `-`/unary-negation while flattening.
     pub sign: f64,
     /// The `ddt` call's own argument — the quantity whose time-derivative is contributed.
     pub expr: ExprId,
-    /// The scaling coefficient, if any (`None` for a plain, unscaled `ddt(expr)`).
-    pub coeff: Option<ExprId>,
-    /// Whether `coeff` divides (`ddt(expr)/coeff`) rather than multiplies. Meaningless when
-    /// `coeff` is `None`.
-    pub coeff_is_divisor: bool,
+    /// Every scaling factor found wrapping the `ddt`, each paired with whether it divides
+    /// (`true`) rather than multiplies (`false`). Empty for a plain, unscaled `ddt(expr)`.
+    pub coeffs: Vec<(ExprId, bool)>,
 }
 
 /// A single branch contribution, split into resistive and charge channels.
@@ -314,8 +337,16 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     }
 
     let mut stmts = Vec::new();
+    let mut ddt_vars = HashMap::new();
     for stmt in &module.analog {
-        lower_stmt(module, stmt, &slot_of_branch, &param_only, &mut stmts)?;
+        lower_stmt(
+            module,
+            stmt,
+            &slot_of_branch,
+            &param_only,
+            &mut ddt_vars,
+            &mut stmts,
+        )?;
     }
     Ok(Lowered {
         n_unknowns: next_slot,
@@ -376,11 +407,27 @@ fn collect_branch_kinds_one(stmt: &Stmt, flow: &mut BTreeSet<u32>, potential: &m
     }
 }
 
+/// `ddt_vars` maps a local variable (`VarId.0`) to the RHS expression of its most recent
+/// `Stmt::Assign` in the current straight-line scope, *only* when that RHS is itself a
+/// recognized (possibly coefficient-scaled) `ddt` shape (see [`charge_term_shape`]) — i.e. the
+/// "`` real dqdt; dqdt = ddt(q); I <+ dqdt + …; ``" indirection this module's doc comment
+/// documents as a limitation, now handled for the specific shape real models use it in: an
+/// unconditional assignment read back later inside a `<+`. Forked (cloned) on entry to any
+/// branch/loop body and never merged back — see [`lower_stmt`]'s `Stmt::If`/`Stmt::While`/etc.
+/// arms — so a reassignment made only *inside* a branch never leaks a false definition to code
+/// after it; this is a sound, path-insensitive-in-the-conservative-direction restriction, not a
+/// full reaching-definitions analysis. A variable assigned anything else invalidates (removes)
+/// any prior entry, so a variable that's ever reused for an ordinary value (as `T0` commonly is
+/// in real models, e.g. `angelov_gan.va`) only resolves through this map at the specific
+/// contribution sites that run after its most recent assignment was a `ddt` shape.
+type DdtVars = HashMap<u32, ExprId>;
+
 fn lower_stmt(
     module: &Module,
     stmt: &Stmt,
     slot_of_branch: &HashMap<u32, usize>,
     param_only: &HashSet<u32>,
+    ddt_vars: &mut DdtVars,
     out: &mut Vec<LoweredStmt>,
 ) -> Result<(), CodegenError> {
     match stmt {
@@ -393,12 +440,18 @@ fn lower_stmt(
             let mut resistive = Vec::new();
             let mut charge = Vec::new();
             for term in terms {
-                match charge_term_shape(module, term.expr, param_only)? {
-                    Some((expr, coeff, coeff_is_divisor)) => charge.push(ChargeTerm {
+                // A bare variable read that was last assigned a `ddt` shape substitutes to that
+                // shape here, so `real dqdt; dqdt = ddt(q); I <+ dqdt + …;` folds into the charge
+                // channel exactly as `I <+ ddt(q) + …;` would.
+                let shape_expr = match module.expr(term.expr) {
+                    Expr::Var(id) => ddt_vars.get(&id.0).copied().unwrap_or(term.expr),
+                    _ => term.expr,
+                };
+                match charge_term_shape(module, shape_expr, param_only)? {
+                    Some((expr, coeffs)) => charge.push(ChargeTerm {
                         sign: term.sign,
                         expr,
-                        coeff,
-                        coeff_is_divisor,
+                        coeffs,
                     }),
                     None => resistive.push(term),
                 }
@@ -419,27 +472,64 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Assign { lhs, rhs } => {
-            out.push(LoweredStmt::Assign {
-                lhs: *lhs,
-                rhs: *rhs,
-            });
+            // A `ddt`-shape RHS never becomes a `LoweredStmt::Assign`: this project has no way
+            // to evaluate a bare `ddt(...)` as an ordinary value (that's exactly why it normally
+            // must be a top-level contribution term — see this module's doc comment), so the
+            // assignment is tracked symbolically in `ddt_vars` instead and resolved at whatever
+            // later contribution reads it (see the `Stmt::Contribute` arm above). Any other RHS
+            // invalidates a stale entry, so a variable reused for an ordinary value afterward is
+            // read normally, not substituted.
+            match charge_term_shape(module, *rhs, param_only)? {
+                Some(_) => {
+                    ddt_vars.insert(lhs.0, *rhs);
+                }
+                None => {
+                    ddt_vars.remove(&lhs.0);
+                    out.push(LoweredStmt::Assign {
+                        lhs: *lhs,
+                        rhs: *rhs,
+                    });
+                }
+            }
             Ok(())
         }
         Stmt::Block(body) => {
             for s in body {
-                lower_stmt(module, s, slot_of_branch, param_only, out)?;
+                lower_stmt(module, s, slot_of_branch, param_only, ddt_vars, out)?;
             }
             Ok(())
         }
         Stmt::If { cond, then_, else_ } => {
             let mut then_lowered = Vec::new();
+            let mut then_ddt_vars = ddt_vars.clone();
             for s in then_ {
-                lower_stmt(module, s, slot_of_branch, param_only, &mut then_lowered)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    &mut then_ddt_vars,
+                    &mut then_lowered,
+                )?;
             }
             let mut else_lowered = Vec::new();
+            let mut else_ddt_vars = ddt_vars.clone();
             for s in else_ {
-                lower_stmt(module, s, slot_of_branch, param_only, &mut else_lowered)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    &mut else_ddt_vars,
+                    &mut else_lowered,
+                )?;
             }
+            // Neither arm's own reassignments (of a variable pre-existing before the `if`, or a
+            // brand-new one local to just one arm) are known to hold after the `if` — which arm
+            // ran isn't known here — so forget any variable either arm assigned at all, in the
+            // *outer* map that carries forward past this construct (see `DdtVars`'s doc comment).
+            invalidate_ddt_vars(ddt_vars, then_);
+            invalidate_ddt_vars(ddt_vars, else_);
             out.push(LoweredStmt::If {
                 cond: *cond,
                 then_: then_lowered,
@@ -449,9 +539,18 @@ fn lower_stmt(
         }
         Stmt::While { cond, body } => {
             let mut body_lowered = Vec::new();
+            let mut body_ddt_vars = ddt_vars.clone();
             for s in body {
-                lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    &mut body_ddt_vars,
+                    &mut body_lowered,
+                )?;
             }
+            invalidate_ddt_vars(ddt_vars, body);
             out.push(LoweredStmt::While {
                 cond: *cond,
                 body: body_lowered,
@@ -464,14 +563,39 @@ fn lower_stmt(
             step,
             body,
         } => {
+            let mut loop_ddt_vars = ddt_vars.clone();
             let mut init_lowered = Vec::new();
-            lower_stmt(module, init, slot_of_branch, param_only, &mut init_lowered)?;
+            lower_stmt(
+                module,
+                init,
+                slot_of_branch,
+                param_only,
+                &mut loop_ddt_vars,
+                &mut init_lowered,
+            )?;
             let mut step_lowered = Vec::new();
-            lower_stmt(module, step, slot_of_branch, param_only, &mut step_lowered)?;
+            lower_stmt(
+                module,
+                step,
+                slot_of_branch,
+                param_only,
+                &mut loop_ddt_vars,
+                &mut step_lowered,
+            )?;
             let mut body_lowered = Vec::new();
             for s in body {
-                lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    &mut loop_ddt_vars,
+                    &mut body_lowered,
+                )?;
             }
+            invalidate_ddt_vars(ddt_vars, std::slice::from_ref(&**init));
+            invalidate_ddt_vars(ddt_vars, std::slice::from_ref(&**step));
+            invalidate_ddt_vars(ddt_vars, body);
             out.push(LoweredStmt::For {
                 init: init_lowered,
                 cond: *cond,
@@ -482,9 +606,18 @@ fn lower_stmt(
         }
         Stmt::Repeat { count, body } => {
             let mut body_lowered = Vec::new();
+            let mut body_ddt_vars = ddt_vars.clone();
             for s in body {
-                lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    &mut body_ddt_vars,
+                    &mut body_lowered,
+                )?;
             }
+            invalidate_ddt_vars(ddt_vars, body);
             out.push(LoweredStmt::Repeat {
                 count: *count,
                 body: body_lowered,
@@ -496,11 +629,23 @@ fn lower_stmt(
             arms,
             default,
         } => {
+            // Every arm (and `default`) is a mutually exclusive alternative to every other, so
+            // each must be lowered from the *same* pre-`case` snapshot — not one another's
+            // possibly-already-invalidated state — hence cloning from `ddt_vars` up front for
+            // every arm before any of them invalidates anything in it.
             let mut lowered_arms = Vec::new();
             for arm in arms {
                 let mut body_lowered = Vec::new();
+                let mut arm_ddt_vars = ddt_vars.clone();
                 for s in &arm.body {
-                    lower_stmt(module, s, slot_of_branch, param_only, &mut body_lowered)?;
+                    lower_stmt(
+                        module,
+                        s,
+                        slot_of_branch,
+                        param_only,
+                        &mut arm_ddt_vars,
+                        &mut body_lowered,
+                    )?;
                 }
                 lowered_arms.push(LoweredCaseArm {
                     labels: arm.labels.clone(),
@@ -508,9 +653,21 @@ fn lower_stmt(
                 });
             }
             let mut default_lowered = Vec::new();
+            let mut default_ddt_vars = ddt_vars.clone();
             for s in default {
-                lower_stmt(module, s, slot_of_branch, param_only, &mut default_lowered)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    &mut default_ddt_vars,
+                    &mut default_lowered,
+                )?;
             }
+            for arm in arms {
+                invalidate_ddt_vars(ddt_vars, &arm.body);
+            }
+            invalidate_ddt_vars(ddt_vars, default);
             out.push(LoweredStmt::Case {
                 selector: *selector,
                 arms: lowered_arms,
@@ -540,36 +697,51 @@ fn collect_terms(module: &Module, expr: ExprId, sign: f64, out: &mut Vec<Term>) 
     }
 }
 
-/// If `expr` is `ddt(arg)`, `coeff*ddt(arg)`, `ddt(arg)*coeff`, or `ddt(arg)/coeff` (with `coeff`
-/// [`is_param_only`] given `param_only`), return `(arg, coeff, coeff_is_divisor)`. Returns
-/// `Ok(None)` for anything else — including a syntactically-plausible `coeff*ddt(arg)` whose
-/// `coeff` fails the parameter-only check, which falls back to being treated as an ordinary
-/// resistive term (and is rejected later, when `ad::eval` actually tries to evaluate the
-/// still-nested `ddt` call, by the same `CodegenError::Unsupported` this returned `None` to
-/// avoid pre-empting here).
+/// A recognized `ddt` charge shape: the `ddt` call's own argument, plus every parameter-only
+/// scaling factor wrapping it, each paired with whether it divides (`true`) rather than
+/// multiplies (`false`). See [`charge_term_shape`].
+type ChargeShape = (ExprId, Vec<(ExprId, bool)>);
+
+/// If `expr` is `ddt(arg)` wrapped in any depth of parameter-only multiplication/division
+/// (`ddt(arg)`, `coeff*ddt(arg)`, `ddt(arg)*coeff`, `ddt(arg)/coeff`, `(ddt(arg)*coeff1)*coeff2`,
+/// `coeff1*coeff2*ddt(arg)`, ... — real models nest at least two multiplications deep, e.g.
+/// `ekv26.va`'s `ddt(qjd)*TYPE*M`, parsing as `(ddt(qjd)*TYPE)*M`), return `(arg, coeffs)` where
+/// `coeffs` lists every scaling factor found (in the order encountered), each paired with
+/// whether it divides (`true`) rather than multiplies (`false`). Returns `Ok(None)` for anything
+/// else — including a syntactically-plausible `coeff*ddt(arg)` whose `coeff` fails the
+/// parameter-only check ([`is_param_only`] given `param_only`), which falls back to being
+/// treated as an ordinary resistive term (and is rejected later, when `ad::eval` actually tries
+/// to evaluate the still-nested `ddt` call, by the same `CodegenError::Unsupported` this
+/// returned `None` to avoid pre-empting here).
 fn charge_term_shape(
     module: &Module,
     expr: ExprId,
     param_only: &HashSet<u32>,
-) -> Result<Option<(ExprId, Option<ExprId>, bool)>, CodegenError> {
+) -> Result<Option<ChargeShape>, CodegenError> {
+    if let Some(arg) = ddt_arg(module, expr)? {
+        return Ok(Some((arg, Vec::new())));
+    }
     match module.expr(expr) {
-        Expr::Call(Builtin::Ddt, _) => Ok(ddt_arg(module, expr)?.map(|arg| (arg, None, false))),
         Expr::Binary(BinOp::Mul, l, r) => {
-            if let Some(arg) = ddt_arg(module, *l)? {
+            if let Some((arg, mut coeffs)) = charge_term_shape(module, *l, param_only)? {
                 if is_param_only(module, *r, param_only) {
-                    return Ok(Some((arg, Some(*r), false)));
+                    coeffs.push((*r, false));
+                    return Ok(Some((arg, coeffs)));
                 }
-            } else if let Some(arg) = ddt_arg(module, *r)? {
+            }
+            if let Some((arg, mut coeffs)) = charge_term_shape(module, *r, param_only)? {
                 if is_param_only(module, *l, param_only) {
-                    return Ok(Some((arg, Some(*l), false)));
+                    coeffs.push((*l, false));
+                    return Ok(Some((arg, coeffs)));
                 }
             }
             Ok(None)
         }
         Expr::Binary(BinOp::Div, l, r) => {
-            if let Some(arg) = ddt_arg(module, *l)? {
+            if let Some((arg, mut coeffs)) = charge_term_shape(module, *l, param_only)? {
                 if is_param_only(module, *r, param_only) {
-                    return Ok(Some((arg, Some(*r), true)));
+                    coeffs.push((*r, true));
+                    return Ok(Some((arg, coeffs)));
                 }
             }
             Ok(None)
@@ -645,6 +817,18 @@ fn param_only_vars(module: &Module, stmts: &[Stmt]) -> HashSet<u32> {
 fn collect_assigns(stmts: &[Stmt], out: &mut Vec<(u32, ExprId)>) {
     for stmt in stmts {
         collect_assigns_one(stmt, out);
+    }
+}
+
+/// Remove from `ddt_vars` every variable assigned anywhere in `stmts` — used when a branch/loop
+/// body finishes lowering, so a `ddt`-shape substitution recorded (or overwritten) only inside
+/// that body never carries forward past it (see [`DdtVars`]'s doc comment for why this can't
+/// simply merge the body's own final state back instead).
+fn invalidate_ddt_vars(ddt_vars: &mut DdtVars, stmts: &[Stmt]) {
+    let mut assigns = Vec::new();
+    collect_assigns(stmts, &mut assigns);
+    for (var, _) in assigns {
+        ddt_vars.remove(&var);
     }
 }
 
