@@ -9,7 +9,9 @@
 //! slot. Every other operator simply propagates gradients through the chain rule.
 
 use crate::CodegenError;
-use va_ir::{BinOp, Builtin, Expr, ExprId, Module, UnOp};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use va_ir::{BinOp, Builtin, Expr, ExprId, Module, UnOp, VarId};
 
 /// A value carried with its gradient w.r.t. the active unknowns (a dual number).
 #[derive(Clone, Debug)]
@@ -273,6 +275,13 @@ pub struct Ctx<'a> {
     pub vt: f64,
     /// Ambient temperature for `$temperature`.
     pub temp: f64,
+    /// Local-variable bindings accumulated by sequential `Stmt::Assign` execution (the
+    /// statement walk in `crate::GeneratedModel::load`/`validate`), keyed by `VarId`.
+    /// Interior-mutable so it can be populated through a shared `&Ctx`: every recursive `eval`
+    /// call already takes `&Ctx`, and only ever *reads* a binding via [`Self::get_var`] — writes
+    /// happen exactly once per `Stmt::Assign`, from the outer statement walk via
+    /// [`Self::set_var`], never from within expression evaluation itself.
+    pub vars: RefCell<HashMap<u32, Dual>>,
 }
 
 impl Ctx<'_> {
@@ -286,15 +295,38 @@ impl Ctx<'_> {
         let g = self.terminals.get(slot).copied().unwrap_or(usize::MAX);
         self.x.get(g).copied().unwrap_or(0.0)
     }
+
+    /// Bind local variable `id` to `value`, overwriting any previous binding — ordinary
+    /// imperative reassignment, exactly what a second `Stmt::Assign` to the same variable does.
+    pub fn set_var(&self, id: VarId, value: Dual) {
+        self.vars.borrow_mut().insert(id.0, value);
+    }
+
+    /// Read local variable `id`'s current binding.
+    ///
+    /// # Errors
+    ///
+    /// [`CodegenError::Unsupported`] if `id` was never assigned before this read — either a
+    /// genuinely uninitialized variable (undefined in real Verilog-A too), or, more likely
+    /// today, an assignment that lives inside a still-unsupported `if`/`case` arm this
+    /// straight-line statement walk never executes.
+    fn get_var(&self, id: VarId) -> Result<Dual, CodegenError> {
+        self.vars
+            .borrow()
+            .get(&id.0)
+            .cloned()
+            .ok_or_else(|| unsupported(&format!("variable #{} read before assignment", id.0)))
+    }
 }
 
-/// Evaluate `expr` under forward-mode AD in context `ctx`.
+/// Evaluate `expr` under forward-mode AD in context `ctx`. A [`Expr::Var`] reads whatever
+/// `ctx.vars` currently holds — see [`Ctx::set_var`] for who populates it and when.
 ///
 /// # Errors
 ///
-/// Returns [`CodegenError::Unsupported`] for IR constructs the v0 codegen does not evaluate
-/// in value position: local variables, flow probes, and `ddt`/`idt` (which are handled by
-/// the lowering split, not evaluated here).
+/// Returns [`CodegenError::Unsupported`] for IR constructs the v0 codegen does not evaluate in
+/// value position: flow probes, `ddt`/`idt` (handled by the lowering split, not evaluated
+/// here), user-defined functions, and a local variable read before it was ever assigned.
 pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
     let count = ctx.count();
     match ctx.module.expr(expr) {
@@ -307,9 +339,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 .ok_or_else(|| unsupported("parameter index out of range"))?;
             Ok(Dual::constant(v, count))
         }
-        Expr::Var(_) => Err(unsupported(
-            "local variables are not supported in codegen v0",
-        )),
+        Expr::Var(id) => ctx.get_var(*id),
         Expr::Probe(access) => match access.kind {
             va_ir::AccessKind::Potential => {
                 let br = ctx.module.branches[access.branch.0 as usize];
@@ -553,6 +583,7 @@ mod tests {
             terminals: &[],
             vt: 0.025_852,
             temp: 300.0,
+            vars: RefCell::new(HashMap::new()),
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - 0.025_852).abs() < 1e-12);
@@ -596,6 +627,7 @@ mod tests {
             terminals: &terminals,
             vt: vt_ref,
             temp: temp_ref,
+            vars: RefCell::new(HashMap::new()),
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - k_over_q * 350.0).abs() < 1e-12);
@@ -670,6 +702,7 @@ mod tests {
             terminals: &terminals,
             vt: 0.0,
             temp: 0.0,
+            vars: RefCell::new(HashMap::new()),
         };
 
         assert_eq!(eval(&ctx, vin).unwrap().value, 2.0);
@@ -738,6 +771,7 @@ mod tests {
             terminals: &terminals,
             vt,
             temp: 300.0,
+            vars: RefCell::new(HashMap::new()),
         };
         let analytic = eval(&ctx, gdio).unwrap().value;
 
@@ -767,6 +801,7 @@ mod tests {
             terminals: &[],
             vt: 0.0,
             temp: 0.0,
+            vars: RefCell::new(HashMap::new()),
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 2.0);
 
@@ -783,6 +818,7 @@ mod tests {
             terminals: &[],
             vt: 0.0,
             temp: 0.0,
+            vars: RefCell::new(HashMap::new()),
         };
         assert_eq!(eval(&ctx, sel).unwrap().value, 3.0);
     }

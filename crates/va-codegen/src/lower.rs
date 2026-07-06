@@ -1,10 +1,15 @@
-//! Lowering: walk a [`va_ir::Module`]'s analog block and turn `<+` contributions into the
-//! per-branch residual/charge stamps a generated [`va_abi::ModelInstance`] emits.
+//! Lowering: walk a [`va_ir::Module`]'s analog block into an ordered sequence of executable
+//! statements — local-variable assignments and flow contributions (each already flattened and
+//! split into resistive/charge terms) — in source order.
 //!
-//! Each flow contribution `I(p, n) <+ value` is flattened into a signed sum of additive
-//! terms. A top-level `ddt(arg)` term routes `arg` to the **charge** channel; every other
-//! term is a **resistive** contribution. This split is what lets DC ignore storage while the
-//! transient integrator picks the charge channel up via a companion model.
+//! Order matters once local variables are involved: `real q; q = c0*v + …; I(p,n) <+ ddt(q);`
+//! only evaluates correctly if `q`'s assignment runs *before* the contribution that reads it,
+//! and it must run again on every [`va_abi::ModelInstance::load`] call (an assigned value
+//! depends on `x`, so it can't be precomputed once here at lowering time — this module stays
+//! purely structural, same as before local variables were supported; only the shape of the
+//! plan it hands back changed, from an unordered `Vec<Contribution>` to an ordered statement
+//! sequence). See `crate::ad::Ctx::set_var`/`get_var` for where the actual sequential
+//! execution and variable environment live.
 //!
 //! # Limitations
 //!
@@ -13,12 +18,12 @@
 //! - `ddt` is recognised only as a top-level additive term (optionally negated), matching how
 //!   compact models are written (`I <+ resistive + ddt(charge)`); `ddt` nested inside a
 //!   nonlinear function is rejected later by the AD evaluator.
-//! - `if`/`else`, local-variable assignments, loops/`case`, and user-defined analog functions
-//!   in the analog block are not yet lowered. The IR (Interface α) models these, but codegen
-//!   v0 rejects them with [`CodegenError::Unsupported`].
+//! - `if`/`else`, loops/`case`, and user-defined analog functions in the analog block are not
+//!   yet lowered. The IR (Interface α) models these, but codegen v0 rejects them with
+//!   [`CodegenError::Unsupported`].
 
 use crate::CodegenError;
-use va_ir::{AccessKind, BinOp, Builtin, Expr, ExprId, Module, Stmt, UnOp};
+use va_ir::{AccessKind, BinOp, Builtin, Expr, ExprId, Module, Stmt, UnOp, VarId};
 
 /// One additive term of a contribution: a signed expression handle.
 #[derive(Clone, Copy, Debug)]
@@ -42,13 +47,28 @@ pub struct Contribution {
     pub charge: Vec<Term>,
 }
 
+/// One executable statement in the codegen v0 subset, in source order.
+#[derive(Clone, Debug)]
+pub enum LoweredStmt {
+    /// `lhs = rhs`: evaluate `rhs` (under whatever variable bindings are in scope so far) and
+    /// bind the result to `lhs` for subsequent statements to read.
+    Assign {
+        /// The assigned variable.
+        lhs: VarId,
+        /// The expression to evaluate and bind.
+        rhs: ExprId,
+    },
+    /// A flow contribution, already split into resistive/charge terms.
+    Contribute(Contribution),
+}
+
 /// A lowered, evaluable representation of a module's analog block.
 #[derive(Debug, Default)]
 pub struct Lowered {
     /// Number of local unknowns (one per IR node).
     pub n_unknowns: usize,
-    /// Per-branch contributions, in source order.
-    pub contributions: Vec<Contribution>,
+    /// Statements in source order (assignments and contributions only — see Limitations).
+    pub stmts: Vec<LoweredStmt>,
 }
 
 /// Lower a module's analog block into a [`Lowered`] plan.
@@ -56,22 +76,23 @@ pub struct Lowered {
 /// # Errors
 ///
 /// Returns [`CodegenError::Unsupported`] on IR constructs outside the codegen subset
-/// (potential contributions, `if`/`else`, assignments, malformed `ddt`).
+/// (potential contributions, `if`/`else`, loops/`case`, user-defined functions, malformed
+/// `ddt`).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
-    let mut contributions = Vec::new();
+    let mut stmts = Vec::new();
     for stmt in &module.analog {
-        lower_stmt(module, stmt, &mut contributions)?;
+        lower_stmt(module, stmt, &mut stmts)?;
     }
     Ok(Lowered {
         n_unknowns: module.nodes.len(),
-        contributions,
+        stmts,
     })
 }
 
 fn lower_stmt(
     module: &Module,
     stmt: &Stmt,
-    out: &mut Vec<Contribution>,
+    out: &mut Vec<LoweredStmt>,
 ) -> Result<(), CodegenError> {
     match stmt {
         Stmt::Contribute { target, value } => {
@@ -102,11 +123,18 @@ fn lower_stmt(
                 }
             }
 
-            out.push(Contribution {
+            out.push(LoweredStmt::Contribute(Contribution {
                 p_slot: br.p.0 as usize,
                 n_slot: br.n.0 as usize,
                 resistive,
                 charge,
+            }));
+            Ok(())
+        }
+        Stmt::Assign { lhs, rhs } => {
+            out.push(LoweredStmt::Assign {
+                lhs: *lhs,
+                rhs: *rhs,
             });
             Ok(())
         }
@@ -117,9 +145,6 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::If { .. } => Err(unsupported("if/else is not supported in codegen v0")),
-        Stmt::Assign { .. } => Err(unsupported(
-            "local variable assignments are not supported in codegen v0",
-        )),
         Stmt::While { .. } | Stmt::For { .. } | Stmt::Repeat { .. } | Stmt::Case { .. } => Err(
             unsupported("loops and case statements are not supported in codegen v0"),
         ),

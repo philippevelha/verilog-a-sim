@@ -15,7 +15,11 @@
 //! - One global unknown per IR node, supplied as `terminals`. The v0 frontend emits modules
 //!   whose nodes are exactly their ports, so `terminals` is the port→global map; modules with
 //!   internal unknowns are out of scope.
-//! - Only flow contributions; no `if`/`else`, no local variables (see [`lower`]).
+//! - Only flow contributions; no `if`/`else`, no loops/`case`, no user-defined analog
+//!   functions (see [`lower`]). Local-variable assignments *are* supported: statements execute
+//!   in source order, each `Stmt::Assign` binding into [`ad::Ctx::vars`] for later statements
+//!   (including later assignments — a variable can be reassigned) to read via [`ad::Ctx::set_var`]/
+//!   the [`ad::eval`] `Expr::Var` case.
 //! - `$vt`/`$temperature` evaluate at the fixed ambient point ([`VT`], [`TEMP`]); `$vt(T)`
 //!   evaluates the thermal voltage at the given absolute temperature `T`, carrying `T`'s
 //!   gradient (e.g. a self-heating thermal node).
@@ -26,7 +30,8 @@ pub mod ad;
 pub mod lower;
 
 use ad::{eval, Ctx, Dual};
-use lower::{Contribution, Lowered};
+use lower::{Contribution, Lowered, LoweredStmt};
+use std::cell::RefCell;
 use thiserror::Error;
 use va_abi::{ModelInstance, StampSink};
 use va_ir::Module;
@@ -113,19 +118,47 @@ impl GeneratedModel {
             terminals: &self.terminals,
             vt: self.vt,
             temp: self.temp,
+            vars: RefCell::new(std::collections::HashMap::new()),
         }
     }
 
-    /// Evaluate every term once (structural validation): surfaces any unsupported construct
-    /// as a `CodegenError` before the instance is handed out.
-    fn validate(&self) -> Result<(), CodegenError> {
-        let ctx = self.ctx(&[]);
-        for c in &self.lowered.contributions {
-            for term in c.resistive.iter().chain(c.charge.iter()) {
-                eval(&ctx, term.expr)?;
+    /// Walk the lowered statement sequence once, in source order: an assignment evaluates its
+    /// right-hand side and binds it into `ctx`'s variable environment (`ad::Ctx::set_var`) so
+    /// later statements can read it; a contribution is handed to `on_contribution`. Shared by
+    /// [`Self::validate`] (which just surfaces the first unsupported/failing construct) and
+    /// [`ModelInstance::load`] (which actually stamps).
+    ///
+    /// Aborts the whole walk on the first error — an assignment that fails post-validation
+    /// (which "cannot happen") would otherwise leave later contributions reading a stale or
+    /// missing variable binding, which is worse than stopping early and leaving whatever was
+    /// already stamped as-is.
+    fn walk(
+        &self,
+        ctx: &Ctx,
+        mut on_contribution: impl FnMut(&Contribution) -> Result<(), CodegenError>,
+    ) -> Result<(), CodegenError> {
+        for stmt in &self.lowered.stmts {
+            match stmt {
+                LoweredStmt::Assign { lhs, rhs } => {
+                    let d = eval(ctx, *rhs)?;
+                    ctx.set_var(*lhs, d);
+                }
+                LoweredStmt::Contribute(c) => on_contribution(c)?,
             }
         }
         Ok(())
+    }
+
+    /// Evaluate every statement once (structural validation): surfaces any unsupported
+    /// construct as a `CodegenError` before the instance is handed out.
+    fn validate(&self) -> Result<(), CodegenError> {
+        let ctx = self.ctx(&[]);
+        self.walk(&ctx, |c| {
+            for term in c.resistive.iter().chain(c.charge.iter()) {
+                eval(&ctx, term.expr)?;
+            }
+            Ok(())
+        })
     }
 
     /// Sum a list of signed terms into a single dual.
@@ -183,9 +216,12 @@ impl ModelInstance for GeneratedModel {
 
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
         let ctx = self.ctx(x);
-        for c in &self.lowered.contributions {
+        // Post-validation this cannot fail; `walk` already stops early rather than stamping
+        // from a corrupted variable environment if it somehow does (see `walk`'s doc comment).
+        let _ = self.walk(&ctx, |c| {
             self.stamp(&ctx, c, sink);
-        }
+            Ok(())
+        });
     }
 }
 
@@ -195,7 +231,7 @@ mod tests {
     use va_abi::stamps::DenseStamp;
     use va_ir::{
         Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, Module, NodeDecl, NodeId,
-        Param, Stmt,
+        Param, Stmt, VarDecl, VarId,
     };
 
     /// Build the resistor IR: `I(p,n) <+ V(p,n) / R`, R defaulting to 1 kΩ.
@@ -335,6 +371,214 @@ mod tests {
             value: i,
         }];
         m
+    }
+
+    /// Build a varactor-like IR (mirrors `external/varactor.va`'s real shape, with `v0`/`v1`
+    /// fixed at `0`/`1` for a simpler expected-value formula): two local variables assigned in
+    /// sequence, the second reading the first, then a contribution reading the second —
+    /// `real v, q; v = V(p,n); q = c0*v + c1*ln(cosh(v)); I(p,n) <+ ddt(q);`. This is exactly
+    /// the shape `va-codegen` rejected before local-variable assignment support (`Stmt::Assign`
+    /// lowering) existed.
+    fn varactor_like_ir() -> Module {
+        let mut m = Module::new("varactor_like");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "c0".into(),
+                default: 1e-12,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "c1".into(),
+                default: 0.5e-12,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+        m.vars = vec![VarDecl { name: "v".into() }, VarDecl { name: "q".into() }];
+        let (v_id, q_id) = (VarId(0), VarId(1));
+
+        let vprobe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let c1 = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let v_read = m.push_expr(Expr::Var(v_id));
+        let c0v = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0, v_read));
+        let cosh_v = m.push_expr(Expr::Call(Builtin::Cosh, vec![v_read]));
+        let ln_cosh = m.push_expr(Expr::Call(Builtin::Ln, vec![cosh_v]));
+        let c1_ln = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c1, ln_cosh));
+        let q_expr = m.push_expr(Expr::Binary(va_ir::BinOp::Add, c0v, c1_ln));
+        let q_read = m.push_expr(Expr::Var(q_id));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q_read]));
+
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: v_id,
+                rhs: vprobe,
+            },
+            Stmt::Assign {
+                lhs: q_id,
+                rhs: q_expr,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: ddt_q,
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn local_variables_compute_a_nonlinear_charge() {
+        let inst = build_instance(&varactor_like_ir(), &[0, 1]).unwrap();
+        let v = 0.6;
+        let mut sink = DenseStamp::new(1);
+        inst.load(&[v], &mut sink);
+
+        let (c0, c1) = (1e-12, 0.5e-12);
+        let q_expected = c0 * v + c1 * v.cosh().ln();
+        // d/dv[c0*v + c1*ln(cosh(v))] = c0 + c1*tanh(v).
+        let dqdv_expected = c0 + c1 * v.tanh();
+        assert!(
+            (sink.charge[0] - q_expected).abs() / q_expected.abs() < 1e-9,
+            "charge: {} vs {}",
+            sink.charge[0],
+            q_expected
+        );
+        assert!(
+            (sink.dcharge[0] - dqdv_expected).abs() / dqdv_expected.abs() < 1e-9,
+            "dcharge: {} vs {}",
+            sink.dcharge[0],
+            dqdv_expected
+        );
+    }
+
+    /// The §5 milestone for this construct: the AD Jacobian threaded *through* two sequential
+    /// local-variable assignments must still match a central finite difference.
+    #[test]
+    fn ad_through_local_variables_matches_finite_difference() {
+        let inst = build_instance(&varactor_like_ir(), &[0, 1]).unwrap();
+        let charge_at = |v: f64| {
+            let mut s = DenseStamp::new(1);
+            inst.load(&[v], &mut s);
+            s.charge[0]
+        };
+
+        let v = 0.6;
+        let h = 1e-6;
+        let fd = (charge_at(v + h) - charge_at(v - h)) / (2.0 * h);
+
+        let mut sink = DenseStamp::new(1);
+        inst.load(&[v], &mut sink);
+        let analytic = sink.dcharge[0];
+
+        let rel = (analytic - fd).abs() / fd.abs();
+        assert!(rel < 1e-6, "analytic {analytic} vs fd {fd} (rel {rel})");
+    }
+
+    #[test]
+    fn reassignment_overwrites_the_previous_binding() {
+        // real x; x = 1; x = x + 1; I(p,n) <+ x;  -- must read 2, the second assignment, not 1.
+        let mut m = Module::new("reassign");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        let x_id = VarId(0);
+        m.vars = vec![VarDecl { name: "x".into() }];
+        let one = m.push_expr(Expr::Const(1.0));
+        let x_read = m.push_expr(Expr::Var(x_id));
+        let x_plus_one = m.push_expr(Expr::Binary(va_ir::BinOp::Add, x_read, one));
+        let x_read_again = m.push_expr(Expr::Var(x_id));
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: x_id,
+                rhs: one,
+            },
+            Stmt::Assign {
+                lhs: x_id,
+                rhs: x_plus_one,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: x_read_again,
+            },
+        ];
+
+        let inst = build_instance(&m, &[0, 1]).unwrap();
+        let mut sink = DenseStamp::new(1);
+        inst.load(&[0.0], &mut sink);
+        assert_eq!(sink.residual[0], 2.0);
+    }
+
+    #[test]
+    fn reading_an_unassigned_variable_is_rejected() {
+        // I(p,n) <+ x, with no assignment to x anywhere -- caught eagerly by build_instance's
+        // own validate() pass, the same way every other unsupported construct is.
+        let mut m = Module::new("unassigned");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "x".into() }];
+        let x_read = m.push_expr(Expr::Var(VarId(0)));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: x_read,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1]),
+            Err(CodegenError::Unsupported(_))
+        ));
     }
 
     #[test]
