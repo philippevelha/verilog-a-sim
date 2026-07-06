@@ -645,16 +645,40 @@ matches the code verbatim.
 > reassigning arm didn't actually run, `load` silently leaves the sink unstamped, a pre-existing
 > "cannot happen post-validation" fallback rather than a regression this fix introduces).
 >
-> Re-scanned the full external/ corpus (115 .va files, recursive): **53/115 pass frontend+codegen,
-> up from 50** (+3 net new files — `ekv26.va`, `angelov_gan.va`, `hisim2.va`, exactly the three
-> concrete shapes above). *Outstanding:* the remaining 3 nested-`ddt`/`idt` files (PSP102's NQS
-> variants — `psp102_nqs.va`/`psp102b_nqs.va`/`psp102e_nqs.va`) all need `idt` support outright
-> (`V(SPLINE1) <+ vnorm_inv * idt(-Tnorm*fk1, Qp1_0);` — a coefficient-scaled `idt` with an
-> explicit initial-condition argument), not attempted this round: it needs its own auxiliary
-> accumulator unknown, architecturally distinct from a branch-current unknown, since its value
-> depends on the entire history of its argument, not just the current unknowns; plus the
-> non-path-sensitive variable-read-before-assignment gap surfaced by 2 files (see above). Full
-> committed sweep; `t2-codegen/02-lowering.qmd`.
+> Re-scanned the full external/ corpus (115 .va files, recursive): 53/115 pass frontend+codegen,
+> up from 50 (+3 net new files — `ekv26.va`, `angelov_gan.va`, `hisim2.va`, exactly the three
+> concrete shapes above).
+>
+> **`idt` (the time-*integral* operator) is now lowered too**, closing the last of the three
+> outstanding shapes and unblocking PSP102's NQS variants
+> (`psp102_nqs.va`/`psp102b_nqs.va`/`psp102e_nqs.va`:
+> `V(SPLINE1) <+ vnorm_inv * idt(-Tnorm*fk1, Qp1_0);`). Architecturally distinct from `ddt`:
+> `idt`'s value at a given instant depends on the *entire history* of its argument, not just the
+> current unknowns, so it can't be recovered symbolically from a top-level contribution shape the
+> way `ddt`'s charge argument is. Instead, every distinct `idt(expr)` call site gets its own
+> auxiliary "accumulator" unknown `Y` (`lower::IdtAccumulator`), enforcing `ddt(Y) = expr` via the
+> *existing* charge-channel machinery — self-contained exactly like a potential contribution's own
+> branch-current unknown (`GeneratedModel::stamp_idt_accumulators` stamps it unconditionally every
+> `load()` call, after the statement walk finishes, since `expr` may itself read a local variable
+> the walk just bound — PSP102's NQS argument is built from `Tnorm`/`fk1`, both ordinary earlier
+> assignments). Reading `idt(expr)`'s *value* is then just an ordinary read of `Y`
+> (`ad::Ctx::idt_slots`/`ad::eval`'s new `Builtin::Idt` case) — so, unlike `ddt`, `idt` may appear
+> **anywhere** in an expression, not only as a top-level contribution term: no special-casing was
+> needed for PSP102's `coeff*idt(...)` shape at all, since the multiplication just evaluates `idt`'s
+> value like any other sub-expression. `build_instance` allocates each accumulator's global index
+> the same way it already allocates branch-current unknowns (generalized to `while full.len() <
+> lowered.n_unknowns`, so it stays correct regardless of how many auxiliary-unknown categories
+> exist). *Honest limitation, not a special gap in `idt`:* the optional initial-condition argument
+> is accepted syntactically but not applied — this project already starts every transient run from
+> the all-zero vector with no `.ic`/`UIC` support at all, so an accumulator's true initial value is
+> whatever the DC operating point resolves it to, the same limitation every other reactive state in
+> this codegen already has.
+>
+> Re-scanned again: **56/115 pass frontend+codegen, up from 53** (+3 — all three PSP102 NQS
+> variants). *Outstanding:* a flow probe on a branch with no potential contribution of its own (4
+> files, pre-existing, unrelated to `ddt`/`idt`) and the non-path-sensitive
+> variable-read-before-assignment gap (2 files, see above) — the nested-`ddt`/`idt` bucket that
+> opened this round of work is now fully closed. Full committed sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.
@@ -666,9 +690,12 @@ matches the code verbatim.
 
 ### Phase T2.3 — Charge channel (transient-ready) & coverage
 > **Status: 🟢 partial** — `ddt(q)` terms are routed to the charge/`dcharge` channel; the
-> generated capacitor stamps only charge (`Q=C·V`, `dQ/dV=C`), ready for T4. `idt` and a
-> formal coverage matrix are still open; `ddt` is recognised only as a top-level additive
-> term. *Outstanding:* coverage tracking; `t2-codegen/03-charge-and-coverage.qmd`.
+> generated capacitor stamps only charge (`Q=C·V`, `dQ/dV=C`), ready for T4. `idt(expr)` is now
+> lowered too, via its own auxiliary accumulator unknown reusing the same charge channel (T2.2's
+> `IdtAccumulator`) — no initial-condition (`.ic`/UIC) support, the one honest gap left, shared
+> with every other reactive state in this codegen. A formal coverage matrix is still open; `ddt`
+> is recognised only as a top-level additive term (by design — see T2.2). *Outstanding:* coverage
+> tracking; `t2-codegen/03-charge-and-coverage.qmd`.
 
 - Emit the charge/`dcharge` channel from `ddt`/`idt` so T4 can integrate.
 - Broaden operator/built-in coverage toward the declared subset; track what is supported.

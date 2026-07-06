@@ -121,20 +121,34 @@
 //! `LoweredStmt::Assign` was ever emitted for it) rather than miscomputing — out of scope because
 //! neither corpus file needs it, not because it would be sound to guess a value.
 //!
+//! `idt` (the time-*integral* operator) is lowered too, but architecturally differently from
+//! `ddt`: its value at a given instant depends on the *entire history* of its argument, not just
+//! the current unknowns, so it can't be recovered symbolically the way `ddt`'s charge argument
+//! is. Instead, each distinct `idt(expr)` call site gets its own auxiliary "accumulator" unknown
+//! `Y` (see [`IdtAccumulator`]), enforcing `ddt(Y) = expr` via the ordinary charge-channel
+//! machinery, self-contained exactly like a potential contribution's own branch-current unknown —
+//! `crate::GeneratedModel::stamp_idt_accumulators` stamps this row unconditionally every `load()`
+//! call, independent of whatever control flow does or doesn't reach the specific `idt(...)`
+//! expression that call site sits in. Reading `idt(expr)`'s *value* is then just an ordinary read
+//! of `Y` (`crate::ad::Ctx::idt_slots`/`crate::ad::eval`'s `Builtin::Idt` case), so — unlike
+//! `ddt` — `idt` may appear anywhere in an expression, not only as a top-level contribution term:
+//! this is exactly the shape `psp102`'s NQS variants need,
+//! `V(SPLINE1) <+ vnorm_inv * idt(-Tnorm * fk1, Qp1_0);`, a coefficient-scaled `idt` nested inside
+//! a potential contribution's RHS with no special-casing of the multiplication at all.
+//!
 //! # Limitations
 //!
-//! - `idt` (the time-*integral* operator) is not lowered at all yet, top-level or otherwise —
-//!   unlike `ddt`, it doesn't fit the existing charge-channel shape at all (its value at a given
-//!   instant depends on the *entire* history of its argument, not just the current unknowns, so
-//!   it needs its own auxiliary accumulator unknown, analogous to but distinct from a potential
-//!   contribution's branch-current unknown — out of scope here). `psp102`'s NQS variants
-//!   (`psp102_nqs.va`/`psp102b_nqs.va`/`psp102e_nqs.va`) are blocked on exactly this:
-//!   `V(SPLINE1) <+ vnorm_inv * idt(-Tnorm * fk1, Qp1_0);` — a coefficient-scaled `idt` with an
-//!   explicit initial-condition argument, the two-argument form the LRM defines.
+//! - `idt`'s optional second (initial-condition) argument is accepted syntactically (so a
+//!   two-argument call doesn't fail to lower) but not applied: this project already starts every
+//!   transient run from the all-zero vector (no `.ic`/`UIC` support at all — `va-cli`'s module
+//!   doc comment), so an accumulator's initial value is whatever the DC operating point resolves
+//!   it to (in general *not* the declared `ic`), the same honest limitation as every other
+//!   reactive state in this codegen, not a special gap in `idt` specifically.
 //! - The local-variable `ddt`-indirection tracking above only ever substitutes a *bare* variable
 //!   read (`Expr::Var`) that is itself one additive term; a variable read as part of a larger
 //!   sub-expression (e.g. `2*dqdt`) is not tracked back to its defining `ddt` call — no corpus
-//!   file surveyed needed that shape.
+//!   file surveyed needed that shape. `idt` never needs this at all — its value is an ordinary
+//!   unknown read, substitutable anywhere, not just at a `<+` site.
 //!
 //! User-defined analog functions (`Expr::CallUser`) are handled entirely in `crate::ad` instead
 //! — a function call is an expression-level construct, so it never needs anything from this
@@ -296,11 +310,34 @@ pub struct LoweredCaseArm {
     pub body: Vec<LoweredStmt>,
 }
 
+/// One `idt` call site. Unlike `ddt`, whose result only ever needs to be *stamped* (the charge
+/// channel encodes "this row's residual is the time-derivative of `expr`" without ever computing
+/// an actual value for it), `idt(expr)`'s result is a genuine *value* every containing expression
+/// needs to read — and, unlike `ddt`'s charge argument, this codegen has no way to recover
+/// `expr`'s time-integral symbolically. So `idt` gets its own auxiliary "accumulator" unknown
+/// `Y`, enforcing `ddt(Y) = expr` as a self-contained row exactly like a `ddt` charge term would
+/// (see `crate::GeneratedModel::stamp_idt_accumulators`) — and `crate::ad::eval` reads `idt`'s
+/// *value* as simply `Y`'s current value (see `crate::ad::Ctx::idt_slots`). Because the value is
+/// just an ordinary unknown read, `idt` may appear anywhere in an expression, not just as a
+/// top-level contribution term the way `ddt` must.
+#[derive(Clone, Copy, Debug)]
+pub struct IdtAccumulator {
+    /// The `idt(...)` call's own `ExprId.0` — how `crate::ad::Ctx::idt_slots` maps a specific
+    /// call site back to the unknown its value reads from (the same call written twice is two
+    /// independent accumulators, exactly as two `ddt` calls on the same argument are).
+    pub expr_id: u32,
+    /// `idt`'s first argument — the quantity being integrated.
+    pub arg: ExprId,
+    /// Local terminal slot (past every node and [`BranchCurrent`] slot) allocated for this
+    /// accumulator's own unknown.
+    pub local_slot: usize,
+}
+
 /// A lowered, evaluable representation of a module's analog block.
 #[derive(Debug, Default)]
 pub struct Lowered {
     /// Total number of local unknowns: one per IR node, plus one per entry in
-    /// [`Self::branch_currents`].
+    /// [`Self::branch_currents`], plus one per entry in [`Self::idt_accumulators`].
     pub n_unknowns: usize,
     /// Statements in source order (assignments and contributions only — see Limitations).
     pub stmts: Vec<LoweredStmt>,
@@ -308,6 +345,10 @@ pub struct Lowered {
     /// ascending [`BranchId`] order (the deterministic order their local terminal slots are
     /// allocated in, past `module.nodes.len()`).
     pub branch_currents: Vec<BranchCurrent>,
+    /// One entry per distinct `idt(...)` call site anywhere in the module, in the order
+    /// encountered walking the analog block (the deterministic order their local terminal slots
+    /// are allocated in, past every [`BranchCurrent`] slot).
+    pub idt_accumulators: Vec<IdtAccumulator>,
 }
 
 /// Lower a module's analog block into a [`Lowered`] plan.
@@ -315,7 +356,8 @@ pub struct Lowered {
 /// # Errors
 ///
 /// Returns [`CodegenError::Unsupported`] on IR constructs outside the codegen subset
-/// (user-defined functions, malformed `ddt`).
+/// (user-defined functions, malformed `ddt`, or an `idt` called with other than one or two
+/// arguments).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let (flow_branches, potential_branches) = branch_kinds(&module.analog);
     let param_only = param_only_vars(module, &module.analog);
@@ -336,6 +378,28 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         next_slot += 1;
     }
 
+    let mut idt_calls = Vec::new();
+    collect_idt_calls_in_stmts(module, &module.analog, &mut idt_calls);
+    let mut idt_accumulators = Vec::new();
+    let mut seen_idt = HashSet::new();
+    for call in idt_calls {
+        if !seen_idt.insert(call.0) {
+            continue;
+        }
+        let Expr::Call(Builtin::Idt, args) = module.expr(call) else {
+            unreachable!("collect_idt_calls_in_stmts only ever collects `Idt` call sites");
+        };
+        if args.is_empty() || args.len() > 2 {
+            return Err(unsupported("idt expects one or two arguments"));
+        }
+        idt_accumulators.push(IdtAccumulator {
+            expr_id: call.0,
+            arg: args[0],
+            local_slot: next_slot,
+        });
+        next_slot += 1;
+    }
+
     let mut stmts = Vec::new();
     let mut ddt_vars = HashMap::new();
     for stmt in &module.analog {
@@ -352,7 +416,97 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         n_unknowns: next_slot,
         stmts,
         branch_currents,
+        idt_accumulators,
     })
+}
+
+/// Collect every `idt(...)` call site reachable anywhere in `stmts`, in source order (a given
+/// call may be pushed more than once if it's somehow reachable via more than one path — callers
+/// dedupe by `ExprId`). Recurses into every nested construct `lower_stmt` itself recurses through,
+/// the same shape as [`collect_branch_kinds`]/[`collect_assigns`].
+fn collect_idt_calls_in_stmts(module: &Module, stmts: &[Stmt], out: &mut Vec<ExprId>) {
+    for stmt in stmts {
+        collect_idt_calls_in_stmt(module, stmt, out);
+    }
+}
+
+fn collect_idt_calls_in_stmt(module: &Module, stmt: &Stmt, out: &mut Vec<ExprId>) {
+    match stmt {
+        Stmt::Contribute { value, .. } => collect_idt_calls_in_expr(module, *value, out),
+        Stmt::Assign { rhs, .. } => collect_idt_calls_in_expr(module, *rhs, out),
+        Stmt::Block(body) => collect_idt_calls_in_stmts(module, body, out),
+        Stmt::If { cond, then_, else_ } => {
+            collect_idt_calls_in_expr(module, *cond, out);
+            collect_idt_calls_in_stmts(module, then_, out);
+            collect_idt_calls_in_stmts(module, else_, out);
+        }
+        Stmt::While { cond, body } => {
+            collect_idt_calls_in_expr(module, *cond, out);
+            collect_idt_calls_in_stmts(module, body, out);
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            collect_idt_calls_in_stmt(module, init, out);
+            collect_idt_calls_in_expr(module, *cond, out);
+            collect_idt_calls_in_stmt(module, step, out);
+            collect_idt_calls_in_stmts(module, body, out);
+        }
+        Stmt::Repeat { count, body } => {
+            collect_idt_calls_in_expr(module, *count, out);
+            collect_idt_calls_in_stmts(module, body, out);
+        }
+        Stmt::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            collect_idt_calls_in_expr(module, *selector, out);
+            for arm in arms {
+                for &label in &arm.labels {
+                    collect_idt_calls_in_expr(module, label, out);
+                }
+                collect_idt_calls_in_stmts(module, &arm.body, out);
+            }
+            collect_idt_calls_in_stmts(module, default, out);
+        }
+    }
+}
+
+/// Walk every sub-expression of `expr` looking for an `idt(...)` call — unlike `ddt`, which is
+/// only ever recognized in the specific top-level-additive-term shapes [`charge_term_shape`]
+/// inspects, `idt` may appear anywhere at all (see [`IdtAccumulator`]'s doc comment), so this
+/// visits every `Expr` variant's sub-expressions generically rather than following a specific
+/// contribution shape.
+fn collect_idt_calls_in_expr(module: &Module, expr: ExprId, out: &mut Vec<ExprId>) {
+    match module.expr(expr) {
+        Expr::Call(Builtin::Idt, args) => {
+            out.push(expr);
+            for &a in args {
+                collect_idt_calls_in_expr(module, a, out);
+            }
+        }
+        Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => {}
+        Expr::Unary(_, e) => collect_idt_calls_in_expr(module, *e, out),
+        Expr::Binary(_, l, r) => {
+            collect_idt_calls_in_expr(module, *l, out);
+            collect_idt_calls_in_expr(module, *r, out);
+        }
+        Expr::Call(_, args) | Expr::CallUser(_, args) => {
+            for &a in args {
+                collect_idt_calls_in_expr(module, a, out);
+            }
+        }
+        Expr::Select(c, t, e) => {
+            collect_idt_calls_in_expr(module, *c, out);
+            collect_idt_calls_in_expr(module, *t, out);
+            collect_idt_calls_in_expr(module, *e, out);
+        }
+        Expr::Ddx(e, _) => collect_idt_calls_in_expr(module, *e, out),
+    }
 }
 
 /// Collect the set of branch IDs targeted by a flow contribution and the set targeted by a

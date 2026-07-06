@@ -88,13 +88,15 @@ fn loop_iteration_cap_exceeded() -> CodegenError {
 
 /// Compile an elaborated IR module into a loadable model instance. `terminals` must have
 /// exactly `module.nodes.len()` entries — the global unknown index for each of the module's
-/// own nodes, in node order (unchanged from before potential contributions existed). If the
-/// module has one or more branches with a potential contribution, each needs its own auxiliary
-/// branch-current unknown too; `build_instance` allocates those itself from `next_unknown`
-/// (incrementing it once per such branch, in ascending `BranchId` order — see
-/// [`lower::Lowered::branch_currents`]), so the caller's own next-free-index counter (e.g.
-/// `va-cli`'s device-building loop) stays in sync without having to pre-compute how many extra
-/// unknowns a module will need.
+/// own nodes, in node order (unchanged from before potential contributions existed). Every
+/// branch with a potential contribution needs its own auxiliary branch-current unknown, and
+/// every distinct `idt(...)` call site needs its own accumulator unknown (see
+/// [`lower::Lowered::branch_currents`]/[`lower::Lowered::idt_accumulators`]); `build_instance`
+/// allocates all of these itself from `next_unknown` (incrementing it once per extra unknown,
+/// branch currents first in ascending `BranchId` order, then accumulators in the order their
+/// call sites were encountered), so the caller's own next-free-index counter (e.g. `va-cli`'s
+/// device-building loop) stays in sync without having to pre-compute how many extra unknowns a
+/// module will need.
 ///
 /// # Errors
 ///
@@ -115,7 +117,10 @@ pub fn build_instance(
 
     let lowered = lower::lower(module)?;
     let mut full = terminals.to_vec();
-    for _ in &lowered.branch_currents {
+    // One further global unknown per entry in `branch_currents`, then one more per entry in
+    // `idt_accumulators` — `lowered.n_unknowns` is the authoritative total (see `lower::lower`),
+    // so this stays correct regardless of how many categories of auxiliary unknown exist.
+    while full.len() < lowered.n_unknowns {
         full.push(*next_unknown);
         *next_unknown += 1;
     }
@@ -156,6 +161,12 @@ impl GeneratedModel {
             .iter()
             .map(|bc| (bc.branch.0, bc.local_slot))
             .collect();
+        let idt_slots = self
+            .lowered
+            .idt_accumulators
+            .iter()
+            .map(|acc| (acc.expr_id, acc.local_slot))
+            .collect();
         Ctx {
             module: &self.module,
             params: &self.params,
@@ -165,6 +176,7 @@ impl GeneratedModel {
             temp: self.temp,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots,
+            idt_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
             validating,
         }
@@ -291,7 +303,16 @@ impl GeneratedModel {
     /// here, a stated limitation, not a silent one).
     fn validate(&self) -> Result<(), CodegenError> {
         let ctx = self.ctx(&[], true);
-        Self::validate_stmts(&ctx, &self.lowered.stmts)
+        Self::validate_stmts(&ctx, &self.lowered.stmts)?;
+        // An `idt` accumulator's argument only ever gets evaluated by
+        // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
+        // statement walk above (the call site that *reads* the accumulator's value never
+        // evaluates its argument at all — see `lower::IdtAccumulator`'s doc comment) — so it
+        // needs its own explicit validation pass here.
+        for acc in &self.lowered.idt_accumulators {
+            eval(&ctx, acc.arg)?;
+        }
+        Ok(())
     }
 
     fn validate_stmts(ctx: &Ctx, stmts: &[LoweredStmt]) -> Result<(), CodegenError> {
@@ -549,6 +570,37 @@ impl GeneratedModel {
             }
         }
     }
+
+    /// Stamp every `idt` accumulator's own row: residual `-arg` (so Newton drives the row's
+    /// charge-channel derivative — the accumulator's own `d/dt` — to equal `arg`) and charge
+    /// equal to the accumulator's own current value (`dcharge/d(accumulator) = 1`) — see
+    /// `lower::IdtAccumulator`'s doc comment for why this is the right encoding of `ddt(Y) = arg`.
+    /// Runs unconditionally, once per `load()`/`validate()` call, independent of whichever
+    /// `if`/`case` arm actually reaches this call site's `idt(...)` expression that call (same
+    /// "always stamp the structural part" character as [`Self::stamp_branch_currents`]) — and
+    /// only *after* [`Self::run`]/`Self::validate_stmts` finish, since `arg` may itself read a
+    /// local variable only bound by the statement walk (real compact models routinely compute an
+    /// `idt` argument from variables assigned earlier in the same analog block, e.g. PSP102's
+    /// NQS `Tnorm`/`fk1`).
+    fn stamp_idt_accumulators(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
+        for acc in &self.lowered.idt_accumulators {
+            let g = self.terminals[acc.local_slot];
+            // Post-validation this cannot fail; skip stamping if it somehow does, matching
+            // `Self::stamp`'s own "cannot fail, bail without stamping if it somehow does" pattern.
+            let Ok(d) = eval(ctx, acc.arg) else {
+                continue;
+            };
+            sink.residual(g, -d.value);
+            for (slot, &dg) in d.grad.iter().enumerate() {
+                if dg != 0.0 {
+                    let gk = self.terminals[slot];
+                    sink.jacobian(g, gk, -dg);
+                }
+            }
+            sink.charge(g, ctx.x.get(g).copied().unwrap_or(0.0));
+            sink.dcharge(g, g, 1.0);
+        }
+    }
 }
 
 impl ModelInstance for GeneratedModel {
@@ -573,6 +625,9 @@ impl ModelInstance for GeneratedModel {
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
         let _ = self.run(&ctx, &self.lowered.stmts, sink);
         self.finalize_mixed_branch_currents(&ctx, sink);
+        // After `run`, not before: an `idt` accumulator's argument may read a local variable the
+        // statement walk just bound (see `Self::stamp_idt_accumulators`'s doc comment).
+        self.stamp_idt_accumulators(&ctx, sink);
     }
 }
 
@@ -1108,6 +1163,182 @@ mod tests {
         assert!((sink.charge[0] - 3e-12).abs() < 1e-24);
         assert!((sink.dcharge[0] - 1e-12).abs() < 1e-27);
         assert_eq!(sink.residual[0], 0.0);
+    }
+
+    /// `V(p,n) <+ k*idt(V(p,n));` -- `psp102`'s NQS `V(SPLINE1) <+ vnorm_inv*idt(...)` shape in
+    /// miniature: `idt`'s argument is the very branch voltage the potential contribution
+    /// constrains, so this exercises both halves of `IdtAccumulator` at once: the accumulator's
+    /// own row (`ddt(Y) = arg`) and the constraint row reading `Y` back through a coefficient.
+    fn idt_ir(k: f64) -> Module {
+        let mut m = Module::new("idt_ir");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "k".into(),
+            default: k,
+            min: None,
+            max: None,
+        }];
+
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let k_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let idt_call = m.push_expr(Expr::Call(Builtin::Idt, vec![vpn]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, k_e, idt_call));
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+        m
+    }
+
+    #[test]
+    fn idt_accumulator_integrates_its_argument_and_reads_back_through_a_coefficient() {
+        let mut next = 2;
+        let k = 3.0;
+        let inst = build_instance(&idt_ir(k), &[0, 1], &mut next).unwrap();
+        // node p=0, n=1; branch-current slot -> global 2; idt accumulator slot -> global 3.
+        assert_eq!(next, 4);
+
+        let (vp, vn, y) = (0.7, 0.0, 1.25);
+        let mut sink = DenseStamp::new(4);
+        inst.load(&[vp, vn, 0.0, y], &mut sink);
+
+        // The accumulator's own row (global 3): residual = -(arg) = -(V(p,n)); jacobian w.r.t.
+        // p/n = -1/+1; charge = Y itself; dcharge/dY = 1.
+        assert!((sink.residual[3] - -(vp - vn)).abs() < 1e-12);
+        assert!((sink.jac(3, 0) - -1.0).abs() < 1e-12);
+        assert!((sink.jac(3, 1) - 1.0).abs() < 1e-12);
+        assert!((sink.charge[3] - y).abs() < 1e-12);
+        assert!((sink.dcharge[3 * 4 + 3] - 1.0).abs() < 1e-12);
+
+        // The branch's constraint row (global 2): structural `V(p)-V(n)` minus `k*idt(...)`'s
+        // value (`k*Y`, since `idt`'s own gradient w.r.t. `V(p,n)` is zero -- its value comes
+        // only from the accumulator unknown, never its argument).
+        let expected_residual = (vp - vn) - k * y;
+        assert!((sink.residual[2] - expected_residual).abs() < 1e-12);
+        assert!((sink.jac(2, 0) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(2, 1) - -1.0).abs() < 1e-12);
+        assert!((sink.jac(2, 3) - -k).abs() < 1e-12);
+    }
+
+    /// `idt(arg, ic)`'s second (initial-condition) argument must not fail to lower or load --
+    /// it's accepted syntactically (`lower::IdtAccumulator`'s doc comment) even though this v0
+    /// codegen doesn't apply it as a real initial value.
+    #[test]
+    fn idt_with_initial_condition_argument_builds_and_loads() {
+        let mut m = Module::new("idt_with_ic");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let ic = m.push_expr(Expr::Const(0.5));
+        let idt_call = m.push_expr(Expr::Call(Builtin::Idt, vec![vpn, ic]));
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            },
+            value: idt_call,
+        }];
+
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
+        let mut sink = DenseStamp::new(4);
+        // p == n == 0, so the constraint row's structural `V(p)-V(n)` term drops out, isolating
+        // `idt`'s own contribution: it reads back as the accumulator's raw value (0.0 here,
+        // since the codegen doesn't seed it from `ic`) -- building and loading without erroring
+        // is the main point of this test.
+        inst.load(&[0.0, 0.0, 0.0, 0.0], &mut sink);
+        assert_eq!(sink.residual[2], 0.0);
+    }
+
+    /// Two distinct `idt(...)` call sites -- even with syntactically identical arguments -- get
+    /// two independent accumulators, not one shared between them.
+    #[test]
+    fn two_distinct_idt_calls_get_independent_accumulators() {
+        let mut m = Module::new("two_idt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+
+        let vpn = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let idt_a = m.push_expr(Expr::Call(Builtin::Idt, vec![vpn]));
+        let idt_b = m.push_expr(Expr::Call(Builtin::Idt, vec![vpn]));
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, idt_a, idt_b));
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            },
+            value: sum,
+        }];
+
+        let mut next = 2;
+        let inst = build_instance(&m, &[0, 1], &mut next).unwrap();
+        // branch-current slot -> 2; two distinct idt accumulators -> 3 and 4.
+        assert_eq!(next, 5);
+
+        let (y_a, y_b) = (2.0, 5.0);
+        let mut sink = DenseStamp::new(5);
+        inst.load(&[0.0, 0.0, 0.0, y_a, y_b], &mut sink);
+        // The constraint row reads `idt_a + idt_b` = y_a + y_b, not `2*` either one.
+        assert!((sink.residual[2] - -(y_a + y_b)).abs() < 1e-12);
+        // Each accumulator's own row is independent: both driven by the same argument (V(p,n)
+        // = 0 here), but each is its own row with its own charge slot.
+        assert!((sink.charge[3] - y_a).abs() < 1e-12);
+        assert!((sink.charge[4] - y_b).abs() < 1e-12);
     }
 
     #[test]

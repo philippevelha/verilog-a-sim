@@ -290,6 +290,12 @@ pub struct Ctx<'a> {
     /// module (`crate::lower::Lowered::branch_currents`). A flow probe `I(...)` on a branch
     /// absent from this map has no current unknown to read and is rejected.
     pub branch_current_slots: HashMap<u32, usize>,
+    /// Maps an `idt(...)` call site (by its own `ExprId.0`) to the local terminal slot of its
+    /// auxiliary accumulator unknown (`crate::lower::Lowered::idt_accumulators`). Consulted by
+    /// [`eval`]'s `Builtin::Idt` case to read the call's *value* — see
+    /// `crate::lower::IdtAccumulator`'s doc comment for why this is a plain unknown read rather
+    /// than anything resembling `ddt`'s charge-channel handling.
+    pub idt_slots: HashMap<u32, usize>,
     /// Per-`load()`-call bookkeeping for a branch that mixes flow and potential contributions
     /// (`crate::lower::BranchCurrent::mixed`): the local slots whose constraint-row structural
     /// stamp has already been applied *this call*, because a potential contribution has
@@ -362,10 +368,11 @@ impl Ctx<'_> {
 /// # Errors
 ///
 /// Returns [`CodegenError::Unsupported`] for IR constructs the v0 codegen does not evaluate in
-/// value position: a flow probe on a branch with no potential contribution of its own,
-/// `ddt`/`idt` (handled by the lowering split, not evaluated here), a local variable read
-/// before it was ever assigned, and anything [`call_function`] rejects (a `<+` contribution
-/// inside a function body, a wrong argument count, or a runaway loop inside one).
+/// value position: a flow probe on a branch with no potential contribution of its own, a bare
+/// `ddt` (handled by the lowering split, not evaluated here — unlike `idt`, which *is* evaluated
+/// here, as a plain read of its own accumulator unknown), a local variable read before it was
+/// ever assigned, and anything [`call_function`] rejects (a `<+` contribution inside a function
+/// body, a wrong argument count, or a runaway loop inside one).
 pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
     let count = ctx.count();
     match ctx.module.expr(expr) {
@@ -462,6 +469,25 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 ),
             })
         }
+        // `idt(...)`'s value is a plain read of its own accumulator unknown (see
+        // `crate::lower::IdtAccumulator`'s doc comment) — never evaluated through `eval_call`'s
+        // ordinary per-builtin dispatch, since its argument is never evaluated to produce this
+        // call's *value* at all (only `crate::GeneratedModel::stamp_idt_accumulators` evaluates
+        // it, to stamp the accumulator's own row). `expr` is this call's own id, exactly the key
+        // `lower::lower` registered it under in `ctx.idt_slots`.
+        Expr::Call(Builtin::Idt, _) => {
+            let slot = *ctx.idt_slots.get(&expr.0).ok_or_else(|| {
+                unsupported(
+                    "idt accumulator not registered for this call site (internal codegen error)",
+                )
+            })?;
+            let value = ctx.node_voltage(slot);
+            let mut grad = vec![0.0; count];
+            if slot < count {
+                grad[slot] = 1.0;
+            }
+            Ok(Dual { value, grad })
+        }
         Expr::Call(builtin, args) => eval_call(ctx, *builtin, args),
         Expr::CallUser(fid, args) => {
             let func = &ctx.module.functions[fid.0 as usize];
@@ -541,9 +567,11 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
             None => Dual::constant(ctx.vt, count),
         },
         Builtin::Temperature => Dual::constant(ctx.temp, count),
+        // `idt` never reaches here — `eval`'s own `Expr::Call` match intercepts it before this
+        // function is even called (see `eval`'s `Builtin::Idt` arm).
         Builtin::Ddt | Builtin::Idt => {
             return Err(unsupported(
-                "ddt/idt must appear as a top-level contribution term, not inside an expression",
+                "ddt must appear as a top-level contribution term, not inside an expression",
             ))
         }
     })
@@ -794,6 +822,7 @@ mod tests {
             temp: 300.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             validating: false,
         };
@@ -841,6 +870,7 @@ mod tests {
             temp: temp_ref,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             validating: false,
         };
@@ -919,6 +949,7 @@ mod tests {
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             validating: false,
         };
@@ -991,6 +1022,7 @@ mod tests {
             temp: 300.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             validating: false,
         };
@@ -1024,6 +1056,7 @@ mod tests {
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             validating: false,
         };
@@ -1044,6 +1077,7 @@ mod tests {
             temp: 0.0,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
             validating: false,
         };
