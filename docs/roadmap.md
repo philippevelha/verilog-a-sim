@@ -40,7 +40,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity; 6 tests | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; the three zoo models elaborate end-to-end; 6 tests | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments; 19/118 real corpus files pass frontend+codegen (`if`/`else` now the top blocker) | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments and `if`/`else`; 22/115 real corpus files pass frontend+codegen (potential contributions now the top blocker) | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
@@ -406,37 +406,38 @@ matches the code verbatim.
 > resistor reproduces `va-abi`'s hand-checked stamp; diode matches analytic current +
 > conductance; **§5 AD-vs-FD milestone green**.
 >
-> **Corpus baseline (2026-07-07), the T2 analogue of T1's `token-reference.md` tracking**:
+> **Corpus baseline (2026-07-08), the T2 analogue of T1's `token-reference.md` tracking**:
 > passing the *frontend* (T1, `docs/token-reference.md`'s domain) and passing *codegen* —
 > actually buildable into a `ModelInstance`, i.e. actually simulatable — are different bars,
-> and only the first was ever measured against the real 118-file `external/` corpus. Scanning
-> the second (`va_codegen::build_instance` on every module that already elaborates): of the
-> 62 that pass the frontend, only **19 also pass codegen**. Of the 43 that don't:
-> `if`/`else` (35), potential/voltage contributions (6), loops/`case` (2) — `if`/`else` is now
-> the clear highest-leverage target, the same way local variable assignments were before this
-> update (see below).
+> and only the first was ever measured against the real, recursively-scanned 115-file
+> `external/` corpus. Scanning the second (`va_codegen::build_instance` on every module that
+> already elaborates): of the 62 that pass the frontend, **22 now also pass codegen** (up from
+> 19). Of the 40 that don't: potential/voltage contributions (23), loops/`case` (14),
+> user-defined analog functions (2), a nested (non-top-level) `ddt`/`idt` (1) —
+> potential contributions are now the clear highest-leverage target.
 >
-> **Local-variable assignments are now lowered** (`real q; q = c0*v + …;`, previously the
-> single biggest codegen blocker — 38 of the 43 non-frontend-clean-but-codegen-failing files,
-> including the simplest real device in the whole corpus, `external/varactor.va`). Not a
-> structural extraction like contributions always were: local variables need genuine
-> *sequential* execution, since an assignment's value depends on `x` and must be recomputed
-> (and rebound) every [`ModelInstance::load`] call, in source order, before whatever later
-> reads it. `lower::Lowered` changed shape from an unordered `Vec<Contribution>` to an ordered
-> `Vec<LoweredStmt>` (`Assign` | `Contribute`) to carry that order; `ad::Ctx` gained a
-> `RefCell<HashMap<u32, Dual>>` variable environment (interior-mutable so every existing `eval`
-> call site, which only ever *reads* a binding, keeps taking a shared `&Ctx` — writes happen
-> exactly once per `Stmt::Assign`, from the new sequential walk, never from within expression
-> evaluation itself). A read before any assignment is a `CodegenError`, caught eagerly by the
-> existing `validate()` pass, same as every other unsupported construct.
-> Confirmed against the real device, not just synthetic IR: `cargo run -p va-cli -- sim
-> <netlist> --model external/varactor.va` now solves both DC (open-circuit, as a pure-charge
-> device should look) and transient (matches the nonlinear `Q(V)` curve). Reassignment
-> (`x = x + 1`) and the eager unassigned-read rejection are both regression-tested, alongside
-> a full AD-vs-FD check threaded *through* two sequential assignments (§5 — the varactor's own
-> `q = c0*v + c1*ln(cosh(v))` shape).
-> *Outstanding:* `if`/`else` (now the clear next target) + analog functions; full committed
-> sweep; `t2-codegen/02-lowering.qmd`.
+> **`if`/`else` is now lowered** (previously the single biggest codegen blocker — 35 of the 43
+> non-frontend-clean-but-codegen-failing files as of the prior baseline; the fix removed that
+> whole category from the corpus scan's failure buckets). Genuinely different from a flat
+> contribution or a sequential assignment: which branch runs depends on `x`, so `lower.rs`
+> can't flatten an `if` away structurally the way it flattens `+`/`-` into signed terms —
+> `LoweredStmt::If { cond, then_, else_ }` carries *both* arms as their own lowered statement
+> sequences, and `GeneratedModel::run` (used by `load`) picks one at evaluation time based on
+> the condition's value, the same "only the taken branch is ever evaluated" rule `Expr::Select`
+> (the ternary) already followed in `ad::eval`. The one real design problem: `build_instance`
+> validates eagerly at the all-zero point specifically so `load` can never fail later, and a
+> naive "validate only the branch selected at x=0" scheme would miss an unsupported construct
+> hiding in the *other* arm — so `GeneratedModel::validate`/`validate_stmts` walk **both** arms
+> unconditionally instead, an honest over-approximation (sound for the common case of a
+> region-selecting compact model where both arms assign the same variables; not full
+> path-sensitive flow analysis). Regression-tested directly against that failure mode: a test
+> builds a module where the arm *not* selected at x=0 contains an unassigned-variable read, and
+> asserts `build_instance` still rejects it eagerly rather than only failing at a later `load`
+> call with a different operating point — plus a branch-selection test asserting both the
+> stamped residual *and* Jacobian differ correctly across the two arms (proving the selected
+> arm's own gradient is what gets stamped, not the other arm's).
+> *Outstanding:* potential (voltage) contributions (now the clear next target) + loops/`case` +
+> analog functions; full committed sweep; `t2-codegen/02-lowering.qmd`.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

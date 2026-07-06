@@ -11,6 +11,17 @@
 //! sequence). See `crate::ad::Ctx::set_var`/`get_var` for where the actual sequential
 //! execution and variable environment live.
 //!
+//! `if`/`else` (`Stmt::If`) lowers too, but it is genuinely different from the other two
+//! statement kinds: which branch runs depends on `x`, so it can't be flattened away here the
+//! way a contribution's terms are — [`LoweredStmt::If`] carries *both* arms, each its own
+//! lowered statement sequence, and `crate::GeneratedModel` picks one at `load()` time based on
+//! the condition's value at the current operating point (same "only the taken branch is ever
+//! evaluated" rule the ternary `Expr::Select` already follows in `crate::ad::eval`). One
+//! consequence: `crate::GeneratedModel::validate`, which normally evaluates everything once at
+//! the all-zero point to catch an unsupported construct before it ever reaches `load`, must
+//! visit *both* arms unconditionally here — an arm the all-zero point doesn't happen to select
+//! could still be the one a real operating point takes later.
+//!
 //! # Limitations
 //!
 //! - Only flow (current) contributions are lowered. Potential (`V(...) <+ …`) contributions
@@ -18,8 +29,8 @@
 //! - `ddt` is recognised only as a top-level additive term (optionally negated), matching how
 //!   compact models are written (`I <+ resistive + ddt(charge)`); `ddt` nested inside a
 //!   nonlinear function is rejected later by the AD evaluator.
-//! - `if`/`else`, loops/`case`, and user-defined analog functions in the analog block are not
-//!   yet lowered. The IR (Interface α) models these, but codegen v0 rejects them with
+//! - Loops/`case` and user-defined analog functions in the analog block are not yet lowered.
+//!   The IR (Interface α) models these, but codegen v0 rejects them with
 //!   [`CodegenError::Unsupported`].
 
 use crate::CodegenError;
@@ -60,6 +71,17 @@ pub enum LoweredStmt {
     },
     /// A flow contribution, already split into resistive/charge terms.
     Contribute(Contribution),
+    /// `if (cond) { then_ } else { else_ }`. `crate::GeneratedModel::run` walks only the arm
+    /// `cond` selects at the current operating point; `crate::GeneratedModel::validate` walks
+    /// both (see this module's doc comment).
+    If {
+        /// The condition to evaluate; non-zero selects `then_`.
+        cond: ExprId,
+        /// Statements to run when `cond` is non-zero.
+        then_: Vec<LoweredStmt>,
+        /// Statements to run when `cond` is zero.
+        else_: Vec<LoweredStmt>,
+    },
 }
 
 /// A lowered, evaluable representation of a module's analog block.
@@ -76,8 +98,7 @@ pub struct Lowered {
 /// # Errors
 ///
 /// Returns [`CodegenError::Unsupported`] on IR constructs outside the codegen subset
-/// (potential contributions, `if`/`else`, loops/`case`, user-defined functions, malformed
-/// `ddt`).
+/// (potential contributions, loops/`case`, user-defined functions, malformed `ddt`).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let mut stmts = Vec::new();
     for stmt in &module.analog {
@@ -144,7 +165,22 @@ fn lower_stmt(
             }
             Ok(())
         }
-        Stmt::If { .. } => Err(unsupported("if/else is not supported in codegen v0")),
+        Stmt::If { cond, then_, else_ } => {
+            let mut then_lowered = Vec::new();
+            for s in then_ {
+                lower_stmt(module, s, &mut then_lowered)?;
+            }
+            let mut else_lowered = Vec::new();
+            for s in else_ {
+                lower_stmt(module, s, &mut else_lowered)?;
+            }
+            out.push(LoweredStmt::If {
+                cond: *cond,
+                then_: then_lowered,
+                else_: else_lowered,
+            });
+            Ok(())
+        }
         Stmt::While { .. } | Stmt::For { .. } | Stmt::Repeat { .. } | Stmt::Case { .. } => Err(
             unsupported("loops and case statements are not supported in codegen v0"),
         ),

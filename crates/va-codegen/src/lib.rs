@@ -122,43 +122,82 @@ impl GeneratedModel {
         }
     }
 
-    /// Walk the lowered statement sequence once, in source order: an assignment evaluates its
+    /// Real, load-time execution: walks `stmts` in source order. An assignment evaluates its
     /// right-hand side and binds it into `ctx`'s variable environment (`ad::Ctx::set_var`) so
-    /// later statements can read it; a contribution is handed to `on_contribution`. Shared by
-    /// [`Self::validate`] (which just surfaces the first unsupported/failing construct) and
-    /// [`ModelInstance::load`] (which actually stamps).
+    /// later statements can read it; a contribution stamps directly via `sink`; an `if`/`else`
+    /// evaluates its condition and recurses into *only* the arm it selects — same "only the
+    /// taken branch is ever evaluated" rule the ternary `Expr::Select` follows in `ad::eval`,
+    /// and the reason this can't share a traversal with [`Self::validate_stmts`], which must
+    /// visit both arms instead (see `lower`'s module doc comment).
     ///
-    /// Aborts the whole walk on the first error — an assignment that fails post-validation
-    /// (which "cannot happen") would otherwise leave later contributions reading a stale or
-    /// missing variable binding, which is worse than stopping early and leaving whatever was
-    /// already stamped as-is.
-    fn walk(
+    /// Aborts the whole walk on the first error — an assignment or condition that fails
+    /// post-validation (which "cannot happen") would otherwise leave later statements reading a
+    /// stale or missing variable binding, which is worse than stopping early and leaving
+    /// whatever was already stamped as-is.
+    fn run(
         &self,
         ctx: &Ctx,
-        mut on_contribution: impl FnMut(&Contribution) -> Result<(), CodegenError>,
+        stmts: &[LoweredStmt],
+        sink: &mut dyn StampSink,
     ) -> Result<(), CodegenError> {
-        for stmt in &self.lowered.stmts {
+        for stmt in stmts {
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => {
                     let d = eval(ctx, *rhs)?;
                     ctx.set_var(*lhs, d);
                 }
-                LoweredStmt::Contribute(c) => on_contribution(c)?,
+                LoweredStmt::Contribute(c) => self.stamp(ctx, c, sink),
+                LoweredStmt::If { cond, then_, else_ } => {
+                    let taken = if eval(ctx, *cond)?.value != 0.0 {
+                        then_
+                    } else {
+                        else_
+                    };
+                    self.run(ctx, taken, sink)?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Evaluate every statement once (structural validation): surfaces any unsupported
-    /// construct as a `CodegenError` before the instance is handed out.
+    /// Evaluate every statement once, at the all-zero operating point (structural validation):
+    /// surfaces any unsupported construct as a `CodegenError` before the instance is handed
+    /// out, so [`ModelInstance::load`] never has to.
+    ///
+    /// Unlike [`Self::run`], this visits **both** arms of every `if`/`else` unconditionally —
+    /// an arm the all-zero point doesn't happen to select could still be the one a real
+    /// operating point takes later, and `run` must never discover an unsupported construct
+    /// there for the first time. Both arms validate against the same accumulating variable
+    /// environment (an over-approximation, not full path-sensitive analysis: this is exact
+    /// when both arms assign the same variables, as region-selecting `if`/`else` in real
+    /// compact models does — `ids`/`gm`-style outputs set in every arm — but a variable
+    /// genuinely assigned in only one arm and read after the `if` would not be soundly caught
+    /// here, a stated limitation, not a silent one).
     fn validate(&self) -> Result<(), CodegenError> {
         let ctx = self.ctx(&[]);
-        self.walk(&ctx, |c| {
-            for term in c.resistive.iter().chain(c.charge.iter()) {
-                eval(&ctx, term.expr)?;
+        Self::validate_stmts(&ctx, &self.lowered.stmts)
+    }
+
+    fn validate_stmts(ctx: &Ctx, stmts: &[LoweredStmt]) -> Result<(), CodegenError> {
+        for stmt in stmts {
+            match stmt {
+                LoweredStmt::Assign { lhs, rhs } => {
+                    let d = eval(ctx, *rhs)?;
+                    ctx.set_var(*lhs, d);
+                }
+                LoweredStmt::Contribute(c) => {
+                    for term in c.resistive.iter().chain(c.charge.iter()) {
+                        eval(ctx, term.expr)?;
+                    }
+                }
+                LoweredStmt::If { cond, then_, else_ } => {
+                    eval(ctx, *cond)?;
+                    Self::validate_stmts(ctx, then_)?;
+                    Self::validate_stmts(ctx, else_)?;
+                }
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 
     /// Sum a list of signed terms into a single dual.
@@ -216,12 +255,9 @@ impl ModelInstance for GeneratedModel {
 
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
         let ctx = self.ctx(x);
-        // Post-validation this cannot fail; `walk` already stops early rather than stamping
-        // from a corrupted variable environment if it somehow does (see `walk`'s doc comment).
-        let _ = self.walk(&ctx, |c| {
-            self.stamp(&ctx, c, sink);
-            Ok(())
-        });
+        // Post-validation this cannot fail; `run` already stops early rather than stamping
+        // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
+        let _ = self.run(&ctx, &self.lowered.stmts, sink);
     }
 }
 
@@ -579,6 +615,161 @@ mod tests {
             build_instance(&m, &[0, 1]),
             Err(CodegenError::Unsupported(_))
         ));
+    }
+
+    /// Build a two-terminal device with an asymmetric (piecewise-linear) conductance:
+    /// `if (V(p,n) > 0) I(p,n) <+ g_pos*V(p,n); else I(p,n) <+ g_neg*V(p,n);` — a real,
+    /// common region-selection pattern (e.g. a crude clamp/rectifier-like element), not a
+    /// contrived one.
+    fn piecewise_ir(g_pos: f64, g_neg: f64) -> Module {
+        let mut m = Module::new("piecewise");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![
+            Param {
+                name: "g_pos".into(),
+                default: g_pos,
+                min: Some(0.0),
+                max: None,
+            },
+            Param {
+                name: "g_neg".into(),
+                default: g_neg,
+                min: Some(0.0),
+                max: None,
+            },
+        ];
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v, zero));
+
+        let v_then = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let g_pos_e = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let i_pos = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, g_pos_e, v_then));
+        let then_ = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: i_pos,
+        }];
+
+        let v_else = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let g_neg_e = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let i_neg = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, g_neg_e, v_else));
+        let else_ = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: i_neg,
+        }];
+
+        m.analog = vec![Stmt::If { cond, then_, else_ }];
+        m
+    }
+
+    #[test]
+    fn if_else_selects_the_conductance_for_the_operating_point() {
+        let (g_pos, g_neg) = (1e-3, 5e-3);
+        let inst = build_instance(&piecewise_ir(g_pos, g_neg), &[0, 1]).unwrap();
+
+        // V(p,n) = +1 V: the `then` arm, conductance g_pos.
+        let mut sink = DenseStamp::new(1);
+        inst.load(&[1.0], &mut sink);
+        assert!((sink.residual[0] - g_pos).abs() / g_pos < 1e-12);
+        assert!((sink.jac(0, 0) - g_pos).abs() / g_pos < 1e-12);
+
+        // V(p,n) = -1 V: the `else` arm, conductance g_neg -- a different value *and* a
+        // different Jacobian, proving the selected branch's own gradient is what's stamped,
+        // not the other arm's.
+        let mut sink = DenseStamp::new(1);
+        inst.load(&[-1.0], &mut sink);
+        assert!((sink.residual[0] + g_neg).abs() / g_neg < 1e-12);
+        assert!((sink.jac(0, 0) - g_neg).abs() / g_neg < 1e-12);
+    }
+
+    #[test]
+    fn validate_catches_an_error_in_the_arm_not_selected_at_the_all_zero_point() {
+        // At x=0 (validate's own operating point), V(p,n) = 0, so `V(p,n) > 0` is false and
+        // the `else` arm is what a naive "validate only the taken branch" scheme would check.
+        // Put the broken construct in `then` instead -- build_instance must still reject it.
+        let mut m = Module::new("bad_then");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.vars = vec![VarDecl { name: "x".into() }];
+
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v, zero));
+
+        // `then`: reads `x`, which is never assigned anywhere -- the broken arm.
+        let x_read = m.push_expr(Expr::Var(VarId(0)));
+        let then_ = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: x_read,
+        }];
+        // `else`: perfectly fine on its own.
+        let one = m.push_expr(Expr::Const(1.0));
+        let else_ = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: one,
+        }];
+
+        m.analog = vec![Stmt::If { cond, then_, else_ }];
+
+        assert!(
+            matches!(
+                build_instance(&m, &[0, 1]),
+                Err(CodegenError::Unsupported(_))
+            ),
+            "an error in the untaken-at-x=0 arm must still be caught eagerly"
+        );
     }
 
     #[test]
