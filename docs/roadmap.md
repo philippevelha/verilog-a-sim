@@ -734,6 +734,35 @@ matches the code verbatim.
 > node-KCL sum across every other branch touching that node, not from any one branch's own
 > contribution — not attempted, a different and harder feature than anything in this or the
 > preceding two rounds. Full committed sweep; `t2-codegen/02-lowering.qmd`.
+>
+> **`ohmmeter.va` now lowers too.** A branch that receives *no* contribution anywhere (neither
+> flow nor potential) but is read via a bare `I(...)` probe with one terminal being the module's
+> implicit ground reference resolves via a genuine node-KCL sum at its *other* terminal, over
+> every other contributing branch touching that same node (`lower::NodeKclProbe`) — exactly the
+> gap the previous round left open. `ohmmeter.va`'s two branches, `(dutm,iprobe)` (the
+> `V(dutm,iprobe)<+0` ideal-ammeter wire, an ordinary `BranchCurrent`) and `(iprobe,gnd)` (the
+> bare `I(iprobe)` probe, contributed to nowhere), share node `iprobe`; the probe's own auxiliary
+> unknown gets a purely linear defining equation, `Y = -(±other_branch_current)`, sign matching
+> whichever terminal (`p`/`n`) of the other branch node `iprobe` is (`GeneratedModel::
+> stamp_node_kcl_probes`) — no expression evaluation needed at all, since every referenced slot is
+> already resolved by the time this stamps (an existing `BranchCurrent`, or a `FlowCurrentAccumulator`
+> forced into existence if the touching branch is flow-only and wasn't independently probed
+> elsewhere). *Limitations:* only the single-terminal (implicit-ground) case is handled — a bare
+> `I(a,b)` probe of an uncontributed branch between two other, non-ground nodes stays rejected,
+> no corpus file surveyed needing it; a touching branch that is itself a **mixed** `BranchCurrent`
+> whose flow arm ran a given call reads back `0` here, the same pre-existing character every
+> other bare `I(...)` read of a mixed branch already has.
+>
+> Re-scanned again: **62/115 pass frontend+codegen, up from 61** (+1: `verilogaLib-master/
+> ohmmeter.va`, the last item on the previous round's outstanding list). *Outstanding:* the
+> remaining 53 failures are almost entirely earlier-pipeline gaps unrelated to this crate —
+> preprocessor macros used before their `` `define `` is seen (a handful of `ekv3*.va`/`r3_cmc.va`/
+> `psphv*.va` files sharing macros from a header this scan doesn't include), a `<` in a parameter
+> declaration the parser doesn't yet accept (`hicumL*.va`), macro-only "definitions" files with no
+> `module` at all (`*MacrosAndDefines.va`, `ekv3_definitions.va`, ...), a port used before any
+> `electrical`/discipline declaration (`psp10{3,4}*.va`, `L_UTSOI_102*.va`, `r2*_cmc.va`), and one
+> unescaped backslash the lexer rejects (`bsimsoi.va`) — none of them a `va-codegen` gap like this
+> round's.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

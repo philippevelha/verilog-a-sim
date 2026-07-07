@@ -588,6 +588,32 @@ mod tests {
         );
     }
 
+    /// `verilogaLib-master/ohmmeter.va`'s `I(iprobe)` — a single-terminal implicit-ground probe
+    /// of a branch that receives no contribution of its own anywhere, entirely distinct from the
+    /// explicit `V(dutm,iprobe) <+ 0;` branch it shares node `iprobe` with (see
+    /// `va_codegen::lower::NodeKclProbe`'s doc comment) — now lowers through the real pipeline
+    /// instead of being rejected as unsupported. `ohmmeter` is an instrument model (its ports
+    /// don't correspond to any circuit this repo has a netlist for), so this only exercises
+    /// frontend → codegen, not a full DC solve.
+    #[test]
+    fn ohmmeter_probe_compiles_through_codegen() {
+        let src = include_str!("../../../external/verilogaLib-master/ohmmeter.va");
+        let include_dirs = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../external"
+        ))];
+        let design =
+            va_frontend::compile_with_includes(src, &include_dirs).expect("compile ohmmeter.va");
+        assert_eq!(design.modules.len(), 1);
+        let module = &design.modules[0];
+        assert_eq!(module.name, "ohmmeter");
+
+        let terminals: Vec<usize> = (0..module.nodes.len()).collect();
+        let mut next_unknown = module.nodes.len();
+        va_codegen::build_instance(module, &terminals, &mut next_unknown)
+            .expect("ohmmeter.va's I(iprobe) node-KCL probe should now lower");
+    }
+
     #[test]
     fn transient_deck_is_rejected() {
         let deck = include_str!("../../../circuits/rectifier.net");

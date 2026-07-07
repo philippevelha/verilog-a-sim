@@ -24,7 +24,11 @@
 //!   somewhere gets its own auxiliary unknown too, same as a potential contribution's branch
 //!   current (see [`lower::FlowCurrentAccumulator`]), but only sums the branch's *resistive*
 //!   contributions — a `ddt`/charge term contributed to a self-probed branch isn't reflected in
-//!   what that probe reads back.
+//!   what that probe reads back. A branch that receives *no* contribution anywhere, probed as a
+//!   single-terminal (implicit-ground) access, resolves instead via a node-KCL sum over every
+//!   other contributing branch touching its non-ground terminal (see [`lower::NodeKclProbe`]) —
+//!   a bare two-node probe of an uncontributed branch between two other, non-ground nodes stays
+//!   unsupported.
 //!   Local-variable assignments and `if`/`else` *are* supported: statements execute in source
 //!   order, each `Stmt::Assign` binding into [`ad::Ctx::vars`] for later statements (including
 //!   later assignments — a variable can be reassigned) to read via [`ad::Ctx::set_var`]/the
@@ -173,6 +177,12 @@ impl GeneratedModel {
                     .flow_current_accumulators
                     .iter()
                     .map(|acc| (acc.branch.0, acc.local_slot)),
+            )
+            .chain(
+                self.lowered
+                    .node_kcl_probes
+                    .iter()
+                    .map(|p| (p.branch.0, p.local_slot)),
             )
             .collect();
         let idt_slots = self
@@ -665,6 +675,29 @@ impl GeneratedModel {
             }
         }
     }
+
+    /// Stamp every [`lower::NodeKclProbe`]'s own row: a purely linear relation to the current
+    /// slots of every other contributing branch touching its non-ground terminal (`residual =
+    /// unknown + Σ ± other_branch_current`, `jacobian(self,self) = 1`, `jacobian(self,other_slot)
+    /// = ±1` per term) — see [`lower::NodeKclProbe`]'s doc comment for the sign convention. Unlike
+    /// every other accumulator kind, this needs no expression evaluation at all: every slot it
+    /// references is already fully resolved by the time this runs, whether from
+    /// [`Self::stamp_branch_currents`]'s unconditional structural stamp or
+    /// [`Self::stamp_flow_current_accumulators`]'s post-`run` resolution — so it only ever reads
+    /// `x` directly, the same as [`Self::stamp_branch_currents`].
+    fn stamp_node_kcl_probes(&self, x: &[f64], sink: &mut dyn StampSink) {
+        for probe in &self.lowered.node_kcl_probes {
+            let g = self.terminals[probe.local_slot];
+            let mut residual = x.get(g).copied().unwrap_or(0.0);
+            sink.jacobian(g, g, 1.0);
+            for &(slot, sign) in &probe.terms {
+                let gk = self.terminals[slot];
+                residual += sign * x.get(gk).copied().unwrap_or(0.0);
+                sink.jacobian(g, gk, sign);
+            }
+            sink.residual(g, residual);
+        }
+    }
 }
 
 impl ModelInstance for GeneratedModel {
@@ -695,6 +728,11 @@ impl ModelInstance for GeneratedModel {
         // Also after `run`: `ctx.flow_current_totals` only holds a branch's real total once every
         // contribution to it has run (see `Self::stamp_flow_current_accumulators`'s doc comment).
         self.stamp_flow_current_accumulators(&ctx, sink);
+        // After every other accumulator kind: a `NodeKclProbe`'s row only ever reads other
+        // slots, but a slot it reads may itself be a `FlowCurrentAccumulator` forced into
+        // existence solely to serve it (see `lower::NodeKclProbe`'s doc comment) — order doesn't
+        // change its *own* stamp (it only reads `x`), but keeping it last mirrors the dependency.
+        self.stamp_node_kcl_probes(x, sink);
     }
 }
 
@@ -1508,6 +1546,96 @@ mod tests {
         // stamp, exactly as if it were never self-probed at all.
         assert!((sink.residual[0] - total).abs() < 1e-9);
         assert!((sink.residual[1] - -total).abs() < 1e-9);
+    }
+
+    /// `verilogaLib-master/ohmmeter.va`'s real shape: `V(dutm,iprobe) <+ 0;` (an ideal-ammeter
+    /// wire, branch 0) then `r_val = V(dutp,dutm) / I(iprobe);` — a *single-terminal* probe
+    /// (branch 1, `(iprobe, gnd)`) that never itself receives any contribution at all, distinct
+    /// from branch 0 even though they share node `iprobe`. Its value can only come from a
+    /// node-KCL sum at `iprobe` over branch 0's own auxiliary current — see
+    /// [`lower::NodeKclProbe`]. Exposes the probe's read the same way the other flow-probe tests
+    /// do here, by contributing it into a third branch's (`out`, `gnd`) potential constraint.
+    #[test]
+    fn single_terminal_ground_probe_resolves_via_node_kcl_sum() {
+        let mut m = Module::new("ohmmeter_like");
+        for name in ["dutp", "dutm", "iprobe", "gnd", "out"] {
+            m.nodes.push(NodeDecl {
+                name: name.into(),
+                discipline: Discipline::Electrical,
+            });
+        }
+        m.ports = vec![
+            vec![NodeId(0)],
+            vec![NodeId(1)],
+            vec![NodeId(2)],
+            vec![NodeId(3)],
+            vec![NodeId(4)],
+        ];
+        m.branches = vec![
+            Branch {
+                p: NodeId(1),
+                n: NodeId(2),
+            }, // branch 0: `V(dutm,iprobe) <+ 0;`, the ideal-ammeter wire
+            Branch {
+                p: NodeId(2),
+                n: NodeId(3),
+            }, // branch 1: `I(iprobe)` — a bare single-terminal probe, no contribution ever
+            Branch {
+                p: NodeId(4),
+                n: NodeId(3),
+            }, // branch 2: exposes the probe's read via a potential contribution
+        ];
+
+        let zero = m.push_expr(Expr::Const(0.0));
+        let iprobe_read = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(1),
+        }));
+
+        m.analog = vec![
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Potential,
+                    branch: BranchId(0),
+                },
+                value: zero,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Potential,
+                    branch: BranchId(2),
+                },
+                value: iprobe_read,
+            },
+        ];
+
+        let mut next = 5;
+        let inst = build_instance(&m, &[0, 1, 2, 3, 4], &mut next).unwrap();
+        // branch-current slots (branches 0 and 2, ascending) -> 5, 6; the node-KCL probe's own
+        // accumulator (branch 1) -> 7. No `FlowCurrentAccumulator` is needed: branch 0 already
+        // has a `BranchCurrent` slot to read from.
+        assert_eq!(next, 8);
+
+        let ib0 = 0.02;
+        let mut sink = DenseStamp::new(8);
+        inst.load(&[0.6, 0.5, 0.5, 0.0, 0.0, ib0, 0.0, 0.0], &mut sink);
+
+        // The probe's own row (slot 7): residual = x[7] - x[5] (branch 0's shared terminal is
+        // its `n`, so its sign is `-1`), independent of whatever `x[7]` starts at.
+        assert!((sink.residual[7] - -ib0).abs() < 1e-12);
+        assert!((sink.jac(7, 7) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(7, 5) - -1.0).abs() < 1e-12);
+
+        // Branch 0's own constraint/injection stamps are completely unaffected by also being
+        // read through the new probe.
+        assert!((sink.residual[5] - (0.5 - 0.5)).abs() < 1e-12);
+        assert!((sink.jac(5, 1) - 1.0).abs() < 1e-12);
+        assert!((sink.jac(5, 2) - -1.0).abs() < 1e-12);
+
+        // Branch 2's constraint row (slot 6) reads the probe back correctly: residual =
+        // (vout-vgnd) - x[7].
+        assert!((sink.residual[6] - (0.0 - 0.0)).abs() < 1e-12);
+        assert!((sink.jac(6, 7) - -1.0).abs() < 1e-12);
     }
 
     /// `diode_basic.va`'s real idiom: `Id = I(anode,cathode);` read *before* the contribution

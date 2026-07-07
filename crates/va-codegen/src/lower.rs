@@ -156,7 +156,9 @@
 
 use crate::CodegenError;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use va_ir::{AccessKind, BinOp, BranchId, Builtin, Expr, ExprId, Module, Stmt, UnOp, VarId};
+use va_ir::{
+    AccessKind, BinOp, BranchId, Builtin, Expr, ExprId, Module, NodeId, Stmt, UnOp, VarId,
+};
 
 /// One additive term of a contribution: a signed expression handle.
 #[derive(Clone, Copy, Debug)]
@@ -381,12 +383,55 @@ pub struct FlowCurrentAccumulator {
     pub local_slot: usize,
 }
 
+/// A branch that receives **no** contribution anywhere in the module, but is read via a bare
+/// `I(...)` probe with one terminal being the module's implicit ground reference (the node a
+/// single-terminal access creates — see `va-frontend::elaborate::Elaborator::reference_node`).
+/// Unlike [`FlowCurrentAccumulator`] (a branch whose *own* contribution defines its current),
+/// this branch has no contribution of its own to sum: its value can only be recovered from a
+/// node-KCL sum at its non-ground terminal, over every *other* contributing branch that touches
+/// that same node. `verilogaLib-master/ohmmeter.va` is the corpus case this exists for: its
+/// `I(iprobe)` is a single-terminal probe of the branch `(iprobe, gnd)`, entirely distinct from
+/// the branch `(dutm, iprobe)` that `V(dutm,iprobe) <+ 0;` actually contributes to — the two
+/// share node `iprobe`, and KCL there is exactly what ties the probe's value to that other
+/// branch's own current.
+///
+/// Every contributing branch touching the non-ground terminal already has its own current slot
+/// (a [`BranchCurrent`] for a potential contribution) or is given one, forcing a new
+/// [`FlowCurrentAccumulator`] into existence if it doesn't have one yet (a flow-only branch that
+/// happens not to be independently `I(...)`-probed anywhere else). This accumulator's defining
+/// equation is then purely linear in those slots — `Y = -(Σ ± other_branch_current)`, sign `+`
+/// if the shared node is that other branch's own `p`, `-` if its `n`, the same convention every
+/// branch's own node-KCL injection already uses (see `crate::GeneratedModel::stamp_node_kcl_probes`).
+///
+/// **Limitations:**
+/// - Only a *single-terminal* (implicit-ground) probe is handled: a bare `I(a,b)` probe of an
+///   uncontributed branch between two *other*, non-ground nodes is rejected rather than guessing
+///   which terminal's local KCL sum to trust — no corpus file surveyed needs it.
+/// - A touching branch that is itself a **mixed** [`BranchCurrent`] (`BranchCurrent::mixed`)
+///   whose *flow* arm actually ran a given call reads back `0` here — the same pre-existing
+///   character every other bare `I(...)` read of a mixed branch already has, since
+///   `crate::GeneratedModel::finalize_mixed_branch_currents` pins that branch's auxiliary
+///   current to `0` whenever its flow arm (which injects the real current directly into the node
+///   KCL rows instead) ran instead of its potential arm.
+#[derive(Clone, Debug)]
+pub struct NodeKclProbe {
+    /// The purely-probed branch itself (e.g. `(iprobe, gnd)`).
+    pub branch: BranchId,
+    /// Local terminal slot (past every other accumulator kind) allocated for this probe's own
+    /// unknown — read exactly like any other branch current, via
+    /// `crate::ad::Ctx::branch_current_slots`.
+    pub local_slot: usize,
+    /// Every other contributing branch touching the non-ground terminal: `(current_slot, sign)`,
+    /// `sign` `+1.0` if the shared node is that branch's own `p`, `-1.0` if its `n`.
+    pub terms: Vec<(usize, f64)>,
+}
+
 /// A lowered, evaluable representation of a module's analog block.
 #[derive(Debug, Default)]
 pub struct Lowered {
     /// Total number of local unknowns: one per IR node, plus one per entry in
-    /// [`Self::branch_currents`], [`Self::idt_accumulators`], and
-    /// [`Self::flow_current_accumulators`].
+    /// [`Self::branch_currents`], [`Self::idt_accumulators`], [`Self::flow_current_accumulators`],
+    /// and [`Self::node_kcl_probes`].
     pub n_unknowns: usize,
     /// Statements in source order (assignments and contributions only — see Limitations).
     pub stmts: Vec<LoweredStmt>,
@@ -400,8 +445,14 @@ pub struct Lowered {
     pub idt_accumulators: Vec<IdtAccumulator>,
     /// One entry per purely-flow-defined branch that is also read via a bare `I(...)` probe
     /// somewhere in the module, in ascending [`BranchId`] order (the deterministic order their
-    /// local terminal slots are allocated in, past every [`IdtAccumulator`] slot).
+    /// local terminal slots are allocated in, past every [`IdtAccumulator`] slot) — plus any
+    /// forced into existence solely to give a [`NodeKclProbe`] something to read (see its doc
+    /// comment).
     pub flow_current_accumulators: Vec<FlowCurrentAccumulator>,
+    /// One entry per purely-probed branch with no contribution anywhere, one terminal of which
+    /// is the module's implicit ground reference (see [`NodeKclProbe`]), in ascending
+    /// [`BranchId`] order, past every [`FlowCurrentAccumulator`] slot.
+    pub node_kcl_probes: Vec<NodeKclProbe>,
 }
 
 /// Lower a module's analog block into a [`Lowered`] plan.
@@ -456,7 +507,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let mut probed_flow_branches = BTreeSet::new();
     collect_flow_probe_branches_in_stmts(module, &module.analog, &mut probed_flow_branches);
     let mut flow_current_accumulators = Vec::new();
-    for id in probed_flow_branches {
+    for &id in &probed_flow_branches {
         // Only a *purely* flow-defined branch needs this: one with a potential contribution
         // anywhere already has a working `BranchCurrent` (see its doc comment), and a bare
         // `I(...)` probe already reads that just fine via `crate::ad::Ctx::branch_current_slots`.
@@ -467,6 +518,71 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             });
             next_slot += 1;
         }
+    }
+
+    // A probed branch that receives *no* contribution anywhere (neither flow nor potential) —
+    // `ohmmeter.va`'s `I(iprobe)` is exactly this — can't be resolved from its own contribution
+    // at all; see `NodeKclProbe`'s doc comment for the node-KCL sum this falls back to.
+    let ground = ground_node(module);
+    let mut node_kcl_probes = Vec::new();
+    for &id in &probed_flow_branches {
+        if flow_branches.contains(&id) || potential_branches.contains(&id) {
+            continue;
+        }
+        let br = module.branches[id as usize];
+        let probe_node = match ground {
+            Some(g) if br.p == g && br.n != g => br.n,
+            Some(g) if br.n == g && br.p != g => br.p,
+            _ => {
+                return Err(unsupported(
+                    "a bare `I(...)` probe of a branch that receives no contribution anywhere \
+                     is only supported when one terminal is the module's implicit ground \
+                     reference",
+                ));
+            }
+        };
+
+        let mut terms = Vec::new();
+        for (bidx, other) in module.branches.iter().enumerate() {
+            let bidx = bidx as u32;
+            if bidx == id {
+                continue;
+            }
+            let sign = if other.p == probe_node {
+                1.0
+            } else if other.n == probe_node {
+                -1.0
+            } else {
+                continue;
+            };
+            if !flow_branches.contains(&bidx) && !potential_branches.contains(&bidx) {
+                continue; // this branch contributes nothing; treat as zero.
+            }
+            let slot = if let Some(bc) = branch_currents.iter().find(|bc| bc.branch.0 == bidx) {
+                bc.local_slot
+            } else if let Some(acc) = flow_current_accumulators
+                .iter()
+                .find(|acc| acc.branch.0 == bidx)
+            {
+                acc.local_slot
+            } else {
+                let slot = next_slot;
+                flow_current_accumulators.push(FlowCurrentAccumulator {
+                    branch: BranchId(bidx),
+                    local_slot: slot,
+                });
+                next_slot += 1;
+                slot
+            };
+            terms.push((slot, sign));
+        }
+
+        node_kcl_probes.push(NodeKclProbe {
+            branch: BranchId(id),
+            local_slot: next_slot,
+            terms,
+        });
+        next_slot += 1;
     }
 
     let mut stmts = Vec::new();
@@ -487,7 +603,20 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         branch_currents,
         idt_accumulators,
         flow_current_accumulators,
+        node_kcl_probes,
     })
+}
+
+/// The module's implicit global reference node, if a single-terminal access anywhere ever
+/// created one (see `va-frontend::elaborate::Elaborator::reference_node`) — identified by name,
+/// the same `"gnd"` sentinel convention `va-netlist` uses when wiring nodes across module
+/// instances. `None` if the module never has one (no single-terminal access anywhere).
+fn ground_node(module: &Module) -> Option<NodeId> {
+    module
+        .nodes
+        .iter()
+        .position(|n| n.name.eq_ignore_ascii_case("gnd"))
+        .map(|i| NodeId(i as u32))
 }
 
 /// Collect every branch targeted by a bare `I(...)` (flow) probe reachable anywhere in `stmts`,
