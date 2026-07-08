@@ -79,4 +79,16 @@ mod tests {
         assert_eq!(design.modules.len(), 1);
         assert_eq!(design.modules[0].name, "resistor");
     }
+
+    /// Real corpus headers (`generalMacrosAndDefines.va`, `simulatorFlags.va`, ...) are meant
+    /// only to be `` `include ``d by an actual device file, never compiled standalone, and
+    /// contain nothing but `` `define ``s — no `module` at all. Compiling one of these directly
+    /// is not an error: it's a degenerate but valid compilation unit with nothing to elaborate.
+    #[test]
+    fn macro_only_file_compiles_to_zero_modules() {
+        let design =
+            super::compile("`define GMIN 1.0e-12\n`define MAX(a, b) ((a) > (b) ? (a) : (b))")
+                .expect("a macro-only file should compile, just to zero modules");
+        assert!(design.modules.is_empty());
+    }
 }

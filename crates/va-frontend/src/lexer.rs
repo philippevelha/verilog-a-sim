@@ -54,8 +54,9 @@ pub enum Token {
     #[regex(r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[TGMKkmunpfa]?", parse_number)]
     Number(f64),
 
-    /// A double-quoted string literal, with the surrounding quotes stripped.
-    #[regex(r#""[^"]*""#, |lex| { let s = lex.slice(); s[1..s.len() - 1].to_string() })]
+    /// A double-quoted string literal, with the surrounding quotes stripped and every LRM
+    /// escape sequence resolved (see [`parse_string`]).
+    #[regex(r#""([^"\\]|\\.)*""#, parse_string)]
     Str(String),
 
     /// A system function/task name, with the leading `$` stripped (e.g. `vt`, `temperature`).
@@ -452,6 +453,53 @@ fn parse_number(lex: &logos::Lexer<Token>) -> Option<f64> {
     digits.parse::<f64>().ok().map(|v| v * scale)
 }
 
+/// Un-escape a lexed string literal's contents (LRM quoted-string escapes: `\\`, `\"`, `\n`,
+/// `\t`, `\v`, `\f`, `\a`, `\%` — a literal `%`, letting a display-format string spell one
+/// without doubling it — and up to three octal digits `\ddd`). Real corpus files rely on this
+/// for error-message strings that themselves embed an escaped quote (`bsimsoi.va`'s "...
+/// uncomment \"`define ...\" ..." — without unescaping, the *lexer's* string regex would need
+/// to stop at that inner `"`, breaking every token after it, not just this string). An escape
+/// this table doesn't recognize drops the backslash and keeps the following character literally
+/// rather than erroring — permissive by design, since this project never executes `$display`-
+/// style output, so a message string's exact byte-for-byte content is never observed.
+fn parse_string(lex: &logos::Lexer<Token>) -> String {
+    let s = lex.slice();
+    let inner = &s[1..s.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('v') => out.push('\u{0B}'),
+            Some('f') => out.push('\u{0C}'),
+            Some('a') => out.push('\u{07}'),
+            Some(d) if d.is_digit(8) => {
+                let mut code = d.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    match chars.peek() {
+                        Some(&next) if next.is_digit(8) => {
+                            code = code * 8 + next.to_digit(8).unwrap();
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if let Some(ch) = char::from_u32(code) {
+                    out.push(ch);
+                }
+            }
+            Some(other) => out.push(other), // `\\`, `\"`, `\%`, and any unrecognized escape.
+            None => {}
+        }
+    }
+    out
+}
+
 /// Tokenize `source` into a flat token vector.
 ///
 /// Whitespace and comments are discarded. Directives are preserved as [`Token::Directive`]
@@ -530,6 +578,24 @@ mod tests {
         assert_eq!(lex_ok("2k"), vec![Token::Number(2000.0)]);
         assert_eq!(lex_ok("1p"), vec![Token::Number(1e-12)]);
         assert_eq!(lex_ok("5m"), vec![Token::Number(5e-3)]);
+    }
+
+    /// `bsimsoi.va`'s real idiom: an error-message string literal that itself embeds an escaped
+    /// quote (`"...uncomment \"`define _TNOIMOD3_\"..."`). Without escape handling, the naive
+    /// `[^"]*` string regex stops at the *inner* `"`, leaving a bare `\` that fails to lex at
+    /// all — breaking not just this string but every token after it in the file.
+    #[test]
+    fn string_escapes_are_resolved() {
+        assert_eq!(
+            lex_ok(r#""say \"hi\"""#),
+            vec![Token::Str("say \"hi\"".into())]
+        );
+        assert_eq!(lex_ok(r#""a\\b""#), vec![Token::Str("a\\b".into())]);
+        assert_eq!(lex_ok(r#""a\nb\tc""#), vec![Token::Str("a\nb\tc".into())]);
+        // Octal escape (LRM `\ddd`): `\101` is `'A'`.
+        assert_eq!(lex_ok(r#""\101""#), vec![Token::Str("A".into())]);
+        // An unrecognized escape drops the backslash rather than erroring.
+        assert_eq!(lex_ok(r#""a\qb""#), vec![Token::Str("aqb".into())]);
     }
 
     #[test]
