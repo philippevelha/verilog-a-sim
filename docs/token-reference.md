@@ -537,22 +537,30 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 - **Declaration and Assignment**: `real name, name, ...;` / `integer name, name, ...;` at module
   scope (`Item::Var`) or block scope (`Stmt::VarDecl`); also the optional base-type prefix on a
   `parameter`/`localparam` (defaults to `real` if omitted) and an `analog function`'s
-  return-type prefix. Any name in the list may carry its own `[msb:lsb]` array range
+  return-type prefix. Any name in the list may carry *either* its own `[msb:lsb]` array range
   (`real out_val[0:15], tmp;`, § array variables, Part 2 §2.2b) — found directly in the
-  `verilogaLib` corpus.
+  `verilogaLib` corpus — *or* an inline `= expr` initializer (`real laser_freq = `P_C /
+  wavelength / 1e-9;`, the exact `external/photonic/CwLaser.va` idiom), never both (the LRM's
+  `real_identifier` grammar allows a dimension or an initializer, not both — `Parser::
+  parse_var_entry` only looks for `=` when there was no `[...]` range).
   **Separately**, `real(expr)`/`integer(expr)` — the same dedicated tokens, but immediately
   followed by `(` — are type-cast *call* expressions, not a declaration at all (e.g.
   `digital = integer((V(in)/vref) * (1 << N));`); the parser disambiguates purely on the
   following `(`, the same way it disambiguates `V`/`I` access-function calls from ordinary
   identifiers.
-- **Expressions and Evaluation**: Declaring a scalar name introduces it into scope with no
-  initial value; it becomes assignable via `=`. The type itself is parsed and then *discarded*
-  for a scalar — v0 performs no integer-vs-real type checking or truncation (a stated
-  limitation) — but an *array* declaration's range is genuinely load-bearing: it's
+- **Expressions and Evaluation**: Declaring a scalar name with no initializer introduces it into
+  scope with no initial value; it becomes assignable via `=`. The type itself is parsed and then
+  *discarded* for a scalar — v0 performs no integer-vs-real type checking or truncation (a
+  stated limitation) — but an *array* declaration's range is genuinely load-bearing: it's
   const-evaluated and interns one `VarId` per index, named `"name[k]"`, exactly mirroring how a
-  vector net expands (§2.18). `real(x)` casts fold to `x` unchanged (every value here is already
-  `f64` — a complete no-op); `integer(x)` rounds to nearest (`Builtin::Round`), matching
-  Verilog's real-to-integer *assignment* conversion rule — not `int()`'s truncate-toward-zero.
+  vector net expands (§2.18). An inline initializer lowers to a `Stmt::Assign`, prepended to the
+  analog block (module-level) or emitted in place (block-local) — the LRM requires it to run
+  before the first analog block executes, and this project has no simulation-phase distinction
+  yet, so "prepended/in place, in source order" is the same DC-only approximation `@(initial_
+  step)` already uses (§ event control). `real(x)` casts fold to `x` unchanged (every value here
+  is already `f64` — a complete no-op); `integer(x)` rounds to nearest (`Builtin::Round`),
+  matching Verilog's real-to-integer *assignment* conversion rule — not `int()`'s
+  truncate-toward-zero.
 - **Structural and Analog Usage**: Module-level (`real x;`, `real out_val[0:15];`) and
   analog-block-local (`real x;` inside `begin...end`) *scalar* declarations are both legal and
   treated identically by elaboration (registering the same kind of `VarId`). An *array*
@@ -1323,11 +1331,16 @@ depends on surrounding context), organized by what they do rather than by a sing
   as `va_ir::Param`s in the parent — every `Expr::Param` reference inside its copied body
   collapses to `Expr::Const` using the already-resolved value, since a Verilog-A parameter is
   a compile-time constant either way. A port connection's net is resolved in the parent's own
-  scope (`resolve_net_arg` — an ordinary net, or one constant/genvar-indexed vector-net
-  element) and aliased directly to the submodule's corresponding port node; every other node,
-  branch, variable, and function the submodule declares is copied into the parent's arenas,
-  namespaced `"{inst_name}.{name}"` to avoid colliding with a same-named parent declaration
-  (impossible anyway, since Verilog-A identifiers can't contain `.`).
+  scope (`resolve_conn_nodes` — a scalar net, a constant/genvar-indexed single vector-net
+  element, a bare vector-net name, or an explicit `[msb:lsb]` slice, the last two both
+  resolving to the connection's full ascending-index-order node list) and bound element-wise
+  (`bind_port_nodes`) to the submodule's corresponding port's own node list — a vector port
+  (`electrical [0:1] x, y;`) connects exactly like a scalar one once both sides are just "a node
+  list of the same width," which is also why a connection whose resolved width disagrees with
+  the port's declared width is a dedicated elaboration error, not a silent partial bind. Every
+  other node, branch, variable, and function the submodule declares is copied into the parent's
+  arenas, namespaced `"{inst_name}.{name}"` to avoid colliding with a same-named parent
+  declaration (impossible anyway, since Verilog-A identifiers can't contain `.`).
 - **Structural and Analog Usage**: Module-item level, exactly like a net or parameter
   declaration — never inside an `analog` block. A cycle (a module instantiating itself,
   directly or transitively) and an unknown module/port/parameter-override name are all
@@ -1336,10 +1349,25 @@ depends on surrounding context), organized by what they do rather than by a sing
   the way an aggressively-inlining compiler would rather than the way a hardware elaborator
   keeps hierarchy: `va_ir::Module` never gains a hierarchy concept of its own (Interface α is
   unchanged by this — see `docs/interfaces.md`'s note), so `va-codegen`/`va-core`/`va-abi`
-  still only ever see one flat module, exactly as before. **Stated v1 limits**: scalar port
-  connections only (no vector-port fan-out to a submodule); no module-item-level
-  `generate`/`endgenerate` around an instance (so no genvar-driven *array* of instances — see
-  §1.4 `Genvar`'s and §2.14's comparison notes); and a submodule's own implicit ground (from a
+  still only ever see one flat module, exactly as before. **Cross-file instantiation**: at the
+  `va_frontend::elaborate` layer, `Elaborator::library` is still just "every module parsed from
+  one compilation unit" (`elaborate_with_library`'s caller decides what that unit is — it never
+  cared which file an entry came from, so no frontend/Interface α change was needed here). A
+  submodule defined in a different `.va` file (a real pattern: `external/photonic/
+  Attenuator.va` instantiates `Polar2Cartesian`, declared in the sibling `Polar2Cartesian.va`)
+  now resolves at the `va-cli` layer instead: `check_models` groups every file it's about to
+  check by its own immediate parent directory and elaborates every module from every
+  successfully-parsed file in a group against one library combining all of them
+  (`crates/va-cli/src/lib.rs`'s `check_group`) — deliberately scoped to "files sharing one
+  directory," not the whole top-level scanned root, since several real corpus files at the same
+  nesting depth directly under `external/` declare a module with the same name (a directory-wide
+  merge across unrelated vendor releases would risk silently resolving an instantiation against
+  the wrong same-named module). `run_sim`'s `--model <path>` (the actual simulation front door,
+  as opposed to the `check` diagnostic) still only ever compiles the one given file via
+  `compile_with_includes`, so this fix is `check`-only for now — a stated remaining v1 limit.
+  **Other stated v1 limits**: no module-item-level `generate`/`endgenerate` around an instance
+  (so no genvar-driven *array* of instances — see §1.4 `Genvar`'s and §2.14's comparison notes);
+  and a submodule's own implicit ground (from a
   single-terminal `V(p)` shorthand, `Elaborator::reference_node`) is *not* unified with the
   parent's or a sibling instance's ground, since each submodule elaborates in its own arena — a
   model that needs the true circuit reference node from inside a submodule must declare an

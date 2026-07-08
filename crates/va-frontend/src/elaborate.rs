@@ -592,6 +592,30 @@ impl Elaborator<'_> {
             ExprAst::IndexedIdent(name, _) => Err(elab(format!(
                 "array variable `{name}` is not constant in a parameter context"
             ))),
+            ExprAst::ArrayLit(_) => Err(elab(
+                "an array-literal expression is not constant in a parameter context (only \
+                 valid as a `laplace_nd` coefficient-list argument)"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Extract and const-evaluate the first (`s^0`-degree) coefficient of a `{...}`
+    /// array-literal argument — all `laplace_nd`'s DC-gain fold needs (see its `lower_expr`
+    /// arm). `what` names the argument in the error message.
+    fn array_lit_first(&self, r: ExprRef, what: &str) -> Result<f64, FrontendError> {
+        match self.ast.expr(r) {
+            ExprAst::ArrayLit(elems) => {
+                let first = elems.first().ok_or_else(|| {
+                    elab(format!(
+                        "{what} array literal must have at least one coefficient"
+                    ))
+                })?;
+                self.const_eval(*first)
+            }
+            _ => Err(elab(format!(
+                "{what} must be a `{{...}}` array-literal coefficient list"
+            ))),
         }
     }
 
@@ -714,6 +738,7 @@ impl Elaborator<'_> {
     // --- pass 4: lowering ------------------------------------------------------------
 
     fn lower_analog(&mut self) -> Result<(), FrontendError> {
+        self.lower_module_var_inits()?;
         let ast = self.ast;
         for item in &ast.items {
             if let Item::Analog(stmt) = item {
@@ -732,6 +757,27 @@ impl Elaborator<'_> {
         Ok(())
     }
 
+    /// Lower every module-level `real x = expr;` inline initializer (§ variable declarations)
+    /// into a `Stmt::Assign`, prepended to `self.out.analog` in declaration order — the LRM
+    /// requires these to run before the first analog block executes, and this project has no
+    /// simulation-phase distinction yet (the same approximation `@(initial_step)` already uses,
+    /// § event control), so "prepended, in source order" is the closest sound DC reading.
+    fn lower_module_var_inits(&mut self) -> Result<(), FrontendError> {
+        let ast = self.ast;
+        for item in &ast.items {
+            if let Item::Var { names, .. } = item {
+                for entry in names {
+                    if let Some(init) = entry.init {
+                        let id = self.vars[&entry.name];
+                        let rhs = self.lower_expr(init)?;
+                        self.out.analog.push(va_ir::Stmt::Assign { lhs: id, rhs });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn lower_stmt(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
         match stmt {
             Stmt::Block(body) => {
@@ -741,8 +787,21 @@ impl Elaborator<'_> {
                 }
                 Ok(va_ir::Stmt::Block(out))
             }
-            // A declaration introduces a variable (registered in pass 3) but emits no code.
-            Stmt::VarDecl { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
+            // A declaration introduces a variable (registered in pass 3); an entry with an
+            // inline `= expr` initializer additionally emits an assignment in its place, the
+            // same DC-only "runs where it's written" approximation `@(initial_step)` already
+            // uses (§ event control) — entries without one still emit nothing.
+            Stmt::VarDecl { names } => {
+                let mut inits = Vec::new();
+                for entry in names {
+                    if let Some(init) = entry.init {
+                        let id = self.vars[&entry.name];
+                        let rhs = self.lower_expr(init)?;
+                        inits.push(va_ir::Stmt::Assign { lhs: id, rhs });
+                    }
+                }
+                Ok(va_ir::Stmt::Block(inits))
+            }
             // System tasks (`$strobe`, `$finish`, …) have no effect on a DC solve.
             Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
             Stmt::Contribute { target, value } => {
@@ -1151,6 +1210,52 @@ impl Elaborator<'_> {
                 })?;
                 return self.lower_expr(value);
             }
+            // `laplace_nd(value, num, den)` (LRM §4.5.10) — a Laplace-domain filter, `num`/`den`
+            // given as `{...}` array-literal coefficient lists (lowest-degree-of-`s` first).
+            // Genuinely time-domain (the whole point is the rational transfer function), but its
+            // DC (s=0) steady-state gain is exactly `num[0]/den[0]` — a constant scale factor on
+            // `value`, so it folds the same way `transition`/`absdelay` do above, just with a
+            // nontrivial gain rather than an identity fold. The other array-literal-consuming
+            // filter builtins (`laplace_np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) are not
+            // implemented — no corpus need found beyond `laplace_nd` (`docs/roadmap.md`
+            // backlog).
+            ExprAst::Call { name, args } if name == "laplace_nd" => {
+                let (value, num, den) = match (args.first(), args.get(1), args.get(2), args.len()) {
+                    (Some(&v), Some(&n), Some(&d), 3) => (v, n, d),
+                    _ => {
+                        return Err(elab(
+                            "`laplace_nd` takes exactly three arguments: value, a numerator \
+                             coefficient list, and a denominator coefficient list, e.g. \
+                             `laplace_nd(sig, {1}, {1, tau})`"
+                                .to_string(),
+                        ))
+                    }
+                };
+                let num0 = self.array_lit_first(num, "laplace_nd's numerator")?;
+                let den0 = self.array_lit_first(den, "laplace_nd's denominator")?;
+                if den0 == 0.0 {
+                    return Err(elab(
+                        "`laplace_nd`'s denominator s^0 coefficient is zero: the DC gain is \
+                         undefined"
+                            .to_string(),
+                    ));
+                }
+                let value_id = self.lower_expr(value)?;
+                let gain_id = self.out.push_expr(Expr::Const(num0 / den0));
+                Expr::Binary(va_ir::BinOp::Mul, value_id, gain_id)
+            }
+            // An array literal reaching here means it appeared somewhere other than a
+            // `laplace_nd` numerator/denominator argument (that case reads it directly via
+            // `array_lit_first` above, never through `lower_expr`) — not a general-purpose
+            // value anywhere in the LRM.
+            ExprAst::ArrayLit(_) => {
+                return Err(elab(
+                    "an array-literal expression (`{...}`) is only valid as a `laplace_nd` \
+                     coefficient-list argument (§ Laplace/Z-domain filters), not as a \
+                     general-purpose value"
+                        .to_string(),
+                ))
+            }
             // `real(expr)` is a type-cast call, not the declaration keyword (that's `Item::Var`/
             // `Stmt::VarDecl` — a different grammar production entirely). Every value in this
             // project is already `f64`, so it's a complete no-op: fold transparently to `expr`.
@@ -1304,6 +1409,13 @@ impl Elaborator<'_> {
     /// call [`Self::resolve_vector_node_at`] (this method's constant-index tail, factored out)
     /// once per candidate index rather than once for a single statically-known one.
     fn resolve_net_arg(&mut self, arg: &ast::NetArg) -> Result<NodeId, FrontendError> {
+        if arg.slice.is_some() {
+            return Err(elab(format!(
+                "`{}[..]` is a vector slice; a branch access/declaration needs a single node, \
+                 e.g. `V({}[0])` (a slice is only valid as an instance port-connection argument)",
+                arg.name, arg.name
+            )));
+        }
         match arg.index {
             None => {
                 if self.vectors.contains_key(&arg.name) {
@@ -1347,6 +1459,38 @@ impl Elaborator<'_> {
                 "internal error: vector node `{key}` was not interned"
             ))
         })
+    }
+
+    /// Resolve an instance port-connection argument to the ordered node list it wires up — the
+    /// connection-only counterpart of [`Self::resolve_net_arg`], which can only ever name one
+    /// node. A bare vector-net name or an explicit `[msb:lsb]` slice both resolve to their full,
+    /// ascending-index-order node list (`in[0:1]` → `[in[0], in[1]]`, matching how
+    /// [`Self::resolve_ports`] already normalizes a vector *port*'s own node list — lowest index
+    /// first regardless of which direction the source wrote), ready to zip element-wise against
+    /// a same-width vector port's node list. A scalar net or a single `[i]` index still resolves
+    /// to a one-element list, unifying the scalar and vector connection paths in
+    /// [`Self::inline_instance`].
+    fn resolve_conn_nodes(&mut self, arg: &ast::NetArg) -> Result<Vec<NodeId>, FrontendError> {
+        if let Some((msb, lsb)) = arg.slice {
+            let msb = self.const_eval_int(msb, "vector slice bound")?;
+            let lsb = self.const_eval_int(lsb, "vector slice bound")?;
+            let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
+            return (lo..=hi)
+                .map(|k| self.resolve_vector_node_at(&arg.name, k))
+                .collect();
+        }
+        if let Some(idx_expr) = arg.index {
+            let idx = self.const_eval_int(idx_expr, "vector index")?;
+            return Ok(vec![self.resolve_vector_node_at(&arg.name, idx)?]);
+        }
+        if let Some(&(lo, hi)) = self.vectors.get(&arg.name) {
+            return (lo..=hi)
+                .map(|k| self.resolve_vector_node_at(&arg.name, k))
+                .collect();
+        }
+        Ok(vec![self.nodes.get(&arg.name).copied().ok_or_else(
+            || elab(format!("unknown net `{}` in port connection", arg.name)),
+        )?])
     }
 
     /// If `args` has exactly one terminal whose base name is a declared vector net and whose
@@ -1733,12 +1877,6 @@ impl Elaborator<'_> {
         child_stack.push(self.ast.name.clone());
         let sub = elaborate_inner(sub_ast, self.library, &child_stack, &overrides)?;
 
-        if sub.ports.iter().any(|p| p.len() != 1) {
-            return Err(elab(format!(
-                "instance `{inst_name}` of `{module_name}`: vector port connections are not \
-                 supported (v1 scope limit)"
-            )));
-        }
         if connections.len() != sub.ports.len() {
             return Err(elab(format!(
                 "instance `{inst_name}` of `{module_name}` connects {} port(s), but the module \
@@ -1766,8 +1904,15 @@ impl Elaborator<'_> {
                 let ast::PortConn::Positional(net_arg) = conn else {
                     unreachable!()
                 };
-                let parent_node = self.resolve_net_arg(net_arg)?;
-                node_map.insert(sub.ports[i][0], parent_node);
+                let parent_nodes = self.resolve_conn_nodes(net_arg)?;
+                bind_port_nodes(
+                    inst_name,
+                    module_name,
+                    &(i + 1).to_string(),
+                    &sub.ports[i],
+                    &parent_nodes,
+                    &mut node_map,
+                )?;
             }
         } else {
             let mut covered = vec![false; sub_ast.ports.len()];
@@ -1791,8 +1936,15 @@ impl Elaborator<'_> {
                     )));
                 }
                 covered[idx] = true;
-                let parent_node = self.resolve_net_arg(net)?;
-                node_map.insert(sub.ports[idx][0], parent_node);
+                let parent_nodes = self.resolve_conn_nodes(net)?;
+                bind_port_nodes(
+                    inst_name,
+                    module_name,
+                    port,
+                    &sub.ports[idx],
+                    &parent_nodes,
+                    &mut node_map,
+                )?;
             }
         }
 
@@ -1874,6 +2026,35 @@ impl Elaborator<'_> {
 
 fn elab(msg: String) -> FrontendError {
     FrontendError::Elaborate(msg)
+}
+
+/// Bind a submodule port's node list to a resolved connection's node list, element-wise, in
+/// [`Elaborator::inline_instance`] — used for both positional (`port_label` = 1-based port
+/// number) and named (`port_label` = port name) connections. Both a scalar port (`sub_nodes.len()
+/// == 1`) and a vector port take the same path: `sub_nodes`/`parent_nodes` are already the full
+/// ascending-index-order lists ([`Elaborator::resolve_ports`], [`Elaborator::resolve_conn_nodes`]),
+/// so a width mismatch here means the connection's own width — not just port count — disagrees
+/// with the module's declared port width.
+fn bind_port_nodes(
+    inst_name: &str,
+    module_name: &str,
+    port_label: &str,
+    sub_nodes: &[NodeId],
+    parent_nodes: &[NodeId],
+    node_map: &mut HashMap<NodeId, NodeId>,
+) -> Result<(), FrontendError> {
+    if sub_nodes.len() != parent_nodes.len() {
+        return Err(elab(format!(
+            "instance `{inst_name}` of `{module_name}`: port `{port_label}` is {}-wide but the \
+             connection is {}-wide",
+            sub_nodes.len(),
+            parent_nodes.len()
+        )));
+    }
+    for (&sub_node, &parent_node) in sub_nodes.iter().zip(parent_nodes.iter()) {
+        node_map.insert(sub_node, parent_node);
+    }
+    Ok(())
 }
 
 /// Remap an already-elaborated submodule expression's embedded indices into the parent's
@@ -2260,6 +2441,90 @@ mod tests {
             }
             other => panic!("expected a contribution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn module_var_initializer_lowers_to_a_prepended_assign() {
+        // `real laser_freq = ...;` (`external/photonic/CwLaser.va`'s idiom) must run before the
+        // analog block's own statements, and `amplitude` (no initializer) must not emit
+        // anything at all.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; \
+             parameter real wavelength = 1550.0; \
+             real laser_freq = 3.0e8 / wavelength; \
+             real amplitude; \
+             analog begin I(a, b) <+ laser_freq; end endmodule",
+        );
+        assert_eq!(
+            m.analog.len(),
+            2,
+            "one prepended init assign + one contribution"
+        );
+        let laser_freq = m.vars.iter().position(|v| v.name == "laser_freq").unwrap();
+        match &m.analog[0] {
+            va_ir::Stmt::Assign { lhs, .. } => assert_eq!(lhs.0 as usize, laser_freq),
+            other => panic!("expected the prepended initializer assign, got {other:?}"),
+        }
+        assert!(matches!(m.analog[1], va_ir::Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn block_local_var_initializer_lowers_to_an_assign() {
+        // `real x = 1.0;` inside the analog block itself, not at module scope.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; \
+             analog begin real x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        // The top-level `analog begin...end` block is flattened (§ lower_analog), so the
+        // `VarDecl`'s own lowering (a `Block` wrapping its initializer assigns) and the
+        // `Contribute` are two separate top-level entries.
+        assert_eq!(m.analog.len(), 2);
+        match &m.analog[0] {
+            va_ir::Stmt::Block(body) => {
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0], va_ir::Stmt::Assign { .. }));
+            }
+            other => panic!("expected a block wrapping the initializer assign, got {other:?}"),
+        }
+        assert!(matches!(m.analog[1], va_ir::Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn laplace_nd_folds_to_its_dc_gain() {
+        // `laplace_nd(V(a,b), {2, 0}, {2, 1})` (num[0]/den[0] = 2/2 = 1.0) — the exact
+        // `external/photonic/PhotoDetector.va`/`TunableFilter.va` shape (a normalized-gain
+        // low-pass filter), reduced to a `Binary(Mul, probe, Const(1.0))`.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; \
+             analog I(a, b) <+ laplace_nd(V(a, b), {2, 0}, {2, 1}); endmodule",
+        );
+        match &m.analog[0] {
+            va_ir::Stmt::Contribute { value, .. } => match m.expr(*value) {
+                Expr::Binary(va_ir::BinOp::Mul, l, r) => {
+                    assert!(matches!(m.expr(*l), Expr::Probe(_)));
+                    assert!(matches!(m.expr(*r), Expr::Const(g) if (*g - 1.0).abs() < 1e-12));
+                }
+                other => panic!("expected a Mul-by-gain fold, got {other:?}"),
+            },
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn laplace_nd_zero_dc_denominator_is_an_error() {
+        let src = "module t(a, b); electrical a, b; \
+                    analog I(a, b) <+ laplace_nd(V(a, b), {1}, {0, 1}); endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
+        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
+    }
+
+    #[test]
+    fn array_literal_outside_laplace_nd_is_an_error() {
+        let src = "module t(); parameter real x = {1, 2}; endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
+        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
     }
 
     #[test]
@@ -3449,6 +3714,47 @@ mod tests {
         let m = elaborate_top(&src, "top");
         assert_eq!(m.nodes.len(), 2);
         assert_eq!(m.branches.len(), 1);
+    }
+
+    #[test]
+    fn vector_port_instance_connects_whole_bus_and_a_slice() {
+        // The exact `external/photonic/Attenuator.va`/`CartesianMultiplier.va` shape: a 2-wide
+        // vector port connected once to a same-width bare vector net (`transfer`, no index) and
+        // once to a `[msb:lsb]` slice of a wider one (`in[0:1]` out of a 4-wide `in`).
+        const MUL: &str = "module mul(x, y); electrical [0:1] x, y; \
+                            analog begin V(x[0]) <+ V(y[0]); V(x[1]) <+ V(y[1]); end endmodule ";
+        let src = format!(
+            "{MUL} module top(); electrical [0:1] transfer; electrical [0:3] in; \
+             mul m1(transfer, in[0:1]); endmodule"
+        );
+        let m = elaborate_top(&src, "top");
+        // `transfer[0..1]` and `in[0..1]` are both already-declared parent nodes — the instance
+        // must alias `mul`'s vector ports `x`/`y` to them element-wise, not synthesize new
+        // `m1.x[..]`/`m1.y[..]` nodes (the 7th node is `m1.gnd`, `mul`'s own implicit reference
+        // node for its single-terminal `V(x[0])`-style probes — unrelated to port binding).
+        assert_eq!(
+            m.nodes.len(),
+            7,
+            "transfer[0..1] + in[0..3] + m1's own implicit gnd"
+        );
+        assert!(m
+            .nodes
+            .iter()
+            .all(|n| !n.name.starts_with("m1.x") && !n.name.starts_with("m1.y")));
+    }
+
+    #[test]
+    fn vector_port_instance_width_mismatch_is_an_error() {
+        const MUL: &str = "module mul(x, y); electrical [0:1] x, y; analog begin end endmodule ";
+        let src = format!(
+            "{MUL} module top(); electrical [0:2] a; electrical [0:1] b; \
+             mul m1(a, b); endmodule"
+        );
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let top = asts.iter().find(|m| m.name == "top").unwrap();
+        let err = elaborate_with_library(top, &asts).unwrap_err();
+        assert!(matches!(err, FrontendError::Elaborate(_)));
     }
 
     #[test]

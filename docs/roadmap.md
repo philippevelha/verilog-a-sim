@@ -183,31 +183,98 @@ is unmoved by this) but via a locally-authored, not-yet-validated `optical`-disc
 (`external/microring_modulator.va`, gitignored, not part of the corpus) that hit exactly the gap
 item 4 predicted.
 
+Three more gaps closed together, all found the same way — via a second locally-authored,
+not-yet-validated library (`external/photonic/`, gitignored, not part of the tracked 118-file
+corpus; a set of basic photonic building-block models) rather than the tracked corpus itself,
+so none of these move the 62/118 count either:
+
+- **Module-level/block-local `real`/`integer` inline initializers**, `real laser_freq =
+  `P_C / wavelength / 1e-9;` — the LRM allows a name to carry either an array range or an `=
+  expr` initializer, never both; only the range half was parsed before. `Parser::parse_var_entry`
+  now looks for `= expr` when there's no range; elaboration lowers it to a `Stmt::Assign`
+  (prepended to the analog block at module scope, emitted in place at block scope) — the same
+  DC-only "runs where it's written" approximation `@(initial_step)` already uses. Closed 6 files
+  in `external/photonic/` (`CwLaser.va`, `NoisyEDFA.va`, `Pcw.va`, `PcwPhaseModulator.va`,
+  `PhaseModulator.va`, `Waveguide.va`).
+- **Vector-net slices as instance port-connection arguments**, `CartesianMultiplier1(transfer,
+  in[0:1], out[0:1]);` — connecting a `[msb:lsb]` sub-range of a wider vector net (or a whole
+  bare vector net) to a same-width vector port. This also lifts the old "scalar port connections
+  only (v1 scope limit)" restriction entirely: `Elaborator::resolve_conn_nodes` resolves a
+  connection argument to its full ordered node list (one node for a scalar/single-index
+  argument, the ascending-index-order list for a slice or bare vector name) and
+  `bind_port_nodes` zips it element-wise against the submodule port's own node list — a scalar
+  port is just the width-1 case of the same path now, not a separate one. Closed 3 files
+  (`Attenuator.va`, `Isolator.va`, `PhaseShifter.va`) *for slice parsing/binding itself* — all
+  three (plus 5 more `real`-initializer-fixed files) still fail for the next reason below, a
+  distinct, newly-discovered gap.
+- **Array-literal `{...}` expressions**, needed as `laplace_nd`'s coefficient-list arguments
+  (this backlog's former item 1) — `{` and `}` are now lexed, `{expr, ...}` parses into a new
+  `ExprAst::ArrayLit` (no `va-ir` change: it never survives past elaboration as a runtime value,
+  so Interface α needed no §6 coordination). `laplace_nd(value, num, den)` is genuinely
+  time-domain, but its DC (`s=0`) steady-state gain is exactly `num[0]/den[0]` — a constant
+  scale factor on `value`, folded the same way `transition`/`absdelay` already fold to their
+  input (§ this file's earlier discipline/nature entry). An array literal anywhere else is a
+  clear elaboration error. Closed `external/photonic/PhotoDetector.va` outright;
+  `TunableFilter.va` now hits the cross-file-instantiation gap below instead (same as the slice
+  fix's 3 files) — the other 7 array-literal-consuming filter builtins (`laplace_np`/`zd`/`zp`,
+  `zi_nd`/`np`/`zd`/`zp`) remain unimplemented, no corpus need found beyond `laplace_nd`.
+
+That work surfaced one more, previously-unexercised gap: every instantiated module had to be a
+sibling `module...endmodule` **in the same source file** — a submodule declared in a different
+`.va` file was "unknown module" (`Elaborator::library` is built per-compilation-unit, i.e.
+per-file, by `crate::compile`). Nothing in the tracked 118-file corpus happened to need
+cross-file instantiation, but 9 of `external/photonic/`'s 31 files did (e.g. `Attenuator.va`'s
+`Polar2Cartesian1` instance references `Polar2Cartesian`, declared in the sibling
+`Polar2Cartesian.va`) — real Verilog-A practice, one module per file, is exactly this shape.
+
+**Now closed, at the `va-cli` layer, not `va-frontend`**: `va_frontend::elaborate_with_library`
+already took an arbitrary `library: &[ModuleAst]` — it never cared which file an entry came
+from, so no frontend/Interface α change was needed at all. `check_models` (`crates/va-cli/src/
+lib.rs`) now groups every file it's about to check by its own immediate parent directory
+(`BTreeMap<PathBuf, Vec<_>>`), and the new `check_group` parses each file in a group individually
+(still reporting that file's own read/preprocess/lex/parse failure on its own line) but
+elaborates every module from every successfully-parsed file in the group against one *combined*
+library. Grouping is deliberately scoped to "files sharing one directory," not "everything under
+the top-level scanned root": several real corpus files at the same nesting depth directly under
+`external/` declare a module with the same name (`hisimsoi_va`, `hicumL2va`, `mvsg_cmc`, `psphv`,
+…, confirmed by `grep -h '^module ' external/*.va | sort | uniq -d`), so a directory-wide merge
+across unrelated vendor releases would have risked an instantiation silently resolving against
+the wrong same-named module; a folder someone actually put files into together is the one case
+with an established intent to be used as one library. `external/photonic/` now passes 29/31 (up
+from 20/31) — the remaining two are the expected header-only `disciplines.vams` and
+`NoisyEDFA.va`, which hits a distinct, unrelated gap: an unrecognized system function,
+`$rdist_normal` (a random-distribution noise source query), added to the backlog below.
+
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
-1. **Laplace/Z-domain filters** (`laplace_nd`/`np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) — blocked
-   on array/list-literal expression syntax (`{1, 2, 3}`), which the grammar doesn't have at all
-   yet; a DC answer (the filter's gain at s=0/z=1, from the coefficient arrays) is sound once
-   that syntax exists. Do the array-literal grammar work once, then revisit.
-2. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
+1. **Other Laplace/Z-domain filter builtins** (`laplace_np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) —
+   `laplace_nd` itself is done (above); these need the same `{...}`-argument DC-gain fold, just
+   computed differently per form (pole/zero products for the `*p`/`*z` forms vs. polynomial
+   coefficients for `*d`/`*n`). No corpus file found needing any of the seven yet.
+2. **`$rdist_normal` and friends** (`$rdist_uniform`, `$rdist_exponential`, …, LRM §3.6's
+   random-distribution system functions) — found via `external/photonic/NoisyEDFA.va`, not the
+   tracked corpus. Likely the same DC-fold family as the noise-source builtins already handled
+   (`white_noise`/`flicker_noise`/`noise_table` fold to `0.0` at a fixed operating point) — these
+   are almost certainly the same "no meaningful DC value" story, just system-function-spelled.
+3. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
    semantics) — cannot be soundly approximated at DC the way `transition`/`slew` can (their
    whole purpose is time history); genuinely blocked on `va-transient` existing.
-3. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
+4. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
    as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
    priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
    artifact).
-4. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
+5. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
    `idt_nature`/`ddt_nature` are parsed and stored (`disciplines.rs::NatureDecl`) but never read
    by `va-core` or elaboration; a real per-discipline `abstol` could feed `convergence.rs`'s
    `gmin`/damping aids once a net's discipline round-trips that far.
-5. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
+6. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
    access's implicit "gnd" second terminal is hardcoded `Discipline::Electrical` regardless of
    the access's own discipline (e.g. a bare `Temp(dt)` still resolves against an
    electrical-tagged reference node); pre-existing, not introduced by the discipline/nature
    pass, and not fixable without per-access discipline tracking that doesn't exist even for
    electrical/thermal today.
-6. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
+7. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
    production in `parse_item` at all; the implicit "gnd" node (`reference_node`, above) is the
    only reference-node convention this project has.
 

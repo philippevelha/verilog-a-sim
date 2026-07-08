@@ -218,10 +218,37 @@ impl Parser<'_> {
     /// Parse a single net terminal: a plain net name, or one element of a vector net selected
     /// by a bracketed index expression (`bus[i]`). The index, when present, must be a genvar
     /// expression — checked at elaboration, not here.
+    /// Parse a net terminal: a plain name, `name[index]`, or `name[msb:lsb]` (a slice — only
+    /// meaningful in a [`PortConn`], see [`NetArg::slice`]; other callers reject one at
+    /// elaboration).
     fn parse_net_arg(&mut self) -> Result<NetArg, FrontendError> {
         let name = self.expect_ident()?;
-        let index = self.parse_optional_index()?;
-        Ok(NetArg { name, index })
+        if !self.at(&Token::LBracket) {
+            return Ok(NetArg {
+                name,
+                index: None,
+                slice: None,
+            });
+        }
+        self.pos += 1;
+        let first = self.parse_expr()?;
+        if self.at(&Token::Colon) {
+            self.pos += 1;
+            let last = self.parse_expr()?;
+            self.eat(&Token::RBracket)?;
+            Ok(NetArg {
+                name,
+                index: None,
+                slice: Some((first, last)),
+            })
+        } else {
+            self.eat(&Token::RBracket)?;
+            Ok(NetArg {
+                name,
+                index: Some(first),
+                slice: None,
+            })
+        }
     }
 
     /// Parse an optional bracketed index, `[expr]` — one element of a vector net or array
@@ -284,15 +311,23 @@ impl Parser<'_> {
         Ok(Item::Net { discipline, nets })
     }
 
-    /// Parse one entry of a `real`/`integer` variable-declaration list: a name, optionally
-    /// followed by its own `[msb:lsb]` array range (§ array variables) — e.g.
-    /// `real out_val[0:15], tmp;`. Unlike a net declaration, there is no shared prefix-range
-    /// form here: a scalar/array `real`/`integer` never carries a width before the name list,
-    /// only a per-name array dimension after it.
+    /// Parse one entry of a `real`/`integer` variable-declaration list: a name, followed by
+    /// either its own `[msb:lsb]` array range (§ array variables) — e.g. `real out_val[0:15],
+    /// tmp;` — or an inline `= expr` initializer, e.g. `real laser_freq = `P_C / wavelength /
+    /// 1e-9;`. The LRM allows one or the other per name, never both, so an initializer is only
+    /// looked for when there was no range. Unlike a net declaration, there is no shared
+    /// prefix-range form here: a scalar/array `real`/`integer` never carries a width before the
+    /// name list, only a per-name array dimension after it.
     fn parse_var_entry(&mut self) -> Result<VarEntry, FrontendError> {
         let name = self.expect_ident()?;
         let range = self.parse_bracket_range()?;
-        Ok(VarEntry { name, range })
+        let init = if range.is_none() && self.at(&Token::Assign) {
+            self.pos += 1;
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(VarEntry { name, range, init })
     }
 
     /// A non-empty comma-separated list of [`Self::parse_var_entry`].
@@ -1242,6 +1277,19 @@ impl Parser<'_> {
                 self.eat(&Token::RParen)?;
                 Ok(e)
             }
+            // `{expr, expr, ...}`: an array literal, only meaningful as a `laplace_nd`-style
+            // coefficient-list argument (§ Laplace/Z-domain filters) — parsed generically here,
+            // like every other expression form, and restricted to that one use at elaboration.
+            Some(Token::LBrace) => {
+                self.pos += 1;
+                let mut elems = vec![self.parse_expr()?];
+                while self.at(&Token::Comma) {
+                    self.pos += 1;
+                    elems.push(self.parse_expr()?);
+                }
+                self.eat(&Token::RBrace)?;
+                Ok(self.push(ExprAst::ArrayLit(elems)))
+            }
             Some(Token::SysFunc(name)) => {
                 let name = name.clone();
                 self.pos += 1;
@@ -1530,6 +1578,39 @@ mod tests {
     }
 
     #[test]
+    fn array_literal_expression_parses() {
+        // `laplace_nd(sig, {1}, {1, tau})` — the exact `external/photonic/PhotoDetector.va`
+        // idiom (coefficient-list arguments to a Laplace-domain filter builtin).
+        let m = parse_src(
+            "module t(a, b); electrical a, b; \
+             analog I(a, b) <+ laplace_nd(V(a, b), {1}, {1, 2, 3}); endmodule",
+        );
+        let call = analog_body(&m)
+            .into_iter()
+            .find_map(|s| match s {
+                Stmt::Contribute { value, .. } => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        match m.expr(call) {
+            ExprAst::Call { name, args } => {
+                assert_eq!(name, "laplace_nd");
+                assert_eq!(args.len(), 3);
+                assert!(matches!(m.expr(args[0]), ExprAst::Probe(_)));
+                match m.expr(args[1]) {
+                    ExprAst::ArrayLit(elems) => assert_eq!(elems.len(), 1),
+                    other => panic!("expected an array literal, got {other:?}"),
+                }
+                match m.expr(args[2]) {
+                    ExprAst::ArrayLit(elems) => assert_eq!(elems.len(), 3),
+                    other => panic!("expected an array literal, got {other:?}"),
+                }
+            }
+            other => panic!("expected a call, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ternary_parses_and_is_right_associative() {
         // `1 + 2 > 0 ? 10 : 20 ? 30 : 40` ==> Cond(1+2>0, 10, Cond(20, 30, 40)).
         let m =
@@ -1815,6 +1896,36 @@ mod tests {
     }
 
     #[test]
+    fn variable_declaration_with_inline_initializer_parses() {
+        // `real laser_freq = `P_C / wavelength / 1e-9;` — the exact
+        // `external/photonic/CwLaser.va` idiom. A name with no initializer (`amplitude`) still
+        // parses with `init: None`.
+        let m = parse_src(
+            "module t(); parameter real wavelength = 1550.0; \
+             real laser_freq = 3.0e8 / wavelength / 1e-9; real amplitude; endmodule",
+        );
+        let names = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Var { names, .. } if names[0].name == "laser_freq" => Some(names.clone()),
+                _ => None,
+            })
+            .expect("laser_freq declaration");
+        assert_eq!(names.len(), 1);
+        assert!(names[0].init.is_some());
+        let amplitude = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Var { names, .. } if names[0].name == "amplitude" => Some(names.clone()),
+                _ => None,
+            })
+            .expect("amplitude declaration");
+        assert!(amplitude[0].init.is_none());
+    }
+
+    #[test]
     fn array_variable_declaration_parses() {
         // `real out_val[0:15], tmp;` — mixed array and scalar in one declaration, matching the
         // real corpus idiom (`external/verilogaLib-master/adc_16bit_ideal.va`).
@@ -2080,6 +2191,42 @@ mod tests {
                 for (conn, expected) in connections.iter().zip(["a", "b"]) {
                     match conn {
                         PortConn::Positional(net) => assert_eq!(net.name, expected),
+                        other => panic!("expected a positional connection, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected an instance item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_connection_slice_parses() {
+        // `in[0:1]` as a connection argument — the exact
+        // `external/photonic/Attenuator.va` idiom (`CartesianMultiplier1(transfer, in[0:1],
+        // out[0:1]);`): a range slice, distinct from a single `[i]` index.
+        let m = parse_src(
+            "module top(); electrical [0:1] transfer; electrical [0:3] in, out; \
+             mul m1(transfer, in[0:1], out[0:1]); endmodule",
+        );
+        // items[0] = `transfer`'s net decl, items[1] = `in, out`'s (one shared declaration),
+        // items[2] = the instance.
+        match &m.items[2] {
+            Item::Instance { connections, .. } => {
+                assert_eq!(connections.len(), 3);
+                match &connections[0] {
+                    PortConn::Positional(net) => {
+                        assert_eq!(net.name, "transfer");
+                        assert!(net.index.is_none() && net.slice.is_none());
+                    }
+                    other => panic!("expected a positional connection, got {other:?}"),
+                }
+                for (conn, expected_name) in connections[1..].iter().zip(["in", "out"]) {
+                    match conn {
+                        PortConn::Positional(net) => {
+                            assert_eq!(net.name, expected_name);
+                            assert!(net.slice.is_some());
+                            assert!(net.index.is_none());
+                        }
                         other => panic!("expected a positional connection, got {other:?}"),
                     }
                 }

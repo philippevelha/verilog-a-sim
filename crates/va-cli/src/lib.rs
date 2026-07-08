@@ -138,16 +138,37 @@ pub fn check_models(paths: &[String]) -> Result<()> {
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut passed = 0usize;
-    for (file, root) in &files {
-        if check_one(file, root) {
-            passed += 1;
-        }
+    // Group by each file's own immediate parent directory: every module across every file in
+    // the same directory is elaborated against one combined library, so an `Item::Instance`
+    // naming a module declared in a sibling file resolves (§ module instantiation) — matching
+    // how a real Verilog-A toolchain treats a whole library folder handed to it together (e.g.
+    // `external/photonic/Attenuator.va` instantiating `Polar2Cartesian`, declared in the
+    // sibling `Polar2Cartesian.va`). This is *not* extended to the top-level scan root itself
+    // sharing one library across unrelated subfolders: several real corpus files at the same
+    // nesting depth under `external/` (e.g. two different `hisimsoi_va` releases) declare a
+    // module with the same name, so a directory-wide-not-just-folder-wide merge would risk
+    // silently resolving an instantiation against the wrong same-named module. Grouping by
+    // immediate parent directory only merges files a human actually put together in one
+    // folder, which is the one case with an established intent to be used as one library.
+    let mut groups: std::collections::BTreeMap<
+        std::path::PathBuf,
+        Vec<(String, std::path::PathBuf)>,
+    > = std::collections::BTreeMap::new();
+    for (file, root) in files {
+        let parent = std::path::Path::new(&file)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        groups.entry(parent).or_default().push((file, root));
     }
-    println!(
-        "\n{passed}/{} files passed the frontend (lex → parse → elaborate)",
-        files.len()
-    );
+
+    let mut passed = 0usize;
+    let mut total = 0usize;
+    for group in groups.into_values() {
+        total += group.len();
+        passed += check_group(&group);
+    }
+    println!("\n{passed}/{total} files passed the frontend (lex → parse → elaborate)");
     Ok(())
 }
 
@@ -173,16 +194,18 @@ fn collect_va_files(
     Ok(())
 }
 
-/// Check a single source file through the frontend stages, printing a tagged status line.
-/// `scan_root` is the top-level directory the file was discovered under (empty if the file
-/// was passed directly rather than found via directory scan). Returns whether it elaborated
-/// cleanly.
-fn check_one(path: &str, scan_root: &std::path::Path) -> bool {
+/// Run one source file through preprocess → lex → parse, printing a tagged status line on
+/// failure. Returns `None` (already reported) if any stage fails, `Some(asts)` (every module
+/// the file's own text defines) otherwise. `scan_root` is the top-level directory the file was
+/// discovered under (empty if the file was passed directly rather than found via directory
+/// scan) — used only to widen `` `include `` resolution, unrelated to [`check_group`]'s
+/// cross-file *instantiation* library.
+fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<Vec<va_frontend::ast::ModuleAst>> {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             println!("  [read ] {path}: {e}");
-            return false;
+            return None;
         }
     };
     // Resolve `include against the file's own directory first, then fall back to the
@@ -197,45 +220,70 @@ fn check_one(path: &str, scan_root: &std::path::Path) -> bool {
         Ok(s) => s,
         Err(e) => {
             println!("  [pp   ] {path}: {e}");
-            return false;
+            return None;
         }
     };
     let tokens = match va_frontend::lexer::lex(&src) {
         Ok(t) => t,
         Err(e) => {
             println!("  [lex  ] {path}: {e}");
-            return false;
+            return None;
         }
     };
-    let asts = match va_frontend::parser::parse(&tokens) {
-        Ok(a) => a,
+    match va_frontend::parser::parse(&tokens) {
+        Ok(a) => Some(a),
         Err(e) => {
             println!("  [parse] {path}: {e}");
-            return false;
-        }
-    };
-    // Elaborate every module the file defines (each against the full sibling list, so an
-    // `Item::Instance` anywhere in the file resolves), since a file may define a subcircuit
-    // plus a top module rather than exactly one (§ module instantiation).
-    let mut all_ok = true;
-    for ast in &asts {
-        match va_frontend::elaborate::elaborate_with_library(ast, &asts) {
-            Ok(m) => {
-                println!(
-                    "  [ok   ] {path}: module `{}` ({} nodes, {} params, {} funcs)",
-                    m.name,
-                    m.nodes.len(),
-                    m.params.len(),
-                    m.functions.len()
-                );
-            }
-            Err(e) => {
-                println!("  [elab ] {path}: module `{}`: {e}", ast.name);
-                all_ok = false;
-            }
+            None
         }
     }
-    all_ok
+}
+
+/// Check every file in one directory-grouped library together (§ module instantiation across
+/// files, [`check_models`]): parse each file individually — still reporting its own
+/// read/preprocess/lex/parse failure on its own line — then elaborate every module from every
+/// successfully-parsed file against the *combined* list of all their modules, so an
+/// `Item::Instance` naming a module declared in a sibling file resolves
+/// (`elaborate_with_library`'s `library` argument doesn't care which file an entry came from).
+/// Returns how many files had every one of their own modules elaborate cleanly.
+fn check_group(group: &[(String, std::path::PathBuf)]) -> usize {
+    let mut library: Vec<va_frontend::ast::ModuleAst> = Vec::new();
+    // Each successfully-parsed file's own modules, as a `library` index range — avoids cloning
+    // every `ModuleAst` a second time just to report per-file status.
+    let mut file_ranges: Vec<(&str, std::ops::Range<usize>)> = Vec::new();
+    for (file, root) in group {
+        if let Some(asts) = parse_file(file, root) {
+            let start = library.len();
+            library.extend(asts);
+            file_ranges.push((file.as_str(), start..library.len()));
+        }
+    }
+
+    let mut passed = 0usize;
+    for (file, range) in file_ranges {
+        let mut all_ok = true;
+        for ast in &library[range] {
+            match va_frontend::elaborate::elaborate_with_library(ast, &library) {
+                Ok(m) => {
+                    println!(
+                        "  [ok   ] {file}: module `{}` ({} nodes, {} params, {} funcs)",
+                        m.name,
+                        m.nodes.len(),
+                        m.params.len(),
+                        m.functions.len()
+                    );
+                }
+                Err(e) => {
+                    println!("  [elab ] {file}: module `{}`: {e}", ast.name);
+                    all_ok = false;
+                }
+            }
+        }
+        if all_ok {
+            passed += 1;
+        }
+    }
+    passed
 }
 
 /// Reject analyses v0 does not implement (AC), and mismatches between what the deck's own
@@ -510,6 +558,69 @@ mod tests {
     #[test]
     fn analysis_default_is_dc() {
         assert_eq!(Analysis::default(), Analysis::Dc);
+    }
+
+    #[test]
+    fn check_group_resolves_cross_file_instantiation() {
+        // `check_models`'s directory scan must let `top.va`'s `leg l1(a, b);` instance resolve
+        // against `leg`, declared in a *separate* sibling file — the real corpus shape
+        // (`external/photonic/Attenuator.va` instantiating `Polar2Cartesian`, declared in the
+        // sibling `Polar2Cartesian.va`) plain per-file elaboration can't see.
+        let dir = std::env::temp_dir().join("va_cli_check_group_cross_file_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let leg_path = dir.join("leg.va");
+        let top_path = dir.join("top.va");
+        std::fs::write(
+            &leg_path,
+            "module leg(p, n); electrical p, n; parameter real r = 1000; \
+             analog I(p, n) <+ V(p, n) / r; endmodule",
+        )
+        .unwrap();
+        std::fs::write(
+            &top_path,
+            "module top(a, b); electrical a, b; leg l1(a, b); endmodule",
+        )
+        .unwrap();
+
+        let group = vec![
+            (leg_path.to_string_lossy().into_owned(), dir.clone()),
+            (top_path.to_string_lossy().into_owned(), dir.clone()),
+        ];
+        let passed = check_group(&group);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            passed, 2,
+            "both leg.va and top.va must elaborate cleanly, top.va's instance resolved \
+             against leg.va's module"
+        );
+    }
+
+    #[test]
+    fn check_group_does_not_resolve_an_instance_missing_from_its_own_group() {
+        // A negative control for `check_group_resolves_cross_file_instantiation`: `top.va`
+        // alone (its sibling `leg.va` withheld from the group entirely) must still fail to
+        // resolve `leg l1(a, b);`, confirming the positive test's success comes from the shared
+        // group and not from some other, broader lookup.
+        let dir = std::env::temp_dir().join("va_cli_check_group_missing_sibling_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let top_path = dir.join("top.va");
+        std::fs::write(
+            &top_path,
+            "module top(a, b); electrical a, b; leg l1(a, b); endmodule",
+        )
+        .unwrap();
+
+        let group = vec![(top_path.to_string_lossy().into_owned(), dir.clone())];
+        let passed = check_group(&group);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            passed, 0,
+            "top.va's `leg` instance must not resolve with no leg.va present"
+        );
     }
 
     /// End-to-end DC: parse the divider deck, build reference instances, solve.

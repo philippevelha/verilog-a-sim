@@ -94,9 +94,13 @@ pub struct Access {
     pub args: Vec<NetArg>,
 }
 
-/// A single net terminal in an [`Access`] or `branch` declaration: a plain net name, or a
-/// vector element selected by a bracketed index (`bus[i]`). The index, when present, must be
-/// a genvar expression — resolved to a constant node at elaboration (§ vector nets).
+/// A single net terminal in an [`Access`], `branch` declaration, or instance port connection
+/// ([`PortConn`]): a plain net name, a vector element selected by a bracketed index (`bus[i]`),
+/// or (connections only) a bracketed slice (`bus[3:0]`) wiring a sub-range of a wider vector net
+/// to a vector port. The index/slice, when present, must be a genvar or compile-time-constant
+/// expression — resolved at elaboration (§ vector nets). `index` and `slice` are mutually
+/// exclusive; a `slice` on an `Access`/`branch` terminal is rejected at elaboration (`V`/`I`
+/// take single nodes, never a sub-range).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetArg {
     /// The net (or vector net) name.
@@ -104,6 +108,9 @@ pub struct NetArg {
     /// The bracketed index expression, if this terminal selects one element of a vector net
     /// declared with a range (e.g. `electrical [3:0] bus;`).
     pub index: Option<ExprRef>,
+    /// The bracketed `[msb:lsb]` slice, if this terminal selects a sub-range of a vector net —
+    /// only meaningful as an instance port-connection argument.
+    pub slice: Option<(ExprRef, ExprRef)>,
 }
 
 /// One net name in an [`Item::Net`] declaration list, with its own optional vector range
@@ -128,6 +135,11 @@ pub struct VarEntry {
     /// The declared array size, `[msb:lsb]`, if this name is an array variable. `None` for an
     /// ordinary scalar variable.
     pub range: Option<(ExprRef, ExprRef)>,
+    /// An inline initializer, `real x = expr;`. Mutually exclusive with `range` — the LRM's
+    /// `real_identifier` grammar allows a dimension *or* an initializer, never both, and the
+    /// parser only looks for `= expr` when there was no `[...]` range. `None` for a declaration
+    /// with no initializer.
+    pub init: Option<ExprRef>,
 }
 
 /// A parameter's `from` value range, e.g. `from (0:inf)` or `from [0:c0)`.
@@ -418,6 +430,13 @@ pub enum ExprAst {
         /// Value when `cond` is zero.
         else_: ExprRef,
     },
+    /// An array-literal expression, `{expr, expr, ...}` (LRM §4.5.10's Laplace/Z-domain filter
+    /// coefficient-list argument syntax, e.g. `laplace_nd(sig, {1}, {1, tau})`). Not a
+    /// general-purpose value — elaboration only accepts one as a `laplace_nd` numerator/
+    /// denominator argument, const-evaluating each element for the filter's DC (s=0) gain fold;
+    /// anywhere else it's an elaboration error. No `va-ir` representation exists for it (and
+    /// none is needed): it never survives past elaboration as a runtime value.
+    ArrayLit(Vec<ExprRef>),
 }
 
 /// Unary operators.

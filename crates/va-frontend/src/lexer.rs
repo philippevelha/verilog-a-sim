@@ -390,6 +390,13 @@ pub enum Token {
     /// `]` — closes an inclusive parameter range bound.
     #[token("]")]
     RBracket,
+    /// `{` — opens an array-literal expression, `{1, 2, 3}` (a `laplace_nd`-style
+    /// coefficient-list argument).
+    #[token("{")]
+    LBrace,
+    /// `}` — closes an array-literal expression.
+    #[token("}")]
+    RBrace,
     /// `@` — opens an event-control expression, `@(initial_step)`.
     #[token("@")]
     At,
@@ -702,7 +709,10 @@ mod tests {
 
     #[test]
     fn unexpected_character_reports_offset() {
-        let err = lex("R = {").unwrap_err();
+        // `\` (a lone backslash, not part of an escaped identifier) is still unlexable — `{`
+        // used to be this test's example, but it's now a real token (§ array-literal
+        // expressions, `{expr, ...}`).
+        let err = lex("R = \\").unwrap_err();
         match err {
             FrontendError::Lex { offset, .. } => assert_eq!(offset, 4),
             other => panic!("expected lex error, got {other:?}"),
