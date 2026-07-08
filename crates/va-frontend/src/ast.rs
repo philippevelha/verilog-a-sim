@@ -53,12 +53,18 @@ pub enum Direction {
 }
 
 /// A net discipline keyword.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Discipline {
     /// `electrical`.
     Electrical,
     /// `thermal`.
     Thermal,
+    /// A user-defined discipline (`discipline foo; ... enddiscipline`) used as a net-type
+    /// keyword, e.g. `foo a, b;`. `va-core` doesn't model multi-physics beyond
+    /// electrical/thermal yet, so this elaborates to [`va_ir::Discipline::Other`] (§1 roadmap)
+    /// — the node still exists and can be probed/contributed to, it just isn't checked for
+    /// domain-specific conservation.
+    Custom(String),
 }
 
 /// A parameter's declared base type.

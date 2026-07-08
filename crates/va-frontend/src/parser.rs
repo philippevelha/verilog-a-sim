@@ -54,12 +54,17 @@ use crate::disciplines::{DisciplineDecl, DomainKind, NatureDecl};
 use crate::lexer::Token;
 use crate::FrontendError;
 
-/// Parse a token stream into every module it defines, in source order.
+/// Parse a token stream into every module it defines, in source order. A stream that defines
+/// **no** module at all is not an error — it's a valid, if degenerate, compilation unit: real
+/// corpus files routinely carry nothing but `` `define ``s (e.g. `generalMacrosAndDefines.va`,
+/// meant only to be `` `include ``d by a real device file, never compiled standalone), and the
+/// LRM never requires a source file to contain a module. `Self::parse` returns `Ok(vec![])`
+/// for one; the caller ends up with a [`crate::CompiledDesign`] with an empty `modules`, which
+/// is simply nothing to elaborate or build instances from.
 ///
 /// # Errors
 ///
-/// Returns [`FrontendError::Parse`] on unexpected or missing tokens, or if the stream defines
-/// no module at all.
+/// Returns [`FrontendError::Parse`] on unexpected or missing tokens.
 pub fn parse(tokens: &[Token]) -> Result<Vec<ModuleAst>, FrontendError> {
     // The always-on access-function baseline (§ module preamble discipline/nature parsing):
     // recognized regardless of whether any `discipline`/`nature` block is ever parsed, so a
@@ -85,9 +90,6 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<ModuleAst>, FrontendError> {
             break;
         }
         modules.push(p.parse_module()?);
-    }
-    if modules.is_empty() {
-        return p.err("expected at least one `module ... endmodule`".to_string());
     }
     Ok(modules)
 }
@@ -258,6 +260,28 @@ impl Parser<'_> {
         let name = self.expect_ident()?;
         let range = self.parse_bracket_range()?.or(default_range);
         Ok(NetDecl { name, range })
+    }
+
+    /// Parse the name list of a net declaration under `discipline` (the discipline keyword —
+    /// built-in or custom — is already consumed by the caller): an optional shared `[msb:lsb]`
+    /// prefix range, then a comma-separated [`Self::parse_net_decl`] list, then `;`. Shared by
+    /// every discipline spelling so `electrical`/`thermal` (dedicated tokens) and a
+    /// user-declared discipline name (a plain `Ident` looked up in `self.disciplines`) parse
+    /// identically past the keyword.
+    fn parse_net_item(&mut self, discipline: Discipline) -> Result<Item, FrontendError> {
+        // A `[msb:lsb]` before the name list is a *default* vector range; each name may also
+        // carry its own range suffix (`bus[3:0]`), overriding the default for that name only —
+        // both forms appear in real Verilog-A (e.g. `electrical [0:w-1] in;` vs. `electrical
+        // in[`W-1:0], out;`). Either way, a vector name becomes a bus of nodes, indexed by a
+        // genvar expression in a branch access.
+        let default_range = self.parse_bracket_range()?;
+        let mut nets = vec![self.parse_net_decl(default_range)?];
+        while self.at(&Token::Comma) {
+            self.pos += 1;
+            nets.push(self.parse_net_decl(default_range)?);
+        }
+        self.eat(&Token::Semicolon)?;
+        Ok(Item::Net { discipline, nets })
     }
 
     /// Parse one entry of a `real`/`integer` variable-declaration list: a name, optionally
@@ -550,19 +574,7 @@ impl Parser<'_> {
                     Some(Token::Electrical) => Discipline::Electrical,
                     _ => Discipline::Thermal,
                 };
-                // A `[msb:lsb]` before the name list is a *default* vector range; each name may
-                // also carry its own range suffix (`bus[3:0]`), overriding the default for that
-                // name only — both forms appear in real Verilog-A (e.g. `electrical [0:w-1]
-                // in;` vs. `electrical in[`W-1:0], out;`). Either way, a vector name becomes a
-                // bus of nodes, indexed by a genvar expression in a branch access.
-                let default_range = self.parse_bracket_range()?;
-                let mut nets = vec![self.parse_net_decl(default_range)?];
-                while self.at(&Token::Comma) {
-                    self.pos += 1;
-                    nets.push(self.parse_net_decl(default_range)?);
-                }
-                self.eat(&Token::Semicolon)?;
-                Ok(Item::Net { discipline, nets })
+                self.parse_net_item(discipline)
             }
             Some(Token::Parameter) | Some(Token::LocalParam) => self.parse_param(),
             // A bare `real`/`integer` at module scope declares variables (a `parameter`
@@ -596,9 +608,19 @@ impl Parser<'_> {
                 let body = self.parse_block_or_single()?;
                 Ok(Item::Analog(Stmt::Block(body)))
             }
-            // Every other item production starts with a dedicated keyword/type token above,
-            // so a bare leading identifier is unambiguously a module instantiation (§ module
-            // instantiation), `module_name inst_name(...);` / `module_name #(...) inst_name(...);`.
+            // A bare leading identifier is either a net declaration under a user-defined
+            // discipline (`discipline optical; ... enddiscipline` earlier in the file, then
+            // `optical a, b;` here — the built-in `electrical`/`thermal` spellings are their
+            // own dedicated tokens above, but a custom discipline name is just an `Ident`) or a
+            // module instantiation, `module_name inst_name(...);` / `module_name #(...)
+            // inst_name(...);` (§ module instantiation). Every `discipline` block registers its
+            // name in `self.disciplines` (see `parse_discipline`) before any item using it can
+            // appear, so that lookup disambiguates the two without lookahead past the name.
+            Some(Token::Ident(name)) if self.disciplines.contains_key(name) => {
+                let discipline = Discipline::Custom(name.clone());
+                self.pos += 1;
+                self.parse_net_item(discipline)
+            }
             Some(Token::Ident(name)) => {
                 let module = name.clone();
                 self.parse_instance(module)
@@ -904,6 +926,15 @@ impl Parser<'_> {
 
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
         match self.peek() {
+            // The empty statement, a bare `;` — legal wherever a statement is expected (LRM),
+            // and a real idiom besides: `mvsg_cmc_3.2.0.va`'s
+            // `if ($port_connected(dt) == 0);` uses one as an `if`'s entire body, deliberately
+            // doing nothing on that branch (its optional thermal port is simply left
+            // unconnected). Elaborated the same as an empty `begin end` block.
+            Some(Token::Semicolon) => {
+                self.pos += 1;
+                Ok(Stmt::Block(Vec::new()))
+            }
             Some(Token::Begin) => Ok(Stmt::Block(self.parse_block_or_single()?)),
             // Event control `@(event) statement`. v0 discards the trigger and runs the
             // controlled statement: correct for a DC operating point, where `initial_step`
@@ -1991,6 +2022,47 @@ mod tests {
         assert!(parse(&toks).is_err());
     }
 
+    /// `mvsg_cmc_3.2.0.va`'s real idiom: `if (cond);` — the empty statement as an `if`'s entire
+    /// body, deliberately doing nothing on that branch. Legal wherever a statement is expected
+    /// (LRM); lowers to an empty `Stmt::Block`.
+    #[test]
+    fn empty_statement_is_a_valid_no_op() {
+        let m = parse_src(
+            "module t(); electrical p, n; \
+             analog begin \
+                 if (V(p, n) == 0.0); \
+                 I(p, n) <+ V(p, n); \
+             end endmodule",
+        );
+        let analog = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Analog(stmt) => Some(stmt),
+                _ => None,
+            })
+            .expect("an analog block");
+        let Stmt::Block(body) = analog else {
+            panic!("expected the analog block's top-level Block");
+        };
+        let Stmt::If { then_, .. } = &body[0] else {
+            panic!("expected an If statement");
+        };
+        assert_eq!(then_.len(), 1);
+        assert!(matches!(&then_[0], Stmt::Block(inner) if inner.is_empty()));
+    }
+
+    /// A source file with no `module` at all is not an error — real corpus headers
+    /// (`generalMacrosAndDefines.va`, meant only to be `` `include ``d, never compiled
+    /// standalone) carry nothing but `` `define ``s, which `` crate::preprocess `` fully expands
+    /// away, leaving zero tokens by the time `parse` ever sees them (see
+    /// [`crate::tests::macro_only_file_compiles_to_zero_modules`] for that full,
+    /// preprocessor-inclusive path).
+    #[test]
+    fn zero_modules_is_not_an_error() {
+        assert!(parse(&[]).expect("parse").is_empty());
+    }
+
     #[test]
     fn instance_with_positional_ports_parses() {
         let m = parse_src("module top(a, b); electrical a, b; resistor r1(a, b); endmodule");
@@ -2155,6 +2227,32 @@ mod tests {
         );
         assert_eq!(m.name, "t");
         assert!(matches!(analog_body(&m)[0], Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn custom_discipline_used_as_a_net_type_keyword() {
+        // `optical a, b;` after `discipline optical; ... enddiscipline` — a bare leading
+        // identifier that names a declared custom discipline is a net declaration, not a
+        // module instantiation (`external/microring_modulator.va`'s optical ports).
+        let m = parse_src(
+            "nature Opt_field; units = \"sqrt(W)\"; access = E; endnature \
+             discipline optical; potential Opt_field; enddiscipline \
+             module t(a, b); optical a, b; analog E(a) <+ E(b); endmodule",
+        );
+        assert_eq!(m.name, "t");
+        let nets = m
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Net { discipline, nets } => Some((discipline, nets)),
+                _ => None,
+            })
+            .expect("a net declaration item");
+        assert_eq!(nets.0, &Discipline::Custom("optical".to_string()));
+        assert_eq!(
+            nets.1.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
     }
 
     #[test]

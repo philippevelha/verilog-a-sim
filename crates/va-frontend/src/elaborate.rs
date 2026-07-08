@@ -360,6 +360,10 @@ impl Elaborator<'_> {
                 let disc = match discipline {
                     ast::Discipline::Electrical => Discipline::Electrical,
                     ast::Discipline::Thermal => Discipline::Thermal,
+                    // Multi-physics beyond electrical/thermal isn't modeled by `va-core` yet
+                    // (§1 roadmap) — the node still exists and can be probed/contributed to,
+                    // it's just not checked for domain-specific conservation.
+                    ast::Discipline::Custom(_) => Discipline::Other,
                 };
                 // Each name carries its own optional range — `electrical [0:w-1] in;` and
                 // `electrical in[`W-1:0], out;` both reach here as one `NetDecl` per name, the

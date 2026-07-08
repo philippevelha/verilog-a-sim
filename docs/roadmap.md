@@ -166,14 +166,22 @@ in-`va-frontend` table (`disciplines.rs`), instead of discarded as an opaque tok
 widens the recognized access-function name set beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
 baseline — any access name a parsed discipline binds (e.g. `Q`, `Phi`, `MMF` from the real
 corpus's magnetic/kinematic/rotational discipline families) is recognized too, additively, so
-the baseline itself never regresses. Net *declarations* still only accept the
-`electrical`/`thermal` keywords — a stated v1 limit (see the backlog below), not corpus-tested
-against any real file (none in `external/` declares a net with a custom discipline). And
+the baseline itself never regresses. (Net *declarations* under a custom discipline were a
+stated v1 limit at the time — see the closed backlog item further down.) And
 **`absdelay(value, delay[, max_delay])`** (LRM §4.5.9) — same DC-steady-state-fold family as
 `transition`/`slew`/`$limit`: settles to its undelayed `value` with no delay history at a fixed
 operating point, so it folds transparently at elaboration exactly like those (`delay`/
 `max_delay` parsed, never evaluated). Closes `external/fbh_hbt-2_1.va`, moving the pass count
-from 61 to 62.
+from 61 to 62. And **custom-discipline net declarations** (backlog item 4, below) — a net can
+now be declared under any user-defined discipline, not just `electrical`/`thermal`:
+`Parser::parse_item` checks a bare leading `Ident` against `self.disciplines` (populated by a
+prior `discipline...enddiscipline` block) before falling back to the module-instantiation
+reading, and both forms now share one `Parser::parse_net_item` helper; elaboration lowers a
+custom discipline to the already-existing `va_ir::Discipline::Other`. Found not via the counted
+118-file corpus (still none of those declare a net under a custom discipline, so the pass count
+is unmoved by this) but via a locally-authored, not-yet-validated `optical`-discipline model
+(`external/microring_modulator.va`, gitignored, not part of the corpus) that hit exactly the gap
+item 4 predicted.
 
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
@@ -189,25 +197,17 @@ from 61 to 62.
    as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
    priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
    artifact).
-4. **Custom-discipline net declarations** — a net can still only be declared `electrical`/
-   `thermal` (dedicated keyword tokens); accepting an arbitrary parsed-discipline identifier
-   (`optical p1, p2;`) needs new lookahead disambiguation against module instantiation's "a bare
-   leading `Ident` at item level → `parse_instance`" rule (e.g. `Ident Ident (` = instance vs.
-   `Ident Ident ,`/`;`/`[` = net declaration). Zero real-world need found in `external/`, so not
-   urgent, but the natural next step toward `CLAUDE.md` §1's multi-physics goal ("disciplines
-   optical, thermal, mechanical, etc") — `va_ir::Discipline::Other` already exists in the IR for
-   exactly this, still never constructed.
-5. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
+4. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
    `idt_nature`/`ddt_nature` are parsed and stored (`disciplines.rs::NatureDecl`) but never read
    by `va-core` or elaboration; a real per-discipline `abstol` could feed `convergence.rs`'s
    `gmin`/damping aids once a net's discipline round-trips that far.
-6. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
+5. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
    access's implicit "gnd" second terminal is hardcoded `Discipline::Electrical` regardless of
    the access's own discipline (e.g. a bare `Temp(dt)` still resolves against an
    electrical-tagged reference node); pre-existing, not introduced by the discipline/nature
    pass, and not fixable without per-access discipline tracking that doesn't exist even for
    electrical/thermal today.
-7. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
+6. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
    production in `parse_item` at all; the implicit "gnd" node (`reference_node`, above) is the
    only reference-node convention this project has.
 
@@ -346,6 +346,15 @@ matches the code verbatim.
 > numeric literals with scientific notation + SI suffixes, `$`-system funcs, directives,
 > comments. Subset documented in the module header (no separate grammar file yet). 8 tests.
 > *Outstanding:* `t1-frontend/01-lexing.qmd`.
+>
+> **String-literal escapes now resolve.** The naive `"[^"]*"` string regex broke on any literal
+> containing an escaped quote (`bsimsoi.va`'s error-message string embedding `\"`` `define
+> ...\"``) — the coarse match stopped at the *inner* `"`, leaving a stray `\` that failed to
+> lex at all, taking down every token after it in the file. The regex now allows `\\.` pairs
+> (`"([^"\\]|\\.)*"`), and `parse_string` resolves the LRM's quoted-string escapes (`\\`, `\"`,
+> `\n`, `\t`, `\v`, `\f`, `\a`, `\%`, and up to three octal digits `\ddd`), permissively keeping
+> an unrecognized escape's literal character (dropping just the backslash) rather than erroring
+> — sound here since this project never executes `$display`-style output.
 
 - Define the supported Verilog-A subset precisely (tokens, keywords, operators). Write it
   down as a grammar before writing code.
@@ -358,6 +367,18 @@ matches the code verbatim.
 > `va-frontend/src/{parser,ast}.rs`; precedence-climbing expressions (correct `*`/`+`
 > precedence, right-associative `**`). Returns `FrontendError::Parse` (no panics). 6 tests.
 > *Outstanding:* `t1-frontend/02-parsing.qmd`.
+>
+> **Two real-corpus parser gaps closed.** (1) The empty statement — a bare `;`, legal wherever a
+> statement is expected (LRM) — now parses as a no-op (`Stmt::Block(vec![])`);
+> `mvsg_cmc_3.2.0.va`'s `if ($port_connected(dt) == 0);` uses one as an `if`'s entire body,
+> deliberately doing nothing when its optional thermal port is left unconnected. (2) A source
+> file that defines **zero** modules is no longer a parse error — real corpus headers
+> (`generalMacrosAndDefines.va`, `simulatorFlags.va`, `cmcGeneralMacrosAndDefines.va`, and
+> others) exist purely to be `` `include ``d by an actual device file, carrying nothing but
+> `` `define ``s; the LRM never requires a module in a compilation unit, so `parse` now returns
+> `Ok(vec![])` for one instead of erroring. Re-scanned the full external corpus (115 files):
+> **72/115 pass frontend+codegen, up from 62** (+10, all previously "expected at least one
+> `module`" failures — the entire macro-only-header bucket closed in one shot).
 
 - Recursive-descent (or chosen) parser → AST for module headers, ports, params with ranges,
   the analog block, `<+`, `if/else`, analog function calls.
@@ -755,14 +776,16 @@ matches the code verbatim.
 >
 > Re-scanned again: **62/115 pass frontend+codegen, up from 61** (+1: `verilogaLib-master/
 > ohmmeter.va`, the last item on the previous round's outstanding list). *Outstanding:* the
-> remaining 53 failures are almost entirely earlier-pipeline gaps unrelated to this crate —
-> preprocessor macros used before their `` `define `` is seen (a handful of `ekv3*.va`/`r3_cmc.va`/
-> `psphv*.va` files sharing macros from a header this scan doesn't include), a `<` in a parameter
-> declaration the parser doesn't yet accept (`hicumL*.va`), macro-only "definitions" files with no
-> `module` at all (`*MacrosAndDefines.va`, `ekv3_definitions.va`, ...), a port used before any
-> `electrical`/discipline declaration (`psp10{3,4}*.va`, `L_UTSOI_102*.va`, `r2*_cmc.va`), and one
-> unescaped backslash the lexer rejects (`bsimsoi.va`) — none of them a `va-codegen` gap like this
-> round's.
+> remaining 53 failures are almost entirely earlier-pipeline gaps unrelated to this crate — see
+> T1.2 (macro-only headers, now fixed) and T1.1 (`bsimsoi.va`'s string-escape lex error, now
+> fixed, though the file still fails deeper in elaboration) for two that have since moved;
+> `hicumL*.va`'s `<` is the LRM's `I(<b>)` **port-branch** probe syntax (a different, real
+> construct from the `NodeKclProbe` this round added — not attempted); `psp10{3,4}*.va`,
+> `L_UTSOI_102*.va`, and `r2*_cmc.va` are not actually fixable from this corpus snapshot at all —
+> each `` `include ``s a companion `*_module.include`/`*_body.include` file (the port/discipline
+> declarations themselves) that simply isn't present here; the rest are `ekv3*.va`/`r3_cmc.va`/
+> `psphv*.va` preprocessor-macro-ordering issues (a macro used before this scan's `` `include ``
+> chain reaches its `` `define ``).
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

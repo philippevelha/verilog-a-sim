@@ -640,13 +640,18 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 - **Declaration and Assignment**: `electrical name, ...;` / `thermal name, ...;`, optionally
   preceded by a `[msb:lsb]` vector-width bracket (declaring a bus of nodes rather than one
   scalar node — see Part 2 §2.18). `discipline`/`nature` blocks are now genuinely parsed (§1.5's
-  `discipline`/`nature` entries, § module preamble discipline/nature parsing), but a net
-  *declaration* still only accepts these two dedicated keyword tokens — a custom parsed
-  discipline can't yet be used to declare a net (a stated v1 limitation; see `docs/roadmap.md`).
-  What the parsing *does* unlock is access-function recognition (§2.17): any access name a
-  parsed discipline binds becomes usable on a net regardless of that net's own declared
-  discipline, matching how this project already treats access names as purely name-based, not
-  type-checked against the declaring net.
+  `discipline`/`nature` entries, § module preamble discipline/nature parsing), and a
+  user-defined discipline name registered by one of those blocks can also head a net
+  declaration (`Parser::parse_item`'s `self.disciplines.contains_key(name)` guard before the
+  module-instantiation fallback, dispatching to the shared `Parser::parse_net_item` both forms
+  use) — e.g. `discipline optical; ... enddiscipline` then `optical in_r, in_i;` (the exact
+  shape in `external/microring_modulator.va`'s optical ports). It elaborates to
+  `va_ir::Discipline::Other` (§1 roadmap: `va-core` doesn't model multi-physics conservation
+  beyond electrical/thermal yet, so an `Other` node is still a fully usable KCL row, just not
+  domain-checked). Separately, the parsing *also* unlocks access-function recognition (§2.17):
+  any access name a parsed discipline binds becomes usable on a net regardless of that net's own
+  declared discipline, matching how this project already treats access names as purely
+  name-based, not type-checked against the declaring net.
 - **Expressions and Evaluation**: N/A — pure declaration; the discipline is looked up once
   (`collect_nodes`) and attached to each interned `NodeId`.
 - **Structural and Analog Usage**: Module-level declaration; referenced from the analog block
