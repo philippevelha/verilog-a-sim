@@ -261,13 +261,48 @@ reordering `Ident` resolution to check `vars` before `params` (a local variable,
 must shadow a same-named parameter for *reads* too, not just the initial assignment). Moved the
 corpus from 105/150 to 106/150.
 
+**Also now closed**: the other 7 Laplace/Z-domain filter builtins (`laplace_np`/`zd`/`zp`,
+`zi_nd`/`np`/`zd`/`zp` — `laplace_nd` was already done). Implemented against the *normative* LRM
+text (§4.5.11/§4.5.12 of `references/VAMS-LRM-2-4.pdf`, read via rendered page images after
+`pdftotext`'s math-formula extraction proved ambiguous — worth knowing if this section is
+revisited, since the garbled text alone would have produced a wrong formula), not memory: each
+form settles to its DC (`s=0`, Laplace) or steady-state (`z=1`, Z-domain) gain the same way
+`laplace_nd`/`transition`/`absdelay` already fold. Two helpers now back all 8: a `num`/`den`
+polynomial-in-`s`/`z⁻¹` coefficient list contributes its `s⁰`/`z⁰` term for Laplace
+(`array_lit_first`, unchanged) but the *sum of every* term for Z-domain (`array_lit_values`,
+since `z⁻¹ = 1` at `z=1` for every power, not just the constant one); a `zero`/`pole` array
+(flattened `(re, im)` root pairs) contributes a root-product term that is real-only and trivial
+for Laplace (`laplace_root_product_at_origin`: `1.0` for any non-origin root regardless of it
+being real or complex, `0.0` for a root exactly at the origin) but genuinely complex-valued for
+Z-domain (`z_root_product_at_one`: `1 - root`, `1.0` for a root at the origin — note the origin
+case's fold value differs *by domain*, `0` vs `1`, since `s=0` is the Laplace-plane origin a
+root there coincides with, while `z=1` is a different point from the Z-plane origin `z=0`).
+Validated against the LRM's own worked example (`laplace_zp('{-1,0}, '{-1,-1,-1,1})` → gain 1)
+and hand-derived cases covering an origin zero (→ 0 gain), an origin pole (→ error), and a
+complex-conjugate zero pair reducing to a real Z-domain gain — 11 new tests, all passing.
+**Does not move the corpus count** (106/150, unchanged): of the 3 files in `external/`
+referencing these builtins, `angelov.va`/`angelov_gan.va`'s `laplace_np` call sits inside a
+permanently-disabled `` `ifdef HAVE_GRN_NOISE `` (never `` `define ``d — the whole block is
+preprocessed away, so this was never live code to validate against), and
+`verilogaLib-master/ctle.va`'s `laplace_zp` call — genuinely live — passes its zero/pole as
+*array variables* (`wz`, `wp`, assigned element-by-element earlier in the analog block), not
+literal `{...}` expressions; that's a new, separate, harder gap (below), and `ctle.va`
+independently still has its own pre-existing bug (`gain` used but never declared anywhere in
+the file — confirmed by inspection, not a frontend gap).
+
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
-1. **Other Laplace/Z-domain filter builtins** (`laplace_np`/`zd`/`zp`, `zi_nd`/`np`/`zd`/`zp`) —
-   `laplace_nd` itself is done (above); these need the same `{...}`-argument DC-gain fold, just
-   computed differently per form (pole/zero products for the `*p`/`*z` forms vs. polynomial
-   coefficients for `*d`/`*n`). No corpus file found needing any of the seven yet.
+1. **Array-variable arguments to Laplace/Z-domain filters** — every filter builtin above only
+   accepts a literal `{...}` for its numerator/zero/denominator/pole argument
+   (`array_lit_values` requires `ExprAst::ArrayLit`); `external/verilogaLib-master/ctle.va`
+   instead declares `real wz[1:0], wp[3:0];` and assigns each element in the analog block
+   (`wz[1] = -`M_TWO_PI * fz;`, …) before passing the whole array *variable* to `laplace_zp`.
+   Supporting this needs a real capability this project doesn't have anywhere else: tracing a
+   variable's value through its own (straight-line, unconditional) assignment statements at
+   elaboration time — a small constant-propagation pass, not just an AST pattern match. Every
+   other DC fold in this codebase only ever inspects the expression being evaluated, never other
+   statements in the block.
 2. **`$rdist_normal` and friends** (`$rdist_uniform`, `$rdist_exponential`, …, LRM §3.6's
    random-distribution system functions) — found via `external/photonic/NoisyEDFA.va`, not the
    tracked corpus. Likely the same DC-fold family as the noise-source builtins already handled
