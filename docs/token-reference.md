@@ -563,10 +563,17 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   truncate-toward-zero.
 - **Structural and Analog Usage**: Module-level (`real x;`, `real out_val[0:15];`) and
   analog-block-local (`real x;` inside `begin...end`) *scalar* declarations are both legal and
-  treated identically by elaboration (registering the same kind of `VarId`). An *array*
-  declaration is module-scope only — a block-local one is rejected with a specific error, since
-  by the time the analog-block pass runs there's nowhere sound left to register an array's
-  worth of nodes into (§2.2b).
+  treated identically by elaboration (registering the same kind of `VarId`, via
+  `Elaborator::declare_local_var`). An *array* declaration is module-scope only — a block-local
+  one is rejected with a specific error, since by the time the analog-block pass runs there's
+  nowhere sound left to register an array's worth of nodes into (§2.2b). An explicit declaration
+  always introduces a *new* identifier, shadowing a same-named module parameter for the rest of
+  its block (ordinary nested-scope rules — `declare_local_var` never checks `params`, unlike
+  `register_var`'s auto-registration for a bare, declaration-less assignment target, which treats
+  a same-named parameter as already resolvable and registers nothing new); `Ident` resolution
+  checks `vars` before `params` so a read inside the shadowing scope sees the local variable, not
+  the outer parameter. A real corpus pattern: `external/bsimsoi.va`'s `begin : load ... real
+  ... MJSWG; ... end`, shadowing a same-named `` `MPRoo``-macro-declared parameter.
 - **Comparison with Traditional Constructs**: A scalar declaration reads exactly like a C
   `double`/`int` declaration, but v0's "declared type is parsed and dropped" behavior means it
   behaves more like a dynamically-typed language's variable declaration (Python's bare `x = 0`)

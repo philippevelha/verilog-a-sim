@@ -659,6 +659,30 @@ impl Elaborator<'_> {
         }
     }
 
+    /// Register an explicit `real`/`integer` local declaration (`Stmt::VarDecl`) as a fresh
+    /// variable — unlike [`Self::register_var`]'s auto-registration for a bare
+    /// (declaration-less) assignment target, an explicit declaration always introduces a *new*
+    /// identifier in this block's scope, per ordinary nested-scope shadowing, even when a
+    /// module-level parameter of the same name already exists. A real corpus pattern:
+    /// `external/bsimsoi.va`'s `begin : load ... real ... MJSWG; ... end` declares a local
+    /// `MJSWG` that shadows a same-named `` `MPRoo``-macro-declared module parameter for the
+    /// rest of that block — `register_var`'s "a same-named parameter means no new var needed"
+    /// heuristic is correct for its own weaker, no-declaration-required convenience (assigning
+    /// to an actual parameter is invalid Verilog-A, so that case is never a real shadow), but
+    /// wrong here, where the declaration is explicit and shadowing is exactly the point.
+    fn declare_local_var(&mut self, name: &str) {
+        if self.genvars.contains(name) {
+            return;
+        }
+        if !self.vars.contains_key(name) {
+            let id = VarId(self.out.vars.len() as u32);
+            self.out.vars.push(VarDecl {
+                name: name.to_string(),
+            });
+            self.vars.insert(name.to_string(), id);
+        }
+    }
+
     fn collect_vars_stmt(&mut self, stmt: &Stmt) -> Result<(), FrontendError> {
         match stmt {
             // An indexed assignment target (`out_val[i] = ...;`) must already be declared as
@@ -683,7 +707,7 @@ impl Elaborator<'_> {
                             entry.name
                         )));
                     }
-                    self.register_var(&entry.name);
+                    self.declare_local_var(&entry.name);
                 }
                 Ok(())
             }
@@ -1012,13 +1036,17 @@ impl Elaborator<'_> {
             ExprAst::Number(n) => Expr::Const(*n),
             ExprAst::Ident(name) => {
                 // A genvar bound by an enclosing generate loop (§ generate loops) reads as the
-                // constant it is currently unrolled to — it never becomes a `Var`/`Param`.
+                // constant it is currently unrolled to — it never becomes a `Var`/`Param`. `vars`
+                // is checked *before* `params`: an explicit local declaration (`declare_local_var`)
+                // always shadows a same-named module parameter for the rest of its block (ordinary
+                // nested-scope shadowing — see `declare_local_var`'s doc comment), so once a local
+                // `MJSWG` exists, a read of `MJSWG` must resolve to it, not the outer parameter.
                 if let Some(v) = self.genvar_env.get(name) {
                     Expr::Const(*v as f64)
-                } else if let Some(p) = self.params.get(name) {
-                    Expr::Param(*p)
                 } else if let Some(v) = self.vars.get(name) {
                     Expr::Var(*v)
+                } else if let Some(p) = self.params.get(name) {
+                    Expr::Param(*p)
                 } else {
                     return Err(elab(format!("unknown identifier `{name}`")));
                 }
@@ -2851,6 +2879,46 @@ mod tests {
         );
         // The block lowers; the declaration contributes an empty block, not a statement error.
         assert!(!m.analog.is_empty());
+    }
+
+    #[test]
+    fn block_local_variable_shadows_a_same_named_parameter() {
+        // The exact `external/bsimsoi.va` shape: a named block declares a local `real MJSWG;`
+        // that shares its name with a module-level parameter (there, macro-declared via
+        // `` `MPRoo(MJSWG, ...)` ``) — `MJSWG = ...;` must resolve as an assignment to the new
+        // local variable (previously an "assignment to unknown variable" error, since
+        // `register_var` saw the same-named parameter and skipped registering it at all), and a
+        // later read of `MJSWG` in the same block must read that local variable back, not the
+        // outer parameter's constant default (previously silently wrong once the assignment was
+        // made to work at all, since `Ident` resolution checked `params` before `vars`).
+        let src = "module t(a, b); electrical a, b; \
+                    parameter real g = 0.5 from (0:1); \
+                    analog begin : load \
+                        real g; \
+                        g = 0.25; \
+                        I(a, b) <+ g; \
+                    end endmodule";
+        let m = elaborate_src(src);
+        assert_eq!(m.params.len(), 1, "the outer parameter `g` still exists");
+        assert!(
+            m.vars.iter().any(|d| d.name == "g"),
+            "a local `g` must also be registered"
+        );
+
+        // The contribution's value must read the local variable, not `Expr::Param`.
+        let value = m
+            .analog
+            .iter()
+            .find_map(|s| match s {
+                va_ir::Stmt::Contribute { value, .. } => Some(*value),
+                _ => None,
+            })
+            .expect("a contribution");
+        assert!(
+            matches!(m.expr(value), Expr::Var(_)),
+            "expected the contribution to read the local `g`, got {:?}",
+            m.expr(value)
+        );
     }
 
     #[test]

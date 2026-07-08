@@ -245,6 +245,22 @@ from 20/31) — the remaining two are the expected header-only `disciplines.vams
 `NoisyEDFA.va`, which hits a distinct, unrelated gap: an unrecognized system function,
 `$rdist_normal` (a random-distribution noise source query), added to the backlog below.
 
+**Also now closed**: `external/bsimsoi.va`'s `begin : load ... real ... MJSWG; ... end` — a
+named block declaring a local variable that shares its name with a module-level parameter
+(there, macro-declared via `` `MPRoo(MJSWG, ...)` ``) — used to fail elaboration with
+"assignment to unknown variable `MJSWG`". Root cause: `Elaborator::register_var` (used to
+auto-register a bare, declaration-less assignment target) treats "a same-named parameter
+already exists" as "nothing to register" — a reasonable heuristic for its own weaker,
+no-declaration-required convenience (assigning to an actual parameter is invalid Verilog-A, so
+that case is never a real shadow), but it was also the *only* path `Stmt::VarDecl` (an
+*explicit* `real`/`integer` declaration) used to register a name, silently applying the same
+wrong heuristic there — an explicit declaration must always introduce a new identifier in its
+block's scope, shadowing a same-named outer parameter, per ordinary nested-scope rules. Fixed
+with a dedicated `declare_local_var` for the explicit-declaration path (no parameter check), plus
+reordering `Ident` resolution to check `vars` before `params` (a local variable, once declared,
+must shadow a same-named parameter for *reads* too, not just the initial assignment). Moved the
+corpus from 105/150 to 106/150.
+
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
@@ -260,10 +276,10 @@ from 20/31) — the remaining two are the expected header-only `disciplines.vams
 3. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
    semantics) — cannot be soundly approximated at DC the way `transition`/`slew` can (their
    whole purpose is time history); genuinely blocked on `va-transient` existing.
-4. **Escaped identifiers** (`` \name `` — LRM §2.7) and a stray `` \ `` line-continuation lexed
-   as an error in `external/bsimsoi.va` — not yet triaged in detail; low file count (1) so low
-   priority, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a fragment
-   artifact).
+4. **Escaped identifiers** (`` \name `` — LRM §2.7) — not yet triaged in detail; low corpus need
+   found so far, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a
+   fragment artifact). (The previously-noted stray `` \ `` line-continuation lex error in
+   `external/bsimsoi.va` is gone — string-escape handling, added separately, covers it.)
 5. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
    `idt_nature`/`ddt_nature` are parsed and stored (`disciplines.rs::NatureDecl`) but never read
    by `va-core` or elaboration; a real per-discipline `abstol` could feed `convergence.rs`'s
