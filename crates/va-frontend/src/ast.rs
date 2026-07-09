@@ -95,50 +95,67 @@ pub struct Access {
 }
 
 /// A single net terminal in an [`Access`], `branch` declaration, or instance port connection
-/// ([`PortConn`]): a plain net name, a vector element selected by a bracketed index (`bus[i]`),
-/// or (connections only) a bracketed slice (`bus[3:0]`) wiring a sub-range of a wider vector net
-/// to a vector port. The index/slice, when present, must be a genvar or compile-time-constant
-/// expression — resolved at elaboration (§ vector nets). `index` and `slice` are mutually
-/// exclusive; a `slice` on an `Access`/`branch` terminal is rejected at elaboration (`V`/`I`
-/// take single nodes, never a sub-range).
+/// ([`PortConn`]): a plain net name, a vector element selected by one or two bracketed indices
+/// (`bus[i]`, or `grid[i][j]` for a § 2-D vector net), or (connections only) a bracketed slice
+/// (`bus[3:0]`) wiring a sub-range of a wider vector net to a vector port. Each index, when
+/// present, must be a genvar or compile-time-constant expression — resolved at elaboration
+/// (§ vector nets) — except in an `Access`/`Stmt::Contribute` terminal, where at most one of
+/// `index`'s (up to 2) entries may instead be a genuinely runtime expression (§ dynamic
+/// vector-net indexing). `index` and `slice` are mutually exclusive except for the `[i][lo:hi]`
+/// shape (an index followed by a trailing slice), which parses but is rejected at elaboration —
+/// slicing stays single-dimension-only even for a 2-D vector net (v1 limitation). A `slice` on
+/// an `Access`/`branch` terminal is rejected at elaboration regardless (`V`/`I` take single
+/// nodes, never a sub-range).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetArg {
     /// The net (or vector net) name.
     pub name: String,
-    /// The bracketed index expression, if this terminal selects one element of a vector net
-    /// declared with a range (e.g. `electrical [3:0] bus;`).
-    pub index: Option<ExprRef>,
+    /// 0 (bare name), 1 (`bus[i]`), or 2 (`grid[i][j]`, § 2-D vector net) bracketed index
+    /// expressions, outer-to-inner.
+    pub index: Vec<ExprRef>,
     /// The bracketed `[msb:lsb]` slice, if this terminal selects a sub-range of a vector net —
-    /// only meaningful as an instance port-connection argument.
+    /// only meaningful as an instance port-connection argument, and only for a 1-D vector net
+    /// (a slice on a 2-D-declared vector, or combined with a non-empty `index`, is rejected at
+    /// elaboration — v1 limitation, § 2-D vector net).
     pub slice: Option<(ExprRef, ExprRef)>,
 }
 
-/// One net name in an [`Item::Net`] declaration list, with its own optional vector range
-/// (`bus[3:0]`) — independent of any shared prefix range on the declaration itself.
+/// One net name in an [`Item::Net`] declaration list, with its own optional vector range(s)
+/// (`bus[3:0]`, or `grid[0:R][0:C]` for a § 2-D vector net) — independent of any shared prefix
+/// range on the declaration itself.
+///
+/// **§ 2-D vector net**: a second dimension here is *not* standard Verilog-A — the LRM's
+/// `net_declaration` grammar only ever carries one `[msb:lsb]` range. This is a deliberate,
+/// documented extension (capped at exactly 2 dimensions, never more), kept clearly labeled
+/// wherever it's surfaced (elaboration errors, `docs/token-reference.md`) so it's never mistaken
+/// for standard grammar. Contrast [`VarEntry`], whose 2-D form *is* standard.
 #[derive(Clone, Debug)]
 pub struct NetDecl {
     /// The net name.
     pub name: String,
-    /// The declared vector width, `[msb:lsb]`, if this name is a vector net. `None` for an
-    /// ordinary scalar net.
-    pub range: Option<(ExprRef, ExprRef)>,
+    /// The declared dimension ranges, outer-to-inner: empty for an ordinary scalar net, one
+    /// entry for a standard 1-D vector net, two for a § 2-D vector net (non-standard extension).
+    pub ranges: Vec<(ExprRef, ExprRef)>,
 }
 
 /// One name in a `real`/`integer` variable declaration list (module-level or block-local),
-/// with its own optional array range — the same shape as [`NetDecl`], for the same reason
+/// with its own optional array range(s) — the same shape as [`NetDecl`], for the same reason
 /// (`real out_val[0:15], tmp;` mixes an array name with a plain scalar one, just like a net
-/// declaration can).
+/// declaration can). Unlike [`NetDecl`]'s 2-D form, a second dimension here *is* standard
+/// Verilog-A grammar — the LRM's `variable_identifier` production allows a repeated
+/// unpacked-dimension list; this implementation caps it at 2 (not general N-D).
 #[derive(Clone, Debug)]
 pub struct VarEntry {
     /// The variable name.
     pub name: String,
-    /// The declared array size, `[msb:lsb]`, if this name is an array variable. `None` for an
-    /// ordinary scalar variable.
-    pub range: Option<(ExprRef, ExprRef)>,
-    /// An inline initializer, `real x = expr;`. Mutually exclusive with `range` — the LRM's
+    /// The declared array dimension ranges, outer-to-inner: empty for an ordinary scalar
+    /// variable, one entry for a standard 1-D array (`out_val[0:15]`), two for a § 2-D array
+    /// variable (`tile[0:R][0:C]`).
+    pub ranges: Vec<(ExprRef, ExprRef)>,
+    /// An inline initializer, `real x = expr;`. Mutually exclusive with `ranges` — the LRM's
     /// `real_identifier` grammar allows a dimension *or* an initializer, never both, and the
-    /// parser only looks for `= expr` when there was no `[...]` range. `None` for a declaration
-    /// with no initializer.
+    /// parser only looks for `= expr` when there was no `[...]` dimension. `None` for a
+    /// declaration with no initializer.
     pub init: Option<ExprRef>,
 }
 
@@ -173,7 +190,10 @@ pub enum Item {
     /// `electrical bus[3:0], p;` (both forms appear in real Verilog-A; the parser applies a
     /// prefix range as the default for any name in the list that doesn't specify its own). A
     /// vector name becomes a bus of nodes spanning its range, indexed by a genvar expression in
-    /// a branch access (§ vector nets).
+    /// a branch access (§ vector nets). A *second* dimension (`electrical [0:R][0:C] grid;`,
+    /// § 2-D vector net) is a deliberate, documented **non-standard** extension — the LRM's
+    /// `net_declaration` grammar never carries more than one range — capped at exactly 2
+    /// dimensions. Contrast [`Item::Var`]'s 2-D form, which *is* standard grammar.
     Net {
         /// The discipline keyword.
         discipline: Discipline,
@@ -198,6 +218,10 @@ pub enum Item {
     /// A module-level variable declaration, `real q, v;` / `integer i;`, or an array-variable
     /// declaration, `real out_val[0:15];` (§ array variables — indexed like a vector net, by a
     /// compile-time-constant or genvar expression; there is no runtime-indexed array support).
+    /// A *second* dimension (`real tile[0:R][0:C];`, § 2-D array variable) **is** standard
+    /// Verilog-A grammar (the LRM's `variable_identifier` allows a repeated unpacked-dimension
+    /// list) — this implementation caps it at 2, not general N-D. Contrast [`Item::Net`]'s 2-D
+    /// form, which is a non-standard extension.
     Var {
         /// Declared base type (`real`/`integer`).
         ty: ParamType,
@@ -311,7 +335,7 @@ pub enum Stmt {
     /// declaration, `real out_val[0:15];` (§ array variables). Carries no value; it only
     /// introduces variable (or array) names (the base type is not retained).
     VarDecl {
-        /// Declared variable names, each with its own optional array range.
+        /// Declared variable names, each with its own optional array range(s).
         names: Vec<VarEntry>,
     },
     /// A system-task call statement, e.g. `$strobe("…", a, b);` or `$finish;`. v0 treats
@@ -330,14 +354,16 @@ pub enum Stmt {
         value: ExprRef,
     },
     /// A procedural assignment: `lhs = rhs;`, or an array-element assignment,
-    /// `lhs[index] = rhs;` (§ array variables).
+    /// `lhs[index] = rhs;` / `lhs[i][j] = rhs;` (§ array variables / § 2-D array variables).
     Assign {
         /// Assigned variable name.
         lhs: String,
-        /// The array index, if `lhs` is an array-variable element rather than a plain scalar.
-        /// Must be a compile-time-constant or genvar expression — checked at elaboration, not
-        /// here (mirroring [`NetArg::index`]).
-        index: Option<ExprRef>,
+        /// 0 (plain scalar), 1, or 2 array indices, if `lhs` is an array-variable element
+        /// rather than a plain scalar. Each must be compile-time-constant or genvar, except at
+        /// most one of (up to 2) may instead be a genuinely runtime expression (§ dynamic
+        /// array-variable indexing) — checked at elaboration, not here (mirroring
+        /// [`NetArg::index`]).
+        index: Vec<ExprRef>,
         /// Right-hand-side expression.
         rhs: ExprRef,
     },
@@ -393,10 +419,12 @@ pub enum ExprAst {
     Number(f64),
     /// A bare identifier: a parameter, variable, or genvar reference (resolved at elaboration).
     Ident(String),
-    /// An indexed identifier, `name[index]`: one element of an array variable (§ array
-    /// variables). `index` must be a compile-time-constant or genvar expression — checked at
-    /// elaboration, not here.
-    IndexedIdent(String, ExprRef),
+    /// An indexed identifier, `name[index]` or `name[i][j]`: one element of a 1-D or § 2-D
+    /// array variable. Always 1 or 2 entries (the parser only builds this variant once it has
+    /// seen a `[`). Each index must be compile-time-constant or genvar, except at most one of
+    /// (up to 2) may instead be a genuinely runtime expression (§ dynamic array-variable
+    /// indexing) — checked at elaboration, not here.
+    IndexedIdent(String, Vec<ExprRef>),
     /// A system function call with the `$` stripped, e.g. `$vt`, `$temperature`,
     /// `$simparam("gmin", 0)`. `args` is empty for the zero-argument forms.
     SysFunc {
@@ -429,6 +457,24 @@ pub enum ExprAst {
         then_: ExprRef,
         /// Value when `cond` is zero.
         else_: ExprRef,
+    },
+    /// A port-current probe, `I(<port>)` (LRM §5.4.3 "Accessing flow through a port", §3.12.1
+    /// "Port Branches") — the current flowing *into the module* through a declared port,
+    /// distinct from an ordinary `V(...)`/`I(...)` branch access (which probes/creates a branch
+    /// between two nets, never a port's own boundary current). Real, normative Verilog-A
+    /// grammar (`port_probe_function_call ::= nature_access_function ( < analog_port_reference
+    /// >)`), not an extension — confirmed by the LRM's own diode worked example (a current-limit
+    /// warning guarded on this probe's value). Two hard LRM constraints, both enforced at parse
+    /// time: **flow-only** (`kind` is always [`AccessKind::Flow`] — `V(<port>)` is explicitly
+    /// invalid and rejected while parsing) and **read-only** (the parser never produces this
+    /// variant in a contribution-target position; "the port access function shall not be used
+    /// on the left side of `<+`").
+    PortProbe {
+        /// Always [`AccessKind::Flow`] in practice (kept as a field, not a bare `String`, so
+        /// the parser's `V`/`I`-uniform dispatch stays uniform; elaboration re-checks it).
+        kind: AccessKind,
+        /// The probed port's name — must name one of this module's own declared ports.
+        port: String,
     },
     /// An array-literal expression, `{expr, expr, ...}` (LRM §4.5.10's Laplace/Z-domain filter
     /// coefficient-list argument syntax, e.g. `laplace_nd(sig, {1}, {1, tau})`). Not a

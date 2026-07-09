@@ -336,14 +336,28 @@ strength/charge-storage keywords (`strong0`/`trireg`/`highz0`/…), and digital 
 constructs (`always`/`initial`/`fork`/`join`/`task`/`wait`/`specify`/`casex`/`casez`/…). See
 `token-reference.md` §1.6 for the full, word-by-word accounting.
 
-**Not chased, unclear if real**: `external/hicumL0_v2p0p0.va` and its siblings (6 HICUM/L0
-files) contain `IB = I(<b>);` — literal angle brackets around the terminal name, inside an
-`` `ifdef PORT_CURR `` block that *is* active (`PORT_CURR` is `` `define ``d at the top of the
-file). This isn't recognizable Verilog-A syntax under any reading found so far; before writing
-a parser rule for it, worth checking the model's own upstream source/changelog (it's guarded by
-`CALC_OP`/`OP_STATIC`, an operating-point-debug-only code path) for whether this is a
-known-broken construct in the CMC release itself rather than something this project should
-parse.
+**Now closed** (was "not chased, unclear if real" — resolved 2026-07-09): `IB = I(<b>);` in
+`external/hicumL0_v2p0p0.va` and its 5 HICUM/L0 siblings turned out to be real, normative
+Verilog-A grammar, not a broken/vendor-specific construct — confirmed directly against
+`references/VAMS-LRM-2-4.pdf` (§3.12.1 "Port Branches", §5.4.3 "Accessing flow through a
+port"): `port_probe_function_call ::= nature_access_function ( < analog_port_reference > )`.
+`I(<a>)` accesses the current flowing *into the module* through port `a`, distinct from an
+ordinary `I(a)` branch access; the LRM's own diode worked example uses exactly this idiom
+(`if (I(<a>) > imax) $strobe(...)`). Two hard constraints, both enforced at parse time:
+flow-only (`V(<port>)` is explicitly invalid) and read-only (never a contribution target).
+Implemented entirely in `va-frontend` — no `va-ir`/`va-abi` change needed, mirroring the
+runtime-indexed vector-net/array-variable fold above: `Elaborator::lower_port_probe` computes
+the probed port's current as the signed sum of every flow contribution already made (elsewhere
+in the same analog block) to a branch touching the port's node — `+value` where the port is a
+branch's `p` terminal, `-value` where it's `n` (sign convention verified against the LRM's own
+diode example: a forward-biased `branch(a,c)` contributes positive current from anode `a` to
+cathode `c`, so current must be *supplied* into the module at `a`). A contribution found inside
+an `if`/`else` is wrapped in a matching `Expr::Select` guard (so it only counts when the
+condition holds, closing the exact HICUM idiom of a threshold-guarded series-resistance branch);
+one found inside a `case`/`for`/`while`/`repeat` is rejected with a clear "not yet supported"
+error rather than silently mis-summed or dropped — no corpus need for either has surfaced.
+Vector ports are a stated v1 limitation (scalar only). Moved the corpus from 106/150 to
+112/150 (the 6 HICUM/L0 files).
 
 **Corpus artifact, not a language gap** (found chasing what first looked like the discipline/
 nature gap above): the PSP102/103/104 family, `L_UTSOI_102[_nqs]`, and `r2_cmc`/`r2_et_cmc` (8

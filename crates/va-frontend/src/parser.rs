@@ -35,10 +35,16 @@
 //! - Event control `@(event) stmt` is parsed but the trigger is discarded — the controlled
 //!   statement runs unconditionally. This matches DC operating-point semantics (`initial_step`
 //!   setup runs once regardless); proper event scheduling is a transient-analysis concern.
-//! - Vector nets are one-dimensional and scalar-typed (no vector ports, no multi-dimensional
-//!   buses); `generate`/`genvar` are elaboration-only, module-scoped, and analog-block-only —
-//!   there is no structural (module-item-level) generate (so no genvar-driven *array* of
-//!   instances — a plain [`Item::Instance`] is always exactly one instance).
+//! - Vector nets and array variables carry at most 2 declared dimensions: 1-D is the standard
+//!   form; a 2-D array variable (`real tile[0:R][0:C];`) is standard LRM grammar too, but a 2-D
+//!   vector net (`electrical [0:R][0:C] grid;`) is a deliberate, documented **non-standard**
+//!   extension — the LRM's `net_declaration` grammar never carries more than one range (see
+//!   [`NetDecl`]). A 2-D vector net may never be used as a port, sliced, or connected/
+//!   accessed bare or partially indexed — only a fully 2-indexed element resolves (checked at
+//!   elaboration). `generate`/`genvar` are elaboration-only, module-scoped, and
+//!   analog-block-only — there is no structural (module-item-level) generate (so no
+//!   genvar-driven *array* of instances — a plain [`Item::Instance`] is always exactly one
+//!   instance).
 //! - A module instantiation's port connections may be all-positional or all-named
 //!   (`.port(net)`), never mixed — the parser accepts either shape uniformly and leaves
 //!   rejecting a mix, and any other per-instance validation (port count, vector ports, unknown
@@ -215,56 +221,68 @@ impl Parser<'_> {
         Ok(names)
     }
 
-    /// Parse a single net terminal: a plain net name, or one element of a vector net selected
-    /// by a bracketed index expression (`bus[i]`). The index, when present, must be a genvar
+    /// Parse a net terminal: a plain name, `name[i]`, `name[i][j]` (§ 2-D vector net), a slice
+    /// `name[msb:lsb]` (only meaningful in a [`PortConn`], see [`NetArg::slice`]; other callers
+    /// reject one at elaboration), or an index followed by a trailing slice, `name[i][lo:hi]`
+    /// (parses syntactically; semantic validity — e.g. that `name` even has a dimension left to
+    /// slice — is checked at elaboration, matching how this parser already defers all
+    /// index/slice semantics there). At most 2 bracket groups total, and a slice (if present)
+    /// must be the *last* one — `name[lo:hi][i]` is a parse error. Each index/bound, when
+    /// present, must be a genvar or compile-time-constant expression, except in an
+    /// `Access`/`Stmt::Contribute` terminal an index may instead be a genuinely runtime
     /// expression — checked at elaboration, not here.
-    /// Parse a net terminal: a plain name, `name[index]`, or `name[msb:lsb]` (a slice — only
-    /// meaningful in a [`PortConn`], see [`NetArg::slice`]; other callers reject one at
-    /// elaboration).
     fn parse_net_arg(&mut self) -> Result<NetArg, FrontendError> {
         let name = self.expect_ident()?;
-        if !self.at(&Token::LBracket) {
-            return Ok(NetArg {
-                name,
-                index: None,
-                slice: None,
-            });
-        }
-        self.pos += 1;
-        let first = self.parse_expr()?;
-        if self.at(&Token::Colon) {
+        let mut index = Vec::new();
+        let mut slice = None;
+        while self.at(&Token::LBracket) {
+            if slice.is_some() {
+                return self.err(format!(
+                    "`{name}[..]`: a `[lo:hi]` slice must be the final bracket group"
+                ));
+            }
+            if index.len() >= 2 {
+                return self.err(format!(
+                    "`{name}` has more than 2 bracket groups; indexing/slicing is capped at 2 \
+                     dimensions"
+                ));
+            }
             self.pos += 1;
-            let last = self.parse_expr()?;
-            self.eat(&Token::RBracket)?;
-            Ok(NetArg {
-                name,
-                index: None,
-                slice: Some((first, last)),
-            })
-        } else {
-            self.eat(&Token::RBracket)?;
-            Ok(NetArg {
-                name,
-                index: Some(first),
-                slice: None,
-            })
+            let first = self.parse_expr()?;
+            if self.at(&Token::Colon) {
+                self.pos += 1;
+                let last = self.parse_expr()?;
+                self.eat(&Token::RBracket)?;
+                slice = Some((first, last));
+            } else {
+                self.eat(&Token::RBracket)?;
+                index.push(first);
+            }
         }
+        Ok(NetArg { name, index, slice })
     }
 
-    /// Parse an optional bracketed index, `[expr]` — one element of a vector net or array
-    /// variable. The index, when present, must be a compile-time-constant or genvar
-    /// expression — checked at elaboration, not here.
-    fn parse_optional_index(&mut self) -> Result<Option<ExprRef>, FrontendError> {
-        if !self.at(&Token::LBracket) {
-            return Ok(None);
+    /// Parse zero or more consecutive `[expr]` index brackets — one element of a 1-D or § 2-D
+    /// array variable / vector-net terminal, capped at 2 (not general N-D). Each expression must
+    /// be a compile-time-constant or genvar expression, except in an `Access`/`Stmt::Contribute`
+    /// context at most one of (up to 2) may instead be a genuinely runtime expression — checked
+    /// at elaboration, not here.
+    fn parse_index_list(&mut self) -> Result<Vec<ExprRef>, FrontendError> {
+        let mut idxs = Vec::new();
+        while self.at(&Token::LBracket) {
+            if idxs.len() >= 2 {
+                return self.err("indexing is capped at 2 dimensions".to_string());
+            }
+            self.pos += 1;
+            idxs.push(self.parse_expr()?);
+            self.eat(&Token::RBracket)?;
         }
-        self.pos += 1;
-        let idx = self.parse_expr()?;
-        self.eat(&Token::RBracket)?;
-        Ok(Some(idx))
+        Ok(idxs)
     }
 
-    /// Parse an optional `[msb:lsb]` bracket, e.g. a vector net/port's declared width.
+    /// Parse an optional `[msb:lsb]` bracket, e.g. a vector net/port's declared width. The
+    /// single-dimension primitive [`Self::parse_dim_list`] repeats to build a 1- or 2-D
+    /// declaration.
     fn parse_bracket_range(&mut self) -> Result<Option<(ExprRef, ExprRef)>, FrontendError> {
         if !self.at(&Token::LBracket) {
             return Ok(None);
@@ -277,57 +295,84 @@ impl Parser<'_> {
         Ok(Some((msb, lsb)))
     }
 
+    /// Parse zero or more consecutive `[msb:lsb]` declared-dimension brackets, capped at 2. Used
+    /// by both `real`/`integer` array-variable declarations (LRM-standard `variable_identifier`
+    /// repeated-unpacked-dimension grammar, § 2-D array variable) and, as a deliberate,
+    /// documented non-standard extension (§ 2-D vector net — the LRM's `net_declaration` grammar
+    /// never carries more than one range), a vector net's declaration range(s).
+    fn parse_dim_list(&mut self) -> Result<Vec<(ExprRef, ExprRef)>, FrontendError> {
+        let mut ranges = Vec::new();
+        while self.at(&Token::LBracket) {
+            if ranges.len() >= 2 {
+                return self.err("more than 2 declared dimensions; capped at 2".to_string());
+            }
+            ranges.push(
+                self.parse_bracket_range()?
+                    .expect("just checked LBracket is present"),
+            );
+        }
+        Ok(ranges)
+    }
+
     /// Parse one entry of a net-declaration list: a name, optionally followed by its own
-    /// `[msb:lsb]` range suffix; falls back to `default_range` (the declaration's shared prefix
-    /// range, if any) when the name has no suffix of its own.
+    /// declared dimension range(s) (§ vector nets / § 2-D vector net); falls back to
+    /// `default_ranges` (the declaration's shared prefix range(s), if any) when the name has no
+    /// suffix of its own.
     fn parse_net_decl(
         &mut self,
-        default_range: Option<(ExprRef, ExprRef)>,
+        default_ranges: &[(ExprRef, ExprRef)],
     ) -> Result<NetDecl, FrontendError> {
         let name = self.expect_ident()?;
-        let range = self.parse_bracket_range()?.or(default_range);
-        Ok(NetDecl { name, range })
+        let own = self.parse_dim_list()?;
+        let ranges = if own.is_empty() {
+            default_ranges.to_vec()
+        } else {
+            own
+        };
+        Ok(NetDecl { name, ranges })
     }
 
     /// Parse the name list of a net declaration under `discipline` (the discipline keyword —
-    /// built-in or custom — is already consumed by the caller): an optional shared `[msb:lsb]`
-    /// prefix range, then a comma-separated [`Self::parse_net_decl`] list, then `;`. Shared by
-    /// every discipline spelling so `electrical`/`thermal` (dedicated tokens) and a
+    /// built-in or custom — is already consumed by the caller): optional shared declared
+    /// dimension range(s), then a comma-separated [`Self::parse_net_decl`] list, then `;`.
+    /// Shared by every discipline spelling so `electrical`/`thermal` (dedicated tokens) and a
     /// user-declared discipline name (a plain `Ident` looked up in `self.disciplines`) parse
     /// identically past the keyword.
     fn parse_net_item(&mut self, discipline: Discipline) -> Result<Item, FrontendError> {
-        // A `[msb:lsb]` before the name list is a *default* vector range; each name may also
-        // carry its own range suffix (`bus[3:0]`), overriding the default for that name only —
-        // both forms appear in real Verilog-A (e.g. `electrical [0:w-1] in;` vs. `electrical
+        // Dimension range(s) before the name list are a *default*; each name may also carry its
+        // own suffix range(s) (`bus[3:0]`), overriding the default for that name only — both
+        // forms appear in real Verilog-A (e.g. `electrical [0:w-1] in;` vs. `electrical
         // in[`W-1:0], out;`). Either way, a vector name becomes a bus of nodes, indexed by a
-        // genvar expression in a branch access.
-        let default_range = self.parse_bracket_range()?;
-        let mut nets = vec![self.parse_net_decl(default_range)?];
+        // genvar expression in a branch access. A second dimension (§ 2-D vector net) is a
+        // non-standard extension — see `NetDecl`'s doc comment.
+        let default_ranges = self.parse_dim_list()?;
+        let mut nets = vec![self.parse_net_decl(&default_ranges)?];
         while self.at(&Token::Comma) {
             self.pos += 1;
-            nets.push(self.parse_net_decl(default_range)?);
+            nets.push(self.parse_net_decl(&default_ranges)?);
         }
         self.eat(&Token::Semicolon)?;
         Ok(Item::Net { discipline, nets })
     }
 
     /// Parse one entry of a `real`/`integer` variable-declaration list: a name, followed by
-    /// either its own `[msb:lsb]` array range (§ array variables) — e.g. `real out_val[0:15],
-    /// tmp;` — or an inline `= expr` initializer, e.g. `real laser_freq = `P_C / wavelength /
-    /// 1e-9;`. The LRM allows one or the other per name, never both, so an initializer is only
-    /// looked for when there was no range. Unlike a net declaration, there is no shared
-    /// prefix-range form here: a scalar/array `real`/`integer` never carries a width before the
-    /// name list, only a per-name array dimension after it.
+    /// either its own declared dimension range(s) (§ array variables / § 2-D array variable) —
+    /// e.g. `real out_val[0:15], tile[0:R][0:C], tmp;` — or an inline `= expr` initializer, e.g.
+    /// `real laser_freq = `P_C / wavelength / 1e-9;`. The LRM allows one or the other per name,
+    /// never both, so an initializer is only looked for when there were no dimensions. Unlike a
+    /// net declaration, there is no shared prefix-range form here: a scalar/array `real`/
+    /// `integer` never carries a width before the name list, only per-name array dimension(s)
+    /// after it.
     fn parse_var_entry(&mut self) -> Result<VarEntry, FrontendError> {
         let name = self.expect_ident()?;
-        let range = self.parse_bracket_range()?;
-        let init = if range.is_none() && self.at(&Token::Assign) {
+        let ranges = self.parse_dim_list()?;
+        let init = if ranges.is_empty() && self.at(&Token::Assign) {
             self.pos += 1;
             Some(self.parse_expr()?)
         } else {
             None
         };
-        Ok(VarEntry { name, range, init })
+        Ok(VarEntry { name, ranges, init })
     }
 
     /// A non-empty comma-separated list of [`Self::parse_var_entry`].
@@ -1019,6 +1064,15 @@ impl Parser<'_> {
             Some(Token::Ident(name))
                 if self.is_access(name) && self.nth(1) == Some(&Token::LParen) =>
             {
+                // `I(<port>)` (§ port-current probe, LRM §5.4.3) is flow-only and read-only —
+                // "shall not be used on the left side of `<+`" — so a `(` immediately followed
+                // by `<` here is a parse error, not a contribution target.
+                if self.nth(2) == Some(&Token::Lt) {
+                    return self.err(format!(
+                        "`{name}(<...>)` (a port-current probe) may not be used on the left \
+                         side of `<+` — it is read-only (LRM §5.4.3)"
+                    ));
+                }
                 let target = self.parse_access()?;
                 self.eat(&Token::Contribute)?;
                 let value = self.parse_expr()?;
@@ -1027,10 +1081,10 @@ impl Parser<'_> {
             }
             Some(Token::Ident(_)) => {
                 let lhs = self.expect_ident()?;
-                // `lhs[index] = rhs;` assigns one element of an array variable (§ array
-                // variables); `index` must be a compile-time-constant or genvar expression,
-                // checked at elaboration.
-                let index = self.parse_optional_index()?;
+                // `lhs[index] = rhs;` / `lhs[i][j] = rhs;` assigns one element of a 1-D or § 2-D
+                // array variable; each index must be a compile-time-constant or genvar
+                // expression, checked at elaboration.
+                let index = self.parse_index_list()?;
                 self.eat(&Token::Assign)?;
                 let rhs = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
@@ -1172,7 +1226,7 @@ impl Parser<'_> {
         let rhs = self.parse_expr()?;
         Ok(Stmt::Assign {
             lhs,
-            index: None,
+            index: Vec::new(),
             rhs,
         })
     }
@@ -1203,6 +1257,28 @@ impl Parser<'_> {
         }
         self.eat(&Token::RParen)?;
         Ok(Access { kind, args })
+    }
+
+    /// Parse a port-current probe, `name(<port>)` (§ port-current probe, LRM §5.4.3) — an
+    /// access-function name applied to a single port identifier delimited by `<`/`>` rather
+    /// than a plain net terminal list. `V(<port>)` parses syntactically (the grammar is
+    /// otherwise identical to [`Self::parse_access`]'s dispatch) but is rejected at elaboration
+    /// — the LRM only defines this form for a flow access function.
+    fn parse_port_probe(&mut self) -> Result<(AccessKind, String), FrontendError> {
+        let name = match self.peek() {
+            Some(Token::Ident(n)) => n.clone(),
+            _ => return self.err("expected an access function".to_string()),
+        };
+        let kind = *self.known_access.get(&name).ok_or_else(|| {
+            FrontendError::Parse(format!("`{name}` is not a recognized access function"))
+        })?;
+        self.pos += 1;
+        self.eat(&Token::LParen)?;
+        self.eat(&Token::Lt)?;
+        let port = self.expect_ident()?;
+        self.eat(&Token::Gt)?;
+        self.eat(&Token::RParen)?;
+        Ok((kind, port))
     }
 
     // --- expressions (precedence climbing) -----------------------------------------
@@ -1321,19 +1397,22 @@ impl Parser<'_> {
                 let name = name.clone();
                 if self.nth(1) == Some(&Token::LParen) {
                     if self.is_access(&name) {
+                        if self.nth(2) == Some(&Token::Lt) {
+                            let (kind, port) = self.parse_port_probe()?;
+                            return Ok(self.push(ExprAst::PortProbe { kind, port }));
+                        }
                         let access = self.parse_access()?;
                         Ok(self.push(ExprAst::Probe(access)))
                     } else {
                         self.parse_call(name)
                     }
                 } else if self.nth(1) == Some(&Token::LBracket) {
-                    // `name[index]`: one element of an array variable (§ array variables), not
-                    // a call — distinguished from a scalar reference purely by the following
-                    // `[`, same disambiguation style as the call-vs-reference check above.
+                    // `name[index]` / `name[i][j]`: one element of a 1-D or § 2-D array
+                    // variable, not a call — distinguished from a scalar reference purely by the
+                    // following `[`, same disambiguation style as the call-vs-reference check
+                    // above.
                     self.pos += 1;
-                    let index = self
-                        .parse_optional_index()?
-                        .expect("just checked LBracket is present");
+                    let index = self.parse_index_list()?;
                     Ok(self.push(ExprAst::IndexedIdent(name, index)))
                 } else {
                     self.pos += 1;
@@ -1464,7 +1543,7 @@ mod tests {
                 assert_eq!(target.kind, AccessKind::Flow);
                 assert_eq!(target.args[0].name, "p");
                 assert_eq!(target.args[1].name, "n");
-                assert!(target.args.iter().all(|a| a.index.is_none()));
+                assert!(target.args.iter().all(|a| a.index.is_empty()));
                 assert!(matches!(m.expr(*value), ExprAst::Binary(BinOp::Div, _, _)));
             }
             other => panic!("expected a contribution, got {other:?}"),
@@ -1762,7 +1841,7 @@ mod tests {
         assert_eq!(nets.len(), 1);
         assert_eq!(nets[0].name, "bus");
         assert!(
-            nets[0].range.is_some(),
+            !nets[0].ranges.is_empty(),
             "a bracketed `[3:0]` should record a range"
         );
 
@@ -1779,9 +1858,9 @@ mod tests {
             .expect("net item");
         assert_eq!(nets.len(), 2);
         assert_eq!(nets[0].name, "bus");
-        assert!(nets[0].range.is_some());
+        assert!(!nets[0].ranges.is_empty());
         assert_eq!(nets[1].name, "p");
-        assert!(nets[1].range.is_none());
+        assert!(nets[1].ranges.is_empty());
     }
 
     #[test]
@@ -1808,11 +1887,167 @@ mod tests {
         match &analog_body(&m)[0] {
             Stmt::Contribute { target, .. } => {
                 assert_eq!(target.args[0].name, "bus");
-                assert!(target.args[0].index.is_some());
+                assert_eq!(target.args[0].index.len(), 1);
                 assert_eq!(target.args[1].name, "gnd");
-                assert!(target.args[1].index.is_none());
+                assert!(target.args[1].index.is_empty());
             }
             other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn port_probe_parses() {
+        // `I(<a>)` (§ port-current probe, LRM §5.4.3) — distinct from `I(a)`, no `NetArg`
+        // involved at all.
+        let m = parse_src(
+            "module t(a); inout a; electrical a; \
+             analog begin I(a) <+ I(<a>); end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Contribute { value, .. } => match m.expr(*value) {
+                ExprAst::PortProbe { kind, port } => {
+                    assert_eq!(*kind, AccessKind::Flow);
+                    assert_eq!(port, "a");
+                }
+                other => panic!("expected a PortProbe, got {other:?}"),
+            },
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_d_array_variable_declaration_parses() {
+        let m = parse_src("module t(); real tile[0:3][0:2], scalar; endmodule");
+        let names = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Var { names, .. } => Some(names.clone()),
+                _ => None,
+            })
+            .expect("var item");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].name, "tile");
+        assert_eq!(names[0].ranges.len(), 2);
+        assert_eq!(names[1].name, "scalar");
+        assert!(names[1].ranges.is_empty());
+    }
+
+    #[test]
+    fn two_d_array_indexed_assignment_and_read_parse() {
+        let m = parse_src(
+            "module t(); real tile[0:3][0:2]; integer i, j; \
+             analog begin tile[i][j] = 1.0; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Assign { lhs, index, .. } => {
+                assert_eq!(lhs, "tile");
+                assert_eq!(index.len(), 2);
+            }
+            other => panic!("expected an indexed assignment, got {other:?}"),
+        }
+
+        let m = parse_src(
+            "module t(); real tile[0:3][0:2]; electrical a; integer i, j; \
+             analog begin I(a) <+ tile[i][j]; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Contribute { value, .. } => match m.expr(*value) {
+                ExprAst::IndexedIdent(name, index) => {
+                    assert_eq!(name, "tile");
+                    assert_eq!(index.len(), 2);
+                }
+                other => panic!("expected an IndexedIdent, got {other:?}"),
+            },
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_d_vector_net_declaration_parses() {
+        // Prefix form.
+        let m = parse_src("module t(); electrical [0:1][0:2] grid; endmodule");
+        let nets = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Net { nets, .. } => Some(nets.clone()),
+                _ => None,
+            })
+            .expect("net item");
+        assert_eq!(nets[0].name, "grid");
+        assert_eq!(nets[0].ranges.len(), 2);
+
+        // Suffix form.
+        let m = parse_src("module t(); electrical grid[0:1][0:2]; endmodule");
+        let nets = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Net { nets, .. } => Some(nets.clone()),
+                _ => None,
+            })
+            .expect("net item");
+        assert_eq!(nets[0].name, "grid");
+        assert_eq!(nets[0].ranges.len(), 2);
+    }
+
+    #[test]
+    fn two_d_indexed_net_access_parses() {
+        let m = parse_src(
+            "module t(); electrical [0:1][0:1] grid; electrical gnd; \
+             analog begin I(grid[0][1], gnd) <+ 1.0; end endmodule",
+        );
+        match &analog_body(&m)[0] {
+            Stmt::Contribute { target, .. } => {
+                assert_eq!(target.args[0].name, "grid");
+                assert_eq!(target.args[0].index.len(), 2);
+            }
+            other => panic!("expected a contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn more_than_two_bracket_groups_is_a_parse_error() {
+        for src in [
+            "module t(); real tile[0:1][0:1][0:1]; endmodule",
+            "module t(); electrical [0:1][0:1][0:1] grid; endmodule",
+            "module t(); real tile[0:1][0:1]; integer i,j,k; \
+             analog begin tile[i][j][k] = 1.0; end endmodule",
+        ] {
+            let toks = lex(src).expect("lex");
+            assert!(parse(&toks).is_err(), "expected rejection for: {src}");
+        }
+    }
+
+    #[test]
+    fn slice_before_a_trailing_index_bracket_is_a_parse_error() {
+        // `bus[0:1][0]` (a slice followed by another bracket) is rejected — a slice must be
+        // the final bracket group. The parser doesn't resolve `mul` as a module (that's an
+        // elaboration-time concern), so no module needs to be declared for it.
+        let src = "module top(); electrical [0:3] bus; \
+                   mul m1(bus[0:1][0], bus[2]); endmodule";
+        let toks = lex(src).expect("lex");
+        assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn index_then_trailing_slice_parses_syntactically() {
+        // `bus[2][0:1]` (an index followed by a trailing slice) is accepted at parse time —
+        // whether it's semantically valid for a given declared net is an elaboration-time
+        // question (§ 2-D vector net), not a parser one.
+        let src = "module top(); electrical [0:3] bus; \
+                   mul m1(bus[2][0:1], bus[0]); endmodule";
+        let m = parse_src(src);
+        match &m.items[1] {
+            Item::Instance { connections, .. } => match &connections[0] {
+                PortConn::Positional(net) => {
+                    assert_eq!(net.index.len(), 1);
+                    assert!(net.slice.is_some());
+                }
+                other => panic!("expected a positional connection, got {other:?}"),
+            },
+            other => panic!("expected an instance item, got {other:?}"),
         }
     }
 
@@ -1940,9 +2175,9 @@ mod tests {
             .expect("var item");
         assert_eq!(names.len(), 2);
         assert_eq!(names[0].name, "out_val");
-        assert!(names[0].range.is_some());
+        assert!(!names[0].ranges.is_empty());
         assert_eq!(names[1].name, "tmp");
-        assert!(names[1].range.is_none());
+        assert!(names[1].ranges.is_empty());
     }
 
     #[test]
@@ -1954,7 +2189,7 @@ mod tests {
         match &analog_body(&m)[0] {
             Stmt::Assign { lhs, index, .. } => {
                 assert_eq!(lhs, "out_val");
-                assert!(index.is_some());
+                assert_eq!(index.len(), 1);
             }
             other => panic!("expected an indexed assignment, got {other:?}"),
         }
@@ -2216,7 +2451,7 @@ mod tests {
                 match &connections[0] {
                     PortConn::Positional(net) => {
                         assert_eq!(net.name, "transfer");
-                        assert!(net.index.is_none() && net.slice.is_none());
+                        assert!(net.index.is_empty() && net.slice.is_none());
                     }
                     other => panic!("expected a positional connection, got {other:?}"),
                 }
@@ -2225,7 +2460,7 @@ mod tests {
                         PortConn::Positional(net) => {
                             assert_eq!(net.name, expected_name);
                             assert!(net.slice.is_some());
-                            assert!(net.index.is_none());
+                            assert!(net.index.is_empty());
                         }
                         other => panic!("expected a positional connection, got {other:?}"),
                     }

@@ -1404,6 +1404,14 @@ depends on surrounding context), organized by what they do rather than by a sing
   array declaration (`double bus[4];`), except the "array" here is a bus of physical nodes, not
   storage. The mixed prefix/suffix-with-override grammar has no clean C parallel (closest: a C
   declaration list where each declarator can independently be a pointer/array, `int *a, b[4];`).
+- **§ 2-D vector net (non-standard extension, added 2026-07-09)**: a *second* dimension —
+  `electrical [0:R][0:C] grid;` (prefix) or `electrical grid[0:R][0:C];` (suffix), capped at
+  exactly 2 dimensions — is **not** standard Verilog-A. The real LRM's `net_declaration`
+  grammar only ever carries one `[msb:lsb]` range; this project implements it anyway as a
+  deliberate, clearly labeled extension (see §2.2c) because it's the natural way to express a
+  2-D-addressed grid of physical nodes ("tiles"), and CLAUDE.md's scope-creep guardrail is about
+  *silently* drifting beyond the LRM, not about a documented, opt-in exception. Contrast §2.2b's
+  array-variable 2-D form, which *is* standard grammar.
 
 ## 2.2b Array variable declaration & indexed access (`real out_val[0:15]`, `out_val[i]`)
 
@@ -1426,9 +1434,9 @@ integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = h
 - **Declaration and Assignment**: `real|integer name[msb:lsb], name2, ...;` — only the
   per-identifier suffix form (§2.2's `NetDecl`-style prefix-range form doesn't apply to
   `real`/`integer`, which have no bit-width concept to prefix). `name[index_expr] = rhs;`
-  assigns one element (`Stmt::Assign.index: Option<ExprRef>`); `name[index_expr]` reads one
-  (`ExprAst::IndexedIdent`) — both share the AST-level index-parsing helper vector-net access
-  uses (`parse_optional_index`).
+  assigns one element (`Stmt::Assign.index: Vec<ExprRef>`, 0–2 entries); `name[index_expr]`
+  reads one (`ExprAst::IndexedIdent`) — both share the AST-level index-parsing helper vector-net
+  access uses (`Parser::parse_index_list`, capped at 2 entries — see §2.2c for the 2-D form).
 - **Expressions and Evaluation**: A constant/genvar index is evaluated by `const_eval_int` and
   bounds-checked against the array's declared `(lo, hi)` (`resolve_var_array_index`, thinly
   wrapping `resolve_array_var_at`, the constant-index tail also used by the runtime-index path
@@ -1459,6 +1467,57 @@ integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = h
   by the real corpus once vector *ports* started resolving (§2.18): both
   `dac_16bit_ideal.va`/`adc_16bit_ideal.va` index their vector nets/arrays with a plain
   `integer` loop variable, and both now elaborate cleanly end to end.
+
+## 2.2c 2-D array variables & 2-D vector nets (`tile[0:R][0:C]`, `grid[0:R][0:C]`, added 2026-07-09)
+
+The general 2-D-addressed-"tile" case: `real`/`integer` array variables and (as a documented
+non-standard extension, §2.2) vector nets both generalize from 1 to up to 2 declared
+dimensions, indexed as `tile[i][j]` / `V(grid[i][j])`. Not general N-D — capped at exactly 2.
+
+- **Purpose and Static Nature**: Same as §2.2/§2.2b — elaboration-only. A 2-D name interns one
+  `NodeId`/`VarId` per index *tuple*, row-major, named `"base[i][j]"` (`Elaborator::indexed_key`
+  builds the flattened key; `Elaborator::dim_indices` enumerates the tuples at declaration
+  time). `va-ir` (Interface α) needs no change — a 2-D vector/array still fully flattens to
+  scalar `NodeDecl`/`VarDecl`s, exactly like the 1-D case.
+- **Declaration and Assignment**: `real tile[0:R][0:C], scalar;` (LRM-standard — the
+  `variable_identifier` production allows a repeated unpacked-dimension list) and
+  `electrical [0:R][0:C] grid;` / `electrical grid[0:R][0:C];` (non-standard extension, §2.2).
+  Both go through `Parser::parse_dim_list`, which loops the single-dimension
+  `parse_bracket_range` primitive, capped at 2 (a 3rd bracket group is a parse error). AST:
+  `NetDecl.ranges`/`VarEntry.ranges: Vec<(ExprRef, ExprRef)>` (0, 1, or 2 entries).
+- **Expressions and Evaluation**: Indexed access — `NetArg.index`/`Stmt::Assign.index`/
+  `ExprAst::IndexedIdent`'s second field — is likewise `Vec<ExprRef>` (0–2 entries), parsed by
+  `Parser::parse_index_list`/`parse_net_arg`'s bracket loop. Resolution generalizes §2.2/§2.2b's
+  single-index functions to take an index slice (`Elaborator::resolve_vector_node_at`/
+  `resolve_array_var_at`: `&[i64]`), bounds-checking each dimension and erroring on a
+  dimension-*count* mismatch too (`grid[0]` against a declared-2-D `grid` is rejected, not
+  silently treated as a partial/broadcast access).
+  - **Dynamic (runtime) indexing**: at most **one** of a name's (up to 2) index positions may be
+    a genuinely runtime expression per access — `Elaborator::dynamic_index_pos` scans and
+    rejects two simultaneously-dynamic positions on the same name. This mirrors §2.2b's existing
+    precedent of rejecting a two-dynamic-*terminal* access rather than building an `O(range²)`
+    chain: a 2-D name's own two index positions are a second place that same blowup could occur,
+    so the same discipline applies. When exactly one dimension is dynamic, only *that* dimension
+    unrolls into the `Select`/`If` chain (`combine_idx` reattaches the other, already-resolved
+    dimension to each candidate) — the expansion stays `O(range)`, never `O(range²)`.
+- **Structural and Analog Usage**: A 2-D array variable behaves exactly like §2.2b's 1-D form
+  (module-scope-only declaration, analog-block-only access). A 2-D vector net has additional
+  restrictions a 1-D vector net doesn't: it can never be used as a module port
+  (`Elaborator::resolve_ports` rejects a declared vector whose dimension count isn't 1), and a
+  port *connection* (`resolve_conn_nodes`) only accepts a fully 2-indexed single node — never
+  bare or partially indexed. Slicing (`[lo:hi]`) stays single-dimension-only in both `resolve_
+  net_arg` and `resolve_conn_nodes`: it's rejected outright on a declared-2-D vector, and
+  rejected if combined with a non-empty index — even though `bus[i][lo:hi]` (an index followed
+  by a trailing slice) parses syntactically (`Parser::parse_net_arg` accepts it structurally;
+  only elaboration decides whether it's meaningful for the particular declared name).
+- **Comparison with Traditional Constructs**: A 2-D array variable is the direct analogue of a
+  C 2-D array (`double tile[R][C];`), restricted (like §2.2b's 1-D case) to a
+  `constexpr`/genvar-derived index on the constant path, or an unrolled comparison chain on the
+  (single-dimension-only) dynamic path. A 2-D vector net has no clean traditional analogue at
+  all — it's a non-standard extension purpose-built for a 2-D grid of physical circuit nodes
+  ("reticule"-style addressing), closest in spirit to a 2-D array of wires in a hardware
+  description language that *does* support multi-dimensional nets (e.g. SystemVerilog's packed/
+  unpacked array nets), which Verilog-A itself does not.
 
 ## 2.3 Direction declaration
 
@@ -1658,6 +1717,58 @@ as an ordinary loop.
   type — or, for the `V`-vs-`Temp` naming split specifically, function overloading by a
   caller-chosen "unit family" rather than by argument type.
 
+## 2.17b Port-current probe (`I(<port>)`, LRM §3.12.1/§5.4.3, added 2026-07-09)
+
+Real, normative Verilog-A grammar — initially miscategorized as "unclear if real" after
+`external/hicumL0_v2p0p0.va` and 5 HICUM/L0 siblings failed to parse `IB = I(<b>);`, until
+confirmed directly against `references/VAMS-LRM-2-4.pdf`. Distinct from an ordinary `I(a)`
+branch access (§2.17): `I(<a>)` accesses the current flowing *into the module* through
+declared port `a`, not a branch between two nets.
+
+- **Purpose and Static Nature**: Simulation-time, like any other access function — but its
+  *value* is derived, not probed directly from a single branch: the signed sum of every flow
+  contribution made elsewhere in the same analog block to a branch touching the port's node.
+- **Declaration and Assignment**: `port_probe_function_call ::= nature_access_function ( <
+  analog_port_reference > )` — grammatically `name(<port>)`, where `name` is any recognized
+  access function (§2.17) and `port` is a bare port identifier. Parsed by `Parser::
+  parse_port_probe`, hooked into the same two call sites `Parser::parse_access` already had
+  (a contribution target and a primary expression) by checking for `Token::Lt` immediately
+  after `Token::LParen`. Two LRM constraints enforced structurally: **flow-only** — `V(<port>)`
+  parses (the grammar doesn't distinguish access-function names) but is rejected at
+  elaboration with a clear error, since the LRM states only a flow access function is valid
+  here; **read-only** — the contribution-target call site rejects a `(<` lookahead as a *parse*
+  error outright ("the port access function shall not be used on the left side of `<+`"), so
+  `ExprAst::PortProbe` is never constructible as a `Stmt::Contribute` target at all.
+- **Expressions and Evaluation**: `Elaborator::lower_port_probe` resolves `port` to its node
+  (must be a declared port of *this* module; a vector port is a stated v1 limitation — scalar
+  only, no corpus need found yet), then `Elaborator::collect_port_flow_contributions`
+  recursively walks the already-lowered prefix of `self.out.analog` for every `Stmt::Contribute`
+  of `AccessKind::Flow` whose branch touches that node. **Sign convention** (verified against
+  the LRM's own diode worked example — a forward-biased `branch(a,c)` contributes positive
+  current from anode `a` to cathode `c`, so the external circuit must *supply* that current at
+  `a`): a branch where the port's node is the `p` terminal contributes `+value`; where it's `n`,
+  `-value`. A contribution found inside an `if`/`else` is wrapped in a matching `Expr::Select`
+  guard (nested one level per enclosing `if`), so a conditionally-made contribution only counts
+  when its condition held — closes the exact HICUM idiom this construct was found from
+  (`if (rbi >= `MIN_R) I(br_rbi) <+ ...;` before an operating-point block's `IB = I(<b>);`).
+  Every term is summed into one `Expr::Binary(Add, ...)` chain; no qualifying contribution at
+  all folds to `Expr::Const(0.0)` (an untouched port genuinely has zero current, not an error).
+  **Limitation**: a qualifying contribution found inside a `case`/`for`/`while`/`repeat` is
+  rejected with a clear "not yet supported" error (`Elaborator::branch_flow_touches` detects
+  the case) rather than silently mis-summed or silently dropped — those need either a per-arm
+  equality guard or genuine loop-carried accumulation, neither of which this fold attempts.
+- **Structural and Analog Usage**: Analog-block only, same as any other access-function use.
+  No `va-ir`/`va-abi` change needed at all — this folds entirely within `va-frontend` into
+  ordinary `Expr::Binary`/`Expr::Select`/`Expr::Unary` nodes that already existed, mirroring how
+  the runtime-indexed vector-net/array-variable fold (§2.18/§2.2b) needed no Interface α change
+  either.
+- **Comparison with Traditional Constructs**: No general-purpose-language analogue — it's a
+  derived quantity computed from KCL over the module's own declared branches, closer to a SPICE
+  simulator's post-solve "terminal current" report than to any ordinary language construct. The
+  closest Verilog-A-internal parallel is `ddx(expr, probe)` (§4.5.13): both are access-function-
+  adjacent operators whose value isn't a literal probe of one fixed unknown but a *derived*
+  quantity computed from the surrounding circuit description.
+
 ## 2.18 Vector net declaration & indexed access (`bus[i]`)
 
 - **Purpose and Static Nature**: The *declaration* is elaboration-only (interning nodes). An
@@ -1669,8 +1780,10 @@ as an ordinary loop.
 - **Declaration and Assignment**: `electrical|thermal [msb:lsb] name;` (§2.2) declares the
   vector; `V(name[index_expr])` / `I(name[index_expr])` (or a bare `name[index_expr]` as either
   terminal of a two-terminal access) reads/writes one element. `NetArg { name, index:
-  Option<ExprRef> }` is the AST representation shared by both branch-declaration terminals and
-  access-function arguments.
+  Vec<ExprRef> }` (0–2 entries) is the AST representation shared by both branch-declaration
+  terminals and access-function arguments — a second entry addresses a § 2-D vector net (§2.2c,
+  non-standard extension); see §2.2c for the dimension-count/dynamic-indexing rules that extend
+  to it.
 - **Expressions and Evaluation**: A constant/genvar index is evaluated by `const_eval_int`
   (requiring an exactly-integral result, within `1e-9`) and bounds-checked against the vector's
   declared `(lo, hi)` (`resolve_net_arg`, thinly wrapping `resolve_vector_node_at`) — an

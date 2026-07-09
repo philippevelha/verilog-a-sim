@@ -49,13 +49,26 @@
 //!   be indexed (`V(bus[0])`, never bare `V(bus)`), and the index is bounds-checked against the
 //!   declared `[msb:lsb]` range. A vector-typed port resolves to the full node list
 //!   (`Module::ports: Vec<Vec<NodeId>>`).
-//! - Vector nets and array variables (§ array variables) both support a genuinely runtime
-//!   index (an ordinary loop variable, not just a genvar/constant) via elaboration-time
-//!   unrolling into a `Select`/`If` chain over every declared index, guarded by an equality
-//!   check — see `dynamic_terminal_range`/`lower_probe_expr`/`unroll_indexed_contribute` and
-//!   `lower_indexed_var_read`/`lower_indexed_var_write`. There is still no
-//!   runtime-indexable-*storage* concept in the IR; a runtime index outside the declared range
-//!   at simulation time silently resolves to the chain's last arm rather than erroring.
+//! - **2-D vector nets / 2-D array variables**: both vector nets and array variables (§ array
+//!   variables) may carry a second declared dimension, interning one node/`VarId` per index
+//!   *tuple* as `base[i][j]`. For array variables (`real tile[0:R][0:C];`) this is standard LRM
+//!   grammar; for vector nets (`electrical [0:R][0:C] grid;`) it is a deliberate, documented
+//!   **non-standard extension** — the LRM's `net_declaration` grammar never carries more than
+//!   one range. Both are capped at exactly 2 dimensions (not general N-D). A 2-D vector net may
+//!   never be used as a port, sliced, or connected/accessed bare or partially indexed (only a
+//!   fully 2-indexed element resolves); these restrictions are enforced in `resolve_ports`,
+//!   `resolve_net_arg`, and `resolve_conn_nodes`.
+//! - Vector nets and array variables (§ array variables) both support a genuinely runtime index
+//!   in **at most one** of their (up to 2) dimensions (an ordinary loop variable, not just a
+//!   genvar/constant) via elaboration-time unrolling into a `Select`/`If` chain over every
+//!   declared value of that one dimension, guarded by an equality check, with the other
+//!   dimension (if any) resolved once up front — see
+//!   `dynamic_terminal_range`/`lower_probe_expr`/`unroll_indexed_contribute` and
+//!   `dynamic_var_index`/`lower_indexed_var_read`/`lower_indexed_var_write`. Both index
+//!   positions of the same 2-D access being simultaneously dynamic is rejected (`O(range²)`
+//!   chains are deliberately not built — see `dynamic_index_pos`'s doc comment). There is still
+//!   no runtime-indexable-*storage* concept in the IR; a runtime index outside the declared
+//!   range at simulation time silently resolves to the chain's last arm rather than erroring.
 //! - **Module instantiation** (§ module instantiation, LRM Annex C.8): [`Item::Instance`] is
 //!   resolved entirely here, not in the IR — [`elaborate_with_library`] recursively elaborates
 //!   the referenced submodule (as if it were standalone, with any `#(...)` overrides baked into
@@ -138,15 +151,76 @@ fn elaborate_inner(
 /// A single vector-net terminal (of a `V(...)`/`I(...)` access) whose index is present but not
 /// compile-time-constant — the input to the § dynamic vector-net/array-variable indexing
 /// expansion (`Elaborator::lower_probe_expr`/`unroll_indexed_contribute`). `lo`/`hi` is the
-/// vector's own declared range, looked up once by [`Elaborator::dynamic_terminal_range`] so
-/// callers don't have to re-look it up.
+/// dynamic dimension's own declared range, looked up once by
+/// [`Elaborator::dynamic_terminal_range`] so callers don't have to re-look it up.
 struct DynamicTerminal {
     /// 0 for the first (`p`) terminal, 1 for the second (`n`).
     pos: usize,
+    /// Which of the terminal's (1 or 2, § 2-D vector net) index positions is the dynamic one.
+    dyn_dim: usize,
+    /// The terminal's other, already-constant-resolved dimension, for a § 2-D vector net —
+    /// `None` for a 1-D vector net, which has no other dimension.
+    other_idx: Option<i64>,
     name: String,
     idx_expr: ExprRef,
     lo: i64,
     hi: i64,
+}
+
+/// The `VarId` counterpart of [`DynamicTerminal`] — an array-variable index that is present but
+/// not compile-time-constant, one of the (up to 2) declared dimensions.
+struct DynamicVarIndex {
+    /// Which index position is the dynamic one.
+    dyn_dim: usize,
+    /// The other, already-constant-resolved dimension, for a § 2-D array variable.
+    other_idx: Option<i64>,
+    lo: i64,
+    hi: i64,
+}
+
+/// The flattened storage key for a 1- or 2-D indexed name: `"name[i]"` or `"name[i][j]"`,
+/// exactly mirroring how a scalar-indexed 1-D vector/array has always been interned.
+fn indexed_key(name: &str, idxs: &[i64]) -> String {
+    let mut s = name.to_string();
+    for k in idxs {
+        s.push_str(&format!("[{k}]"));
+    }
+    s
+}
+
+/// Every declared index tuple, row-major, for 1 or 2 inclusive dimension ranges — the
+/// declaration-time expansion `collect_nodes`/`declare_var_entry` both need.
+///
+/// # Panics
+///
+/// Panics if `dims` has more than 2 entries — unreachable in practice, since the parser caps
+/// declared dimensions at 2 (`Parser::parse_dim_list`).
+fn dim_indices(dims: &[(i64, i64)]) -> Vec<Vec<i64>> {
+    match dims {
+        [] => vec![vec![]],
+        [(lo, hi)] => (*lo..=*hi).map(|k| vec![k]).collect(),
+        [(lo0, hi0), (lo1, hi1)] => {
+            let mut out = Vec::new();
+            for i in *lo0..=*hi0 {
+                for j in *lo1..=*hi1 {
+                    out.push(vec![i, j]);
+                }
+            }
+            out
+        }
+        _ => unreachable!("declared dimensions are capped at 2 by the parser"),
+    }
+}
+
+/// Combine a dynamic dimension's concrete candidate value `k` with the other (already-constant)
+/// dimension, if any, into a full index tuple — shared by the vector-net probe/contribute
+/// expansion and the array-variable read/write expansion.
+fn combine_idx(dyn_dim: usize, k: i64, other_idx: Option<i64>) -> Vec<i64> {
+    match other_idx {
+        None => vec![k],
+        Some(o) if dyn_dim == 0 => vec![k, o],
+        Some(o) => vec![o, k],
+    }
 }
 
 struct Elaborator<'a> {
@@ -181,16 +255,20 @@ struct Elaborator<'a> {
     /// loops over distinct genvars stack (each key is inserted/removed independently); a loop
     /// re-entering its own still-bound genvar (nested reuse of the same name) is rejected.
     genvar_env: HashMap<String, i64>,
-    /// Declared vector nets' inclusive `(lo, hi)` index range, keyed by base name (§ vector
-    /// nets). A vector net `bus` interns one [`NodeId`] per index as `bus[k]`.
-    vectors: HashMap<String, (i64, i64)>,
-    /// Declared array variables' inclusive `(lo, hi)` index range, keyed by base name (§ array
-    /// variables) — the `VarId` counterpart of `vectors` above. An array `out_val` interns one
-    /// [`VarId`] per index as `out_val[k]`. A compile-time-constant or genvar index resolves
-    /// directly; a genuinely runtime index (§ dynamic vector-net/array-variable indexing) is
-    /// unrolled into a `Select`/`If` chain over every declared `k`, since there is still no
-    /// runtime-indexable-storage concept in the IR itself.
-    var_arrays: HashMap<String, (i64, i64)>,
+    /// Declared vector nets' inclusive `(lo, hi)` index range per dimension, keyed by base name
+    /// (§ vector nets). Length 1 is a standard 1-D vector; length 2 is a § 2-D vector net (a
+    /// deliberate, documented non-standard extension). A vector net `bus` interns one
+    /// [`NodeId`] per index tuple as `bus[k]`/`bus[i][j]`.
+    vectors: HashMap<String, Vec<(i64, i64)>>,
+    /// Declared array variables' inclusive `(lo, hi)` index range per dimension, keyed by base
+    /// name (§ array variables) — the `VarId` counterpart of `vectors` above. Length 1 is
+    /// standard 1-D; length 2 is a § 2-D array variable (standard LRM grammar). An array
+    /// `out_val` interns one [`VarId`] per index tuple as `out_val[k]`/`out_val[i][j]`. A
+    /// compile-time-constant or genvar index resolves directly; a genuinely runtime index in at
+    /// most one dimension (§ dynamic vector-net/array-variable indexing) is unrolled into a
+    /// `Select`/`If` chain over every declared value of that one dimension, since there is still
+    /// no runtime-indexable-storage concept in the IR itself.
+    var_arrays: HashMap<String, Vec<(i64, i64)>>,
 }
 
 impl Elaborator<'_> {
@@ -231,39 +309,38 @@ impl Elaborator<'_> {
         Ok(())
     }
 
-    /// Register one variable-declaration entry: a plain scalar, or (if it carries a range) an
-    /// array — interning one [`VarId`] per index, named `"name[k]"`, exactly mirroring how
-    /// [`Self::collect_nodes`] expands a vector net.
+    /// Register one variable-declaration entry: a plain scalar, or (if it carries dimension
+    /// range(s)) a 1-D or § 2-D array — interning one [`VarId`] per index tuple, named
+    /// `"name[k]"`/`"name[i][j]"`, exactly mirroring how [`Self::collect_nodes`] expands a
+    /// vector net.
     fn declare_var_entry(&mut self, entry: &ast::VarEntry) -> Result<(), FrontendError> {
-        match entry.range {
-            None => {
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    self.vars.entry(entry.name.clone())
-                {
-                    let id = VarId(self.out.vars.len() as u32);
-                    self.out.vars.push(VarDecl {
-                        name: entry.name.clone(),
-                    });
-                    slot.insert(id);
-                }
+        if entry.ranges.is_empty() {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.vars.entry(entry.name.clone())
+            {
+                let id = VarId(self.out.vars.len() as u32);
+                self.out.vars.push(VarDecl {
+                    name: entry.name.clone(),
+                });
+                slot.insert(id);
             }
-            Some((msb, lsb)) => {
-                let msb = self.const_eval_int(msb, "array variable range bound")?;
-                let lsb = self.const_eval_int(lsb, "array variable range bound")?;
-                let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
-                for k in lo..=hi {
-                    let key = format!("{}[{k}]", entry.name);
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        self.vars.entry(key.clone())
-                    {
-                        let id = VarId(self.out.vars.len() as u32);
-                        self.out.vars.push(VarDecl { name: key });
-                        slot.insert(id);
-                    }
-                }
-                self.var_arrays.insert(entry.name.clone(), (lo, hi));
+            return Ok(());
+        }
+        let mut dims = Vec::with_capacity(entry.ranges.len());
+        for &(msb, lsb) in &entry.ranges {
+            let msb = self.const_eval_int(msb, "array variable range bound")?;
+            let lsb = self.const_eval_int(lsb, "array variable range bound")?;
+            dims.push(if msb <= lsb { (msb, lsb) } else { (lsb, msb) });
+        }
+        for idxs in dim_indices(&dims) {
+            let key = indexed_key(&entry.name, &idxs);
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.vars.entry(key.clone()) {
+                let id = VarId(self.out.vars.len() as u32);
+                self.out.vars.push(VarDecl { name: key });
+                slot.insert(id);
             }
         }
+        self.var_arrays.insert(entry.name.clone(), dims);
         Ok(())
     }
 
@@ -365,26 +442,27 @@ impl Elaborator<'_> {
                     // it's just not checked for domain-specific conservation.
                     ast::Discipline::Custom(_) => Discipline::Other,
                 };
-                // Each name carries its own optional range — `electrical [0:w-1] in;` and
-                // `electrical in[`W-1:0], out;` both reach here as one `NetDecl` per name, the
-                // prefix-vs-suffix distinction already resolved by the parser (§2.2).
+                // Each name carries its own optional dimension range(s) — `electrical [0:w-1]
+                // in;` and `electrical in[`W-1:0], out;` both reach here as one `NetDecl` per
+                // name, the prefix-vs-suffix distinction already resolved by the parser (§2.2).
+                // A second dimension (§ 2-D vector net) is a non-standard extension.
                 for net in nets {
-                    match net.range {
-                        None => {
-                            self.intern_node(&net.name, disc);
-                        }
-                        // A vector net interns one node per index (§ vector nets); a branch
-                        // access later selects one by a genvar expression.
-                        Some((msb, lsb)) => {
-                            let msb = self.const_eval_int(msb, "vector net range bound")?;
-                            let lsb = self.const_eval_int(lsb, "vector net range bound")?;
-                            let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
-                            for k in lo..=hi {
-                                self.intern_node(&format!("{}[{k}]", net.name), disc);
-                            }
-                            self.vectors.insert(net.name.clone(), (lo, hi));
-                        }
+                    if net.ranges.is_empty() {
+                        self.intern_node(&net.name, disc);
+                        continue;
                     }
+                    // A vector net interns one node per index tuple (§ vector nets); a branch
+                    // access later selects one by a genvar expression.
+                    let mut dims = Vec::with_capacity(net.ranges.len());
+                    for &(msb, lsb) in &net.ranges {
+                        let msb = self.const_eval_int(msb, "vector net range bound")?;
+                        let lsb = self.const_eval_int(lsb, "vector net range bound")?;
+                        dims.push(if msb <= lsb { (msb, lsb) } else { (lsb, msb) });
+                    }
+                    for idxs in dim_indices(&dims) {
+                        self.intern_node(&indexed_key(&net.name, &idxs), disc);
+                    }
+                    self.vectors.insert(net.name.clone(), dims);
                 }
             }
         }
@@ -419,10 +497,18 @@ impl Elaborator<'_> {
                 self.out.ports.push(vec![*id]);
                 continue;
             }
-            if let Some(&(lo, hi)) = self.vectors.get(port) {
+            if let Some(dims) = self.vectors.get(port) {
+                if dims.len() != 1 {
+                    return Err(elab(format!(
+                        "port `{port}` is a {}-D vector net (§ 2-D vector net extension); only \
+                         a 1-D vector net may be used as a port",
+                        dims.len()
+                    )));
+                }
+                let (lo, hi) = dims[0];
                 let mut ids = Vec::with_capacity((hi - lo + 1) as usize);
                 for k in lo..=hi {
-                    let key = format!("{port}[{k}]");
+                    let key = indexed_key(port, &[k]);
                     ids.push(*self.nodes.get(&key).ok_or_else(|| {
                         elab(format!(
                             "internal error: vector port node `{key}` was not interned"
@@ -589,6 +675,9 @@ impl Elaborator<'_> {
             ExprAst::Probe(_) => Err(elab(
                 "a branch probe is not constant in a parameter context".to_string(),
             )),
+            ExprAst::PortProbe { .. } => Err(elab(
+                "a port-current probe is not constant in a parameter context".to_string(),
+            )),
             ExprAst::IndexedIdent(name, _) => Err(elab(format!(
                 "array variable `{name}` is not constant in a parameter context"
             ))),
@@ -754,7 +843,7 @@ impl Elaborator<'_> {
             // An indexed assignment target (`out_val[i] = ...;`) must already be declared as
             // an array variable via `Item::Var` (§ array variables) — nothing to register here.
             Stmt::Assign { lhs, index, .. } => {
-                if index.is_none() {
+                if index.is_empty() {
                     self.register_var(lhs);
                 }
                 Ok(())
@@ -765,7 +854,7 @@ impl Elaborator<'_> {
                     // must be known up front (§ array variables); `Item::Var`'s module-scope
                     // pass already ran by the time this (analog-block) pass runs, so a
                     // block-local array range has nowhere sound to be declared into.
-                    if entry.range.is_some() {
+                    if !entry.ranges.is_empty() {
                         return Err(elab(format!(
                             "array variable `{}` must be declared at module scope, not inside \
                              the analog block (block-local array variables are not yet \
@@ -930,26 +1019,20 @@ impl Elaborator<'_> {
                          it drives (restricted assignment)"
                     )));
                 }
-                match index {
-                    // `lhs[index] = rhs;`: one element of an array variable (§ array
-                    // variables). A runtime index (§ dynamic vector-net/array-variable
-                    // indexing) can't resolve to a single `VarId`, so it unrolls into an
-                    // if/else-if chain instead — see `lower_indexed_var_write`.
-                    Some(idx_expr) if self.const_eval(*idx_expr).is_err() => {
-                        self.lower_indexed_var_write(lhs, *idx_expr, *rhs)
-                    }
-                    Some(idx_expr) => {
-                        let id = self.resolve_var_array_index(lhs, *idx_expr)?;
-                        let rhs = self.lower_expr(*rhs)?;
-                        Ok(va_ir::Stmt::Assign { lhs: id, rhs })
-                    }
-                    None => {
-                        let id = *self.vars.get(lhs).ok_or_else(|| {
-                            elab(format!("assignment to unknown variable `{lhs}`"))
-                        })?;
-                        let rhs = self.lower_expr(*rhs)?;
-                        Ok(va_ir::Stmt::Assign { lhs: id, rhs })
-                    }
+                if index.is_empty() {
+                    let id = *self
+                        .vars
+                        .get(lhs)
+                        .ok_or_else(|| elab(format!("assignment to unknown variable `{lhs}`")))?;
+                    let rhs = self.lower_expr(*rhs)?;
+                    Ok(va_ir::Stmt::Assign { lhs: id, rhs })
+                } else {
+                    // `lhs[index] = rhs;` / `lhs[i][j] = rhs;`: one element of a 1-D or § 2-D
+                    // array variable (§ array variables). A runtime index in at most one
+                    // dimension (§ dynamic vector-net/array-variable indexing) can't resolve to
+                    // a single `VarId`, so it unrolls into an if/else-if chain instead — see
+                    // `lower_indexed_var_write`.
+                    self.lower_indexed_var_write(lhs, index, *rhs)
                 }
             }
             Stmt::If { cond, then_, else_ } => {
@@ -1120,7 +1203,7 @@ impl Elaborator<'_> {
             // `name[index]`: one element of an array variable (§ array variables). Constant/
             // genvar indices resolve directly; a runtime index (§ dynamic vector-net/array-
             // variable indexing) expands into a `Select` chain — see `lower_indexed_var_read`.
-            ExprAst::IndexedIdent(name, index) => return self.lower_indexed_var_read(name, *index),
+            ExprAst::IndexedIdent(name, index) => return self.lower_indexed_var_read(name, index),
             ExprAst::SysFunc { name, args } if name == "simparam" => {
                 // `$simparam(param_name [, default])`: the queried parameter is always unknown
                 // in v0 (no simulator parameter store), so the call returns the `default`
@@ -1263,6 +1346,7 @@ impl Elaborator<'_> {
                 ))
             }
             ExprAst::Probe(access) => return self.lower_probe_expr(access),
+            ExprAst::PortProbe { kind, port } => return self.lower_port_probe(*kind, port),
             ExprAst::Call { name, args } if name == "analysis" => {
                 // `analysis("name", …)` queries the current analysis. v0 is DC-only, so it
                 // folds to a constant: true for the DC/operating-point phases.
@@ -1531,7 +1615,7 @@ impl Elaborator<'_> {
 
     fn resolve_branch(&mut self, args: &[ast::NetArg]) -> Result<BranchId, FrontendError> {
         // A single unindexed argument may be a declared branch name (e.g. `V(br_rseries)`).
-        if args.len() == 1 && args[0].index.is_none() {
+        if args.len() == 1 && args[0].index.is_empty() {
             if let Some(id) = self.named_branches.get(&args[0].name) {
                 return Ok(*id);
             }
@@ -1560,9 +1644,35 @@ impl Elaborator<'_> {
         id
     }
 
+    /// Which (if any) position of `idxs` (0, 1, or 2 entries) is genuinely dynamic (not
+    /// compile-time-constant/genvar). At most one may be — two dynamic positions on the same
+    /// name is rejected here rather than expanded into an O(range²) chain, mirroring this file's
+    /// existing precedent of rejecting a two-dynamic-*terminal* access rather than building one
+    /// (see [`Self::dynamic_terminal_range`]'s doc comment) — now also enforced *within* a
+    /// single § 2-D name's two index positions.
+    fn dynamic_index_pos(
+        &self,
+        what: &str,
+        idxs: &[ExprRef],
+    ) -> Result<Option<usize>, FrontendError> {
+        let mut dyn_dim = None;
+        for (d, &e) in idxs.iter().enumerate() {
+            if self.const_eval(e).is_err() {
+                if dyn_dim.is_some() {
+                    return Err(elab(format!(
+                        "`{what}` has two dynamically-indexed dimensions in the same access; \
+                         at most one index position may be a genuinely runtime expression"
+                    )));
+                }
+                dyn_dim = Some(d);
+            }
+        }
+        Ok(dyn_dim)
+    }
+
     /// Resolve one [`ast::NetArg`] terminal to its [`NodeId`]: a plain net name, or one element
     /// of a vector net selected by a compile-time-constant or genvar expression (§ vector
-    /// nets), bounds-checked against its declared `[msb:lsb]` range. A genuinely runtime index
+    /// nets), bounds-checked against its declared dimension range(s). A genuinely runtime index
     /// (§ dynamic vector-net/array-variable indexing) is not resolvable to a single `NodeId`
     /// here at all — that case is detected earlier, by [`Self::dynamic_terminal_range`], and
     /// routed to [`Self::lower_probe_expr`]/[`Self::unroll_indexed_contribute`] instead, which
@@ -1570,50 +1680,85 @@ impl Elaborator<'_> {
     /// once per candidate index rather than once for a single statically-known one.
     fn resolve_net_arg(&mut self, arg: &ast::NetArg) -> Result<NodeId, FrontendError> {
         if arg.slice.is_some() {
+            if let Some(dims) = self.vectors.get(&arg.name) {
+                if dims.len() == 2 {
+                    return Err(elab(format!(
+                        "`{}[..]`: slicing a 2-D vector net is not supported (slicing is \
+                         single-dimension-only); index both dimensions instead, e.g. \
+                         `V({}[0][0])`",
+                        arg.name, arg.name
+                    )));
+                }
+            }
+            if !arg.index.is_empty() {
+                return Err(elab(format!(
+                    "`{}[..]`: a `[lo:hi]` slice cannot be combined with an index — slicing is \
+                     single-dimension-only",
+                    arg.name
+                )));
+            }
             return Err(elab(format!(
                 "`{}[..]` is a vector slice; a branch access/declaration needs a single node, \
                  e.g. `V({}[0])` (a slice is only valid as an instance port-connection argument)",
                 arg.name, arg.name
             )));
         }
-        match arg.index {
-            None => {
-                if self.vectors.contains_key(&arg.name) {
-                    return Err(elab(format!(
-                        "`{}` is a vector net; an access must index it, e.g. `V({}[0])`",
-                        arg.name, arg.name
-                    )));
-                }
-                self.nodes
-                    .get(&arg.name)
-                    .copied()
-                    .ok_or_else(|| elab(format!("unknown net `{}` in branch access", arg.name)))
+        if arg.index.is_empty() {
+            if let Some(dims) = self.vectors.get(&arg.name) {
+                let example = if dims.len() == 1 {
+                    format!("`V({}[0])`", arg.name)
+                } else {
+                    format!("`V({}[0][0])`", arg.name)
+                };
+                return Err(elab(format!(
+                    "`{}` is a {}-D vector net; an access must index every dimension, e.g. {}",
+                    arg.name,
+                    dims.len(),
+                    example
+                )));
             }
-            Some(idx_expr) => {
-                let idx = self.const_eval_int(idx_expr, "vector index")?;
-                self.resolve_vector_node_at(&arg.name, idx)
-            }
+            return self
+                .nodes
+                .get(&arg.name)
+                .copied()
+                .ok_or_else(|| elab(format!("unknown net `{}` in branch access", arg.name)));
         }
+        let idxs: Vec<i64> = arg
+            .index
+            .iter()
+            .map(|&e| self.const_eval_int(e, "vector index"))
+            .collect::<Result<_, _>>()?;
+        self.resolve_vector_node_at(&arg.name, &idxs)
     }
 
-    /// Resolve one already-known index `idx` of a declared vector net `name` to its [`NodeId`],
-    /// bounds-checked against the vector's declared range. The constant-index tail of
-    /// [`Self::resolve_net_arg`], factored out so a runtime-indexed access's expansion chain
-    /// (§ dynamic vector-net/array-variable indexing) can resolve each concrete candidate index
-    /// without an `ExprRef` for a literal — there is none, since a literal loop index doesn't
-    /// come from the source AST.
-    fn resolve_vector_node_at(&self, name: &str, idx: i64) -> Result<NodeId, FrontendError> {
-        let (lo, hi) = *self.vectors.get(name).ok_or_else(|| {
+    /// Resolve one already-known index tuple `idxs` of a declared vector net `name` to its
+    /// [`NodeId`], bounds-checked against the vector's declared dimension range(s) (dimension
+    /// count must also match, catching a partial/over-index like `grid[0]` on a declared-2-D
+    /// `grid`). The constant-index tail of [`Self::resolve_net_arg`], factored out so a
+    /// runtime-indexed access's expansion chain (§ dynamic vector-net/array-variable indexing)
+    /// can resolve each concrete candidate index without an `ExprRef` for a literal — there is
+    /// none, since a literal loop index doesn't come from the source AST.
+    fn resolve_vector_node_at(&self, name: &str, idxs: &[i64]) -> Result<NodeId, FrontendError> {
+        let dims = self.vectors.get(name).ok_or_else(|| {
             elab(format!(
                 "`{name}` is not a vector net (no bracketed `[msb:lsb]` range declared)"
             ))
         })?;
-        if idx < lo || idx > hi {
+        if dims.len() != idxs.len() {
             return Err(elab(format!(
-                "index {idx} is out of `{name}`'s declared range [{lo}:{hi}]"
+                "`{name}` is declared with {} dimension(s) but accessed with {}",
+                dims.len(),
+                idxs.len()
             )));
         }
-        let key = format!("{name}[{idx}]");
+        for (d, (&(lo, hi), &idx)) in dims.iter().zip(idxs).enumerate() {
+            if idx < lo || idx > hi {
+                return Err(elab(format!(
+                    "index {idx} is out of `{name}`'s declared dimension {d} range [{lo}:{hi}]"
+                )));
+            }
+        }
+        let key = indexed_key(name, idxs);
         self.nodes.get(&key).copied().ok_or_else(|| {
             elab(format!(
                 "internal error: vector node `{key}` was not interned"
@@ -1629,23 +1774,55 @@ impl Elaborator<'_> {
     /// first regardless of which direction the source wrote), ready to zip element-wise against
     /// a same-width vector port's node list. A scalar net or a single `[i]` index still resolves
     /// to a one-element list, unifying the scalar and vector connection paths in
-    /// [`Self::inline_instance`].
+    /// [`Self::inline_instance`]. A § 2-D vector net may only connect as a fully 2-indexed
+    /// single node — slicing it, or connecting it bare/partially indexed, is rejected (the same
+    /// restrictions [`Self::resolve_net_arg`] applies to an `Access`/`branch` terminal).
     fn resolve_conn_nodes(&mut self, arg: &ast::NetArg) -> Result<Vec<NodeId>, FrontendError> {
         if let Some((msb, lsb)) = arg.slice {
+            if let Some(dims) = self.vectors.get(&arg.name) {
+                if dims.len() == 2 {
+                    return Err(elab(format!(
+                        "`{}[..]`: slicing a 2-D vector net is not supported (slicing is \
+                         single-dimension-only); index both dimensions instead, e.g. \
+                         `{}[0][0]`",
+                        arg.name, arg.name
+                    )));
+                }
+            }
+            if !arg.index.is_empty() {
+                return Err(elab(format!(
+                    "`{}[..]`: a `[lo:hi]` slice cannot be combined with an index — slicing is \
+                     single-dimension-only",
+                    arg.name
+                )));
+            }
             let msb = self.const_eval_int(msb, "vector slice bound")?;
             let lsb = self.const_eval_int(lsb, "vector slice bound")?;
             let (lo, hi) = if msb <= lsb { (msb, lsb) } else { (lsb, msb) };
             return (lo..=hi)
-                .map(|k| self.resolve_vector_node_at(&arg.name, k))
+                .map(|k| self.resolve_vector_node_at(&arg.name, &[k]))
                 .collect();
         }
-        if let Some(idx_expr) = arg.index {
-            let idx = self.const_eval_int(idx_expr, "vector index")?;
-            return Ok(vec![self.resolve_vector_node_at(&arg.name, idx)?]);
+        if !arg.index.is_empty() {
+            let idxs: Vec<i64> = arg
+                .index
+                .iter()
+                .map(|&e| self.const_eval_int(e, "vector index"))
+                .collect::<Result<_, _>>()?;
+            return Ok(vec![self.resolve_vector_node_at(&arg.name, &idxs)?]);
         }
-        if let Some(&(lo, hi)) = self.vectors.get(&arg.name) {
+        if let Some(dims) = self.vectors.get(&arg.name) {
+            if dims.len() != 1 {
+                return Err(elab(format!(
+                    "`{}` is a {}-D vector net; a bare (unindexed) port connection is only \
+                     supported for a 1-D vector net",
+                    arg.name,
+                    dims.len()
+                )));
+            }
+            let (lo, hi) = dims[0];
             return (lo..=hi)
-                .map(|k| self.resolve_vector_node_at(&arg.name, k))
+                .map(|k| self.resolve_vector_node_at(&arg.name, &[k]))
                 .collect();
         }
         Ok(vec![self.nodes.get(&arg.name).copied().ok_or_else(
@@ -1654,37 +1831,54 @@ impl Elaborator<'_> {
     }
 
     /// If `args` has exactly one terminal whose base name is a declared vector net and whose
-    /// index expression is present but not a compile-time constant (an ordinary runtime
-    /// variable, e.g. an `integer` loop counter — confirmed needed by
+    /// index expressions include exactly one that is present but not a compile-time constant
+    /// (an ordinary runtime variable, e.g. an `integer` loop counter — confirmed needed by
     /// `adc_16bit_ideal.va`/`dac_16bit_ideal.va`'s bit-serialization loops), return it. Returns
     /// `Ok(None)` for the ordinary case (every index constant-resolvable, or no index at all),
     /// which the caller falls through to the existing `resolve_branch`/`lower_access` path for
     /// unchanged. A *second* dynamically-indexed terminal in the same access (`V(a[i], b[j])`
     /// with both `i`/`j` runtime) is left to `resolve_net_arg`'s ordinary error path rather than
     /// expanded into an O(range²) chain here — not evidenced anywhere in the corpus, and
-    /// CLAUDE.md's scope discipline argues against building for a case nothing needs yet.
+    /// CLAUDE.md's scope discipline argues against building for a case nothing needs yet. A
+    /// § 2-D vector net's *own* two index positions being simultaneously dynamic is instead
+    /// caught eagerly by [`Self::dynamic_index_pos`], for the same O(range²)-avoidance reason.
     fn dynamic_terminal_range(
         &self,
         args: &[ast::NetArg],
     ) -> Result<Option<DynamicTerminal>, FrontendError> {
         for (pos, arg) in args.iter().enumerate() {
-            if let Some(idx_expr) = arg.index {
-                if self.const_eval(idx_expr).is_err() {
-                    let (lo, hi) = *self.vectors.get(&arg.name).ok_or_else(|| {
-                        elab(format!(
-                            "`{}` is not a vector net (no bracketed `[msb:lsb]` range declared)",
-                            arg.name
-                        ))
-                    })?;
-                    return Ok(Some(DynamicTerminal {
-                        pos,
-                        name: arg.name.clone(),
-                        idx_expr,
-                        lo,
-                        hi,
-                    }));
-                }
+            let Some(dyn_dim) = self.dynamic_index_pos(&arg.name, &arg.index)? else {
+                continue;
+            };
+            let dims = self.vectors.get(&arg.name).ok_or_else(|| {
+                elab(format!(
+                    "`{}` is not a vector net (no bracketed `[msb:lsb]` range declared)",
+                    arg.name
+                ))
+            })?;
+            if dims.len() != arg.index.len() {
+                return Err(elab(format!(
+                    "`{}` is declared with {} dimension(s) but accessed with {}",
+                    arg.name,
+                    dims.len(),
+                    arg.index.len()
+                )));
             }
+            let other_idx = if dims.len() == 2 {
+                Some(self.const_eval_int(arg.index[1 - dyn_dim], "vector index")?)
+            } else {
+                None
+            };
+            let (lo, hi) = dims[dyn_dim];
+            return Ok(Some(DynamicTerminal {
+                pos,
+                dyn_dim,
+                other_idx,
+                name: arg.name.clone(),
+                idx_expr: arg.index[dyn_dim],
+                lo,
+                hi,
+            }));
         }
         Ok(None)
     }
@@ -1712,6 +1906,8 @@ impl Elaborator<'_> {
         };
         let DynamicTerminal {
             pos,
+            dyn_dim,
+            other_idx,
             name,
             idx_expr,
             lo,
@@ -1729,7 +1925,8 @@ impl Elaborator<'_> {
         };
         let mut chain: Option<ExprId> = None;
         for k in (lo..=hi).rev() {
-            let node_k = self.resolve_vector_node_at(&name, k)?;
+            let full = combine_idx(dyn_dim, k, other_idx);
+            let node_k = self.resolve_vector_node_at(&name, &full)?;
             let (p, n) = if pos == 0 {
                 let n = match other {
                     Some(n) => n,
@@ -1775,6 +1972,8 @@ impl Elaborator<'_> {
     ) -> Result<va_ir::Stmt, FrontendError> {
         let DynamicTerminal {
             pos,
+            dyn_dim,
+            other_idx,
             name,
             idx_expr,
             lo,
@@ -1790,7 +1989,8 @@ impl Elaborator<'_> {
         };
         let mut chain: Option<va_ir::Stmt> = None;
         for k in (lo..=hi).rev() {
-            let node_k = self.resolve_vector_node_at(name, k)?;
+            let full = combine_idx(dyn_dim, k, other_idx);
+            let node_k = self.resolve_vector_node_at(name, &full)?;
             let (p, n) = if pos == 0 {
                 let n = match other {
                     Some(n) => n,
@@ -1826,9 +2026,182 @@ impl Elaborator<'_> {
         Ok(chain.expect("a declared vector net's range is always non-empty"))
     }
 
+    /// Lower `I(<port>)` (§ port-current probe, LRM §5.4.3) to an `Expr`: the current flowing
+    /// into this module through `port`, computed as the signed sum of every flow contribution
+    /// already made (elsewhere in this same analog block, at or before this point in source
+    /// order — see [`Self::collect_port_flow_contributions`]) to a branch touching the port's
+    /// node. `port` must name one of this module's own scalar ports (a vector port is a stated
+    /// v1 limitation — the LRM allows one, but no corpus need has surfaced it yet); `kind` must
+    /// be [`ast::AccessKind::Flow`] (`V(<port>)` is explicitly invalid per the LRM).
+    ///
+    /// **Sign convention**: a branch `(p, n)` contributed `I(p, n) <+ value;` sends `value`
+    /// current *from `p` to `n`* (the LRM's own convention — confirmed against its diode worked
+    /// example, where a forward-biased `branch(a, c)` with positive `V(a,c)` contributes
+    /// positive current, matching conventional current flow from anode `a` to cathode `c`). By
+    /// conservation, whatever current a branch sends *away* from the probed port's node must be
+    /// *supplied from outside* through the port, and whatever a branch sends *into* the node
+    /// reduces (or reverses) what's needed from outside — so a branch where the port's node is
+    /// `p` contributes `+value`, and one where it's `n` contributes `-value`.
+    fn lower_port_probe(
+        &mut self,
+        kind: ast::AccessKind,
+        port: &str,
+    ) -> Result<ExprId, FrontendError> {
+        if kind != ast::AccessKind::Flow {
+            return Err(elab(format!(
+                "`V(<{port}>)` is invalid — a port-current probe is a flow access only \
+                 (LRM §5.4.3); use `I(<{port}>)`"
+            )));
+        }
+        if !self.ast.ports.iter().any(|p| p == port) {
+            return Err(elab(format!(
+                "`{port}` is not a declared port of this module; a port-current probe can only \
+                 name one of this module's own ports"
+            )));
+        }
+        if let Some(dims) = self.vectors.get(port) {
+            return Err(elab(format!(
+                "`{port}` is a {}-D vector port; port-current probes are only supported for a \
+                 scalar port (v1 limitation)",
+                dims.len()
+            )));
+        }
+        let node = *self
+            .nodes
+            .get(port)
+            .ok_or_else(|| elab(format!("port `{port}` has no discipline declaration")))?;
+
+        let mut terms = Vec::new();
+        self.collect_port_flow_contributions(node, &self.out.analog.clone(), &[], &mut terms)?;
+
+        let mut sum = None;
+        for (sign, value) in terms {
+            let signed = if sign < 0.0 {
+                self.out.push_expr(Expr::Unary(va_ir::UnOp::Neg, value))
+            } else {
+                value
+            };
+            sum = Some(match sum {
+                None => signed,
+                Some(acc) => self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Add, acc, signed)),
+            });
+        }
+        Ok(sum.unwrap_or_else(|| self.out.push_expr(Expr::Const(0.0))))
+    }
+
+    /// Recursively walk `stmts` (a prefix of `self.out.analog`, already fully lowered) for every
+    /// `Stmt::Contribute` of [`AccessKind::Flow`] whose branch touches `node`, collecting
+    /// `(sign, value)` pairs into `out` — the constant-additive-fold half of
+    /// [`Self::lower_port_probe`]. `guards` accumulates the `If` conditions (as already-lowered
+    /// `ExprId`s) enclosing the current position; a qualifying contribution found `n` levels
+    /// deep in nested `if`s has its value wrapped in `n` nested `Expr::Select(guard, value, 0)`s,
+    /// so a conditionally-made contribution only counts when its condition actually held —
+    /// **not** applied to a contribution outside any `if` (`guards` empty), which counts
+    /// unconditionally, matching the direct real-corpus idiom (`external/hicumL0_v2p0p0.va`'s
+    /// `IB = I(<b>);`, read after every port-touching branch's contribution already ran
+    /// unconditionally earlier in the same block).
+    ///
+    /// **Limitation**: a qualifying contribution found inside a `case`/`for`/`while`/`repeat` is
+    /// rejected with a clear error rather than silently mis-summed or silently dropped — those
+    /// need either a per-arm equality guard (`case`) or genuine loop-carried accumulation
+    /// (`for`/`while`/`repeat`), neither of which this fold attempts; no corpus need for either
+    /// has surfaced yet (§ port-current probe).
+    fn collect_port_flow_contributions(
+        &mut self,
+        node: NodeId,
+        stmts: &[va_ir::Stmt],
+        guards: &[ExprId],
+        out: &mut Vec<(f64, ExprId)>,
+    ) -> Result<(), FrontendError> {
+        for stmt in stmts {
+            match stmt {
+                va_ir::Stmt::Contribute { target, value } if target.kind == AccessKind::Flow => {
+                    let branch = self.out.branches[target.branch.0 as usize];
+                    let sign = if branch.p == node {
+                        1.0
+                    } else if branch.n == node {
+                        -1.0
+                    } else {
+                        continue;
+                    };
+                    let mut v = *value;
+                    for &g in guards.iter().rev() {
+                        let zero = self.out.push_expr(Expr::Const(0.0));
+                        v = self.out.push_expr(Expr::Select(g, v, zero));
+                    }
+                    out.push((sign, v));
+                }
+                va_ir::Stmt::Contribute { .. } | va_ir::Stmt::Assign { .. } => {}
+                va_ir::Stmt::Block(body) => {
+                    self.collect_port_flow_contributions(node, body, guards, out)?;
+                }
+                va_ir::Stmt::If { cond, then_, else_ } => {
+                    let mut then_guards = guards.to_vec();
+                    then_guards.push(*cond);
+                    self.collect_port_flow_contributions(node, then_, &then_guards, out)?;
+
+                    let not_cond = self.out.push_expr(Expr::Unary(va_ir::UnOp::Not, *cond));
+                    let mut else_guards = guards.to_vec();
+                    else_guards.push(not_cond);
+                    self.collect_port_flow_contributions(node, else_, &else_guards, out)?;
+                }
+                va_ir::Stmt::Case { arms, default, .. } => {
+                    let hit = arms.iter().any(|a| self.branch_flow_touches(node, &a.body))
+                        || self.branch_flow_touches(node, default);
+                    if hit {
+                        return Err(elab(
+                            "a port-current probe (§ port-current probe) can't sum a flow \
+                             contribution made inside a `case` arm — not yet supported"
+                                .to_string(),
+                        ));
+                    }
+                }
+                va_ir::Stmt::For { body, .. }
+                | va_ir::Stmt::While { body, .. }
+                | va_ir::Stmt::Repeat { body, .. } => {
+                    if self.branch_flow_touches(node, body) {
+                        return Err(elab(
+                            "a port-current probe (§ port-current probe) can't sum a flow \
+                             contribution made inside a loop — not yet supported"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `stmts` contains, anywhere (at any nesting depth), a flow contribution to a
+    /// branch touching `node` — the presence-only check [`Self::collect_port_flow_contributions`]
+    /// uses to detect an unsupported case (a `case`/loop body it can't soundly fold) rather than
+    /// silently under-counting.
+    fn branch_flow_touches(&self, node: NodeId, stmts: &[va_ir::Stmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            va_ir::Stmt::Contribute { target, .. } if target.kind == AccessKind::Flow => {
+                let branch = self.out.branches[target.branch.0 as usize];
+                branch.p == node || branch.n == node
+            }
+            va_ir::Stmt::Contribute { .. } | va_ir::Stmt::Assign { .. } => false,
+            va_ir::Stmt::Block(body) => self.branch_flow_touches(node, body),
+            va_ir::Stmt::If { then_, else_, .. } => {
+                self.branch_flow_touches(node, then_) || self.branch_flow_touches(node, else_)
+            }
+            va_ir::Stmt::Case { arms, default, .. } => {
+                arms.iter().any(|a| self.branch_flow_touches(node, &a.body))
+                    || self.branch_flow_touches(node, default)
+            }
+            va_ir::Stmt::For { body, .. }
+            | va_ir::Stmt::While { body, .. }
+            | va_ir::Stmt::Repeat { body, .. } => self.branch_flow_touches(node, body),
+        })
+    }
+
     /// Resolve one element of an array variable (§ array variables) to its [`VarId`] — the
-    /// `VarId` counterpart of [`Self::resolve_net_arg`]'s vector-net indexing. `index_expr`
-    /// must be a compile-time-constant or genvar expression; a genuinely runtime index
+    /// `VarId` counterpart of [`Self::resolve_net_arg`]'s vector-net indexing. Each entry of
+    /// `idxs` must be a compile-time-constant or genvar expression; a genuinely runtime index
     /// (§ dynamic vector-net/array-variable indexing) is not resolvable to a single `VarId`
     /// here — that case is detected earlier and routed to
     /// [`Self::lower_indexed_var_read`]/[`Self::lower_indexed_var_write`] instead, which call
@@ -1837,29 +2210,42 @@ impl Elaborator<'_> {
     fn resolve_var_array_index(
         &mut self,
         name: &str,
-        index_expr: ExprRef,
+        idxs: &[ExprRef],
     ) -> Result<VarId, FrontendError> {
-        let idx = self.const_eval_int(index_expr, "array variable index")?;
-        self.resolve_array_var_at(name, idx)
+        let idxs: Vec<i64> = idxs
+            .iter()
+            .map(|&e| self.const_eval_int(e, "array variable index"))
+            .collect::<Result<_, _>>()?;
+        self.resolve_array_var_at(name, &idxs)
     }
 
-    /// Resolve one already-known index `idx` of a declared array variable `name` to its
-    /// [`VarId`], bounds-checked against the array's declared range. The constant-index tail of
+    /// Resolve one already-known index tuple `idxs` of a declared array variable `name` to its
+    /// [`VarId`], bounds-checked against the array's declared dimension range(s) (dimension
+    /// count must also match, catching a partial/over-index). The constant-index tail of
     /// [`Self::resolve_var_array_index`], factored out for the same reason as
     /// [`Self::resolve_vector_node_at`] is: a runtime-indexed expansion chain needs to resolve
     /// several concrete literal indices, none of which have an `ExprRef` of their own.
-    fn resolve_array_var_at(&self, name: &str, idx: i64) -> Result<VarId, FrontendError> {
-        let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
+    fn resolve_array_var_at(&self, name: &str, idxs: &[i64]) -> Result<VarId, FrontendError> {
+        let dims = self.var_arrays.get(name).ok_or_else(|| {
             elab(format!(
                 "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
             ))
         })?;
-        if idx < lo || idx > hi {
+        if dims.len() != idxs.len() {
             return Err(elab(format!(
-                "index {idx} is out of `{name}`'s declared range [{lo}:{hi}]"
+                "`{name}` is declared with {} dimension(s) but accessed with {}",
+                dims.len(),
+                idxs.len()
             )));
         }
-        let key = format!("{name}[{idx}]");
+        for (d, (&(lo, hi), &idx)) in dims.iter().zip(idxs).enumerate() {
+            if idx < lo || idx > hi {
+                return Err(elab(format!(
+                    "index {idx} is out of `{name}`'s declared dimension {d} range [{lo}:{hi}]"
+                )));
+            }
+        }
+        let key = indexed_key(name, idxs);
         self.vars.get(&key).copied().ok_or_else(|| {
             elab(format!(
                 "internal error: array variable node `{key}` was not interned"
@@ -1867,13 +2253,50 @@ impl Elaborator<'_> {
         })
     }
 
-    /// Lower `name[index]` (one element of an array variable, § array variables) to an
-    /// `Expr`. The common case (`index` compile-time-constant/genvar) resolves directly to the
-    /// concrete element's `Expr::Var`. When `index` is a genuinely runtime expression (an
-    /// ordinary `integer` loop counter, say — confirmed needed by
+    /// Array-variable counterpart of [`Self::dynamic_terminal_range`]: if `idxs` includes
+    /// exactly one genuinely runtime (non-constant, non-genvar) entry, return it; two dynamic
+    /// entries is rejected by [`Self::dynamic_index_pos`] before this is even reached.
+    fn dynamic_var_index(
+        &self,
+        name: &str,
+        idxs: &[ExprRef],
+    ) -> Result<Option<DynamicVarIndex>, FrontendError> {
+        let Some(dyn_dim) = self.dynamic_index_pos(name, idxs)? else {
+            return Ok(None);
+        };
+        let dims = self.var_arrays.get(name).ok_or_else(|| {
+            elab(format!(
+                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
+            ))
+        })?;
+        if dims.len() != idxs.len() {
+            return Err(elab(format!(
+                "`{name}` is declared with {} dimension(s) but accessed with {}",
+                dims.len(),
+                idxs.len()
+            )));
+        }
+        let other_idx = if dims.len() == 2 {
+            Some(self.const_eval_int(idxs[1 - dyn_dim], "array variable index")?)
+        } else {
+            None
+        };
+        let (lo, hi) = dims[dyn_dim];
+        Ok(Some(DynamicVarIndex {
+            dyn_dim,
+            other_idx,
+            lo,
+            hi,
+        }))
+    }
+
+    /// Lower `name[index]` / `name[i][j]` (one element of a 1-D or § 2-D array variable) to an
+    /// `Expr`. The common case (every index compile-time-constant/genvar) resolves directly to
+    /// the concrete element's `Expr::Var`. When exactly one index is a genuinely runtime
+    /// expression (an ordinary `integer` loop counter, say — confirmed needed by
     /// `adc_16bit_ideal.va`/`dac_16bit_ideal.va`), there is no single `VarId` to read at
-    /// elaboration time; expand into a nested `Expr::Select` chain instead, one arm per
-    /// declared index, guarded by `index == k` — the expression-level sibling of
+    /// elaboration time; expand into a nested `Expr::Select` chain instead, one arm per declared
+    /// value of that one dimension, guarded by `index == k` — the expression-level sibling of
     /// [`Self::lower_indexed_var_write`]'s statement-level `If` chain, and structurally
     /// identical to [`Self::lower_probe_expr`]'s (same fallback-arm limitation: an
     /// out-of-declared-range runtime index resolves to the `hi` arm rather than erroring, since
@@ -1881,21 +2304,23 @@ impl Elaborator<'_> {
     fn lower_indexed_var_read(
         &mut self,
         name: &str,
-        index_expr: ExprRef,
+        idxs: &[ExprRef],
     ) -> Result<ExprId, FrontendError> {
-        if self.const_eval(index_expr).is_ok() {
-            let id = self.resolve_var_array_index(name, index_expr)?;
+        let Some(DynamicVarIndex {
+            dyn_dim,
+            other_idx,
+            lo,
+            hi,
+        }) = self.dynamic_var_index(name, idxs)?
+        else {
+            let id = self.resolve_var_array_index(name, idxs)?;
             return Ok(self.out.push_expr(Expr::Var(id)));
-        }
-        let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
-            elab(format!(
-                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
-            ))
-        })?;
-        let idx = self.lower_expr(index_expr)?;
+        };
+        let idx = self.lower_expr(idxs[dyn_dim])?;
         let mut chain: Option<ExprId> = None;
         for k in (lo..=hi).rev() {
-            let id = self.resolve_array_var_at(name, k)?;
+            let full = combine_idx(dyn_dim, k, other_idx);
+            let id = self.resolve_array_var_at(name, &full)?;
             let read = self.out.push_expr(Expr::Var(id));
             chain = Some(match chain {
                 None => read,
@@ -1911,27 +2336,36 @@ impl Elaborator<'_> {
         Ok(chain.expect("a declared array variable's range is always non-empty"))
     }
 
-    /// Statement-level sibling of [`Self::lower_indexed_var_read`]: `name[index] = rhs;` where
-    /// `index` is a genuinely runtime expression expands into an if/else-if chain, one
-    /// `Stmt::Assign` per declared index, guarded by `index == k`. `rhs` is lowered once, up
-    /// front, and shared across every arm (same reasoning as
-    /// [`Self::unroll_indexed_contribute`]'s shared `value`).
+    /// Statement-level sibling of [`Self::lower_indexed_var_read`]: `name[index] = rhs;` /
+    /// `name[i][j] = rhs;` where exactly one index is a genuinely runtime expression expands
+    /// into an if/else-if chain, one `Stmt::Assign` per declared value of that one dimension,
+    /// guarded by `index == k`. `rhs` is lowered once, up front, and shared across every arm
+    /// (same reasoning as [`Self::unroll_indexed_contribute`]'s shared `value`). The
+    /// every-index-constant case resolves directly to a single `Stmt::Assign`, mirroring
+    /// [`Self::lower_indexed_var_read`]'s dual-path shape.
     fn lower_indexed_var_write(
         &mut self,
         name: &str,
-        index_expr: ExprRef,
+        idxs: &[ExprRef],
         rhs: ExprRef,
     ) -> Result<va_ir::Stmt, FrontendError> {
-        let (lo, hi) = *self.var_arrays.get(name).ok_or_else(|| {
-            elab(format!(
-                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
-            ))
-        })?;
-        let idx = self.lower_expr(index_expr)?;
+        let Some(DynamicVarIndex {
+            dyn_dim,
+            other_idx,
+            lo,
+            hi,
+        }) = self.dynamic_var_index(name, idxs)?
+        else {
+            let id = self.resolve_var_array_index(name, idxs)?;
+            let rhs = self.lower_expr(rhs)?;
+            return Ok(va_ir::Stmt::Assign { lhs: id, rhs });
+        };
+        let idx = self.lower_expr(idxs[dyn_dim])?;
         let rhs = self.lower_expr(rhs)?;
         let mut chain: Option<va_ir::Stmt> = None;
         for k in (lo..=hi).rev() {
-            let id = self.resolve_array_var_at(name, k)?;
+            let full = combine_idx(dyn_dim, k, other_idx);
+            let id = self.resolve_array_var_at(name, &full)?;
             let assign = va_ir::Stmt::Assign { lhs: id, rhs };
             chain = Some(match chain {
                 None => assign,
@@ -3858,6 +4292,394 @@ mod tests {
                 assert!(matches!(else_.as_slice(), [va_ir::Stmt::Contribute { .. }]));
             }
             other => panic!("expected an if/else-if chain, got {other:?}"),
+        }
+    }
+
+    // --- § port-current probe (LRM §5.4.3, `I(<port>)`) ----------------------------------
+
+    #[test]
+    fn port_probe_sums_unconditional_contributions_with_correct_sign() {
+        // The LRM's own diode worked example (§5.4.3): two branches both terminating at `a`
+        // (`a` is the `p` terminal of both `i_diode` and `junc_cap`) each contribute positive
+        // current, so `I(<a>)` should be their sum.
+        let m = elaborate_src(
+            "module diode(a, c); inout a, c; electrical a, c; \
+             branch (a, c) i_diode, junc_cap; \
+             parameter real is = 1e-14; \
+             analog begin \
+               I(i_diode) <+ is; \
+               I(junc_cap) <+ 2.0 * is; \
+               I(a) <+ I(<a>); \
+             end endmodule",
+        );
+        let value = match &m.analog[2] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        // `I(<a>)` sums both branches' contributed values (`is` and `2*is`), both `+` since
+        // `a` is the `p` terminal of both branches — expect a `Binary(Add, ...)` chain, not a
+        // bare probe/const.
+        assert!(matches!(
+            m.expr(value),
+            va_ir::Expr::Binary(va_ir::BinOp::Add, _, _)
+        ));
+    }
+
+    #[test]
+    fn port_probe_negates_contributions_where_the_port_is_the_n_terminal() {
+        // `branch (c, a)`: `a` is now the `n` terminal, so a positive contribution should sum
+        // into `I(<a>)` as a *negative* term (current arriving at `a` from inside the module
+        // reduces what must be supplied from outside).
+        let m = elaborate_src(
+            "module leg(a, c); inout a, c; electrical a, c; \
+             branch (c, a) i_leg; \
+             analog begin \
+               I(i_leg) <+ 1.0; \
+               I(a) <+ I(<a>); \
+             end endmodule",
+        );
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(
+            m.expr(value),
+            va_ir::Expr::Unary(va_ir::UnOp::Neg, _)
+        ));
+    }
+
+    #[test]
+    fn port_probe_with_no_contributions_folds_to_zero() {
+        let m = elaborate_src(
+            "module t(a); inout a; electrical a; \
+             analog begin I(a) <+ I(<a>); end endmodule",
+        );
+        let value = match &m.analog[0] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(m.expr(value), va_ir::Expr::Const(v) if *v == 0.0));
+    }
+
+    #[test]
+    fn port_probe_inside_if_wraps_in_a_select_guarded_by_the_condition() {
+        // The HICUM-style pattern: a series-resistance branch only contributes when a
+        // parameter clears a threshold — `I(<port>)` must only count it when the guard held.
+        let m = elaborate_src(
+            "module t(a, bi); inout a, bi; electrical a, bi; \
+             branch (a, bi) rbx; parameter real r = 10.0; \
+             analog begin \
+               if (r >= 1.0) begin \
+                 I(rbx) <+ V(rbx) / r; \
+               end \
+               I(a) <+ I(<a>); \
+             end endmodule",
+        );
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(m.expr(value), va_ir::Expr::Select(_, _, _)));
+    }
+
+    #[test]
+    fn v_of_port_probe_is_rejected() {
+        let src = "module t(a); inout a; electrical a; \
+                   analog begin I(a) <+ V(<a>); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn port_probe_naming_a_non_port_is_rejected() {
+        let src = "module t(a); inout a; electrical a, internal; \
+                   analog begin I(a) <+ I(<internal>); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn port_probe_as_a_contribution_target_is_a_parse_error() {
+        let src = "module t(a); inout a; electrical a; analog begin I(<a>) <+ 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        assert!(parse(&toks).is_err());
+    }
+
+    #[test]
+    fn port_probe_of_a_flow_contribution_inside_a_case_arm_is_rejected() {
+        let src = "module t(a); inout a; electrical a, x; branch (a, x) br; \
+                   parameter real sel = 0.0; \
+                   analog begin \
+                     case (sel) \
+                       0: I(br) <+ 1.0; \
+                       default: I(br) <+ 0.0; \
+                     endcase \
+                     I(a) <+ I(<a>); \
+                   end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("case"),
+                "expected a case-specific message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
+    }
+
+    // --- § 2-D array variables / § 2-D vector nets --------------------------------------
+
+    #[test]
+    fn two_d_array_variable_write_and_read_with_constant_indices() {
+        // `tile[0][1] = 5.0; I(a,b) <+ tile[0][1];` — literal (compile-time-constant) indices
+        // resolve to the same `VarId` on both the write and the read, named "tile[0][1]".
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; real tile[0:1][0:1]; \
+             analog begin tile[0][1] = 5.0; I(a, b) <+ tile[0][1]; end endmodule",
+        );
+        let write_id = match &m.analog[0] {
+            va_ir::Stmt::Assign { lhs, .. } => *lhs,
+            other => panic!("expected an assignment, got {other:?}"),
+        };
+        let read_id = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => match m.expr(*value) {
+                va_ir::Expr::Var(id) => *id,
+                other => panic!("expected Expr::Var, got {other:?}"),
+            },
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert_eq!(write_id, read_id);
+        assert_eq!(m.vars[write_id.0 as usize].name, "tile[0][1]");
+    }
+
+    #[test]
+    fn two_d_array_variable_out_of_range_index_is_rejected() {
+        let src = "module t(); real tile[0:1][0:1]; \
+                   analog begin tile[2][0] = 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn two_d_array_variable_partial_index_dimension_mismatch_is_rejected() {
+        // `tile` is declared with 2 dimensions; indexing it with only 1 must be rejected
+        // rather than silently resolving to some other element.
+        let src = "module t(); real tile[0:1][0:1]; analog begin tile[0] = 1.0; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("dimension"),
+                "expected a dimension-count message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_d_array_variable_runtime_index_in_one_dim_expands_to_a_select_chain() {
+        // `tile[0][j]` with a runtime `j` and a constant first dimension: only the dynamic
+        // dimension unrolls into a `Select` chain (not an O(range²) chain over both).
+        let src = "module t(a); electrical a; real tile[0:0][0:3]; integer j; \
+                   analog begin j = 2; I(a) <+ tile[0][j]; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        let m = elaborate(&ast).expect("elaborates");
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(m.expr(value), va_ir::Expr::Select(_, _, _)));
+        let read_names: std::collections::HashSet<_> = m
+            .exprs
+            .iter()
+            .filter_map(|e| match e {
+                va_ir::Expr::Var(id) => Some(m.vars[id.0 as usize].name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for k in 0..4 {
+            assert!(
+                read_names.contains(format!("tile[0][{k}]").as_str()),
+                "missing read of tile[0][{k}] in {read_names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_d_array_variable_both_dims_dynamic_is_rejected() {
+        // Both index positions of the same 2-D access being simultaneously dynamic is
+        // rejected rather than expanded into an O(range²) chain (mirrors this file's existing
+        // precedent of rejecting two dynamically-indexed *terminals* in one access — see
+        // `dynamic_index_pos`'s doc comment).
+        let src = "module t(a); electrical a; real tile[0:1][0:1]; integer i, j; \
+                   analog begin i = 0; j = 1; I(a) <+ tile[i][j]; end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
+    fn two_d_vector_net_declaration_and_indexed_probe_elaborates() {
+        // `electrical [0:1][0:1] grid;` (§ 2-D vector net, a documented non-standard
+        // extension) interns 4 nodes, named "grid[i][j]"; a fully 2-indexed probe resolves.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; electrical [0:1][0:1] grid; \
+             analog begin I(a, b) <+ V(grid[0][1]); end endmodule",
+        );
+        assert!(m.nodes.iter().any(|n| n.name == "grid[0][0]"));
+        assert!(m.nodes.iter().any(|n| n.name == "grid[1][1]"));
+        assert_eq!(
+            m.nodes
+                .iter()
+                .filter(|n| n.name.starts_with("grid["))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn two_d_vector_net_bare_or_partial_index_is_rejected() {
+        for src in [
+            "module t(); electrical [0:1][0:1] grid; analog begin I(grid) <+ 1.0; end endmodule",
+            "module t(); electrical [0:1][0:1] grid; analog begin I(grid[0]) <+ 1.0; end endmodule",
+        ] {
+            let toks = lex(src).expect("lex");
+            let ast = parse(&toks)
+                .expect("parse")
+                .into_iter()
+                .next()
+                .expect("at least one module");
+            assert!(elaborate(&ast).is_err(), "expected rejection for: {src}");
+        }
+    }
+
+    #[test]
+    fn two_d_vector_net_cannot_be_used_as_a_port() {
+        let src = "module t(grid); electrical [0:1][0:1] grid; analog begin end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        match elaborate(&ast) {
+            Err(FrontendError::Elaborate(msg)) => assert!(
+                msg.contains("2-D"),
+                "expected a 2-D-vector-net-specific message, got: {msg}"
+            ),
+            other => panic!("expected an elaboration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_d_vector_net_runtime_index_in_one_dim_expands_to_a_select_chain() {
+        let src = "module t(a, b); electrical a, b; electrical [0:0][0:1] grid; integer i; \
+                   analog begin i = 1; I(a, b) <+ V(grid[0][i]); end endmodule";
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        let m = elaborate(&ast).expect("elaborates");
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(matches!(m.expr(value), va_ir::Expr::Select(_, _, _)));
+    }
+
+    #[test]
+    fn two_d_vector_net_slice_is_rejected() {
+        for src in [
+            // A bare slice on a declared-2-D vector net.
+            "module t(a, b); electrical a, b; electrical [0:1][0:1] grid; \
+             analog begin I(a, b) <+ V(grid[0:1]); end endmodule",
+            // An index combined with a trailing slice.
+            "module t(a, b); electrical a, b; electrical [0:1][0:1] grid; \
+             analog begin I(a, b) <+ V(grid[0][0:1]); end endmodule",
+        ] {
+            let toks = lex(src).expect("lex");
+            let ast = parse(&toks)
+                .expect("parse")
+                .into_iter()
+                .next()
+                .expect("at least one module");
+            assert!(elaborate(&ast).is_err(), "expected rejection for: {src}");
+        }
+    }
+
+    #[test]
+    fn two_d_reticule_nested_generate_for_addresses_every_tile() {
+        // The motivating "2-D reticule" case: two nested genvar-driven generate loops build a
+        // 2x2 grid of tile values, each addressed by `tile[i][j]`.
+        let m = elaborate_src(
+            "module reticule(a); electrical a; real tile[0:1][0:1]; genvar i, j; \
+             analog begin \
+               for (i = 0; i < 2; i = i + 1) begin \
+                 for (j = 0; j < 2; j = j + 1) begin \
+                   tile[i][j] = i + j; \
+                 end \
+               end \
+               I(a) <+ tile[0][0] + tile[0][1] + tile[1][0] + tile[1][1]; \
+             end endmodule",
+        );
+        // Both generate loops are fully unrolled: the outer Block holds one inner Block per
+        // `i`, each inner Block holding one Assign per `j`.
+        match &m.analog[0] {
+            va_ir::Stmt::Block(outer) => {
+                assert_eq!(outer.len(), 2);
+                for inner in outer {
+                    match inner {
+                        va_ir::Stmt::Block(inner) => {
+                            assert_eq!(inner.len(), 2);
+                            assert!(inner
+                                .iter()
+                                .all(|s| matches!(s, va_ir::Stmt::Assign { .. })));
+                        }
+                        other => panic!("expected an inner unrolled block, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected the outer unrolled block, got {other:?}"),
+        }
+        for (i, j) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            assert!(
+                m.vars.iter().any(|v| v.name == format!("tile[{i}][{j}]")),
+                "missing tile[{i}][{j}]"
+            );
         }
     }
 
