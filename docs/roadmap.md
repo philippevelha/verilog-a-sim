@@ -315,17 +315,13 @@ the file — confirmed by inspection, not a frontend gap).
    found so far, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a
    fragment artifact). (The previously-noted stray `` \ `` line-continuation lex error in
    `external/bsimsoi.va` is gone — string-escape handling, added separately, covers it.)
-5. **Wiring parsed nature metadata into convergence/multi-physics** — `units`/`abstol`/
-   `idt_nature`/`ddt_nature` are parsed and stored (`disciplines.rs::NatureDecl`) but never read
-   by `va-core` or elaboration; a real per-discipline `abstol` could feed `convergence.rs`'s
-   `gmin`/damping aids once a net's discipline round-trips that far.
-6. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
+5. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
    access's implicit "gnd" second terminal is hardcoded `Discipline::Electrical` regardless of
    the access's own discipline (e.g. a bare `Temp(dt)` still resolves against an
    electrical-tagged reference node); pre-existing, not introduced by the discipline/nature
    pass, and not fixable without per-access discipline tracking that doesn't exist even for
    electrical/thermal today.
-7. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
+6. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
    production in `parse_item` at all; the implicit "gnd" node (`reference_node`, above) is the
    only reference-node convention this project has.
 
@@ -358,6 +354,39 @@ one found inside a `case`/`for`/`while`/`repeat` is rejected with a clear "not y
 error rather than silently mis-summed or dropped — no corpus need for either has surfaced.
 Vector ports are a stated v1 limitation (scalar only). Moved the corpus from 106/150 to
 112/150 (the 6 HICUM/L0 files).
+
+**Now closed** (was backlog item 5, "wiring parsed nature metadata into convergence" —
+resolved 2026-07-09): a discipline's `abstol` now round-trips all the way from a parsed
+`nature...endnature` block into `va-core`'s Newton convergence check for a real `va-cli sim`
+run, not just into `disciplines.rs::NatureDecl` where it used to stop. Turned out to be a
+four-hop gap, not one: (1) `Parser::natures`/`disciplines` never left `Parser` — `parse()`'s
+public return type was `Vec<ModuleAst>` only, fixed with an additive `parse_with_disciplines`
+(`parse` becomes a thin wrapper); (2) `Elaborator` had nowhere to receive them — fixed with
+`elaborate_with_library_and_disciplines` (again additive; `elaborate`/`elaborate_with_library`
+now thin wrappers passing empty tables, so a net with no resolvable metadata still gets
+`abstol: None`, exactly the old behavior); (3) `va_ir::NodeDecl` had nowhere to carry a
+resolved value — closed by an Interface α §6 change, `NodeDecl.abstol: Option<f64>`, sourced
+from the node's discipline's **potential** nature (`disciplines::resolve_abstol`); (4)
+`va_abi::ModelInstance` had no way to expose a per-unknown tolerance to `va-core` at all —
+closed by an Interface β §6 change, `unknown_abstol`, a default trait method in the exact
+shape of the 2026-07-04 `unknown_kind` addition. `va-codegen`'s generated models implement it
+by reading their own `NodeDecl.abstol`; `va-core::mna::classify_abstol` collects it (mirroring
+`classify_unknowns`); `newton::solve_from`'s per-unknown convergence check now consults it
+instead of always using `NewtonConfig::abstol`. `va-cli` itself needed **no changes** — its
+`--model <m.va>` flag already compiled a real `.va` file through `va-frontend` → `va-codegen`
+and matched it against netlist devices by model name (`build_from_model`), so switching
+`compile_with_includes` to the discipline-aware entry points was the entire integration.
+Two stated v1 limits: no wiring for a discipline's *flow* nature (e.g. `Current`'s own
+`abstol`) — only a `Node`-kind unknown has a natural `NodeDecl`-shaped home for one, a
+branch-current unknown stays on the global default; and the separate `residual_norm <=
+cfg.abstol` gate in `solve_from` stays a single global scalar (reweighting an `inf_norm` check
+into a per-row form is a different design question). Also added `models/disciplines.vams` (a
+minimal, self-written electrical-only header — not a copy of the ~700-line Accellera annex) so
+the project's own bring-up model zoo, previously silently missing this `` `include ``, now
+resolves a real `abstol` too. Doesn't move the corpus pass count (no tracked corpus file's DC
+answer depends on convergence-aid tolerance, by design — this is a convergence-aid change, not
+a modeling one, confirmed by a regression test asserting the divider's operating point is
+bit-for-bit identical with and without `disciplines.vams` resolved).
 
 **Corpus artifact, not a language gap** (found chasing what first looked like the discipline/
 nature gap above): the PSP102/103/104 family, `L_UTSOI_102[_nqs]`, and `r2_cmc`/`r2_et_cmc` (8

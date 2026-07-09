@@ -134,6 +134,15 @@ pub struct NodeDecl {
     pub name: String,
     /// The discipline that governs this node.
     pub discipline: Discipline,
+    /// The node's discipline's **potential** nature's `abstol`, if a `discipline...
+    /// enddiscipline`/`nature...endnature` preamble resolved one (§ nature-metadata wiring,
+    /// `va_frontend::disciplines::resolve_abstol`). `None` whenever no such preamble was parsed,
+    /// the resolved discipline has no `potential` nature, or that nature's own `abstol` is
+    /// absent/non-literal — `va-core` falls back to its own configured default in every `None`
+    /// case, exactly its prior behavior. There is no equivalent slot for the *flow* nature's
+    /// `abstol` (e.g. `Current`'s) — only a `Node`-kind unknown (a KCL potential) has a natural
+    /// per-`NodeDecl` home; a branch-current unknown stays on the solver's global default.
+    pub abstol: Option<f64>,
 }
 
 /// A branch between two nodes (the `+` and `-` terminals of an `Access`).

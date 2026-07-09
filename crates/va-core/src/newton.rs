@@ -7,6 +7,14 @@
 //! circuit with limiting off this lands in two iterations; for smooth nonlinear devices Newton
 //! converges quadratically near the solution.
 //!
+//! **The `abstol` in the per-unknown "applied update" check is per-unknown**, not always
+//! `cfg.abstol`: [`solve`] builds it once via [`crate::mna::classify_abstol`], which lets any
+//! [`va_abi::ModelInstance::unknown_abstol`] override its own unknown's tolerance (§
+//! nature-metadata wiring — a `va-codegen`-generated model's discipline/nature metadata,
+//! ultimately) — every unknown with no override still uses `cfg.abstol`. The residual-norm
+//! gate (`residual_norm <= cfg.abstol`, just above) stays a single global scalar — reweighting
+//! that `inf_norm` check into a per-row form is a separate design question, out of scope here.
+//!
 //! [`solve`] also drives an optional outer `gmin`-stepping homotopy (`NewtonConfig::gmin_steps`)
 //! around the inner iteration: each stage re-solves with [`crate::mna::System::shunt_gmin`]
 //! adding a decreasing conductance ([`crate::convergence::gmin_for_step`]) to every
@@ -81,13 +89,16 @@ pub fn solve(
     } else {
         vec![UnknownKind::Node; dim]
     };
+    // Unlike `kinds`, this always runs: every `solve_from` call's per-iteration convergence
+    // check needs it, not just `shunt_gmin` (§ nature-metadata wiring's module doc comment).
+    let per_abstol = mna::classify_abstol(instances, dim, cfg.abstol);
 
     let mut x = vec![0.0; dim];
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
         let gmin = convergence::gmin_for_step(step, cfg.gmin_steps);
-        x = solve_from(x, instances, dim, cfg, gmin, &kinds)?;
+        x = solve_from(x, instances, dim, cfg, gmin, &kinds, &per_abstol)?;
     }
     Ok(x)
 }
@@ -102,6 +113,7 @@ fn solve_from(
     cfg: NewtonConfig,
     gmin: f64,
     kinds: &[UnknownKind],
+    per_abstol: &[f64],
 ) -> Result<Vec<f64>, CoreError> {
     let vt = convergence::VT_300K;
     let vcrit = convergence::default_vcrit(vt);
@@ -128,7 +140,7 @@ fn solve_from(
             x[i] = vnew;
 
             let applied = vnew - vold;
-            if applied.abs() > cfg.reltol * vnew.abs() + cfg.abstol {
+            if applied.abs() > cfg.reltol * vnew.abs() + per_abstol[i] {
                 update_small = false;
             }
         }
@@ -171,6 +183,47 @@ mod tests {
         assert!((x[1] - 1.0).abs() < 1e-9, "midpoint = {}", x[1]);
         // Branch current through the source equals the divider current = 1 mA.
         assert!((x[2].abs() - 1e-3).abs() < 1e-12, "i = {}", x[2]);
+    }
+
+    #[test]
+    fn per_unknown_abstol_override_changes_the_convergence_decision() {
+        // The exact `solves_resistor_divider` circuit, but capped to 1 Newton iteration
+        // (`limit_junctions: false` for a deterministic, uncla­mped first step — the divider is
+        // linear, so that one step already lands exactly on the solution; only the *declared*
+        // convergence outcome is what this test is about). At the default (tight, 1e-12)
+        // abstol, the first iteration's own jump (0 -> ~2V/1V/1mA) is nowhere near "small", so
+        // `update_small` doesn't fire and 1 iteration isn't enough — the residual only settles
+        // to ~0 on the *second* pass, exactly `reports_non_convergence`'s shape.
+        let vs = VSource::new(0, GROUND, 2, 2.0);
+        let r1 = Resistor::new(0, 1, 1000.0);
+        let r2 = Resistor::new(1, GROUND, 1000.0);
+        let cfg = NewtonConfig {
+            max_iters: 1,
+            limit_junctions: false,
+            ..NewtonConfig::default()
+        };
+
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r1, &r2];
+        assert!(
+            matches!(solve(&insts, 3, cfg), Err(CoreError::NoConvergence { .. })),
+            "the default tight abstol should not absorb the first iteration's jump"
+        );
+
+        // Every unknown's abstol loosened (§ nature-metadata wiring) past the size of that
+        // first jump: `update_small` now holds after the very first iteration, at the exact
+        // same 1-iteration budget — the override, not a wider budget, is what changes this.
+        let vs_loose = crate::testutil::AbstolOverride {
+            inner: &vs,
+            overrides: &[(0, 10.0), (2, 10.0)], // node0, this source's own branch current
+        };
+        let r1_loose = crate::testutil::AbstolOverride {
+            inner: &r1,
+            overrides: &[(1, 10.0)], // node1, via r1's own local index for it
+        };
+        let insts_loose: [&dyn ModelInstance; 3] = [&vs_loose, &r1_loose, &r2];
+        let x = solve(&insts_loose, 3, cfg).expect("loosened abstol converges within 1 iteration");
+        assert!((x[0] - 2.0).abs() < 1e-9, "node0 = {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-9, "midpoint = {}", x[1]);
     }
 
     #[test]

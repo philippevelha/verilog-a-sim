@@ -36,4 +36,37 @@ pub enum CoreError {
 #[cfg(test)]
 pub(crate) mod testutil {
     pub use va_abi::reference::VSource;
+
+    /// Wraps any [`va_abi::ModelInstance`], overriding [`va_abi::ModelInstance::unknown_abstol`]
+    /// for zero or more of its own local indices (`overrides`, `(local index, abstol)` pairs) —
+    /// lets `mna`'s and `newton`'s tests exercise § nature-metadata wiring's per-unknown
+    /// convergence tolerance without a real Verilog-A-compiled model (none of the hand-written
+    /// `va-abi::reference` devices carry discipline metadata to report). A local index with no
+    /// matching entry in `overrides` falls back to `inner`'s own (always `None`, for every
+    /// `va-abi::reference` device) — so a multi-unknown instance like `VSource` can have some
+    /// of its unknowns overridden and others left at the solver's default in one wrapper,
+    /// without double-stamping `inner.load()` via two separate wrapper instances.
+    pub struct AbstolOverride<'a> {
+        pub inner: &'a dyn va_abi::ModelInstance,
+        pub overrides: &'a [(usize, f64)],
+    }
+
+    impl va_abi::ModelInstance for AbstolOverride<'_> {
+        fn unknowns(&self) -> &[usize] {
+            self.inner.unknowns()
+        }
+        fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+            self.inner.unknown_kind(i)
+        }
+        fn unknown_abstol(&self, i: usize) -> Option<f64> {
+            self.overrides
+                .iter()
+                .find(|&&(local, _)| local == i)
+                .map(|&(_, abstol)| abstol)
+                .or_else(|| self.inner.unknown_abstol(i))
+        }
+        fn load(&self, x: &[f64], sink: &mut dyn va_abi::stamps::StampSink) {
+            self.inner.load(x, sink)
+        }
+    }
 }

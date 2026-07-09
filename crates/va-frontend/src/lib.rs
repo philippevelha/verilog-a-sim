@@ -62,10 +62,15 @@ pub fn compile_with_includes(
 ) -> Result<CompiledDesign, FrontendError> {
     let expanded = preprocess::preprocess(source, include_dirs)?;
     let tokens = lexer::lex(&expanded)?;
-    let asts = parser::parse(&tokens)?;
+    let (asts, natures, disciplines) = parser::parse_with_disciplines(&tokens)?;
     let mut modules = Vec::with_capacity(asts.len());
     for ast in &asts {
-        modules.push(elaborate::elaborate_with_library(ast, &asts)?);
+        modules.push(elaborate::elaborate_with_library_and_disciplines(
+            ast,
+            &asts,
+            &disciplines,
+            &natures,
+        )?);
     }
     Ok(CompiledDesign { modules })
 }

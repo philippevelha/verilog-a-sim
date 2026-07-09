@@ -72,6 +72,28 @@ use crate::FrontendError;
 ///
 /// Returns [`FrontendError::Parse`] on unexpected or missing tokens.
 pub fn parse(tokens: &[Token]) -> Result<Vec<ModuleAst>, FrontendError> {
+    parse_with_disciplines(tokens).map(|(modules, _, _)| modules)
+}
+
+/// [`parse_with_disciplines`]'s return: every parsed module, plus the file-scoped
+/// `nature...endnature`/`discipline...enddiscipline` tables (§ module preamble discipline/
+/// nature parsing) keyed by name.
+pub type ParsedUnit = (
+    Vec<ModuleAst>,
+    HashMap<String, NatureDecl>,
+    HashMap<String, DisciplineDecl>,
+);
+
+/// Like [`parse`], but also returning the file-scoped `nature...endnature`/
+/// `discipline...enddiscipline` tables the parser built along the way (§ module preamble
+/// discipline/nature parsing) — dropped by [`parse`] itself, since most callers never need
+/// them, but required by `crate::compile_with_includes` to thread a net's resolved `abstol`
+/// (§ nature-metadata wiring) into `crate::elaborate::elaborate_with_library_and_disciplines`.
+///
+/// # Errors
+///
+/// As [`parse`].
+pub fn parse_with_disciplines(tokens: &[Token]) -> Result<ParsedUnit, FrontendError> {
     // The always-on access-function baseline (§ module preamble discipline/nature parsing):
     // recognized regardless of whether any `discipline`/`nature` block is ever parsed, so a
     // file with no preamble at all still recognizes the standard electrical/thermal names.
@@ -97,7 +119,7 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<ModuleAst>, FrontendError> {
         }
         modules.push(p.parse_module()?);
     }
-    Ok(modules)
+    Ok((modules, p.natures, p.disciplines))
 }
 
 struct Parser<'a> {

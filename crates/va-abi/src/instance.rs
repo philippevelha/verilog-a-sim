@@ -49,6 +49,24 @@ pub trait ModelInstance {
         UnknownKind::Node
     }
 
+    /// A per-unknown absolute-tolerance override for `va-core`'s Newton convergence check
+    /// (`unknowns()[i]`'s own tolerance, not indexed globally — same convention as
+    /// [`Self::unknown_kind`]), sourced from a Verilog-A model's discipline/nature metadata
+    /// (§ nature-metadata wiring, e.g. `nature Voltage; abstol = 1e-6; endnature`).
+    ///
+    /// Default `None`: no override, so `va-core` falls back to its own configured default
+    /// (`va-core::newton::NewtonConfig::abstol`) — correct for every hand-written
+    /// `crate::reference` model (none of them are compiled from Verilog-A source, so none has
+    /// discipline metadata to report) and for a `va-codegen`-generated model whose module
+    /// declared no `discipline`/`nature` preamble. Only `va-codegen`'s generated models
+    /// override this, and only for their own node-kind unknowns (an auxiliary branch-current
+    /// unknown has no natural per-unknown tolerance source and stays `None` too — see
+    /// `va_ir::NodeDecl::abstol`'s doc comment).
+    fn unknown_abstol(&self, i: usize) -> Option<f64> {
+        let _ = i;
+        None
+    }
+
     /// Evaluate the model at solution vector `x` and emit its contributions into `sink`.
     ///
     /// Must emit the resistive channel (residual + Jacobian). Models with storage also emit

@@ -81,16 +81,18 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > still exactly what `va-codegen`/`va-core`/`va-abi` receive — one flat module, no hierarchy
 > concept, unchanged in shape. Hierarchy is a `va-frontend`-internal concern, not an IR one.
 
-> **Not a §6 change: discipline/nature declarations.** `discipline...enddiscipline`/
-> `nature...endnature` blocks are now genuinely parsed (`docs/token-reference.md` §1.5, §2.17,
-> §2.25) into a small `va-frontend`-internal table (`disciplines::{NatureDecl,
-> DisciplineDecl}`), instead of discarded as an opaque token span. This doesn't touch Interface
-> α either: net *declarations* still only accept the `electrical`/`thermal` keyword tokens
-> (unchanged `ast::Discipline`/`va_ir::Discipline`), so `Module`/`NodeDecl` are exactly as
-> before — `va_ir::Discipline::Other` still exists as a forward-looking placeholder, still
-> never constructed. The only real effect is parser-internal: a parsed discipline's bound
-> nature `access` names widen `Parser::known_access` beyond the hardcoded `V`/`I`/`Temp`/`Pwr`
-> baseline, additively.
+> **Not a §6 change (at the time — see the 2026-07-09 revision below): discipline/nature
+> declarations.** `discipline...enddiscipline`/`nature...endnature` blocks are now genuinely
+> parsed (`docs/token-reference.md` §1.5, §2.17, §2.25) into a small `va-frontend`-internal
+> table (`disciplines::{NatureDecl, DisciplineDecl}`), instead of discarded as an opaque token
+> span. This didn't touch Interface α either, *as of this note*: net *declarations* still only
+> accept the `electrical`/`thermal` keyword tokens (unchanged `ast::Discipline`/
+> `va_ir::Discipline`), so `Module`/`NodeDecl` were exactly as before — `va_ir::Discipline::Other`
+> still existed as a forward-looking placeholder, still never constructed. The only real effect
+> was parser-internal: a parsed discipline's bound nature `access` names widen
+> `Parser::known_access` beyond the hardcoded `V`/`I`/`Temp`/`Pwr` baseline, additively. (This
+> stopped being fully accurate once `NodeDecl` itself gained a field sourced from this same
+> metadata — see the 2026-07-09 revision.)
 
 > **Revision (§6 change, 2026-07-06):** added `Function::arg_dirs: Vec<ArgDir>` (`ArgDir` a new
 > three-variant enum: `Input`/`Output`/`Inout`), same length and order as `Function::args`,
@@ -105,6 +107,21 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > restriction on output/inout actual arguments). Additive and backward compatible: every existing
 > `Function` construction site needed only `arg_dirs: vec![ArgDir::Input; args.len()]` added,
 > preserving its exact prior behavior.
+
+> **Revision (§6 change, 2026-07-09):** added `NodeDecl.abstol: Option<f64>` (§ nature-metadata
+> wiring, `docs/roadmap.md` backlog item 5) — the node's discipline's **potential** nature's
+> `abstol`, if a parsed `discipline...enddiscipline`/`nature...endnature` preamble resolves one
+> (`va_frontend::disciplines::resolve_abstol`), else `None`. This is the change the
+> "not a §6 change" note above predates: a parsed discipline's metadata now reaches `Module`
+> itself, not just `Parser::known_access`. Additive and backward compatible: every existing
+> `NodeDecl { name, discipline }` construction site needed only `abstol: None` added, preserving
+> its exact prior behavior; `va-frontend`'s public entry points stayed source-compatible too —
+> `elaborate`/`elaborate_with_library` are now thin wrappers over the new
+> `elaborate_with_library_and_disciplines`, passing empty tables. `None` is `va-core`'s signal to
+> fall back to its own configured default (see Interface β's matching `unknown_abstol` revision,
+> below) — there is deliberately no equivalent field for a discipline's *flow* nature (e.g.
+> `Current`'s `abstol`): only a `Node`-kind unknown (a KCL potential) has a natural per-`NodeDecl`
+> home for one.
 
 ## Interface β — model instance ABI (`va-abi`)
 
@@ -132,6 +149,8 @@ pub trait ModelInstance {
     fn unknowns(&self) -> &[usize];
     /// Structural kind of `unknowns()[i]`. Default `UnknownKind::Node`.
     fn unknown_kind(&self, i: usize) -> UnknownKind { UnknownKind::Node }
+    /// Per-unknown abstol override for `unknowns()[i]`. Default `None` (solver's own default).
+    fn unknown_abstol(&self, i: usize) -> Option<f64> { None }
     /// Evaluate at solution vector `x`; emit residual + Jacobian (+ charge in transient).
     fn load(&self, x: &[f64], sink: &mut dyn StampSink);
 }
@@ -151,3 +170,15 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > rows like a source's `V(p) − V(n) = value` (which shunting would silently corrupt) — see
 > `docs/roadmap.md`'s T3.3 for the full account of why this was previously listed as
 > blocked on exactly this change.
+
+> **Revision (§6 change, 2026-07-09):** added `ModelInstance::unknown_abstol`, another **default
+> trait method** in exactly the same shape as `unknown_kind` above — every existing implementor
+> kept compiling unchanged. `va-codegen`'s generated models override it, reading the matching
+> `va_ir::NodeDecl::abstol` (Interface α's paired revision, above) for any of their node-kind
+> unknowns; every hand-written `va-abi::reference` device (none compiled from Verilog-A, so none
+> has discipline metadata) and any auxiliary (branch-current/`idt` accumulator) unknown beyond a
+> generated model's own node count keep the default `None`. `va-core::mna::classify_abstol`
+> collects this into a per-unknown tolerance vector (mirroring `classify_unknowns`), which
+> `newton::solve_from`'s per-unknown convergence check now consults instead of always using
+> `NewtonConfig::abstol` — see `docs/roadmap.md` backlog item 5 for the full account and its
+> stated v1 limits (no flow-nature/branch-unknown wiring; the residual-norm gate stays global).

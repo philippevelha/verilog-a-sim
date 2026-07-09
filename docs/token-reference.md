@@ -1058,14 +1058,26 @@ including the ones with no implemented behavior at all.
   `flow Nature;`/`domain discrete|continuous;`. An unrecognized attribute keyword inside either
   body is a hard parse error — the LRM's attribute set is fixed, not user-extensible, matching
   every other unknown-construct error in this parser.
-- **Expressions and Evaluation**: `units`/`abstol`/`idt_nature`/`ddt_nature` are parsed but
-  currently **unused metadata** — no `va-core` convergence or unit-checking code consults them
-  yet (like `ast::Range`'s inclusive/exclusive flags). `abstol`'s value is read as a plain
-  (optionally negated) numeric literal when the source writes one; a more complex expression
-  (`abstol = 2*1e-6;`) still parses (its tokens are consumed via the ordinary expression parser)
-  but its value is dropped rather than rejected. The one attribute with a *real* effect is a
-  nature's `access` name, once a `discipline` block binds that nature as its `potential`/`flow`
-  nature: `Parser::register_access` then adds that access name to the recognized set
+- **Expressions and Evaluation**: `units`/`idt_nature`/`ddt_nature` are parsed but remain
+  **unused metadata** — no `va-core` unit-checking code consults them yet (like `ast::Range`'s
+  inclusive/exclusive flags). `abstol` (§ nature-metadata wiring, added 2026-07-09) is the
+  exception: its value is read as a plain (optionally negated) numeric literal when the source
+  writes one — a more complex expression (`abstol = 2*1e-6;`) still parses (its tokens are
+  consumed via the ordinary expression parser) but its value is dropped rather than rejected —
+  and now round-trips all the way into `va-core`. `Parser::parse_with_disciplines` exposes the
+  parsed `natures`/`disciplines` tables (dropped by the plain `Parser::parse` most callers use);
+  `crate::compile_with_includes` threads them into
+  `Elaborator::elaborate_with_library_and_disciplines`, which resolves each net's discipline to
+  its **potential** nature's `abstol` (`disciplines::resolve_abstol`) and records it on the
+  matching `va_ir::NodeDecl::abstol` (an Interface α change). `va-codegen`'s generated models
+  expose that per-node value via `va_abi::ModelInstance::unknown_abstol` (an Interface β
+  addition, the same default-method shape as `unknown_kind`); `va-core::mna::classify_abstol`
+  collects it, and `newton::solve_from`'s per-unknown convergence check consults it instead of
+  always using the solver's single configured default. No wiring exists yet for a discipline's
+  *flow* nature (e.g. `Current`'s own `abstol`) — only a `Node`-kind unknown has a natural
+  `NodeDecl`-shaped home for one. The other attribute with a *real* effect is a nature's
+  `access` name, once a `discipline` block binds that nature as its `potential`/`flow` nature:
+  `Parser::register_access` then adds that access name to the recognized set
   (`Parser::known_access`) — additively, on top of the always-on `V`/`I`/`Temp`/`Pwr` baseline,
   which stays recognized regardless of whether any block was ever parsed. See §2.17.
 - **Structural and Analog Usage**: Module-preamble-level — before, or interleaved between, the
@@ -1093,7 +1105,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 |---|---|---|---|---|---|
 | `abs` | Dynamic/static dual, see §1.5 Math builtins | `abs(x)` call | Absolute value, both paths | Analog expr / const context | C `fabs()`/`abs()` |
 | `absdelay` | Folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
-| `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`), unused metadata | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
+| `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`); round-trips into `va_ir::NodeDecl::abstol` and `va-core`'s per-unknown Newton convergence check (§ nature-metadata wiring) | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
 | `access` | Parsed into `NatureDecl::access` (§1.5), widens the recognized access-function set once bound by a `discipline` | Nature attribute `access = fn_name;` | Read as a plain identifier; has a real effect (§2.17) once a `discipline` binds this nature as `potential`/`flow` | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |
 | `acosh` | Dynamic/static dual, §1.5 | `acosh(x)` call | Inverse hyperbolic cosine | Analog expr / const context | C99 `acosh()` |

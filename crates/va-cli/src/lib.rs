@@ -659,6 +659,35 @@ mod tests {
         assert!((op.x[1] - 0.5).abs() < 1e-9, "V(mid) = {}", op.x[1]);
     }
 
+    /// § nature-metadata wiring, end to end: with `models/disciplines.vams` on the include
+    /// path, `resistor.va`'s two `electrical` nodes pick up a real `abstol` (the LRM-standard
+    /// `Voltage` nature's `1e-6`) — and the DC answer is unaffected (a linear divider solves to
+    /// the same exact operating point regardless of the Newton convergence tolerance used to
+    /// declare it), confirming this is purely a convergence-aid change, not a modeling one.
+    #[test]
+    fn divider_solves_unchanged_with_disciplines_metadata_resolved() {
+        let src = include_str!("../../../models/resistor.va");
+        let include_dirs = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))];
+        let design = va_frontend::compile_with_includes(src, &include_dirs)
+            .expect("compile resistor.va with disciplines.vams resolved");
+        assert_eq!(design.modules.len(), 1);
+        assert!(
+            design.modules[0]
+                .nodes
+                .iter()
+                .all(|n| n.abstol == Some(1e-6)),
+            "both of resistor.va's electrical nodes should resolve Voltage's abstol: {:?}",
+            design.modules[0].nodes
+        );
+
+        let op = solve_divider(&design.modules);
+        assert!((op.x[0] - 1.0).abs() < 1e-9, "V(in) = {}", op.x[0]);
+        assert!((op.x[1] - 0.5).abs() < 1e-9, "V(mid) = {}", op.x[1]);
+    }
+
     /// End-to-end DC through module instantiation (§ module instantiation): `series_divider`
     /// (two `leg` instances in series, sharing a parent-declared internal node, one connected
     /// positionally and one by name with a parameter override — see `models/series_divider.va`)

@@ -85,6 +85,26 @@ pub fn classify_unknowns(instances: &[&dyn ModelInstance], dim: usize) -> Vec<Un
     kinds
 }
 
+/// Collect each global unknown's per-unknown absolute-tolerance override (§ nature-metadata
+/// wiring), by asking each instance about the unknowns it declares via
+/// [`va_abi::ModelInstance::unknown_abstol`]. Every index defaults to `default` (the solver's
+/// own configured tolerance); any instance reporting `Some(_)` for one of its own indices
+/// overrides just that entry — structurally identical to [`classify_unknowns`], the same
+/// collection shape for a different per-unknown property.
+pub fn classify_abstol(instances: &[&dyn ModelInstance], dim: usize, default: f64) -> Vec<f64> {
+    let mut abstol = vec![default; dim];
+    for inst in instances {
+        for (local, &global) in inst.unknowns().iter().enumerate() {
+            if global < dim {
+                if let Some(a) = inst.unknown_abstol(local) {
+                    abstol[global] = a;
+                }
+            }
+        }
+    }
+    abstol
+}
+
 impl StampSink for System {
     fn residual(&mut self, row: usize, value: f64) {
         if row < self.dim {
@@ -155,6 +175,24 @@ mod tests {
             kinds,
             vec![UnknownKind::Node, UnknownKind::Node, UnknownKind::Branch]
         );
+    }
+
+    #[test]
+    fn classify_abstol_lets_one_instance_override_its_own_unknown() {
+        // Divider: node0, node1, branch=2. Only node1's resistor (`r2`, wrapped) reports an
+        // override; every other index falls back to `default`.
+        let vs = VSource::new(0, GROUND, 2, 2.0);
+        let r1 = Resistor::new(0, 1, 1000.0);
+        let r2 = Resistor::new(1, GROUND, 1000.0);
+        let r2_override = crate::testutil::AbstolOverride {
+            inner: &r2,
+            // r2's own unknowns()[0] is global index 1 ("n" = node1).
+            overrides: &[(0, 1e-3)],
+        };
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r1, &r2_override];
+
+        let abstol = classify_abstol(&insts, 3, 1e-12);
+        assert_eq!(abstol, vec![1e-12, 1e-3, 1e-12]);
     }
 
     #[test]

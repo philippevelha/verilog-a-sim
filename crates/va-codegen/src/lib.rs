@@ -715,6 +715,14 @@ impl ModelInstance for GeneratedModel {
         }
     }
 
+    /// A node-kind unknown reports its `NodeDecl`'s own resolved `abstol` (§ nature-metadata
+    /// wiring), if any; an auxiliary (branch-current/`idt` accumulator) unknown beyond
+    /// `module.nodes.len()` has no `NodeDecl` to read one from and reports `None`, exactly
+    /// mirroring `unknown_kind`'s `Node`/`Branch` split above.
+    fn unknown_abstol(&self, i: usize) -> Option<f64> {
+        self.module.nodes.get(i).and_then(|n| n.abstol)
+    }
+
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
         let ctx = self.ctx(x, false);
         self.stamp_branch_currents(x, sink);
@@ -752,10 +760,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -793,10 +803,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -835,10 +847,12 @@ mod tests {
             NodeDecl {
                 name: "a".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "c".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -896,10 +910,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1015,10 +1031,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1065,10 +1083,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1102,10 +1122,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1197,10 +1219,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1260,6 +1284,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_abstol_reads_the_node_decls_own_value() {
+        // § nature-metadata wiring: node 0 ("p") carries a resolved abstol, node 1 ("n") does
+        // not — `unknown_abstol` must read each unknown's own `NodeDecl`, not a blanket value.
+        let mut m = resistor_ir();
+        m.nodes[0].abstol = Some(1e-6);
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
+        assert_eq!(inst.unknown_abstol(0), Some(1e-6));
+        assert_eq!(inst.unknown_abstol(1), None);
+        // An index beyond `module.nodes.len()` (an auxiliary unknown) has no `NodeDecl` to
+        // read one from — mirrors `unknown_kind`'s `Node`/`Branch` boundary at the same index.
+        assert_eq!(inst.unknown_abstol(2), None);
+    }
+
+    #[test]
     fn capacitor_stamps_only_charge() {
         let inst = build_instance(&capacitor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
@@ -1280,10 +1318,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1356,10 +1396,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1402,10 +1444,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1457,6 +1501,7 @@ mod tests {
             m.nodes.push(NodeDecl {
                 name: name.into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             });
         }
         m.ports = vec![
@@ -1562,6 +1607,7 @@ mod tests {
             m.nodes.push(NodeDecl {
                 name: name.into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             });
         }
         m.ports = vec![
@@ -1650,10 +1696,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1778,10 +1826,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1862,10 +1912,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -1930,10 +1982,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2036,10 +2090,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2144,10 +2200,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2246,10 +2304,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2353,10 +2413,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2439,10 +2501,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2505,10 +2569,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2599,10 +2665,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2720,10 +2788,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2833,10 +2903,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2894,10 +2966,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -2968,10 +3042,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3018,10 +3094,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3083,10 +3161,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3184,10 +3264,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3239,10 +3321,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3313,10 +3397,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3451,10 +3537,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3551,10 +3639,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3646,10 +3736,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
@@ -3738,10 +3830,12 @@ mod tests {
             NodeDecl {
                 name: "p".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
             NodeDecl {
                 name: "n".into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             },
         ];
         m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];

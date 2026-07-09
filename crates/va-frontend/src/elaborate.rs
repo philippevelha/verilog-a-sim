@@ -86,6 +86,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, ExprAst, ExprRef, Item, ModuleAst, Stmt};
+use crate::disciplines::{self, DisciplineDecl, NatureDecl};
 use crate::FrontendError;
 use va_ir::{
     Access, AccessKind, ArgDir, Branch, BranchId, Builtin, CaseArm, Discipline, Expr, ExprId,
@@ -109,6 +110,10 @@ pub fn elaborate(ast: &ModuleAst) -> Result<Module, FrontendError> {
 /// instantiation). This is the entry point multi-module callers
 /// ([`crate::compile_with_includes`]) use, once per module in a file.
 ///
+/// Equivalent to [`elaborate_with_library_and_disciplines`] with no parsed discipline/nature
+/// metadata — every node's [`va_ir::NodeDecl::abstol`] comes out `None`, exactly this
+/// function's behavior before § nature-metadata wiring existed.
+///
 /// # Errors
 ///
 /// As [`elaborate`], plus an unknown instantiated module name or an instantiation cycle.
@@ -116,7 +121,26 @@ pub fn elaborate_with_library(
     ast: &ModuleAst,
     library: &[ModuleAst],
 ) -> Result<Module, FrontendError> {
-    elaborate_inner(ast, library, &[], &HashMap::new())
+    elaborate_with_library_and_disciplines(ast, library, &HashMap::new(), &HashMap::new())
+}
+
+/// Like [`elaborate_with_library`], but also resolving each net's [`va_ir::NodeDecl::abstol`]
+/// from a parsed `discipline...enddiscipline`/`nature...endnature` preamble (§ nature-metadata
+/// wiring) — `disciplines`/`natures` are the tables `crate::parser::parse_with_disciplines`
+/// returns alongside the parsed modules, file-scoped (§ module preamble discipline/nature
+/// parsing), so the same tables apply to every module `library` holds, including any submodule
+/// this call recursively elaborates (§ module instantiation).
+///
+/// # Errors
+///
+/// As [`elaborate_with_library`].
+pub fn elaborate_with_library_and_disciplines(
+    ast: &ModuleAst,
+    library: &[ModuleAst],
+    disciplines: &HashMap<String, DisciplineDecl>,
+    natures: &HashMap<String, NatureDecl>,
+) -> Result<Module, FrontendError> {
+    elaborate_inner(ast, library, &[], &HashMap::new(), disciplines, natures)
 }
 
 fn elaborate_inner(
@@ -124,12 +148,16 @@ fn elaborate_inner(
     library: &[ModuleAst],
     stack: &[String],
     param_overrides: &HashMap<String, f64>,
+    disciplines: &HashMap<String, DisciplineDecl>,
+    natures: &HashMap<String, NatureDecl>,
 ) -> Result<Module, FrontendError> {
     let mut e = Elaborator {
         ast,
         library,
         stack,
         param_overrides,
+        disciplines,
+        natures,
         out: Module::new(&ast.name),
         nodes: HashMap::new(),
         params: HashMap::new(),
@@ -235,6 +263,14 @@ struct Elaborator<'a> {
     /// (empty when elaborating a top-level module). Consulted by [`Self::collect_params`] in
     /// place of the AST default when present.
     param_overrides: &'a HashMap<String, f64>,
+    /// Parsed `discipline...enddiscipline` blocks, keyed by name (§ nature-metadata wiring),
+    /// empty when elaborated via [`elaborate`]/[`elaborate_with_library`] (no preamble
+    /// available). File-scoped, shared unchanged across every submodule this elaboration
+    /// recursively inlines (§ module instantiation).
+    disciplines: &'a HashMap<String, DisciplineDecl>,
+    /// Parsed `nature...endnature` blocks, keyed by name — the `disciplines`'s bound
+    /// `potential`/`flow` names are looked up here to resolve a net's `abstol`.
+    natures: &'a HashMap<String, NatureDecl>,
     out: Module,
     nodes: HashMap<String, NodeId>,
     params: HashMap<String, ParamId>,
@@ -442,13 +478,24 @@ impl Elaborator<'_> {
                     // it's just not checked for domain-specific conservation.
                     ast::Discipline::Custom(_) => Discipline::Other,
                 };
+                // The discipline's own *name* (as opposed to `disc`, the collapsed `va_ir`
+                // enum) is what a parsed `discipline...enddiscipline` block is keyed by — even
+                // the dedicated `electrical`/`thermal` keywords have one, since a real
+                // `disciplines.vams` declares `discipline electrical; ... enddiscipline` by
+                // that same name (§ nature-metadata wiring).
+                let disc_name = match discipline {
+                    ast::Discipline::Electrical => "electrical",
+                    ast::Discipline::Thermal => "thermal",
+                    ast::Discipline::Custom(name) => name.as_str(),
+                };
+                let abstol = disciplines::resolve_abstol(disc_name, self.disciplines, self.natures);
                 // Each name carries its own optional dimension range(s) — `electrical [0:w-1]
                 // in;` and `electrical in[`W-1:0], out;` both reach here as one `NetDecl` per
                 // name, the prefix-vs-suffix distinction already resolved by the parser (§2.2).
                 // A second dimension (§ 2-D vector net) is a non-standard extension.
                 for net in nets {
                     if net.ranges.is_empty() {
-                        self.intern_node(&net.name, disc);
+                        self.intern_node(&net.name, disc, abstol);
                         continue;
                     }
                     // A vector net interns one node per index tuple (§ vector nets); a branch
@@ -460,7 +507,7 @@ impl Elaborator<'_> {
                         dims.push(if msb <= lsb { (msb, lsb) } else { (lsb, msb) });
                     }
                     for idxs in dim_indices(&dims) {
-                        self.intern_node(&indexed_key(&net.name, &idxs), disc);
+                        self.intern_node(&indexed_key(&net.name, &idxs), disc, abstol);
                     }
                     self.vectors.insert(net.name.clone(), dims);
                 }
@@ -469,7 +516,7 @@ impl Elaborator<'_> {
         Ok(())
     }
 
-    fn intern_node(&mut self, name: &str, discipline: Discipline) -> NodeId {
+    fn intern_node(&mut self, name: &str, discipline: Discipline, abstol: Option<f64>) -> NodeId {
         if let Some(id) = self.nodes.get(name) {
             return *id;
         }
@@ -477,6 +524,7 @@ impl Elaborator<'_> {
         self.out.nodes.push(NodeDecl {
             name: name.to_string(),
             discipline,
+            abstol,
         });
         self.nodes.insert(name.to_string(), id);
         id
@@ -2390,7 +2438,7 @@ impl Elaborator<'_> {
         if let Some(id) = self.ground {
             return id;
         }
-        let id = self.intern_node("gnd", Discipline::Electrical);
+        let id = self.intern_node("gnd", Discipline::Electrical, None);
         self.ground = Some(id);
         id
     }
@@ -2469,7 +2517,14 @@ impl Elaborator<'_> {
 
         let mut child_stack: Vec<String> = self.stack.to_vec();
         child_stack.push(self.ast.name.clone());
-        let sub = elaborate_inner(sub_ast, self.library, &child_stack, &overrides)?;
+        let sub = elaborate_inner(
+            sub_ast,
+            self.library,
+            &child_stack,
+            &overrides,
+            self.disciplines,
+            self.natures,
+        )?;
 
         if connections.len() != sub.ports.len() {
             return Err(elab(format!(
@@ -2565,6 +2620,7 @@ impl Elaborator<'_> {
                 self.out.nodes.push(NodeDecl {
                     name: format!("{inst_name}.{}", decl.name),
                     discipline: decl.discipline,
+                    abstol: decl.abstol,
                 });
                 node_off.push(new_id);
             }
@@ -2988,7 +3044,10 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{lexer::lex, parser::parse};
+    use crate::{
+        lexer::lex,
+        parser::{parse, parse_with_disciplines},
+    };
 
     fn elaborate_src(src: &str) -> Module {
         let toks = lex(src).expect("lex");
@@ -3035,6 +3094,50 @@ mod tests {
             }
             other => panic!("expected a contribution, got {other:?}"),
         }
+    }
+
+    // --- § nature-metadata wiring (`abstol`) ----------------------------------------------
+
+    #[test]
+    fn discipline_preamble_resolves_a_nets_abstol() {
+        let src = "nature Voltage; units = \"V\"; access = V; abstol = 1e-6; endnature \
+                   nature Current; units = \"A\"; access = I; abstol = 1e-12; endnature \
+                   discipline electrical; potential Voltage; flow Current; enddiscipline \
+                   module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+        let toks = lex(src).expect("lex");
+        let (asts, natures, disciplines) = parse_with_disciplines(&toks).expect("parse");
+        let ast = &asts[0];
+        let m = elaborate_with_library_and_disciplines(ast, &asts, &disciplines, &natures)
+            .expect("elaborate");
+        assert_eq!(m.nodes.len(), 2);
+        assert_eq!(m.nodes[0].abstol, Some(1e-6));
+        assert_eq!(m.nodes[1].abstol, Some(1e-6));
+    }
+
+    #[test]
+    fn plain_elaborate_still_gives_no_abstol_without_a_preamble() {
+        // Regression: `elaborate`/`elaborate_with_library` (no discipline/nature tables
+        // supplied) must keep their exact prior behavior — every node's `abstol` stays `None`,
+        // even for an ordinary `electrical` net with no preamble at all.
+        let m =
+            elaborate_src("module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule");
+        assert_eq!(m.nodes[0].abstol, None);
+        assert_eq!(m.nodes[1].abstol, None);
+    }
+
+    #[test]
+    fn discipline_preamble_with_no_potential_nature_leaves_abstol_none() {
+        // `electrical`'s `flow Current;` is declared, but no `potential` nature — resolving
+        // must fail closed (`None`), not panic or fall back to the flow nature's own abstol.
+        let src = "nature Current; units = \"A\"; access = I; abstol = 1e-12; endnature \
+                   discipline electrical; flow Current; enddiscipline \
+                   module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+        let toks = lex(src).expect("lex");
+        let (asts, natures, disciplines) = parse_with_disciplines(&toks).expect("parse");
+        let ast = &asts[0];
+        let m = elaborate_with_library_and_disciplines(ast, &asts, &disciplines, &natures)
+            .expect("elaborate");
+        assert_eq!(m.nodes[0].abstol, None);
     }
 
     #[test]

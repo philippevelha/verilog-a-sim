@@ -897,10 +897,12 @@ mod tests {
         m.nodes.push(NodeDecl {
             name: "t".into(),
             discipline: va_ir::Discipline::Thermal,
+            abstol: None,
         });
         m.nodes.push(NodeDecl {
             name: "gnd".into(),
             discipline: va_ir::Discipline::Thermal,
+            abstol: None,
         });
         m.branches.push(Branch {
             p: NodeId(0),
@@ -961,6 +963,7 @@ mod tests {
             m.nodes.push(NodeDecl {
                 name: name.into(),
                 discipline: Discipline::Electrical,
+                abstol: None,
             });
         }
         let (pout, pin, nin, gnd) = (NodeId(0), NodeId(2), NodeId(3), NodeId(4));
@@ -1039,10 +1042,12 @@ mod tests {
         m.nodes.push(NodeDecl {
             name: "a".into(),
             discipline: Discipline::Electrical,
+            abstol: None,
         });
         m.nodes.push(NodeDecl {
             name: "c".into(),
             discipline: Discipline::Electrical,
+            abstol: None,
         });
         let (a, c) = (NodeId(0), NodeId(1));
         m.branches.push(Branch { p: a, n: c }); // BranchId(0): V(a,c)
