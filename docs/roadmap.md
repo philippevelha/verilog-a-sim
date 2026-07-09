@@ -1145,21 +1145,40 @@ the reference models.
 > adaptive step would hit); a breakpoint past `tstop` changing nothing; the RC charging curve's
 > crossing of `Vs/2` matches the analytic `t = RC·ln(2)`; no false crossing when the threshold
 > is never reached; `run`/`run_with_events` agree given an empty queue.
-> **Ladder rung 6 (ring oscillator) is not attempted, and not just "not yet done" —
-> structurally out of reach with the current model zoo.** An oscillator needs a device with
-> gain (something that can sustain oscillation against its own losses); `va-abi::reference`
-> is entirely passive (resistor, capacitor, diode, ideal source). No wiring inside
-> `va-transient` can make a passive-only circuit oscillate. This is a model-zoo gap (needs a
-> controlled source or a transistor-like model to exist somewhere in the pipeline first), not
-> something T4.3 itself can close — flagged honestly rather than faked with a circuit that
-> isn't really an oscillator.
-> *Outstanding:* the golden-vs-ngspice gate generally (awaits T6, and rung 6 specifically
-> awaits a gain-capable model); `t4-transient/03-events.qmd`.
+> **Ladder rung 6 (ring oscillator): now closed (resolved 2026-07-09)** — was "structurally out
+> of reach with the current model zoo," since `va-abi::reference` was entirely passive
+> (resistor, capacitor, diode, ideal source) and no wiring inside `va-transient` can make a
+> passive-only circuit oscillate. Closed by adding the missing gain element: `va-abi::
+> reference::Bjt`, a three-terminal simplified (no Early effect, no ohmic/parasitic
+> resistance, no saturation-charge smoothing) Ebers-Moll NPN — hand-derived Jacobian, validated
+> against a central finite difference the same way `Diode`'s already is. A 3-stage RC-coupled
+> common-emitter BJT ring (`integrator::tests::ring_oscillator_sustains_oscillation`, instances
+> built directly — no netlist file, since `va-netlist` has no 3-terminal-device grammar yet)
+> runs through the exact same DC (gmin-stepping) and transient machinery every other circuit in
+> this crate uses. Finding working component values needed real iteration, not just a hand
+> calculation: a lower-impedance "linear-gain" bias point converges at DC but turned out
+> small-signal *stable* (no oscillation) once the coupling network's own loading was properly
+> accounted for; a too-aggressive deep-saturation bias point made the DC solve itself
+> numerically singular (both BJT junctions strongly forward-biased blows up the simplified
+> model's exponential terms). A MΩ-range `Rb` sits in the working middle: comfortably
+> forward-active at DC, genuinely unstable in the loop. The DC operating point Newton finds
+> *is* that unstable equilibrium (Newton doesn't know or care that a fixed point is unstable) —
+> a deliberate few-mV perturbation plus mismatched per-stage component values (breaking the
+> three-way symmetry a real circuit's tolerances always break) diverges into real, growing
+> oscillation, confirmed by a deepening trough over time, not just a couple of crossings.
+> **Stated limitation, found empirically, not hidden:** as the oscillation grows, it eventually
+> pushes a junction into strong forward bias on both sides at once, where the LTE embedded-pair
+> estimator stops agreeing at any step size — the test's `tstop` stays inside the confirmed
+> well-behaved region rather than chasing that numerical edge.
+> *Outstanding:* the golden-vs-ngspice gate generally still awaits T6.3 — this validates that
+> the circuit oscillates (and grows, as an unstable equilibrium should), not a specific
+> frequency against a reference simulator; `t4-transient/03-events.qmd`.
 
 - Event handling / breakpoints (`events.rs`) for sources and discontinuities; ring-oscillator
   shakedown.
-- **Validation gate (ladder rung 6):** ring oscillator transient is stable and matches golden
-  within band.
+- **Validation gate (ladder rung 6):** ring oscillator transient genuinely oscillates (done,
+  2026-07-09 — see the status block above) *and* matches golden within band (still pending
+  T6.3's harness).
 - **Tutorial:** `t4-transient/03-events.qmd` — breakpoints, forced timepoints, the oscillator
   demo.
 
@@ -1262,7 +1281,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | `cargo run -p va-cli -- sim circuits/rc_step.net --tran` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | `cargo run -p va-cli -- sim circuits/rectifier.net --tran` produces a correct half-wave-rectified/RC-filtered waveform; **golden gate pending `va-harness` (T6.3)** |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
-| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ⬜ **blocked**: needs a gain-capable device; the model zoo is entirely passive (see T4.3) |
+| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | `cargo test -p va-transient ring_oscillator_sustains_oscillation` — real, growing oscillation from an unstable DC equilibrium, `va-abi::Bjt` (new); **golden gate pending `va-harness` (T6.3)** (see T4.3) |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.

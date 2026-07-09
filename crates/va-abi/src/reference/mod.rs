@@ -2,13 +2,16 @@
 //!
 //! These are **real, working** models (not `todo!()`), used both as the bring-up devices for
 //! `va-core` and as the oracle that AD-generated models in `va-codegen` are checked against.
-//! Each is a two-terminal compact model; the shared two-terminal stamping helper lives here.
+//! Most are two-terminal compact models sharing this module's stamping helpers; [`Bjt`] is the
+//! one three-terminal exception (its own cross-coupled stamps, no shared helper applies).
 
+pub mod bjt;
 pub mod capacitor;
 pub mod diode;
 pub mod resistor;
 pub mod vsource;
 
+pub use bjt::Bjt;
 pub use capacitor::Capacitor;
 pub use diode::Diode;
 pub use resistor::Resistor;

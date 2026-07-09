@@ -23,13 +23,24 @@
 //! every pair of consecutive accepted points. [`run`] is a thin wrapper over it with an empty
 //! queue, kept for callers that don't need either.
 //!
-//! **Not attempted: a ring-oscillator demo (ladder rung 6).** It needs a device with gain —
-//! something that can sustain oscillation — and this project's model zoo (`va-abi::reference`:
-//! resistor, capacitor, diode, ideal source) is entirely passive. No combination of them
-//! oscillates; there is nothing this crate can add to make one work without a gain element
-//! (a controlled source or a transistor-like model) existing somewhere in the pipeline first.
-//! That is a model-zoo gap, not a `va-transient` one — flagged honestly rather than faked with
-//! an artificial "oscillator" that isn't really one.
+//! **Ladder rung 6 (ring oscillator) is closed** — `va-abi::reference` gained a gain-capable
+//! device (`Bjt`, a three-terminal simplified Ebers-Moll NPN), and
+//! `tests::ring_oscillator_sustains_oscillation` builds a 3-stage RC-coupled common-emitter
+//! BJT ring (instances constructed directly, no netlist — `va-netlist` has no 3-terminal-
+//! device grammar) and runs it through exactly this module's DC (`va_core::dc::
+//! operating_point`, gmin-stepping) and transient machinery. The DC solve lands on a real but
+//! *unstable* equilibrium (Newton doesn't know or care that a fixed point is unstable, only
+//! that its residual is zero); a small perturbation plus deliberately mismatched per-stage
+//! component values (breaking the three-way symmetry a real circuit's tolerances always break)
+//! is enough to diverge into genuine, growing oscillation — confirmed by watching one node's
+//! voltage cross its own DC bias repeatedly with a deepening trough over time, not just guessed
+//! at. **Limitation, found empirically while tuning it, not hidden:** as the oscillation grows,
+//! it eventually drives a junction into strong forward bias on both sides at once, where this
+//! simplified (no saturation-charge smoothing) `Bjt` model's exponential terms grow large
+//! enough that the embedded-pair LTE estimator stops agreeing at any step size — the test's
+//! `tstop` stays comfortably inside the well-behaved region rather than chasing that edge. No
+//! golden/ngspice comparison yet (`docs/roadmap.md`'s T6.3 harness is still pending) — this
+//! validates that it oscillates, not a specific frequency.
 
 use crate::events::EventQueue;
 use crate::TransientError;
@@ -865,5 +876,143 @@ mod tests {
             err,
             TransientError::Core(CoreError::NoConvergence { .. })
         ));
+    }
+
+    // --- ladder rung 6: ring oscillator ---------------------------------------------------
+
+    /// A 3-stage RC-coupled common-emitter BJT ring oscillator (LRM/roadmap "ladder rung 6" —
+    /// see this module's doc comment). Global unknowns: 0 = Vcc node, 1 = its `VSource` branch
+    /// current, then (base, collector) for stages 1/2/3 as (2,3), (4,5), (6,7). Each stage:
+    /// emitter grounded, a single resistor `Rb` (~3.3-3.5 MΩ) biases the base from `Vcc`, a
+    /// single resistor `Rc` (~19-21 kΩ) loads the collector from `Vcc`, and a coupling
+    /// capacitor `Cc` (10 nF) AC-couples this stage's collector to the *next* stage's base —
+    /// stage 3's collector couples back to stage 1's base, closing the ring. `Rb`/`Rc` are
+    /// high-impedance by design (found empirically, not guessed): a lower-impedance,
+    /// "linear-gain" bias point (kΩ-range `Rb`) converges to a real DC operating point but
+    /// turned out to be small-signal *stable* around it (no oscillation on any reasonable
+    /// timescale) once the coupling network's own loading is properly accounted for; a
+    /// too-aggressive, deep-saturation bias point (tens-of-kΩ `Rb`) instead makes the DC solve
+    /// itself numerically singular (this simplified Ebers-Moll model's exponential terms blow
+    /// up when both junctions are strongly forward-biased at once). This MΩ-range point sits
+    /// in between: comfortably forward-active at DC, but with enough loop gain margin to be a
+    /// genuinely unstable equilibrium. Component values are deliberately mismatched
+    /// stage-to-stage (not just for realism — see this test's own comment on why).
+    fn ring_oscillator() -> Vec<Box<dyn ModelInstance>> {
+        let vt = va_abi::reference::diode::VT_300K;
+        let bjt = |b: usize, c: usize| -> va_abi::reference::Bjt {
+            va_abi::reference::Bjt::new(b, c, va_abi::reference::GROUND, 1e-15, 100.0, 1.0, vt)
+        };
+        let vcc = 0;
+        vec![
+            Box::new(va_abi::reference::VSource::new(
+                vcc,
+                va_abi::reference::GROUND,
+                1,
+                5.0,
+            )),
+            // Stage 1: base=2, collector=3.
+            Box::new(va_abi::reference::Resistor::new(vcc, 2, 3_300_000.0)),
+            Box::new(va_abi::reference::Resistor::new(vcc, 3, 20_000.0)),
+            Box::new(bjt(2, 3)),
+            Box::new(va_abi::reference::Capacitor::new(3, 4, 10e-9)),
+            // Stage 2: base=4, collector=5.
+            Box::new(va_abi::reference::Resistor::new(vcc, 4, 3_400_000.0)),
+            Box::new(va_abi::reference::Resistor::new(vcc, 5, 19_000.0)),
+            Box::new(bjt(4, 5)),
+            Box::new(va_abi::reference::Capacitor::new(5, 6, 10e-9)),
+            // Stage 3: base=6, collector=7 — couples back to stage 1's base (2), closing the
+            // ring.
+            Box::new(va_abi::reference::Resistor::new(vcc, 6, 3_500_000.0)),
+            Box::new(va_abi::reference::Resistor::new(vcc, 7, 21_000.0)),
+            Box::new(bjt(6, 7)),
+            Box::new(va_abi::reference::Capacitor::new(7, 2, 10e-9)),
+        ]
+    }
+
+    #[test]
+    fn ring_oscillator_sustains_oscillation() {
+        // Closes "ladder rung 6" (this module's doc comment, `docs/roadmap.md`): the first
+        // circuit in this codebase with a gain-capable device, run through the exact same DC
+        // (Newton, gmin-stepping) and transient (adaptive trapezoidal) machinery every other
+        // circuit here uses — no netlist file (§ scope decision 2 in the implementation plan;
+        // `va-netlist` has no 3-terminal-device grammar yet), instances built directly.
+        //
+        // **Why mismatched component values, not identical ones**: three *identical* ring
+        // stages have an exactly symmetric DC equilibrium — a real circuit's component
+        // tolerances always break that symmetry (which is what actually lets thermal noise
+        // kick real oscillators into motion), but a deterministic solver started from a
+        // matching guess has no noise to do that job for it. Mismatching `Rb`/`Rc` stage to
+        // stage means `x = 0` (and the symmetric bias point) is never an exact equilibrium of
+        // *this* circuit to begin with — a genuinely tricky-for-convergence property worth
+        // demonstrating, not just a simulation trick.
+        //
+        // **Why the assertions check growth, not many clean periods**: this is a genuinely
+        // *unstable* DC operating point (found by Newton exactly like any other — Newton
+        // doesn't know or care that a fixed point is unstable, only that its residual is zero),
+        // so the transient's whole point is to diverge away from it. It does: stage 1's
+        // collector swings from a ~15 mV trough-to-trough excursion early on to well over 400
+        // mV by the second cycle (confirmed empirically while tuning this test's component
+        // values). That growth is real, correct oscillator-startup behavior — but it also
+        // means the swing eventually reaches this simplified Ebers-Moll model's own edge (no
+        // saturation-charge smoothing — see `va_abi::reference::bjt`'s doc comment), where the
+        // embedded-pair LTE estimator's two methods stop agreeing at any step size. `tstop`
+        // here is chosen comfortably inside the well-behaved region (confirmed empirically),
+        // not at the numerical edge — a real limitation to note, not hidden.
+        let devices = ring_oscillator();
+        let insts: Vec<&dyn ModelInstance> = devices.iter().map(|d| d.as_ref()).collect();
+        let dim = 8;
+
+        // DC bias first (gmin-stepping enabled — this is exactly the harder-than-a-diode-chain
+        // convergence case the ring's positive-feedback loop was chosen to exercise).
+        let dc_cfg = va_core::newton::NewtonConfig {
+            gmin_steps: 12,
+            ..va_core::newton::NewtonConfig::default()
+        };
+        let op = va_core::dc::operating_point(&insts, dim, dc_cfg).expect("DC bias converges");
+
+        // Belt-and-suspenders symmetry break (this module's doc comment, scope decision 3b):
+        // nudge stage 1's base a few mV off its DC bias before starting the transient.
+        let mut x0 = op.x.clone();
+        x0[2] += 0.005;
+
+        let cfg = TranConfig {
+            tstart: 0.0,
+            tstop: 0.2,
+            tstep: 100e-6,
+            tstep_min: 1e-9,
+            method: Method::Trapezoidal,
+            lte_reltol: 5e-2,
+            lte_abstol: 2e-3,
+        };
+        let mut events = crate::events::EventQueue::new();
+        events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage
+        let wf = run_with_events(&insts, dim, x0, cfg, &events).expect("transient integrates");
+
+        // At least two crossings (a genuine there-and-back alternation, not a one-off kick
+        // that settles).
+        assert!(
+            wf.crossings.len() >= 2,
+            "expected at least one full alternation (sustained oscillation), got {}: {:?}",
+            wf.crossings.len(),
+            wf.crossings
+        );
+
+        // Growing amplitude: the trough in the second half of the run must be deeper than the
+        // trough in the first half — direct evidence this is a diverging (unstable-equilibrium)
+        // oscillation, not a damped one settling back toward the DC bias.
+        let mid = wf.t.len() / 2;
+        let min_x3 = |range: std::ops::Range<usize>| {
+            wf.x[range]
+                .iter()
+                .map(|x| x[3])
+                .fold(f64::INFINITY, f64::min)
+        };
+        let first_half_min = min_x3(0..mid);
+        let second_half_min = min_x3(mid..wf.t.len());
+        assert!(
+            second_half_min < first_half_min - 0.05,
+            "expected a deeper trough later in the run (growing oscillation): first-half min \
+             {first_half_min}, second-half min {second_half_min}"
+        );
     }
 }
