@@ -46,8 +46,17 @@ use logos::Logos;
 #[logos(skip r"\(\*[^*]*\*+([^)*][^*]*\*+)*\)")] // (* attribute *) — metadata, discarded
 pub enum Token {
     // --- literals & names -------------------------------------------------------------
-    /// An identifier (also covers built-in math/access names, classified later).
+    /// An identifier (also covers built-in math/access names, classified later). Also covers
+    /// an *escaped* identifier (LRM §2.8.1), `\name`: starts with `\` and runs through any
+    /// printable, non-whitespace ASCII character, ending at the first whitespace — which is
+    /// exactly what `[!-~]+` (the printable range minus space) matches without any special
+    /// terminator handling, since whitespace is already a separate skipped token. Neither the
+    /// leading `\` nor the terminating whitespace is part of the identifier, so `\cpu3` lexes
+    /// identically to a plain `cpu3` (the LRM's own example) — including, unusually, any
+    /// operator/punctuation characters the escaped spelling swallows before its next space
+    /// (`\a+b <space>` is the single identifier `a+b`, not `a`, `+`, `b`).
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
+    #[regex(r"\\[!-~]+", |lex| lex.slice()[1..].to_string())]
     Ident(String),
 
     /// A numeric literal, already scaled to its `f64` value.
@@ -771,6 +780,26 @@ mod tests {
             lex_ok("expression"),
             vec![Token::Ident("expression".into())]
         );
+    }
+
+    #[test]
+    fn escaped_identifier_matches_the_lrm_example() {
+        // LRM §2.8.1's own example: `\cpu3` is treated the same as the plain identifier `cpu3`
+        // — neither the leading `\` nor the terminating whitespace is part of the name.
+        assert_eq!(lex_ok(r"\cpu3 "), vec![Token::Ident("cpu3".into())]);
+        // The terminating whitespace is a real token separator, not swallowed: a following
+        // token lexes normally right after it.
+        assert_eq!(
+            lex_ok(r"\cpu3 + 1"),
+            vec![Token::Ident("cpu3".into()), Token::Plus, Token::Number(1.0),]
+        );
+    }
+
+    #[test]
+    fn escaped_identifier_swallows_punctuation_up_to_whitespace() {
+        // Genuinely unusual, but exactly the LRM's rule: an escaped identifier absorbs *any*
+        // printable non-whitespace character, including ones that are otherwise operators.
+        assert_eq!(lex_ok(r"\a+b "), vec![Token::Ident("a+b".into())]);
     }
 
     #[test]

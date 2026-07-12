@@ -313,6 +313,7 @@ impl Elaborator<'_> {
         self.collect_params()?;
         self.collect_genvars();
         self.collect_nodes()?;
+        self.collect_ground()?;
         self.resolve_ports()?;
         self.collect_branches()?;
         self.collect_functions()?;
@@ -510,6 +511,36 @@ impl Elaborator<'_> {
                         self.intern_node(&indexed_key(&net.name, &idxs), disc, abstol);
                     }
                     self.vectors.insert(net.name.clone(), dims);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve every [`Item::Ground`] (§ ground declaration): each named net must already be
+    /// declared (by [`Self::collect_nodes`], run just before this), and becomes the module's
+    /// global reference node. Runs before [`Self::resolve_ports`]/[`Self::collect_branches`] so
+    /// an implicit single-terminal access later in elaboration (`Self::reference_node`) reuses
+    /// whichever node an explicit `ground` statement already named, instead of lazily creating
+    /// its own separate `"gnd"`-named node. A second (or later) grounded net in the same module
+    /// is aliased into the same [`NodeId`] as the first — every net a `ground` declaration
+    /// names is electrically the same global reference node (LRM §3.6.4), so this merges them
+    /// rather than leaving them as distinct nodes that happen to both read as zero.
+    fn collect_ground(&mut self) -> Result<(), FrontendError> {
+        for item in &self.ast.items {
+            if let Item::Ground { names } = item {
+                for name in names {
+                    let id = *self.nodes.get(name).ok_or_else(|| {
+                        elab(format!(
+                            "`ground {name}`: `{name}` is not a previously declared net"
+                        ))
+                    })?;
+                    match self.ground {
+                        Some(gnd) => {
+                            self.nodes.insert(name.clone(), gnd);
+                        }
+                        None => self.ground = Some(id),
+                    }
                 }
             }
         }
@@ -1368,6 +1399,28 @@ impl Elaborator<'_> {
                 })?;
                 return self.lower_expr(value);
             }
+            // `$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/
+            // `$rdist_chi_square`/`$rdist_t`/`$rdist_erlang` (LRM §9.13.2) generate repeatable
+            // pseudo-random values from a named distribution, seeded by their first argument.
+            // v0 has no time axis and no simulator random-number generator to drive one with —
+            // the same "no meaningful DC value" gap `white_noise`/`flicker_noise`/`noise_table`
+            // already have (`docs/roadmap.md`'s language-coverage backlog) — so see
+            // `Self::fold_rdist` for the fold, which uses each distribution's own mean rather
+            // than an arbitrary constant.
+            ExprAst::SysFunc { name, args }
+                if matches!(
+                    name.as_str(),
+                    "rdist_uniform"
+                        | "rdist_normal"
+                        | "rdist_exponential"
+                        | "rdist_poisson"
+                        | "rdist_chi_square"
+                        | "rdist_t"
+                        | "rdist_erlang"
+                ) =>
+            {
+                return self.fold_rdist(name, args);
+            }
             ExprAst::SysFunc { name, args } => {
                 let builtin = sysfunc_builtin(name)?;
                 let mut ids = Vec::with_capacity(args.len());
@@ -1632,6 +1685,47 @@ impl Elaborator<'_> {
             }
         };
         Ok(self.out.push_expr(expr))
+    }
+
+    /// Fold a `$rdist_*` call (LRM §9.13.2) to its distribution's mean, per the doc comment on
+    /// this function's call site in [`Self::lower_expr`]. Every form takes `seed` first (parsed
+    /// but never evaluated — v0 never calls twice, so there is nothing to seed) and an optional
+    /// trailing `type_string` last (LRM Table 9-2's `"global"`/`"instance"`; likewise parsed but
+    /// never evaluated — a string literal isn't a valid expression to lower at all).
+    fn fold_rdist(&mut self, name: &str, args: &[ExprRef]) -> Result<ExprId, FrontendError> {
+        let (min_args, mean_idx) = match name {
+            "rdist_uniform" => (3, None),   // seed, start, end[, type]
+            "rdist_normal" => (3, Some(1)), // seed, mean, standard_deviation[, type]
+            "rdist_exponential" | "rdist_poisson" | "rdist_chi_square" | "rdist_t" => (2, Some(1)), // seed, mean/degree_of_freedom[, type]
+            "rdist_erlang" => (3, Some(2)), // seed, k_stage, mean[, type]
+            _ => unreachable!("guarded by the caller's match arm"),
+        };
+        if args.len() < min_args || args.len() > min_args + 1 {
+            return Err(elab(format!(
+                "`${name}` takes {min_args} or {} arguments",
+                min_args + 1
+            )));
+        }
+        match name {
+            // The uniform distribution's mean is the midpoint of its bounds — no single
+            // argument carries it directly, unlike every other form here.
+            "rdist_uniform" => {
+                let start = self.lower_expr(args[1])?;
+                let end = self.lower_expr(args[2])?;
+                let sum = self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Add, start, end));
+                let two = self.out.push_expr(Expr::Const(2.0));
+                Ok(self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Div, sum, two)))
+            }
+            // A Student's t distribution is symmetric about zero (the only case with a
+            // well-defined mean, degrees of freedom > 1) — there's no argument to read a center
+            // from at all.
+            "rdist_t" => Ok(self.out.push_expr(Expr::Const(0.0))),
+            _ => self.lower_expr(args[mean_idx.expect("every other rdist_* form names its mean")]),
+        }
     }
 
     /// Whether an `analysis(...)` call is active under v0's DC-only model: true if any
@@ -3791,6 +3885,78 @@ mod tests {
     }
 
     #[test]
+    fn rdist_normal_exponential_poisson_chi_square_fold_to_their_mean_argument() {
+        for call in [
+            "$rdist_normal(1, 2.5, 1.0)",
+            "$rdist_exponential(1, 2.5)",
+            "$rdist_poisson(1, 2.5)",
+            "$rdist_chi_square(1, 2.5)",
+        ] {
+            let src = format!(
+                "module t(a, b); electrical a, b; analog begin I(a, b) <+ {call} * V(a, b); end endmodule"
+            );
+            let m = elaborate_src(&src);
+            assert!(
+                m.exprs
+                    .iter()
+                    .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 2.5)),
+                "{call} should fold to a Const(2.5) mean"
+            );
+        }
+    }
+
+    #[test]
+    fn rdist_erlang_folds_to_its_mean_argument() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_erlang(1, 2, 7.0) * V(a, b); end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 7.0)));
+    }
+
+    #[test]
+    fn rdist_uniform_folds_to_the_midpoint_of_its_bounds() {
+        // No single argument carries the mean directly, unlike the other rdist_* forms — it's
+        // built as (start + end) / 2 in the IR itself.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_uniform(1, 2.0, 6.0) * V(a, b); end endmodule",
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Add, _, _))));
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Div, _, _))));
+    }
+
+    #[test]
+    fn rdist_t_folds_to_zero_and_type_string_is_never_evaluated() {
+        let m = elaborate_src(
+            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_t(1, 5, "instance") * V(a, b); end endmodule"#,
+        );
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+    }
+
+    #[test]
+    fn rdist_wrong_arity_is_an_error() {
+        // `$rdist_normal` needs 3 or 4 arguments (seed, mean, standard_deviation[, type]), not 2.
+        let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_normal(1, 2.0) * V(a, b); end endmodule";
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
+    }
+
+    #[test]
     fn simparam_folds_to_default_in_a_parameter_default_too() {
         // `external/bsim6.0.va`: `parameter real GMIN = $simparam("gmin", 1.0e-15);` — the same
         // fold `$simparam` gets in the analog block must also work in a parameter's own default
@@ -5081,5 +5247,36 @@ mod tests {
         let asts = parse(&toks).expect("parse");
         let top = asts.iter().find(|m| m.name == "top").expect("top present");
         assert!(elaborate_with_library(top, &asts).is_err());
+    }
+
+    #[test]
+    fn ground_aliases_an_explicit_net_to_the_implicit_reference_node() {
+        // `V(a, gnd)` (explicit) and `V(a)` (implicit single-terminal) must resolve to exactly
+        // the same branch once `gnd` is declared ground — proving `collect_ground` reused
+        // `gnd`'s own `NodeId` as the reference node rather than creating a separate one.
+        let m = elaborate_src(
+            "module t(a); electrical a, gnd; ground gnd; analog begin I(a, gnd) <+ V(a, gnd); I(a) <+ V(a); end endmodule",
+        );
+        assert_eq!(m.branches.len(), 1);
+    }
+
+    #[test]
+    fn ground_merges_multiple_named_nets_into_one_reference_node() {
+        let m = elaborate_src(
+            "module t(a); electrical a, gnd1, gnd2; ground gnd1, gnd2; analog begin I(a, gnd1) <+ V(a, gnd1); I(a, gnd2) <+ V(a, gnd2); end endmodule",
+        );
+        assert_eq!(m.branches.len(), 1);
+    }
+
+    #[test]
+    fn ground_of_an_undeclared_net_errors() {
+        let src =
+            "module t(a); electrical a; ground nope; analog begin I(a) <+ V(a); end endmodule";
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
     }
 }

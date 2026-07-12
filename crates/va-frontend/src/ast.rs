@@ -275,6 +275,18 @@ pub enum Item {
         /// elaboration.
         connections: Vec<PortConn>,
     },
+    /// A ground declaration, `ground gnd;` (LRM §3.6.4, Syntax 3-7). Each named net must
+    /// already be declared (typically `electrical gnd; ground gnd;`, the LRM's own idiom); the
+    /// node it resolves to becomes the module's global reference node, exactly like the
+    /// implicit single-terminal-access ground `Elaborator::reference_node` otherwise creates on
+    /// first use (§ ground declaration). **v1 limitation:** the grammar's optional leading
+    /// `discipline_identifier`/`range` (declaring a net inline as part of the same statement,
+    /// rather than referencing an already-declared one) is not parsed — no corpus need found,
+    /// and every real-world example this project has seen uses the already-declared idiom.
+    Ground {
+        /// The declared-ground net names.
+        names: Vec<String>,
+    },
 }
 
 /// One port connection in an [`Item::Instance`].

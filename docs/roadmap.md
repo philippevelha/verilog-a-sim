@@ -290,6 +290,38 @@ literal `{...}` expressions; that's a new, separate, harder gap (below), and `ct
 independently still has its own pre-existing bug (`gain` used but never declared anywhere in
 the file — confirmed by inspection, not a frontend gap).
 
+**Now closed** (three backlog items, resolved 2026-07-12): **`$rdist_normal` and friends** —
+`$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/`$rdist_chi_square`/
+`$rdist_t`/`$rdist_erlang` (LRM §9.13.2's repeatable seeded random-distribution family, confirmed
+against the normative grammar at `references/VAMS-LRM-2-4.pdf`, not memory) now fold to their own
+distribution's *mean* in `Elaborator::fold_rdist` — `(start+end)/2` for `rdist_uniform` (the one
+form with no single mean-bearing argument, built as a real IR `Add`/`Div` pair), the bare
+`mean`/`degree_of_freedom` argument for every other form except `rdist_t` (`0.0`, the only
+well-defined center for a distribution symmetric about zero) — a more honest DC operating point
+than the arbitrary `0.0` the noise-source builtins (`white_noise`/`flicker_noise`/`noise_table`)
+already use, though the underlying gap is the same: v0 has no simulator random-number generator
+to actually draw a sample from. `seed` (always first) and an optional trailing `type_string`
+(LRM Table 9-2) are parsed but never evaluated. Closes `external/photonic/NoisyEDFA.va` — moves
+that directory from 29/31 to 30/31 (only the expected header-only `disciplines.vams` remains) and
+the tracked corpus from 112/150 to 113/150. **`ground` declaration** — `Item::Ground`
+(`Parser::parse_ground_item`) now parses `ground list_of_net_identifiers;` (LRM §3.6.4, Syntax
+3-7); `Elaborator::collect_ground` resolves each named net (which must already be declared) and
+aliases it to the module's global reference node — the *first* grounded net's own `NodeId`
+becomes the reference node directly (so it keeps its real declared name instead of a synthetic
+`"gnd"`), and any additional grounded net in the same module is merged into that same `NodeId`,
+since every net a `ground` declaration names is electrically the same reference node per the LRM.
+Runs right after `collect_nodes` and before anything that could lazily create the implicit
+`"gnd"` node (`Elaborator::reference_node`, unchanged, now simply reusing whichever `NodeId` an
+explicit `ground` declaration already claimed). No corpus file surveyed uses a `ground`
+declaration, so this doesn't move the pass count — added because it's real, reserved LRM grammar
+with a token already sitting unused, not because a corpus failure demanded it. **Escaped
+identifiers** (`` \name ``, LRM §2.8.1) — a second `#[regex(...)]` on `Token::Ident` now matches
+`` \[!-~]+ `` (backslash through the next whitespace), stripping the leading backslash in its
+callback so `` \cpu3 `` lexes identically to the plain identifier `cpu3` (the LRM's own example)
+— genuinely interchangeable from every later pass onward, since both produce the same
+`Token::Ident`. Also doesn't move the pass count (no corpus file surveyed uses one); added for
+the same "real reserved grammar, not a fragment artifact" reason as `ground` above.
+
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 
@@ -303,27 +335,20 @@ the file — confirmed by inspection, not a frontend gap).
    elaboration time — a small constant-propagation pass, not just an AST pattern match. Every
    other DC fold in this codebase only ever inspects the expression being evaluated, never other
    statements in the block.
-2. **`$rdist_normal` and friends** (`$rdist_uniform`, `$rdist_exponential`, …, LRM §3.6's
-   random-distribution system functions) — found via `external/photonic/NoisyEDFA.va`, not the
-   tracked corpus. Likely the same DC-fold family as the noise-source builtins already handled
-   (`white_noise`/`flicker_noise`/`noise_table` fold to `0.0` at a fixed operating point) — these
-   are almost certainly the same "no meaningful DC value" story, just system-function-spelled.
-3. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
+2. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
    semantics) — cannot be soundly approximated at DC the way `transition`/`slew` can (their
-   whole purpose is time history); genuinely blocked on `va-transient` existing.
-4. **Escaped identifiers** (`` \name `` — LRM §2.7) — not yet triaged in detail; low corpus need
-   found so far, but a real lexer gap (escaped identifiers are legitimate Verilog-A, not a
-   fragment artifact). (The previously-noted stray `` \ `` line-continuation lex error in
-   `external/bsimsoi.va` is gone — string-escape handling, added separately, covers it.)
-5. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
+   whole purpose is time history); `va-transient` now exists (T4 is code-complete), but that only
+   supplies a time axis to *run* — nothing in Interface β lets a `ModelInstance::load` call see
+   its own history (past crossing times, a running timer) at all, so this is still blocked on a
+   design question, not just an engine being absent.
+3. **`Elaborator::reference_node`'s hardcoded-electrical ground** — every single-terminal
    access's implicit "gnd" second terminal is hardcoded `Discipline::Electrical` regardless of
    the access's own discipline (e.g. a bare `Temp(dt)` still resolves against an
    electrical-tagged reference node); pre-existing, not introduced by the discipline/nature
    pass, and not fixable without per-access discipline tracking that doesn't exist even for
-   electrical/thermal today.
-6. **`ground` declaration** — `Token::Ground` is lexed and reserved but still has no grammar
-   production in `parse_item` at all; the implicit "gnd" node (`reference_node`, above) is the
-   only reference-node convention this project has.
+   electrical/thermal today. (Unaffected by the `ground` declaration closed above: an *explicit*
+   `ground` statement aliases to whatever discipline the named net already has; this item is
+   about the separate *implicit* single-terminal-access path's hardcoded discipline.)
 
 **Permanently out of scope, not a backlog item** (LRM Annex C.7: "No digital behavior or
 events are supported in Verilog-A" — these are excluded from Verilog-A *itself*, not narrowed

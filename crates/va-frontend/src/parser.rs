@@ -377,6 +377,15 @@ impl Parser<'_> {
         Ok(Item::Net { discipline, nets })
     }
 
+    /// Parse a ground declaration, `ground gnd, vss;` (LRM §3.6.4, Syntax 3-7) — see
+    /// `Item::Ground`'s doc comment for the supported subset.
+    fn parse_ground_item(&mut self) -> Result<Item, FrontendError> {
+        self.pos += 1; // consume `ground`
+        let names = self.ident_list()?;
+        self.eat(&Token::Semicolon)?;
+        Ok(Item::Ground { names })
+    }
+
     /// Parse one entry of a `real`/`integer` variable-declaration list: a name, followed by
     /// either its own declared dimension range(s) (§ array variables / § 2-D array variable) —
     /// e.g. `real out_val[0:15], tile[0:R][0:C], tmp;` — or an inline `= expr` initializer, e.g.
@@ -679,6 +688,9 @@ impl Parser<'_> {
                 self.parse_net_item(discipline)
             }
             Some(Token::Parameter) | Some(Token::LocalParam) => self.parse_param(),
+            // `ground gnd;` (LRM §3.6.4) — see `Item::Ground`'s doc comment for the supported
+            // subset of Syntax 3-7.
+            Some(Token::Ground) => self.parse_ground_item(),
             // A bare `real`/`integer` at module scope declares variables (a `parameter`
             // declaration starts with `parameter`, and an `analog function` with `analog`).
             Some(Token::Real) | Some(Token::Integer) => {

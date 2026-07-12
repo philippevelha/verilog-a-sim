@@ -73,13 +73,24 @@ class of lexemes.
 ### `Ident(String)`
 
 - **Purpose and Static Nature**: Purely lexical — carries any identifier-shaped lexeme
-  (`[a-zA-Z_][a-zA-Z0-9_]*`) that isn't one of the 172 reserved words. Whether the identifier
-  it names is itself static (a parameter, a genvar) or dynamic (a variable, a net) is decided
-  later, by elaboration, not by the lexer.
+  (`[a-zA-Z_][a-zA-Z0-9_]*`, or an *escaped* identifier, below) that isn't one of the 172
+  reserved words. Whether the identifier it names is itself static (a parameter, a genvar) or
+  dynamic (a variable, a net) is decided later, by elaboration, not by the lexer.
 - **Declaration and Assignment**: Any parameter, net, variable, branch, function, or genvar name
   is lexed as `Ident`. The two access-function names `V` and `I` are *also* plain `Ident`
   tokens — Verilog-A does not reserve them (LRM §5.5, "nature access functions"; see Part 2 §2.17
-  for how the parser recognizes them contextually).
+  for how the parser recognizes them contextually). An *escaped identifier* (LRM §2.8.1),
+  `\name`, is a second lexeme for the same token: it starts with `\` and runs through any
+  printable, non-whitespace ASCII character, ending at the first whitespace — matched by the
+  regex `\\[!-~]+` (a second `#[regex(...)]` on the same `Ident` variant), stripping the leading
+  `\` in its callback. Neither the leading `\` nor the terminating whitespace is part of the
+  name, so `\cpu3` lexes identically to the plain identifier `cpu3` (the LRM's own example) —
+  genuinely interchangeable from every later pass's point of view, since both produce the same
+  `Token::Ident("cpu3")`. One real wrinkle worth knowing: an escaped identifier absorbs *any*
+  printable character up to the next whitespace, including ones that are otherwise
+  operators/punctuation (`\a+b ` lexes as the single identifier `"a+b"`, not `a`, `+`, `b`) —
+  unusual, but exactly the LRM's rule, not a bug. No corpus file surveyed uses one; added as a
+  real lexer gap regardless (`docs/roadmap.md`'s language-coverage backlog).
 - **Expressions and Evaluation**: In expression position, an `Ident` followed by `(` is either
   an access-function call (`V(...)`/`I(...)`, if the name is `V`/`I`) or an ordinary function
   call (routed to `parse_call`); otherwise it is a bare reference, resolved at elaboration
@@ -151,17 +162,27 @@ class of lexemes.
   of the *unlimited* equations, so the limiter changes only the iteration path toward that point,
   never the point itself, and this project's stateless `ModelInstance::load` ABI has no
   previous-iteration history to limit against in the first place (see `va-core/src/convergence.rs`
-  and `docs/roadmap.md`); anything else reachable as a `Stmt::Task` (`$strobe`, `$finish`, …) is
-  parsed but elaborates to a no-op. `$simparam` gets its default-argument fold in *two* places,
+  and `docs/roadmap.md`); `$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/
+  `$rdist_chi_square`/`$rdist_t`/`$rdist_erlang` (LRM §9.13.2, the repeatable seeded
+  random-distribution family) fold to their own distribution's *mean* — `(start+end)/2` for
+  `rdist_uniform` (built as a real `Add`/`Div` IR pair, since no single argument carries it), the
+  bare `mean`/`degree_of_freedom` argument for every other form except `rdist_t` (`0.0`, the only
+  well-defined center for a distribution symmetric about zero) — rather than an arbitrary `0.0`
+  the way the noise-source builtins below do, since v0 has no simulator random-number generator
+  to actually draw a sample from at all (the same "no meaningful DC value" gap `white_noise`/
+  `flicker_noise`/`noise_table` have); `seed` (always first) and an optional trailing
+  `type_string` (`"global"`/`"instance"`, LRM Table 9-2) are both parsed but never evaluated
+  (`Elaborator::fold_rdist`); anything else reachable as a `Stmt::Task` (`$strobe`, `$finish`, …)
+  is parsed but elaborates to a no-op. `$simparam` gets its default-argument fold in *two* places,
   not one: `lower_expr` (the dynamic analog-block path) and the separate, non-mutating
   `const_eval` (the parameter-default/range/genvar-bound constant-folding path) — a real model
   can default a parameter directly from `$simparam` (`external/bsim6.0.va`:
   `parameter real GMIN = $simparam("gmin", 1.0e-15);`), and the two evaluators don't share code,
   so the fold has to be taught to both explicitly.
 - **Structural and Analog Usage**: Analog-block only — `$vt`/`$temperature`/`$simparam`/
-  `$mfactor`/`$param_given`/`$port_connected`/`$limit` appear in expressions, `$strobe`-class
-  calls are statements. `$simparam` is the one exception to "analog-block only": it is also legal
-  (and, per the corpus, common) in a parameter's own default expression.
+  `$mfactor`/`$param_given`/`$port_connected`/`$limit`/`$rdist_*` appear in expressions,
+  `$strobe`-class calls are statements. `$simparam` is the one exception to "analog-block only":
+  it is also legal (and, per the corpus, common) in a parameter's own default expression.
 - **Comparison with Traditional Constructs**: The closest C analogue is a compiler
   intrinsic/builtin (`__builtin_...`) or an environment query (`getenv`) — a name that isn't a
   user function but is still called with ordinary call syntax. Digital Verilog's `$display`
@@ -678,16 +699,29 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 
 ### `Ground`
 
-- **Purpose and Static Nature**: Structural — declares that a net is the (or a) reference node.
-- **Declaration and Assignment**: `ground name;` per the LRM; note this project's v0 doesn't
-  actually parse a distinct `ground` *declaration* item at all (there is no `Token::Ground`
-  match arm in `parse_item` today) — the reference node used for a single-terminal access
-  (`V(a)` meaning "potential of `a` relative to reference") is instead created implicitly and
-  named `"gnd"` the first time it's needed (`Elaborator::reference_node`). `ground` is reserved
-  (has a dedicated token) purely to keep the identifier available for this convention and to
-  match the LRM's reserved-word list — it currently has no grammar production of its own.
-- **Expressions and Evaluation**: N/A today.
-- **Structural and Analog Usage**: Would be module-level if implemented.
+- **Purpose and Static Nature**: Structural — declares that an already-declared net is the
+  module's global reference node.
+- **Declaration and Assignment**: `ground list_of_net_identifiers;` (LRM §3.6.4, Syntax 3-7),
+  e.g. `electrical gnd; ground gnd;` — the LRM's own idiom, and every real-world example this
+  project has seen. `Item::Ground { names }` (`Parser::parse_ground_item`) parses a
+  comma-separated identifier list terminated by `;`. **v1 limitation:** the grammar's optional
+  leading `discipline_identifier`/`range` (declaring a net inline as part of the *same*
+  statement, rather than referencing an already-declared one) is not parsed — no corpus need
+  found for it.
+- **Expressions and Evaluation**: N/A — pure declaration, resolved once during elaboration
+  (`Elaborator::collect_ground`, run right after `collect_nodes` and before anything that could
+  lazily create the implicit reference node). Each named net must already exist; an undeclared
+  name is an elaboration error. The *first* grounded net's own already-interned `NodeId` becomes
+  `self.ground` directly (so its `NodeDecl.name` stays whatever the net was actually called, not
+  a synthetic `"gnd"`); any additional grounded net in the same module is aliased into that same
+  `NodeId` (`self.nodes.insert(name, gnd)`) — every net a `ground` declaration names is
+  electrically the same global reference node (LRM §3.6.4), so this merges them rather than
+  leaving them as distinct nodes that happen to both read as zero. The pre-existing implicit
+  path — a bare single-terminal access (`V(a)`) lazily creating a node named `"gnd"`
+  (`Elaborator::reference_node`) — is unchanged and now simply reuses whichever `NodeId` an
+  explicit `ground` declaration already claimed, when one is present.
+- **Structural and Analog Usage**: Module-level declaration; referenced from the analog block
+  only indirectly, through any single-terminal or explicit-to-ground `V(...)`/`I(...)` access.
 - **Comparison with Traditional Constructs**: The electrical-circuit notion of "ground" has no
   general-purpose-language analogue; the closest structural parallel is a distinguished
   "origin"/"zero" sentinel value.
@@ -1177,7 +1211,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `function` | Function-definition keyword, §1.5 | `analog function ...` | — | Module-level | C `static` pure function |
 | `generate` | Syntactic bracket only, §1.5 | `generate ... endgenerate` | N/A | Analog-block only | No C analogue |
 | `genvar` | **Elaboration-only construct**, dedicated token, full treatment in §1.4 | — | — | — | — |
-| `ground` | Dedicated token (currently unimplemented as a declaration), §1.4 | — | — | — | — |
+| `ground` | Dedicated token, real grammar production, §1.4 | `ground list_of_net_identifiers;` | Aliases each named (already-declared) net to the module's reference node | Module-level declaration | No general-purpose analogue |
 | `highz0` | Reserved, no grammar production (net strength: high-impedance driving 0) | N/A | N/A | Digital net-strength only | No C analogue |
 | `highz1` | Reserved, no grammar production (net strength: high-impedance driving 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `hypot` | Dynamic/static dual, §1.5 | `hypot(x, y)` call | `sqrt(x²+y²)` | Analog expr / const context | C99 `hypot()` |
