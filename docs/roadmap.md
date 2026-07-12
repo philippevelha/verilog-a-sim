@@ -322,6 +322,29 @@ callback so `` \cpu3 `` lexes identically to the plain identifier `cpu3` (the LR
 `Token::Ident`. Also doesn't move the pass count (no corpus file surveyed uses one); added for
 the same "real reserved grammar, not a fragment artifact" reason as `ground` above.
 
+**Now closed** (a fresh gap, not from the numbered backlog — found chasing `external/ekv3.va`
+itself, resolved 2026-07-12): two distinct, previously-uncategorized blockers, both real language
+gaps rather than the "missing companion file" artifact category most of this corpus's remaining
+failures fall into. (1) **`` `include `` resolution now falls back to basename matching** — see
+this doc's own `Directive(String)` entry's mirror in `docs/token-reference.md` for the full
+account; in short, `external/ekv3.va`'s 15 `` `include "ekv3_include/*.va" `` directives named a
+vendor subdirectory this corpus snapshot flattened away without rewriting the directives
+themselves, so every macro those headers defined (`EXPL_THRESHOLD`, `MAX`/`MAXA`/`MINA`, …) came
+back "undefined" even though the target files are still physically present, just directly under
+`external/`. (2) **`electrical`/`thermal`/`ground` now also parse as an ordinary identifier**
+wherever the grammar expects a bare name, not just at the start of their own declaration —
+`external/ekv3_variables.va` (one of the files (1) unblocked) declares `real thermal;`, a plain
+variable literally spelled `thermal`, later read/reassigned as a bare identifier throughout
+`ekv3_noise.va`/`ekv3_oppoints.va`; the same "real word, real corpus, dedicated token" tension the
+`vt`/`temperature` un-reservation (above) already resolved for two *non*-dedicated reserved
+words, now extended to the three dedicated single-word declaration-starting tokens
+(`Parser::ident_like_keyword`, `docs/token-reference.md`'s `Electrical`/`Thermal`/`Ground`
+entries). Both were needed together to get `ekv3.va` itself past the frontend — fixing only one
+would have still left it failing on the other. Moves the tracked corpus from 113/150 to 114/150
+(`external/ekv3.va` itself; its 17 `ekv3_*.va` body/header fragments remain in the known
+"never meant to compile standalone" scan-artifact bucket, now genuinely confirmed as such since
+the file that actually `` `include ``s them all now passes).
+
 **Backlog, prioritized** (highest-value/most-tractable first, re-derived against the full
 118-file corpus):
 

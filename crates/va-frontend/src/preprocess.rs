@@ -233,7 +233,27 @@ impl Preprocessor {
             }
         }
         let direct = PathBuf::from(file);
-        direct.is_file().then_some(direct)
+        if direct.is_file() {
+            return Some(direct);
+        }
+        // Fallback: an `` `include `` naming a subdirectory path (e.g. a vendor's own
+        // `ekv3_include/ekv3_definitions.va`) that doesn't exist relative to any search
+        // directory, even though a file with the same *basename* does — real when a corpus
+        // flattens a vendor's original directory layout without rewriting its own `include`
+        // directives (confirmed against `external/ekv3.va` and its `ekv3_include/*.va`
+        // siblings, which this corpus snapshot ships directly under `external/`). Tried only
+        // after every exact-path candidate above fails, so an exact match always wins; scoped
+        // to the same already-configured search directories, not a new filesystem walk, so it
+        // can't reach across an unrelated library folder that happens to ship a same-named
+        // header (e.g. two different vendors' own `disciplines.vams`).
+        let basename = std::path::Path::new(file).file_name()?;
+        for dir in &self.include_dirs {
+            let candidate = dir.join(basename);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     // --- macro expansion ------------------------------------------------------------
@@ -548,5 +568,42 @@ mod tests {
         // No include path → the include is dropped, the rest survives.
         let out = pp("`include \"nope.vams\"\nmodule m; endmodule\n");
         assert!(out.contains("module m"));
+    }
+
+    #[test]
+    fn include_falls_back_to_basename_when_the_exact_path_is_missing() {
+        // A corpus that flattens a vendor's own subdirectory layout (e.g.
+        // `external/ekv3.va`'s own `` `include "ekv3_include/ekv3_definitions.va" ``, shipped
+        // flat as `external/ekv3_definitions.va`) without rewriting its own `include`
+        // directives still has the target file, just not at the literal path.
+        let dir = std::env::temp_dir().join("va_frontend_test_include_basename_fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        std::fs::write(dir.join("real_header.va"), "`define A 2\n").expect("write header");
+
+        let src = "`include \"missing_subdir/real_header.va\"\nx = `A;\n";
+        let out = preprocess(src, std::slice::from_ref(&dir)).expect("preprocess");
+        assert_eq!(out.split_whitespace().collect::<String>(), "x=2;");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn include_exact_path_wins_over_basename_fallback() {
+        // The basename fallback is only tried after every exact-path candidate fails — an
+        // exact match must never be shadowed by a same-named file elsewhere on the search
+        // path.
+        let dir = std::env::temp_dir().join("va_frontend_test_include_exact_wins");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sub = dir.join("real_sub");
+        std::fs::create_dir_all(&sub).expect("create test subdir");
+        std::fs::write(dir.join("h.va"), "`define A 1\n").expect("write flat header");
+        std::fs::write(sub.join("h.va"), "`define A 2\n").expect("write nested header");
+
+        let src = "`include \"real_sub/h.va\"\nx = `A;\n";
+        let out = preprocess(src, std::slice::from_ref(&dir)).expect("preprocess");
+        assert_eq!(out.split_whitespace().collect::<String>(), "x=2;");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

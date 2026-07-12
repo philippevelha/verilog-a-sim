@@ -122,6 +122,26 @@ pub fn parse_with_disciplines(tokens: &[Token]) -> Result<ParsedUnit, FrontendEr
     Ok((modules, p.natures, p.disciplines))
 }
 
+/// The dedicated single-word tokens (`electrical`/`thermal`/`ground`) that exist purely to
+/// support their own declaration grammar, but whose plain spelling a real corpus model
+/// sometimes reuses as an ordinary variable/parameter name (`external/ekv3_variables.va`:
+/// `real thermal;`, later read as a bare identifier throughout `ekv3_noise.va`'s analog code
+/// — both files are `` `include ``d into the same compilation unit as `external/ekv3.va`).
+/// Returns that token's own spelling, for use wherever the grammar expects a bare *name*
+/// rather than the start of a declaration (`Parser::expect_ident`, `Parser::parse_primary`) —
+/// mirrors the precedent `Parser::expect_discipline_or_nature_name` already established for
+/// `electrical`/`thermal` as a `discipline`/`nature` block's own declared name. Deliberately
+/// narrow: `Real`/`Integer`/`Parameter`/… stay fully reserved — no corpus need found for them,
+/// and their central role in the grammar makes the collision risk much higher.
+fn ident_like_keyword(t: &Token) -> Option<&'static str> {
+    match t {
+        Token::Electrical => Some("electrical"),
+        Token::Thermal => Some("thermal"),
+        Token::Ground => Some("ground"),
+        _ => None,
+    }
+}
+
 struct Parser<'a> {
     toks: &'a [Token],
     pos: usize,
@@ -222,6 +242,11 @@ impl Parser<'_> {
         match self.peek() {
             Some(Token::Ident(s)) => {
                 let s = s.clone();
+                self.pos += 1;
+                Ok(s)
+            }
+            Some(t) if ident_like_keyword(t).is_some() => {
+                let s = ident_like_keyword(t).unwrap().to_string();
                 self.pos += 1;
                 Ok(s)
             }
@@ -1124,6 +1149,17 @@ impl Parser<'_> {
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::Assign { lhs, index, rhs })
             }
+            // `electrical`/`thermal`/`ground` reused as a plain variable name (see
+            // `ident_like_keyword`'s doc comment) — an assignment target here, never a
+            // declaration start (that only ever happens in `parse_item`).
+            Some(t) if ident_like_keyword(t).is_some() => {
+                let lhs = self.expect_ident()?;
+                let index = self.parse_index_list()?;
+                self.eat(&Token::Assign)?;
+                let rhs = self.parse_expr()?;
+                self.eat(&Token::Semicolon)?;
+                Ok(Stmt::Assign { lhs, index, rhs })
+            }
             Some(&Token::Keyword(kw)) => match kw.as_str() {
                 "while" => self.parse_while(),
                 "repeat" => self.parse_repeat(),
@@ -1452,6 +1488,15 @@ impl Parser<'_> {
                     self.pos += 1;
                     Ok(self.push(ExprAst::Ident(name)))
                 }
+            }
+            // `electrical`/`thermal`/`ground` in expression-atom position: never a legitimate
+            // declaration start here (that dispatch only ever happens in `parse_item`, never
+            // mid-expression), so treat it as a bare identifier read — see
+            // `ident_like_keyword`'s doc comment.
+            Some(t) if ident_like_keyword(t).is_some() => {
+                let name = ident_like_keyword(t).unwrap().to_string();
+                self.pos += 1;
+                Ok(self.push(ExprAst::Ident(name)))
             }
             // A reserved word in expression position must be a built-in function call
             // (`exp(x)`, `ddt(...)`, `pow(x, y)`, …). Elaboration maps the name to a
@@ -2713,5 +2758,52 @@ mod tests {
                 .expect("lex");
         let mut p = make_parser(&toks);
         assert!(p.parse_preamble().is_err());
+    }
+
+    #[test]
+    fn thermal_electrical_ground_reused_as_a_plain_variable_name() {
+        // `external/ekv3_variables.va`: `real thermal;`, later read/assigned as a bare
+        // identifier throughout `ekv3_noise.va`/`ekv3_oppoints.va` — all three `` `include ``d
+        // into the same compilation unit as `external/ekv3.va`.
+        let m = parse_src(
+            "module t(a, b); electrical a, b; real thermal, electrical, ground; \
+             analog begin thermal = 1.0; ground = thermal * 2.0; \
+             I(a, b) <+ ground + electrical; end endmodule",
+        );
+        let names: Vec<&str> = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Var { names, .. } => Some(names.iter().map(|e| e.name.as_str()).collect()),
+                _ => None,
+            })
+            .expect("var decl");
+        assert_eq!(names, vec!["thermal", "electrical", "ground"]);
+
+        let analog = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Analog(Stmt::Block(s)) => Some(s),
+                _ => None,
+            })
+            .expect("analog block");
+        assert!(matches!(
+            &analog[0],
+            Stmt::Assign { lhs, .. } if lhs == "thermal"
+        ));
+        assert!(matches!(
+            &analog[1],
+            Stmt::Assign { lhs, .. } if lhs == "ground"
+        ));
+        match &analog[1] {
+            Stmt::Assign { rhs, .. } => {
+                assert!(matches!(
+                    m.expr(*rhs),
+                    ExprAst::Binary(BinOp::Mul, l, _) if matches!(m.expr(*l), ExprAst::Ident(n) if n == "thermal")
+                ));
+            }
+            _ => unreachable!(),
+        }
     }
 }

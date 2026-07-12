@@ -199,7 +199,18 @@ class of lexemes.
   preprocessing pass before lexing "real" tokens (macro objects/functions expand recursively,
   conditionals are evaluated against the defined-macro set). An unresolved `` `include `` is
   skipped rather than erroring, since the standard `disciplines.vams`/`constants.vams` headers'
-  effects are built directly into elaboration.
+  effects are built directly into elaboration. `Preprocessor::resolve_include` tries the literal
+  path against each search directory first (as always), then — only if every exact candidate
+  misses — retries by *basename alone* against those same directories. This closes a real,
+  corpus-confirmed gap distinct from a genuinely absent file: `external/ekv3.va`'s own `` `include
+  "ekv3_include/ekv3_definitions.va" `` (and 14 sibling `` `include ``s under the same
+  subdirectory) names a vendor subdirectory this corpus snapshot flattened away without rewriting
+  the `` `include `` directives themselves — `external/ekv3_definitions.va` (and every other
+  target) is still physically present, just directly under `external/`, not
+  `external/ekv3_include/`. The fallback is scoped to the already-configured search directories
+  (never a new filesystem walk) and tried only after every exact match fails, so it can't reach
+  across an unrelated library folder that happens to ship a same-named header (e.g. two vendors'
+  own `disciplines.vams`) and never shadows a real exact match.
 - **Structural and Analog Usage**: Textual, so it can appear anywhere in source, but in practice
   only before the `module` keyword (headers) or around a macro-guarded declaration.
 - **Comparison with Traditional Constructs**: Direct analogue of the C preprocessor (`#include`,
@@ -689,7 +700,23 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   declared discipline, matching how this project already treats access names as purely
   name-based, not type-checked against the declaring net.
 - **Expressions and Evaluation**: N/A — pure declaration; the discipline is looked up once
-  (`collect_nodes`) and attached to each interned `NodeId`.
+  (`collect_nodes`) and attached to each interned `NodeId`. **`electrical`/`thermal` (and
+  `ground`, §1.4) also parse as an ordinary identifier wherever the grammar expects a bare
+  *name* rather than the start of a declaration** — `Parser::ident_like_keyword` — a real corpus
+  need, not a hypothetical one: `external/ekv3_variables.va` declares `real thermal;` (a plain
+  module-level variable literally spelled `thermal`), later read and reassigned as a bare
+  identifier throughout `external/ekv3_noise.va`/`ekv3_oppoints.va` — all `` `include ``d into
+  the same compilation unit as `external/ekv3.va`. This mirrors the precedent
+  `Parser::expect_discipline_or_nature_name` already established for `electrical`/`thermal` as a
+  `discipline`/`nature` block's own declared name, generalized to `Parser::expect_ident` (every
+  declaration-name position: variable/parameter/net/branch/function/genvar names) and
+  `Parser::parse_primary` (expression-atom position, so a later *read* of `thermal` resolves,
+  and a bare `thermal = expr;` parses as `Stmt::Assign`, not a declaration). Unambiguous by
+  construction: `parse_item`'s dispatch on `Token::Electrical`/`Token::Thermal` to start a net
+  declaration happens *before* falling into either of these paths, so a token reached inside
+  them is never the start of a declaration. Deliberately narrow — `Real`/`Integer`/`Parameter`/…
+  stay fully reserved; no corpus need found for those, and their central grammar role makes the
+  collision risk much higher.
 - **Structural and Analog Usage**: Module-level declaration; referenced from the analog block
   only indirectly, through `V(...)`/`I(...)` access-function calls naming the net.
 - **Comparison with Traditional Constructs**: No C analogue (C has no notion of a physical
@@ -719,7 +746,10 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   leaving them as distinct nodes that happen to both read as zero. The pre-existing implicit
   path — a bare single-terminal access (`V(a)`) lazily creating a node named `"gnd"`
   (`Elaborator::reference_node`) — is unchanged and now simply reuses whichever `NodeId` an
-  explicit `ground` declaration already claimed, when one is present.
+  explicit `ground` declaration already claimed, when one is present. Like `electrical`/
+  `thermal` above, `ground` also parses as an ordinary identifier wherever the grammar expects a
+  bare name (`Parser::ident_like_keyword`) — symmetric treatment of the same token class, though
+  no corpus file surveyed declares a variable/parameter literally named `ground`.
 - **Structural and Analog Usage**: Module-level declaration; referenced from the analog block
   only indirectly, through any single-terminal or explicit-to-ground `V(...)`/`I(...)` access.
 - **Comparison with Traditional Constructs**: The electrical-circuit notion of "ground" has no
