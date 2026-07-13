@@ -1,0 +1,11 @@
+* NMOS common-source bias point — bring-up rung 5.
+* VDD --[RD]-- d --[M1: d,g,s=gnd, models/mosfet.va defaults]
+* Gate biased at 2.0 V (Vov = Vgs - vto = 2.0 - 0.7 = 1.3 V).
+* Self-consistent saturation-region solve: Id = 0.5*kp*(w/l)*Vov^2*(1+lambda*Vds),
+*   Vd = VDD - Id*RD  =>  Id ~= 1.745 mA, V(d) ~= 3.255 V (see va-cli's mos_dc_solves_* test).
+VDD vdd gnd DC 5.0
+VG  g   gnd DC 2.0
+RD  vdd d   1000
+M1  d   g   gnd mosfet
+.op
+.end

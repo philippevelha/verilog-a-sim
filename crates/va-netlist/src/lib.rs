@@ -170,6 +170,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_mos_dc_devices() {
+        let deck = include_str!("../../../circuits/mos_dc.net");
+        let net = parse(deck).expect("mos_dc.net should parse");
+        // VDD, VG, RD, M1.
+        assert_eq!(net.devices.len(), 4);
+        assert_eq!(net.analysis, AnalysisCard::Op);
+
+        let m1 = net.devices.iter().find(|d| d.name == "M1").unwrap();
+        assert_eq!(m1.model, "mosfet");
+        assert_eq!(m1.value, None);
+        assert_eq!(m1.terminals.len(), 3, "d, g, s — no body terminal in v0");
+        assert_eq!(m1.terminals[2], GROUND, "M1's source is tied to gnd");
+    }
+
+    #[test]
     fn si_suffixes_and_comments() {
         let deck = "* a comment\nR1 a 0 2k\nC1 a 0 1u\n.op\n.end\n";
         let net = parse(deck).expect("should parse");

@@ -2,9 +2,10 @@
 //!
 //! Reads a SPICE-flavored deck: one element or dot-card per line, whitespace-separated
 //! tokens, `*` full-line comments. The supported element letters are `R` (resistor), `C`
-//! (capacitor), `D` (a model-referencing device, e.g. a diode), and `V` (voltage source).
-//! Net `0`/`gnd` is the reference node; every other net gets a dense unknown index in
-//! first-seen order.
+//! (capacitor), `D` (a two-terminal model-referencing device, e.g. a diode), `M` (a
+//! three-terminal model-referencing device, e.g. a MOSFET — `` M<name> d g s model ``, no
+//! separate body/bulk terminal in v0, § ladder rung 5), and `V` (voltage source). Net `0`/`gnd`
+//! is the reference node; every other net gets a dense unknown index in first-seen order.
 //!
 //! # Limitations
 //!
@@ -92,7 +93,8 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
         message,
     };
 
-    // Every supported element has two terminals.
+    // Minimum token count for the element kind about to be parsed (two terminals for most,
+    // three for `M`).
     let need = |n: usize| -> Result<(), NetlistError> {
         if toks.len() < n {
             Err(err(format!(
@@ -129,6 +131,24 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 name,
                 model: toks[3].to_string(),
                 terminals: vec![p, n],
+                value: None,
+                waveform: None,
+            })
+        }
+        // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
+        // ladder rung 5). No body/bulk terminal in v0, unlike SPICE's usual four-terminal `M`
+        // line — a stated simplification, not an oversight (mirrors `va-abi::reference::Bjt`'s
+        // own no-body-effect scope for the analogous three-terminal BJT).
+        'M' => {
+            need(5)?;
+            let d = intern(net, toks[1]);
+            let g = intern(net, toks[2]);
+            let s = intern(net, toks[3]);
+            // The fifth token names the model (e.g. `mosfet`).
+            Ok(Device {
+                name,
+                model: toks[4].to_string(),
+                terminals: vec![d, g, s],
                 value: None,
                 waveform: None,
             })

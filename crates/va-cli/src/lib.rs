@@ -631,6 +631,43 @@ mod tests {
         solve_dc(&net, compiled).expect("solve divider")
     }
 
+    /// End-to-end DC (ladder rung 5): compile `models/mosfet.va` and solve `circuits/mos_dc.net`
+    /// — an NMOS common-source bias point through the real frontend → codegen → core pipeline.
+    #[test]
+    fn mos_dc_solves_through_codegen_pipeline() {
+        let src = include_str!("../../../models/mosfet.va");
+        let design = va_frontend::compile(src).expect("compile mosfet.va");
+        assert_eq!(design.modules.len(), 1);
+        assert_eq!(design.modules[0].name, "mosfet");
+
+        let deck = include_str!("../../../circuits/mos_dc.net");
+        let net = va_netlist::parser::parse(deck).expect("parse mos_dc");
+        let op = solve_dc(&net, &design.modules).expect("solve mos_dc");
+
+        // node_order: vdd, g, d (first-seen order; gnd is the reference sentinel).
+        let vdd_idx = 0;
+        let g_idx = 1;
+        let d_idx = 2;
+        assert!(
+            (op.x[vdd_idx] - 5.0).abs() < 1e-9,
+            "V(vdd) = {}",
+            op.x[vdd_idx]
+        );
+        assert!((op.x[g_idx] - 2.0).abs() < 1e-9, "V(g) = {}", op.x[g_idx]);
+
+        // Hand-derived fixed point (see circuits/mos_dc.net's own comment): with Vgs = 2.0 V
+        // fixed (vto = 0.7, so Vov = 1.3 V) and the drain node solving
+        // `(VDD - Vd)/RD = 0.5*kp*(w/l)*Vov^2*(1 + lambda*Vd)` (Vds = Vd, since the source is
+        // tied to gnd), `Vd = 3.31 / 1.0169 = 3.254991...` — well inside saturation
+        // (Vd > Vov), confirming the region-selection branch Newton actually lands in.
+        let expected_vd = 3.31 / 1.0169;
+        assert!(
+            (op.x[d_idx] - expected_vd).abs() < 1e-6,
+            "V(d) = {}, expected {expected_vd}",
+            op.x[d_idx]
+        );
+    }
+
     #[test]
     fn divider_solves_with_reference_models() {
         let op = solve_divider(&[]);

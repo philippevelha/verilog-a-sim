@@ -1328,7 +1328,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | pieces work in isolation (frontend, codegen, nonlinear DC); not yet wired or golden-gated |
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | `cargo run -p va-cli -- sim circuits/rc_step.net --tran` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | `cargo run -p va-cli -- sim circuits/rectifier.net --tran` produces a correct half-wave-rectified/RC-filtered waveform; **golden gate pending `va-harness` (T6.3)** |
-| 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ⬜ |
+| 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | `cargo run -p va-cli -- sim circuits/mos_dc.net --model models/mosfet.va` solves an NMOS common-source bias point through the real frontend→codegen→core pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | `cargo test -p va-transient ring_oscillator_sustains_oscillation` — real, growing oscillation from an unstable DC equilibrium, `va-abi::Bjt` (new); **golden gate pending `va-harness` (T6.3)** (see T4.3) |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
@@ -1337,6 +1337,36 @@ is available.
 > **No rung is formally "passed" yet** — passing requires `va-harness` green against committed
 > `golden/` (per `validation.md`), which awaits T6. The table records *implementation reach*,
 > not passed gates.
+
+**Ladder rung 5 (a MOS): implementation reach closed 2026-07-12** — was the sole fully
+unstarted rung; closed the same way rung 6's ring oscillator was, with a new hand-written
+reference model rather than waiting on an industrial compact model (every BSIM/HiSIM/PSP family
+`.va` file in `external/` that passes the frontend is far past what this codegen's if/else/
+loop/function coverage can build into a `ModelInstance` today — confirmed by inspection, not
+assumed, since no per-file codegen breakdown is exposed via any `va-cli` subcommand yet).
+`models/mosfet.va`: a three-terminal (`d`, `g`, `s` — no body/bulk terminal, matching
+`va-abi::reference::Bjt`'s own no-body-effect scope for the analogous three-terminal BJT), Level-1
+(Shichman-Hodges) square-law NMOS — cutoff/triode/saturation region selection via ordinary
+`if`/`else if`/`else`, no new codegen capability needed (T2.2's `if`/`else` lowering already
+covers it). Unlike `Bjt` (a hand-written `va-abi` Rust struct with **no** netlist wiring at all —
+its ring-oscillator demo builds instances directly in a `va-transient` test, since
+`va-netlist` had no 3-terminal-device grammar), rung 5 is a real `.va` source file compiled
+through the actual frontend→codegen pipeline via `va-cli`'s existing `--model` flag, genuinely
+exercising T1+T2, not just T3 — matching the ladder table's own "T1, T2, T3 (model reach)"
+description. Needed one small, additive `va-netlist` grammar change: `Parser::parse_device`
+gained an `'M'` element-line arm (`M<name> d g s model`, mirroring the existing `'D'`
+two-terminal model-referencing-device arm) — `va_ir::Module`/`va_abi::ModelInstance` and
+`va-cli`'s own device-building code needed **no** changes at all, since `Device::terminals`
+(already `Vec<usize>`, arbitrary length) and `build_from_model` (already zips port nodes against
+`terminals` of any length) were both already terminal-count-generic; only the 2-terminal-specific
+netlist *grammar* was missing. `circuits/mos_dc.net`: an NMOS common-source bias point (`VDD`
+through a drain resistor, gate held at a fixed bias, source grounded) that needs genuine Newton
+iteration to solve — not a linear divider — and lands well inside the saturation region, checked
+against a hand-derived fixed point (`(VDD-Vd)/RD = 0.5·kp·(w/l)·Vov²·(1+λ·Vd)` collapses to
+`Vd = 3.31/1.0169 = 3.254991…` for this circuit's values), not just against the tool's own output
+— `cargo test -p va-cli mos_dc_solves_through_codegen_pipeline` asserts this to `1e-6`.
+*Outstanding, same as every other rung*: the golden-vs-ngspice gate awaits T6.3; no `t1/t2`
+tutorial written yet.
 
 ---
 

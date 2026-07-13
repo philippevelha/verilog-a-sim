@@ -1,0 +1,43 @@
+// Simplified Level-1 (Shichman-Hodges square-law) NMOS — bring-up ladder rung 5.
+//
+// Id(Vgs, Vds), Vov = Vgs - vto:
+//   cutoff   (Vov <= 0):            Id = 0
+//   triode   (0 < Vov, Vds < Vov):  Id = kp*(w/l)*(Vov*Vds - Vds^2/2)*(1 + lambda*Vds)
+//   saturation (0 < Vov, Vds>=Vov): Id = 0.5*kp*(w/l)*Vov^2*(1 + lambda*Vds)
+//
+// Limitations: no body/bulk terminal (source is the only reference, so no body effect), no
+// subthreshold conduction, no temperature dependence, no junction/overlap capacitance (DC
+// operating-point/sweep only — no transient support). The classic Level-1 region boundaries
+// are not smoothed, matching the textbook SPICE LEVEL=1 equations (including their well-known,
+// SPICE-tolerated derivative discontinuities at Vov=0 and Vds=Vov) rather than approximating
+// them away.
+`include "disciplines.vams"
+
+module mosfet(d, g, s);
+    inout d, g, s;
+    electrical d, g, s;
+
+    parameter real vto    = 0.7    from (-inf:inf); // threshold voltage, V
+    parameter real kp     = 200u   from (0:inf);     // transconductance parameter, A/V^2
+    parameter real lambda = 0.01   from [0:inf);      // channel-length modulation, 1/V
+    parameter real w      = 10u    from (0:inf);      // channel width, m
+    parameter real l      = 1u     from (0:inf);      // channel length, m
+
+    real vgs, vds, vov, id;
+
+    analog begin
+        vgs = V(g, s);
+        vds = V(d, s);
+        vov = vgs - vto;
+
+        if (vov <= 0.0) begin
+            id = 0.0;
+        end else if (vds < vov) begin
+            id = kp * (w / l) * (vov * vds - vds * vds / 2.0) * (1.0 + lambda * vds);
+        end else begin
+            id = 0.5 * kp * (w / l) * vov * vov * (1.0 + lambda * vds);
+        end
+
+        I(d, s) <+ id;
+    end
+endmodule
