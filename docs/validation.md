@@ -26,20 +26,19 @@ Each rung is a checkpoint; it is "passed" only when `va-harness` is green agains
 5. a MOS DC
 6. ring oscillator (transient)
 
-### Current status (updated 2026-07-12)
+### Current status (updated 2026-07-13)
 
 **No rung is "passed" yet:** `va-harness`/`golden/`/`xtask gen-golden` are still stubs (no
 ngspice available in this environment to generate golden from, either), so there is still no
 harness-vs-ngspice comparison in place for *any* rung. What has changed since the table above
-was first written is *implementation reach* — every rung but #2 now solves through the real
-`va-cli` pipeline, validated against analytic/hand-derived values and inline unit tests, not
-golden:
+was first written is *implementation reach* — **every rung now solves through the real `va-cli`
+pipeline**, validated against analytic/hand-derived values and inline unit tests, not golden:
 
 - **Rung 1 (resistor divider, DC):** `cargo run -p va-cli -- sim circuits/divider.net` solves to
   the analytic midpoint (< 1e-9).
-- **Rung 2 (diode I–V):** the constituent pieces work in isolation — `va-frontend` elaborates
-  `diode.va`, `va-codegen` differentiates it (AD vs FD green), and `va-core` converges a
-  nonlinear diode–resistor clamp — but they are not yet wired by a netlist driver.
+- **Rung 2 (diode I–V, DC sweep):** `cargo run -p va-cli -- sim circuits/diode_iv.net --model
+  models/diode.va` sweeps `V1` 0–0.6 V and matches the closed-form Shockley law
+  `Id(V)=Is·(exp(V/(N·vt))−1)` at every point.
 - **Rung 3 (RC transient):** `cargo run -p va-cli -- sim circuits/rc_step.net --tran` matches the
   analytic `V(t)=Vs·(1−e^{−t/RC})` closely.
 - **Rung 4 (diode rectifier, transient):** `cargo run -p va-cli -- sim circuits/rectifier.net

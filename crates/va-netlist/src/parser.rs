@@ -18,8 +18,12 @@
 //!   reconstructs a fresh, differently-valued source each step instead
 //!   (`va_transient::integrator::run_dynamic`). SPICE's optional trailing `SIN` parameters
 //!   (delay, damping, phase) are not parsed.
+//! - `.dc <source> <start> <stop> <step>` (§ ladder rung 2) sweeps one voltage source's DC
+//!   value, solving a fresh operating point at each step ([`crate::DcSweep`]) — only a linear
+//!   sweep of a single source, no nested/multi-source sweeps and no `.dc` with no arguments
+//!   (a source-list sweep) as some SPICE dialects also accept.
 
-use crate::{AnalysisCard, Device, Netlist, NetlistError, Waveform};
+use crate::{AnalysisCard, DcSweep, Device, Netlist, NetlistError, Waveform};
 use va_abi::reference::GROUND;
 
 /// Parse a netlist deck into a [`Netlist`].
@@ -78,6 +82,25 @@ fn parse_card(net: &mut Netlist, body: &str) {
             toks.get(2).and_then(|v| parse_value(v)),
         ) {
             net.tran = Some((tstep, tstop));
+        }
+    }
+    // `.dc <source> <start> <stop> <step>` (§ ladder rung 2) — the SPICE-standard positional
+    // sweep spec. `source` names a device (validated against `net.devices` by `va-cli`, not
+    // here — this pass hasn't necessarily seen every device line yet, source order isn't
+    // guaranteed).
+    if card == AnalysisCard::Dc {
+        if let (Some(source), Some(start), Some(stop), Some(step)) = (
+            toks.get(1).map(|s| s.to_string()),
+            toks.get(2).and_then(|v| parse_value(v)),
+            toks.get(3).and_then(|v| parse_value(v)),
+            toks.get(4).and_then(|v| parse_value(v)),
+        ) {
+            net.dc = Some(DcSweep {
+                source,
+                start,
+                stop,
+                step,
+            });
         }
     }
 }

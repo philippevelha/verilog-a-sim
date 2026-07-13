@@ -1,0 +1,8 @@
+* Diode I-V curve — bring-up rung 2.
+* V1 directly forces V(in); I(V1) reads the diode's own current (negated — see va-abi's
+* VSource sign convention), matching the closed-form Shockley law
+* Id(V) = Is*(exp(V/(N*vt)) - 1) that models/diode.va implements.
+V1 in gnd DC 0.0
+D1 in gnd diode
+.dc V1 0.0 0.6 0.1
+.end

@@ -107,6 +107,9 @@ pub fn run_sim(
             plot::plot_transient(path, &net, &wf).with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote transient plot to {path}");
         }
+    } else if let Some(sweep) = &net.dc {
+        let points = solve_dc_sweep(&net, &compiled, sweep)?;
+        report_sweep(&net, sweep, &points);
     } else {
         let op = solve_dc(&net, &compiled)?;
         report(&net, &op.x);
@@ -336,6 +339,57 @@ fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::Operating
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
 }
 
+/// Solve a `.dc` sweep (§ ladder rung 2): re-solve the whole circuit fresh at each swept value
+/// of `sweep.source`, since `va-core::dc::sweep` is agnostic about *what* changed between
+/// points and just wants a fresh instance set per point. `sweep.source` must name a `vsource`
+/// device; anything else is a clear error rather than a silently-ignored sweep.
+fn solve_dc_sweep(
+    net: &Netlist,
+    compiled: &[Module],
+    sweep: &va_netlist::DcSweep,
+) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
+    let src = net
+        .devices
+        .iter()
+        .find(|d| d.name == sweep.source)
+        .with_context(|| format!("`.dc` sweeps unknown device `{}`", sweep.source))?;
+    if src.model != "vsource" {
+        bail!(
+            "`.dc` can only sweep a voltage source; `{}` is a `{}`",
+            sweep.source,
+            src.model
+        );
+    }
+
+    let points = sweep_points(sweep.start, sweep.stop, sweep.step);
+    let mut out = Vec::with_capacity(points.len());
+    for value in points {
+        let mut swept = net.clone();
+        let dev = swept
+            .devices
+            .iter_mut()
+            .find(|d| d.name == sweep.source)
+            .expect("just found this device above");
+        dev.value = Some(value);
+        let op = solve_dc(&swept, compiled)
+            .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
+        out.push((value, op));
+    }
+    Ok(out)
+}
+
+/// Generate the swept values `start, start+step, …` up to and including `stop` (within half a
+/// step, to absorb float rounding at the endpoint — the SPICE-standard inclusive-range
+/// convention). A zero or wrong-signed `step` (one that would never reach `stop`) yields just
+/// `start`, rather than looping forever.
+fn sweep_points(start: f64, stop: f64, step: f64) -> Vec<f64> {
+    if step == 0.0 || (stop - start) * step < 0.0 {
+        return vec![start];
+    }
+    let n = ((stop - start) / step).round().max(0.0) as usize;
+    (0..=n).map(|i| start + step * i as f64).collect()
+}
+
 /// One `vsource` device's `(p, n, branch)` global indices plus the waveform it should be
 /// rebuilt from at each transient step (see [`build_instances_split`]).
 type TimeVaryingSource = (usize, usize, usize, va_netlist::Waveform);
@@ -533,6 +587,37 @@ fn report(net: &Netlist, x: &[f64]) {
     }
 }
 
+/// Print a `.dc` sweep: one line per swept value, every node's voltage and source current —
+/// the same per-point content [`report`] prints for a single operating point, repeated.
+fn report_sweep(
+    net: &Netlist,
+    sweep: &va_netlist::DcSweep,
+    points: &[(f64, va_core::dc::OperatingPoint)],
+) {
+    println!(
+        "DC sweep {} from {} to {} step {} ({} points):",
+        sweep.source,
+        sweep.start,
+        sweep.stop,
+        sweep.step,
+        points.len()
+    );
+    for (value, op) in points {
+        print!("  {}={value:.6}:", sweep.source);
+        for (i, name) in net.node_order.iter().enumerate() {
+            print!(" V({name})={:.6}V", op.x[i]);
+        }
+        let mut branch = net.node_order.len();
+        for dev in &net.devices {
+            if dev.model == "vsource" {
+                print!(" I({})={:.6e}A", dev.name, op.x[branch]);
+                branch += 1;
+            }
+        }
+        println!();
+    }
+}
+
 /// Print the transient waveform: one line per accepted timepoint, every node's voltage.
 fn report_transient(net: &Netlist, wf: &Waveform) {
     println!(
@@ -629,6 +714,48 @@ mod tests {
         let deck = include_str!("../../../circuits/divider.net");
         let net = va_netlist::parser::parse(deck).expect("parse divider");
         solve_dc(&net, compiled).expect("solve divider")
+    }
+
+    /// End-to-end DC sweep (ladder rung 2): compile `models/diode.va` and sweep
+    /// `circuits/diode_iv.net`'s `V1` from 0 to 0.6 V, checking every point against the
+    /// closed-form Shockley diode law the model itself implements — `Id(V) =
+    /// Is*(exp(V/(N*vt))-1)` — not just against the tool's own output.
+    #[test]
+    fn diode_iv_sweep_solves_through_codegen_pipeline() {
+        let src = include_str!("../../../models/diode.va");
+        let design = va_frontend::compile(src).expect("compile diode.va");
+        assert_eq!(design.modules.len(), 1);
+        assert_eq!(design.modules[0].name, "diode");
+
+        let deck = include_str!("../../../circuits/diode_iv.net");
+        let net = va_netlist::parser::parse(deck).expect("parse diode_iv");
+        let sweep = net.dc.clone().expect("`.dc` sweep card");
+        let points = solve_dc_sweep(&net, &design.modules, &sweep).expect("solve diode_iv sweep");
+        assert_eq!(points.len(), 7); // 0.0, 0.1, ..., 0.6
+
+        // diode.va's own defaults: Is = 1e-14 A, N = 1.0; va-codegen's default thermal voltage.
+        let is = 1e-14_f64;
+        let vt = va_codegen::VT;
+        // node_order: ["in"] — V1's own branch-current unknown follows it at index 1.
+        let in_idx = 0;
+        let branch_idx = 1;
+        for (v, op) in &points {
+            assert!(
+                (op.x[in_idx] - v).abs() < 1e-9,
+                "V(in) = {} at V1={v}",
+                op.x[in_idx]
+            );
+            let expected_id = is * ((v / vt).exp() - 1.0);
+            // KCL at `in`: id (diode) + ib (source) = 0 (va-abi::VSource's own sign
+            // convention — "current flows out of p and into n" internally), so I(V1) = -id.
+            let i_v1 = op.x[branch_idx];
+            let tol = 1e-9_f64.max(expected_id.abs() * 1e-6);
+            assert!(
+                (i_v1 - (-expected_id)).abs() < tol,
+                "at V1={v}: I(V1)={i_v1}, expected {}",
+                -expected_id
+            );
+        }
     }
 
     /// End-to-end DC (ladder rung 5): compile `models/mosfet.va` and solve `circuits/mos_dc.net`

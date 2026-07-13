@@ -60,6 +60,27 @@ pub struct Netlist {
     /// transient run then has nothing to go on and `va-cli` reports that clearly rather than
     /// guessing a default.
     pub tran: Option<(f64, f64)>,
+    /// `.dc <source> <start> <stop> <step>` sweep spec, if a DC-sweep card was present and every
+    /// value parsed (§ ladder rung 2). `None` for a deck with no `.dc` card, one whose tokens
+    /// didn't parse, or a plain `.op` card — those solve a single operating point instead.
+    pub dc: Option<DcSweep>,
+}
+
+/// A `.dc <source> <start> <stop> <step>` sweep spec (§ ladder rung 2): step `source`'s DC value
+/// from `start` to `stop` in increments of `step`, solving a fresh operating point at each. Only
+/// a voltage-source device may be named — matching the LRM/SPICE convention that a `.dc` sweep
+/// steps a source, not an arbitrary device value; `va-cli` reports a clear error if `source`
+/// doesn't resolve to one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DcSweep {
+    /// The swept device's name (must be a `vsource`).
+    pub source: String,
+    /// First value.
+    pub start: f64,
+    /// Last value (inclusive, subject to rounding — see `va-cli`'s point generator).
+    pub stop: f64,
+    /// Increment between points.
+    pub step: f64,
 }
 
 /// A single parsed device line, before it is turned into a [`va_abi::ModelInstance`].
@@ -100,7 +121,7 @@ pub enum Waveform {
 
 #[cfg(test)]
 mod tests {
-    use super::{parser::parse, AnalysisCard, Waveform};
+    use super::{parser::parse, AnalysisCard, DcSweep, Waveform};
     use va_abi::reference::GROUND;
 
     #[test]
@@ -182,6 +203,33 @@ mod tests {
         assert_eq!(m1.value, None);
         assert_eq!(m1.terminals.len(), 3, "d, g, s — no body terminal in v0");
         assert_eq!(m1.terminals[2], GROUND, "M1's source is tied to gnd");
+    }
+
+    #[test]
+    fn parses_diode_iv_sweep_card() {
+        let deck = include_str!("../../../circuits/diode_iv.net");
+        let net = parse(deck).expect("diode_iv.net should parse");
+        assert_eq!(net.analysis, AnalysisCard::Dc);
+
+        let sweep = net.dc.expect("`.dc` sweep card");
+        assert_eq!(
+            sweep,
+            DcSweep {
+                source: "V1".to_string(),
+                start: 0.0,
+                stop: 0.6,
+                step: 0.1,
+            }
+        );
+
+        let d1 = net.devices.iter().find(|d| d.name == "D1").unwrap();
+        assert_eq!(d1.model, "diode");
+    }
+
+    #[test]
+    fn a_deck_with_no_dc_card_has_no_sweep() {
+        let net = parse(include_str!("../../../circuits/divider.net")).expect("parse divider");
+        assert_eq!(net.dc, None);
     }
 
     #[test]
