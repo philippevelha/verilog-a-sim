@@ -1,39 +1,222 @@
-﻿---
+---
 title: "The validation harness"
 subtitle: "T6 · Phase T6.3 · `va-harness`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: partial.** The comparison machinery is real and tested; the golden data isn't there
+yet. See "Limitations" below for exactly why, and [the roadmap](../../roadmap.md)'s T6.3 section
+for the full change log.
 :::
 
 ## Goal
 
-Run the whole zoo vs golden and report the per-rung pass/fail and convergence-fraction dashboard.
+Turn "the simulator produced some numbers" into "the simulator produced the *right* numbers":
+solve a circuit through the real pipeline, diff it against a committed reference, and report a
+clear pass/fail — the one thing that actually earns a ✅ on the ladder-rung table, per
+`CLAUDE.md` §7.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+`va-harness` sits at the very end of the pipeline `CLAUDE.md` §2 draws, downstream of
+everything else:
+
+```
+Verilog-A source          circuit netlist
+       │                         │
+  [va-frontend] ──IR──► [va-codegen]      [va-netlist]
+                              │                │
+                        ModelInstance (Interface β)
+                              │                │
+                              ▼                ▼
+                         [va-core] ──► [va-cli] ──► [va-harness] ──► golden/
+                                                          │
+                                                     (ngspice, offline,
+                                                      as the oracle)
+```
+
+It doesn't add a new capability to the simulator itself — it drives the *existing* `va-cli`
+pipeline and checks the answer, the same way a test suite doesn't make the code faster, it makes
+you trust that it's correct.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+Three pieces, matching `docs/validation.md` §7:
+
+1. **A metric** — how far apart are "what we computed" and "what's golden"? `va_harness::metrics`
+   has two: `max_relative_error` (DC — the worst relative deviation across every point) and
+   `rms_error` (transient — root-mean-square over an already-aligned waveform).
+2. **A golden format** — a file format to *store* that reference. `va_harness::golden` has two so
+   far: `GoldenDc` (one operating point) and `GoldenSweep` (a `.dc` sweep, one `GoldenDc`-shaped
+   row per swept value).
+3. **A driver** — something that actually runs the pipeline, builds a comparable result, and
+   applies the metric. `va_harness::dc` does this for both golden shapes; `cargo xtask validate`
+   is the command-line entry point that ties it to a curated list of circuits.
+
+ngspice is the oracle throughout (`CLAUDE.md` §7): we are not building on it, only checking
+against it. That one sentence turns out to matter a lot for how honest this phase can be about
+its own progress — see Limitations.
+
+### The DC metric, precisely
+
+```
+rel = max_i |got_i - ref_i| / max(|ref_i|, floor)
+```
+
+`floor` (`1e-12`) exists purely so a golden value of exactly `0` — a diode's leakage current at
+`V=0`, say — doesn't turn a negligible absolute difference into a division-by-zero blowup. It's
+a division guard, not a "this is a small error" threshold in its own right; a genuinely large
+absolute difference against a near-zero reference still divides out to something huge and fails
+the check, exactly as it should.
+
+### The golden formats
+
+A `GoldenDc` (`.golden`) is as plain as it gets:
+
+```text
+# golden/divider.golden
+in 1
+mid 0.5
+```
+
+A `GoldenSweep` adds one header line naming the swept source and the node order, then one row
+per point:
+
+```text
+# golden/diode_iv.golden
+V1 in
+0 0
+0.1 0.1
+```
+
+Both round-trip exactly through `f64`'s `Display` (Rust's shortest-round-trippable-decimal
+formatting, not a truncated one) — `render()` then `parse()` always reproduces the original
+value bit-for-bit, which matters for a format whose entire job is being a trustworthy reference.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+`va_cli::load` — parses a netlist and, if given, compiles a `.va` model through the real
+frontend → codegen pipeline. `run_sim` (the CLI's own entry point) already did this inline;
+it's now its own `pub fn` so `va-harness` can reuse it instead of re-implementing netlist parsing
+or shelling out to the CLI binary and re-parsing stdout:
+
+```rust
+pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)>
+```
+
+`va_cli::solve_dc` / `solve_dc_sweep` — likewise made `pub`, unchanged otherwise. They already
+existed to serve `run_sim`'s own DC/sweep reporting.
+
+`va_harness::dc::run_dc` — the glue: load, solve, package as a `GoldenDc`.
+
+```rust
+pub fn run_dc(circuit: &str, model: Option<&str>) -> Result<GoldenDc, HarnessError> {
+    let (net, compiled) = va_cli::load(circuit, model)...?;
+    let op = va_cli::solve_dc(&net, &compiled)...?;
+    Ok(GoldenDc::from_operating_point(&net.node_order, &op.x))
+}
+```
+
+`va_harness::dc::compare_dc` — diff two `GoldenDc`s. Node order must match exactly first — a
+silent value-by-position diff across differently-ordered nodes would compare unrelated
+quantities and could pass by accident:
+
+```rust
+pub fn compare_dc(got: &GoldenDc, golden: &GoldenDc) -> Result<Verdict, HarnessError> {
+    if got.node_order != golden.node_order {
+        return Err(HarnessError::NodeOrderMismatch { .. });
+    }
+    let error = metrics::max_relative_error(&got.values, &golden.values)?;
+    Ok(Verdict::new(error, tol::DC_REL))
+}
+```
+
+`run_dc_sweep`/`compare_dc_sweep` do the identical thing for a `.dc` sweep, flattening every
+point's node voltages into one long series before handing it to the same `max_relative_error`.
+
+`cargo xtask validate` walks two small, explicit tables (`DC_CIRCUITS`, `SWEEP_CIRCUITS`) — one
+entry per circuit this project currently knows how to golden-check — and for each: if
+`golden/<name>.golden` exists, run + compare + report `PASS`/`FAIL`; if it doesn't, report `skip`
+rather than failing the build. An empty `golden/` (this project's actual state — see
+Limitations) is a legitimate "nothing captured yet," not an error.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+The comparison logic itself — metrics, golden parse/render round-trips, node-order/length
+mismatch rejection — is unit-tested without needing any external tool:
+
+```console
+$ cargo test -p va-harness --lib
+running 28 tests
+test golden::tests::sweep_render_round_trips_through_parse ... ok
+test metrics::tests::max_relative_error_floor_guards_a_near_zero_reference ... ok
+test dc::tests::run_dc_solves_the_divider ... ok
+test dc::tests::run_dc_sweep_solves_the_diode_iv_curve ... ok
+test dc::tests::compare_dc_sweep_passes_for_an_identical_reference ... ok
+...
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`cargo xtask validate` against this project's actual (empty) `golden/`:
+
+```console
+$ cargo run -q -p xtask -- validate
+[xtask] validate: running va-harness over the model zoo vs golden/ …
+[xtask]   skip circuits/divider.net: no golden reference at .../golden/divider.golden
+[xtask]   skip circuits/mos_dc.net: no golden reference at .../golden/mos_dc.golden
+[xtask]   skip circuits/diode_iv.net: no golden reference at .../golden/diode_iv.golden
+[xtask] validate: 0 checked, 0 failed, 3 skipped (no golden)
+```
+
+Exit code `0` — skipping isn't failing. Now drop in a golden file by hand (this is exactly
+`divider.net`'s already-known analytic answer, `V(in)=1`, `V(mid)=1·R2/(R1+R2)=0.5` — not a
+fabricated value, just typed in manually instead of generated by `gen-golden`, which is why this
+worked example doesn't commit the file):
+
+```console
+$ printf "in 1\nmid 0.5\n" > golden/divider.golden
+$ cargo run -q -p xtask -- validate
+[xtask]   PASS circuits/divider.net: error=0.000e0 (tol 1e-4)
+[xtask]   skip circuits/mos_dc.net: no golden reference at ...
+[xtask]   skip circuits/diode_iv.net: no golden reference at ...
+[xtask] validate: 1 checked, 0 failed, 2 skipped (no golden)
+$ rm golden/divider.golden   # this file is not committed — see Limitations
+```
+
+A deliberately-wrong golden value (`mid 0.9` instead of `0.5`) reports `FAIL` and a non-zero exit
+— confirmed the same way, not just asserted in prose.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**No `golden/*.golden` file is committed, on purpose.** `cargo xtask gen-golden` — the command
+that's supposed to produce one, by actually running ngspice — is not implemented: this
+development environment has no ngspice installed (`gen-golden` reports exactly that, rather than
+silently no-op'ing), and even with ngspice present, this project still needs to write and verify
+a `circuits/*.net` → ngspice-deck translator, which hasn't happened. The worked example above
+types a golden value in by hand from an *already independently known* analytic answer — that's
+fine for demonstrating the comparison machinery, but it would **not** be fine to commit as a real
+golden reference, because the entire point of `CLAUDE.md` §7's "ngspice is the oracle" rule is
+that golden data comes from an *independent* simulator, not from this project's own hand-derived
+math. A `golden/` file with a hand-computed value in it would quietly stop being a check on
+correctness and start being a check on arithmetic consistency with itself.
+
+**DC only.** `rms_error` (the transient metric) is implemented and unit-tested, but nothing
+feeds it a real waveform yet — that needs a `GoldenWaveform` format and a "shared-timebase
+resample" step (two different transient runs won't land on the same timepoints unless one is
+resampled onto the other's), neither written yet. `.tran` circuits (`rc_step.net`,
+`rectifier.net`) aren't in any `xtask validate` table for this reason.
+
+**A per-rung/convergence-fraction dashboard** (§7's fourth metric, "fraction of zoo circuits
+that reach a solution") doesn't exist — `validate`'s own pass/fail/skip tally is the closest
+thing today.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+1. Write and verify a `circuits/*.net` → ngspice-deck translator, on a machine that actually has
+   ngspice installed — the real blocker for `gen-golden`, and for every ladder rung's golden gate
+   ever going green.
+2. `GoldenWaveform` + `rms_error`'s shared-timebase resample, to bring `.tran` circuits into
+   `xtask validate`.
+3. Once real golden data exists for even one rung, that rung is the project's first genuinely
+   ✅-complete ladder milestone — worth its own celebration, and its own worked example replacing
+   this tutorial's hand-typed stand-in.
