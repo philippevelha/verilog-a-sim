@@ -1341,11 +1341,22 @@ methodology + metrics report vs ngspice.
 > session's own unit tests) would misrepresent it as ngspice output, exactly the "ngspice is the
 > oracle" methodology `CLAUDE.md` §7 establishes — better to leave `golden/` honestly empty than
 > to launder a hand-computed value as a golden reference.
-> *Outstanding:* the ngspice deck translator + `gen_golden`'s real implementation (blocked on
-> having ngspice available to develop against); `.dc`-sweep and `.tran`-waveform golden support
-> (needs a `GoldenSweep`/`GoldenWaveform` alongside `GoldenDc`, plus `rms_error`'s
-> shared-timebase resample step, itself still unwritten); a per-rung/convergence-fraction
-> dashboard; `t6-integration/03-validation.qmd`.
+> *Outstanding at the time:* the ngspice deck translator + `gen_golden`'s real implementation
+> (still blocked on having ngspice available to develop against); `.dc`-sweep golden support;
+> `.tran`-waveform golden support; a per-rung/convergence-fraction dashboard;
+> `t6-integration/03-validation.qmd`.
+>
+> **`.dc`-sweep golden support: closed the same day.** `golden::GoldenSweep` (a header line
+> naming the swept source and every node, then one `<value> <node value>...` row per point) and
+> `dc::{run_dc_sweep, compare_dc_sweep}` extend the same pattern `GoldenDc`/`run_dc`/`compare_dc`
+> already established, reusing `max_relative_error` over every point's node voltages flattened
+> into one series. Needed `solve_dc_sweep` (already implemented for T6.2's rung-2 CLI wiring)
+> made `pub`, mirroring `solve_dc` — no other `va-cli` change. `xtask validate` now also drives a
+> `SWEEP_CIRCUITS` table (`diode_iv.net`); manually verified all three outcomes again
+> (pass/fail/skip) the same way, including a deliberately-wrong sweep point. Still no
+> `golden/*.golden` committed, for the identical ngspice-provenance reason as the DC case above.
+> *Now outstanding:* `.tran`-waveform golden support (needs `rms_error`'s still-unwritten
+> shared-timebase resample step first) and everything else in the paragraph above.
 
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.

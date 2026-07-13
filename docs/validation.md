@@ -17,11 +17,12 @@ zoo grows; record any change with its justification.
 
 **Updated 2026-07-13:** the DC metric (`va_harness::metrics::max_relative_error`) and the
 transient metric (`rms_error`) are real implementations now, not `todo!()` stubs — see
-`docs/roadmap.md`'s T6.3 section. `xtask validate` drives the DC metric for real over `divider.net`/
-`mos_dc.net`; `golden/` itself is still empty (no ngspice in this environment to generate real
-references from — `golden/README.md` explains why a hand-computed stand-in isn't committed
-instead). The transient metric's "shared-timebase resample" is still unwritten, and a `.dc`
-sweep has no golden format yet.
+`docs/roadmap.md`'s T6.3 section. `xtask validate` drives the DC metric for real over
+`divider.net`/`mos_dc.net` (a single operating point) and `diode_iv.net` (a `.dc` sweep);
+`golden/` itself is still empty (no ngspice in this environment to generate real references
+from — `golden/README.md` explains why a hand-computed stand-in isn't committed instead). The
+transient metric's "shared-timebase resample" is still unwritten, so a `.tran` waveform has no
+golden format yet.
 
 ## Bring-up ladder
 

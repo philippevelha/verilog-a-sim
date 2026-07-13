@@ -39,47 +39,67 @@ fn print_usage() {
     );
 }
 
-/// The DC circuits `validate`/`gen-golden` currently know how to drive (§ ladder rungs 1/5) —
-/// only a plain `.op`/no-sweep-`.dc` circuit is wired to golden yet; a `.dc` sweep (rung 2) or
-/// a `.tran` deck (rungs 3/4/6) isn't (`docs/roadmap.md`'s T6.3 notes), so they're deliberately
-/// left off this list rather than silently mishandled. `model` is `None` for a circuit solved
-/// entirely by `va-abi`'s reference primitives.
+/// The single-operating-point DC circuits `validate`/`gen-golden` know how to drive (§ ladder
+/// rungs 1/5) — a `.tran` deck (rungs 3/4/6) has no golden format yet (`docs/roadmap.md`'s T6.3
+/// notes), so it's deliberately left off this list rather than silently mishandled. `model` is
+/// `None` for a circuit solved entirely by `va-abi`'s reference primitives.
 const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/divider.net", None),
     ("circuits/mos_dc.net", Some("models/mosfet.va")),
 ];
 
-/// Run the validation harness over every known DC circuit and report pass/fail/skip. A circuit
-/// with no committed `golden/<name>.golden` is *skipped*, not failed — an empty `golden/` (this
-/// project's actual state today, absent a local ngspice install — see [`gen_golden`]) is a
-/// legitimate "nothing captured yet," not a build-breaking error.
-///
-/// # Errors
-///
-/// If any circuit that *does* have a golden reference fails to solve, or diverges from it
-/// beyond `va_harness::tol::DC_REL`.
-fn validate() -> Result<()> {
-    eprintln!("[xtask] validate: running va-harness over the model zoo vs golden/ …");
-    let root = workspace_root()?;
-    let golden_dir = root.join("golden");
+/// The `.dc`-sweep circuits `validate`/`gen-golden` know how to drive (§ ladder rung 2).
+const SWEEP_CIRCUITS: &[(&str, Option<&str>)] =
+    &[("circuits/diode_iv.net", Some("models/diode.va"))];
 
-    let (mut checked, mut failed, mut skipped) = (0u32, 0u32, 0u32);
+/// Pass/fail/skip tally, shared across [`validate`]'s DC and sweep circuit passes.
+#[derive(Default)]
+struct Tally {
+    checked: u32,
+    failed: u32,
+    skipped: u32,
+}
+
+impl Tally {
+    fn merge(&mut self, other: Tally) {
+        self.checked += other.checked;
+        self.failed += other.failed;
+        self.skipped += other.skipped;
+    }
+}
+
+/// Resolve `circuit`'s (and, if given, `model`'s) absolute path plus its expected
+/// `golden/<stem>.golden` path — shared by the DC and sweep passes.
+fn circuit_paths(
+    root: &Path,
+    circuit: &str,
+    model: Option<&str>,
+) -> Result<(PathBuf, Option<PathBuf>, PathBuf)> {
+    let circuit_path = root.join(circuit);
+    let model_path = model.map(|m| root.join(m));
+    let stem = Path::new(circuit)
+        .file_stem()
+        .context("circuit path has no file stem")?
+        .to_string_lossy()
+        .into_owned();
+    let golden_path = root.join("golden").join(format!("{stem}.golden"));
+    Ok((circuit_path, model_path, golden_path))
+}
+
+/// Run the validation harness over every known single-operating-point DC circuit, reporting
+/// pass/fail/skip per circuit. A circuit with no committed `golden/<name>.golden` is *skipped*,
+/// not failed — an empty `golden/` (this project's actual state today, absent a local ngspice
+/// install — see [`gen_golden`]) is a legitimate "nothing captured yet," not a build error.
+fn validate_dc_circuits(root: &Path) -> Result<Tally> {
+    let mut tally = Tally::default();
     for &(circuit, model) in DC_CIRCUITS {
-        let circuit_path = root.join(circuit);
-        let model_path = model.map(|m| root.join(m));
-        let name = Path::new(circuit)
-            .file_stem()
-            .context("circuit path has no file stem")?
-            .to_string_lossy()
-            .into_owned();
-        let golden_path = golden_dir.join(format!("{name}.golden"));
-
+        let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
         if !golden_path.is_file() {
             eprintln!(
                 "[xtask]   skip {circuit}: no golden reference at {}",
                 golden_path.display()
             );
-            skipped += 1;
+            tally.skipped += 1;
             continue;
         }
 
@@ -95,27 +115,79 @@ fn validate() -> Result<()> {
         .with_context(|| format!("solving {circuit}"))?;
         let verdict = va_harness::dc::compare_dc(&got, &golden)
             .with_context(|| format!("comparing {circuit} against golden"))?;
-
-        checked += 1;
-        if verdict.passed {
-            eprintln!(
-                "[xtask]   PASS {circuit}: error={:.3e} (tol {:.0e})",
-                verdict.error, verdict.tol
-            );
-        } else {
-            eprintln!(
-                "[xtask]   FAIL {circuit}: error={:.3e} exceeds tol {:.0e}",
-                verdict.error, verdict.tol
-            );
-            failed += 1;
-        }
+        report_verdict(circuit, verdict, &mut tally);
     }
+    Ok(tally)
+}
+
+/// Like [`validate_dc_circuits`], for every known `.dc`-sweep circuit (§ ladder rung 2).
+fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
+    let mut tally = Tally::default();
+    for &(circuit, model) in SWEEP_CIRCUITS {
+        let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
+        if !golden_path.is_file() {
+            eprintln!(
+                "[xtask]   skip {circuit}: no golden reference at {}",
+                golden_path.display()
+            );
+            tally.skipped += 1;
+            continue;
+        }
+
+        let golden = va_harness::golden::GoldenSweep::read(&golden_path)
+            .with_context(|| format!("reading golden reference for {circuit}"))?;
+        let got = va_harness::dc::run_dc_sweep(
+            circuit_path.to_str().context("non-UTF8 circuit path")?,
+            model_path
+                .as_deref()
+                .map(|p| p.to_str().context("non-UTF8 model path"))
+                .transpose()?,
+        )
+        .with_context(|| format!("solving {circuit}"))?;
+        let verdict = va_harness::dc::compare_dc_sweep(&got, &golden)
+            .with_context(|| format!("comparing {circuit} against golden"))?;
+        report_verdict(circuit, verdict, &mut tally);
+    }
+    Ok(tally)
+}
+
+/// Print one circuit's PASS/FAIL line and fold it into `tally`.
+fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally) {
+    tally.checked += 1;
+    if verdict.passed {
+        eprintln!(
+            "[xtask]   PASS {circuit}: error={:.3e} (tol {:.0e})",
+            verdict.error, verdict.tol
+        );
+    } else {
+        eprintln!(
+            "[xtask]   FAIL {circuit}: error={:.3e} exceeds tol {:.0e}",
+            verdict.error, verdict.tol
+        );
+        tally.failed += 1;
+    }
+}
+
+/// Run the validation harness over every known circuit (DC and `.dc`-sweep) and report
+/// pass/fail/skip.
+///
+/// # Errors
+///
+/// If any circuit that *does* have a golden reference fails to solve, or diverges from it
+/// beyond `va_harness::tol::DC_REL`.
+fn validate() -> Result<()> {
+    eprintln!("[xtask] validate: running va-harness over the model zoo vs golden/ …");
+    let root = workspace_root()?;
+
+    let mut tally = validate_dc_circuits(&root)?;
+    tally.merge(validate_sweep_circuits(&root)?);
 
     eprintln!(
-        "[xtask] validate: {checked} checked, {failed} failed, {skipped} skipped (no golden)"
+        "[xtask] validate: {} checked, {} failed, {} skipped (no golden)",
+        tally.checked, tally.failed, tally.skipped
     );
-    if failed > 0 {
-        bail!("{failed} circuit(s) failed golden comparison");
+    if tally.failed > 0 {
+        bail!("{} circuit(s) failed golden comparison", tally.failed);
     }
     Ok(())
 }

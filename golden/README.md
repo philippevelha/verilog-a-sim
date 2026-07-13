@@ -8,15 +8,17 @@ must be real ngspice output**, not a hand-computed/analytic stand-in, even a cor
 `cargo xtask validate` (below) trusts what's here as ground truth, so laundering a hand-derived
 value in as if it were ngspice's would defeat the entire point of an external oracle.
 
-## The `.golden` format (DC only, so far)
+## The `.golden` format (DC and `.dc` sweep, so far)
 
-A `.golden` file is plain text, one `<node> <value>` pair per line, in the circuit's own
-`node_order` (`va_harness::golden::GoldenDc` — see that module's doc comment for the full
-format). Name it `<circuit-stem>.golden`, e.g. `circuits/divider.net` → `golden/divider.golden`.
-Only a single DC operating point (a plain `.op`, or a `.dc` card with no real sweep) is
-supported today; a `.dc` sweep or a `.tran` transient waveform has no golden format yet (§
-`docs/roadmap.md`'s T6.3 notes) — `xtask validate`'s own circuit table only lists the rungs that
-qualify (`divider.net`, `mos_dc.net`).
+A single-operating-point `.golden` file is plain text, one `<node> <value>` pair per line, in
+the circuit's own `node_order` (`va_harness::golden::GoldenDc` — see that module's doc comment
+for the full format). A `.dc`-sweep golden file instead has a header line naming the swept
+source and every node, then one `<swept value> <node value>...` row per point
+(`va_harness::golden::GoldenSweep`). Either way, name it `<circuit-stem>.golden`, e.g.
+`circuits/divider.net` → `golden/divider.golden`, `circuits/diode_iv.net` →
+`golden/diode_iv.golden`. A `.tran` transient waveform has no golden format yet (§
+`docs/roadmap.md`'s T6.3 notes) — `xtask validate`'s own circuit tables only list the rungs that
+qualify (`divider.net`, `mos_dc.net`, `diode_iv.net`).
 
 ## Regenerating
 

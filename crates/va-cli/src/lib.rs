@@ -359,8 +359,10 @@ pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::Opera
 /// Solve a `.dc` sweep (§ ladder rung 2): re-solve the whole circuit fresh at each swept value
 /// of `sweep.source`, since `va-core::dc::sweep` is agnostic about *what* changed between
 /// points and just wants a fresh instance set per point. `sweep.source` must name a `vsource`
-/// device; anything else is a clear error rather than a silently-ignored sweep.
-fn solve_dc_sweep(
+/// device; anything else is a clear error rather than a silently-ignored sweep. `pub` for the
+/// same reason `solve_dc` is (§ golden comparison) — `va-harness` wants the numeric points back,
+/// not `run_sim`'s printed stdout.
+pub fn solve_dc_sweep(
     net: &Netlist,
     compiled: &[Module],
     sweep: &va_netlist::DcSweep,
