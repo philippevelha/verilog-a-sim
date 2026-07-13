@@ -65,7 +65,10 @@ contamination:
   forward/reverse-mode and source-to-source AD papers — for T2.
 - **SPICE/MNA & circuit-simulation texts** — for T3/T4/T5 (nodal analysis, Newton,
   integration, AC/noise).
-- **ngspice** — used only as a validation **oracle** (`validation.md`); we never build on it.
+- **QSPICE** — used only as a validation **oracle** (`validation.md`); we never build on it.
+  (Originally ngspice; switched 2026-07-13 — Windows-only, matching this project's dev
+  environment, and directly parses this project's own SPICE-flavored `.net` deck syntax with no
+  translation for a pure R/C/D/V circuit.)
 - **Permissively-licensed crates** for utilities: `la-arena`/`id-arena`, `index_vec`,
   `fixedbitset`, `faer` (numerics). Prefer these over reimplementing — and never salvage
   OpenVAF's `lib/*` equivalents.

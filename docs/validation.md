@@ -1,7 +1,8 @@
 # Validation & the Model Zoo
 
-Reference simulator: **ngspice** — an oracle only; we are not building on it. `va-harness`
-runs the pipeline and compares to committed `golden/` outputs.
+Reference simulator: **QSPICE** (originally ngspice; switched 2026-07-13 to match the actual
+dev environment) — an oracle only; we are not building on it. `va-harness` runs the pipeline
+and compares to committed `golden/` outputs.
 
 ## Metrics & default tolerances
 
@@ -18,11 +19,13 @@ zoo grows; record any change with its justification.
 **Updated 2026-07-13:** the DC metric (`va_harness::metrics::max_relative_error`) and the
 transient metric (`rms_error`) are real implementations now, not `todo!()` stubs — see
 `docs/roadmap.md`'s T6.3 section. `xtask validate` drives the DC metric for real over
-`divider.net`/`mos_dc.net` (a single operating point) and `diode_iv.net` (a `.dc` sweep);
-`golden/` itself is still empty (no ngspice in this environment to generate real references
-from — `golden/README.md` explains why a hand-computed stand-in isn't committed instead). The
-transient metric's "shared-timebase resample" is still unwritten, so a `.tran` waveform has no
-golden format yet.
+`divider.net`/`mos_dc.net` (a single operating point) and `diode_iv.net` (a `.dc` sweep).
+**`golden/divider.golden` is now real, QSPICE-generated data** — `cargo xtask gen-golden`
+regenerates it for real (QSPICE is installed in this environment, confirmed by running it, not
+assumed); `mos_dc.net`/`diode_iv.net` aren't regenerated yet, for a concrete, diagnosed reason
+(a 300 K vs QSPICE's default 300.15 K thermal-voltage-convention mismatch — `docs/roadmap.md`'s
+T6.3 section has the full derivation), not a missing tool. The transient metric's
+"shared-timebase resample" is still unwritten, so a `.tran` waveform has no golden format yet.
 
 ## Bring-up ladder
 
@@ -37,14 +40,12 @@ Each rung is a checkpoint; it is "passed" only when `va-harness` is green agains
 
 ### Current status (updated 2026-07-13)
 
-**No rung is "passed" yet:** `va-harness`/`golden/`/`xtask gen-golden` are still stubs (no
-ngspice available in this environment to generate golden from, either), so there is still no
-harness-vs-ngspice comparison in place for *any* rung. What has changed since the table above
-was first written is *implementation reach* — **every rung now solves through the real `va-cli`
-pipeline**, validated against analytic/hand-derived values and inline unit tests, not golden:
+**Rung 1 is formally passed** — `cargo xtask validate` is green against `golden/divider.golden`,
+real output from an actual QSPICE run (error=0.000e0, tol 1e-4), not a hand-computed stand-in.
+Rungs 2–6 are *implementation reach* only, validated against analytic/hand-derived values and
+inline unit tests, not golden — **every rung solves through the real `va-cli` pipeline**:
 
-- **Rung 1 (resistor divider, DC):** `cargo run -p va-cli -- sim circuits/divider.net` solves to
-  the analytic midpoint (< 1e-9).
+- **Rung 1 (resistor divider, DC):** ✅ `cargo xtask validate` — real, QSPICE-generated golden.
 - **Rung 2 (diode I–V, DC sweep):** `cargo run -p va-cli -- sim circuits/diode_iv.net --model
   models/diode.va` sweeps `V1` 0–0.6 V and matches the closed-form Shockley law
   `Id(V)=Is·(exp(V/(N·vt))−1)` at every point.
@@ -60,9 +61,11 @@ pipeline**, validated against analytic/hand-derived values and inline unit tests
   ring_oscillator_sustains_oscillation` shows real, growing oscillation from an unstable DC
   equilibrium (`va-abi::Bjt`, a hand-written reference — no netlist wiring yet).
 
-Every ngspice-golden gate still awaits T6.3. See `roadmap.md`'s *Status at a glance* and its
-*Cross-thesis milestones* ladder table for the authoritative, continuously-updated per-rung
-detail — this section is a summary, not the source of truth.
+Every remaining golden gate awaits either a QSPICE-native `.model` translation (rungs 2/5, plus
+the 300 K/300.15 K convention fix `docs/roadmap.md`'s T6.3 section derives) or `.tran`-waveform
+golden support (rungs 3/4/6). See `roadmap.md`'s *Status at a glance* and its *Cross-thesis
+milestones* ladder table for the authoritative, continuously-updated per-rung detail — this
+section is a summary, not the source of truth.
 
 ## The model zoo
 

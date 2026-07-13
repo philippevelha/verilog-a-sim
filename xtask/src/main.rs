@@ -2,7 +2,7 @@
 //!
 //! Subcommands:
 //! - `validate`   — run `va-harness` over the model zoo and compare to `golden/`.
-//! - `gen-golden` — (re)generate golden outputs from ngspice, if installed.
+//! - `gen-golden` — (re)generate golden outputs from QSPICE, if installed.
 //! - `tutorials`  — render the Quarto developer-tutorial book (`--preview` to live-edit).
 
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ fn print_usage() {
         "cargo xtask <subcommand>\n\n\
          SUBCOMMANDS:\n    \
          validate            Run va-harness over the model zoo vs golden/\n    \
-         gen-golden          (Re)generate golden outputs from ngspice, if installed\n    \
+         gen-golden          (Re)generate golden outputs from QSPICE, if installed\n    \
          tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)"
     );
 }
@@ -88,8 +88,8 @@ fn circuit_paths(
 
 /// Run the validation harness over every known single-operating-point DC circuit, reporting
 /// pass/fail/skip per circuit. A circuit with no committed `golden/<name>.golden` is *skipped*,
-/// not failed — an empty `golden/` (this project's actual state today, absent a local ngspice
-/// install — see [`gen_golden`]) is a legitimate "nothing captured yet," not a build error.
+/// not failed — most of `golden/` (see [`gen_golden`]) is still empty, and that's a legitimate
+/// "nothing captured yet," not a build error.
 fn validate_dc_circuits(root: &Path) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in DC_CIRCUITS {
@@ -192,44 +192,241 @@ fn validate() -> Result<()> {
     Ok(())
 }
 
-/// (Re)generate golden reference outputs by invoking ngspice, if it is on PATH.
+/// The circuits `gen_golden` can currently regenerate for real: pure `R`/`C`/`V` decks with no
+/// custom Verilog-A model and no temperature-sensitive nonlinearity, so QSPICE's own built-in
+/// primitives reproduce this project's answer with zero translation and zero ambiguity —
+/// confirmed empirically, not assumed (`circuits/divider.net` run through QSPICE unmodified
+/// gives `V(mid)=0.5` exactly, bit-for-bit matching the analytic/computed value).
+///
+/// `circuits/mos_dc.net`/`diode_iv.net` are deliberately **not** here yet: both need a custom
+/// `.va` model (`models/mosfet.va`/`diode.va`) translated into an equivalent QSPICE-native
+/// `.model` card to cross-check against at all, and — found while investigating exactly that —
+/// QSPICE's default simulation temperature (27°C = 300.15 K) differs from this project's own
+/// fixed convention (`va_codegen::TEMP = 300.0`, `VT = 0.025_852`) by 0.15 K. For a linear
+/// circuit that's irrelevant; for `diode.va`'s exponential I–V law it isn't — a forced 0.5 V
+/// diode measured `2.50974869898304e-6` A from this project's own model (fixed 300 K) against
+/// `2.48560822992004e-6` A from QSPICE's default-temperature native diode model, a ~0.85%
+/// relative difference — comfortably past `va_harness::tol::DC_REL` (`1e-4`). Forcing QSPICE's
+/// `.temp` to exactly 300 K does **not** fix this: SPICE diode models rescale `IS` relative to
+/// their own nominal temperature (`TNOM`, defaulting to `27°C`) whenever `.temp` differs from
+/// it, so overriding `.temp` away from QSPICE's implicit `TNOM=27°C` moves the answer *further*
+/// away, not closer (confirmed empirically: implied `Vt` at `.temp 26.85` was `0.0258827`, not
+/// the expected `0.0258520`). Closing this needs a real decision — likely aligning this
+/// project's own fixed thermal-voltage constants to the 300.15 K SPICE-standard convention,
+/// which touches `va-codegen`'s `VT`/`TEMP` constants and every test that hardcodes a value
+/// derived from them — not attempted here.
+const QSPICE_NATIVE_CIRCUITS: &[&str] = &["circuits/divider.net"];
+
+/// (Re)generate golden reference outputs by invoking QSPICE, if it is installed.
 ///
 /// # Errors
 ///
-/// Always, in this environment: ngspice isn't installed here (confirmed — there is nothing to
-/// shell out to), and even when it is, this subcommand doesn't yet translate a `circuits/*.net`
-/// deck into an ngspice-compatible one and invoke it (`docs/roadmap.md`'s T6.3 notes) — a real,
-/// but not-yet-written, next step, reported honestly rather than as a silent no-op.
+/// If QSPICE can't be found ([`find_qspice`]), or a circuit in [`QSPICE_NATIVE_CIRCUITS`] fails
+/// to run or its `.qraw` output fails to parse.
 fn gen_golden() -> Result<()> {
-    eprintln!("[xtask] gen-golden: regenerating golden/ from ngspice …");
-    if which_ngspice().is_none() {
-        bail!(
-            "ngspice not found on PATH — install it (https://ngspice.sourceforge.io/) to \
-             regenerate golden/ references. `cargo xtask validate` still works against \
-             whatever's already committed there."
+    eprintln!("[xtask] gen-golden: regenerating golden/ from QSPICE …");
+    let qspice = find_qspice().context(
+        "QSPICE64.exe not found — set QSPICE_PATH, add it to PATH, or install it to the \
+         standard location (C:\\Program Files\\QSPICE\\QSPICE64.exe): https://qspice.com",
+    )?;
+    eprintln!("[xtask]   using {}", qspice.display());
+    let root = workspace_root()?;
+    let golden_dir = root.join("golden");
+    let tmp = std::env::temp_dir().join("va_xtask_gen_golden");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).context("creating a scratch dir for the QSPICE run")?;
+
+    let mut generated = 0u32;
+    for &circuit in QSPICE_NATIVE_CIRCUITS {
+        let circuit_path = root.join(circuit);
+        let deck =
+            std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
+        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+
+        let raw = run_qspice_op(&qspice, &deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit}"))?;
+        let golden = golden_dc_from_qraw(&raw, &net.node_order)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} node(s))",
+            golden_path.display(),
+            golden.node_order.len()
         );
+        generated += 1;
     }
-    bail!(
-        "ngspice was found, but this subcommand doesn't yet translate a `circuits/*.net` deck \
-         into an ngspice-compatible one and invoke it — not implemented yet \
-         (docs/roadmap.md's T6.3 notes)"
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    eprintln!(
+        "[xtask] gen-golden: {generated} circuit(s) regenerated from QSPICE (of {} known — the \
+         rest need a native-model translation and/or a temperature-convention fix, see \
+         QSPICE_NATIVE_CIRCUITS's doc comment)",
+        DC_CIRCUITS.len() + SWEEP_CIRCUITS.len()
     );
+    Ok(())
 }
 
-/// Locate `ngspice`/`ngspice.exe` on `PATH`, without relying on the shell to resolve it (so
-/// [`gen_golden`] can give an accurate diagnosis either way, not just propagate whatever error
-/// `Command::new("ngspice").status()` would raise).
-fn which_ngspice() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let exe_name = if cfg!(windows) {
-        "ngspice.exe"
-    } else {
-        "ngspice"
-    };
-    std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(exe_name);
-        candidate.is_file().then_some(candidate)
+/// Run `deck` (a `.op`/no-sweep-`.dc` netlist, already confirmed QSPICE-native — see
+/// [`QSPICE_NATIVE_CIRCUITS`]) through QSPICE in `workdir` and parse its `.qraw` output.
+fn run_qspice_op(qspice: &Path, deck: &str, workdir: &Path, stem: &str) -> Result<QspiceRaw> {
+    let cir_path = workdir.join(format!("{stem}.cir"));
+    std::fs::write(&cir_path, deck).context("writing scratch .cir")?;
+    let status = Command::new(qspice)
+        .arg(
+            cir_path
+                .file_name()
+                .context("scratch .cir has no filename")?,
+        )
+        .current_dir(workdir)
+        .status()
+        .context("launching QSPICE64.exe")?;
+    if !status.success() {
+        bail!("QSPICE exited with {status}");
+    }
+    let qraw_path = workdir.join(format!("{stem}.qraw"));
+    let bytes = std::fs::read(&qraw_path)
+        .with_context(|| format!("QSPICE did not produce {}", qraw_path.display()))?;
+    parse_qraw(&bytes)
+}
+
+/// One QSPICE `.qraw` file's contents, restricted to the single-operating-point case (`No.
+/// Points: 1` — a `.qraw` for a sweep or transient run has more, and isn't handled here).
+struct QspiceRaw {
+    /// Variable names in declared order, e.g. `"V(in)"`, `"I(V1)"` (as QSPICE spells them).
+    variables: Vec<String>,
+    /// One value per `variables` entry, same order.
+    values: Vec<f64>,
+}
+
+/// Parse a `.qraw` file: an ASCII/UTF-8 header (`Title:`/`Plotname:`/`No. Variables:`/a
+/// `Variables:` block listing `<index>\t<name>\t<unit>` per line/`Binary:`), followed by one
+/// little-endian `f64` per variable — confirmed empirically against a real QSPICE `.op` run
+/// (`circuits/divider.net`: `V(in)=1`, `V(mid)=0.5`, matching this project's own analytic
+/// answer exactly), the same ASCII-header-then-binary-payload shape ngspice's own `.raw` format
+/// uses. Only `No. Points: 1` is supported — see [`QspiceRaw`].
+///
+/// # Errors
+///
+/// If the header is missing/malformed, declares zero or an unparseable variable count, or the
+/// binary payload is shorter than the header promises.
+fn parse_qraw(bytes: &[u8]) -> Result<QspiceRaw> {
+    const MARKER: &[u8] = b"Binary:\n";
+    let marker_at = bytes
+        .windows(MARKER.len())
+        .position(|w| w == MARKER)
+        .context("no `Binary:` marker in .qraw — not a QSPICE raw file, or an unsupported one")?;
+    let payload_start = marker_at + MARKER.len();
+    let header =
+        std::str::from_utf8(&bytes[..marker_at]).context(".qraw header is not valid UTF-8")?;
+
+    let mut n_vars = None;
+    let mut n_points = None;
+    let mut variables = Vec::new();
+    let mut in_variables_block = false;
+    for line in header.lines() {
+        if let Some(rest) = line.strip_prefix("No. Variables:") {
+            n_vars = Some(
+                rest.trim()
+                    .parse::<usize>()
+                    .context("unparseable `No. Variables:`")?,
+            );
+        } else if let Some(rest) = line.strip_prefix("No. Points:") {
+            n_points = Some(
+                rest.trim()
+                    .parse::<usize>()
+                    .context("unparseable `No. Points:`")?,
+            );
+        } else if line.trim() == "Variables:" {
+            in_variables_block = true;
+        } else if in_variables_block {
+            // `\t<index>\t<name>\t<unit>`.
+            if let Some(name) = line.split('\t').nth(2) {
+                variables.push(name.to_string());
+            }
+        }
+    }
+    let n_vars = n_vars.context("`.qraw` header has no `No. Variables:` line")?;
+    match n_points {
+        Some(1) => {}
+        Some(n) => bail!("`.qraw` has {n} point(s); only a single operating point is supported"),
+        None => bail!("`.qraw` header has no `No. Points:` line"),
+    }
+    if variables.len() != n_vars {
+        bail!(
+            "`.qraw` header declares {n_vars} variable(s) but the `Variables:` block lists {}",
+            variables.len()
+        );
+    }
+
+    let payload = &bytes[payload_start..];
+    if payload.len() < n_vars * 8 {
+        bail!(
+            "`.qraw` binary payload is {} byte(s), too short for {n_vars} f64 value(s)",
+            payload.len()
+        );
+    }
+    let values = (0..n_vars)
+        .map(|i| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&payload[i * 8..i * 8 + 8]);
+            f64::from_le_bytes(b)
+        })
+        .collect();
+    Ok(QspiceRaw { variables, values })
+}
+
+/// Map a parsed `.qraw` operating point onto this project's own `node_order`, by looking up
+/// each node's `"V(<name>)"` label — QSPICE's own variable ordering isn't assumed to match
+/// `node_order`'s (it happened to, for `divider.net`, but nothing guarantees that in general).
+fn golden_dc_from_qraw(
+    raw: &QspiceRaw,
+    node_order: &[String],
+) -> Result<va_harness::golden::GoldenDc> {
+    let values = node_order
+        .iter()
+        .map(|name| {
+            let label = format!("V({name})");
+            raw.variables
+                .iter()
+                .position(|v| v.eq_ignore_ascii_case(&label))
+                .map(|i| raw.values[i])
+                .with_context(|| format!("QSPICE output has no `{label}` variable"))
+        })
+        .collect::<Result<Vec<f64>>>()?;
+    Ok(va_harness::golden::GoldenDc {
+        node_order: node_order.to_vec(),
+        values,
     })
+}
+
+/// Locate `QSPICE64.exe`: `QSPICE_PATH` env var first (an exact file path), then `PATH`, then
+/// the standard Windows install location. QSPICE is Windows-only, matching this project's own
+/// dev environment.
+fn find_qspice() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("QSPICE_PATH") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("QSPICE64.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let standard = PathBuf::from(r"C:\Program Files\QSPICE\QSPICE64.exe");
+    standard.is_file().then_some(standard)
 }
 
 /// Absolute path to the workspace root, derived from this crate's manifest dir so every
@@ -308,20 +505,115 @@ mod tests {
     }
 
     #[test]
-    fn validate_passes_with_no_golden_present() {
-        // The project's actual current state: `golden/` has no `.golden` files committed yet
-        // (no ngspice available to generate them from) — `validate` must treat that as "nothing
-        // to check yet," not a failure.
-        validate().expect("validate should pass when every circuit is merely skipped");
+    fn validate_passes_with_a_mix_of_real_golden_and_skips() {
+        // The project's actual current state: `golden/divider.golden` is real QSPICE output
+        // (§ ladder rung 1, the first circuit `gen_golden` can regenerate for real); the rest
+        // of `golden/` is still empty. `validate` must both check the one real reference (and
+        // pass it) and treat the rest as "nothing captured yet," not a failure.
+        validate().expect("validate should pass: one real PASS plus the rest merely skipped");
     }
 
     #[test]
-    fn gen_golden_reports_a_clear_error_without_ngspice() {
-        // This environment has no ngspice installed — confirmed manually, not assumed. Whatever
-        // the reason, `gen_golden` must return a real `Err` (never panic) with an actionable
-        // message, not silently succeed having done nothing.
-        let err =
-            gen_golden().expect_err("gen_golden should fail without ngspice or a deck translator");
-        assert!(!err.to_string().is_empty());
+    fn find_qspice_finds_the_real_install_on_this_machine() {
+        // QSPICE is genuinely installed in this dev environment (confirmed manually via its own
+        // CLI, not assumed) — a real regression check on the standard-install-location
+        // fallback, not just a "does it compile" test.
+        assert!(find_qspice().is_some());
+    }
+
+    /// Build a synthetic `.qraw` byte buffer with the same shape a real QSPICE `.op` run
+    /// produces (confirmed against an actual run of `circuits/divider.net`) — lets
+    /// `parse_qraw`'s logic be tested hermetically, without invoking QSPICE itself.
+    fn synthetic_qraw(vars: &[(&str, &str)], values: &[f64]) -> Vec<u8> {
+        let mut header = String::new();
+        header.push_str("Title: * synthetic\n");
+        header.push_str("Date: Mon Jan  1 00:00:00 2026\n");
+        header.push_str("Plotname: Operating Point\n");
+        header.push_str("Flags: real\n");
+        header.push_str(&format!("No. Variables: {}\n", vars.len()));
+        header.push_str("No. Points: 1                    \n");
+        header.push_str("Command: QSPICE64, Build test\n");
+        header.push_str("Variables:\n");
+        for (i, (name, unit)) in vars.iter().enumerate() {
+            header.push_str(&format!("\t{i}\t{name}\t{unit}\n"));
+        }
+        header.push_str("Binary:\n");
+        let mut bytes = header.into_bytes();
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn parse_qraw_reads_a_divider_style_fixture() {
+        let bytes = synthetic_qraw(
+            &[
+                ("V(in)", "voltage"),
+                ("V(mid)", "voltage"),
+                ("I(V1)", "current"),
+            ],
+            &[1.0, 0.5, -0.0005],
+        );
+        let raw = parse_qraw(&bytes).expect("parse");
+        assert_eq!(raw.variables, vec!["V(in)", "V(mid)", "I(V1)"]);
+        assert_eq!(raw.values, vec![1.0, 0.5, -0.0005]);
+    }
+
+    #[test]
+    fn parse_qraw_rejects_a_multi_point_file() {
+        // Corrupt just the header text's `No. Points:` line, not the whole (non-UTF-8) buffer —
+        // the binary payload's raw float bytes aren't valid UTF-8 to round-trip through String.
+        let bytes = synthetic_qraw(&[("V(in)", "voltage")], &[1.0]);
+        let marker = b"Binary:\n";
+        let split_at = bytes
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .unwrap()
+            + marker.len();
+        let header = std::str::from_utf8(&bytes[..split_at]).unwrap();
+        let mut fixed = header
+            .replacen("No. Points: 1", "No. Points: 2", 1)
+            .into_bytes();
+        fixed.extend_from_slice(&bytes[split_at..]);
+        fixed.extend_from_slice(&1.0f64.to_le_bytes()); // pad so length alone isn't the failure
+        assert!(parse_qraw(&fixed).is_err());
+    }
+
+    #[test]
+    fn parse_qraw_rejects_a_missing_binary_marker() {
+        assert!(parse_qraw(b"Title: no binary marker here\n").is_err());
+    }
+
+    #[test]
+    fn parse_qraw_rejects_a_truncated_payload() {
+        let mut bytes = synthetic_qraw(&[("V(in)", "voltage"), ("V(mid)", "voltage")], &[1.0, 0.5]);
+        bytes.truncate(bytes.len() - 4); // half of the second value missing
+        assert!(parse_qraw(&bytes).is_err());
+    }
+
+    #[test]
+    fn golden_dc_from_qraw_looks_up_by_name_regardless_of_order() {
+        let raw = QspiceRaw {
+            variables: vec![
+                "I(V1)".to_string(),
+                "V(mid)".to_string(),
+                "V(in)".to_string(),
+            ],
+            values: vec![-0.0005, 0.5, 1.0],
+        };
+        let node_order = vec!["in".to_string(), "mid".to_string()];
+        let golden = golden_dc_from_qraw(&raw, &node_order).expect("map");
+        assert_eq!(golden.values, vec![1.0, 0.5]);
+    }
+
+    #[test]
+    fn golden_dc_from_qraw_errors_on_a_missing_node() {
+        let raw = QspiceRaw {
+            variables: vec!["V(in)".to_string()],
+            values: vec![1.0],
+        };
+        let node_order = vec!["in".to_string(), "mid".to_string()];
+        assert!(golden_dc_from_qraw(&raw, &node_order).is_err());
     }
 }

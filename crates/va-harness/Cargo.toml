@@ -3,7 +3,7 @@ name = "va-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "T6: golden-reference validation harness and accuracy metrics vs ngspice."
+description = "T6: golden-reference validation harness and accuracy metrics vs QSPICE."
 
 [dependencies]
 va-cli = { workspace = true }

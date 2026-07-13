@@ -175,7 +175,7 @@ consumer may rely on them without re-checking.
   with no arguments. Their numeric values are supplied at solve time, not baked into the IR.
 - **No units in the type system.** Values are `f64` in SI base units by convention
   (volts, amperes, kelvin, coulombs). The bridge does not carry unit tags; correctness is by
-  convention and validated against ngspice downstream (§7).
+  convention and validated against QSPICE downstream (§7).
 
 ## 6. Worked example — `I(b) <+ V(b)/R`
 

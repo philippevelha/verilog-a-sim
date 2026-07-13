@@ -1,6 +1,6 @@
 //! T6 — the validation harness: run the pipeline and compare to committed `golden/` outputs.
 //!
-//! ngspice is the oracle (§7). The harness drives `va-cli`'s pipeline, computes the [`metrics`]
+//! QSPICE is the oracle (§7). The harness drives `va-cli`'s pipeline, computes the [`metrics`]
 //! against golden references, and reports pass/fail against the stated tolerances. No analysis
 //! result is trusted until it is green here.
 

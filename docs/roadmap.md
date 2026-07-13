@@ -1357,6 +1357,50 @@ methodology + metrics report vs ngspice.
 > `golden/*.golden` committed, for the identical ngspice-provenance reason as the DC case above.
 > *Now outstanding:* `.tran`-waveform golden support (needs `rms_error`'s still-unwritten
 > shared-timebase resample step first) and everything else in the paragraph above.
+>
+> **The oracle switched from ngspice to QSPICE, and rung 1 is now formally passed — same day.**
+> The project decision changed (QSPICE, not ngspice, per the actual dev environment), and unlike
+> the earlier ngspice search, **QSPICE turned out to already be installed**
+> (`C:\Program Files\QSPICE\QSPICE64.exe`) — confirmed by running it, not by finding the
+> directory. Three things fell out of actually trying it: (1) `circuits/divider.net` runs
+> through QSPICE **completely unmodified** — it's SPICE-flavored `.net` syntax already, no
+> deck-translation layer needed for a pure `R`/`C`/`V` circuit; (2) QSPICE's `.qraw` output is an
+> ASCII header (`Title:`/`Plotname:`/`No. Variables:`/a `Variables:` block/`Binary:`) followed by
+> one little-endian `f64` per variable — the same shape ngspice's own `.raw` format uses, and
+> genuinely parseable; (3) running it on `divider.net` gives `V(in)=1`, `V(mid)=0.5` — bit-for-bit
+> the value this project's own pipeline already computes. `xtask::{find_qspice, run_qspice_op,
+> parse_qraw, golden_dc_from_qraw}` turn that into a real `gen_golden()`: locate `QSPICE64.exe`
+> (`QSPICE_PATH` env var, then `PATH`, then the standard install location), run it on a scratch
+> copy of the deck, parse the `.qraw`, look up each of this project's own `node_order` names by
+> their `"V(name)"` label (QSPICE's own variable ordering isn't assumed to match), and write a
+> `GoldenDc`. **`golden/divider.golden` is now a real, committed, QSPICE-generated reference** —
+> `cargo xtask validate` reports `PASS circuits/divider.net: error=0.000e0 (tol 1e-4)`. This is
+> the project's first rung to satisfy `CLAUDE.md` §7's actual definition of "passed," not just
+> "implementation reach."
+>
+> **`circuits/mos_dc.net`/`diode_iv.net` are deliberately still not regenerated** — investigating
+> exactly why surfaced a second real, useful finding: QSPICE's default simulation temperature is
+> 27°C (300.15 K), while this project's codegen fixes a single constant pair
+> (`va_codegen::TEMP=300.0`, `VT=0.025_852`, i.e. exactly 300 K) for every model's `$vt`/
+> `$temperature`. Irrelevant for a linear circuit; not for `diode.va`'s exponential law — a
+> forced-0.5 V diode measures `2.50974869898304e-6` A from this project's fixed-300 K model
+> against `2.48560822992004e-6` A from QSPICE's native diode model at its default 27°C, a ~0.85%
+> relative difference, well past `DC_REL`'s `1e-4`. Forcing QSPICE's `.temp` to exactly 300 K
+> does **not** close the gap — it opens a *different* one: standard SPICE diode models rescale
+> `IS` relative to their own nominal temperature (`TNOM`, defaulting to the simulation's own
+> default 27°C) whenever `.temp` differs from it, so moving `.temp` away from `TNOM` invokes that
+> rescaling rather than landing on a cleanly-matched answer (confirmed empirically: `.temp 26.85`
+> — literally `300 K` — gave an *even further* mismatched implied `Vt`, `0.0258827` instead of
+> the expected `0.0258520`). `QSPICE_NATIVE_CIRCUITS`'s doc comment carries the full derivation.
+> Fixing this for real is a genuine, scoped next step — most likely moving this project's own
+> fixed thermal-voltage convention to the 300.15 K SPICE-standard value — but it touches
+> `va-codegen`'s constants and every test that hardcodes a value derived from them, so it wasn't
+> done as a side effect of this pass.
+>
+> *Now outstanding:* the 300 K vs 300.15 K convention fix (needed before `mos_dc.net`/
+> `diode_iv.net` can regenerate); QSPICE-native `.model` equivalents for `mosfet.va`/`diode.va`
+> once that's resolved; `.tran`-waveform golden support; a per-rung/convergence-fraction
+> dashboard; refreshing `t6-integration/03-validation.qmd` for the now-real `divider.golden`.
 
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.
@@ -1372,7 +1416,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 
 | Rung | Circuit            | Analysis  | Lights up                | Tutorials presented           | Status |
 |------|--------------------|-----------|--------------------------|-------------------------------|--------|
-| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | `cargo run -p va-cli -- sim circuits/divider.net` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
+| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | ✅ **first rung formally passed** — `cargo xtask validate` is green against `golden/divider.golden`, real QSPICE output (error=0.000e0, tol 1e-4) |
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | `cargo run -p va-cli -- sim circuits/diode_iv.net --model models/diode.va` sweeps a real diode I–V curve through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | `cargo run -p va-cli -- sim circuits/rc_step.net --tran` solves it through the real pipeline; **golden gate pending `va-harness` (T6.3)** |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | `cargo run -p va-cli -- sim circuits/rectifier.net --tran` produces a correct half-wave-rectified/RC-filtered waveform; **golden gate pending `va-harness` (T6.3)** |
@@ -1382,9 +1426,12 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.
 
-> **No rung is formally "passed" yet** — passing requires `va-harness` green against committed
-> `golden/` (per `validation.md`), which awaits T6. The table records *implementation reach*,
-> not passed gates.
+> **Rung 1 is formally "passed" as of 2026-07-13** — the first rung to have both real
+> implementation reach *and* a green `cargo xtask validate` against a committed, genuinely
+> QSPICE-generated `golden/divider.golden`. Rungs 2–6 still record *implementation reach* only;
+> passing them needs either a QSPICE-native `.model` translation for the ones using a custom
+> `.va` model, or (for rungs 3/4/6) `.tran`-waveform golden support that doesn't exist yet — see
+> this file's own T6.3 section for the full, current account of exactly what's blocking each.
 
 **Ladder rung 5 (a MOS): implementation reach closed 2026-07-12** — was the sole fully
 unstarted rung; closed the same way rung 6's ring oscillator was, with a new hand-written

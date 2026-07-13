@@ -1570,6 +1570,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "va-harness",
+ "va-netlist",
 ]
 
 [[package]]

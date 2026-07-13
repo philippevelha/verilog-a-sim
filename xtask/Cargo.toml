@@ -9,3 +9,4 @@ description = "Dev automation: cargo xtask validate / gen-golden."
 [dependencies]
 anyhow = { workspace = true }
 va-harness = { workspace = true }
+va-netlist = { workspace = true }

@@ -37,7 +37,7 @@ We are building a **complete pipeline** simulator:
 lexes, parses, and elaborates** — pursued incrementally and validated construct by construct
 (§7's bring-up ladder, `docs/token-reference.md`'s coverage), not declared complete before
 it's real. "Done" for an analysis still means it's validated against a reference simulator
-(ngspice) to stated tolerances. Scope creep *beyond* Verilog-A itself — into Verilog-AMS-only
+(QSPICE) to stated tolerances. Scope creep *beyond* Verilog-A itself — into Verilog-AMS-only
 hierarchy/configuration constructs (`config`, `paramset`, `connectmodule`, …) or the
 digital-only constructs Annex C already excludes — remains the failure mode to resist; within
 Verilog-A, the goal is now completeness, not a further-reduced slice of it.
@@ -69,7 +69,7 @@ build hinges on these interfaces being defined first and never casually changed.
                                        │              │            │
                                  [va-transient]  [va-acnoise]   [va-cli]
                                                                     │
-                                                              [va-harness] ─► vs ngspice
+                                                              [va-harness] ─► vs QSPICE
 ```
 
 **The load-bearing invariant:** `va-core` depends on `va-abi` (Interface β) and **nothing
@@ -163,7 +163,7 @@ verilog-a-sim/
 ├── circuits/                  # test netlists
 │   ├── divider.net
 │   └── rectifier.net
-├── golden/                    # ngspice reference outputs (committed)
+├── golden/                    # QSPICE reference outputs (committed)
 ├── tests/                     # workspace-level integration tests
 └── xtask/{Cargo.toml, src/main.rs}
 ```
@@ -267,7 +267,7 @@ this trait at bootstrap, so `va-core` has something real to solve on commit #1.
 - **AD is validated against finite differences.** Every model/operator that `va-codegen`
   differentiates has a test asserting analytic vs central-difference Jacobian agreement.
   No exceptions — a wrong Jacobian silently destroys Newton convergence.
-- **Numerics validated against ngspice.** No analysis result is trusted until `va-harness`
+- **Numerics validated against QSPICE.** No analysis result is trusted until `va-harness`
   checks it against a committed golden output to a stated tolerance (§7).
 - **Every public item has a doc comment**, and limitations are stated, not hidden.
 - **Small PRs, one crate each.** Touching another crate means an interface change (§6).
@@ -292,7 +292,9 @@ sibling thesis at once.
 
 ## 7. Validation & the model zoo
 
-Reference simulator: **ngspice** (used as an oracle only — we are not building on it).
+Reference simulator: **QSPICE** (used as an oracle only — we are not building on it; Windows-only,
+which matches this project's own dev environment — `xtask gen-golden` shells out to it when
+installed, at `%ProgramFiles%\QSPICE\QSPICE64.exe` or wherever `QSPICE_PATH` names).
 `va-harness` runs the pipeline and compares to committed `golden/` outputs.
 
 Metrics & default tolerances (tune in `docs/validation.md`):
@@ -317,7 +319,7 @@ cargo test  --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo xtask validate        # run va-harness over the model zoo vs golden/
-cargo xtask gen-golden      # (re)generate golden outputs from ngspice, if installed
+cargo xtask gen-golden      # (re)generate golden outputs from QSPICE, if installed
 cargo run -p va-cli -- sim circuits/divider.net --model models/resistor.va
 ```
 

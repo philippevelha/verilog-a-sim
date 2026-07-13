@@ -19,7 +19,7 @@ be outstanding — see `roadmap.md`); 🟡 partial; ⬜ stub only.
 | `va-acnoise`   | T5      | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`      | TBD   | ⬜ stub | An AC/noise-formulation report (adjoint method derivation). |
 | `va-netlist`   | T6      | circuit-level netlist parser                      | `va-abi`                 | TBD   | 🟢 R/C/D/V elements + dot-cards incl. `.tran` timing + `SIN` waveform | A netlist-format + parser design note. |
 | `va-cli`       | T6      | binary front-door wiring the pipeline             | all                      | TBD   | 🟢 `sim` drives DC and transient (incl. `SIN`-sourced circuits) through the real pipeline, `--plot` renders SVG waveforms (golden-gen/`xtask` still stubs) | An integration/UX report on driving the pipeline. |
-| `va-harness`   | T6      | golden-reference validation + metrics             | `va-cli`                 | TBD   | ⬜ stub (metric functions are `todo!()`; no golden data exists yet) | A validation-methodology + metrics report vs ngspice. |
+| `va-harness`   | T6      | golden-reference validation + metrics             | `va-cli`                 | TBD   | 🟢 metrics + golden formats (`GoldenDc`/`GoldenSweep`) + `xtask validate` are real; `golden/` has one real QSPICE-generated reference (`divider.golden`), the rest still empty | A validation-methodology + metrics report vs QSPICE. |
 
 \* `va-core` was advertised as T3 at kickoff. No T3 student was found (as of 2026-07-04). Of
 the three fallback options considered — (1) scope T3 down to a smaller "harden the existing
@@ -33,7 +33,7 @@ Unlike `va-ir`/`va-abi` it is not a leaf (it depends on `va-abi`), so it still p
 ## Staffing notes (§10)
 
 - `va-core` is staff-maintained shared infrastructure, not a student thesis (see the table
-  footnote above) — its remaining work (sparse solve, golden-vs-ngspice validation once T6
+  footnote above) — its remaining work (sparse solve, golden-vs-QSPICE validation once T6
   lands, and the `t3-core/*.qmd` tutorials) proceeds as a staff-owned maintenance backlog,
   tracked in `roadmap.md`'s T3 section, rather than a thesis deliverable with its own defense.
   Junction limiting (`convergence.rs`'s `limit_junction`) and `gmin` stepping

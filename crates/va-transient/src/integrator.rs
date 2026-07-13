@@ -39,7 +39,7 @@
 //! simplified (no saturation-charge smoothing) `Bjt` model's exponential terms grow large
 //! enough that the embedded-pair LTE estimator stops agreeing at any step size — the test's
 //! `tstop` stays comfortably inside the well-behaved region rather than chasing that edge. No
-//! golden/ngspice comparison yet (`docs/roadmap.md`'s T6.3 harness is still pending) — this
+//! golden/QSPICE comparison yet (`docs/roadmap.md`'s T6.3 harness is still pending) — this
 //! validates that it oscillates, not a specific frequency.
 
 use crate::events::EventQueue;

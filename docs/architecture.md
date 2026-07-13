@@ -20,7 +20,7 @@ changed.
                                        │              │            │
                                  [va-transient]  [va-acnoise]   [va-cli]
                                                                     │
-                                                              [va-harness] ─► vs ngspice
+                                                              [va-harness] ─► vs QSPICE
 ```
 
 ## The load-bearing invariant

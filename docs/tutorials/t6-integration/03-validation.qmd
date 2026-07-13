@@ -4,9 +4,9 @@ subtitle: "T6 · Phase T6.3 · `va-harness`"
 ---
 
 ::: {.callout-note}
-**Status: partial.** The comparison machinery is real and tested; the golden data isn't there
-yet. See "Limitations" below for exactly why, and [the roadmap](../../roadmap.md)'s T6.3 section
-for the full change log.
+**Status: partial, but rung 1 is real.** `golden/divider.golden` is genuine QSPICE output, and
+`cargo xtask validate` is green against it — the project's first formally passed ladder rung.
+Everything else in `golden/` is still empty, for concrete, diagnosed reasons — see "Limitations."
 :::
 
 ## Goal
@@ -31,7 +31,7 @@ Verilog-A source          circuit netlist
                               ▼                ▼
                          [va-core] ──► [va-cli] ──► [va-harness] ──► golden/
                                                           │
-                                                     (ngspice, offline,
+                                                     (QSPICE, offline,
                                                       as the oracle)
 ```
 
@@ -51,11 +51,11 @@ Three pieces, matching `docs/validation.md` §7:
    row per swept value).
 3. **A driver** — something that actually runs the pipeline, builds a comparable result, and
    applies the metric. `va_harness::dc` does this for both golden shapes; `cargo xtask validate`
-   is the command-line entry point that ties it to a curated list of circuits.
+   is the command-line entry point that ties it to a curated list of circuits, and `cargo xtask
+   gen-golden` is the entry point that *produces* a golden file in the first place.
 
-ngspice is the oracle throughout (`CLAUDE.md` §7): we are not building on it, only checking
-against it. That one sentence turns out to matter a lot for how honest this phase can be about
-its own progress — see Limitations.
+QSPICE is the oracle throughout (`CLAUDE.md` §7): we are not building on it, only checking
+against it.
 
 ### The DC metric, precisely
 
@@ -71,10 +71,10 @@ the check, exactly as it should.
 
 ### The golden formats
 
-A `GoldenDc` (`.golden`) is as plain as it gets:
+A `GoldenDc` (`.golden`) is as plain as it gets — and `golden/divider.golden` is a real one,
+committed exactly as shown:
 
 ```text
-# golden/divider.golden
 in 1
 mid 0.5
 ```
@@ -83,7 +83,6 @@ A `GoldenSweep` adds one header line naming the swept source and the node order,
 per point:
 
 ```text
-# golden/diode_iv.golden
 V1 in
 0 0
 0.1 0.1
@@ -92,6 +91,15 @@ V1 in
 Both round-trip exactly through `f64`'s `Display` (Rust's shortest-round-trippable-decimal
 formatting, not a truncated one) — `render()` then `parse()` always reproduces the original
 value bit-for-bit, which matters for a format whose entire job is being a trustworthy reference.
+
+### QSPICE's own `.qraw` format
+
+QSPICE writes its results as `.qraw`: an ASCII header (`Title:`/`Plotname:`/`No. Variables:`/a
+`Variables:` block listing `<index>\t<name>\t<unit>`/`Binary:`), then one little-endian `f64`
+per variable — the same header-then-binary-payload shape ngspice's own `.raw` format uses.
+Confirmed empirically, not assumed: running `circuits/divider.net` through QSPICE **completely
+unmodified** (this project's own SPICE-flavored `.net` syntax already parses as a QSPICE deck)
+gives `V(in)=1`, `V(mid)=0.5` — bit-for-bit this project's own already-known answer.
 
 ## The code
 
@@ -104,8 +112,7 @@ or shelling out to the CLI binary and re-parsing stdout:
 pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)>
 ```
 
-`va_cli::solve_dc` / `solve_dc_sweep` — likewise made `pub`, unchanged otherwise. They already
-existed to serve `run_sim`'s own DC/sweep reporting.
+`va_cli::solve_dc` / `solve_dc_sweep` — likewise made `pub`, unchanged otherwise.
 
 `va_harness::dc::run_dc` — the glue: load, solve, package as a `GoldenDc`.
 
@@ -134,71 +141,87 @@ pub fn compare_dc(got: &GoldenDc, golden: &GoldenDc) -> Result<Verdict, HarnessE
 `run_dc_sweep`/`compare_dc_sweep` do the identical thing for a `.dc` sweep, flattening every
 point's node voltages into one long series before handing it to the same `max_relative_error`.
 
+`xtask::gen_golden` — the other direction: for each circuit in `QSPICE_NATIVE_CIRCUITS`, locate
+`QSPICE64.exe` (`QSPICE_PATH` env var, then `PATH`, then the standard install location), run it
+on a scratch copy of the deck, parse the `.qraw` (`parse_qraw`), look up each of this project's
+own `node_order` names by their `"V(name)"` label (`golden_dc_from_qraw` — QSPICE's own variable
+ordering isn't assumed to match `node_order`'s), and write the resulting `GoldenDc` to
+`golden/<name>.golden`.
+
 `cargo xtask validate` walks two small, explicit tables (`DC_CIRCUITS`, `SWEEP_CIRCUITS`) — one
 entry per circuit this project currently knows how to golden-check — and for each: if
 `golden/<name>.golden` exists, run + compare + report `PASS`/`FAIL`; if it doesn't, report `skip`
-rather than failing the build. An empty `golden/` (this project's actual state — see
-Limitations) is a legitimate "nothing captured yet," not an error.
+rather than failing the build.
 
 ## It works
 
-The comparison logic itself — metrics, golden parse/render round-trips, node-order/length
-mismatch rejection — is unit-tested without needing any external tool:
+The comparison logic itself — metrics, golden parse/render round-trips, `.qraw` parsing (against
+a synthetic fixture built to match a real QSPICE run byte-for-byte in shape),
+node-order/length-mismatch rejection — is unit-tested without needing QSPICE running at test
+time:
 
 ```console
 $ cargo test -p va-harness --lib
 running 28 tests
-test golden::tests::sweep_render_round_trips_through_parse ... ok
-test metrics::tests::max_relative_error_floor_guards_a_near_zero_reference ... ok
-test dc::tests::run_dc_solves_the_divider ... ok
-test dc::tests::run_dc_sweep_solves_the_diode_iv_curve ... ok
-test dc::tests::compare_dc_sweep_passes_for_an_identical_reference ... ok
 ...
 test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ cargo test -p xtask
+running 9 tests
+test tests::parse_qraw_reads_a_divider_style_fixture ... ok
+test tests::find_qspice_finds_the_real_install_on_this_machine ... ok
+...
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-`cargo xtask validate` against this project's actual (empty) `golden/`:
+Generating the golden reference for real:
+
+```console
+$ cargo run -q -p xtask -- gen-golden
+[xtask] gen-golden: regenerating golden/ from QSPICE …
+[xtask]   using C:\Program Files\QSPICE\QSPICE64.exe
+[xtask]   wrote .../golden/divider.golden (2 node(s))
+[xtask] gen-golden: 1 circuit(s) regenerated from QSPICE (of 3 known — the rest need a
+native-model translation and/or a temperature-convention fix, see QSPICE_NATIVE_CIRCUITS's doc
+comment)
+```
+
+And validating against it:
 
 ```console
 $ cargo run -q -p xtask -- validate
 [xtask] validate: running va-harness over the model zoo vs golden/ …
-[xtask]   skip circuits/divider.net: no golden reference at .../golden/divider.golden
+[xtask]   PASS circuits/divider.net: error=0.000e0 (tol 1e-4)
 [xtask]   skip circuits/mos_dc.net: no golden reference at .../golden/mos_dc.golden
 [xtask]   skip circuits/diode_iv.net: no golden reference at .../golden/diode_iv.golden
-[xtask] validate: 0 checked, 0 failed, 3 skipped (no golden)
-```
-
-Exit code `0` — skipping isn't failing. Now drop in a golden file by hand (this is exactly
-`divider.net`'s already-known analytic answer, `V(in)=1`, `V(mid)=1·R2/(R1+R2)=0.5` — not a
-fabricated value, just typed in manually instead of generated by `gen-golden`, which is why this
-worked example doesn't commit the file):
-
-```console
-$ printf "in 1\nmid 0.5\n" > golden/divider.golden
-$ cargo run -q -p xtask -- validate
-[xtask]   PASS circuits/divider.net: error=0.000e0 (tol 1e-4)
-[xtask]   skip circuits/mos_dc.net: no golden reference at ...
-[xtask]   skip circuits/diode_iv.net: no golden reference at ...
 [xtask] validate: 1 checked, 0 failed, 2 skipped (no golden)
-$ rm golden/divider.golden   # this file is not committed — see Limitations
 ```
 
-A deliberately-wrong golden value (`mid 0.9` instead of `0.5`) reports `FAIL` and a non-zero exit
-— confirmed the same way, not just asserted in prose.
+Exit code `0`, and `error=0.000e0` — QSPICE and this project's own pipeline agree exactly on a
+resistor divider. A deliberately-wrong golden value reports `FAIL` and a non-zero exit instead,
+confirmed the same way (plant a wrong `mid` value, re-run, restore it).
 
 ## Limitations
 
-**No `golden/*.golden` file is committed, on purpose.** `cargo xtask gen-golden` — the command
-that's supposed to produce one, by actually running ngspice — is not implemented: this
-development environment has no ngspice installed (`gen-golden` reports exactly that, rather than
-silently no-op'ing), and even with ngspice present, this project still needs to write and verify
-a `circuits/*.net` → ngspice-deck translator, which hasn't happened. The worked example above
-types a golden value in by hand from an *already independently known* analytic answer — that's
-fine for demonstrating the comparison machinery, but it would **not** be fine to commit as a real
-golden reference, because the entire point of `CLAUDE.md` §7's "ngspice is the oracle" rule is
-that golden data comes from an *independent* simulator, not from this project's own hand-derived
-math. A `golden/` file with a hand-computed value in it would quietly stop being a check on
-correctness and start being a check on arithmetic consistency with itself.
+**Only `circuits/divider.net` has real golden data.** It's the sole circuit that's both a pure
+`R`/`C`/`V` deck (so QSPICE's own built-in primitives apply with zero translation) and free of
+temperature-sensitive nonlinearity. `mos_dc.net`/`diode_iv.net` each use a custom `.va` model
+(`models/mosfet.va`/`diode.va`); regenerating their golden needs an equivalent QSPICE-native
+`.model` card for each, *and* resolving a real, empirically-diagnosed mismatch: QSPICE's default
+simulation temperature is 27°C (300.15 K), while this project's codegen fixes a single constant
+pair (`va_codegen::TEMP=300.0`, `VT=0.025_852`, exactly 300 K) for every model's `$vt`. That
+0.15 K difference is invisible for a linear circuit but produces a real ~0.85% divergence in
+`diode.va`'s exponential I–V law at a representative bias point — past `DC_REL`'s `1e-4`
+tolerance. Forcing QSPICE's `.temp` to exactly 300 K does **not** close the gap; it opens a
+*different* one, since standard SPICE diode models rescale `IS` relative to their own nominal
+temperature (`TNOM`) whenever `.temp` differs from it — confirmed by trying it and getting a
+*worse* mismatch, not a better one. `docs/roadmap.md`'s T6.3 section has the full numbers.
+
+**No `golden/*.golden` file is fabricated, ever, for any circuit** — `CLAUDE.md` §7's "QSPICE is
+the oracle" rule means golden data must come from an *independent* simulator, not from this
+project's own hand-derived math, even when that math is verifiably correct. A `golden/` file
+with a hand-computed value in it would quietly stop being a check on correctness and start being
+a check on arithmetic consistency with itself.
 
 **DC only.** `rms_error` (the transient metric) is implemented and unit-tested, but nothing
 feeds it a real waveform yet — that needs a `GoldenWaveform` format and a "shared-timebase
@@ -212,11 +235,11 @@ thing today.
 
 ## What's next
 
-1. Write and verify a `circuits/*.net` → ngspice-deck translator, on a machine that actually has
-   ngspice installed — the real blocker for `gen-golden`, and for every ladder rung's golden gate
-   ever going green.
+1. Resolve the 300 K vs 300.15 K thermal-voltage convention (most likely: move this project's
+   own fixed constants to the 300.15 K SPICE-standard value) — the real blocker for
+   `mos_dc.net`/`diode_iv.net`'s golden data, once QSPICE-native `.model` equivalents for
+   `mosfet.va`/`diode.va` exist too.
 2. `GoldenWaveform` + `rms_error`'s shared-timebase resample, to bring `.tran` circuits into
    `xtask validate`.
-3. Once real golden data exists for even one rung, that rung is the project's first genuinely
-   ✅-complete ladder milestone — worth its own celebration, and its own worked example replacing
-   this tutorial's hand-typed stand-in.
+3. With rung 1 now genuinely ✅, the next milestone is rung 2 or 5 doing the same — worth its own
+   worked example once the temperature convention is settled.
