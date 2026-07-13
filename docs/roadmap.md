@@ -26,7 +26,9 @@ shared, demoable milestone that several theses light up at once.
 
 ## Status at a glance
 
-> Updated 2026-06-29. Legend:
+> Updated 2026-07-13 (T6.1/T6.2/T6.3 rows only — the rest of this table predates this session's
+> ladder-rung/harness work and is not otherwise refreshed; see this file's later sections and
+> the *Cross-thesis milestones* table for current per-rung detail). Legend:
 > **✅ Complete** — code, tests, the validation gate, *and* the tutorial are all green.
 > **🟢 Code complete** — implementation + unit/FD tests committed and green (`fmt`,
 > `clippy -D warnings`, `test` clean), but at least one of {harness-vs-golden gate, Quarto
@@ -48,9 +50,10 @@ shared, demoable milestone that several theses light up at once.
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; 16 tests | 🟢 |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
-| T6.1 — netlist parser | R/C/D/V elements, dot-cards incl. `.tran` timing; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
-| T6.2 — CLI wiring (DC + transient) | `va-cli sim` drives DC and `.tran` (incl. `SIN`-sourced circuits like the rectifier) through the real pipeline | 🟢 |
-| T5 · T6.3 | crate stubs only (`todo!()`) | ⬜ |
+| T6.1 — netlist parser | R/C/D/M/V elements (`M` = 3-terminal model-referencing device, § rung 5), dot-cards incl. `.tran` timing and `.dc <source> <start> <stop> <step>` sweep; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
+| T6.2 — CLI wiring (DC + sweep + transient) | `va-cli sim` drives a DC operating point, a `.dc` sweep, and `.tran` (incl. `SIN`-sourced circuits like the rectifier) through the real pipeline | 🟢 |
+| T6.3 — validation harness | `va-harness::metrics` (real, was `todo!()`), `golden::GoldenDc` (`.golden` file format), `dc::{run_dc, compare_dc}`; `xtask validate` wired for real over a small DC-circuit table — see this file's T6.3 section for the honest "no golden committed yet, no ngspice here to generate it" caveat | 🟢 (partial — see T6.3) |
+| T5 | crate stub only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -1310,6 +1313,40 @@ methodology + metrics report vs ngspice.
   workflow.
 
 ### Phase T6.3 — Full validation harness & the metrics dashboard
+> **Status: 🟢 partial (resolved 2026-07-13) — the plumbing is real, the golden data isn't yet.**
+> `va-harness::metrics::{max_relative_error, rms_error}` are real implementations now (were
+> `todo!()`), including the near-zero-reference division guard `max_relative_error`'s own doc
+> comment always specified but never implemented; 10 tests. `va-harness::golden::GoldenDc` is a
+> small, documented `.golden` text format (`<node> <value>` per line) with a tested
+> parse/read/render round-trip. `va-harness::dc::{run_dc, compare_dc}` drive a single DC
+> operating point through `va-cli`'s pipeline and diff it against a `GoldenDc`, erroring (not
+> silently comparing unrelated data) on a node-order mismatch. This needed one small, additive
+> `va-cli` change: `solve_dc` is now `pub`, and the netlist-parse/model-compile prelude
+> previously inlined in `run_sim` is its own `pub fn load` (which `run_sim` itself now calls, no
+> logic duplicated) — so `va-harness` gets real `OperatingPoint` values back, not `run_sim`'s
+> printed stdout to re-parse. `cargo xtask validate` is wired for real over a small, explicit
+> `DC_CIRCUITS` table (`divider.net`, `mos_dc.net` — the two single-`.op`-point circuits; a
+> `.dc` sweep (rung 2) or `.tran` deck (rungs 3/4/6) isn't wired to golden yet, a stated scope
+> limit, not an oversight): a circuit with no committed `golden/<name>.golden` is *skipped*, not
+> failed, matching this project's actual state — `golden/` is still empty (see below). Manually
+> verified all three outcomes work (pass/fail/skip), including planting a deliberately-wrong
+> golden value and confirming `validate` correctly reports `FAIL` and a nonzero exit.
+> `cargo xtask gen-golden` is **not** implemented — it now fails with a clear, honest message
+> instead of a bare `todo!()` panic, but actually shelling out to ngspice needs a
+> `circuits/*.net` → ngspice-deck translator this pass didn't attempt, and this environment has
+> no ngspice installed to develop *or verify* that translator against (confirmed, not assumed —
+> `cargo xtask gen-golden` here reports "ngspice not found on PATH"). **This is the honest
+> reason no `golden/*.golden` file is committed by this pass**: fabricating one by hand from
+> this project's own analytic/hand-derived reference values (already used throughout this
+> session's own unit tests) would misrepresent it as ngspice output, exactly the "ngspice is the
+> oracle" methodology `CLAUDE.md` §7 establishes — better to leave `golden/` honestly empty than
+> to launder a hand-computed value as a golden reference.
+> *Outstanding:* the ngspice deck translator + `gen_golden`'s real implementation (blocked on
+> having ngspice available to develop against); `.dc`-sweep and `.tran`-waveform golden support
+> (needs a `GoldenSweep`/`GoldenWaveform` alongside `GoldenDc`, plus `rms_error`'s
+> shared-timebase resample step, itself still unwritten); a per-rung/convergence-fraction
+> dashboard; `t6-integration/03-validation.qmd`.
+
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.
 - **Validation gate:** all passed ladder rungs are green under one `cargo xtask validate`.

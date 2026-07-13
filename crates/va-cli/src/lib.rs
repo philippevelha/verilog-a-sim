@@ -51,32 +51,19 @@ pub enum Analysis {
     Ac,
 }
 
-/// Run the full pipeline for `netlist` + an optional Verilog-A `model` under `analysis`.
-///
-/// Wires `va-frontend` → `va-codegen` → `va-netlist` → `va-core`/`va-transient`. Prints the DC
-/// operating point (node voltages and source currents), or the transient waveform, to stdout.
+/// Parse `netlist` and, if `model` is given, compile it through the real frontend → codegen
+/// pipeline — the common prelude every driver needs before solving. Split out of [`run_sim`]
+/// (which still calls it, unchanged) so a caller that wants the *values* — `va-harness`
+/// comparing against golden, not a human reading stdout — doesn't have to re-implement this
+/// wiring or shell out to the CLI binary and re-parse its printed output.
 ///
 /// # Errors
 ///
-/// Returns an error if a file cannot be read, the deck or model cannot be parsed, an
-/// unsupported analysis is requested, a device names an unknown model, or the solve diverges.
-/// If `plot` is given, also returns an error if it names a transient run (a DC operating point
-/// is a single point, not a waveform — plotting one isn't implemented) or if writing the SVG
-/// fails.
-pub fn run_sim(
-    netlist: &str,
-    model: Option<&str>,
-    analysis: Analysis,
-    plot: Option<&str>,
-) -> Result<()> {
+/// If the netlist or model file cannot be read, or either fails to parse/compile.
+pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)> {
     let deck =
         std::fs::read_to_string(netlist).with_context(|| format!("reading netlist {netlist}"))?;
     let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {netlist}"))?;
-
-    gate_analysis(&net, analysis)?;
-    if plot.is_some() && analysis != Analysis::Transient {
-        bail!("--plot only supports transient analysis in v0 (pass --tran)");
-    }
 
     let compiled = match model {
         Some(path) => {
@@ -99,6 +86,34 @@ pub fn run_sim(
         }
         None => Vec::new(),
     };
+
+    Ok((net, compiled))
+}
+
+/// Run the full pipeline for `netlist` + an optional Verilog-A `model` under `analysis`.
+///
+/// Wires `va-frontend` → `va-codegen` → `va-netlist` → `va-core`/`va-transient`. Prints the DC
+/// operating point (node voltages and source currents), or the transient waveform, to stdout.
+///
+/// # Errors
+///
+/// Returns an error if a file cannot be read, the deck or model cannot be parsed, an
+/// unsupported analysis is requested, a device names an unknown model, or the solve diverges.
+/// If `plot` is given, also returns an error if it names a transient run (a DC operating point
+/// is a single point, not a waveform — plotting one isn't implemented) or if writing the SVG
+/// fails.
+pub fn run_sim(
+    netlist: &str,
+    model: Option<&str>,
+    analysis: Analysis,
+    plot: Option<&str>,
+) -> Result<()> {
+    let (net, compiled) = load(netlist, model)?;
+
+    gate_analysis(&net, analysis)?;
+    if plot.is_some() && analysis != Analysis::Transient {
+        bail!("--plot only supports transient analysis in v0 (pass --tran)");
+    }
 
     if analysis == Analysis::Transient {
         let wf = solve_transient(&net, &compiled)?;
@@ -332,8 +347,10 @@ fn build_instances(
     Ok((instances, next_unknown))
 }
 
-/// Build every device instance and solve the DC operating point.
-fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
+/// Build every device instance and solve the DC operating point. `pub` so `va-harness` can get
+/// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
+/// parsing [`run_sim`]'s printed stdout.
+pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
     let (instances, dim) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")

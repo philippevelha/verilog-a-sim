@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dc;
+pub mod golden;
 pub mod metrics;
 
 use thiserror::Error;
@@ -19,6 +21,29 @@ pub enum HarnessError {
     /// The series being compared had mismatched lengths / timebases.
     #[error("series length mismatch: got {got}, expected {expected}")]
     LengthMismatch { got: usize, expected: usize },
+    /// A `.golden` file's contents didn't parse (§ [`golden`]).
+    #[error("golden file parse error on line {line}: {message}")]
+    Golden {
+        /// 1-indexed line number.
+        line: usize,
+        /// What went wrong.
+        message: String,
+    },
+    /// The computed and golden results describe different nodes (or the same nodes in a
+    /// different order) — comparing their values at all would silently diff unrelated
+    /// quantities, so this is always an error rather than an approximation.
+    #[error("node order mismatch: got {got:?}, expected {expected:?}")]
+    NodeOrderMismatch {
+        /// The freshly-computed result's node order.
+        got: Vec<String>,
+        /// The golden reference's node order.
+        expected: Vec<String>,
+    },
+    /// Running the pipeline itself (`va-cli::load`/`solve_dc`) failed — a bad netlist/model
+    /// path, a parse error, or a divergent solve. Wraps the underlying `anyhow::Error`'s full
+    /// chain as a string rather than depending on `anyhow` directly (§ `dc.rs`'s doc comment).
+    #[error("running the pipeline failed: {0}")]
+    Run(String),
 }
 
 /// Default tolerances from §7. Tune in `docs/validation.md`.
