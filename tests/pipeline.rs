@@ -4,7 +4,7 @@
 //! is `#[ignore]` until the T3/T6 milestones wire the pipeline; the smoke test below runs
 //! today against the `va-abi` reference models to keep the harness honest from day one.
 
-use va_abi::reference::{Capacitor, Diode, Resistor, GROUND, VT_300K};
+use va_abi::reference::{Capacitor, Diode, Resistor, GROUND, VT_NOMINAL};
 use va_abi::stamps::DenseStamp;
 use va_abi::ModelInstance;
 
@@ -34,7 +34,7 @@ fn reference_models_stamp_together() {
 /// §5 AD-vs-FD discipline, exercised at the workspace level too.
 #[test]
 fn diode_conductance_is_consistent() {
-    let d = Diode::new(0, GROUND, 1e-14, 1.0, VT_300K);
+    let d = Diode::new(0, GROUND, 1e-14, 1.0, VT_NOMINAL);
     let vd = 0.7;
     let h = 1e-6;
     let fd = (d.current(vd + h) - d.current(vd - h)) / (2.0 * h);

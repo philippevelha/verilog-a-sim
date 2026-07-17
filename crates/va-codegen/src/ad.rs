@@ -873,8 +873,8 @@ mod tests {
             params: &[],
             x: &[],
             terminals: &[],
-            vt: 0.025_852,
-            temp: 300.0,
+            vt: crate::VT,
+            temp: crate::TEMP,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
@@ -883,7 +883,7 @@ mod tests {
             validating: false,
         };
         let d = eval(&ctx, vt).unwrap();
-        assert!((d.value - 0.025_852).abs() < 1e-12);
+        assert!((d.value - crate::VT).abs() < 1e-12);
         assert!(d.grad.is_empty());
     }
 
@@ -914,7 +914,7 @@ mod tests {
         }));
         let vt = m.push_expr(Expr::Call(Builtin::Vt, vec![temp_probe]));
 
-        let (vt_ref, temp_ref) = (0.025_852_f64, 300.0_f64);
+        let (vt_ref, temp_ref) = (crate::VT, crate::TEMP);
         let k_over_q = vt_ref / temp_ref;
         // Node `t` held at 350 K; ground slot maps out of range (reads 0).
         let x = [350.0];
@@ -1054,7 +1054,7 @@ mod tests {
         m.branches.push(Branch { p: a, n: c }); // BranchId(1): V(a) -- c doubles as reference
 
         let is = 1e-14_f64;
-        let vt = 0.025_852_f64;
+        let vt = crate::VT;
         let vac = m.push_expr(Expr::Probe(Access {
             kind: AccessKind::Potential,
             branch: BranchId(0),
@@ -1082,7 +1082,7 @@ mod tests {
             x: &x,
             terminals: &terminals,
             vt,
-            temp: 300.0,
+            temp: crate::TEMP,
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),

@@ -7,7 +7,7 @@
 //!
 //! **`limit_junction` is now wired into [`crate::newton::solve`]**
 //! (`NewtonConfig::limit_junctions`, default on): applied as a blanket per-unknown clamp each
-//! iteration, using [`VT_300K`] and [`default_vcrit`]. The earlier blocker ("needs the
+//! iteration, using [`VT_NOMINAL`] and [`default_vcrit`]. The earlier blocker ("needs the
 //! device's previous-iteration voltage") doesn't actually hold — the Newton loop already has
 //! both `x[i]` (before the update) and `x[i] + dx[i]` (the proposed update) for every unknown,
 //! with no ABI change needed. The *real* limitation is that `va-core` has no way to know
@@ -57,12 +57,13 @@ pub fn limit_junction(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
     }
 }
 
-/// Physical thermal voltage `kT/q` at ~300 K, in volts.
+/// Physical thermal voltage `kT/q` at the project's nominal simulation temperature, 300.15 K
+/// (27°C) — matches `va_codegen::TEMP`/`VT` and `va_abi::reference::diode::VT_NOMINAL`.
 ///
-/// Kept as its own copy here (rather than importing `va_abi::reference::diode::VT_300K`) so
+/// Kept as its own copy here (rather than importing `va_abi::reference::diode::VT_NOMINAL`) so
 /// `va-core`'s generic Newton loop doesn't reach into one specific reference *device* for a
 /// physical constant that has nothing to do with that device in particular.
-pub const VT_300K: f64 = 0.025_852;
+pub const VT_NOMINAL: f64 = 0.025_865;
 
 /// Nominal saturation current used only to derive [`default_vcrit`] — representative of a
 /// small silicon junction, not read from any specific device in the circuit being solved.
@@ -100,7 +101,7 @@ pub fn gmin_for_step(step: usize, total_steps: usize) -> f64 {
 mod tests {
     use super::*;
 
-    const VT: f64 = 0.025_852;
+    const VT: f64 = super::VT_NOMINAL;
 
     #[test]
     fn junction_limiting_bounds_step() {

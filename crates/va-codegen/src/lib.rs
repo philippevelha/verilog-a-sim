@@ -50,12 +50,17 @@ use thiserror::Error;
 use va_abi::{ModelInstance, StampSink, UnknownKind};
 use va_ir::Module;
 
-/// Thermal voltage `kT/q` at ~300 K, in volts. Matches `va_abi::reference::diode::VT_300K`
+/// Thermal voltage `kT/q` at [`TEMP`], in volts. Matches `va_abi::reference::diode::VT_NOMINAL`
 /// so a generated diode reproduces the reference diode's stamps.
-pub const VT: f64 = 0.025_852;
+pub const VT: f64 = 0.025_865;
 
-/// Ambient temperature for `$temperature`, in kelvin.
-pub const TEMP: f64 = 300.0;
+/// Ambient temperature for `$temperature`, in kelvin: 300.15 K (27°C) — SPICE's/QSPICE's own
+/// default nominal simulation temperature (`TNOM`), not an arbitrary round 300 K. Chosen to
+/// match QSPICE (`CLAUDE.md` §7's oracle) exactly, since a mismatched fixed ambient temperature
+/// is otherwise invisible for a linear circuit but produces a real, tolerance-breaking
+/// divergence on any exponential model (confirmed empirically against `diode.va`: the two
+/// conventions disagreed by ~0.85% at a 0.5 V forced bias — see `docs/roadmap.md`'s T6.3 notes).
+pub const TEMP: f64 = 300.15;
 
 /// Safety cap on how many times [`GeneratedModel::run`] will iterate a `while`/`for`/`repeat`
 /// loop in a single [`ModelInstance::load`] call, before giving up rather than hanging.

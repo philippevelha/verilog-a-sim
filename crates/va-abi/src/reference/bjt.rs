@@ -27,7 +27,8 @@ impl Bjt {
     /// Create an NPN BJT between global indices `b` (base), `c` (collector), `e` (emitter).
     ///
     /// `is` is the saturation current (A), `beta_f`/`beta_r` the forward/reverse current gains,
-    /// `vt` the thermal voltage (V) — pass [`super::diode::VT_300K`] for room temperature.
+    /// `vt` the thermal voltage (V) — pass [`super::diode::VT_NOMINAL`] for the project's
+    /// nominal simulation temperature.
     pub fn new(b: usize, c: usize, e: usize, is: f64, beta_f: f64, beta_r: f64, vt: f64) -> Self {
         debug_assert!(is > 0.0 && beta_f > 0.0 && beta_r > 0.0 && vt > 0.0);
         Self {
@@ -100,10 +101,10 @@ impl ModelInstance for Bjt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::diode::VT_300K;
+    use crate::reference::diode::VT_NOMINAL;
 
     fn fixture() -> Bjt {
-        Bjt::new(0, 1, 2, 1e-15, 100.0, 1.0, VT_300K)
+        Bjt::new(0, 1, 2, 1e-15, 100.0, 1.0, VT_NOMINAL)
     }
 
     /// AD-style sanity check required by §5, applied to this hand-derived Jacobian: analytic

@@ -34,7 +34,7 @@ pub struct NewtonConfig {
     /// Relative update tolerance for convergence.
     pub reltol: f64,
     /// Clamp each iteration's proposed update with [`crate::convergence::limit_junction`],
-    /// using [`crate::convergence::VT_300K`]/[`crate::convergence::default_vcrit`] as a
+    /// using [`crate::convergence::VT_NOMINAL`]/[`crate::convergence::default_vcrit`] as a
     /// blanket (not per-device) threshold. Keeps stiff exponential devices (diodes, BJTs) from
     /// overflowing on a cold start; the tradeoff is it can slow convergence on unknowns that
     /// were never exponential to begin with, since `va-core` has no way to tell those apart
@@ -115,7 +115,7 @@ fn solve_from(
     kinds: &[UnknownKind],
     per_abstol: &[f64],
 ) -> Result<Vec<f64>, CoreError> {
-    let vt = convergence::VT_300K;
+    let vt = convergence::VT_NOMINAL;
     let vcrit = convergence::default_vcrit(vt);
 
     let mut last_residual = f64::INFINITY;
@@ -166,7 +166,7 @@ fn inf_norm(v: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use crate::testutil::VSource;
-    use va_abi::reference::diode::VT_300K;
+    use va_abi::reference::diode::VT_NOMINAL;
     use va_abi::reference::{Diode, Resistor, GROUND};
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
         // Vin = 1 V → R = 1 kΩ → diode to ground. Nonlinear: exercises the exp Jacobian.
         let vs = VSource::new(0, GROUND, 2, 1.0);
         let r = Resistor::new(0, 1, 1000.0);
-        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_300K);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
         let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
 
         let x = solve(&insts, 3, NewtonConfig::default()).expect("converges");
@@ -279,7 +279,7 @@ mod tests {
     fn gmin_stepping_still_converges_the_diode_clamp() {
         let vs = VSource::new(0, GROUND, 2, 1.0);
         let r = Resistor::new(0, 1, 1000.0);
-        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_300K);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
         let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
 
         let cfg = NewtonConfig {
@@ -324,9 +324,9 @@ mod tests {
         let r = Resistor::new(0, 1, 10.0);
         let mut diodes = Vec::new();
         for i in 1..n_diodes {
-            diodes.push(Diode::new(i, i + 1, 1e-14, 1.0, VT_300K));
+            diodes.push(Diode::new(i, i + 1, 1e-14, 1.0, VT_NOMINAL));
         }
-        diodes.push(Diode::new(n_diodes, GROUND, 1e-14, 1.0, VT_300K));
+        diodes.push(Diode::new(n_diodes, GROUND, 1e-14, 1.0, VT_NOMINAL));
         let mut insts: Vec<&dyn ModelInstance> = vec![&vs, &r];
         insts.extend(diodes.iter().map(|d| d as &dyn ModelInstance));
 
@@ -366,7 +366,7 @@ mod tests {
         // One iteration is not enough for a nonlinear solve from the zero guess.
         let vs = VSource::new(0, GROUND, 2, 1.0);
         let r = Resistor::new(0, 1, 1000.0);
-        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_300K);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
         let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
 
         let cfg = NewtonConfig {

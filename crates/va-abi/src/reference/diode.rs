@@ -4,8 +4,10 @@ use super::{stamp_conductance, voltage_across};
 use crate::instance::ModelInstance;
 use crate::stamps::StampSink;
 
-/// Default thermal voltage `kT/q` at ~300 K, in volts.
-pub const VT_300K: f64 = 0.025_852;
+/// Default thermal voltage `kT/q` at the project's nominal simulation temperature, 300.15 K
+/// (27°C) — matches `va_codegen::TEMP`/`VT` and QSPICE's own default `TNOM` (`CLAUDE.md` §7's
+/// oracle), not an arbitrary round 300 K.
+pub const VT_NOMINAL: f64 = 0.025_865;
 
 /// A Shockley diode `I = Is * (exp(Vd / (n * Vt)) - 1)`, `Vd = V(anode) - V(cathode)`.
 ///
@@ -26,7 +28,7 @@ impl Diode {
     /// Create a diode between `anode` and `cathode` global indices.
     ///
     /// `is` is the saturation current (A), `n` the ideality factor, `vt` the thermal voltage
-    /// (V) — pass [`VT_300K`] for room temperature.
+    /// (V) — pass [`VT_NOMINAL`] for the project's nominal simulation temperature.
     pub fn new(anode: usize, cathode: usize, is: f64, n: f64, vt: f64) -> Self {
         debug_assert!(is > 0.0 && n > 0.0 && vt > 0.0);
         Self {
@@ -68,7 +70,7 @@ mod tests {
     /// AD-style sanity check required by §5: analytic conductance vs central difference.
     #[test]
     fn conductance_matches_finite_difference() {
-        let d = Diode::new(0, 1, 1e-14, 1.0, VT_300K);
+        let d = Diode::new(0, 1, 1e-14, 1.0, VT_NOMINAL);
         let vd = 0.6;
         let h = 1e-6;
         let fd = (d.current(vd + h) - d.current(vd - h)) / (2.0 * h);

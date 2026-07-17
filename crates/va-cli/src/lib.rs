@@ -30,7 +30,7 @@ mod plot;
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
-use va_abi::reference::{diode::VT_300K, Capacitor, Diode, Resistor, VSource};
+use va_abi::reference::{diode::VT_NOMINAL, Capacitor, Diode, Resistor, VSource};
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
@@ -581,7 +581,7 @@ fn reference_instance(dev: &Device) -> Result<Box<dyn ModelInstance>> {
     let inst: Box<dyn ModelInstance> = match dev.model.as_str() {
         "resistor" => Box::new(Resistor::new(p, n, value()?)),
         "capacitor" => Box::new(Capacitor::new(p, n, value()?)),
-        "diode" => Box::new(Diode::new(p, n, 1e-14, 1.0, VT_300K)),
+        "diode" => Box::new(Diode::new(p, n, 1e-14, 1.0, VT_NOMINAL)),
         other => bail!(
             "device `{}` references unknown model `{other}` (no compiled `--model` matched, \
              and it is not a built-in primitive)",

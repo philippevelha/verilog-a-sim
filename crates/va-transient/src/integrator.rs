@@ -230,7 +230,7 @@ fn newton_step(
     const ABSTOL: f64 = 1e-12;
     const RELTOL: f64 = 1e-9;
 
-    let vt = convergence::VT_300K;
+    let vt = convergence::VT_NOMINAL;
     let vcrit = convergence::default_vcrit(vt);
 
     let mut x = x_prev.to_vec();
@@ -898,7 +898,7 @@ mod tests {
     /// genuinely unstable equilibrium. Component values are deliberately mismatched
     /// stage-to-stage (not just for realism — see this test's own comment on why).
     fn ring_oscillator() -> Vec<Box<dyn ModelInstance>> {
-        let vt = va_abi::reference::diode::VT_300K;
+        let vt = va_abi::reference::diode::VT_NOMINAL;
         let bjt = |b: usize, c: usize| -> va_abi::reference::Bjt {
             va_abi::reference::Bjt::new(b, c, va_abi::reference::GROUND, 1e-15, 100.0, 1.0, vt)
         };
