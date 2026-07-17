@@ -192,30 +192,82 @@ fn validate() -> Result<()> {
     Ok(())
 }
 
-/// The circuits `gen_golden` can currently regenerate for real: pure `R`/`C`/`V` decks with no
-/// custom Verilog-A model and no temperature-sensitive nonlinearity, so QSPICE's own built-in
-/// primitives reproduce this project's answer with zero translation and zero ambiguity —
-/// confirmed empirically, not assumed (`circuits/divider.net` run through QSPICE unmodified
-/// gives `V(mid)=0.5` exactly, bit-for-bit matching the analytic/computed value).
+/// The circuits `gen_golden` can regenerate with **zero translation**: pure `R`/`C`/`V` decks
+/// with no custom Verilog-A model and no temperature-sensitive nonlinearity, so QSPICE's own
+/// built-in primitives reproduce this project's answer with zero ambiguity — confirmed
+/// empirically, not assumed (`circuits/divider.net` run through QSPICE unmodified gives
+/// `V(mid)=0.5` exactly, bit-for-bit matching the analytic/computed value).
 ///
-/// `circuits/mos_dc.net`/`diode_iv.net` are deliberately **not** here yet: both need a custom
-/// `.va` model (`models/mosfet.va`/`diode.va`) translated into an equivalent QSPICE-native
-/// `.model` card to cross-check against at all, and — found while investigating exactly that —
-/// QSPICE's default simulation temperature (27°C = 300.15 K) differs from this project's own
-/// fixed convention (`va_codegen::TEMP = 300.0`, `VT = 0.025_852`) by 0.15 K. For a linear
-/// circuit that's irrelevant; for `diode.va`'s exponential I–V law it isn't — a forced 0.5 V
-/// diode measured `2.50974869898304e-6` A from this project's own model (fixed 300 K) against
-/// `2.48560822992004e-6` A from QSPICE's default-temperature native diode model, a ~0.85%
-/// relative difference — comfortably past `va_harness::tol::DC_REL` (`1e-4`). Forcing QSPICE's
-/// `.temp` to exactly 300 K does **not** fix this: SPICE diode models rescale `IS` relative to
-/// their own nominal temperature (`TNOM`, defaulting to `27°C`) whenever `.temp` differs from
-/// it, so overriding `.temp` away from QSPICE's implicit `TNOM=27°C` moves the answer *further*
-/// away, not closer (confirmed empirically: implied `Vt` at `.temp 26.85` was `0.0258827`, not
-/// the expected `0.0258520`). Closing this needs a real decision — likely aligning this
-/// project's own fixed thermal-voltage constants to the 300.15 K SPICE-standard convention,
-/// which touches `va-codegen`'s `VT`/`TEMP` constants and every test that hardcodes a value
-/// derived from them — not attempted here.
+/// `circuits/mos_dc.net`/`diode_iv.net` need a custom `.va` model (`models/mosfet.va`/
+/// `diode.va`) translated into an equivalent QSPICE-native `.model` card instead — see
+/// [`QSPICE_MODEL_TRANSLATIONS`]/[`QSPICE_SWEEP_MODEL_TRANSLATIONS`]. The temperature-convention
+/// mismatch that used to block both (QSPICE's default 300.15 K `TNOM` vs. this project's old
+/// fixed 300 K constants — a forced 0.5 V diode measured `2.50974869898304e-6` A at 300 K against
+/// `2.48560822992004e-6` A from QSPICE's native diode at its own default temperature, ~0.85%
+/// relative difference, comfortably past `va_harness::tol::DC_REL`'s `1e-4`; forcing QSPICE's
+/// `.temp` to exactly 300 K made it *worse*, not better, since SPICE rescales `IS` relative to
+/// `TNOM` whenever `.temp` differs from it) is now closed: `va_codegen::TEMP`/`VT` (and every
+/// reference-model copy) were moved to the 300.15 K/QSPICE-matching convention.
 const QSPICE_NATIVE_CIRCUITS: &[&str] = &["circuits/divider.net"];
+
+/// QSPICE-native `.model` card translations for the single-`.op`-point circuits (§ ladder rung 5)
+/// that reference a custom `.va` model QSPICE has no idea how to load. Hand-translated from the
+/// `.va` model's own default parameters — kept in sync manually, not derived from the `.va`
+/// source, so a parameter default changed in the `.va` file must be mirrored here too.
+///
+/// `models/mosfet.va`'s Level-1 (Shichman-Hodges) equations are exactly SPICE's own `NMOS
+/// LEVEL=1` equations (`Id_sat = KP/2 * (W/L) * Vov^2 * (1+LAMBDA*Vds)`, `Id_triode = KP*(W/L) *
+/// (Vov*Vds - Vds^2/2) * (1+LAMBDA*Vds)`), so the parameter names carry over one-to-one.
+const QSPICE_MODEL_TRANSLATIONS: &[(&str, &str)] = &[(
+    "circuits/mos_dc.net",
+    ".model mosfet NMOS(LEVEL=1 VTO=0.7 KP=200u LAMBDA=0.01 W=10u L=1u)",
+)];
+
+/// Like [`QSPICE_MODEL_TRANSLATIONS`], for the `.dc`-sweep circuits (§ ladder rung 2).
+///
+/// `models/diode.va`'s `I = Is*(exp(V/(N*$vt)) - 1)` is exactly SPICE's own diode `D` model with
+/// no series resistance/junction capacitance/breakdown — `IS`/`N` carry over one-to-one.
+const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] =
+    &[("circuits/diode_iv.net", ".model diode D(IS=1e-14 N=1)")];
+
+/// Rewrite `deck` into a QSPICE-runnable deck: insert `model_card`, and widen any 3-terminal
+/// `M<name> d g s model` device line (this project's own simplified form, § `va-netlist`'s
+/// module doc) into QSPICE's native 4-terminal `M<name> d g s b model` by tying the body to the
+/// source — matches `models/mosfet.va`'s own no-body-effect scope (source is its only
+/// reference), so body=source is the physically-faithful translation, not just a syntactic one.
+///
+/// `model_card` is inserted as the deck's **second** line, not prepended as the first: like
+/// every SPICE dialect, QSPICE unconditionally treats a deck's first line as its title, whatever
+/// its content — prepending `model_card` outright made it swallow the `.model` card as the title
+/// string instead of a real directive, silently falling back to a built-in default model
+/// (confirmed empirically: QSPICE printed `Didn't find a model for "MOSFET" -- defaults assumed`
+/// and solved to `V(d)=4.96` instead of the analytic ~3.255 V).
+fn translate_for_qspice(deck: &str, model_card: &str) -> String {
+    let mut lines = deck.lines();
+    let mut out = String::new();
+    if let Some(title) = lines.next() {
+        out.push_str(title);
+        out.push('\n');
+    }
+    out.push_str(model_card);
+    out.push('\n');
+    for line in lines {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let is_m_device = matches!(toks.first(), Some(t) if t.starts_with(['M', 'm']))
+            && !line.trim_start().starts_with('*');
+        if is_m_device && toks.len() == 5 {
+            // `M1 d g s model` -> `M1 d g s s model` (body tied to source).
+            out.push_str(&format!(
+                "{} {} {} {} {} {}\n",
+                toks[0], toks[1], toks[2], toks[3], toks[3], toks[4]
+            ));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
 
 /// (Re)generate golden reference outputs by invoking QSPICE, if it is installed.
 ///
@@ -263,12 +315,70 @@ fn gen_golden() -> Result<()> {
         );
         generated += 1;
     }
+
+    for &(circuit, model_card) in QSPICE_MODEL_TRANSLATIONS {
+        let circuit_path = root.join(circuit);
+        let deck =
+            std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
+        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+        let native_deck = translate_for_qspice(&deck, model_card);
+
+        let raw = run_qspice_op(&qspice, &native_deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
+        let golden = golden_dc_from_qraw(&raw, &net.node_order)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} node(s), native-model translation)",
+            golden_path.display(),
+            golden.node_order.len()
+        );
+        generated += 1;
+    }
+
+    for &(circuit, model_card) in QSPICE_SWEEP_MODEL_TRANSLATIONS {
+        let circuit_path = root.join(circuit);
+        let deck =
+            std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
+        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+        let dc = net
+            .dc
+            .as_ref()
+            .with_context(|| format!("{circuit} has no `.dc` sweep card"))?;
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+        let native_deck = translate_for_qspice(&deck, model_card);
+
+        let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
+        let golden = golden_sweep_from_qraw(&raw, &dc.source, &net.node_order)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} point(s), native-model translation)",
+            golden_path.display(),
+            golden.points.len()
+        );
+        generated += 1;
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 
     eprintln!(
-        "[xtask] gen-golden: {generated} circuit(s) regenerated from QSPICE (of {} known — the \
-         rest need a native-model translation and/or a temperature-convention fix, see \
-         QSPICE_NATIVE_CIRCUITS's doc comment)",
+        "[xtask] gen-golden: {generated} circuit(s) regenerated from QSPICE (of {} known)",
         DC_CIRCUITS.len() + SWEEP_CIRCUITS.len()
     );
     Ok(())
@@ -297,8 +407,36 @@ fn run_qspice_op(qspice: &Path, deck: &str, workdir: &Path, stem: &str) -> Resul
     parse_qraw(&bytes)
 }
 
+/// Like [`run_qspice_op`], for a `.dc`-sweep deck (§ ladder rung 2) whose `.qraw` has more than
+/// one point.
+fn run_qspice_sweep(
+    qspice: &Path,
+    deck: &str,
+    workdir: &Path,
+    stem: &str,
+) -> Result<QspiceRawSweep> {
+    let cir_path = workdir.join(format!("{stem}.cir"));
+    std::fs::write(&cir_path, deck).context("writing scratch .cir")?;
+    let status = Command::new(qspice)
+        .arg(
+            cir_path
+                .file_name()
+                .context("scratch .cir has no filename")?,
+        )
+        .current_dir(workdir)
+        .status()
+        .context("launching QSPICE64.exe")?;
+    if !status.success() {
+        bail!("QSPICE exited with {status}");
+    }
+    let qraw_path = workdir.join(format!("{stem}.qraw"));
+    let bytes = std::fs::read(&qraw_path)
+        .with_context(|| format!("QSPICE did not produce {}", qraw_path.display()))?;
+    parse_qraw_sweep(&bytes)
+}
+
 /// One QSPICE `.qraw` file's contents, restricted to the single-operating-point case (`No.
-/// Points: 1` — a `.qraw` for a sweep or transient run has more, and isn't handled here).
+/// Points: 1` — a `.qraw` for a sweep or transient run has more; see [`QspiceRawSweep`]).
 struct QspiceRaw {
     /// Variable names in declared order, e.g. `"V(in)"`, `"I(V1)"` (as QSPICE spells them).
     variables: Vec<String>,
@@ -306,18 +444,32 @@ struct QspiceRaw {
     values: Vec<f64>,
 }
 
-/// Parse a `.qraw` file: an ASCII/UTF-8 header (`Title:`/`Plotname:`/`No. Variables:`/a
-/// `Variables:` block listing `<index>\t<name>\t<unit>` per line/`Binary:`), followed by one
-/// little-endian `f64` per variable — confirmed empirically against a real QSPICE `.op` run
-/// (`circuits/divider.net`: `V(in)=1`, `V(mid)=0.5`, matching this project's own analytic
-/// answer exactly), the same ASCII-header-then-binary-payload shape ngspice's own `.raw` format
-/// uses. Only `No. Points: 1` is supported — see [`QspiceRaw`].
+/// One QSPICE `.qraw` file's contents for a multi-point run (§ ladder rung 2's `.dc` sweep).
+struct QspiceRawSweep {
+    /// Variable names in declared order, same spelling as [`QspiceRaw::variables`] — the first
+    /// is always the swept quantity itself (its bare source name, e.g. `"V1"`, not `"V(V1)"`;
+    /// confirmed against a real QSPICE `.dc` run of `circuits/diode_iv.net`).
+    variables: Vec<String>,
+    /// One row of `variables.len()` values per sweep point, in point-major order (confirmed
+    /// empirically: a real QSPICE `.dc V1 0 0.6 0.1` run's binary payload is laid out as 7
+    /// consecutive 6-value rows, not 6 consecutive 7-value columns).
+    points: Vec<Vec<f64>>,
+}
+
+/// Shared `.qraw` header parse: variable names plus the declared point count and the raw binary
+/// payload slice. Both [`parse_qraw`] and [`parse_qraw_sweep`] build on this, differing only in
+/// how many points they accept and how they slice the payload.
+///
+/// An ASCII/UTF-8 header (`Title:`/`Plotname:`/`No. Variables:`/a `Variables:` block listing
+/// `<index>\t<name>\t<unit>` per line/`Binary:`), followed by one little-endian `f64` per
+/// variable per point — confirmed empirically against real QSPICE runs (a single-point `.op` of
+/// `circuits/divider.net`; a 7-point `.dc` of a translated `circuits/diode_iv.net`), the same
+/// ASCII-header-then-binary-payload shape ngspice's own `.raw` format uses.
 ///
 /// # Errors
 ///
-/// If the header is missing/malformed, declares zero or an unparseable variable count, or the
-/// binary payload is shorter than the header promises.
-fn parse_qraw(bytes: &[u8]) -> Result<QspiceRaw> {
+/// If the header is missing/malformed, or declares zero or an unparseable variable count.
+fn parse_qraw_header(bytes: &[u8]) -> Result<(Vec<String>, usize, &[u8])> {
     const MARKER: &[u8] = b"Binary:\n";
     let marker_at = bytes
         .windows(MARKER.len())
@@ -354,19 +506,30 @@ fn parse_qraw(bytes: &[u8]) -> Result<QspiceRaw> {
         }
     }
     let n_vars = n_vars.context("`.qraw` header has no `No. Variables:` line")?;
-    match n_points {
-        Some(1) => {}
-        Some(n) => bail!("`.qraw` has {n} point(s); only a single operating point is supported"),
-        None => bail!("`.qraw` header has no `No. Points:` line"),
-    }
+    let n_points = n_points.context("`.qraw` header has no `No. Points:` line")?;
     if variables.len() != n_vars {
         bail!(
             "`.qraw` header declares {n_vars} variable(s) but the `Variables:` block lists {}",
             variables.len()
         );
     }
+    Ok((variables, n_points, &bytes[payload_start..]))
+}
 
-    let payload = &bytes[payload_start..];
+/// Parse a single-operating-point `.qraw` file. Only `No. Points: 1` is supported — see
+/// [`parse_qraw_sweep`] for a multi-point `.dc` sweep.
+///
+/// # Errors
+///
+/// If [`parse_qraw_header`] fails, the file has other than one point, or the binary payload is
+/// shorter than the header promises.
+fn parse_qraw(bytes: &[u8]) -> Result<QspiceRaw> {
+    let (variables, n_points, payload) = parse_qraw_header(bytes)?;
+    match n_points {
+        1 => {}
+        n => bail!("`.qraw` has {n} point(s); only a single operating point is supported"),
+    }
+    let n_vars = variables.len();
     if payload.len() < n_vars * 8 {
         bail!(
             "`.qraw` binary payload is {} byte(s), too short for {n_vars} f64 value(s)",
@@ -383,28 +546,99 @@ fn parse_qraw(bytes: &[u8]) -> Result<QspiceRaw> {
     Ok(QspiceRaw { variables, values })
 }
 
-/// Map a parsed `.qraw` operating point onto this project's own `node_order`, by looking up
-/// each node's `"V(<name>)"` label — QSPICE's own variable ordering isn't assumed to match
-/// `node_order`'s (it happened to, for `divider.net`, but nothing guarantees that in general).
+/// Parse a multi-point (`.dc` sweep) `.qraw` file — point-major payload layout, see
+/// [`QspiceRawSweep`].
+///
+/// # Errors
+///
+/// If [`parse_qraw_header`] fails, the file has zero points, or the binary payload is shorter
+/// than the header promises.
+fn parse_qraw_sweep(bytes: &[u8]) -> Result<QspiceRawSweep> {
+    let (variables, n_points, payload) = parse_qraw_header(bytes)?;
+    if n_points == 0 {
+        bail!("`.qraw` declares 0 points");
+    }
+    let n_vars = variables.len();
+    if payload.len() < n_vars * n_points * 8 {
+        bail!(
+            "`.qraw` binary payload is {} byte(s), too short for {n_points} point(s) of \
+             {n_vars} f64 value(s) each",
+            payload.len()
+        );
+    }
+    let points = (0..n_points)
+        .map(|p| {
+            (0..n_vars)
+                .map(|v| {
+                    let base = (p * n_vars + v) * 8;
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&payload[base..base + 8]);
+                    f64::from_le_bytes(b)
+                })
+                .collect()
+        })
+        .collect();
+    Ok(QspiceRawSweep { variables, points })
+}
+
+/// Look up each of `node_order`'s `"V(<name>)"` labels in `variables`/`row` — shared by
+/// [`golden_dc_from_qraw`] and [`golden_sweep_from_qraw`]. QSPICE's own variable ordering isn't
+/// assumed to match `node_order`'s (it happened to, for `divider.net`, but nothing guarantees
+/// that in general).
+fn node_values_from_row(
+    variables: &[String],
+    row: &[f64],
+    node_order: &[String],
+) -> Result<Vec<f64>> {
+    node_order
+        .iter()
+        .map(|name| {
+            let label = format!("V({name})");
+            variables
+                .iter()
+                .position(|v| v.eq_ignore_ascii_case(&label))
+                .map(|i| row[i])
+                .with_context(|| format!("QSPICE output has no `{label}` variable"))
+        })
+        .collect()
+}
+
+/// Map a parsed `.qraw` operating point onto this project's own `node_order`.
 fn golden_dc_from_qraw(
     raw: &QspiceRaw,
     node_order: &[String],
 ) -> Result<va_harness::golden::GoldenDc> {
-    let values = node_order
-        .iter()
-        .map(|name| {
-            let label = format!("V({name})");
-            raw.variables
-                .iter()
-                .position(|v| v.eq_ignore_ascii_case(&label))
-                .map(|i| raw.values[i])
-                .with_context(|| format!("QSPICE output has no `{label}` variable"))
-        })
-        .collect::<Result<Vec<f64>>>()?;
+    let values = node_values_from_row(&raw.variables, &raw.values, node_order)?;
     Ok(va_harness::golden::GoldenDc {
         node_order: node_order.to_vec(),
         values,
     })
+}
+
+/// Map a parsed `.qraw` sweep onto this project's own `node_order`, keyed by `source`'s own
+/// swept value in each row (QSPICE labels that column with the bare source name, e.g. `"V1"`,
+/// not `"V(V1)"` — confirmed empirically, see [`QspiceRawSweep::variables`]).
+fn golden_sweep_from_qraw(
+    raw: &QspiceRawSweep,
+    source: &str,
+    node_order: &[String],
+) -> Result<va_harness::golden::GoldenSweep> {
+    let source_idx = raw
+        .variables
+        .iter()
+        .position(|v| v.eq_ignore_ascii_case(source))
+        .with_context(|| format!("QSPICE output has no `{source}` swept-value variable"))?;
+    let points = raw
+        .points
+        .iter()
+        .map(|row| {
+            let node_values = node_values_from_row(&raw.variables, row, node_order)?;
+            Ok((row[source_idx], node_values))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(va_harness::golden::GoldenSweep::from_sweep(
+        source, node_order, &points,
+    ))
 }
 
 /// Locate `QSPICE64.exe`: `QSPICE_PATH` env var first (an exact file path), then `PATH`, then
@@ -505,12 +739,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_passes_with_a_mix_of_real_golden_and_skips() {
-        // The project's actual current state: `golden/divider.golden` is real QSPICE output
-        // (§ ladder rung 1, the first circuit `gen_golden` can regenerate for real); the rest
-        // of `golden/` is still empty. `validate` must both check the one real reference (and
-        // pass it) and treat the rest as "nothing captured yet," not a failure.
-        validate().expect("validate should pass: one real PASS plus the rest merely skipped");
+    fn validate_passes_with_all_known_circuits_golden() {
+        // The project's actual current state: every circuit in `DC_CIRCUITS`/`SWEEP_CIRCUITS`
+        // now has real, committed QSPICE golden (rungs 1/2/5) — `divider.net` from
+        // `QSPICE_NATIVE_CIRCUITS`, `mos_dc.net`/`diode_iv.net` from the native-model
+        // translations. Nothing is skipped anymore; `validate` must pass all three for real.
+        validate().expect("validate should pass: all three known circuits have real golden");
     }
 
     #[test]
@@ -615,5 +849,94 @@ mod tests {
         };
         let node_order = vec!["in".to_string(), "mid".to_string()];
         assert!(golden_dc_from_qraw(&raw, &node_order).is_err());
+    }
+
+    /// Build a synthetic multi-point (`.dc` sweep) `.qraw` byte buffer, point-major — the same
+    /// shape a real QSPICE `.dc` run produces (confirmed against an actual translated run of
+    /// `circuits/diode_iv.net`).
+    fn synthetic_qraw_sweep(vars: &[&str], rows: &[[f64; 2]]) -> Vec<u8> {
+        let mut header = String::new();
+        header.push_str("Title: * synthetic sweep\n");
+        header.push_str("Plotname: DC Transfer Characteristic\n");
+        header.push_str("Flags: real\n");
+        header.push_str(&format!("No. Variables: {}\n", vars.len()));
+        header.push_str(&format!("No. Points: {}                    \n", rows.len()));
+        header.push_str("Variables:\n");
+        for (i, name) in vars.iter().enumerate() {
+            header.push_str(&format!("\t{i}\t{name}\tvoltage\n"));
+        }
+        header.push_str("Binary:\n");
+        let mut bytes = header.into_bytes();
+        for row in rows {
+            for v in row {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn parse_qraw_sweep_reads_point_major_rows() {
+        let bytes = synthetic_qraw_sweep(&["V1", "V(in)"], &[[0.0, 0.0], [0.1, 0.1], [0.2, 0.2]]);
+        let raw = parse_qraw_sweep(&bytes).expect("parse");
+        assert_eq!(raw.variables, vec!["V1", "V(in)"]);
+        assert_eq!(
+            raw.points,
+            vec![vec![0.0, 0.0], vec![0.1, 0.1], vec![0.2, 0.2],]
+        );
+    }
+
+    #[test]
+    fn parse_qraw_sweep_rejects_a_truncated_payload() {
+        let mut bytes = synthetic_qraw_sweep(&["V1", "V(in)"], &[[0.0, 0.0], [0.1, 0.1]]);
+        bytes.truncate(bytes.len() - 4); // half of the last row's second value missing
+        assert!(parse_qraw_sweep(&bytes).is_err());
+    }
+
+    #[test]
+    fn golden_sweep_from_qraw_maps_source_and_nodes_by_name() {
+        let raw = QspiceRawSweep {
+            variables: vec!["V(in)".to_string(), "V1".to_string()],
+            points: vec![vec![0.0, 0.0], vec![0.1, 0.1]],
+        };
+        let node_order = vec!["in".to_string()];
+        let golden = golden_sweep_from_qraw(&raw, "V1", &node_order).expect("map");
+        assert_eq!(golden.source, "V1");
+        assert_eq!(golden.node_order, vec!["in".to_string()]);
+        assert_eq!(golden.points, vec![(0.0, vec![0.0]), (0.1, vec![0.1])]);
+    }
+
+    #[test]
+    fn golden_sweep_from_qraw_errors_on_a_missing_source() {
+        let raw = QspiceRawSweep {
+            variables: vec!["V(in)".to_string()],
+            points: vec![vec![0.0]],
+        };
+        let node_order = vec!["in".to_string()];
+        assert!(golden_sweep_from_qraw(&raw, "V1", &node_order).is_err());
+    }
+
+    #[test]
+    fn translate_for_qspice_keeps_the_title_as_the_first_line() {
+        // SPICE (and QSPICE) unconditionally treats a deck's first line as its title. Prepending
+        // the `.model` card outright (the original, broken version of this function) made QSPICE
+        // read it as the title string instead of a real directive and silently fall back to a
+        // built-in default model — confirmed empirically (`Didn't find a model for "MOSFET" --
+        // defaults assumed`, solving to `V(d)=4.96` instead of the analytic ~3.255 V).
+        let deck = "* a title comment\nVDD vdd gnd DC 5.0\n.end\n";
+        let out = translate_for_qspice(deck, ".model foo BAR(baz=1)");
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some("* a title comment"));
+        assert_eq!(lines.next(), Some(".model foo BAR(baz=1)"));
+    }
+
+    #[test]
+    fn translate_for_qspice_widens_a_three_terminal_m_line() {
+        let deck = "* title\nM1  d   g   gnd mosfet\n.op\n.end\n";
+        let out = translate_for_qspice(deck, ".model mosfet NMOS(LEVEL=1)");
+        assert!(
+            out.lines().any(|l| l == "M1 d g gnd gnd mosfet"),
+            "expected a body=source-widened M line, got:\n{out}"
+        );
     }
 }
