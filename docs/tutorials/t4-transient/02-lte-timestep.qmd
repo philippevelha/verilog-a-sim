@@ -1,39 +1,126 @@
-﻿---
+---
 title: "LTE & adaptive timestep"
-subtitle: "T4 · Phase T4.2 · `va-transient`"
+subtitle: "T4 · Phase T4.2 · `va-transient::integrator`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete — ladder rung 4, formally passed.** Embedded-pair local-truncation-error
+control drives accept/reject and step growth/shrink. The diode rectifier formally passes against
+real QSPICE golden (2026-07-18, `error=7.925e-4` against a `1e-3` tolerance — the tightest
+margin of any passed rung, and a real, unpadded one).
 :::
 
 ## Goal
 
-Local truncation error driving step accept/reject; the diode rectifier (ladder rung 4).
+Decide, every step, whether the current step size `h` was small enough to trust — and grow or
+shrink it accordingly — without a fixed, hand-tuned schedule.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ each step: solve with the primary method AND the "reference" method at the same h
+                              │
+                    disagreement ──► error ratio ──► accept (maybe grow h) or reject (shrink h)
+```
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**An embedded pair, using the *other* implemented method as the error proxy — not a rigorous
+truncation-error estimate.** A textbook higher-order embedded-pair method (RK45's 4th/5th-order
+combination, say) needs a genuinely different-order companion built for exactly that purpose.
+This project has only two methods implemented, backward Euler and trapezoidal, so
+`reference_method` just swaps to *whichever one isn't currently selected* — trapezoidal's own
+reference is backward Euler, and vice versa — and their disagreement at the same step size
+stands in for the local truncation error. Every accepted step therefore costs roughly 2× a
+fixed-step solve (two full Newton solves, not one). The honest tradeoff, stated in this module's
+own doc comment: a real divided-difference LTE estimate from several *past* accepted points
+would need no second solve per step, but needs a longer history buffer this module doesn't keep
+yet — this is the simpler design that's easy to verify directly against an analytic solution,
+not the more rigorous one.
+
+**The error ratio is scaled per-unknown, the same `reltol·|x| + abstol` shape Newton's own
+convergence check uses** (`t3-core/02-newton.qmd`) — consistent tolerance semantics across the
+whole solver, not a separate ad-hoc scheme for the time axis:
+
+```rust
+fn lte_error_ratio(x_primary: &[f64], x_reference: &[f64], reltol: f64, abstol: f64) -> f64 {
+    x_primary.iter().zip(x_reference).fold(0.0, |worst, (a, b)| {
+        let scale = reltol * a.abs() + abstol;
+        worst.max((a - b).abs() / scale)
+    })
+}
+```
+
+**Accept/reject/grow/shrink is a small, fixed set of constants**, not a tuned control-theory
+loop: `err_ratio <= 1.0` accepts the step; if the ratio is comfortably under `0.5`, the *next*
+step grows by `1.5×` (capped at `cfg.tstep`, the caller's own ceiling — this controller only ever
+shrinks below it, never grows past it); otherwise the step shrinks by `0.5×` and retries from the
+same `t`. A step that would shrink below `cfg.tstep_min` fails with `TimestepUnderflow` rather
+than silently accepting an out-of-tolerance result.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub struct TranConfig {
+    pub tstart: f64,
+    pub tstop: f64,
+    pub tstep: f64,       // ceiling; the controller only ever shrinks from here
+    pub tstep_min: f64,   // shrinking below this is a hard error, not silent acceptance
+    pub method: Method,
+    pub lte_reltol: f64,
+    pub lte_abstol: f64,  // must be > 0 — the error scale's floor when x is near zero
+}
+```
+
+Each step attempt:
+
+```rust
+let primary = Companion::for_method(cfg.method, &q_prev, &r_prev, step_h, &is_dynamic);
+let x_primary = newton_step(instances, dim, &x, &primary)?;
+let reference_companion = Companion::for_method(reference_method(cfg.method), ...);
+let x_reference = newton_step(instances, dim, &x, &reference_companion)?;
+
+let err_ratio = lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol);
+if err_ratio <= 1.0 {
+    // accept x_primary, advance t, maybe grow h
+} else {
+    // shrink h, retry from the same t (or TimestepUnderflow)
+}
+```
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-transient adaptive
+test integrator::tests::adaptive_stepping_grows_the_step_as_the_transient_flattens ... ok
+test integrator::tests::tighter_lte_tolerance_takes_more_steps ... ok
+test integrator::tests::trapezoidal_is_more_accurate_than_backward_euler_at_the_same_schedule ... ok
+```
+
+`adaptive_stepping_grows_the_step_as_the_transient_flattens` is the real proof: an RC charge
+changes fastest early on and flattens later, and the controller is checked to actually take
+*bigger* accepted steps late in the run than at the start — not just "the code runs without
+error." The diode rectifier (`circuits/rectifier.net`), driven through the real netlist pipeline
+and compared against genuine QSPICE output, is ladder rung 4:
+
+```console
+$ cargo run -q -p xtask -- validate
+[xtask]   PASS circuits/rectifier.net: error=7.925e-4 (tol 1e-3)
+```
+
+That `7.925e-4` margin is real and unpadded — the tightest of any rung passed so far, closed
+only after `t6-integration/03-validation.qmd`'s two SPICE-comparison fixes (a `UIC` cold-start
+translation, and excluding both the caller's own unsolved seed sample *and* any golden sample
+earlier than this engine's own first real solved time from the comparison).
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+`GROWTH_FACTOR`/`GROWTH_ERR_THRESHOLD`/`SHRINK_FACTOR` are fixed constants, not exposed as
+`TranConfig` knobs — a circuit that would benefit from a different growth/shrink aggressiveness
+has no way to ask for one today. The ~2× per-step cost of the embedded-pair approach (§ above)
+is a real, accepted tradeoff, not hidden.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t4-transient/03-events.qmd` — forced exact breakpoints, crossing detection, and the ring
+oscillator (ladder rung 6).

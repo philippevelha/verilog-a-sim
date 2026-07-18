@@ -1,39 +1,98 @@
-﻿---
-title: "Charge channel & coverage"
-subtitle: "T2 · Phase T2.3 · `va-codegen`"
+---
+title: "The charge channel, and an honest note on coverage"
+subtitle: "T2 · Phase T2.3 · `va-codegen::lower`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: charge channel is real and transient-ready; a dedicated "coverage matrix" was never
+built as its own artifact** — the honest state, not glossed over. `docs/token-reference.md` (T1's
+own living coverage record) and `docs/roadmap.md`'s dated changelog are where real coverage
+tracking actually lives; see "Limitations" for why a separate T2-specific matrix never
+materialized.
 :::
 
 ## Goal
 
-Emit the charge / dcharge channel from `ddt`/`idt`, and present the honest operator-coverage matrix.
+Route `ddt`/`idt` into the charge channel `va-transient`'s companion model needs to integrate a
+reactive device in time — and be honest about what "coverage" means for this crate specifically.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ ddt(q)/idt(expr) in the analog block ──► [lower.rs] ──► charge/dcharge stamps ──► va-transient
+```
+
+DC analysis (`va-core`) never reads the charge channel at all; it exists purely for T4's
+companion-model integration.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**`ddt` is recovered symbolically, `idt` is not — architecturally different, for a real reason.**
+`ddt(q)`'s value at the current instant depends only on `q`'s *current* value and its Jacobian
+(the charge channel's `Q`/`dQ/dV` are exactly `q`/`dq/dx` at this operating point) — `va-transient`
+differentiates that in time itself via its own companion model, so `lower.rs` just needs to
+recognize the `ddt(...)` shape as a top-level additive term and route its argument to
+`sink.charge`/`sink.dcharge` instead of `sink.residual`/`sink.jacobian`.
+
+`idt(expr)`'s value, by contrast, is `expr`'s entire *history* integrated to now — it can't be
+recovered from the current unknowns alone. Each distinct `idt(expr)` call site instead gets its
+own auxiliary "accumulator" unknown `Y`, and lowering enforces `ddt(Y) = expr` through the
+*same* charge-channel machinery `ddt` already uses — self-contained, exactly like a potential
+contribution's own auxiliary branch-current unknown. Reading `idt(expr)`'s value anywhere in an
+expression is then just an ordinary read of `Y`. This is why `idt` may appear nested arbitrarily
+deep in an expression (a coefficient-scaled `idt` inside a potential contribution's RHS, the
+shape `psp102`'s NQS variants need) while `ddt` may only appear as a top-level additive term —
+`idt` reduces to reading a plain unknown, `ddt` doesn't.
+
+**A `ddt` result assigned to a local variable and read back later** (a real, in-the-wild pattern:
+some vendor models route around this project's own `ddt`-placement restriction by assigning it to
+a scratch variable first) is tracked via a small, deliberately *not* general dataflow analysis:
+forward, single-pass, branch-local — entering an `if`/`case` arm clones the tracking map and
+discards the clone's mutations on exit, so a variable reused for something unrelated in only one
+arm never leaks a stale `ddt` association to code after the branch.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+// A ddt(...) argument routes to the charge channel instead of the resistive one:
+sink.charge(row, q_value);
+sink.dcharge(row, col, dq_dx);
+
+// Each idt(expr) call site gets its own accumulator unknown Y, enforcing ddt(Y) = expr:
+pub struct IdtAccumulator {
+    // the idt(...) call's own ExprId.0 — how ad::Ctx::idt_slots maps a call site to its Y
+    ...
+}
+```
+
+`GeneratedModel::stamp_idt_accumulators` stamps every accumulator's own charge-channel row
+unconditionally on every `load()` call, independent of whatever control flow does or doesn't
+reach that specific `idt(...)` expression that step.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+The generated capacitor stamps only the charge channel (`Q=C·V`, `dQ/dV=C`, an open circuit in
+DC) and is checked against `va-abi::reference::Capacitor`'s own hand-written stamp —
+`t2-codegen/02-lowering.qmd`'s AD-vs-reference milestone extended to a reactive device. The RC
+transient milestone (`t4-transient/01-integration.qmd`) is the real end-to-end proof: a
+generated capacitor's charge-channel output, differentiated by `va-transient`'s own companion
+model, reproduces the analytic RC charging curve.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**No `.ic`/`UIC` initial-condition support** — shared honestly with every other reactive state in
+this codegen and with `va-cli`'s own transient driver (`t4-transient/01-integration.qmd`,
+`t6-integration/03-validation.qmd`'s SPICE-gotcha section has the concrete consequence this had
+for QSPICE golden comparison).
+
+**A dedicated "operator coverage matrix" for T2 specifically never got built as its own
+artifact.** The roadmap originally scoped this phase to include one; what actually happened
+instead is that coverage tracking consolidated into `docs/token-reference.md` (T1's living,
+token-by-token record — since most real coverage gaps turned out to be frontend/elaboration
+gaps, not codegen ones) and `docs/roadmap.md`'s own dated "Language coverage" changelog. That's
+a real, honest gap in *this specific deliverable*, not a silently-abandoned promise — the
+underlying tracking need is met, just not in the shape T2.3 originally called for.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t3-core/01-mna.qmd` — assembling every device's stamps into one linear system.

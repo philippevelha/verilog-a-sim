@@ -1,39 +1,158 @@
-﻿---
+---
 title: "The reference models"
-subtitle: "Phase 0 · shared"
+subtitle: "Shared · Phase 0 · `va-abi::reference`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: real, working models — four of them.** `Resistor`/`Capacitor`/`Diode`/`VSource` shipped
+at bootstrap (`CLAUDE.md` §9); `Bjt` was added later (§ ladder rung 6, T4.3) as the project's
+first gain-capable device. All five back both `va-core`'s own bring-up and every AD-generated
+model in `va-codegen`, which is checked against them.
 :::
 
 ## Goal
 
-Walk the resistor / capacitor / diode stamps by hand — the Rosetta Stone every other thesis refers back to.
+Give `va-core` something real to solve from commit #1, and give every later AD-generated model
+an independent oracle to be checked against — hand-derived, not generated.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+These live at the leaf of `CLAUDE.md` §2's diagram, alongside `va-ir`:
+
+```
+                         [va-abi]
+                    ModelInstance/StampSink
+                    + hand-written reference/
+                              │
+                    ┌─────────┴─────────┐
+                    │                   │
+              [va-codegen]         [va-core]
+           (checked against       (solves them
+            these models)          directly too)
+```
+
+`va-codegen`'s generated resistor/diode reproduce these exact stamps — that equivalence is
+itself one of T2's own tests (`t2-codegen/02-lowering.qmd`).
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+Every model here shares one job: turn its own device physics into the four `StampSink` channels
+(`residual`, `jacobian`, `charge`, `dcharge`) at whatever operating point `x` currently is.
+Four of the five (`Resistor`/`Capacitor`/`Diode`/`VSource`) are two-terminal and mostly share
+three small helpers in `reference/mod.rs`:
+
+```rust
+fn stamp_conductance(sink, p, n, i, g)  // residual ± i, Jacobian ± g, the canonical 2×2 stamp
+fn stamp_charge(sink, p, n, q, c)       // the same shape, into the charge channel
+fn voltage_across(x, p, n) -> f64       // x[p] - x[n], out-of-range = 0 V (ground)
+```
+
+`Bjt` (three-terminal) is the one exception — its base/collector/emitter currents cross-couple,
+so it stamps its own 3×3 block by hand rather than reusing the two-terminal helpers.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+**`Resistor`** — `I = V/R`, the simplest possible stamp:
+
+```rust
+fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    let [p, n] = self.terminals;
+    let v = voltage_across(x, p, n);
+    let i = self.g * v;
+    stamp_conductance(sink, p, n, i, self.g);   // g = 1/R, constant
+}
+```
+
+**`Capacitor`** — `Q = C·V`, contributing *only* to the charge channel (an open circuit in DC;
+`va-transient`'s companion model differentiates the charge channel in time):
+
+```rust
+fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    let [p, n] = self.terminals;
+    let v = voltage_across(x, p, n);
+    let q = self.c * v;
+    stamp_charge(sink, p, n, q, self.c);
+}
+```
+
+**`Diode`** — the Shockley law, `I = Is·(exp(Vd/(N·Vt)) − 1)`, with an *exact* analytic
+conductance (a wrong Jacobian silently destroys Newton convergence — `CLAUDE.md` §5's AD
+discipline applies here too, even though this model has no AD in it):
+
+```rust
+pub fn current(&self, vd: f64) -> f64 { self.is * ((vd / self.nvt).exp() - 1.0) }
+pub fn conductance(&self, vd: f64) -> f64 { (self.is / self.nvt) * (vd / self.nvt).exp() }
+```
+
+`VT_NOMINAL` (`0.025_865` V) is the project's thermal-voltage constant at its nominal 300.15 K
+simulation temperature — chosen to match QSPICE's own default `TNOM` exactly (§ the T6.3
+tutorial's "temperature convention" fix), not an arbitrary round 300 K.
+
+**`VSource`** — the one model here that introduces an *extra* unknown, its own branch current,
+rather than just wiring two terminals:
+
+```rust
+fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    let [p, n, b] = self.terminals;
+    // Constraint row: V(p) - V(n) - value = 0 (not a KCL sum!).
+    sink.residual(b, x[p] - x[n] - self.value);
+    sink.jacobian(b, p, 1.0);
+    sink.jacobian(b, n, -1.0);
+    // The branch current flows out of p, into n.
+    sink.residual(p, x[b]);
+    sink.residual(n, -x[b]);
+    sink.jacobian(p, b, 1.0);
+    sink.jacobian(n, b, -1.0);
+}
+```
+
+Its `branch` unknown overrides `unknown_kind` to report `UnknownKind::Branch` — the first real
+use of that Interface β extension (`shared/01-interfaces.qmd`): `gmin`-stepping must never shunt
+a voltage source's own constraint row.
+
+**`Bjt`** — a simplified (textbook) Ebers-Moll NPN, `Ib = Ibe + Ibc`, `Ic = Icc − Ibc`, where
+`Icc = Is·(exp(Vbe/Vt) − exp(Vbc/Vt))`. The reverse (`Vbc`-driven) term is what keeps this model
+physically sane into saturation — unlike a naive `Ic = βF·Ib`, `Ic` here self-limits as `V(c)`
+drops toward `V(b)`, the real Ebers-Moll saturation behavior, with no separate clamp needed.
+Its Jacobian has a structural identity worth knowing: every column sums to exactly zero
+(`Ib + Ic + Ie_row = 0` for any bias, since KCL at the three terminals must balance) — a cheap,
+powerful sanity check this model's own tests assert directly, independent of the FD check.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+Every model has a finite-difference test asserting its analytic Jacobian matches a central
+difference (`CLAUDE.md` §5, non-negotiable):
+
+```console
+$ cargo test -p va-abi
+test reference::diode::tests::conductance_matches_finite_difference ... ok
+test reference::bjt::tests::partials_match_finite_difference ... ok
+test reference::bjt::tests::jacobian_columns_sum_to_zero ... ok
+test reference::bjt::tests::forward_active_gives_current_gain_near_beta_f ... ok
+test reference::vsource::tests::only_the_branch_current_is_a_constraint_row ... ok
+...
+```
+
+`Bjt` additionally checks `Ic/Ib ≈ βF` deep in forward-active bias (well away from saturation,
+where the reverse term is negligible) — a real physical-gain check, not just a Jacobian shape
+check.
+
+`tests/pipeline.rs` (workspace-level) hand-stamps a two-resistor divider plus a capacitor into
+one `DenseStamp` and checks the assembled Jacobian/charge match the textbook answer by hand —
+the same divider `va-core`'s own bring-up test solves through Newton.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Every model here is deliberately minimal, stated in its own doc comment, not hidden:
+`Resistor`/`Capacitor` have no temperature coefficient or voltage dependence; `Diode` has no
+junction/diffusion capacitance, series resistance, or breakdown; `Bjt` has no Early effect, no
+ohmic parasitics, and — found empirically while tuning the ring-oscillator demo (§ T4.3) — no
+saturation-charge smoothing, so a large-amplitude transient can eventually push it into a regime
+where the embedded-pair LTE estimator stops agreeing at any step size. None of these are bugs;
+they're the textbook-simplest model that's still analytically exact within its own stated scope.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t1-frontend/01-lexing.qmd` — the language front end that will eventually let a *compiled*
+`.va` model (via `va-codegen`) stand in for any of these, starting from source text instead of a
+hand-written Rust struct.

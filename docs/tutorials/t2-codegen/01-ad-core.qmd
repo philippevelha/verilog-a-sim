@@ -1,39 +1,102 @@
-﻿---
+---
 title: "The AD core"
-subtitle: "T2 · Phase T2.1 · `va-codegen`"
+subtitle: "T2 · Phase T2.1 · `va-codegen::ad`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete, real coverage.** 10 tests, all green — forward-mode dual numbers over
+the `va-ir` expression arena, every differentiated operator checked against a central finite
+difference (`CLAUDE.md` §5, non-negotiable).
 :::
 
 ## Goal
 
-Forward-mode automatic differentiation over the unknowns, validated against finite differences.
+Evaluate an `ExprId` at an operating point *and* differentiate it with respect to every active
+unknown, in one pass — the Jacobian a Newton solve needs, computed exactly, not approximated.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ va_ir::Module ──► [ad::eval] ──Dual (value + gradient)──► lower.rs's stamps ──► ModelInstance
+```
+
+Every device's `load` call, for every node/branch in the circuit, walks the IR arena through
+`ad::eval` to get both the residual contribution and its exact Jacobian row/column in one shot.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**Forward-mode, dense gradient vector.** A `Dual` carries its primal `value` plus one partial
+derivative per *active unknown* — every node voltage, plus one per branch that has its own
+auxiliary current unknown. A potential probe `V(p, n)` seeds `+1` in slot `p` and `-1` in slot
+`n`; every other operator (`+`, `*`, `exp`, …) propagates gradients through the ordinary chain
+rule. This is the simplest AD mode that's still exact for this problem shape: a compact model
+has few unknowns (a handful of terminals/internal nodes) and one scalar output per stamp row, so
+forward mode's "one pass per output, dense over all inputs" cost profile is exactly right —
+reverse mode would only pay off with many inputs and few outputs, the opposite shape.
+
+**Why exactness is non-negotiable, not just nice-to-have** (`CLAUDE.md` §5): Newton's quadratic
+convergence depends on the Jacobian being the *true* derivative of the residual. A subtly wrong
+gradient doesn't crash — it silently degrades convergence to something that looks like a
+numerics or convergence-aid problem, which is far harder to debug than a wrong value. Every
+operator this module implements therefore ships with its own finite-difference test, not just
+the ones that "seemed tricky."
+
+**`ddx(expr, probe)` reads the gradient the AD pass already carries**, rather than needing a
+second differentiation pass: since every potential probe already seeds a `+1`/`-1` in its node's
+own gradient slot, the partial derivative the LRM's `ddx` operator asks for is *already sitting
+in* the evaluated `Dual`'s gradient vector at that slot — `eval` just reads it out instead of
+re-differentiating from scratch. Validated against the LRM's own worked examples (a VCCS, a
+diode), the diode case additionally cross-checked against a central finite difference.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub struct Dual {
+    pub value: f64,
+    pub grad: Vec<f64>,   // one entry per active unknown, node-slot order
+}
+
+impl Dual {
+    pub fn variable(value: f64, i: usize, n: usize) -> Self { /* unit derivative in slot i */ }
+    pub fn add(&self, o: &Dual) -> Dual { /* (a+b)' = a' + b' */ }
+    // ... scale, sub, mul, div, and every unary/binary builtin, each with its exact chain rule
+}
+
+pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError>
+```
+
+`Ctx` bundles everything `eval` needs to resolve a name against the current operating point:
+the module's own arena, parameter values, the solution vector `x`, the active terminal-to-slot
+mapping, and (for `ddt`/`idt`) the transient companion state.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-codegen ad::
+running 10 tests
+test ad::tests::exp_chain_rule ... ok
+test ad::tests::div_matches_finite_difference ... ok
+test ad::tests::ddx_of_diode_conductance_matches_finite_difference ... ok
+test ad::tests::select_evaluates_only_the_taken_branch ... ok
+test ad::tests::vt_of_temperature_scales_and_carries_gradient ... ok
+...
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s
+```
+
+`select_evaluates_only_the_taken_branch` matters beyond correctness: the ternary's untaken arm
+may be genuinely undefined at the current point (`x > 0 ? ln(x) : 0`), so `eval` must never
+touch it — the same rule `GeneratedModel::run`'s `if`/`else` lowering (`t2-codegen/02-lowering.qmd`)
+follows one level up.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Second derivatives are out of scope: `ddx`'s result is treated as having zero further gradient,
+a single-pass, first-order AD design decision, not an oversight. `ddx` is only meaningful against
+a *potential* probe — differentiating with respect to a branch flow would need flow probes to be
+independent unknowns, which they are not in this codegen, so `ddx` against a flow probe is a
+rejected construct, not a silently wrong answer.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t2-codegen/02-lowering.qmd` — using this AD core to build a real `ModelInstance` from an IR
+module.

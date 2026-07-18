@@ -1,39 +1,133 @@
-﻿---
-title: "Events & breakpoints"
-subtitle: "T4 · Phase T4.3 · `va-transient`"
+---
+title: "Events, breakpoints, and the ring oscillator"
+subtitle: "T4 · Phase T4.3 · `va-transient::events`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete — ladder rung 6, implementation reach closed through the real pipeline.**
+QSPICE golden generation was attempted and diagnosed, not silently skipped — see "Limitations."
 :::
 
 ## Goal
 
-Breakpoints and forced timepoints; the ring-oscillator demo (ladder rung 6).
+Force the adaptive integrator to land exactly on specific times, and watch for a monitored
+quantity crossing a threshold — the machinery a real oscillator demo needs to prove it actually
+oscillates, not just "ran without error."
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ EventQueue{breakpoints, watches} ──► run_with_events ──► Waveform{t, x, crossings}
+```
+
+`run` is a thin wrapper over `run_with_events` with an empty queue — every circuit that doesn't
+need forced timepoints or crossing detection pays nothing for this machinery.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**A breakpoint clamps the adaptive step, it doesn't reset the controller.** `EventQueue::
+next_after(t)` returns the next scheduled breakpoint after the current time; each step attempt
+clamps its own candidate landing time to that breakpoint (`t_next.min(bp)`) so the integrator is
+guaranteed to solve *exactly* at a source discontinuity or forced timepoint, without discarding
+whatever step-size history the LTE controller had already built up.
+
+**Crossing detection is an honest simplification, not full `cross()` semantics** — stated
+plainly in `CrossingWatch`'s own doc comment: rather than re-solving at the exact crossing
+instant, it checks `x[unknown] - threshold` for a sign change between two consecutive *accepted*
+points and linearly interpolates. This is accurate enough precisely because the same LTE control
+that bounds the state's error between two accepted points also bounds the interpolation error —
+not a coincidence, a consequence of both existing in the same solve loop.
+
+**The ring oscillator is the first circuit here with a genuinely gain-capable device**, and its
+DC operating point is a real, *unstable* equilibrium — Newton finds it exactly like any other
+fixed point (it has no notion of stability), and the transient's whole point is to diverge away
+from it. Two design choices made this tractable rather than merely lucky:
+
+- **Mismatched per-stage component values, not identical ones.** Three identical ring stages
+  have an *exactly* symmetric DC equilibrium; a deterministic solver started from a matching
+  guess has no noise to break that symmetry the way a real circuit's component tolerances
+  always do. Mismatching `Rb`/`Rc` stage to stage means the symmetric point is never an exact
+  equilibrium of *this* circuit to begin with.
+- **A real surprise, found netlist-driving this circuit for the first time (2026-07-18), not
+  assumed from the topology**: the original hand-built fixture nudges the DC solution by 5 mV
+  before starting its transient, specifically to break the exact symmetry a deterministic
+  solver's own converged answer would otherwise sit at motionlessly. Driving the *same* circuit
+  through `va-cli`'s ordinary `x=0` cold start (no such nudge) turns out to do the identical job
+  by a different route: every stage sees an *identical* `Vbe` from `x=0`, so all three charge to
+  nearly the same forward-active bias within ~12.5 µs — close enough to the symmetric-but-unstable
+  equilibrium that the stages' own mismatched `R` values are enough to kick off the same genuine,
+  sustained, growing oscillation. Confirmed by inspecting a full run's node trajectories (each
+  collector swings between ~0.06 V and ~5 V, repeatedly, staggered per stage) before trusting it —
+  a first attempt at checking this by watching only one collector actually *failed* (2 crossings
+  in the observed window, not the expected several), simply because that one stage had a quiet
+  stretch in its own cycle while the other two (6 and 3 crossings) kept oscillating; the real fix
+  was checking the max across all three collectors, not loosening the assertion.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub enum Event { Breakpoint(f64), Crossing(f64) }
+
+pub struct CrossingWatch { pub unknown: usize, pub threshold: f64 }
+
+pub struct EventQueue { /* breakpoints: Vec<f64>, watches: Vec<CrossingWatch> */ }
+impl EventQueue {
+    pub fn push_breakpoint(&mut self, t: f64);
+    pub fn next_after(&self, t: f64) -> Option<f64>;
+    pub fn push_watch(&mut self, unknown: usize, threshold: f64);
+    pub fn watches(&self) -> &[CrossingWatch];
+}
+```
+
+The ring topology itself, now real Verilog-A netlist syntax (`circuits/ring_osc.net`,
+`t6-integration/01-netlist.qmd`'s new `Q<name> c b e model` element): three RC-coupled
+common-emitter stages, each `Q` a `va-abi::reference::Bjt` reached via `va-cli`'s `"bjt"`
+`reference_instance` branch (fixed `Is=1e-15`, `βF=100`, `βR=1`, matching the original hand-built
+fixture's own values).
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+The original, hand-built-instance demo:
+
+```console
+$ cargo test -p va-transient ring_oscillator_sustains_oscillation
+test integrator::tests::ring_oscillator_sustains_oscillation ... ok
+```
+
+checks a deliberately-nudged DC bias grows into real, sustained oscillation (at least two full
+crossings of the collector's own DC bias, with the trough deepening over time — genuine growth,
+not just alternation). The *same* topology, now driven through the real netlist pipeline from an
+ordinary `x=0` cold start:
+
+```console
+$ cargo test -p va-cli ring_osc_sustains_oscillation_through_the_real_pipeline
+test tests::ring_osc_sustains_oscillation_through_the_real_pipeline ... ok
+```
+
+checks the max rail-midpoint crossing count across all three collectors (≥4) and that every
+collector's own swing covers most of the 0–5 V rail at some point in the run — not just one
+node, since a ring oscillator's per-stage phase shift means any single collector can sit on a
+quiet stretch of its own cycle while the ring as a whole keeps oscillating.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**Stated in `integrator.rs`'s own doc comment, found empirically while tuning this circuit's
+component values:** as the oscillation grows, it eventually pushes a junction into strong
+forward bias on both sides at once, where this simplified Ebers-Moll model's exponential terms
+grow large enough that the embedded-pair LTE estimator stops agreeing at any step size. `tstop`
+is chosen comfortably inside the confirmed well-behaved region, not at that numerical edge.
+
+**QSPICE golden generation was attempted and diagnosed, not silently skipped.** Translating this
+circuit the same way rungs 3–5 were (a native `.model bjt NPN(...)` card, `UIC` + `IC=0` on the
+coupling capacitors) runs cleanly but does not reproduce the oscillation: every node in the
+QSPICE run sits at essentially exactly `VCC` for the whole window, a non-conducting degenerate
+state. This circuit's base/collector voltages are purely *nonlinearly* determined (no linear DC
+path, only the BJT's own turn-on characteristic); QSPICE's `UIC` mode only seeds *reactive*
+elements, and doesn't re-solve non-reactive nodes the way this project's own `x=0`-seeded Newton
+cold start does. Closing this — explicit `.ic V(node)=...` seeding, or some other mechanism — is
+real, scoped future work, detailed in `t6-integration/03-validation.qmd`.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t6-integration/01-netlist.qmd` — the netlist parser that turns a `.net` deck (including this
+tutorial's `ring_osc.net`) into device instances in the first place.

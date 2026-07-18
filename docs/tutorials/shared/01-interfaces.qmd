@@ -1,39 +1,166 @@
-﻿---
+---
 title: "The two frozen interfaces"
-subtitle: "Phase 0 · shared"
+subtitle: "Shared · Phase 0 · `va-ir` / `va-abi`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: both interfaces are real, live contracts** — not sketches. `va-ir` (Interface α) and
+`va-abi` (Interface β) are leaf crates every other crate in the workspace ultimately depends on,
+directly or through `va-codegen`, and both have grown well past `CLAUDE.md` §4's original v0
+sketch through several coordinated §6 changes (control flow, `Ddx`, per-unknown `abstol`, …) —
+tracked verbatim in [`docs/bridges/`](../../bridges/README.md).
 :::
 
 ## Goal
 
-Explain Interface alpha (`va-ir`) and Interface beta (`va-abi`), why they are frozen, and how a coordinated change works (`CLAUDE.md` 6).
+Freeze the two seams the whole multi-crate build hinges on, *before* any of T1–T6 starts, so
+that every downstream thesis can build and validate against a stable contract instead of a
+moving target.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+These are the only two boxes in `CLAUDE.md` §2's pipeline diagram that are load-bearing for
+*everyone else*:
+
+```
+ Verilog-A source                         circuit netlist
+        │                                        │
+   [va-frontend]  ──IR (Interface α)──►  [va-codegen]      [va-netlist]
+   lex/parse/elab                        IR → AD → models       │
+                                                │               │
+                                          ModelInstance (Interface β)
+                                                │               │
+                                                ▼               ▼
+                                    ┌──────────────────────────────────┐
+                                    │            [va-core]             │  ← depends ONLY
+                                    │   MNA · Newton · linsolve · conv │    on Interface β
+                                    └──────────────────────────────────┘
+```
+
+`va-core` — and everything built on top of it (`va-transient`, `va-acnoise`, `va-cli`) — depends
+only on `va-abi`. It never needs to know whether a `ModelInstance` came from a hand-written
+Rust struct or from compiling a `.va` file; that's exactly what lets it be validated (and, in
+this project, built) in isolation from the frontend/codegen theses.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**`va-ir` (Interface α)** is the elaborated form of a Verilog-A module: names resolved, nets
+assigned dense indices, parameters range-checked, control flow flattened to a `Vec<Stmt>` tree.
+It is what `va-frontend` produces and `va-codegen` consumes.
+
+**`va-abi` (Interface β)** is this project's own "OSDI" — the ABI a solved circuit's device
+instances present to `va-core`. `va-core` calls `load` on a `&dyn ModelInstance`; it does not
+care, and cannot tell, whether the concrete type is a hand-written `va-abi::reference::Diode`
+or a `va-codegen::GeneratedModel` compiled from `diode.va`.
+
+**Why arena/index, not `Rc`/`Box`/lifetimes (`CLAUDE.md` §5)**: every graph-shaped piece of the
+IR — expressions, statements, branches — lives in a flat `Vec` on `Module` and is referenced by
+a `Copy` index newtype (`ExprId`, `NodeId`, `BranchId`, …). This is the single rule that keeps
+the borrow checker uninvolved in this project's own recursive data structures: an `Expr::Binary`
+holds two `ExprId`s, not two `&Expr`s or `Box<Expr>`s, so there is no lifetime to thread through
+`Module`'s own methods and no `Rc<RefCell<_>>` needed to mutate a shared node.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+### Interface α: `va_ir::Module`
+
+The arena and its index types, current shape (`crates/va-ir/src/lib.rs`):
+
+```rust
+pub struct NodeId(pub u32);
+pub struct ExprId(pub u32);
+pub struct BranchId(pub u32);
+pub struct VarId(pub u32);     // added: local-variable assignment targets
+pub struct FuncId(pub u32);    // added: user-defined analog functions
+
+pub struct Module {
+    pub name: String,
+    pub ports: Vec<Vec<NodeId>>,   // >1 NodeId per port only for a vector port
+    pub nodes: Vec<NodeDecl>,
+    pub branches: Vec<Branch>,
+    pub params: Vec<Param>,
+    pub exprs: Vec<Expr>,          // the arena
+    pub vars: Vec<VarDecl>,
+    pub functions: Vec<Function>,
+    pub analog: Vec<Stmt>,
+}
+```
+
+`Expr`/`Stmt` have both grown well past the original two-page sketch: `Expr` now includes
+`CallUser` (a call into `Module::functions`), `Select` (the ternary), and `Ddx` (the analog
+partial-derivative operator, LRM §4.5.13); `Stmt` now includes `While`/`For`/`Repeat`/`Case`
+alongside the original `Contribute`/`If`/`Assign`/`Block`. Each of these was a real §6-coordinated
+interface change, not a silent widening — `docs/bridges/interface-alpha-ir.md` records each one
+with its date and rationale (e.g. the 2026-07-02 revision that reshaped `ports` from `Vec<NodeId>`
+to `Vec<Vec<NodeId>>` for vector-port support).
+
+### Interface β: `va_abi::ModelInstance`/`StampSink`
+
+```rust
+pub trait ModelInstance {
+    fn unknowns(&self) -> &[usize];
+    fn unknown_kind(&self, i: usize) -> UnknownKind { UnknownKind::Node }
+    fn unknown_abstol(&self, i: usize) -> Option<f64> { None }
+    fn load(&self, x: &[f64], sink: &mut dyn StampSink);
+}
+
+pub trait StampSink {
+    fn residual(&mut self, row: usize, value: f64);
+    fn jacobian(&mut self, row: usize, col: usize, value: f64);
+    fn charge(&mut self, row: usize, value: f64);
+    fn dcharge(&mut self, row: usize, col: usize, value: f64);
+}
+```
+
+`unknown_kind`/`unknown_abstol` are both **additive** §6 changes with default trait methods —
+the exact pattern `docs/bridges/interface-beta-abi.md` recommends for widening an ABI without
+breaking every existing implementor: `unknown_kind` lets a convergence aid (`va-core`'s `gmin`
+stepping) tell a KCL node row from a device's own constraint row (e.g.
+`va_abi::reference::VSource`'s branch-current row, `V(p)-V(n)=value` — shunting a `gmin`
+conductance there would corrupt the constraint, not aid convergence); `unknown_abstol` lets a
+Verilog-A model's own `nature...abstol` reach `va-core`'s per-unknown convergence check instead
+of always falling back to one global default.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+Both crates carry their own arena/ABI-shape tests, run with the rest of the workspace
+(`cargo test -p va-ir -p va-abi`):
+
+```rust
+// va-ir: pushing into the arena and reading back by index.
+let mut m = Module::new("rc");
+let a = m.push_expr(Expr::Const(1.0));
+let b = m.push_expr(Expr::Const(2.0));
+let sum = m.push_expr(Expr::Binary(BinOp::Add, a, b));
+// m.expr(sum) reads back Expr::Binary(BinOp::Add, a, b) — no borrow-checker friction,
+// because a/b/sum are Copy indices, not references into m.
+```
+
+`va-abi`'s own test — that a hand-checked resistor stamp is exactly what `stamp_conductance`
+produces — is the Rosetta Stone every reference model in `shared/02-reference-models.qmd`
+builds on:
+
+```console
+$ cargo test -p va-ir -p va-abi
+test result: ok. ... (all green)
+```
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**`va-ir` still models a single elaborated module**, not a hierarchy of instantiated
+submodules as a first-class IR concept — `va-frontend` closes the practical gap by *inlining*
+an instantiated submodule's own arenas into the instantiating module before handoff (§ module
+instantiation, `t1-frontend/03-elaboration.qmd`), so Interface α itself never had to grow a
+notion of "one module referencing another."
+
+**`va-abi::ModelInstance::load` has no time parameter.** A model can't know what time it's being
+evaluated at — `docs/bridges/interface-beta-abi.md` §7 records why this was a deliberate
+decision, not an oversight: it keeps `va-core`'s DC solve and `va-transient`'s integrator sharing
+one ABI. The consequence shows up concretely in `va-cli`: a time-varying (`SIN`) source can't
+just carry its own clock, so a transient run rebuilds a fresh, differently-valued source
+instance every step instead (`va_transient::integrator::run_dynamic`).
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t1-frontend/01-lexing.qmd` — the language front end that actually populates a `va_ir::Module`,
+starting from raw source text.

@@ -1,39 +1,119 @@
-﻿---
+---
 title: "MNA assembly & linear solve"
-subtitle: "T3 · Phase T3.1 · `va-core`"
+subtitle: "T3 · Phase T3.1 · `va-core::mna`/`linsolve`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete.** Dense Modified Nodal Analysis assembly plus a `faer`-backed LU solve
+with real singularity detection. `va-core` is staff-maintained shared infrastructure
+(`CLAUDE.md` §3), not a student thesis — no T3 owner was found before this mechanics was already
+implemented and green.
 :::
 
 ## Goal
 
-Turn `StampSink` contributions into a matrix and solve it with `faer`.
+Turn every device's own `StampSink` contributions into one dense linear system, and solve it —
+the two pieces every later Newton iteration (`t3-core/02-newton.qmd`) calls in a loop.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ &[&dyn ModelInstance] ──[mna::assemble]──► System{residual, jacobian} ──[linsolve::solve_dense]──► dx
+```
+
+`va-core` depends on `va-abi` and **nothing else** (`CLAUDE.md` §2's load-bearing invariant) —
+it never touches `va-ir`/`va-codegen`, so it can be built and validated entirely against
+`va-abi`'s own hand-written reference models, independent of whether the frontend/codegen
+theses have shipped anything yet.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**`System` implements `StampSink` directly** — assembly is just "let every instance load itself
+into a zeroed dense buffer, then read the buffer back." There's no intermediate representation
+between a device's stamp calls and the matrix; `assemble` is four lines:
+
+```rust
+pub fn assemble(instances: &[&dyn ModelInstance], x: &[f64], dim: usize) -> System {
+    let mut sys = System::new(dim);
+    for inst in instances {
+        inst.load(x, &mut sys);
+    }
+    sys
+}
+```
+
+**The `Node`/`Branch` distinction lives here, not in the ABI's data shape.** `va_abi::UnknownKind`
+(Interface β) only tells `va-core` which *kind* of row a given global index is; `mna::
+classify_unknowns` is what actually walks every instance and builds the per-unknown lookup table
+a convergence aid (`gmin` stepping, `t3-core/03-nonlinear-dc.qmd`) needs to know which rows are
+safe to shunt. `classify_abstol` is the structurally identical collection for a different
+per-unknown property (a discipline's own `abstol`, § the nature-metadata wiring in
+`t1-frontend/03-elaboration.qmd`) — same "default, then let any instance override its own
+index" shape, reused rather than duplicated.
+
+**Dense, deliberately, for now.** `linsolve::solve_dense` uses `faer`'s partial-pivoted LU —
+pure Rust, no BLAS/LAPACK/KLU FFI (`CLAUDE.md` §5's no-native-deps rule, enforced by `deny.toml`).
+Dense is the right *starting* choice for a bring-up-scale circuit; the roadmap's own stated
+direction is a sparse solve once circuit sizes actually demand it, not a premature optimization.
+
+**Singularity is checked two ways, not one.** A zero pivot in floating point doesn't always
+produce a clean `NaN`/`inf` — it can produce a *finite*, wrong answer that merely fails to
+reproduce the right-hand side. `solve_dense` checks both: every solved value must be finite,
+*and* `‖A·x − b‖∞` must be small relative to `‖b‖` — the residual check catches the near-singular
+case partial pivoting alone would otherwise silently pass through as garbage.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub struct System {
+    pub residual: Vec<f64>,     // f(x), length dim
+    pub jacobian: Vec<f64>,     // df/dx, dense row-major dim*dim
+}
+
+pub fn classify_unknowns(instances: &[&dyn ModelInstance], dim: usize) -> Vec<UnknownKind>;
+pub fn classify_abstol(instances: &[&dyn ModelInstance], dim: usize, default: f64) -> Vec<f64>;
+pub fn assemble(instances: &[&dyn ModelInstance], x: &[f64], dim: usize) -> System;
+
+pub fn solve_dense(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreError>;
+```
+
+`System::shunt_gmin` adds a `gmin`-style conductance to ground at every `Node`-kind row only —
+"the one place the `Node`/`Branch` distinction actually matters" (its own doc comment): doing
+this to a `Branch` row (e.g. a voltage source's own `V(p)-V(n)=value` constraint) would corrupt
+the constraint outright, not aid convergence.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-core mna:: linsolve::
+test mna::tests::sink_accumulates_resistor_stamp ... ok
+test mna::tests::assemble_sums_parallel_resistors ... ok
+test mna::tests::classify_unknowns_tags_vsource_branch_only ... ok
+test mna::tests::classify_abstol_lets_one_instance_override_its_own_unknown ... ok
+test mna::tests::shunt_gmin_skips_branch_rows ... ok
+test linsolve::tests::solves_2x2 ... ok
+test linsolve::tests::singular_matrix_is_rejected ... ok
+test linsolve::tests::empty_system_is_trivial ... ok
+```
+
+`classify_unknowns_tags_vsource_branch_only` is the concrete proof the Node/Branch split works
+end to end: a resistor divider with a voltage source correctly reports the source's own branch
+current as the *only* `Branch`-kind row among three unknowns — both node rows stay `Node`-kind
+even though the source also touches them.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**Dense only.** `linsolve::solve_dense` is `O(n^3)` in circuit size — fine at bring-up scale
+(the ladder circuits here have single-digit unknowns), the wrong choice once a real compact
+model's internal-node count or a multi-device circuit grows large. A sparse solve is the roadmap's
+own stated next step for this crate, not attempted here.
+
+**No pivoting strategy beyond `faer`'s own partial pivoting** — sound for a well-conditioned MNA
+system, but nothing here compensates for a genuinely badly-scaled circuit (e.g. mixing pF
+capacitances with MΩ resistances) beyond what convergence aids (`t3-core/03-nonlinear-dc.qmd`)
+already provide at the Newton level.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t3-core/02-newton.qmd` — the iterative loop that calls `assemble`/`solve_dense` repeatedly to
+find a nonlinear circuit's actual operating point.

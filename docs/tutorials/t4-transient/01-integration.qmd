@@ -1,39 +1,117 @@
-﻿---
-title: "Fixed-step integration & RC"
-subtitle: "T4 · Phase T4.1 · `va-transient`"
+---
+title: "Companion models & implicit integration"
+subtitle: "T4 · Phase T4.1 · `va-transient::integrator`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete — ladder rung 3, formally passed.** Backward Euler and trapezoidal, both
+via a companion-model reduction to the same Newton machinery `va-core` already has. The RC
+transient formally passes against real QSPICE golden (2026-07-18,
+`t6-integration/03-validation.qmd`, `error=2.260e-5` against a `1e-3` tolerance).
 :::
 
 ## Goal
 
-Companion models and implicit integration (BE then trapezoidal); the first transient waveform (rung 3).
+Integrate a circuit with charge-storage state (capacitors, `ddt`) forward in time, reusing
+`va-core`'s existing nonlinear solver rather than building a second one.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ &[&dyn ModelInstance] ──[integrator::run]──► Waveform{t, x}
+                              │
+                    each step: build a Companion, hand it + the circuit to Newton
+```
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**A companion model turns "integrate in time" into "solve one more nonlinear DC-shaped
+system."** Both implemented methods reduce a device's charge-channel contribution to the exact
+same shape a resistive term already has: `residual(x) + coeff·charge(x) + offset = 0`. Backward
+Euler approximates `dQ/dt ≈ (Q(x) − Q_prev)/h`; trapezoidal averages the current and previous
+`dQ/dt` estimates. Either way, once `coeff`/`offset` are computed from history, the *rest* of the
+step is an ordinary Newton solve — no separate time-stepping solver needed, no change to
+`va-core` at all.
+
+**Only genuinely dynamic rows get the trapezoidal history term.** The `residual(x) = -dQ/dt`
+identity trapezoidal's derivation leans on only holds for a row some device's charge channel
+actually stamps — a real state variable. An ordinary KCL node with no capacitor, or a branch
+constraint row, is *algebraic*: it must satisfy `residual(x) = 0` at every solved time
+regardless of history. `is_dynamic` (computed once, from which rows charge/dcharge actually
+touch) gates trapezoidal's own history term per-row — found the hard way, by a caller-supplied
+`x0` whose branch-current entry didn't satisfy its own source's constraint exactly, which
+injected a spurious permanent history term into that row and corrupted every subsequent step.
+Backward Euler needed no such gate: its own `offset` is naturally `0` for an algebraic row
+(`q_prev[i] = 0` there), for free.
+
+**The caller owns the initial condition — the engine itself has no bias toward `x=0`.**
+`run`/`run_with_events` take `x0: Vec<f64>` as a plain argument; nothing in this module forces
+it to be zero. `rc_transient_matches_analytic` deliberately starts the capacitor at `0` V (not
+already at steady state) to exercise a real charging transient, while a *different* test's
+`x0` sets the source node directly to its own DC value. `va-cli::solve_transient` — one layer up
+— is the one that always chooses `x0 = vec![0.0; dim]` (its own stated limitation, no `.ic`/`UIC`
+support, `t6-integration/02-cli.qmd`); that's a choice at the integration layer, not a
+restriction of this engine.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+struct Companion { coeff: f64, offset: Vec<f64> }
+
+impl Companion {
+    fn backward_euler(q_prev: &[f64], h: f64) -> Self {
+        Companion { coeff: 1.0 / h, offset: q_prev.iter().map(|q| -q / h).collect() }
+    }
+    fn trapezoidal(q_prev: &[f64], r_prev: &[f64], h: f64, is_dynamic: &[bool]) -> Self {
+        let coeff = 2.0 / h;
+        let offset = q_prev.iter().zip(r_prev).zip(is_dynamic)
+            .map(|((q, r), &dynamic)| if dynamic { r - coeff * q } else { 0.0 })
+            .collect();
+        Companion { coeff, offset }
+    }
+}
+
+pub fn run(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    x0: Vec<f64>,
+    cfg: TranConfig,
+) -> Result<Waveform, TransientError>;
+```
+
+`Waveform { t: Vec<f64>, x: Vec<Vec<f64>> }` — note `x[0]` is always literally the caller's `x0`,
+not a solved sample (`t4-transient/02-lte-timestep.qmd`'s adaptive controller is what actually
+grows `t`/`x` past that first entry).
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-transient rc_transient
+test integrator::tests::rc_transient_matches_analytic ... ok
+```
+
+Checked directly against the closed-form `V(t) = Vs·(1 − e^{−t/RC})`, not just "the tool agrees
+with itself" — the same discipline `t3-core/02-newton.qmd`'s divider test follows. Driven through
+the real netlist pipeline (`circuits/rc_step.net`, `t6-integration/{01-netlist,02-cli}.qmd`) and
+compared against genuine QSPICE output, this is ladder rung 3:
+
+```console
+$ cargo run -q -p xtask -- validate
+[xtask]   PASS circuits/rc_step.net: error=2.260e-5 (tol 1e-3)
+```
+
+Getting that QSPICE comparison right needed two more fixes on the harness side, both found
+empirically — see `t6-integration/03-validation.qmd`'s "Two SPICE gotchas" section for the full
+account (QSPICE solves the DC operating point before a `.tran` run by default; this engine's own
+`x[0]` being the literal, unsolved seed misrepresented an algebraically-forced node).
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+`Method::Gear` is declared but not implemented (`TransientError::UnsupportedMethod`, never a
+silent fallback to another method). The LTE estimate itself — the mechanism that decides *when*
+a step is accepted — is its own phase, `t4-transient/02-lte-timestep.qmd`.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t4-transient/02-lte-timestep.qmd` — the adaptive step-size controller that decides how big `h`
+gets to be at each step.

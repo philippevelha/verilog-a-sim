@@ -1,39 +1,66 @@
-﻿---
+---
 title: "Noise analysis"
-subtitle: "T5 · Phase T5.2 · `va-acnoise`"
+subtitle: "T5 · Phase T5.2 · `va-acnoise::noise`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: honestly unimplemented — a stretch goal, per `CLAUDE.md` §1, that stayed one, and
+blocked on `t5-acnoise/01-ac.qmd` besides.** Same real, compiling stub shape as AC linearization;
+`run` itself is `todo!()`.
 :::
 
 ## Goal
 
-Per-element noise sources to output PSD via the adjoint method.
+Propagate every device's own noise source through the linearized (AC) circuit to one
+output-referred power spectral density, via the adjoint method.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ ac::AcSweep + an output unknown ──► [noise::run] ──► NoiseSpectrum{f, psd, total}
+```
 
-## The idea
+This phase depends on T5.1 existing first — noise propagation needs the same frequency-swept
+linearization AC analysis would build, there's no separate small-signal machinery to construct
+twice.
 
-_The theory, the equations, the design choice behind this feature._
+## The idea (as designed, not yet built)
+
+The adjoint method computes one output's sensitivity to *every* noise source in a single solve
+per frequency, rather than one solve per source — the standard reason SPICE-family simulators
+use it instead of a naive source-by-source sweep. `docs/validation.md`'s own stated first target
+is the simplest possible case to validate against: a single resistor's Johnson-Nyquist thermal
+noise, `4kTR` (V²/Hz), a closed-form answer with no reference simulator needed to check the very
+first result against.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub struct NoiseSpectrum {
+    pub f: Vec<f64>,
+    pub psd: Vec<f64>,     // V²/Hz or A²/Hz
+    pub total: f64,        // integrated over the swept band
+}
+
+pub fn run(_x_dc: &[f64], _sweep: AcSweep, _output: usize) -> Result<NoiseSpectrum, AcNoiseError> {
+    todo!("T5: adjoint noise propagation to the output PSD")
+}
+```
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+It doesn't, yet:
+
+```console
+$ cargo test -p va-acnoise noise::
+test noise::tests::resistor_thermal_noise ... ignored, T5: resistor thermal-noise PSD matches 4kTR vs golden
+```
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Everything, same as `t5-acnoise/01-ac.qmd` — no partial capability exists to caveat around.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+Nothing downstream in this crate depends on it; T5 is the end of its own chain. See
+`docs/roadmap.md`'s T5 section for the fallback deliverable if no student ever picks this up.

@@ -1,39 +1,116 @@
-﻿---
+---
 title: "Nonlinear DC & convergence aids"
-subtitle: "T3 · Phase T3.3 · `va-core`"
+subtitle: "T3 · Phase T3.3 · `va-core::{convergence,dc}`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete — ladder rung 2.** The diode I–V sweep formally passes against real
+QSPICE golden (2026-07-17, `t6-integration/03-validation.qmd`).
 :::
 
 ## Goal
 
-Diode I-V, DC sweeps, and the convergence aids (gmin/source stepping, damping); ladder rung 2.
+Solve circuits Newton alone struggles with — a stiff exponential device, a cold start far from
+the answer — and sweep a source across a range of values.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ newton::solve ──wrapped by──► gmin-stepping homotopy (convergence::gmin_for_step)
+                                        │
+                              dc::{operating_point, sweep}
+```
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**Junction limiting keeps a diode/BJT from overflowing on a cold start** (`limit_junction`,
+already introduced in `t3-core/02-newton.qmd`): a proposed forward-voltage step beyond `2·vt` of
+the previous value is clamped logarithmically instead of taken raw — `exp(5.0/vt)` from a cold
+`x=0` start would otherwise overflow before Newton ever gets a chance to converge.
+
+**`gmin` stepping is a homotopy, not a single trick.** For a circuit plain Newton genuinely
+cannot solve from `x=0` (a long chain of series diodes is the textbook stress case — chosen
+deliberately, not as a token example), `NewtonConfig::gmin_steps > 0` wraps the inner iteration
+in an outer ramp: solve a version of the circuit with a large conductance shunted from every
+`Node`-kind unknown to ground (a strong, easy-to-solve linearizing aid), then geometrically
+shrink that shunt down toward the real circuit's own answer, warm-starting each stage from the
+previous one's solution. The schedule (`gmin_for_step`) decreases from `1e-3` S to a `1e-12` S
+floor, then returns exactly `0.0` for the final stage — an ordinary, unshunted solve of the real
+circuit.
+
+**Only `Node`-kind rows are ever shunted** (`t3-core/01-mna.qmd`'s Node/Branch distinction) — a
+voltage source's own constraint row is never touched, so `gmin` stepping is safe to enable
+unconditionally, even on a circuit built entirely of ideal sources.
+
+**A DC sweep is just "solve fresh from each new source value," deliberately not warm-started
+between sweep points.** `dc::sweep` takes a `rebuild` closure that constructs a brand-new
+instance set per swept value and solves each independently — the simplest correct
+implementation, not the most efficient one. A production sweep could reuse the previous point's
+solution as its own next warm start; this one doesn't, matching `va-core::dc::sweep`'s own
+deliberate agnosticism about *what* changed between points (a source value, a parameter,
+anything the caller's `rebuild` closure decides).
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub fn limit_junction(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64;
+pub fn default_vcrit(vt: f64) -> f64;    // derived the same way SPICE derives a diode's vcrit
+pub fn gmin_for_step(step: usize, total_steps: usize) -> f64;
+
+pub struct OperatingPoint { pub x: Vec<f64> }
+pub fn operating_point(instances: &[&dyn ModelInstance], dim: usize, cfg: NewtonConfig)
+    -> Result<OperatingPoint, CoreError>;
+pub fn sweep<F>(points: &[f64], dim: usize, cfg: NewtonConfig, rebuild: F)
+    -> Result<Vec<OperatingPoint>, CoreError>
+    where F: FnMut(f64) -> Vec<Box<dyn ModelInstance>>;
+```
+
+`VT_NOMINAL`/`NOMINAL_IS`/`default_vcrit` are `va-core`'s own copy of the thermal-voltage
+constant, deliberately *not* imported from `va_abi::reference::diode` — a generic Newton loop
+shouldn't reach into one specific reference *device* for a physical constant that has nothing to
+do with that device in particular.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-core convergence:: dc::
+test convergence::tests::junction_limiting_bounds_step ... ok
+test convergence::tests::default_vcrit_matches_silicon_diode_turn_on ... ok
+test convergence::tests::gmin_schedule_is_monotone_and_terminates ... ok
+test dc::tests::divider_operating_point ... ok
+test dc::tests::sweep_divider_input ... ok
+
+$ cargo test -p va-core gmin_stepping
+test newton::tests::gmin_stepping_converges_a_circuit_plain_newton_cannot ... ok
+test newton::tests::gmin_stepping_still_converges_the_diode_clamp ... ok
+test newton::tests::gmin_stepping_does_not_corrupt_the_vsource_branch ... ok
+```
+
+`gmin_stepping_converges_a_circuit_plain_newton_cannot` is the real proof this isn't decorative:
+a specific circuit is checked to *fail* under plain Newton and *succeed* with `gmin_steps > 0`,
+in the same test — not just "gmin stepping runs without error."
+
+The diode I–V sweep, driven through the real netlist pipeline (`t6-integration/{01-netlist,
+02-cli}.qmd`) and compared against genuine QSPICE output, is ladder rung 2:
+
+```console
+$ cargo run -q -p xtask -- validate
+[xtask]   PASS circuits/diode_iv.net: error=1.850e-16 (tol 1e-4)
+```
+
+(`t6-integration/03-validation.qmd` has an honest caveat on exactly what this comparison does
+and doesn't exercise — the golden format records node voltage, not the diode's own current.)
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**Junction limiting is blanket** (§ `t3-core/02-newton.qmd`) — the same tradeoff carries through
+every convergence aid here, since none of them have per-device knowledge to sharpen with.
+
+**`gmin` stepping's schedule is fixed**, not adaptive to how hard a particular circuit is to
+solve — a circuit that needs more than the geometric ramp from `1e-3` to `1e-12` S provides would
+still fail, just later than with plain Newton.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t4-transient/01-integration.qmd` — moving from a single operating point to a time-domain
+transient.

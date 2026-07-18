@@ -1,39 +1,83 @@
-﻿---
+---
 title: "AC linearization"
-subtitle: "T5 · Phase T5.1 · `va-acnoise`"
+subtitle: "T5 · Phase T5.1 · `va-acnoise::ac`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: honestly unimplemented — a stretch goal, per `CLAUDE.md` §1, that stayed one.** The
+crate compiles (`CLAUDE.md` §9's bootstrap requirement) with real type signatures and one
+`#[ignore]`d test naming its own validation gate, but `run` itself is `todo!()`. This tutorial
+documents the real, current state rather than describing work that hasn't happened.
 :::
 
 ## Goal
 
-Small-signal linearization about a DC point and the complex-valued frequency sweep; a Bode plot vs ngspice.
+Linearize a circuit about a DC operating point and sweep it over frequency — `G + jωC`, solved
+per frequency point, the standard SPICE AC analysis.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ va_core::dc::OperatingPoint ──► [ac::run] ──► AcResponse{f, x: complex per frequency}
+```
 
-## The idea
+`CLAUDE.md` §1 scopes AC/noise as a **stretch goal** behind DC and transient, explicitly, from
+the start — this crate not shipping yet is the plan working as scoped, not a missed deadline.
 
-_The theory, the equations, the design choice behind this feature._
+## The idea (as designed, not yet built)
+
+Every device's DC-point Jacobian already *is* the small-signal conductance matrix `G`; the
+charge-channel Jacobian (`dcharge`, already stamped by every reactive `ModelInstance` for T4's
+benefit) is exactly the capacitance matrix `C` this analysis would need. The intended design
+reuses both without asking any device to stamp anything new — `run` would assemble
+`G + jωC` at each swept frequency and solve the resulting complex linear system, the same
+`ModelInstance`/`StampSink` contract every other analysis already uses.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+The real, current signatures — compiling, dependency-free of any complex-number crate (a plain
+`(f64, f64)` tuple stands in, so a `num-complex` type can replace it without an Interface β
+change):
+
+```rust
+pub type Complex = (f64, f64);
+
+pub struct AcSweep {
+    pub fstart: f64,
+    pub fstop: f64,
+    pub points_per_decade: usize,
+}
+
+pub struct AcResponse {
+    pub f: Vec<f64>,
+    pub x: Vec<Vec<Complex>>,
+}
+
+pub fn run(_x_dc: &[f64], _sweep: AcSweep) -> Result<AcResponse, AcNoiseError> {
+    todo!("T5: assemble (G + jωC), solve per frequency")
+}
+```
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+It doesn't, yet — honestly:
+
+```console
+$ cargo test -p va-acnoise
+running 2 tests
+test ac::tests::rc_lowpass_response ... ignored, T5: RC low-pass magnitude/phase within §7 AC band vs golden
+test noise::tests::resistor_thermal_noise ... ignored, T5: resistor thermal-noise PSD matches 4kTR vs golden
+```
+
+Both ignored tests already name their own eventual validation gate (`docs/validation.md` §7's AC
+band, resistor thermal noise `4kTR`) — the bar this phase will be held to once it's real, decided
+up front rather than left vague.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Everything. `run` panics if called (`todo!()`) — there is no partial AC capability to caveat
+around, just an honest, compiling stub with the right shape for when a T5 owner picks this up.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t5-acnoise/02-noise.qmd` — the noise analysis this AC linearization would feed.

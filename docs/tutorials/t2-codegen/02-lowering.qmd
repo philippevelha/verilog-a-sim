@@ -1,39 +1,109 @@
-﻿---
+---
 title: "Lowering IR to a model instance"
-subtitle: "T2 · Phase T2.2 · `va-codegen`"
+subtitle: "T2 · Phase T2.2 · `va-codegen::lower`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete.** Generated resistor/diode reproduce `va-abi`'s own hand-checked
+reference stamps exactly; the §5 AD-vs-FD milestone is green. Historically (2026-07-14, against
+the smaller 62-file frontend baseline that predates the corpus growing to 150 tracked files),
+50/62 frontend-passing files also passed codegen — not re-measured against the current
+114-passing frontend, so treat that ratio as a snapshot, not a live number.
 :::
 
 ## Goal
 
-Generate a `ModelInstance` from an elaborated module; compare generated vs reference diode stamps.
+Turn an elaborated `va_ir::Module` into a real `Box<dyn ModelInstance>` — something `va-core`
+can actually call `load` on — using the AD core (`t2-codegen/01-ad-core.qmd`) to compute exact
+stamps.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ va_ir::Module ──► [build_instance] ──► GeneratedModel (impl ModelInstance) ──► va-core
+                         │
+                    lower.rs: flatten contributions/control flow into a stampable form
+```
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**Flow contributions split into resistive/charge terms up front.** `lower::lower` walks the
+module's `analog` block once and produces a `Lowered` structure: every `<+` contribution is
+classified into its resistive part (stamped every solve) and, if it involves `ddt`, its charge
+part (stamped only when a transient companion model differentiates it in time). DC analysis
+simply never looks at the charge channel.
+
+**`if`/`else` genuinely can't be flattened away** the way `+`/`-` can — which arm runs depends on
+`x`, so a naive "evaluate everything, pick the answer" approach would evaluate an arm that might
+be undefined at the current point. `LoweredStmt::If { cond, then_, else_ }` carries *both* arms
+as their own lowered statement sequences; `GeneratedModel::run` (which `load` calls) picks one at
+evaluation time based on the condition, the same rule `ad::eval`'s `Select` already follows.
+
+**Eager, both-arms validation, still with a single-taken-arm runtime.** `build_instance` must
+validate that a module is fully within the v0-supported subset *before* returning it — so that
+`ModelInstance::load` can never fail later, deep inside a Newton iteration. A model does that
+validation once at construction, at the all-zero point. But if validation only walked whichever
+`if` arm is taken *at that one point*, an unsupported construct hiding in the *other* arm would
+slip through and only surface much later, at a different operating point mid-solve.
+`GeneratedModel::validate`/`validate_stmts` therefore walk **both** arms of every `if`
+unconditionally — an honest over-approximation (sound for the common "both arms assign the same
+variables" compact-model shape; not full path-sensitive analysis) — while `run` itself still only
+ever evaluates the one arm the current `x` actually selects. A regression test builds a module
+whose *unselected* arm at `x=0` contains an unassigned-variable read, and asserts
+`build_instance` still rejects it eagerly, not just on a later `load` call at a different point.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub fn build_instance(
+    module: &Module,
+    terminals: &[usize],       // one global unknown per module.nodes entry, in node order
+    next_unknown: &mut usize,  // caller's free-index counter; advanced for every extra unknown
+) -> Result<Box<dyn ModelInstance>, CodegenError>
+```
+
+`build_instance` allocates one further global unknown per branch that has its own auxiliary
+current (a potential contribution that isn't a simple two-terminal stamp) and one per distinct
+`idt(...)` call site — `lowered.n_unknowns` is the authoritative total, so a caller (`va-cli`'s
+device-building loop) never has to pre-compute how many extra unknowns a module needs; it just
+keeps calling `build_instance` with its own running counter.
+
+```rust
+struct GeneratedModel {
+    module: Module,        // kept for its arena — ad::eval reads expressions straight from it
+    terminals: Vec<usize>, // full unknown list: node terminals + auxiliary unknowns
+    params: Vec<f64>,      // resolved defaults, first entry overridable by a netlist device value
+    lowered: lower::Lowered,
+    vt: f64,
+    temp: f64,
+}
+
+impl ModelInstance for GeneratedModel {
+    fn load(&self, x: &[f64], sink: &mut dyn StampSink) { /* runs self.lowered via ad::eval */ }
+}
+```
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-codegen
+test result: ok. (generated resistor/diode match va-abi's own hand-checked stamps; the
+if/else branch-selection test asserts both the stamped residual *and* Jacobian differ correctly
+across the two arms, proving the selected-arm-only runtime works; the eager-both-arms-validation
+regression test above)
+```
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Still a real subset, not full Verilog-A codegen: `while`/`for`/`repeat`/`case` and user-defined
+analog functions are elaborated into `va-ir` (T1.3) but `build_instance` still rejects them
+during its own lowering — a corpus file that only *elaborates* successfully doesn't necessarily
+*codegen*, a distinct, narrower bar (§ this tutorial's own status callout). Local-variable reads
+before assignment are also rejected rather than defaulting to some value. As with T1.3, none of
+this is hidden: `build_instance`'s eager validation reports exactly which construct blocked a
+given file, rather than silently miscompiling it.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t2-codegen/03-charge-and-coverage.qmd` — the charge channel (`ddt`) and how corpus coverage is
+tracked going forward.

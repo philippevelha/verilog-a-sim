@@ -1,39 +1,108 @@
-﻿---
+---
 title: "The netlist parser"
 subtitle: "T6 · Phase T6.1 · `va-netlist`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete.** 10 tests, all green — `R`/`C`/`D`/`M`/`Q`/`V` elements, `.op`/`.dc`/
+`.tran` dot-cards. `Q` (a BJT, § ladder rung 6) is the newest arm, added 2026-07-18 alongside
+`M`'s (§ ladder rung 5, 2026-07-12).
 :::
 
 ## Goal
 
-The netlist format and how a circuit maps onto Interface beta instances.
+Read a SPICE-flavored `.net` deck and resolve it into a node map plus the device records
+`va-cli` turns into `ModelInstance`s — the entry point into the whole simulator for anyone who
+doesn't want to write Rust to describe a circuit.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ circuits/*.net ──[va-netlist::parser::parse]──► Netlist{nodes, devices, analysis, tran, dc}
+```
+
+`va-netlist` depends only on `va-abi` (just enough to name the ground sentinel,
+`va_abi::reference::GROUND`) — it has no idea what a `ModelInstance` implementation looks like;
+that dispatch happens one layer up, in `va-cli` (`t6-integration/02-cli.qmd`).
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**One line, one element or dot-card**, whitespace-tokenized, `*` full-line comments. Net `0`/
+`gnd` is the reference node and never gets an unknown index; every other net gets a dense index
+in first-seen order.
+
+**Every model-referencing multi-terminal element follows the same pattern, added one letter at a
+time as each ladder rung needed it**: `D<name> p n model` (two-terminal, ladder rung 2's diode),
+`M<name> d g s model` (three-terminal, SPICE's own drain/gate/source order, ladder rung 5's
+MOSFET — no separate body/bulk terminal, a stated v1 simplification), `Q<name> c b e model`
+(three-terminal, SPICE's own collector/base/emitter order, ladder rung 6's BJT — no substrate
+terminal, mirroring `M`'s own simplification). None of these needed a new *concept* in the
+parser — `Device::terminals` was already `Vec<usize>`, arbitrary length, from the start.
+
+**A `.dc <source> <start> <stop> <step>` sweep only steps a voltage source**, matching the LRM/
+SPICE convention — `va-cli` reports a clear error if `source` doesn't resolve to one, rather than
+silently sweeping something else.
+
+**A `V` source distinguishes its DC value from its full time-domain waveform.** `DC <value>` or a
+bare number sets `Device::value` directly; `SIN(offset amplitude freq)` sets `Device::value` to
+the offset (what a DC operating point needs) *and* records the full `Waveform::Sin` separately —
+because `va_abi::ModelInstance::load` deliberately has no time parameter (Interface β's own
+"no time on the bridge" design, `shared/01-interfaces.qmd`), so a transient consumer needs the
+full waveform to reconstruct a fresh, differently-valued source instance every step.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub struct Netlist {
+    pub nodes: HashMap<String, usize>,
+    pub node_order: Vec<String>,       // first-seen order, for reporting
+    pub devices: Vec<Device>,
+    pub analysis: AnalysisCard,        // .op / .dc / .tran / .ac
+    pub tran: Option<(f64, f64)>,      // .tran <tstep> <tstop>
+    pub dc: Option<DcSweep>,           // .dc <source> <start> <stop> <step>
+}
+
+pub struct Device {
+    pub name: String,
+    pub model: String,                 // "resistor"/"capacitor"/"vsource", or a named model
+    pub terminals: Vec<usize>,         // arbitrary length — 2 for R/C/D, 3 for M/Q
+    pub value: Option<f64>,
+    pub waveform: Option<Waveform>,    // Some only for a SIN-driven V source
+}
+```
+
+SI scale suffixes (`3.3Meg`, `10n`, `1k`) resolve at parse time via the same scale-letter table
+the lexer uses (`t1-frontend/01-lexing.qmd`) — `T G M K k m u n p f a`, `M`/`m` case-sensitive.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-netlist
+running 10 tests
+test tests::parses_mos_dc_devices ... ok
+test tests::parses_ring_osc_devices ... ok
+test tests::parses_diode_iv_sweep_card ... ok
+test tests::parses_rectifier_devices_and_card ... ok
+test parser::tests::value_suffixes ... ok
+test parser::tests::source_values ... ok
+...
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Every test parses a real, committed circuit file — `circuits/mos_dc.net`, `circuits/ring_osc.net`,
+etc. — not a synthetic fixture invented for the test alone, so a parser regression on a real deck
+would be caught here before it ever reached `va-cli`.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Stated in the parser module's own doc comment: inductors, controlled sources, subcircuits (`X`),
+and `.model` cards are not parsed — a device's *model* is always resolved by `va-cli` matching a
+name against either a compiled `.va` file or a hand-written `va-abi` reference primitive, never
+by an in-deck SPICE `.model` card. A `.dc` sweep only steps one source linearly; no nested/
+multi-source sweeps, no bare `.dc` (source-list) form some SPICE dialects accept. A `V` source's
+optional trailing `SIN` parameters (delay, damping, phase) aren't parsed.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t6-integration/02-cli.qmd` — turning a parsed `Netlist` into real `ModelInstance`s and actually
+solving it.

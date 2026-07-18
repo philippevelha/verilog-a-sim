@@ -1,39 +1,115 @@
-﻿---
-title: "CLI wiring & golden generation"
+---
+title: "CLI wiring: from a parsed netlist to a solved circuit"
 subtitle: "T6 · Phase T6.2 · `va-cli`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete.** 16 tests, all green. Golden generation itself lives in `xtask`, not
+here (`t6-integration/03-validation.qmd`) — this crate's job stops at solving the circuit and
+printing/plotting the answer.
 :::
 
 ## Goal
 
-Drive the full pipeline from `va-cli` and (re)generate golden outputs from ngspice.
+Turn a parsed `Netlist` plus an optional compiled `.va` model into real `ModelInstance`s, solve
+whichever analysis was requested, and report the answer — the one binary every ladder-rung demo
+in this project actually runs.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ Netlist + Vec<Module> ──[build_instance per device]──► Vec<Box<dyn ModelInstance>>
+                                    │
+                     va_core::dc::{operating_point, sweep} / va_transient::integrator::{run, run_dynamic}
+```
+
+`va_cli::load` is the shared prelude (parse the netlist, optionally compile a `.va` model) both
+`run_sim` (the binary's own entry point) and `va-harness` (comparing against golden) call —
+added specifically so the harness gets real `OperatingPoint`/`Waveform` values back, not
+`run_sim`'s printed stdout re-parsed.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**A device resolves to an instance by name, preferring a compiled Verilog-A model over a
+built-in primitive.** `build_instance` first checks whether any compiled module's name matches
+the device's own `model` string (`resistor` devices match `resistor.va`, if one was compiled);
+if none matches, `reference_instance` falls back to `va-abi`'s hand-written primitives
+(`resistor`/`capacitor`/`diode`/`bjt`). This is why the same `circuits/mos_dc.net` deck can be
+solved either via `--model models/mosfet.va` (through the real frontend→codegen pipeline) or,
+for a device like `bjt` with no `.va` counterpart, purely through the hand-written reference
+model — the netlist file itself doesn't need to know which.
+
+**A voltage source's own value overrides a compiled model's first parameter, not the other way
+around** — the SPICE convention that an `R`/`C` line's own value sets the model's primary
+parameter (`build_from_model`), so `R1 in out 1000` against a compiled `resistor.va` still means
+1 kΩ, not whatever `resistor.va`'s own declared default happens to be.
+
+**`solve_transient` always seeds `x0 = vec![0.0; dim]`** — no `.ic`/`UIC` support (this crate's
+own stated limitation, threaded through `t3-core/02-newton.qmd`, `t4-transient/01-integration.qmd`,
+and `t6-integration/03-validation.qmd`'s QSPICE-comparison fixes). For a deck with no
+time-varying source, this is the plain fixed-instance path (`va_transient::integrator::run`); a
+`SIN`-sourced deck instead rebuilds that one source fresh every step
+(`va_transient::integrator::run_dynamic`), since `ModelInstance::load` has no time parameter to
+read a clock from.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)>;
+
+pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint>;
+pub fn solve_dc_sweep(net: &Netlist, compiled: &[Module], sweep: &DcSweep)
+    -> Result<Vec<(f64, OperatingPoint)>>;
+pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform>;
+
+pub fn run_sim(netlist: &str, model: Option<&str>, analysis: Analysis, plot: Option<&str>)
+    -> Result<()>;
+```
+
+`reference_instance`'s dispatch table, the seam every new built-in primitive joins:
+
+```rust
+match dev.model.as_str() {
+    "resistor" => Box::new(Resistor::new(p, n, value()?)),
+    "capacitor" => Box::new(Capacitor::new(p, n, value()?)),
+    "diode" => Box::new(Diode::new(p, n, 1e-14, 1.0, VT_NOMINAL)),
+    "bjt" => Box::new(Bjt::new(b, c, e, 1e-15, 100.0, 1.0, VT_NOMINAL)),  // added 2026-07-18
+    other => bail!("device `{}` references unknown model `{other}` ...", dev.name),
+}
+```
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-cli --lib
+running 16 tests
+test tests::divider_solves_through_codegen_pipeline ... ok
+test tests::mos_dc_solves_through_codegen_pipeline ... ok
+test tests::diode_iv_sweep_solves_through_codegen_pipeline ... ok
+test tests::rc_step_solves_through_the_real_pipeline ... ok
+test tests::rectifier_solves_through_the_real_pipeline ... ok
+test tests::ring_osc_sustains_oscillation_through_the_real_pipeline ... ok
+test tests::hierarchical_divider_solves_through_codegen_pipeline ... ok
+...
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.17s
+```
+
+Every one of these drives a real, committed `.net` file (and, where relevant, a real `.va`
+model) through the actual pipeline end to end — not a hand-built instance list — and checks the
+answer against a closed-form/analytic value, the same discipline every crate in this project
+follows.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Same cold-start limitation `t3-core/02-newton.qmd`/`t4-transient/01-integration.qmd` note: no
+`.ic`/`UIC` support, so `solve_transient` can't reproduce a circuit whose demo genuinely depends
+on starting from a specific non-zero operating point (the ring oscillator's hand-built fixture
+does; the same topology run through this crate's own cold start turned out to reproduce the
+oscillation anyway, but only confirmed empirically, not guaranteed by design —
+`t4-transient/03-events.qmd`). `--plot` only supports transient runs (a DC operating point is a
+single point, not a waveform).
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t6-integration/03-validation.qmd` — comparing what this crate solves against real QSPICE
+output.

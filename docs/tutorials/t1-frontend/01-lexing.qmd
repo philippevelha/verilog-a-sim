@@ -1,39 +1,127 @@
-﻿---
-title: "Lexing & the grammar subset"
-subtitle: "T1 · Phase T1.1 · `va-frontend`"
+---
+title: "Lexing the full Verilog-A keyword dictionary"
+subtitle: "T1 · Phase T1.1 · `va-frontend::lexer`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete, real coverage.** 20 tests, all green. Every reserved word LRM Annex D
+lists is recognized (lowercase-only, per the LRM) — not just the tokens the bring-up model zoo
+happens to use.
 :::
 
 ## Goal
 
-Define the supported Verilog-A subset and tokenize it, including what we deliberately do not support.
+Turn Verilog-A source text into a token stream: recognize every reserved word and structural
+symbol the language defines, without deciding anything about grammar yet.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+The first box in `CLAUDE.md` §2's pipeline — everything else in `va-frontend` (and, downstream,
+`va-codegen`) starts from this token stream:
+
+```
+ Verilog-A source
+        │
+   [lexer] ──tokens──► [parser] ──AST──► [elaborate] ──IR (Interface α)──► va-codegen
+```
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+Built on [`logos`](https://docs.rs/logos), a derive-macro lexer generator: each `Token` variant
+carries its own `#[token(...)]`/`#[regex(...)]` pattern, and `logos` compiles the whole set into
+one DFA. Three design choices matter more than the mechanics:
+
+**Full reserved-word coverage, not a hand-picked subset.** Every dedicated structural keyword
+(`module`, `analog`, `if`, `parameter`, …) gets its own `Token` variant, so the parser can match
+on shape instead of re-comparing strings; every *other* LRM-reserved word — including every
+math/analog built-in (`exp`, `ddt`, `idt`, `transition`, …) — is carried as one generic
+`Token::Keyword(Keyword)`, classified by name later. `V`/`I` (the access functions) are
+deliberately **not** reserved: they lex as ordinary identifiers and are only recognized as access
+functions contextually, since real corpus files sometimes declare a plain variable or parameter
+that happens to share a keyword-like name (§ the `vt`/`temperature` un-reservation,
+`docs/roadmap.md`'s language-coverage backlog).
+
+**Numeric literals fold their own SI scale suffix at lex time**, not later: `3.3Meg`/`10n`/`1k`
+all resolve straight to a scaled `f64` (`T G M K k m u n p f a`, matching SPICE/Verilog-A scale
+letters — note `M`/`m` are case-sensitive, mega vs. milli).
+
+**Completeness is checked by construction, not by manual enumeration.** `crate::keywords`
+maintains one canonical `RESERVED_WORDS` list (LRM Annex D); a single test loops over it and
+asserts every entry lexes as *something other than* a plain identifier — so a keyword nobody
+remembered to wire a `#[token(...)]` for fails a real test, rather than silently lexing wrong
+the first time a corpus file happens to use it.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+#[derive(Clone, Debug, PartialEq, Logos)]
+#[logos(skip r"[ \t\r\n\f]+")]                    // whitespace
+#[logos(skip r"//[^\n]*")]                        // line comment
+#[logos(skip r"/\*[^*]*\*+([^/*][^*]*\*+)*/")]     // block comment
+#[logos(skip r"\(\*[^*]*\*+([^)*][^*]*\*+)*\)")]   // (* attribute *) — discarded
+pub enum Token {
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
+    #[regex(r"\\[!-~]+", |lex| lex.slice()[1..].to_string())]   // \escaped identifier
+    Ident(String),
+
+    #[regex(r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[TGMKkmunpfa]?", parse_number)]
+    Number(f64),
+
+    #[regex(r#""([^"\\]|\\.)*""#, parse_string)]
+    Str(String),
+
+    #[token("module")] Module,
+    #[token("analog")] Analog,
+    // … every other dedicated structural keyword …
+
+    #[token("exp", kw)] /* … ~200 more reserved words, all routed through `kw` … */
+    Keyword(Keyword),
+}
+```
+
+`kw` is the same one-line callback for every generic reserved word:
+
+```rust
+fn kw(lex: &logos::Lexer<Token>) -> Keyword {
+    Keyword::from_ident(lex.slice()).expect("matched lexeme is a reserved word")
+}
+```
+
+An escaped identifier (`` \cpu3 ``, LRM §2.8.1 — backslash through the next whitespace) lexes
+into the **same** `Token::Ident` variant as a plain one, just via a second regex on the same
+token — genuinely interchangeable from every later stage's point of view, since both produce
+identical output.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-frontend lexer
+running 20 tests
+test lexer::tests::comments_are_skipped ... ok
+test lexer::tests::every_reserved_word_is_reserved ... ok
+test lexer::tests::numbers_scientific_and_scaled ... ok
+test lexer::tests::string_escapes_are_resolved ... ok
+test lexer::tests::escaped_identifier_swallows_punctuation_up_to_whitespace ... ok
+test lexer::tests::whole_models_lex_without_error ... ok
+...
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 196 filtered out; finished in 0.00s
+```
+
+`whole_models_lex_without_error` runs the lexer end-to-end over the project's own zoo models
+(`resistor.va`/`capacitor.va`/`diode.va`), the same files `va-core` solves; `numbers_scientific_and_scaled`
+and `string_escapes_are_resolved` were both added chasing a real corpus failure, not written from
+a spec in isolation — the string-escape fix in particular came from `bsimsoi.va`'s error-message
+string embedding an escaped quote, which broke the *original* naive `"[^"]*"` regex and took
+every subsequent token in the file down with it.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Stated in the lexer module's own doc comment: `` `include ``/`` `define `` lex as opaque
+`Token::Directive` tokens (expanded by a separate preprocessing pass, `preprocess.rs`, not the
+lexer itself); numeric literals need a leading digit (`0.5`, not `.5`); sized/based integer
+literals (`` 4'b0101 ``) are out of scope — none of these are digital-Verilog constructs Annex C
+excludes, they're just not needed by any Verilog-A analog model in the corpus surveyed so far.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t1-frontend/02-parsing.qmd` — turning this token stream into an AST.

@@ -1,39 +1,129 @@
-﻿---
+---
 title: "Parsing to an AST"
-subtitle: "T1 · Phase T1.2 · `va-frontend`"
+subtitle: "T1 · Phase T1.2 · `va-frontend::parser`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete, real coverage.** 59 tests, all green — recursive-descent, with a
+precedence-climbing expression parser and support for module instantiation, `generate`/`genvar`
+loops, vector nets, and 2-D array variables.
 :::
 
 ## Goal
 
-Build the AST for modules, ports, ranged params, the analog block, `<+`, `if/else`, and function calls.
+Turn the lexer's token stream into a surface AST: module structure, ports, ranged parameters,
+the analog block's full control-flow set, and expressions — with correct operator precedence.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ tokens ──► [parser] ──ModuleAst──► [elaborate] ──IR (Interface α)──► va-codegen
+```
+
+`parse` returns every `module...endmodule` in a source file, not just one — a real file can
+define a subcircuit alongside a top module that instantiates it (`Item::Instance`, § module
+instantiation below), and `va-frontend::elaborate_with_library` later resolves those references
+against the whole set.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**Recursive descent, one function per grammar production** — `Parser::parse_item` dispatches on
+the next token/keyword to `parse_net_item`, `parse_param_item`, `parse_analog_block`, etc.
+Nothing exotic; the interesting design decisions are elsewhere:
+
+**Precedence climbing for expressions**, following the standard Verilog operator-precedence
+table (IEEE 1364 Table 5-4) verbatim — `*`/`/` bind tighter than `+`/`-`, `**` (power) is
+right-associative, the ternary is right-associative, and the full bitwise/shift family
+(`& | ^ ^~ ~ << >>`) slots in at its own real precedence level rather than being bolted on
+loosely.
+
+**Module instantiation, resolved entirely in this crate.** `resistor r1(p, n);` or
+`divider #(.gain(2.0)) d1(.in(a), .out(b));` parses into an `Item::Instance`; nothing about it
+needs a `va-ir`/`va-codegen` change at all — `Elaborator::elaborate_with_library` recursively
+inlines the referenced submodule's own arenas into the instantiating module before handoff, so
+Interface α never had to grow a "one module references another" concept. Scalar and vector-slice
+port connections (`CartesianMultiplier1(transfer, in[0:1], out[0:1]);`) both work; a
+`generate`-driven *array* of instances does not (a stated v1 limit).
+
+**Cross-file instantiation** works too, but at the `va-cli` layer, not here: this crate's own
+`elaborate_with_library` already accepted an arbitrary `library: &[ModuleAst]` regardless of
+which file an entry came from — `va-cli::check_models` groups files by their shared parent
+directory and elaborates every module in a group against one combined library, matching how a
+real Verilog-A toolchain treats a library folder handed to it together.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+The AST's own arena discipline mirrors `va-ir`'s (`CLAUDE.md` §5): expressions are indexed by
+`ExprRef`, not boxed or referenced directly, even at the surface-syntax level, before
+elaboration ever runs:
+
+```rust
+pub struct ExprRef(pub u32);
+
+pub enum ExprAst {
+    Const(f64),
+    Ident(String),
+    Probe(Access),
+    Unary(UnOp, ExprRef),
+    Binary(BinOp, ExprRef, ExprRef),
+    Call(String, Vec<ExprRef>),
+    Ternary(ExprRef, ExprRef, ExprRef),
+    ArrayLit(Vec<ExprRef>),   // `{a, b, c}` — never survives past elaboration as a value
+    // …
+}
+
+pub enum Item {
+    Direction { dir: Direction, nets: Vec<String> },
+    Net { discipline: Discipline, nets: Vec<NetDecl> },   // incl. vector-net ranges
+    Param { ty: ParamType, name: String, default: ExprRef, range: Option<Range> },
+    Analog(Stmt),
+    Function(AnalogFunction),
+    Var { ty: ParamType, names: Vec<VarEntry> },          // incl. array-variable ranges
+    Instance { .. },                                       // module instantiation
+    // …
+}
+```
+
+`Stmt` at this layer already carries the full analog control-flow set — `if/else`, `while`,
+`for`, `repeat`, `case` — that `va-ir::Stmt` (Interface α) mirrors one level down after
+elaboration resolves names.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-frontend parser
+running 59 tests
+test parser::tests::precedence_mul_binds_tighter_than_add ... ok
+test parser::tests::pow_is_right_associative ... ok
+test parser::tests::ternary_parses_and_is_right_associative ... ok
+test parser::tests::bitwise_and_shift_precedence_and_parsing ... ok
+test parser::tests::vector_net_declaration_parses ... ok
+test parser::tests::two_d_vector_net_declaration_parses ... ok
+test parser::tests::two_modules_in_one_file_both_parse ... ok
+test parser::tests::zero_modules_is_not_an_error ... ok
+test parser::tests::reserved_word_as_identifier_is_rejected ... ok
+...
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 157 filtered out; finished in 0.01s
+```
+
+Two of these closed real corpus gaps, not hypothetical ones: `zero_modules_is_not_an_error` —
+a source file containing only `` `define ``s and no `module` at all (real corpus headers like
+`generalMacrosAndDefines.va`) is a valid compilation unit per the LRM, not a parse error; and the
+empty statement (a bare `;`) parses as a no-op, since `mvsg_cmc_3.2.0.va` uses exactly one as an
+`if`'s entire body when its optional thermal port is left unconnected.
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+Stated in the parser module's own doc comment: errors are reported by token index, not source
+byte offset (spans aren't carried past the lexer yet); parameter-range inclusive/exclusive
+delimiters (`[0:inf)`) are recorded but dropped at elaboration; analog-function argument/local
+*types* are parsed and discarded, direction only is kept; `@(event) stmt` parses but the trigger
+is discarded (the controlled statement always runs — sound for a DC operating point, not for
+real event scheduling); vector nets/array variables cap at 2 dimensions, a documented
+(non-standard, for vector nets specifically) extension rather than general N-D support; a
+`generate`-driven array of module instances doesn't parse yet.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t1-frontend/03-elaboration.qmd` — resolving this AST's names into `va-ir`'s arena IR, and the
+much larger real-corpus coverage story that lives there.

@@ -1,39 +1,126 @@
-﻿---
+---
 title: "Elaboration to the IR"
-subtitle: "T1 · Phase T1.3 · `va-frontend`"
+subtitle: "T1 · Phase T1.3 · `va-frontend::elaborate`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete, real corpus coverage.** 120 tests, all green. Against the tracked
+118-real-model + auxiliary-fragment corpus under `external/` (150 files total once every
+sibling `` `include ``-only header/body fragment is counted), **114/150 pass the full
+frontend** (`cargo run -p va-cli -- check external/`, confirmed just now, not assumed from a
+stale count).
 :::
 
 ## Goal
 
-Lower the AST to the arena IR (Interface alpha), end to end on the diode model.
+Turn a surface `ModuleAst` into the frozen arena IR (Interface α, `va-ir`): names resolved to
+indices, constants folded, control flow lowered — the one and only place this crate touches
+`va-ir` directly.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ ModuleAst ──► [elaborate] ──va_ir::Module (Interface α)──► va-codegen
+```
+
+Elaboration is also where **module instantiation** happens for real: `elaborate_with_library`
+takes the whole file's sibling modules as a lookup table and recursively inlines an
+`Item::Instance`'s referenced submodule's own arenas into the instantiating module, so by the
+time a `Module` reaches `va-codegen` it is always flat — `va-ir` itself never had to grow a
+"module references another module" concept.
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+Five ordered passes, each depending only on what came before it (`elaborate.rs`'s own doc
+comment):
+
+1. **Parameters** — const-evaluate every default and range bound to `f64` first, so a vector
+   net's `[msb:lsb]` range can reference one.
+2. **Genvars** — register every declared `genvar` name before variables are collected, so a
+   genvar's own loop header is never mistaken for an ordinary analog variable.
+3. **Nodes** — intern every net that carries a discipline declaration (expanding a vector net's
+   range into one node per index); resolve the port list.
+4. **Variables** — register explicit `real`/`integer` declarations, then every remaining
+   assignment target, as local variables (skipping genvars).
+5. **Lowering** — translate the analog block's expressions/statements, creating branches on
+   demand as accesses resolve. A `for` whose header assigns a genvar is fully unrolled here into
+   a flat `Stmt::Block` (§ `generate` loops); every other `for` lowers to a runtime `Stmt::For`.
+
+**Two const-eval paths, not one.** Parameter defaults/ranges/genvar bounds go through a separate,
+non-mutating `const_eval` — distinct from the main analog-block lowering (`lower_expr`) — since
+they must be resolvable *before* the circuit has a solution at all. A handful of builtins
+(`$simparam`, mainly) needed the identical "fold to the default argument, or error if none"
+treatment added to both paths, not just one.
+
+**A DC-only simulator can still soundly fold time-domain builtins**, one at a time, each
+verified against the specific case that needed it: `transition`/`slew`/`absdelay` settle to
+their undelayed input at a fixed operating point (no delay history exists at DC); the eight
+Laplace/Z-domain filter builtins (`laplace_nd`/`np`/`zd`/`zp`, `zi_*`) settle to their own DC
+(`s=0`) or steady-state (`z=1`) gain, derived from the LRM's own normative formulas, not memory
+— cross-checked against the LRM's own worked example (`laplace_zp('{-1,0}, '{-1,-1,-1,1})` → gain
+`1`); the random-distribution family (`$rdist_uniform`, …) folds to its own distribution's mean,
+since v0 has no RNG to actually draw a sample. None of these are approximations of convenience —
+each is the textbook DC/steady-state limit of the real time-domain behavior.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub fn elaborate_with_library_and_disciplines(
+    ast: &ModuleAst,
+    library: &[ModuleAst],
+    disciplines: &[DisciplineDecl],
+    natures: &[NatureDecl],
+) -> Result<va_ir::Module, FrontendError>
+```
+
+`compile_with_includes` (the crate's front door) calls this once per module in a file, always
+passing the *whole* file's module list as `library` — so any `Item::Instance` anywhere in the
+file resolves, regardless of which module ends up used as a device model. `compile`/`elaborate`
+(no library/no disciplines) are thin wrappers with empty tables, kept only so a net with no
+resolvable metadata still gets `abstol: None`, exactly prior behavior.
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-frontend elaborate
+running 120 tests
+test elaborate::tests::zi_zp_real_roots_use_one_minus_root_not_one_minus_s_over_root ... ok
+...
+test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.01s
+
+$ cargo run -q -p va-cli -- check external/
+114/150 files passed the frontend (lex → parse → elaborate)
+```
+
+Every one of the 36 remaining failures is categorized, not a mystery: ~20 are auxiliary
+`` `include ``-only fragments never meant to compile standalone (`constants.vams`,
+`disciplines.vams`, macro-definition headers); 8 more are top-level files whose entire module
+body lives in a sibling `.include` file this corpus snapshot doesn't ship; the rest are the real,
+tracked backlog below. `docs/roadmap.md`'s "Language coverage" section is the append-only,
+dated changelog of every gap closed to get from the first corpus pass to 114/150 — each entry
+names the specific file it unblocked and how, not a vague "improved coverage."
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+The real, currently-open backlog (`docs/roadmap.md`'s own prioritized list):
+
+1. **Array-variable arguments to the Laplace/Z-domain filters.** Every filter builtin above only
+   accepts a literal `{...}` array; `external/verilogaLib-master/ctle.va` instead assigns a
+   declared array *variable* element-by-element before passing it. Supporting this needs a real
+   capability this codebase doesn't have anywhere else: tracing a variable's value through its
+   own straight-line assignment statements at elaboration time.
+2. **Time-history-dependent event functions** (`last_crossing`, real `cross`/`timer`/`edge`
+   semantics) — can't be soundly DC-folded the way `transition`/`slew` can, since their whole
+   purpose is time history. `va-transient` now exists, but nothing in Interface β lets a
+   `ModelInstance::load` call see its own history at all — a design question, not an engine gap.
+3. **`reference_node`'s hardcoded-electrical implicit ground** — a bare single-terminal access's
+   implicit second terminal is always tagged `Discipline::Electrical`, regardless of the
+   access's own discipline (e.g. a bare `Temp(dt)`).
+
+Permanently out of scope, not a backlog item (LRM Annex C.7 excludes these from Verilog-A
+itself): gate/switch-level primitives, net strength/charge-storage keywords, and digital
+procedural/timing constructs (`always`/`initial`/`fork`/`task`/`casex`/`casez`/…).
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t2-codegen/01-ad-core.qmd` — differentiating the IR this phase produces.

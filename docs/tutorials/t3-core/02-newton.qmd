@@ -1,39 +1,120 @@
-﻿---
+---
 title: "Newton & the resistor divider"
-subtitle: "T3 · Phase T3.2 · `va-core`"
+subtitle: "T3 · Phase T3.2 · `va-core::newton`"
 ---
 
 ::: {.callout-note}
-**Status: stub.** Fill this in as the phase lands — see [the roadmap](../../roadmap.md) for
-the phase definition, validation gate, and where this tutorial fits.
+**Status: code complete — ladder rung 1.** The resistor divider was the first circuit this
+project ever solved end to end, and (2026-07-17) the first to formally pass against real QSPICE
+golden (`t6-integration/03-validation.qmd`).
 :::
 
 ## Goal
 
-The Newton iteration and convergence criteria; the first green `va-harness` run (ladder rung 1).
+Find the operating point of a nonlinear circuit: iterate `x_{n+1} = x_n − J⁻¹f(x_n)` until the
+residual and the update both settle.
 
 ## Where it fits
 
-_Drop the §2 pipeline diagram here with the relevant box highlighted._
+```
+ &[&dyn ModelInstance] ──[newton::solve]──► x (the operating point)
+                              │
+                     loops: mna::assemble → linsolve::solve_dense → update x
+```
 
 ## The idea
 
-_The theory, the equations, the design choice behind this feature._
+**Convergence needs two conditions, not one.** `solve_from` declares convergence when *either*
+the residual's infinity norm drops below `abstol`, *or* every unknown's applied update this
+iteration is smaller than `reltol·|x| + abstol` — the second check matters because a circuit can
+sit at a residual just above `abstol` indefinitely (a stiff nonlinearity, a badly-scaled unknown)
+while genuinely having stopped moving; requiring only the residual check would either loop
+needlessly or need an unreasonably loose `abstol`.
+
+**The per-unknown tolerance in that second check isn't always the same number.** `solve` builds
+a per-unknown `abstol` table via `mna::classify_abstol` once, up front — any
+`ModelInstance::unknown_abstol` override (ultimately sourced from a Verilog-A model's own
+`nature...abstol`, § the nature-metadata wiring in `t1-frontend/03-elaboration.qmd`) replaces the
+global default just for that unknown. The *residual*-norm gate stays one global scalar, deliberately
+— reweighting an `inf_norm` check into a per-row form is a separate design question, not
+attempted.
+
+**Junction limiting is a blanket clamp, not a per-device one — a real, stated tradeoff.**
+`NewtonConfig::limit_junctions` (on by default) clamps each iteration's proposed update via
+`convergence::limit_junction`, using one fixed `vt`/`vcrit` threshold for *every* unknown, not
+just genuinely exponential junction voltages — because `va-core` has no way to distinguish a
+diode's junction voltage from an ordinary linear node from the ABI alone. This keeps a stiff
+exponential device (a diode, a BJT) from overflowing on a cold start, at the cost of possibly
+slowing convergence on unknowns that were never exponential to begin with.
 
 ## The code
 
-_The public API built in this phase, with its doc-comment caveats surfaced. Prefer runnable
-code blocks over prose._
+```rust
+pub struct NewtonConfig {
+    pub max_iters: usize,       // default 100
+    pub abstol: f64,            // default 1e-12
+    pub reltol: f64,            // default 1e-9
+    pub limit_junctions: bool,  // default true
+    pub gmin_steps: usize,      // default 0 — see t3-core/03-nonlinear-dc.qmd
+}
+
+pub fn solve(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+) -> Result<Vec<f64>, CoreError>
+```
+
+Always starts from the zero vector. Each inner iteration:
+
+```rust
+let mut sys = mna::assemble(instances, &x, dim);
+sys.shunt_gmin(&x, gmin, kinds);                      // no-op unless gmin-stepping is active
+let dx = linsolve::solve_dense(&sys.jacobian, &neg_f, dim)?;
+for i in 0..dim {
+    x[i] = if cfg.limit_junctions {
+        convergence::limit_junction(x[i] + dx[i], x[i], vt, vcrit)
+    } else {
+        x[i] + dx[i]
+    };
+}
+```
 
 ## It works
 
-_The test or `va-harness` result that proves it — a plot vs ngspice golden where applicable.
-A tutorial that cannot be re-run to reproduce its figures has rotted._
+```console
+$ cargo test -p va-core newton::
+running 7 tests
+test newton::tests::solves_resistor_divider ... ok
+test newton::tests::solves_diode_resistor_clamp ... ok
+test newton::tests::reports_non_convergence ... ok
+test newton::tests::per_unknown_abstol_override_changes_the_convergence_decision ... ok
+...
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.23s
+```
+
+`solves_resistor_divider` is checked against the closed-form analytic midpoint, not just "the
+tool agrees with itself" — for a linear circuit, exact agreement is the bar. This same circuit,
+driven through the real netlist pipeline (`t6-integration/{01-netlist,02-cli}.qmd`) and compared
+against genuine QSPICE output, is ladder rung 1 — the first to satisfy `CLAUDE.md` §7's actual
+definition of "passed":
+
+```console
+$ cargo run -q -p xtask -- validate
+[xtask]   PASS circuits/divider.net: error=0.000e0 (tol 1e-4)
+```
 
 ## Limitations
 
-_Stated honestly (`CLAUDE.md` §5)._
+**Always cold-starts from `x=0`** — no `.ic`/initial-guess override for a circuit whose real
+operating point is far from zero (the same limitation `t2-codegen/03-charge-and-coverage.qmd`
+notes for the charge channel, and the reason QSPICE golden generation needed a `UIC`-based
+workaround for `t4-transient`'s transient circuits — see `t6-integration/03-validation.qmd`'s
+SPICE-gotcha section).
+
+**Junction limiting is blanket, not per-device** (above) — a real, measured tradeoff, not a bug.
 
 ## What's next
 
-_Pointer to the next phase / tutorial._
+`t3-core/03-nonlinear-dc.qmd` — `gmin` stepping and DC sweeps, for circuits plain Newton alone
+can't reach.
