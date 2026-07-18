@@ -556,8 +556,9 @@ matches the code verbatim.
 ### Phase T1.1 — Lexing & the grammar subset
 > **Status: 🟢 code complete** — `logos` lexer in `va-frontend/src/lexer.rs`; tokens, `<+`,
 > numeric literals with scientific notation + SI suffixes, `$`-system funcs, directives,
-> comments. Subset documented in the module header (no separate grammar file yet). 8 tests.
-> *Outstanding:* `t1-frontend/01-lexing.qmd`.
+> comments. Subset documented in the module header (no separate grammar file yet). 20 tests
+> (up from 8, growing alongside the reserved-word/escape-handling backlog closures below).
+> `t1-frontend/01-lexing.qmd` written 2026-07-18.
 >
 > **String-literal escapes now resolve.** The naive `"[^"]*"` string regex broke on any literal
 > containing an escaped quote (`bsimsoi.va`'s error-message string embedding `\"`` `define
@@ -577,8 +578,9 @@ matches the code verbatim.
 ### Phase T1.2 — Parsing to an AST
 > **Status: 🟢 code complete** — recursive-descent parser + arena AST in
 > `va-frontend/src/{parser,ast}.rs`; precedence-climbing expressions (correct `*`/`+`
-> precedence, right-associative `**`). Returns `FrontendError::Parse` (no panics). 6 tests.
-> *Outstanding:* `t1-frontend/02-parsing.qmd`.
+> precedence, right-associative `**`). Returns `FrontendError::Parse` (no panics). 59 tests
+> (up from 6, growing alongside module instantiation/generate loops/vector nets below).
+> `t1-frontend/02-parsing.qmd` written 2026-07-18.
 >
 > **Two real-corpus parser gaps closed.** (1) The empty statement — a bare `;`, legal wherever a
 > statement is expected (LRM) — now parses as a no-op (`Stmt::Block(vec![])`);
@@ -601,8 +603,9 @@ matches the code verbatim.
 > **Status: 🟢 code complete** — `va-frontend/src/elaborate.rs` lowers AST → `va_ir::Module`:
 > nets→`NodeId`, const-eval'd params + ranges, branch accesses→`BranchId`, builtins→`Builtin`.
 > All three zoo models elaborate end-to-end (the `compile()` milestone test is green). 6 tests.
-> *Outstanding:* committed golden-IR snapshots (currently structural assertions);
-> `t1-frontend/03-elaboration.qmd`.
+> *Outstanding:* committed golden-IR snapshots (currently structural assertions).
+> `t1-frontend/03-elaboration.qmd` written 2026-07-18 (120 tests by then, up from 6; 114/150
+> real corpus files pass the full frontend).
 
 - Resolve names/params, flatten to the arena IR (`Module`, `Expr`, `Stmt`), validate
   parameter ranges, lower `ddt`/`idt`/built-ins into IR `Call`s.
@@ -623,7 +626,7 @@ matches the code verbatim.
 > **Status: 🟢 code complete** — `va-codegen/src/ad.rs`: forward-mode `Dual` over the IR
 > arena (`+ - * / neg`, `exp/ln/log10/sqrt/abs`, variable-exponent `pow`) with an eval `Ctx`.
 > Each operator is FD-checked (`div_matches_finite_difference`, `exp_chain_rule`).
-> *Outstanding:* `t2-codegen/01-ad-core.qmd`.
+> `t2-codegen/01-ad-core.qmd` written 2026-07-18.
 
 - Walk the IR arena and evaluate expressions; implement forward-mode AD (`Dual`) over the
   unknowns.
@@ -966,7 +969,7 @@ matches the code verbatim.
 > explicit `V(dutm,iprobe)<+0` contribution), whose value can only be derived from a genuine
 > node-KCL sum across every other branch touching that node, not from any one branch's own
 > contribution — not attempted, a different and harder feature than anything in this or the
-> preceding two rounds. Full committed sweep; `t2-codegen/02-lowering.qmd`.
+> preceding two rounds. Full committed sweep. `t2-codegen/02-lowering.qmd` written 2026-07-18.
 >
 > **`ohmmeter.va` now lowers too.** A branch that receives *no* contribution anywhere (neither
 > flow nor potential) but is read via a bare `I(...)` probe with one terminal being the module's
@@ -1014,7 +1017,9 @@ matches the code verbatim.
 > `IdtAccumulator`) — no initial-condition (`.ic`/UIC) support, the one honest gap left, shared
 > with every other reactive state in this codegen. A formal coverage matrix is still open; `ddt`
 > is recognised only as a top-level additive term (by design — see T2.2). *Outstanding:* coverage
-> tracking; `t2-codegen/03-charge-and-coverage.qmd`.
+> tracking — a dedicated T2-specific matrix never materialized (`t2-codegen/03-charge-and-
+> coverage.qmd`, written 2026-07-18, states this honestly rather than inventing one); real
+> coverage tracking consolidated into `docs/token-reference.md` and this file's own changelog.
 
 - Emit the charge/`dcharge` channel from `ddt`/`idt` so T4 can integrate.
 - Broaden operator/built-in coverage toward the declared subset; track what is supported.
@@ -1047,7 +1052,7 @@ the reference models.
 > **Status: 🟢 code complete** — `va-core/src/mna.rs` `assemble` walks instances into the
 > `System` sink (ground reduction via `row < dim`); `linsolve.rs` does a `faer` LU solve with
 > singularity detection (non-finite output or failed `A·x≈b` check). 6 tests.
-> *Outstanding:* `t3-core/01-mna.qmd`.
+> `t3-core/01-mna.qmd` written 2026-07-18.
 
 - Assemble the system (`mna.rs`) from a set of `ModelInstance`s via `StampSink`; dense solve
   through `faer` (`linsolve.rs`). Pure-Rust, no native deps (§5).
@@ -1057,9 +1062,9 @@ the reference models.
 ### Phase T3.2 — Newton & the resistor-divider rung
 > **Status: 🟢 code complete (harness gate pending)** — `va-core/src/newton.rs` Newton loop
 > (assemble → `J·dx=−f` → `x+=dx`), converging on residual≤abstol **or** relative update≤reltol.
-> The resistor divider solves to the analytic midpoint (`1.0 V`, < 1e-9). *Outstanding:* the
-> formal rung-1 gate is vs **ngspice golden via `va-harness`** — awaits T6; currently checked
-> against the analytic value. `t3-core/02-newton.qmd`.
+> The resistor divider solves to the analytic midpoint (`1.0 V`, < 1e-9). Rung 1's golden gate
+> has since formally passed for real, against QSPICE (2026-07-17, T6.3). `t3-core/02-newton.qmd`
+> written 2026-07-18.
 
 - Newton–Raphson loop (`newton.rs`) with abstol/reltol; solve the linear resistor divider.
 - **Validation gate (ladder rung 1):** resistor divider DC matches golden ≤ 1e-4.
@@ -1098,8 +1103,9 @@ the reference models.
 > `Err(Singular)` from a non-finite Jacobian entry, confirmed independent of iteration budget
 > (still fails at `max_iters: 2000`). `gmin` stepping's early, well-conditioned stages keep the
 > whole chain in range long enough to land near the true point before the final, unshunted
-> stage finishes it off in a handful of iterations. *Outstanding:* rung-2 gate vs golden (T6);
-> `t3-core/03-nonlinear-dc.qmd`.
+> stage finishes it off in a handful of iterations. Rung 2's golden gate has since formally
+> passed for real, against QSPICE (2026-07-17, T6.3). `t3-core/03-nonlinear-dc.qmd` written
+> 2026-07-18.
 
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
   stepping, source stepping, damping) in `convergence.rs`.
@@ -1130,8 +1136,8 @@ the reference models.
 > never silently falls back.
 > **Superseded by T4.2 (2026-07-06): fixed-`cfg.tstep` stepping no longer exists** — `run()`
 > is adaptive now (see T4.2 below); `cfg.tstep` is the *maximum* step, not the constant one.
-> *Outstanding:* rung-3 gate is vs **ngspice golden via `va-harness`** — awaits T6; currently
-> checked against the analytic RC solution. `t4-transient/01-integration.qmd`.
+> Rung 3's golden gate has since formally passed for real, against QSPICE (2026-07-18, T6.3).
+> `t4-transient/01-integration.qmd` written 2026-07-18.
 
 - Companion-model the charge channel; implement an implicit integrator (backward Euler →
   trapezoidal) in `integrator.rs`; fixed timestep first.
@@ -1176,7 +1182,8 @@ the reference models.
 > everything else in the circuit stays a fixed, borrowed instance exactly as before —
 > `va-cli`'s `build_instances_split` is the one caller that needs this today.
 > *Outstanding:* a rigorous divided-difference LTE estimator to replace the embedded-pair
-> heuristic; `t4-transient/02-lte-timestep.qmd`.
+> heuristic. `t4-transient/02-lte-timestep.qmd` written 2026-07-18 (rung 4's golden gate has
+> since formally passed for real too, against QSPICE, same date).
 
 - Local truncation error estimate driving adaptive step size; step accept/reject logic.
 - **Validation gate (ladder rung 4):** diode rectifier transient RMS ≤ 1e-3 vs golden.
@@ -1223,7 +1230,9 @@ the reference models.
 > well-behaved region rather than chasing that numerical edge.
 > *Outstanding:* the golden-vs-ngspice gate generally still awaits T6.3 — this validates that
 > the circuit oscillates (and grows, as an unstable equilibrium should), not a specific
-> frequency against a reference simulator; `t4-transient/03-events.qmd`.
+> frequency against a reference simulator. `t4-transient/03-events.qmd` written 2026-07-18,
+> covering both this hand-built fixture and the circuit's newer, real netlist-driven form (§
+> this file's own later rung-6 entries).
 >
 > **Now driven through the real netlist pipeline too (2026-07-18)** — until now this rung's
 > oscillation only ran via hand-built `va-abi` instances inside a `va-transient` unit test, since
@@ -1306,8 +1315,9 @@ methodology + metrics report vs ngspice.
 > `.tran`/`.ac`). **2026-07-06: `.tran <tstep> <tstop>` timing is now captured**
 > (`Netlist::tran`), not just the card marker — needed once `va-cli` actually drives a
 > transient run (see T6.2). `va-harness`'s metric functions (`DC_REL`, `TRAN_RMS`) are declared
-> but still `todo!()` — that's the genuinely outstanding piece, tracked under T6.3, not this
-> phase. *Outstanding:* `t6-integration/01-netlist.qmd`.
+> but still `todo!()` at the time — since resolved for real, T6.3. `va-netlist` also gained a
+> `'Q'` element (BJT, § ladder rung 6) on 2026-07-18, alongside `'M'`'s (§ ladder rung 5).
+> `t6-integration/01-netlist.qmd` written 2026-07-18.
 
 - Circuit-level netlist parser (`va-netlist`): elements, nodes, model bindings, analysis
   directives. Define the metric functions in `va-harness` (`DC_REL`, `TRAN_RMS`, …).
@@ -1340,8 +1350,8 @@ methodology + metrics report vs ngspice.
 > `V(in)`'s swing to −5 V, peaks near 4.3 V (5 V minus a silicon diode drop), and shows the
 > expected ripple decay between cycles, all driven through the real frontend/netlist/core/
 > transient pipeline, no golden reference needed to see it's doing the right thing.
-> `xtask gen-golden`/`xtask validate` remain unimplemented (T6.3/`xtask` territory).
-> *Outstanding:* `t6-integration/02-cli.qmd`.
+> `xtask gen-golden`/`xtask validate` remain unimplemented at the time (T6.3/`xtask` territory)
+> — since built for real, closing rungs 1-5. `t6-integration/02-cli.qmd` written 2026-07-18.
 
 - `va-cli` wires the full pipeline (parse model → codegen → assemble → solve → report); flesh
   out `xtask gen-golden` (ngspice) and `xtask validate`.
