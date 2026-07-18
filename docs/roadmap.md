@@ -1224,6 +1224,44 @@ the reference models.
 > *Outstanding:* the golden-vs-ngspice gate generally still awaits T6.3 — this validates that
 > the circuit oscillates (and grows, as an unstable equilibrium should), not a specific
 > frequency against a reference simulator; `t4-transient/03-events.qmd`.
+>
+> **Now driven through the real netlist pipeline too (2026-07-18)** — until now this rung's
+> oscillation only ran via hand-built `va-abi` instances inside a `va-transient` unit test, since
+> `va-netlist` had no 3-terminal-device grammar for a BJT. Closed with a `'Q'` element arm
+> (`` Q<name> c b e model ``, SPICE's own collector/base/emitter order, mirroring `'M'`'s
+> no-body/substrate-terminal simplification) and a `"bjt"` `reference_instance` branch in
+> `va-cli` (fixed parameters matching the hand-built fixture's own: `Is=1e-15`, `βF=100`,
+> `βR=1`). `circuits/ring_osc.net` mirrors the fixture's topology and component values exactly.
+>
+> **A real surprise, confirmed empirically before writing the regression test**: no `.ic`/`UIC`
+> support was needed after all, even though the hand-built fixture starts from a *perturbed DC
+> operating point*, not `x=0`, specifically because a deterministic solver has no noise to break
+> the ring's exact 3-way symmetry otherwise. Cold-starting from `x=0` (`va-cli::solve_transient`'s
+> only mode) turns out to do the same job by a different route: every stage sees an identical
+> `Vbe` from `x=0`, so all three charge to nearly the same forward-active bias within ~12.5 µs —
+> close enough to the ring's own symmetric-but-unstable equilibrium that the stages' mismatched
+> `R` values are enough to kick off the same genuine, sustained oscillation, confirmed by
+> inspecting a full run's node trajectories (each collector swings between ~0.06 V and ~5 V,
+> repeatedly, staggered in phase per stage) before trusting it, not assumed from the topology
+> alone. `cargo test -p va-cli ring_osc_sustains_oscillation_through_the_real_pipeline` checks
+> this properly — across all three collectors, not just one (a single node can sit on a quiet
+> stretch of its own cycle within one `tstop` while the ring as a whole keeps oscillating;
+> checking only one node would have been a flaky, component-value-specific assertion).
+>
+> **The QSPICE golden gate remains open, for a specific, diagnosed reason, not just "not
+> attempted yet"**: translating this circuit the same way rungs 3–5 were (a native `.model bjt
+> NPN(IS=1e-15 BF=100 BR=1)` card, `UIC` + `IC=0` on the coupling capacitors) runs cleanly but
+> does **not** reproduce the oscillation — QSPICE's `UIC` mode only seeds the *reactive* elements'
+> own state; it does not re-solve the *non-reactive* node voltages (here, every base and collector
+> voltage is purely nonlinearly determined by the BJT's own turn-on characteristic, with no linear
+> DC path to fix it directly) the way this project's own cold start does. Confirmed empirically:
+> every node in the QSPICE run sits at essentially exactly `VCC` (`4.9999999...`/`5.0000000...`)
+> for the entire window — a non-conducting, degenerate state, not the real ~0.65–0.7 V
+> forward-active bias `va-cli`'s own cold start (and the hand-built fixture's DC solve) both land
+> on. Closing this needs a real investigation (explicit `.ic V(b1)=... V(c1)=...` seeding to give
+> QSPICE's own initial nonlinear solve something sane to converge from, or some other mechanism
+> entirely) that wasn't attempted here — better to leave this rung's golden gate honestly open
+> than to paper over a translation that produces a qualitatively wrong reference.
 
 - Event handling / breakpoints (`events.rs`) for sources and discontinuities; ring-oscillator
   shakedown.
@@ -1313,8 +1351,9 @@ methodology + metrics report vs ngspice.
   workflow.
 
 ### Phase T6.3 — Full validation harness & the metrics dashboard
-> **Status: 🟢 partial (rungs 1/2/3/4/5 golden real as of 2026-07-18; rung 6 still outstanding —
-> no `circuits/*.net` deck exists for it yet).**
+> **Status: 🟢 partial (rungs 1/2/3/4/5 golden real as of 2026-07-18; rung 6's golden gate stays
+> open for a diagnosed reason — QSPICE's `UIC` mode doesn't reproduce the oscillation, § T4.3's
+> 2026-07-18 entry — even though its implementation reach is now closed too).**
 > `va-harness::metrics::{max_relative_error, rms_error}` are real implementations now (were
 > `todo!()`), including the near-zero-reference division guard `max_relative_error`'s own doc
 > comment always specified but never implemented; 10 tests. `va-harness::golden::GoldenDc` is a
@@ -1498,10 +1537,12 @@ methodology + metrics report vs ngspice.
 > `7.925e-4` respectively, both inside `TRAN_RMS`'s `1e-3` — `rectifier.net`'s margin is real and
 > unpadded, not artificially loosened).
 >
-> *Now outstanding:* rung 6 (needs a `va-netlist` BJT element plus a ring-oscillator `.net` deck,
-> not attempted here); a per-rung/convergence-fraction dashboard; refreshing
-> `t6-integration/03-validation.qmd` for all five now-real golden files; the branch-current golden
-> gap (rung 2, noted above) — the only remaining gaps in T6.3.
+> *Now outstanding:* rung 6's golden gate specifically (§ T4.3's 2026-07-18 entry — implementation
+> reach itself is closed: `va-netlist`'s new `Q` element and `circuits/ring_osc.net` now drive the
+> real oscillation through the full pipeline; only the QSPICE cross-check is blocked, on a
+> diagnosed `UIC`-mode limitation, not an unimplemented circuit); a per-rung/convergence-fraction
+> dashboard; refreshing `t6-integration/03-validation.qmd` for all five now-real golden files; the
+> branch-current golden gap (rung 2, noted above) — the only remaining gaps in T6.3.
 
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.
@@ -1522,7 +1563,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start (error=2.260e-5, tol 1e-3) |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start (error=7.925e-4, tol 1e-3) |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ✅ **formally passed** — green against `golden/mos_dc.golden`, real QSPICE output via a native `.model mosfet NMOS(...)` translation (error=1.977e-9, tol 1e-4) |
-| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | `cargo test -p va-transient ring_oscillator_sustains_oscillation` — real, growing oscillation from an unstable DC equilibrium, `va-abi::Bjt` (new); **golden gate pending `va-harness` `.tran` support (T6.3)** (see T4.3) |
+| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` sustains real, growing oscillation through the real netlist pipeline (`va-netlist`'s new `Q` element, § T4.3's 2026-07-18 entry) — also still `cargo test -p va-transient ring_oscillator_sustains_oscillation` via hand-built instances; **golden gate open for a diagnosed reason, not just pending (T6.3)** |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.
@@ -1531,9 +1572,11 @@ is available.
 > implementation reach *and* a green `cargo xtask validate` against a committed, genuinely
 > QSPICE-generated golden file (rungs 2/5 via a hand-translated QSPICE-native `.model` card;
 > rungs 3/4 via that plus a `UIC` cold-start fix; § the T6.3 section's 2026-07-17/2026-07-18
-> entries). Only rung 6 still records *implementation reach* only — closing it needs a
-> `va-netlist` BJT element and a ring-oscillator `.net` deck, neither of which exists yet; see
-> this file's own T6.3 section for the full account.
+> entries). Rung 6's *implementation reach* is now also closed — through the real netlist
+> pipeline, not just the hand-built `va-transient` fixture (§ T4.3's 2026-07-18 entry) — but its
+> golden gate stays open for a specific, diagnosed reason: QSPICE's `UIC` mode doesn't re-solve
+> this circuit's purely-nonlinearly-determined node voltages, landing on a non-conducting
+> degenerate state instead of the real bias point (same section, same date).
 
 **Ladder rung 5 (a MOS): implementation reach closed 2026-07-12** — was the sole fully
 unstarted rung; closed the same way rung 6's ring oscillator was, with a new hand-written

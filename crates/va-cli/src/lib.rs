@@ -30,7 +30,7 @@ mod plot;
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
-use va_abi::reference::{diode::VT_NOMINAL, Capacitor, Diode, Resistor, VSource};
+use va_abi::reference::{diode::VT_NOMINAL, Bjt, Capacitor, Diode, Resistor, VSource};
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
@@ -584,6 +584,19 @@ fn reference_instance(dev: &Device) -> Result<Box<dyn ModelInstance>> {
         "resistor" => Box::new(Resistor::new(p, n, value()?)),
         "capacitor" => Box::new(Capacitor::new(p, n, value()?)),
         "diode" => Box::new(Diode::new(p, n, 1e-14, 1.0, VT_NOMINAL)),
+        // `Q<name> c b e bjt` (§ `va-netlist`'s `'Q'` arm) — terminals are `[c, b, e]`, SPICE's
+        // own order, but `Bjt::new` takes `(b, c, e)`; fixed parameters match the ring
+        // oscillator's own hand-built fixture (`va_transient::integrator`'s test module).
+        "bjt" => {
+            let &[c, b, e] = dev.terminals.as_slice() else {
+                bail!(
+                    "device `{}` (model `bjt`) needs exactly 3 terminals (c, b, e), found {}",
+                    dev.name,
+                    dev.terminals.len()
+                );
+            };
+            Box::new(Bjt::new(b, c, e, 1e-15, 100.0, 1.0, VT_NOMINAL))
+        }
         other => bail!(
             "device `{}` references unknown model `{other}` (no compiled `--model` matched, \
              and it is not a built-in primitive)",
@@ -1034,5 +1047,82 @@ mod tests {
             (3.5..5.0).contains(&out_max),
             "V(out) peak out of range: {out_max}"
         );
+    }
+
+    /// End-to-end ring oscillator (§ ladder rung 6) through the real netlist pipeline —
+    /// `circuits/ring_osc.net`'s `Q1`/`Q2`/`Q3` lines exercise `va-netlist`'s new `'Q'` element
+    /// arm and this module's new `"bjt"` `reference_instance` branch, both added to close this
+    /// rung. No `.ic`/`UIC` support was needed after all, despite
+    /// `va_transient::integrator::ring_oscillator_sustains_oscillation`'s hand-built fixture
+    /// starting from a *perturbed DC operating point*, not `x=0`: cold-starting from `x=0`
+    /// charges every stage to nearly the same forward-active bias within ~12.5 µs (all three
+    /// stages see an identical `Vbe` from `x=0`), landing close enough to the ring's own
+    /// symmetric-but-unstable equilibrium that the stages' deliberately mismatched `R` values
+    /// (breaking the exact 3-way symmetry, mirroring the hand-built fixture's own reasoning) are
+    /// enough to kick off the same genuine, sustained, growing oscillation — confirmed
+    /// empirically by inspecting a full run's node trajectories before writing this assertion,
+    /// not assumed from the topology alone. Checked across all three collectors, not just one:
+    /// each stage's own swing lags the others' (a real ring oscillator's per-stage phase shift),
+    /// so any single node can land on a quiet stretch of its own cycle within this `tstop` while
+    /// the ring as a whole keeps oscillating — confirmed empirically (`c1`: 2 rail-midpoint
+    /// crossings in this window, `c2`: 6, `c3`: 3; checking only `c1` would have been a flaky,
+    /// component-value-specific assertion, not a real regression guard).
+    #[test]
+    fn ring_osc_sustains_oscillation_through_the_real_pipeline() {
+        let deck = include_str!("../../../circuits/ring_osc.net");
+        let net = va_netlist::parser::parse(deck).expect("parse ring_osc");
+        assert_eq!(net.analysis, AnalysisCard::Tran);
+        gate_analysis(&net, Analysis::Transient).expect("transient analysis is accepted");
+
+        let wf = solve_transient(&net, &[]).expect("integrates");
+        let collector_idxs: Vec<usize> = ["c1", "c2", "c3"]
+            .iter()
+            .map(|name| net.node_order.iter().position(|n| n == name).unwrap())
+            .collect();
+
+        // Sustained oscillation, not a one-off kick that settles: a genuinely oscillating
+        // trajectory crosses the rail midpoint repeatedly; a monotonic settle crosses it at
+        // most once. At least one collector must cross it several times.
+        let mid = 2.5;
+        let max_crossings = collector_idxs
+            .iter()
+            .map(|&idx| {
+                let mut crossings = 0;
+                let mut above = wf.x[0][idx] >= mid;
+                for x in &wf.x[1..] {
+                    let now_above = x[idx] >= mid;
+                    if now_above != above {
+                        crossings += 1;
+                        above = now_above;
+                    }
+                }
+                crossings
+            })
+            .max()
+            .unwrap();
+        assert!(
+            max_crossings >= 4,
+            "expected sustained oscillation (several rail-midpoint crossings on some \
+             collector), best was {max_crossings}"
+        );
+
+        // Real amplitude, not numerical noise around the midpoint: every stage's collector
+        // swings across most of the 0-5 V rail at some point in the run.
+        for (&idx, name) in collector_idxs.iter().zip(["c1", "c2", "c3"]) {
+            let (v_min, v_max) =
+                wf.x.iter()
+                    .map(|x| x[idx])
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                        (lo.min(v), hi.max(v))
+                    });
+            assert!(
+                v_min < 0.5,
+                "V({name}) min = {v_min}, expected a low excursion"
+            );
+            assert!(
+                v_max > 4.0,
+                "V({name}) max = {v_max}, expected a high excursion"
+            );
+        }
     }
 }

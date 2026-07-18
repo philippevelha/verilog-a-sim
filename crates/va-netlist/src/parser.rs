@@ -4,7 +4,9 @@
 //! tokens, `*` full-line comments. The supported element letters are `R` (resistor), `C`
 //! (capacitor), `D` (a two-terminal model-referencing device, e.g. a diode), `M` (a
 //! three-terminal model-referencing device, e.g. a MOSFET — `` M<name> d g s model ``, no
-//! separate body/bulk terminal in v0, § ladder rung 5), and `V` (voltage source). Net `0`/`gnd`
+//! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
+//! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
+//! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
 //! is the reference node; every other net gets a dense unknown index in first-seen order.
 //!
 //! # Limitations
@@ -188,6 +190,24 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 terminals: vec![p, n],
                 value: Some(value),
                 waveform,
+            })
+        }
+        // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
+        // 6), SPICE's own collector/base/emitter terminal order. No substrate terminal in v0,
+        // unlike SPICE's optional four-terminal `Q` line — mirrors `M`'s own no-body-terminal
+        // simplification for the analogous three-terminal MOSFET.
+        'Q' => {
+            need(5)?;
+            let c = intern(net, toks[1]);
+            let b = intern(net, toks[2]);
+            let e = intern(net, toks[3]);
+            // The fifth token names the model (e.g. `bjt`).
+            Ok(Device {
+                name,
+                model: toks[4].to_string(),
+                terminals: vec![c, b, e],
+                value: None,
+                waveform: None,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),

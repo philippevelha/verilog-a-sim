@@ -206,6 +206,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_ring_osc_devices() {
+        let deck = include_str!("../../../circuits/ring_osc.net");
+        let net = parse(deck).expect("ring_osc.net should parse");
+        assert_eq!(net.analysis, AnalysisCard::Tran);
+
+        let q1 = net.devices.iter().find(|d| d.name == "Q1").unwrap();
+        assert_eq!(q1.model, "bjt");
+        assert_eq!(q1.value, None);
+        assert_eq!(
+            q1.terminals.len(),
+            3,
+            "c, b, e — no substrate terminal in v0"
+        );
+        assert_eq!(q1.terminals[2], GROUND, "Q1's emitter is tied to gnd");
+
+        assert!(net
+            .devices
+            .iter()
+            .any(|d| d.name == "Q2" && d.model == "bjt"));
+        assert!(net
+            .devices
+            .iter()
+            .any(|d| d.name == "Q3" && d.model == "bjt"));
+    }
+
+    #[test]
     fn parses_diode_iv_sweep_card() {
         let deck = include_str!("../../../circuits/diode_iv.net");
         let net = parse(deck).expect("diode_iv.net should parse");

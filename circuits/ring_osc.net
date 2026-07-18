@@ -1,0 +1,25 @@
+* Three-stage RC-coupled common-emitter BJT ring oscillator — bring-up rung 6.
+* VCC=5V; mismatched per-stage R values break the exact 3-way DC symmetry (a real circuit's
+* component tolerances always do this; a deterministic solver needs it broken explicitly —
+* see va-abi::reference::Bjt's own doc comment / va-transient's hand-built fixture this deck
+* mirrors). Stage n: Rb(vcc,base_n) sets the base bias; Rc(vcc,coll_n) is the collector load;
+* Q(coll_n,base_n,gnd) is a common-emitter BJT; C(coll_n,base_(n+1)) AC-couples to the next
+* stage, closing the ring at stage 3's collector -> stage 1's base.
+VCC vcc gnd DC 5.0
+* Stage 1: base=b1, collector=c1.
+R1a vcc b1 3.3Meg
+R1b vcc c1 20k
+Q1  c1  b1 gnd bjt
+C1  c1  b2 10n
+* Stage 2: base=b2, collector=c2.
+R2a vcc b2 3.4Meg
+R2b vcc c2 19k
+Q2  c2  b2 gnd bjt
+C2  c2  b3 10n
+* Stage 3: base=b3, collector=c3 — couples back to stage 1's base, closing the ring.
+R3a vcc b3 3.5Meg
+R3b vcc c3 21k
+Q3  c3  b3 gnd bjt
+C3  c3  b1 10n
+.tran 100u 0.2
+.end
