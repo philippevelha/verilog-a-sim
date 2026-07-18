@@ -49,6 +49,7 @@ book:
         - t6-integration/01-netlist.qmd
         - t6-integration/02-cli.qmd
         - t6-integration/03-validation.qmd
+        - t6-integration/04-convergence-dashboard.qmd
 
 format:
   # HTML only, to guarantee reproducible rendering without a LaTeX toolchain.

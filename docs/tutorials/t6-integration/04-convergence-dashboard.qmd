@@ -1,0 +1,136 @@
+---
+title: "The convergence-fraction dashboard"
+subtitle: "T6 · Phase T6.4 · `xtask::validate`"
+---
+
+::: {.callout-note}
+**Status: code complete.** `CLAUDE.md` §7's fourth metric — "fraction of zoo circuits that reach
+a solution … it only ever needs to go up" — now has a real implementation, verified with a
+genuinely non-convergent synthetic circuit, not just the (currently all-passing) real zoo.
+:::
+
+## Goal
+
+Track *convergence* — did the solver reach a solution at all? — as its own outcome, separate
+from whether that solution matched golden, across every known circuit in one `cargo xtask
+validate` run.
+
+## Where it fits
+
+```
+ xtask::validate_{dc,sweep,tran}_circuits ──► Tally{checked, not_converged, failed, skipped}
+                                                        │
+                                              validate()'s final report
+```
+
+## The idea
+
+**"Didn't converge" and "converged but wrong" are different failure modes, with different
+fixes** — a `CoreError::Singular`/non-convergence means the solver itself gave up; a golden
+mismatch means it found *an* answer, just not the right one. Folding both into one `failed`
+counter (the shape `xtask` had before this phase) throws away exactly the distinction `CLAUDE.md`
+§7 asks for.
+
+**The real gap wasn't the metric's arithmetic — it was that a single non-convergent circuit used
+to abort the whole run before it could be computed.** Every `validate_*_circuits` function called
+`va_harness::{dc,tran}::run_*` with a bare `?`, so a solver failure propagated straight out of
+`validate()` itself via `anyhow`'s `?` chain — the run stopped immediately, and every circuit
+*after* the failing one in `DC_CIRCUITS`/`SWEEP_CIRCUITS`/`TRAN_CIRCUITS` was never even attempted,
+let alone reported. A convergence *fraction* computed over "however much of the zoo ran before the
+first crash" isn't a fraction over the zoo at all.
+
+**The fix is to catch the solve error locally, record it, and keep going** — the same principle
+transient LTE control already follows one level down (a rejected step doesn't abort the whole
+integration, it retries with a smaller `h`) applied here to "a whole circuit's own attempt."
+
+## The code
+
+```rust
+struct Tally {
+    checked: u32,        // circuits with golden that were actually attempted
+    failed: u32,          // of `checked`: converged, but outside golden's tolerance
+    not_converged: u32,    // of `checked`: the solver itself failed
+    skipped: u32,          // no golden committed yet — never attempted
+}
+
+impl Tally {
+    fn converged(&self) -> u32 { self.checked - self.not_converged }
+}
+
+/// Attempt `solve`, recording the outcome in `tally` instead of propagating a solver error.
+fn try_solve<T>(
+    circuit: &str,
+    solve: impl FnOnce() -> Result<T, va_harness::HarnessError>,
+    tally: &mut Tally,
+) -> Option<T> {
+    tally.checked += 1;
+    match solve() {
+        Ok(got) => Some(got),
+        Err(e) => {
+            eprintln!("[xtask]   NOCONV {circuit}: {e}");
+            tally.not_converged += 1;
+            None
+        }
+    }
+}
+```
+
+Each `validate_*_circuits` function now calls `try_solve`, and only proceeds to
+`compare_dc`/`compare_dc_sweep`/`compare_tran` (and `report_verdict`, which folds a golden
+mismatch into `failed`) when it returns `Some`. A genuine read/parse error on the *golden file
+itself* (`GoldenDc::read`, a `NodeOrderMismatch`, …) is still propagated with `?` — those signal
+a broken project invariant, not a convergence data point, and should still fail loudly.
+
+`validate()`'s final report prints the fraction directly:
+
+```rust
+eprintln!(
+    "[xtask] validate: convergence {}/{} ({:.1}%) — CLAUDE.md §7's convergence metric",
+    tally.converged(), tally.checked,
+    100.0 * tally.converged() as f64 / tally.checked as f64
+);
+```
+
+## It works
+
+```console
+$ cargo run -q -p xtask -- validate
+...
+[xtask] validate: 6 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
+[xtask] validate: convergence 6/6 (100.0%) — CLAUDE.md §7's convergence metric
+```
+
+Every known circuit converges today — every ladder rung already passes golden, a strictly harder
+bar than merely converging, so `100.0%` is the honest, unsurprising current reading. The real
+test exercises the *mechanism*, not the (trivial, all-passing) current zoo:
+
+```console
+$ cargo test -p xtask try_solve_tracks_a_non_convergent_circuit_without_erroring
+test tests::try_solve_tracks_a_non_convergent_circuit_without_erroring ... ok
+```
+
+This test solves a genuinely singular circuit — two nets joined by a resistor with no path to
+ground anywhere, confirmed empirically to produce `va_core::CoreError::Singular` (via
+`HarnessError::Run`), not a hand-waved failure — and asserts `try_solve` records it as
+`not_converged` and returns `None`, rather than propagating an error to its caller.
+
+## Limitations
+
+The convergence fraction only covers the six circuits `DC_CIRCUITS`/`SWEEP_CIRCUITS`/
+`TRAN_CIRCUITS` already know about — it doesn't scan the much larger `external/` corpus
+`va-cli check` tracks for frontend/codegen *language* coverage (`t1-frontend/03-elaboration.qmd`).
+Those are deliberately different metrics: this one is about whether a *circuit* solves, not
+whether a *model file* compiles.
+
+`validate` still exits non-zero if anything didn't converge or missed golden — this phase makes
+the *reporting* complete, not the bar easier to clear. A real regression in any known circuit
+still fails the gate; it's just no longer silently hidden behind whichever circuit happened to be
+checked first.
+
+## What's next
+
+With three of `CLAUDE.md` §7's four metrics now real (DC, transient, convergence — AC/noise
+stays `todo!()` per `t5-acnoise`'s own honest status) and all six ladder rungs formally passing,
+the one remaining gap this dashboard doesn't touch is tracked in `t6-integration/03-validation.qmd`:
+extending the golden format to carry branch/device currents, so rung 2's comparison actually
+exercises the diode's exponential law instead of trivially matching a forced node voltage.

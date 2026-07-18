@@ -1572,15 +1572,57 @@ methodology + metrics report vs ngspice.
 >
 > *Now outstanding:* rung 6's golden gate closed the same day too (§ T4.3's 2026-07-18 entries —
 > a genuine QSPICE ground-aliasing bug for `Q`-element terminals, then an honestly-scoped
-> early-window comparison for this circuit's unstable equilibrium); a per-rung/convergence-fraction
-> dashboard; refreshing `t6-integration/03-validation.qmd` for all six now-real golden files; the
-> branch-current golden gap (rung 2, noted above) — the only remaining gaps in T6.3.
+> early-window comparison for this circuit's unstable equilibrium); refreshing
+> `t6-integration/03-validation.qmd` for all six now-real golden files (done, same date); the
+> branch-current golden gap (rung 2, noted above) — real, but scoped to its own T6.4 phase below
+> and rung 2 respectively, not blocking T6.3 itself.
 
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.
 - **Validation gate:** all passed ladder rungs are green under one `cargo xtask validate`.
 - **Tutorial:** `t6-integration/03-validation.qmd` — the metrics, tolerances, and the
   ladder-status dashboard; how "done" is measured.
+
+### Phase T6.4 — Convergence-fraction dashboard
+> **Status: 🟢 code complete (2026-07-18)** — `CLAUDE.md` §7's fourth metric ("fraction of zoo
+> circuits that reach a solution … it only ever needs to go up") had no real implementation
+> before this: a circuit that failed to *converge* at all (not just mismatch golden) propagated
+> a hard error out of `xtask::validate_{dc,sweep,tran}_circuits` via `?`, aborting the *entire*
+> `validate` run before any circuit ordered after it was even attempted — so the "convergence
+> fraction" was never actually computable from a real run, only from however much of the zoo
+> happened to be reached before the first failure.
+
+`xtask::Tally` now tracks three distinct outcomes, not two: `skipped` (no golden committed yet),
+`not_converged` (the solver itself failed — a `CoreError` propagating out of `va-harness`'s own
+`run_dc`/`run_dc_sweep`/`run_tran`), and `failed` (converged, but outside golden's tolerance).
+`xtask::try_solve` is the seam: it calls the solve, and on `Err` prints `NOCONV <circuit>: <why>`
+and records `not_converged` instead of propagating — the rest of the zoo is still attempted and
+reported. `validate()`'s own final report now prints the convergence fraction as its own line:
+
+```console
+$ cargo run -q -p xtask -- validate
+...
+[xtask] validate: 6 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
+[xtask] validate: convergence 6/6 (100.0%) — CLAUDE.md §7's convergence metric
+```
+
+Every known circuit converges today (6/6, unsurprising — every ladder rung already passes
+golden, a strictly harder bar), so this reads `100.0%` right now; the real deliverable is the
+*mechanism* — verified with a genuinely non-convergent synthetic circuit (two nets joined by a
+resistor with no path to ground anywhere, confirmed to produce `CoreError::Singular` via
+`va_core`, not assumed), asserting `try_solve` records it as `not_converged` and returns `None`
+rather than erroring the caller. `validate` still exits non-zero if anything didn't converge or
+missed golden — the fix is that the *whole zoo gets reported first*, not that a real regression
+stops failing the gate.
+
+- Track convergence as its own outcome, distinct from golden-comparison pass/fail, across every
+  known circuit — the number `CLAUDE.md` §7 says should only ever go up.
+- **Validation gate:** `cargo xtask validate` reports a convergence fraction that reflects every
+  known circuit, even when one fails to converge (verified with a synthetic non-convergent
+  circuit, not just the passing zoo).
+- **Tutorial:** `t6-integration/04-convergence-dashboard.qmd` — why "didn't converge" and
+  "converged but wrong" are different failure modes, and why aborting the whole batch at the
+  first one would have made the metric meaningless.
 
 ---
 

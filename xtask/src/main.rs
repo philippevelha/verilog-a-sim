@@ -60,11 +60,26 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/ring_osc.net", None),
 ];
 
-/// Pass/fail/skip tally, shared across [`validate`]'s DC and sweep circuit passes.
+/// Tally shared across [`validate`]'s DC/sweep/tran passes — distinguishes *three* different
+/// outcomes, not two, per `CLAUDE.md` §7's four metrics: a circuit can have no golden yet
+/// ([`Self::skipped`]), fail to converge at all ([`Self::not_converged`] — §7's own "convergence:
+/// fraction of zoo circuits that reach a solution" metric, T6.4), or converge but land outside
+/// golden's tolerance ([`Self::failed`]). `checked` counts every circuit actually attempted
+/// (converged or not) — the convergence-fraction denominator.
 #[derive(Default)]
 struct Tally {
+    /// Circuits with a committed golden reference that were actually attempted.
     checked: u32,
+    /// Of `checked`, how many converged but landed outside golden's tolerance.
     failed: u32,
+    /// Of `checked`, how many the solver failed to reach a solution for at all — a `CoreError`
+    /// (non-convergence, a singular Jacobian, …) propagating out of `va-harness`'s own
+    /// `run_dc`/`run_dc_sweep`/`run_tran`. Tracked as its own outcome, not folded into `failed`:
+    /// "didn't converge" and "converged but wrong" are different failure modes with different
+    /// fixes, and CLAUDE.md §7 asks for the convergence fraction specifically, as a number that
+    /// only ever needs to go up.
+    not_converged: u32,
+    /// No committed `golden/<name>.golden` yet — never attempted at all.
     skipped: u32,
 }
 
@@ -72,7 +87,14 @@ impl Tally {
     fn merge(&mut self, other: Tally) {
         self.checked += other.checked;
         self.failed += other.failed;
+        self.not_converged += other.not_converged;
         self.skipped += other.skipped;
+    }
+
+    /// How many of `checked` reached a solution at all, regardless of whether it matched
+    /// golden — `CLAUDE.md` §7's convergence metric.
+    fn converged(&self) -> u32 {
+        self.checked - self.not_converged
     }
 }
 
@@ -94,6 +116,27 @@ fn circuit_paths(
     Ok((circuit_path, model_path, golden_path))
 }
 
+/// Attempt `solve(circuit, model)`, recording the outcome in `tally` and printing `NOCONV`
+/// rather than propagating the error — a circuit that fails to converge is real, useful
+/// information (T6.4's own convergence-fraction metric), and `bail!`-ing the whole `validate`
+/// run at the first one would silently hide the verdict on every circuit ordered after it.
+/// Returns `None` on a solve failure, `Some(got)` on success (regardless of golden match).
+fn try_solve<T>(
+    circuit: &str,
+    solve: impl FnOnce() -> Result<T, va_harness::HarnessError>,
+    tally: &mut Tally,
+) -> Option<T> {
+    tally.checked += 1;
+    match solve() {
+        Ok(got) => Some(got),
+        Err(e) => {
+            eprintln!("[xtask]   NOCONV {circuit}: {e}");
+            tally.not_converged += 1;
+            None
+        }
+    }
+}
+
 /// Run the validation harness over every known single-operating-point DC circuit, reporting
 /// pass/fail/skip per circuit. A circuit with no committed `golden/<name>.golden` is *skipped*,
 /// not failed — most of `golden/` (see [`gen_golden`]) is still empty, and that's a legitimate
@@ -113,14 +156,18 @@ fn validate_dc_circuits(root: &Path) -> Result<Tally> {
 
         let golden = va_harness::golden::GoldenDc::read(&golden_path)
             .with_context(|| format!("reading golden reference for {circuit}"))?;
-        let got = va_harness::dc::run_dc(
-            circuit_path.to_str().context("non-UTF8 circuit path")?,
-            model_path
-                .as_deref()
-                .map(|p| p.to_str().context("non-UTF8 model path"))
-                .transpose()?,
-        )
-        .with_context(|| format!("solving {circuit}"))?;
+        let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+        let model_str = model_path
+            .as_deref()
+            .map(|p| p.to_str().context("non-UTF8 model path"))
+            .transpose()?;
+        let Some(got) = try_solve(
+            circuit,
+            || va_harness::dc::run_dc(circuit_str, model_str),
+            &mut tally,
+        ) else {
+            continue;
+        };
         let verdict = va_harness::dc::compare_dc(&got, &golden)
             .with_context(|| format!("comparing {circuit} against golden"))?;
         report_verdict(circuit, verdict, &mut tally);
@@ -144,14 +191,18 @@ fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
 
         let golden = va_harness::golden::GoldenSweep::read(&golden_path)
             .with_context(|| format!("reading golden reference for {circuit}"))?;
-        let got = va_harness::dc::run_dc_sweep(
-            circuit_path.to_str().context("non-UTF8 circuit path")?,
-            model_path
-                .as_deref()
-                .map(|p| p.to_str().context("non-UTF8 model path"))
-                .transpose()?,
-        )
-        .with_context(|| format!("solving {circuit}"))?;
+        let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+        let model_str = model_path
+            .as_deref()
+            .map(|p| p.to_str().context("non-UTF8 model path"))
+            .transpose()?;
+        let Some(got) = try_solve(
+            circuit,
+            || va_harness::dc::run_dc_sweep(circuit_str, model_str),
+            &mut tally,
+        ) else {
+            continue;
+        };
         let verdict = va_harness::dc::compare_dc_sweep(&got, &golden)
             .with_context(|| format!("comparing {circuit} against golden"))?;
         report_verdict(circuit, verdict, &mut tally);
@@ -159,7 +210,8 @@ fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
     Ok(tally)
 }
 
-/// Like [`validate_dc_circuits`], for every known `.tran` transient circuit (§ ladder rungs 3/4).
+/// Like [`validate_dc_circuits`], for every known `.tran` transient circuit (§ ladder rungs
+/// 3/4/6).
 fn validate_tran_circuits(root: &Path) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in TRAN_CIRCUITS {
@@ -175,14 +227,18 @@ fn validate_tran_circuits(root: &Path) -> Result<Tally> {
 
         let golden = va_harness::golden::GoldenTran::read(&golden_path)
             .with_context(|| format!("reading golden reference for {circuit}"))?;
-        let got = va_harness::tran::run_tran(
-            circuit_path.to_str().context("non-UTF8 circuit path")?,
-            model_path
-                .as_deref()
-                .map(|p| p.to_str().context("non-UTF8 model path"))
-                .transpose()?,
-        )
-        .with_context(|| format!("solving {circuit}"))?;
+        let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+        let model_str = model_path
+            .as_deref()
+            .map(|p| p.to_str().context("non-UTF8 model path"))
+            .transpose()?;
+        let Some(got) = try_solve(
+            circuit,
+            || va_harness::tran::run_tran(circuit_str, model_str),
+            &mut tally,
+        ) else {
+            continue;
+        };
         let verdict = va_harness::tran::compare_tran(&got, &golden)
             .with_context(|| format!("comparing {circuit} against golden"))?;
         report_verdict(circuit, verdict, &mut tally);
@@ -190,9 +246,10 @@ fn validate_tran_circuits(root: &Path) -> Result<Tally> {
     Ok(tally)
 }
 
-/// Print one circuit's PASS/FAIL line and fold it into `tally`.
+/// Print one circuit's PASS/FAIL line and fold a golden-mismatch into `tally`. Only called for a
+/// circuit that already converged ([`try_solve`] returned `Some`) — `tally.checked` was already
+/// incremented there, not here.
 fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally) {
-    tally.checked += 1;
     if verdict.passed {
         eprintln!(
             "[xtask]   PASS {circuit}: error={:.3e} (tol {:.0e})",
@@ -208,12 +265,16 @@ fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally
 }
 
 /// Run the validation harness over every known circuit (DC, `.dc`-sweep, and `.tran`) and report
-/// pass/fail/skip.
+/// pass/fail/skip, plus `CLAUDE.md` §7's fourth metric — the convergence fraction (T6.4) — as its
+/// own line, distinct from the golden-comparison pass/fail count.
 ///
 /// # Errors
 ///
-/// If any circuit that *does* have a golden reference fails to solve, or diverges from it beyond
-/// `va_harness::tol::DC_REL`/`TRAN_RMS`.
+/// If any circuit that *does* have a golden reference fails to converge, or converges but
+/// diverges from golden beyond `va_harness::tol::DC_REL`/`TRAN_RMS`. Every known circuit is still
+/// attempted and reported first — a single non-convergent circuit no longer aborts the batch
+/// before the rest are checked (T6.4's own point: the convergence fraction is only useful if
+/// computed over the *whole* zoo, not just however much of it ran before the first failure).
 fn validate() -> Result<()> {
     eprintln!("[xtask] validate: running va-harness over the model zoo vs golden/ …");
     let root = workspace_root()?;
@@ -223,11 +284,23 @@ fn validate() -> Result<()> {
     tally.merge(validate_tran_circuits(&root)?);
 
     eprintln!(
-        "[xtask] validate: {} checked, {} failed, {} skipped (no golden)",
-        tally.checked, tally.failed, tally.skipped
+        "[xtask] validate: {} checked, {} failed golden, {} did not converge, {} skipped (no golden)",
+        tally.checked, tally.failed, tally.not_converged, tally.skipped
     );
-    if tally.failed > 0 {
-        bail!("{} circuit(s) failed golden comparison", tally.failed);
+    if tally.checked > 0 {
+        eprintln!(
+            "[xtask] validate: convergence {}/{} ({:.1}%) — CLAUDE.md §7's convergence metric",
+            tally.converged(),
+            tally.checked,
+            100.0 * tally.converged() as f64 / tally.checked as f64
+        );
+    }
+    if tally.not_converged > 0 || tally.failed > 0 {
+        bail!(
+            "{} circuit(s) did not converge, {} circuit(s) failed golden comparison",
+            tally.not_converged,
+            tally.failed
+        );
     }
     Ok(())
 }
@@ -1019,6 +1092,56 @@ mod tests {
         // truncated to `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is
         // skipped anymore; `validate` must pass all six for real.
         validate().expect("validate should pass: all six known circuits have real golden");
+    }
+
+    #[test]
+    fn try_solve_tracks_a_non_convergent_circuit_without_erroring() {
+        // A resistor between two nets with no path to ground anywhere is singular, not just
+        // slow to converge (confirmed empirically: `va_core::CoreError::Singular`, propagated as
+        // `HarnessError::Run("... singular matrix during linear solve")`) — a real, if synthetic,
+        // non-convergent circuit, not a hand-waved one.
+        let dir = std::env::temp_dir().join("va_xtask_try_solve_test");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("floating.net");
+        std::fs::write(&path, "R1 a b 1000\n.op\n.end\n").expect("write scratch deck");
+        let circuit_str = path.to_str().unwrap();
+
+        let mut tally = Tally::default();
+        let got = try_solve(
+            "floating.net",
+            || va_harness::dc::run_dc(circuit_str, None),
+            &mut tally,
+        );
+
+        assert!(
+            got.is_none(),
+            "a singular circuit should not report Some(_)"
+        );
+        assert_eq!(tally.checked, 1);
+        assert_eq!(tally.not_converged, 1);
+        assert_eq!(
+            tally.failed, 0,
+            "non-convergence must not also count as a golden mismatch"
+        );
+        assert_eq!(tally.converged(), 0);
+    }
+
+    #[test]
+    fn tally_converged_excludes_non_convergent_circuits_from_the_denominator_numerator() {
+        let mut tally = Tally {
+            checked: 5,
+            not_converged: 2,
+            ..Tally::default()
+        };
+        assert_eq!(tally.converged(), 3);
+        tally.merge(Tally {
+            checked: 1,
+            not_converged: 1,
+            ..Tally::default()
+        });
+        assert_eq!(tally.checked, 6);
+        assert_eq!(tally.not_converged, 3);
+        assert_eq!(tally.converged(), 3);
     }
 
     #[test]
