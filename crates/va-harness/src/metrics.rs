@@ -34,8 +34,8 @@ pub fn max_relative_error(got: &[f64], reference: &[f64]) -> Result<f64, Harness
 /// Root-mean-square error between two waveforms sharing a timebase (the transient metric).
 ///
 /// `rms = sqrt(mean_i (got_i - ref_i)^2)` — a plain absolute RMS over already-aligned samples;
-/// resampling two waveforms onto a shared timebase (§ the "shared-timebase resample" `docs/
-/// validation.md` mentions) is a separate, caller-side concern this function doesn't perform.
+/// resampling two waveforms onto a shared timebase ([`resample_linear`]) is a separate,
+/// caller-side concern this function doesn't perform.
 ///
 /// # Errors
 ///
@@ -56,6 +56,48 @@ pub fn rms_error(got: &[f64], reference: &[f64]) -> Result<f64, HarnessError> {
         .map(|(&g, &r)| (g - r).powi(2))
         .sum();
     Ok((sum_sq / got.len() as f64).sqrt())
+}
+
+/// Linearly resample `(times, values)` onto `target_times` — the "shared-timebase resample"
+/// [`rms_error`]'s own doc comment defers to. Two independent transient integrators (this
+/// project's own adaptive-timestep `va-transient`, QSPICE's own) essentially never land on the
+/// same time points, so comparing their waveforms point-for-point would silently diff unrelated
+/// samples; this reduces both to one shared timebase (`target_times`, conventionally the golden
+/// reference's own) first.
+///
+/// Piecewise-linear interpolation between the two bracketing samples. A `target_times` point
+/// outside `times`' own covered range is clamped to `values`' first/last sample — extrapolating
+/// a transient waveform past what was actually simulated isn't meaningful, and the two runs'
+/// `.tran` windows are expected to already overlap (both solve the same `.tran <tstep> <tstop>`
+/// card).
+///
+/// `times` must be sorted ascending and non-empty (guaranteed by any real integrator/QSPICE
+/// output; a debug assertion catches a hand-built fixture that violates it).
+pub fn resample_linear(times: &[f64], values: &[f64], target_times: &[f64]) -> Vec<f64> {
+    debug_assert_eq!(times.len(), values.len());
+    debug_assert!(!times.is_empty(), "resample_linear: empty source series");
+    debug_assert!(
+        times.windows(2).all(|w| w[0] <= w[1]),
+        "times must be sorted"
+    );
+
+    target_times
+        .iter()
+        .map(|&t| {
+            if t <= times[0] {
+                return values[0];
+            }
+            if t >= *times.last().unwrap() {
+                return *values.last().unwrap();
+            }
+            // First index where `times[i] >= t` — `t` falls in `(times[i-1], times[i]]`.
+            let i = times.partition_point(|&ti| ti < t);
+            let (t0, t1) = (times[i - 1], times[i]);
+            let (v0, v1) = (values[i - 1], values[i]);
+            let frac = (t - t0) / (t1 - t0);
+            v0 + frac * (v1 - v0)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -113,5 +155,30 @@ mod tests {
     fn empty_series_have_zero_error() {
         assert_eq!(max_relative_error(&[], &[]).unwrap(), 0.0);
         assert_eq!(rms_error(&[], &[]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn resample_linear_interpolates_between_bracketing_samples() {
+        let times = [0.0, 1.0, 2.0];
+        let values = [0.0, 10.0, 10.0];
+        // Halfway between t=0 (v=0) and t=1 (v=10) -> 5.0.
+        let out = resample_linear(&times, &values, &[0.5]);
+        assert!((out[0] - 5.0).abs() < 1e-12, "out = {out:?}");
+    }
+
+    #[test]
+    fn resample_linear_matches_exactly_at_source_samples() {
+        let times = [0.0, 1.0, 2.0];
+        let values = [3.0, 4.0, 5.0];
+        let out = resample_linear(&times, &values, &times);
+        assert_eq!(out, values);
+    }
+
+    #[test]
+    fn resample_linear_clamps_outside_the_source_range() {
+        let times = [1.0, 2.0];
+        let values = [10.0, 20.0];
+        let out = resample_linear(&times, &values, &[0.0, 3.0]);
+        assert_eq!(out, vec![10.0, 20.0]);
     }
 }

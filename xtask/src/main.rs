@@ -40,9 +40,8 @@ fn print_usage() {
 }
 
 /// The single-operating-point DC circuits `validate`/`gen-golden` know how to drive (§ ladder
-/// rungs 1/5) — a `.tran` deck (rungs 3/4/6) has no golden format yet (`docs/roadmap.md`'s T6.3
-/// notes), so it's deliberately left off this list rather than silently mishandled. `model` is
-/// `None` for a circuit solved entirely by `va-abi`'s reference primitives.
+/// rungs 1/5). `model` is `None` for a circuit solved entirely by `va-abi`'s reference
+/// primitives.
 const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/divider.net", None),
     ("circuits/mos_dc.net", Some("models/mosfet.va")),
@@ -51,6 +50,15 @@ const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
 /// The `.dc`-sweep circuits `validate`/`gen-golden` know how to drive (§ ladder rung 2).
 const SWEEP_CIRCUITS: &[(&str, Option<&str>)] =
     &[("circuits/diode_iv.net", Some("models/diode.va"))];
+
+/// The `.tran` transient circuits `validate`/`gen-golden` know how to drive (§ ladder rungs
+/// 3/4). Rung 6 (the ring oscillator) isn't here yet — it has no `circuits/*.net` deck at all;
+/// its demo builds `va-abi::Bjt` instances directly in a `va-transient` test, since `va-netlist`
+/// has no BJT netlist element (a real, scoped gap, not an oversight).
+const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
+    ("circuits/rc_step.net", None),
+    ("circuits/rectifier.net", Some("models/diode.va")),
+];
 
 /// Pass/fail/skip tally, shared across [`validate`]'s DC and sweep circuit passes.
 #[derive(Default)]
@@ -151,6 +159,37 @@ fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
     Ok(tally)
 }
 
+/// Like [`validate_dc_circuits`], for every known `.tran` transient circuit (§ ladder rungs 3/4).
+fn validate_tran_circuits(root: &Path) -> Result<Tally> {
+    let mut tally = Tally::default();
+    for &(circuit, model) in TRAN_CIRCUITS {
+        let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
+        if !golden_path.is_file() {
+            eprintln!(
+                "[xtask]   skip {circuit}: no golden reference at {}",
+                golden_path.display()
+            );
+            tally.skipped += 1;
+            continue;
+        }
+
+        let golden = va_harness::golden::GoldenTran::read(&golden_path)
+            .with_context(|| format!("reading golden reference for {circuit}"))?;
+        let got = va_harness::tran::run_tran(
+            circuit_path.to_str().context("non-UTF8 circuit path")?,
+            model_path
+                .as_deref()
+                .map(|p| p.to_str().context("non-UTF8 model path"))
+                .transpose()?,
+        )
+        .with_context(|| format!("solving {circuit}"))?;
+        let verdict = va_harness::tran::compare_tran(&got, &golden)
+            .with_context(|| format!("comparing {circuit} against golden"))?;
+        report_verdict(circuit, verdict, &mut tally);
+    }
+    Ok(tally)
+}
+
 /// Print one circuit's PASS/FAIL line and fold it into `tally`.
 fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally) {
     tally.checked += 1;
@@ -168,19 +207,20 @@ fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally
     }
 }
 
-/// Run the validation harness over every known circuit (DC and `.dc`-sweep) and report
+/// Run the validation harness over every known circuit (DC, `.dc`-sweep, and `.tran`) and report
 /// pass/fail/skip.
 ///
 /// # Errors
 ///
-/// If any circuit that *does* have a golden reference fails to solve, or diverges from it
-/// beyond `va_harness::tol::DC_REL`.
+/// If any circuit that *does* have a golden reference fails to solve, or diverges from it beyond
+/// `va_harness::tol::DC_REL`/`TRAN_RMS`.
 fn validate() -> Result<()> {
     eprintln!("[xtask] validate: running va-harness over the model zoo vs golden/ …");
     let root = workspace_root()?;
 
     let mut tally = validate_dc_circuits(&root)?;
     tally.merge(validate_sweep_circuits(&root)?);
+    tally.merge(validate_tran_circuits(&root)?);
 
     eprintln!(
         "[xtask] validate: {} checked, {} failed, {} skipped (no golden)",
@@ -230,6 +270,16 @@ const QSPICE_MODEL_TRANSLATIONS: &[(&str, &str)] = &[(
 const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] =
     &[("circuits/diode_iv.net", ".model diode D(IS=1e-14 N=1)")];
 
+/// Like [`QSPICE_NATIVE_CIRCUITS`], for the `.tran` transient circuits (§ ladder rung 3):
+/// `circuits/rc_step.net` is a pure `R`/`C`/`V` deck, needing zero translation, just multi-point
+/// `.qraw` parsing ([`golden_tran_from_qraw`]) instead of the single-`.op`-point path.
+const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &["circuits/rc_step.net"];
+
+/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.tran` transient circuits (§ ladder rung 4)
+/// that reference a custom `.va` model.
+const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str)] =
+    &[("circuits/rectifier.net", ".model diode D(IS=1e-14 N=1)")];
+
 /// Rewrite `deck` into a QSPICE-runnable deck: insert `model_card`, and widen any 3-terminal
 /// `M<name> d g s model` device line (this project's own simplified form, § `va-netlist`'s
 /// module doc) into QSPICE's native 4-terminal `M<name> d g s b model` by tying the body to the
@@ -265,6 +315,35 @@ fn translate_for_qspice(deck: &str, model_card: &str) -> String {
             out.push_str(line);
             out.push('\n');
         }
+    }
+    out
+}
+
+/// Force a `.tran` deck to cold-start from the zero vector, matching this project's own
+/// `va-transient` convention (`va-cli::solve_transient`'s doc comment: no `.ic`/`UIC` support,
+/// so a transient run always starts from `x=0`). QSPICE, like standard SPICE, otherwise computes
+/// the DC operating point first and starts the transient integration from *there* instead —
+/// confirmed empirically, not assumed: an unmodified `circuits/rc_step.net` run through QSPICE
+/// reported `V(out)` already at its settled ~5 V for the *entire* 5 ms window, not climbing the
+/// RC charging curve from 0, and `cargo xtask validate` genuinely failed against it (caught the
+/// same way the earlier title-line bug was, by sanity-checking the regenerated golden against
+/// the netlist's own hand-derived expectation rather than trusting a clean `gen-golden` exit).
+/// Seeds every reactive (`C`/`L`) element's own `IC=0` device parameter and appends `UIC` to the
+/// `.tran` card — SPICE's standard mechanism for skipping the initial operating-point solve.
+fn cold_start_tran_deck(deck: &str) -> String {
+    let mut out = String::new();
+    for line in deck.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let is_reactive = matches!(toks.first(), Some(t) if t.starts_with(['C', 'c', 'L', 'l']))
+            && !line.trim_start().starts_with('*');
+        let is_tran_card = line.trim_start().to_ascii_lowercase().starts_with(".tran");
+        out.push_str(line);
+        if is_reactive && !line.to_ascii_uppercase().contains("IC=") {
+            out.push_str(" IC=0");
+        } else if is_tran_card && !line.to_ascii_uppercase().contains("UIC") {
+            out.push_str(" UIC");
+        }
+        out.push('\n');
     }
     out
 }
@@ -375,11 +454,67 @@ fn gen_golden() -> Result<()> {
         );
         generated += 1;
     }
+
+    for &circuit in QSPICE_NATIVE_TRAN_CIRCUITS {
+        let circuit_path = root.join(circuit);
+        let deck =
+            std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
+        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+
+        let native_deck = cold_start_tran_deck(&deck);
+        let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit}"))?;
+        let golden = golden_tran_from_qraw(&raw, &net.node_order)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} point(s))",
+            golden_path.display(),
+            golden.points.len()
+        );
+        generated += 1;
+    }
+
+    for &(circuit, model_card) in QSPICE_TRAN_MODEL_TRANSLATIONS {
+        let circuit_path = root.join(circuit);
+        let deck =
+            std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
+        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+        let native_deck = cold_start_tran_deck(&translate_for_qspice(&deck, model_card));
+
+        let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
+        let golden = golden_tran_from_qraw(&raw, &net.node_order)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} point(s), native-model translation)",
+            golden_path.display(),
+            golden.points.len()
+        );
+        generated += 1;
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 
     eprintln!(
         "[xtask] gen-golden: {generated} circuit(s) regenerated from QSPICE (of {} known)",
-        DC_CIRCUITS.len() + SWEEP_CIRCUITS.len()
+        DC_CIRCUITS.len() + SWEEP_CIRCUITS.len() + TRAN_CIRCUITS.len()
     );
     Ok(())
 }
@@ -407,8 +542,11 @@ fn run_qspice_op(qspice: &Path, deck: &str, workdir: &Path, stem: &str) -> Resul
     parse_qraw(&bytes)
 }
 
-/// Like [`run_qspice_op`], for a `.dc`-sweep deck (§ ladder rung 2) whose `.qraw` has more than
-/// one point.
+/// Like [`run_qspice_op`], for any deck whose `.qraw` has more than one point — a `.dc` sweep
+/// (§ ladder rung 2) or a `.tran` transient run (§ ladder rungs 3/4): both are point-major
+/// multi-point `.qraw` files with no format difference `parse_qraw_sweep` needs to know about
+/// (see [`golden_sweep_from_qraw`] vs. [`golden_tran_from_qraw`] for where the two are told
+/// apart, by which variable each keys its rows on).
 fn run_qspice_sweep(
     qspice: &Path,
     deck: &str,
@@ -641,6 +779,34 @@ fn golden_sweep_from_qraw(
     ))
 }
 
+/// Map a parsed `.qraw` transient run onto this project's own `node_order`, keyed by the `Time`
+/// variable QSPICE always includes for a `.tran` run (confirmed empirically against a real run
+/// of `circuits/rc_step.net`) — the transient analogue of [`golden_sweep_from_qraw`], which keys
+/// off a swept source's own name instead since a `.dc` sweep's independent variable is a device
+/// parameter, not time.
+fn golden_tran_from_qraw(
+    raw: &QspiceRawSweep,
+    node_order: &[String],
+) -> Result<va_harness::golden::GoldenTran> {
+    let time_idx = raw
+        .variables
+        .iter()
+        .position(|v| v.eq_ignore_ascii_case("time"))
+        .context("QSPICE output has no `Time` variable")?;
+    let points = raw
+        .points
+        .iter()
+        .map(|row| {
+            let node_values = node_values_from_row(&raw.variables, row, node_order)?;
+            Ok((row[time_idx], node_values))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(va_harness::golden::GoldenTran {
+        node_order: node_order.to_vec(),
+        points,
+    })
+}
+
 /// Locate `QSPICE64.exe`: `QSPICE_PATH` env var first (an exact file path), then `PATH`, then
 /// the standard Windows install location. QSPICE is Windows-only, matching this project's own
 /// dev environment.
@@ -740,11 +906,12 @@ mod tests {
 
     #[test]
     fn validate_passes_with_all_known_circuits_golden() {
-        // The project's actual current state: every circuit in `DC_CIRCUITS`/`SWEEP_CIRCUITS`
-        // now has real, committed QSPICE golden (rungs 1/2/5) — `divider.net` from
-        // `QSPICE_NATIVE_CIRCUITS`, `mos_dc.net`/`diode_iv.net` from the native-model
-        // translations. Nothing is skipped anymore; `validate` must pass all three for real.
-        validate().expect("validate should pass: all three known circuits have real golden");
+        // The project's actual current state: every circuit in `DC_CIRCUITS`/`SWEEP_CIRCUITS`/
+        // `TRAN_CIRCUITS` now has real, committed QSPICE golden (rungs 1/2/3/4/5) — `divider.net`
+        // from `QSPICE_NATIVE_CIRCUITS`/`rc_step.net` from `QSPICE_NATIVE_TRAN_CIRCUITS`
+        // unmodified; `mos_dc.net`/`diode_iv.net`/`rectifier.net` from a native-model
+        // translation. Nothing is skipped anymore; `validate` must pass all five for real.
+        validate().expect("validate should pass: all five known circuits have real golden");
     }
 
     #[test]

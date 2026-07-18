@@ -460,8 +460,10 @@ fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
 /// Always starts from the zero vector — v0 has no `.ic`/`UIC` support (this module's doc
 /// comment). For a deck with no time-varying source this is the ordinary fixed-instance path
 /// ([`va_transient::integrator::run`]); a `SIN`-sourced deck instead rebuilds that source fresh
-/// every step via [`va_transient::integrator::run_dynamic`].
-fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
+/// every step via [`va_transient::integrator::run_dynamic`]. `pub` so `va-harness` can get the
+/// numeric [`Waveform`] back directly (§ golden comparison), the same reason `solve_dc`/
+/// `solve_dc_sweep` are — rather than parsing [`run_sim`]'s printed stdout.
+pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
     let (tstep, tstop) = net
         .tran
         .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;

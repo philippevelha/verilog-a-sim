@@ -26,7 +26,7 @@ shared, demoable milestone that several theses light up at once.
 
 ## Status at a glance
 
-> Updated 2026-07-13 (T6.1/T6.2/T6.3 rows only — the rest of this table predates this session's
+> Updated 2026-07-18 (T6.1/T6.2/T6.3 rows only — the rest of this table predates this session's
 > ladder-rung/harness work and is not otherwise refreshed; see this file's later sections and
 > the *Cross-thesis milestones* table for current per-rung detail). Legend:
 > **✅ Complete** — code, tests, the validation gate, *and* the tutorial are all green.
@@ -52,7 +52,7 @@ shared, demoable milestone that several theses light up at once.
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
 | T6.1 — netlist parser | R/C/D/M/V elements (`M` = 3-terminal model-referencing device, § rung 5), dot-cards incl. `.tran` timing and `.dc <source> <start> <stop> <step>` sweep; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
 | T6.2 — CLI wiring (DC + sweep + transient) | `va-cli sim` drives a DC operating point, a `.dc` sweep, and `.tran` (incl. `SIN`-sourced circuits like the rectifier) through the real pipeline | 🟢 |
-| T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`; `xtask validate`/`gen-golden` real and wired; ladder rungs 1/2/5 formally passed against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card) — see this file's T6.3 section | 🟢 (partial — rungs 3/4/6 `.tran` golden still outstanding) |
+| T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; ladder rungs 1/2/3/4/5 formally passed against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix) — see this file's T6.3 section | 🟢 (partial — rung 6 still outstanding, no `.net` deck exists) |
 | T5 | crate stub only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
@@ -1313,8 +1313,8 @@ methodology + metrics report vs ngspice.
   workflow.
 
 ### Phase T6.3 — Full validation harness & the metrics dashboard
-> **Status: 🟢 partial (rungs 1/2/5 golden real as of 2026-07-17; rungs 3/4/6 `.tran` golden
-> still outstanding).**
+> **Status: 🟢 partial (rungs 1/2/3/4/5 golden real as of 2026-07-18; rung 6 still outstanding —
+> no `circuits/*.net` deck exists for it yet).**
 > `va-harness::metrics::{max_relative_error, rms_error}` are real implementations now (were
 > `todo!()`), including the near-zero-reference division guard `max_relative_error`'s own doc
 > comment always specified but never implemented; 10 tests. `va-harness::golden::GoldenDc` is a
@@ -1445,6 +1445,63 @@ methodology + metrics report vs ngspice.
 > *Now outstanding:* `.tran`-waveform golden support (rungs 3/4/6); a per-rung/convergence-fraction
 > dashboard; refreshing `t6-integration/03-validation.qmd` for the three now-real golden files;
 > the branch-current golden gap noted just above.
+>
+> **`.tran`-waveform golden support closed for rungs 3/4 (2026-07-18)** — rung 6 (ring
+> oscillator) still has no `circuits/*.net` deck to drive at all (its demo builds `va-abi::Bjt`
+> instances directly in a `va-transient` test; `va-netlist` has no BJT netlist element yet, a
+> real, scoped gap, not attempted here). `golden::GoldenTran` (a `@tran`-marked table, time in
+> place of a sweep's swept value — the `@tran` marker exists so a `.golden` file's own text says
+> unambiguously which of the two table-shaped parsers it needs) and `metrics::resample_linear`
+> (piecewise-linear, clamped outside its source's own covered range) extend the `GoldenDc`/
+> `GoldenSweep` pattern to a transient waveform; `tran::{run_tran, compare_tran}` mirror `dc.rs`'s
+> shape, needing one small additive `va-cli` change (`solve_transient` made `pub`, identically to
+> `solve_dc`/`solve_dc_sweep` before it). `xtask` gained `TRAN_CIRCUITS`/multi-point `.qraw`
+> handling for `.tran`: it turns out to need **no new `.qraw` parsing at all** — a `.dc` sweep and
+> a `.tran` run are both just "point-major multi-point `.qraw`" to `parse_qraw_sweep`, which
+> rung 2 already built; only `golden_tran_from_qraw` (keyed off QSPICE's always-present `Time`
+> variable, vs. `golden_sweep_from_qraw`'s swept-source-name key) is new.
+>
+> Two more real, empirically-found mismatches had to be closed before rungs 3/4 actually
+> validated anything, both caught by sanity-checking the regenerated golden against a
+> hand-derived expectation rather than trusting a clean run (the same discipline the earlier
+> title-line bug — § this section's 2026-07-17 entry — established):
+>
+> 1. **QSPICE solves the DC operating point before a `.tran` run, by standard SPICE convention;
+>    `va-transient` never does** (`va-cli::solve_transient`'s own doc comment: no `.ic`/`UIC`
+>    support, always starts from the zero vector). An unmodified `circuits/rc_step.net` run
+>    through QSPICE reported `V(out)` already at its settled ~5 V for the *entire* 5 ms window,
+>    not climbing the RC charging curve from 0 — `cargo xtask validate` genuinely failed against
+>    it. Fixed with `xtask::cold_start_tran_deck`: seed every reactive (`C`/`L`) element's own
+>    `IC=0` device parameter and append `UIC` to the `.tran` card, SPICE's standard mechanism for
+>    skipping the operating-point solve — confirmed against the analytic RC curve afterward
+>    (`V(out)≈3.169` at `t≈1.004 ms` vs. `5·(1−e⁻¹·⁰⁰⁴)≈3.170`; `≈4.966` at `t=5 ms` vs.
+>    `5·(1−e⁻⁵)≈4.9663`).
+> 2. **`va_transient::integrator`'s `Waveform` always reports the caller's raw seed as its own
+>    first sample** (`t: vec![cfg.tstart], x: vec![x0.clone()]`, before any integration step
+>    runs) — for `rc_step.net`'s `V(in)`, held at its source value `5` at every genuinely solved
+>    step but `0` in that raw seed, comparing it in raised the circuit's own error to `1.097e-1`
+>    (bit-for-bit `5² / (2 × 1038 points)` under a square root — the whole error, concentrated in
+>    one sample). Dropping just that one sample wasn't enough by itself, though: still resampling
+>    *every* golden time — including QSPICE's own densely-clustered early adaptive-step
+>    samples, far finer than `va-transient`'s own first real step — clamps that whole early
+>    region to the first real `got` value, which is fine for `rc_step.net` (already settled) but
+>    wrong for `rectifier.net`'s fast-changing early `SIN` waveform, raising *its* error from
+>    `7.8e-4` to `3.1e-2`. `tran::compare_tran` now excludes both: `got`'s own seed sample, and
+>    every golden sample earlier than `got`'s own first real solved time — the same "don't ask a
+>    coarser series to explain a region it never resolved" principle applied to each side in turn.
+>    Two regression tests (`compare_tran_ignores_gots_seed_for_an_algebraically_forced_node`,
+>    `compare_tran_excludes_golden_samples_earlier_than_gots_first_real_step`) encode each half so
+>    a future change can't silently reintroduce either failure mode.
+>
+> `golden/rc_step.golden` (1038 points) and `golden/rectifier.golden` (1065 points) are now real,
+> committed QSPICE output; `cargo xtask validate` reports `PASS` for both (`error=2.260e-5` and
+> `7.925e-4` respectively, both inside `TRAN_RMS`'s `1e-3` — `rectifier.net`'s margin is real and
+> unpadded, not artificially loosened).
+>
+> *Now outstanding:* rung 6 (needs a `va-netlist` BJT element plus a ring-oscillator `.net` deck,
+> not attempted here); a per-rung/convergence-fraction dashboard; refreshing
+> `t6-integration/03-validation.qmd` for all five now-real golden files; the branch-current golden
+> gap (rung 2, noted above) — the only remaining gaps in T6.3.
 
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.
@@ -1462,20 +1519,21 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 |------|--------------------|-----------|--------------------------|-------------------------------|--------|
 | 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | ✅ **formally passed** — `cargo xtask validate` is green against `golden/divider.golden`, real QSPICE output (error=0.000e0, tol 1e-4) |
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | ✅ **formally passed** — green against `golden/diode_iv.golden`, real QSPICE output via a native `.model diode D(...)` translation (error=1.850e-16, tol 1e-4); see T6.3's caveat on this rung's golden not exercising the diode's own current |
-| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | `cargo run -p va-cli -- sim circuits/rc_step.net --tran` solves it through the real pipeline; **golden gate pending `va-harness` `.tran` support (T6.3)** |
-| 4    | diode rectifier    | transient | T4                       | T4.2                          | `cargo run -p va-cli -- sim circuits/rectifier.net --tran` produces a correct half-wave-rectified/RC-filtered waveform; **golden gate pending `va-harness` `.tran` support (T6.3)** |
+| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start (error=2.260e-5, tol 1e-3) |
+| 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start (error=7.925e-4, tol 1e-3) |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ✅ **formally passed** — green against `golden/mos_dc.golden`, real QSPICE output via a native `.model mosfet NMOS(...)` translation (error=1.977e-9, tol 1e-4) |
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | `cargo test -p va-transient ring_oscillator_sustains_oscillation` — real, growing oscillation from an unstable DC equilibrium, `va-abi::Bjt` (new); **golden gate pending `va-harness` `.tran` support (T6.3)** (see T4.3) |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.
 
-> **Rungs 1, 2, and 5 are formally "passed" as of 2026-07-17** — each has both real
+> **Rungs 1, 2, 3, 4, and 5 are formally "passed"** as of 2026-07-18 — each has both real
 > implementation reach *and* a green `cargo xtask validate` against a committed, genuinely
-> QSPICE-generated golden file (rungs 2/5 via a hand-translated QSPICE-native `.model` card, § the
-> T6.3 section's 2026-07-17 entry). Rungs 3/4/6 still record *implementation reach* only — closing
-> them needs `.tran`-waveform golden support, which doesn't exist yet; see this file's own T6.3
-> section for the full account.
+> QSPICE-generated golden file (rungs 2/5 via a hand-translated QSPICE-native `.model` card;
+> rungs 3/4 via that plus a `UIC` cold-start fix; § the T6.3 section's 2026-07-17/2026-07-18
+> entries). Only rung 6 still records *implementation reach* only — closing it needs a
+> `va-netlist` BJT element and a ring-oscillator `.net` deck, neither of which exists yet; see
+> this file's own T6.3 section for the full account.
 
 **Ladder rung 5 (a MOS): implementation reach closed 2026-07-12** — was the sole fully
 unstarted rung; closed the same way rung 6's ring oscillator was, with a new hand-written

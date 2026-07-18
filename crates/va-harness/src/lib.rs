@@ -9,6 +9,7 @@
 pub mod dc;
 pub mod golden;
 pub mod metrics;
+pub mod tran;
 
 use thiserror::Error;
 
