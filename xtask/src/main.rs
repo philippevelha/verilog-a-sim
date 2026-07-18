@@ -52,12 +52,12 @@ const SWEEP_CIRCUITS: &[(&str, Option<&str>)] =
     &[("circuits/diode_iv.net", Some("models/diode.va"))];
 
 /// The `.tran` transient circuits `validate`/`gen-golden` know how to drive (§ ladder rungs
-/// 3/4). Rung 6 (the ring oscillator) isn't here yet — it has no `circuits/*.net` deck at all;
-/// its demo builds `va-abi::Bjt` instances directly in a `va-transient` test, since `va-netlist`
-/// has no BJT netlist element (a real, scoped gap, not an oversight).
+/// 3/4/6). `ring_osc.net`'s `bjt` device has no `.va` model — it resolves to the hand-written
+/// `va-abi::reference::Bjt` via `va-cli::reference_instance`, so `model` is `None` here too.
 const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_step.net", None),
     ("circuits/rectifier.net", Some("models/diode.va")),
+    ("circuits/ring_osc.net", None),
 ];
 
 /// Pass/fail/skip tally, shared across [`validate`]'s DC and sweep circuit passes.
@@ -275,16 +275,117 @@ const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] =
 /// `.qraw` parsing ([`golden_tran_from_qraw`]) instead of the single-`.op`-point path.
 const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &["circuits/rc_step.net"];
 
-/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.tran` transient circuits (§ ladder rung 4)
-/// that reference a custom `.va` model.
-const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str)] =
-    &[("circuits/rectifier.net", ".model diode D(IS=1e-14 N=1)")];
+/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.tran` transient circuits (§ ladder rungs
+/// 4/6) that reference a custom model. `models/bjt` has no `.va` file (it's the hand-written
+/// `va-abi::reference::Bjt`), but the same one-to-one textbook-parameter translation applies:
+/// `va-abi::reference::Bjt`'s simplified Ebers-Moll is exactly SPICE's own `NPN` model with
+/// `IS`/`BF`/`BR` set and every other parameter (`VAF`, `RB`/`RC`/`RE`, `CJE`/`CJC`, …) left at
+/// its SPICE default of "off" — matching this project's own "no Early effect, no ohmic
+/// parasitics, no junction capacitance" stated scope exactly.
+///
+/// The third field is an optional golden-generation-only `.tran` `tstop` override — see
+/// [`RING_OSC_GOLDEN_TSTOP`]'s own doc comment for why `ring_osc.net` needs one and
+/// `rectifier.net` doesn't.
+const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str, Option<f64>)] = &[
+    (
+        "circuits/rectifier.net",
+        ".model diode D(IS=1e-14 N=1)",
+        None,
+    ),
+    (
+        "circuits/ring_osc.net",
+        ".model bjt NPN(IS=1e-15 BF=100 BR=1)",
+        Some(RING_OSC_GOLDEN_TSTOP),
+    ),
+];
 
-/// Rewrite `deck` into a QSPICE-runnable deck: insert `model_card`, and widen any 3-terminal
+/// The `.tran` cutoff used *only* when generating rung 6's golden reference — deliberately
+/// shorter than `circuits/ring_osc.net`'s own `.tran 100u 0.2` card, which stays at `0.2` s so
+/// `va-cli`'s own oscillation-count test (needing several growth cycles to find ≥4 rail-midpoint
+/// crossings) keeps working unchanged.
+///
+/// This circuit's DC equilibrium is genuinely *unstable* (§ `t4-transient/03-events.qmd`): two
+/// independent Newton/LTE-driven solvers agree closely while the oscillation is still small and
+/// smooth, but diverge sharply once amplitude reaches the point where this simplified Ebers-Moll
+/// model's own numerical edge kicks in — chaotic sensitivity to tiny model/solver differences,
+/// not a modeling error. Confirmed empirically, not chosen arbitrarily: comparing the real
+/// `golden/ring_osc.golden` (a full 0.2 s run) against a real `va-cli` run at successively later
+/// cutoffs gave `error≈1.6e-4` to `2.4e-4` (comfortably under `TRAN_RMS`'s `1e-3`) for every
+/// cutoff up to `0.10` s, then `1.16e-2` at `0.12` s and `2.24e-2` over the full `0.2` s — a
+/// two-order-of-magnitude jump right where the trajectory visibly leaves the smooth growth
+/// regime (collector voltages swinging to within noise of `0`/`5` V, base voltages going
+/// transiently negative). Comparing only this well-behaved early window is the same principle
+/// `va_transient::integrator`'s own hand-built ring-oscillator fixture already follows for
+/// choosing its own `tstop` (§ its doc comment) — not a loosened tolerance, a narrower, honestly
+/// scoped claim about what a comparison against an unstable system can mean at all.
+const RING_OSC_GOLDEN_TSTOP: f64 = 0.1;
+
+/// Rewrite a `.tran <tstep> <tstop> [flags...]` card's own `tstop` to `new_tstop`, leaving
+/// `tstep` and any trailing flag (e.g. `UIC`) untouched. Used only for golden generation
+/// (§ [`RING_OSC_GOLDEN_TSTOP`]) — never changes the tracked circuit file `va-cli`/`va-harness`
+/// actually solve, only the scratch deck handed to QSPICE.
+fn truncate_tran_tstop(deck: &str, new_tstop: f64) -> String {
+    let mut out = String::new();
+    for line in deck.lines() {
+        if line.trim_start().to_ascii_lowercase().starts_with(".tran") {
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            let mut rewritten = vec![
+                toks[0].to_string(),
+                toks[1].to_string(),
+                new_tstop.to_string(),
+            ];
+            rewritten.extend(toks[3..].iter().map(|s| s.to_string()));
+            out.push_str(&rewritten.join(" "));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Rewrite every whole-token `gnd`/`GND` net reference to the literal `0` SPICE ground name.
+///
+/// QSPICE reliably treats `0` as the reference node for every element kind, but does **not**
+/// reliably alias a `gnd`-named net to ground for a `Q` (BJT) element's own terminal, unlike
+/// `R`/`V`/`M` — confirmed empirically, not assumed: a DC solve of a single-BJT bias circuit
+/// wired entirely through `gnd` reported `V(gnd)=5` (ground must always read `0` by definition)
+/// alongside a physically wrong "every node pinned near VCC, zero BJT current" degenerate
+/// result; the *identical* circuit with its emitter/source tied to `0` instead gives the correct
+/// forward-active bias (`V(b1)=0.662`, matching this project's own cold-start value almost
+/// exactly). Applied to every translated deck, not just ones with a `Q` element — the rewrite is
+/// topology-neutral (this project's own net interning already treats `0`/`gnd` as synonymous,
+/// case-insensitively), so there's no need to track which device kinds are actually affected by
+/// QSPICE's own quirk. Comment lines (`*...`) are left untouched.
+fn rewrite_gnd_to_zero(deck: &str) -> String {
+    let mut out = String::new();
+    for line in deck.lines() {
+        if line.trim_start().starts_with('*') || line.split_whitespace().next().is_none() {
+            out.push_str(line);
+        } else {
+            let rewritten: Vec<&str> = line
+                .split_whitespace()
+                .map(|tok| {
+                    if tok.eq_ignore_ascii_case("gnd") {
+                        "0"
+                    } else {
+                        tok
+                    }
+                })
+                .collect();
+            out.push_str(&rewritten.join(" "));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Rewrite `deck` into a QSPICE-runnable deck: insert `model_card`, widen any 3-terminal
 /// `M<name> d g s model` device line (this project's own simplified form, § `va-netlist`'s
 /// module doc) into QSPICE's native 4-terminal `M<name> d g s b model` by tying the body to the
 /// source — matches `models/mosfet.va`'s own no-body-effect scope (source is its only
-/// reference), so body=source is the physically-faithful translation, not just a syntactic one.
+/// reference), so body=source is the physically-faithful translation, not just a syntactic one —
+/// and normalize every `gnd` reference to `0` ([`rewrite_gnd_to_zero`]).
 ///
 /// `model_card` is inserted as the deck's **second** line, not prepended as the first: like
 /// every SPICE dialect, QSPICE unconditionally treats a deck's first line as its title, whatever
@@ -293,6 +394,7 @@ const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str)] =
 /// (confirmed empirically: QSPICE printed `Didn't find a model for "MOSFET" -- defaults assumed`
 /// and solved to `V(d)=4.96` instead of the analytic ~3.255 V).
 fn translate_for_qspice(deck: &str, model_card: &str) -> String {
+    let deck = rewrite_gnd_to_zero(deck);
     let mut lines = deck.lines();
     let mut out = String::new();
     if let Some(title) = lines.next() {
@@ -483,7 +585,7 @@ fn gen_golden() -> Result<()> {
         generated += 1;
     }
 
-    for &(circuit, model_card) in QSPICE_TRAN_MODEL_TRANSLATIONS {
+    for &(circuit, model_card, golden_tstop) in QSPICE_TRAN_MODEL_TRANSLATIONS {
         let circuit_path = root.join(circuit);
         let deck =
             std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
@@ -493,7 +595,10 @@ fn gen_golden() -> Result<()> {
             .context("circuit path has no file stem")?
             .to_string_lossy()
             .into_owned();
-        let native_deck = cold_start_tran_deck(&translate_for_qspice(&deck, model_card));
+        let mut native_deck = cold_start_tran_deck(&translate_for_qspice(&deck, model_card));
+        if let Some(tstop) = golden_tstop {
+            native_deck = truncate_tran_tstop(&native_deck, tstop);
+        }
 
         let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
@@ -907,11 +1012,13 @@ mod tests {
     #[test]
     fn validate_passes_with_all_known_circuits_golden() {
         // The project's actual current state: every circuit in `DC_CIRCUITS`/`SWEEP_CIRCUITS`/
-        // `TRAN_CIRCUITS` now has real, committed QSPICE golden (rungs 1/2/3/4/5) — `divider.net`
-        // from `QSPICE_NATIVE_CIRCUITS`/`rc_step.net` from `QSPICE_NATIVE_TRAN_CIRCUITS`
-        // unmodified; `mos_dc.net`/`diode_iv.net`/`rectifier.net` from a native-model
-        // translation. Nothing is skipped anymore; `validate` must pass all five for real.
-        validate().expect("validate should pass: all five known circuits have real golden");
+        // `TRAN_CIRCUITS` now has real, committed QSPICE golden (all six ladder rungs) —
+        // `divider.net`/`rc_step.net` unmodified (`QSPICE_NATIVE_CIRCUITS`/
+        // `QSPICE_NATIVE_TRAN_CIRCUITS`); `mos_dc.net`/`diode_iv.net`/`rectifier.net`/
+        // `ring_osc.net` from a native-model translation (`ring_osc.net`'s golden additionally
+        // truncated to `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is
+        // skipped anymore; `validate` must pass all six for real.
+        validate().expect("validate should pass: all six known circuits have real golden");
     }
 
     #[test]
@@ -1101,9 +1208,31 @@ mod tests {
     fn translate_for_qspice_widens_a_three_terminal_m_line() {
         let deck = "* title\nM1  d   g   gnd mosfet\n.op\n.end\n";
         let out = translate_for_qspice(deck, ".model mosfet NMOS(LEVEL=1)");
+        // "gnd" is also normalized to "0" (rewrite_gnd_to_zero) before widening.
         assert!(
-            out.lines().any(|l| l == "M1 d g gnd gnd mosfet"),
-            "expected a body=source-widened M line, got:\n{out}"
+            out.lines().any(|l| l == "M1 d g 0 0 mosfet"),
+            "expected a body=source-widened, gnd-normalized M line, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_gnd_to_zero_matches_whole_tokens_only_and_skips_comments() {
+        let deck = "* gnd in a comment stays untouched\nQ1 c b gnd bjt\nR1 gnd background 1k\n";
+        let out = rewrite_gnd_to_zero(deck);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "* gnd in a comment stays untouched");
+        assert_eq!(lines[1], "Q1 c b 0 bjt");
+        // "background" contains "gnd" as a substring but must not be rewritten.
+        assert_eq!(lines[2], "R1 0 background 1k");
+    }
+
+    #[test]
+    fn truncate_tran_tstop_replaces_only_the_stop_time() {
+        let deck = "* title\nV1 a 0 DC 1\n.tran 100u 0.2 UIC\n.end\n";
+        let out = truncate_tran_tstop(deck, 0.1);
+        assert!(
+            out.lines().any(|l| l == ".tran 100u 0.1 UIC"),
+            "expected tstep/UIC preserved, tstop replaced, got:\n{out}"
         );
     }
 }

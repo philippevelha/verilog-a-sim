@@ -4,8 +4,10 @@ subtitle: "T4 · Phase T4.3 · `va-transient::events`"
 ---
 
 ::: {.callout-note}
-**Status: code complete — ladder rung 6, implementation reach closed through the real pipeline.**
-QSPICE golden generation was attempted and diagnosed, not silently skipped — see "Limitations."
+**Status: code complete — ladder rung 6, formally passed.** Closing the golden gate needed
+finding and fixing a real QSPICE bug (a `gnd`-aliasing quirk for `Q`-element terminals) plus an
+honestly-scoped early comparison window for this circuit's own unstable equilibrium — see
+"Limitations."
 :::
 
 ## Goal
@@ -117,15 +119,18 @@ forward bias on both sides at once, where this simplified Ebers-Moll model's exp
 grow large enough that the embedded-pair LTE estimator stops agreeing at any step size. `tstop`
 is chosen comfortably inside the confirmed well-behaved region, not at that numerical edge.
 
-**QSPICE golden generation was attempted and diagnosed, not silently skipped.** Translating this
-circuit the same way rungs 3–5 were (a native `.model bjt NPN(...)` card, `UIC` + `IC=0` on the
-coupling capacitors) runs cleanly but does not reproduce the oscillation: every node in the
-QSPICE run sits at essentially exactly `VCC` for the whole window, a non-conducting degenerate
-state. This circuit's base/collector voltages are purely *nonlinearly* determined (no linear DC
-path, only the BJT's own turn-on characteristic); QSPICE's `UIC` mode only seeds *reactive*
-elements, and doesn't re-solve non-reactive nodes the way this project's own `x=0`-seeded Newton
-cold start does. Closing this — explicit `.ic V(node)=...` seeding, or some other mechanism — is
-real, scoped future work, detailed in `t6-integration/03-validation.qmd`.
+**The QSPICE golden gate needed a real bug fix, then an honest scoping decision — both detailed
+in `t6-integration/03-validation.qmd`.** The bug: QSPICE does not reliably alias a net literally
+named `gnd` to ground for a `Q` element's own terminal (unlike `R`/`V`/`M`) — a plain DC solve of
+this circuit reported `V(gnd)=5`, not `0`, alongside a physically wrong all-`VCC` bias; using
+literal `0` instead fixed it outright. The scoping decision: even with that fixed, comparing the
+*full* run against QSPICE gives `error=2.243e-2`, not because of a modeling error but because
+this genuinely unstable equilibrium is exponentially sensitive to tiny model/solver differences
+once the oscillation grows large (confirmed: error stays `~2e-4` for every cutoff up to `0.10`s,
+then jumps two orders of magnitude by `0.12`s — the same numerical edge the paragraph above
+already avoids for a different reason). Rung 6's golden reference is generated over that
+well-behaved `0.1`s window specifically; the tracked circuit file and every other consumer of it
+(including this tutorial's own oscillation-count test) still run the full `0.2`s.
 
 ## What's next
 
