@@ -53,7 +53,8 @@ shared, demoable milestone that several theses light up at once.
 | T6.1 — netlist parser | R/C/D/M/V elements (`M` = 3-terminal model-referencing device, § rung 5), dot-cards incl. `.tran` timing and `.dc <source> <start> <stop> <step>` sweep; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
 | T6.2 — CLI wiring (DC + sweep + transient) | `va-cli sim` drives a DC operating point, a `.dc` sweep, and `.tran` (incl. `SIN`-sourced circuits like the rectifier) through the real pipeline | 🟢 |
 | T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section | ✅ |
-| T5 | crate stub only (`todo!()`) | ⬜ |
+| T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; RC low-pass validated to 1e-6 vs closed form (2026-07-21) | 🟢 |
+| T5.2 — noise analysis | crate stub only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -1307,11 +1308,41 @@ the reference models.
 **Fallback:** an AC/noise-formulation report (adjoint-method derivation).
 
 ### Phase T5.1 — AC linearization
-- Linearize about a DC operating point; complex-valued solve over a frequency sweep
-  (`ac.rs`).
-- **Validation gate:** RC / RLC AC magnitude & phase within the stated band vs golden.
-- **Tutorial:** `t5-acnoise/01-ac.qmd` — small-signal linearization, the complex MNA system,
-  a Bode plot vs ngspice.
+
+**Implementation reach closed 2026-07-21** — was a `todo!()` stub (T5 was entirely unstarted;
+`va-acnoise` had never had a working line of code). `ac::linearize` runs every
+`ModelInstance::load` at a fixed DC point `x_dc` into a purpose-built `StampSink` that keeps
+only the two channels AC analysis actually needs — the Jacobian (`G = ∂residual/∂x`) and the
+charge-Jacobian (`C = ∂charge/∂x`) — discarding the residual/charge values themselves (they're
+DC-only quantities, irrelevant once the circuit is linearized). `ac::run` then sweeps a log
+frequency grid (`AcSweep::frequencies`, SPICE `.ac dec`-style: `points_per_decade` points per
+decade from `fstart` to `fstop` inclusive) solving `(G + jω·C)·X(ω) = B` at each point.
+
+**No complex-linear-algebra dependency was added** — `CLAUDE.md` §5 restricts numerics to
+`faer`, so the complex solve is embedded as a real `2·dim × 2·dim` block system (`[Re(X);
+Im(X)]` stacked, the standard `[G, -ωC; ωC, G]` block form) and handed straight to
+`va_core::linsolve::solve_dense`, the same dense LU `va-core`'s own Newton loop already uses.
+An independent AC source's excitation (e.g. a `VSource`'s own branch-current row) is purely an
+RHS term, never a `G`/`C` entry — the row's Jacobian already captures `∂/∂x` from its DC
+constraint (`V(p)-V(n) = value`); only the source's own AC magnitude/phase is new, and it can
+only ever appear on the right-hand side.
+
+**Validated against a real closed form, not yet against QSPICE golden**: `ac::tests::
+rc_lowpass_response` builds an actual `VSource`+`Resistor`+`Capacitor` circuit (the same
+`va-abi::reference` primitives `va-core`'s own tests use) and checks the output-node magnitude
+and phase against the textbook RC low-pass transfer function (`H(jω) = 1/(1+jωRC)`) across a
+6-decade sweep (1 Hz–1 MHz, 5 points/decade) to `1e-6` — the same "closed-form before golden"
+path T4.1's RC transient took before `va-harness`/QSPICE wiring existed for it. One real bug
+caught in the process: the first `AcSweep::frequencies` implementation appended `fstop` as a
+literal duplicate when repeated-multiplication float drift left the loop's own last point a few
+ULPs short of it (`100.00000000000003` vs `100.0`) instead of recognizing it as the same point —
+fixed by snapping within a relative tolerance instead of requiring bit-exact equality.
+
+**Outstanding**: the stated validation gate (RC/RLC vs *golden*) and the tutorial still await
+`va-cli`/`va-harness`/`xtask` AC wiring (a netlist `.ac` card, a golden AC format, a QSPICE `.ac`
+translation) — not attempted here, matching how rung 5/6's "implementation reach" and "golden
+gate" were tracked as separate, sequential closures earlier in T6.3. `noise.rs` (T5.2) is
+untouched.
 
 ### Phase T5.2 — Noise analysis
 - Per-element noise sources → output PSD; adjoint method for transfer functions (`noise.rs`).

@@ -20,6 +20,13 @@ zoo grows; record any change with its justification.
 `todo!()` stubs (AC/noise remains a stretch goal per `CLAUDE.md` §1 and `t5-acnoise`'s own
 honest status — see `docs/roadmap.md`'s T5 section):
 
+**Updated 2026-07-21: T5.1's AC linearization (`va_acnoise::ac`) is now real code**, validated
+against a closed-form RC low-pass transfer function to `1e-6` — no longer a bare `todo!()`. The
+**AC row above is still not a `va-harness`/golden metric**, though: no `.ac` netlist card,
+QSPICE-side `.ac` translation, or `xtask`/`va-cli` wiring exists yet, so nothing plugs this into
+`cargo xtask validate`'s convergence/error reporting the way DC and transient are. See
+`docs/roadmap.md`'s T5.1 entry for the full account.
+
 - **DC** (`va_harness::metrics::max_relative_error`) and **transient** (`rms_error`, plus the
   `resample_linear` shared-timebase step two independent adaptive-timestep integrators need) —
   see `docs/roadmap.md`'s T6.3 section.
