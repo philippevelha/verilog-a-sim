@@ -20,7 +20,14 @@ pub fn run_tran(circuit: &str, model: Option<&str>) -> Result<GoldenTran, Harnes
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let wf = va_cli::solve_transient(&net, &compiled)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    Ok(GoldenTran::from_waveform(&net.node_order, &wf.t, &wf.x))
+    let branch_currents = va_cli::branch_currents(&net, &compiled)
+        .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    Ok(GoldenTran::from_waveform(
+        &net.node_order,
+        &wf.t,
+        &wf.x,
+        &branch_currents,
+    ))
 }
 
 /// Compare a freshly-computed transient run against its golden reference (§7's transient
@@ -105,14 +112,15 @@ mod tests {
     #[test]
     fn run_tran_solves_the_rc_step() {
         let g = run_tran(&workspace_path("circuits/rc_step.net"), None).expect("solve rc_step");
-        assert_eq!(g.node_order, vec!["in", "out"]);
+        assert_eq!(g.node_order, vec!["in", "out", "I(V1)"]);
         assert!(g.points.len() > 1);
         let (t0, v0) = &g.points[0];
         assert_eq!(*t0, 0.0);
         // v0 has no `.ic`/`UIC` support (`va-cli::solve_transient`'s own doc comment): every
-        // unknown, including a directly-forced source node, starts from the zero vector, not
-        // its own DC value — so `V(in)=0` at `t=0` too, not the source's `DC 5.0`.
-        assert_eq!(v0, &vec![0.0, 0.0]);
+        // unknown, including a directly-forced source node and its own branch current, starts
+        // from the zero vector, not its own DC value — so `V(in)=0` at `t=0` too, not the
+        // source's `DC 5.0`.
+        assert_eq!(v0, &vec![0.0, 0.0, 0.0]);
         let (t_last, v_last) = g.points.last().unwrap();
         assert!((t_last - 5e-3).abs() < 1e-9, "t_last = {t_last}");
         // RC=1ms, tstop=5ms=5*RC -> V(out) within ~1% of the 5V rail.

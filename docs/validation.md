@@ -28,6 +28,19 @@ honest status — see `docs/roadmap.md`'s T5 section):
   validation run before the rest of the zoo is even attempted) — see `docs/roadmap.md`'s T6.4
   section and `t6-integration/04-convergence-dashboard.qmd`.
 
+**Updated 2026-07-18: `GoldenDc`/`GoldenSweep`/`GoldenTran` now carry named branch currents, not
+just node voltages** (`va_cli::branch_currents`, § `va_harness::golden`'s own doc comment) — see
+`docs/roadmap.md`'s T6.3 section for the full story. This closed rung 2's last stated scope
+limit: `circuits/diode_iv.net`'s golden comparison used to check only `V(in)`, which trivially
+matches regardless of whether the diode model is right at all (it's directly forced by `V1`).
+The golden file now also carries `I(V1)`, which by KCL equals the diode's own current — a real
+Shockley-law cross-check against QSPICE, not just plumbing. Widening the golden format surfaced a
+genuine gap in `max_relative_error`'s own near-zero floor (`1e-12` was too tight once femtoamp-
+scale branch currents entered the comparison — QSPICE's and this project's own solver-noise
+floors disagree at that scale by construction, not because either model is wrong); the floor is
+now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
+derivation).
+
 `golden/{divider,mos_dc,diode_iv,rc_step,rectifier,ring_osc}.golden` are all real, QSPICE-
 generated data (`cargo xtask gen-golden`) — every one of `xtask`'s known circuits now has a
 committed golden reference, closing the "which circuits aren't regenerated yet" gap this file
@@ -52,11 +65,11 @@ QSPICE-generated golden for every one, not analytic/hand-derived stand-ins:
 ```console
 $ cargo run -q -p xtask -- validate
 [xtask]   PASS circuits/divider.net: error=0.000e0 (tol 1e-4)
-[xtask]   PASS circuits/mos_dc.net: error=1.977e-9 (tol 1e-4)
-[xtask]   PASS circuits/diode_iv.net: error=1.850e-16 (tol 1e-4)
-[xtask]   PASS circuits/rc_step.net: error=2.260e-5 (tol 1e-3)
-[xtask]   PASS circuits/rectifier.net: error=7.925e-4 (tol 1e-3)
-[xtask]   PASS circuits/ring_osc.net: error=1.923e-4 (tol 1e-3)
+[xtask]   PASS circuits/mos_dc.net: error=1.490e-6 (tol 1e-4)
+[xtask]   PASS circuits/diode_iv.net: error=6.656e-5 (tol 1e-4)
+[xtask]   PASS circuits/rc_step.net: error=1.845e-5 (tol 1e-3)
+[xtask]   PASS circuits/rectifier.net: error=6.766e-4 (tol 1e-3)
+[xtask]   PASS circuits/ring_osc.net: error=1.799e-4 (tol 1e-3)
 [xtask] validate: 6 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
 [xtask] validate: convergence 6/6 (100.0%) — CLAUDE.md §7's convergence metric
 ```
@@ -68,9 +81,11 @@ by default; this project's own `va-transient` never does); rung 6 needed that pl
 QSPICE ground-aliasing bug fix (`gnd` doesn't reliably resolve to ground for a `Q`-element
 terminal) and an honestly-scoped early comparison window (this circuit's unstable equilibrium
 makes a full-run comparison chaotic-sensitive, not meaningfully comparable past ~0.1s). Rung 2's
-comparison has a stated, still-open scope limit — the golden format records node voltage only,
-so it doesn't exercise the diode's own current; the real Shockley-law check for that circuit is
-`va-cli`'s own closed-form test, not this rung's golden comparison.
+former scope limit is closed (2026-07-18): the golden format now carries `I(V1)` alongside
+`V(in)` (§ above), so `mos_dc.net`'s and `diode_iv.net`'s own `error=` figures above moved from
+`1.977e-9`/`1.850e-16` (voltage-only, both trivially forced by their own sources) to
+`1.490e-6`/`6.656e-5` — larger, but still comfortably inside tolerance, because they now
+genuinely check `I(VDD)`/`I(VG)` and `I(V1)` against QSPICE, not just an echoed source voltage.
 
 See `roadmap.md`'s *Status at a glance* and its *Cross-thesis milestones* ladder table for the
 authoritative, continuously-updated per-rung detail — this section is a summary, not the source

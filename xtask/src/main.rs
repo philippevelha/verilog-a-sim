@@ -547,7 +547,6 @@ fn gen_golden() -> Result<()> {
         let circuit_path = root.join(circuit);
         let deck =
             std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
-        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
         let stem = Path::new(circuit)
             .file_stem()
             .context("circuit path has no file stem")?
@@ -556,7 +555,9 @@ fn gen_golden() -> Result<()> {
 
         let raw = run_qspice_op(&qspice, &deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit}"))?;
-        let golden = golden_dc_from_qraw(&raw, &net.node_order)
+        let node_order = golden_node_order(&root, circuit)
+            .with_context(|| format!("resolving branch currents for {circuit}"))?;
+        let golden = golden_dc_from_qraw(&raw, &node_order)
             .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
 
         let golden_path = golden_dir.join(format!("{stem}.golden"));
@@ -574,7 +575,6 @@ fn gen_golden() -> Result<()> {
         let circuit_path = root.join(circuit);
         let deck =
             std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
-        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
         let stem = Path::new(circuit)
             .file_stem()
             .context("circuit path has no file stem")?
@@ -584,7 +584,9 @@ fn gen_golden() -> Result<()> {
 
         let raw = run_qspice_op(&qspice, &native_deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
-        let golden = golden_dc_from_qraw(&raw, &net.node_order)
+        let node_order = golden_node_order(&root, circuit)
+            .with_context(|| format!("resolving branch currents for {circuit}"))?;
+        let golden = golden_dc_from_qraw(&raw, &node_order)
             .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
 
         let golden_path = golden_dir.join(format!("{stem}.golden"));
@@ -616,7 +618,9 @@ fn gen_golden() -> Result<()> {
 
         let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
-        let golden = golden_sweep_from_qraw(&raw, &dc.source, &net.node_order)
+        let node_order = golden_node_order(&root, circuit)
+            .with_context(|| format!("resolving branch currents for {circuit}"))?;
+        let golden = golden_sweep_from_qraw(&raw, &dc.source, &node_order)
             .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
 
         let golden_path = golden_dir.join(format!("{stem}.golden"));
@@ -634,7 +638,6 @@ fn gen_golden() -> Result<()> {
         let circuit_path = root.join(circuit);
         let deck =
             std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
-        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
         let stem = Path::new(circuit)
             .file_stem()
             .context("circuit path has no file stem")?
@@ -644,7 +647,9 @@ fn gen_golden() -> Result<()> {
         let native_deck = cold_start_tran_deck(&deck);
         let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit}"))?;
-        let golden = golden_tran_from_qraw(&raw, &net.node_order)
+        let node_order = golden_node_order(&root, circuit)
+            .with_context(|| format!("resolving branch currents for {circuit}"))?;
+        let golden = golden_tran_from_qraw(&raw, &node_order)
             .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
 
         let golden_path = golden_dir.join(format!("{stem}.golden"));
@@ -662,7 +667,6 @@ fn gen_golden() -> Result<()> {
         let circuit_path = root.join(circuit);
         let deck =
             std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
-        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
         let stem = Path::new(circuit)
             .file_stem()
             .context("circuit path has no file stem")?
@@ -675,7 +679,9 @@ fn gen_golden() -> Result<()> {
 
         let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
-        let golden = golden_tran_from_qraw(&raw, &net.node_order)
+        let node_order = golden_node_order(&root, circuit)
+            .with_context(|| format!("resolving branch currents for {circuit}"))?;
+        let golden = golden_tran_from_qraw(&raw, &node_order)
             .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
 
         let golden_path = golden_dir.join(format!("{stem}.golden"));
@@ -897,10 +903,14 @@ fn parse_qraw_sweep(bytes: &[u8]) -> Result<QspiceRawSweep> {
     Ok(QspiceRawSweep { variables, points })
 }
 
-/// Look up each of `node_order`'s `"V(<name>)"` labels in `variables`/`row` — shared by
-/// [`golden_dc_from_qraw`] and [`golden_sweep_from_qraw`]. QSPICE's own variable ordering isn't
-/// assumed to match `node_order`'s (it happened to, for `divider.net`, but nothing guarantees
-/// that in general).
+/// Look up each of `node_order`'s labels in `variables`/`row` — shared by [`golden_dc_from_qraw`]
+/// and [`golden_sweep_from_qraw`]. QSPICE's own variable ordering isn't assumed to match
+/// `node_order`'s (it happened to, for `divider.net`, but nothing guarantees that in general).
+///
+/// An entry already shaped `"I(<name>)"` (§ `va_harness::golden`'s branch-current convention) is
+/// looked up *literally* — QSPICE spells a device's own current the same way in its own `.qraw`
+/// variable list — rather than wrapped as `"V(I(<name>))"`; every other entry is a bare node name,
+/// wrapped as `"V(<name>)"` as before.
 fn node_values_from_row(
     variables: &[String],
     row: &[f64],
@@ -909,7 +919,11 @@ fn node_values_from_row(
     node_order
         .iter()
         .map(|name| {
-            let label = format!("V({name})");
+            let label = if name.starts_with("I(") && name.ends_with(')') {
+                name.clone()
+            } else {
+                format!("V({name})")
+            };
             variables
                 .iter()
                 .position(|v| v.eq_ignore_ascii_case(&label))
@@ -917,6 +931,46 @@ fn node_values_from_row(
                 .with_context(|| format!("QSPICE output has no `{label}` variable"))
         })
         .collect()
+}
+
+/// The Verilog-A `--model` path (if any) `va-harness`'s own `run_dc`/`run_dc_sweep`/`run_tran`
+/// compiles for `circuit` at validate time (§ `DC_CIRCUITS`/`SWEEP_CIRCUITS`/`TRAN_CIRCUITS`) —
+/// shared so [`golden_node_order`]'s own branch-current resolution matches exactly what
+/// `validate` will later compare against. Distinct from `gen_golden`'s own QSPICE-side model
+/// translation (`QSPICE_MODEL_TRANSLATIONS` et al.), which is a QSPICE-native `.model` card
+/// string, not a `.va` path — a device like `mos_dc.net`'s `M1` needs the *compiled* model here
+/// to resolve at all (it has no hand-written `va-abi` reference, unlike `resistor`/`diode`/`bjt`).
+fn va_model_for(circuit: &str) -> Option<&'static str> {
+    DC_CIRCUITS
+        .iter()
+        .chain(SWEEP_CIRCUITS)
+        .chain(TRAN_CIRCUITS)
+        .find(|(c, _)| *c == circuit)
+        .and_then(|&(_, m)| m)
+}
+
+/// `circuit`'s own `node_order` widened with an `"I(<device name>)"` entry per `vsource` device
+/// (§ `va_harness::golden`'s branch-current convention) — shared by every `gen_golden` circuit
+/// kind so a golden file's own comparison also exercises the device actually driving that
+/// source, not just whatever node voltage it directly forces. Compiles `circuit`'s own
+/// `va_model_for` model (if any) through the real pipeline (`va_cli::load`), exactly as
+/// `va-harness`'s own `run_dc`/`run_dc_sweep`/`run_tran` will at validate time, so a device with
+/// no hand-written `va-abi` reference (e.g. `mos_dc.net`'s `mosfet`) resolves correctly too.
+fn golden_node_order(root: &Path, circuit: &str) -> Result<Vec<String>> {
+    let circuit_path = root.join(circuit);
+    let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+    let model_path = va_model_for(circuit).map(|m| root.join(m));
+    let model_str = model_path
+        .as_deref()
+        .map(|p| p.to_str().context("non-UTF8 model path"))
+        .transpose()?;
+    let (net, compiled) = va_cli::load(circuit_str, model_str)
+        .with_context(|| format!("loading {circuit} for branch-current resolution"))?;
+    let branch_currents =
+        va_cli::branch_currents(&net, &compiled).context("resolving branch currents")?;
+    let mut node_order = net.node_order;
+    node_order.extend(branch_currents.iter().map(|(name, _)| format!("I({name})")));
+    Ok(node_order)
 }
 
 /// Map a parsed `.qraw` operating point onto this project's own `node_order`.
@@ -952,8 +1006,14 @@ fn golden_sweep_from_qraw(
             Ok((row[source_idx], node_values))
         })
         .collect::<Result<Vec<_>>>()?;
+    // `node_order` already carries any `I(<name>)` branch-current labels (§ `golden_node_order`),
+    // and `points`' own values already line up with it one-for-one — passing an empty
+    // `branch_currents` here means `from_sweep`'s own append step is a no-op, not a double-count.
     Ok(va_harness::golden::GoldenSweep::from_sweep(
-        source, node_order, &points,
+        source,
+        node_order,
+        &points,
+        &[],
     ))
 }
 

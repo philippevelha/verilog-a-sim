@@ -7,7 +7,21 @@ use crate::HarnessError;
 /// large enough that a golden point that is *exactly* (or near) zero — e.g. a diode sweep's
 /// `I(V1)` at `V1=0` — doesn't turn an otherwise-negligible absolute difference into a
 /// division-by-near-zero blowup.
-const REL_ERROR_FLOOR: f64 = 1e-12;
+///
+/// Widened from `1e-12` to `1e-8` (2026-07-18) once `GoldenSweep`/`GoldenDc` started carrying
+/// real branch currents (§ `va_harness::golden`'s branch-current convention): `circuits/
+/// diode_iv.net`'s own `I(V1)` at `V1=0.1` is `~5.7e-13` A in QSPICE's golden vs. `~4.7e-13` A
+/// from this project's own solve — both effectively "off" (femtoamp-scale, dominated by
+/// Newton's own residual-tolerance noise floor in both simulators, not a real model
+/// disagreement), but at `1e-12` the ~`1e-13`-scale absolute difference between them blew up to
+/// a ~10% "error." Likewise `circuits/mos_dc.net`'s `I(VG)` (a MOSFET gate current this Level-1
+/// model has no pathway for at all) is exactly `0` from this project's own solve but QSPICE's own
+/// noise floor reports `~-1.5e-14`. `1e-8` floors every `diode_iv.net` point through `V1=0.3`
+/// (`|I(V1)| <~ 1e-9`, all comfortably under `1e-4` relative once floored) and leaves `V1=0.4`
+/// upward — where the current is large enough to matter, `>~5e-8` A — checked against its own
+/// real relative precision (worst observed: `6.6e-5` at `V1=0.6`, § `docs/validation.md`), still
+/// well inside `tol::DC_REL`'s `1e-4` with room to spare.
+const REL_ERROR_FLOOR: f64 = 1e-8;
 
 /// Maximum relative error between a computed and a golden series (the DC metric).
 ///

@@ -1576,6 +1576,42 @@ methodology + metrics report vs ngspice.
 > `t6-integration/03-validation.qmd` for all six now-real golden files (done, same date); the
 > branch-current golden gap (rung 2, noted above) — real, but scoped to its own T6.4 phase below
 > and rung 2 respectively, not blocking T6.3 itself.
+>
+> **The branch-current golden gap closed for real, same day.** `GoldenDc::from_operating_point`/
+> `GoldenSweep::from_sweep`/`GoldenTran::from_waveform` now take a fourth `branch_currents: &[(String,
+> usize)]` argument (typically `va_cli::branch_currents(net, compiled)`'s own return, a new `pub`
+> function alongside `build_instances`) and append one `I(<device name>)`-labeled entry per branch
+> current after the node entries — the same flat `<name> <value>` file shape, `node_order` just
+> isn't only node names anymore (`va_harness::golden`'s own doc comment has the worked example).
+> Zero changes needed to any `compare_dc`/`compare_dc_sweep`/`compare_tran` comparison logic or the
+> `.golden` parse/render format itself — this was a deliberate design choice to minimize blast
+> radius. `xtask`'s own QSPICE-side mapping needed two changes: `node_values_from_row` now looks up
+> an already-`"I(<name>)"`-shaped `node_order` entry *literally* (QSPICE spells a device's own
+> current the same way in its own `.qraw` variable list) rather than wrapping it as `"V(...)"`; and
+> a new `golden_node_order`/`va_model_for` pair resolves `circuit`'s own branch currents by
+> compiling the *same* `--model` `va-harness`'s own `run_dc`/`run_dc_sweep`/`run_tran` will use at
+> validate time (via `va_cli::load`), so a device with no hand-written `va-abi` reference (e.g.
+> `mos_dc.net`'s `mosfet`) resolves correctly too — `xtask` gained a `va-cli` dependency for this.
+>
+> Regenerating all six golden files surfaced a genuine, useful side effect: two circuits'
+> `error=` figures moved from their old (voltage-only, trivially-forced) values to new,
+> substantively-checked ones — `mos_dc.net` from `1.977e-9` to `1.490e-6` (now checking `I(VDD)`/
+> `I(VG)`, not just the two directly-forced source voltages), and `diode_iv.net` from `1.850e-16`
+> to `6.656e-5` (now checking `I(V1)`, i.e. the diode's own current, against QSPICE's Shockley
+> law for real). Both stayed comfortably inside `DC_REL`'s `1e-4`, but doing so needed a real fix,
+> not just a rebuild: `max_relative_error`'s own near-zero-reference floor (`REL_ERROR_FLOOR`) was
+> `1e-12`, calibrated back when only node voltages (solved to near-machine precision) ever hit it.
+> Femtoamp-scale branch currents (`diode_iv.net`'s own `I(V1)` at `V1=0.1` — QSPICE's golden
+> `~5.7e-13` A vs. this project's own `~4.7e-13` A) are both simulators' *own* Newton-residual noise
+> floor, not a real model disagreement, but at `1e-12` that ~`1e-13`-scale absolute difference
+> blew up to a spurious ~10% "error," and `mos_dc.net`'s `I(VG)` (a MOSFET gate current this
+> Level-1 model has no pathway for — exactly `0` here, `~-1.5e-14` from QSPICE's own noise) did the
+> same. Widened to `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full
+> per-point empirical derivation) — clears every near-zero branch current in the zoo with room to
+> spare while leaving every physically-meaningful current (everything from `diode_iv.net`'s own
+> `~5.2e-8` A upward) checked against its own real relative precision, worst case `6.6e-5`, still
+> well inside `1e-4`. `docs/validation.md`'s rung-2 scope-limit note is now closed, not just
+> tracked as future work.
 
 - `va-harness` runs the whole zoo vs `golden/`, reports per-rung pass/fail and the convergence
   fraction; resample-and-compare for transient.
@@ -1632,12 +1668,12 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 
 | Rung | Circuit            | Analysis  | Lights up                | Tutorials presented           | Status |
 |------|--------------------|-----------|--------------------------|-------------------------------|--------|
-| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | ✅ **formally passed** — `cargo xtask validate` is green against `golden/divider.golden`, real QSPICE output (error=0.000e0, tol 1e-4) |
-| 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | ✅ **formally passed** — green against `golden/diode_iv.golden`, real QSPICE output via a native `.model diode D(...)` translation (error=1.850e-16, tol 1e-4); see T6.3's caveat on this rung's golden not exercising the diode's own current |
-| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start (error=2.260e-5, tol 1e-3) |
-| 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start (error=7.925e-4, tol 1e-3) |
-| 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ✅ **formally passed** — green against `golden/mos_dc.golden`, real QSPICE output via a native `.model mosfet NMOS(...)` translation (error=1.977e-9, tol 1e-4) |
-| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ✅ **formally passed** — green against `golden/ring_osc.golden` (1041 pts, an honestly-scoped 0.1s window — § T4.3's 2026-07-18 entry), real QSPICE output via a native `.model bjt NPN(...)` translation + a `gnd`-to-`0` ground-aliasing fix (error=1.923e-4, tol 1e-3); `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` (full 0.2s) and `cargo test -p va-transient ring_oscillator_sustains_oscillation` (hand-built instances) both still demonstrate the full growing oscillation |
+| 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | ✅ **formally passed** — `cargo xtask validate` is green against `golden/divider.golden`, real QSPICE output, now also checking `I(V1)` (error=0.000e0, tol 1e-4) |
+| 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | ✅ **formally passed** — green against `golden/diode_iv.golden`, real QSPICE output via a native `.model diode D(...)` translation (error=6.656e-5, tol 1e-4); now also checks `I(V1)` (the diode's own current) against QSPICE's Shockley law for real — the former "voltage-only, doesn't exercise the diode" caveat is closed (§ T6.3's 2026-07-18 branch-current entry) |
+| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start, now also checking `I(V1)` (error=1.845e-5, tol 1e-3) |
+| 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start, now also checking `I(V1)` (error=6.766e-4, tol 1e-3) |
+| 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ✅ **formally passed** — green against `golden/mos_dc.golden`, real QSPICE output via a native `.model mosfet NMOS(...)` translation (error=1.490e-6, tol 1e-4); now also checks `I(VDD)`/`I(VG)` |
+| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ✅ **formally passed** — green against `golden/ring_osc.golden` (1041 pts, an honestly-scoped 0.1s window — § T4.3's 2026-07-18 entry), real QSPICE output via a native `.model bjt NPN(...)` translation + a `gnd`-to-`0` ground-aliasing fix, now also checking `I(VCC)` (error=1.799e-4, tol 1e-3); `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` (full 0.2s) and `cargo test -p va-transient ring_oscillator_sustains_oscillation` (hand-built instances) both still demonstrate the full growing oscillation |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available.

@@ -322,15 +322,19 @@ fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
     Ok(())
 }
 
-/// Build every device instance, returning them alongside the total unknown count (`dim`).
-/// `compiled` is every module compiled from the `--model` file (possibly several, if it
-/// defines a subcircuit alongside a top module — § module instantiation); a device is matched
-/// against whichever one shares its model name. Shared by both DC and transient solving —
-/// building the instance set doesn't depend on which analysis will run on it.
-fn build_instances(
-    net: &Netlist,
-    compiled: &[Module],
-) -> Result<(Vec<Box<dyn ModelInstance>>, usize)> {
+/// [`build_instances`]'s return: built instances, the total unknown count (`dim`), and every
+/// `vsource` device's own name paired with its assigned branch-current global index.
+type BuiltInstances = (Vec<Box<dyn ModelInstance>>, usize, Vec<(String, usize)>);
+
+/// Build every device instance, returning them alongside the total unknown count (`dim`) and
+/// every `vsource` device's own name paired with its assigned branch-current global index (§
+/// [`branch_currents`]) — the only devices with a directly-addressable MNA branch-current
+/// unknown in this codegen today. `compiled` is every module compiled from the `--model` file
+/// (possibly several, if it defines a subcircuit alongside a top module — § module
+/// instantiation); a device is matched against whichever one shares its model name. Shared by
+/// both DC and transient solving — building the instance set doesn't depend on which analysis
+/// will run on it.
+fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances> {
     let n_nodes = net.node_order.len();
 
     // Voltage sources take branch-current unknowns after the node unknowns; a flattened
@@ -340,18 +344,37 @@ fn build_instances(
     // every instance has claimed what it needs.
     let mut next_unknown = n_nodes;
     let mut instances: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
+    let mut currents = Vec::new();
     for dev in &net.devices {
-        let inst = build_instance(dev, compiled, &mut next_unknown)?;
+        let (inst, branch) = build_instance(dev, compiled, &mut next_unknown)?;
+        if let Some(branch) = branch {
+            currents.push((dev.name.clone(), branch));
+        }
         instances.push(inst);
     }
-    Ok((instances, next_unknown))
+    Ok((instances, next_unknown, currents))
+}
+
+/// Map every `vsource` device's own name to its assigned branch-current global index —
+/// structural (independent of any solve): the same `net`/`compiled` always assigns the same
+/// indices, in device order, so this can be called once per circuit and reused across every
+/// point of a `.dc` sweep or every step of a `.tran` run.
+///
+/// `pub` so `va-harness` can build a golden reference that also carries named branch currents,
+/// not just node voltages (§ rung 2's own honest coverage caveat — `docs/roadmap.md`'s T6.3
+/// section: a diode forced by a directly-connected voltage source has a node voltage that
+/// trivially matches golden regardless of whether the diode model itself is right; the source's
+/// own current is the quantity that actually depends on it).
+pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String, usize)>> {
+    let (_, _, currents) = build_instances(net, compiled)?;
+    Ok(currents)
 }
 
 /// Build every device instance and solve the DC operating point. `pub` so `va-harness` can get
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
-    let (instances, dim) = build_instances(net, compiled)?;
+    let (instances, dim, _currents) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
 }
@@ -438,7 +461,8 @@ fn build_instances_split(net: &Netlist, compiled: &[Module]) -> Result<SplitInst
                 continue;
             }
         }
-        fixed.push(build_instance(dev, compiled, &mut next_unknown)?);
+        let (inst, _branch) = build_instance(dev, compiled, &mut next_unknown)?;
+        fixed.push(inst);
     }
     Ok((fixed, time_varying, next_unknown))
 }
@@ -499,32 +523,36 @@ pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
 }
 
 /// Turn one parsed [`Device`] into a loadable instance, preferring a matching compiled
-/// Verilog-A model and falling back to the reference primitives.
+/// Verilog-A model and falling back to the reference primitives. Returns the device's own
+/// branch-current global index too, if it claimed one (`Some` only for a `vsource` — the only
+/// device kind with a directly-addressable MNA branch-current unknown in this codegen; see
+/// [`branch_currents`]).
 fn build_instance(
     dev: &Device,
     compiled: &[Module],
     next_unknown: &mut usize,
-) -> Result<Box<dyn ModelInstance>> {
+) -> Result<(Box<dyn ModelInstance>, Option<usize>)> {
     let p = dev.terminals[0];
     let n = dev.terminals[1];
 
     if dev.model == "vsource" {
         let branch = *next_unknown;
         *next_unknown += 1;
-        return Ok(Box::new(VSource::new(
-            p,
-            n,
-            branch,
-            dev.value.unwrap_or(0.0),
-        )));
+        return Ok((
+            Box::new(VSource::new(p, n, branch, dev.value.unwrap_or(0.0))),
+            Some(branch),
+        ));
     }
 
     // Use the compiled Verilog-A model when its name matches the device's model.
     if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
-        return build_from_model(module, dev.value, &dev.terminals, next_unknown);
+        return Ok((
+            build_from_model(module, dev.value, &dev.terminals, next_unknown)?,
+            None,
+        ));
     }
 
-    reference_instance(dev)
+    Ok((reference_instance(dev)?, None))
 }
 
 /// Build a device instance from a compiled IR module, overriding the model's first parameter
@@ -748,6 +776,27 @@ mod tests {
         let deck = include_str!("../../../circuits/divider.net");
         let net = va_netlist::parser::parse(deck).expect("parse divider");
         solve_dc(&net, compiled).expect("solve divider")
+    }
+
+    /// `branch_currents` maps `divider.net`'s own `V1` to its assigned branch-current global
+    /// index — `node_order.len()` (2: `in`, `mid`), since a `vsource`'s branch unknown is the
+    /// first one claimed after every node. Solving confirms the real current through the
+    /// series 1kΩ+1kΩ divider at `Vin=1V`: `I = 1V / 2000Ω = 0.5mA`, flowing *into* the source
+    /// per `VSource`'s own stamp convention (`sink.residual(p, ib)`) — so the solved value is
+    /// negative (current flows *out* of the source into the circuit).
+    #[test]
+    fn branch_currents_maps_the_divider_source_to_its_branch_index() {
+        let deck = include_str!("../../../circuits/divider.net");
+        let net = va_netlist::parser::parse(deck).expect("parse divider");
+        let currents = branch_currents(&net, &[]).expect("branch currents");
+        assert_eq!(currents, vec![("V1".to_string(), 2)]);
+
+        let op = solve_dc(&net, &[]).expect("solve divider");
+        let i_v1 = op.x[2];
+        assert!(
+            (i_v1 - (-0.0005)).abs() < 1e-9,
+            "I(V1) = {i_v1}, expected -0.5mA"
+        );
     }
 
     /// End-to-end DC sweep (ladder rung 2): compile `models/diode.va` and sweep

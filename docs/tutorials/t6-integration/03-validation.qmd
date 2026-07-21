@@ -191,16 +191,18 @@ pub fn compare_dc(got: &GoldenDc, golden: &GoldenDc) -> Result<Verdict, HarnessE
 ```
 
 `run_dc_sweep`/`compare_dc_sweep` do the identical thing for a `.dc` sweep, flattening every
-point's node voltages into one long series before handing it to the same `max_relative_error`.
+point's node voltages (and any named branch currents, § "Branch currents are golden data too"
+below) into one long series before handing it to the same `max_relative_error`.
 `va_harness::tran::{run_tran, compare_tran}` mirror the same shape for a `.tran` run, but with
 the resample-and-window logic described above in place of a direct flatten.
 
 `xtask::gen_golden` — the other direction. For a circuit that needs no translation
 (`QSPICE_NATIVE_CIRCUITS`/`QSPICE_NATIVE_TRAN_CIRCUITS`), it locates `QSPICE64.exe`
 (`QSPICE_PATH` env var, then `PATH`, then the standard install location), runs it on a scratch
-copy of the deck, parses the `.qraw`, looks up each of this project's own `node_order` names by
-their `"V(name)"` label (QSPICE's own variable ordering isn't assumed to match `node_order`'s),
-and writes the resulting golden file. For a circuit whose device references a custom model
+copy of the deck, parses the `.qraw`, looks up each of this project's own `node_order` entries —
+by its `"V(name)"` label for a bare node name, or literally for an already-`"I(name)"`-shaped
+branch-current entry (QSPICE's own variable ordering isn't assumed to match `node_order`'s
+either way) — and writes the resulting golden file. For a circuit whose device references a custom model
 (`QSPICE_MODEL_TRANSLATIONS`/`QSPICE_SWEEP_MODEL_TRANSLATIONS`/`QSPICE_TRAN_MODEL_TRANSLATIONS`),
 `translate_for_qspice` first rewrites the deck: normalizes every `gnd` reference to `0`
 (`rewrite_gnd_to_zero` — see "Three SPICE gotchas" below), inserts a hand-translated,
@@ -228,8 +230,8 @@ Generating every golden reference for real:
 $ cargo run -q -p xtask -- gen-golden
 [xtask] gen-golden: regenerating golden/ from QSPICE …
 [xtask]   using C:\Program Files\QSPICE\QSPICE64.exe
-[xtask]   wrote .../golden/divider.golden (2 node(s))
-[xtask]   wrote .../golden/mos_dc.golden (3 node(s), native-model translation)
+[xtask]   wrote .../golden/divider.golden (3 node(s))
+[xtask]   wrote .../golden/mos_dc.golden (5 node(s), native-model translation)
 [xtask]   wrote .../golden/diode_iv.golden (7 point(s), native-model translation)
 [xtask]   wrote .../golden/rc_step.golden (1038 point(s))
 [xtask]   wrote .../golden/rectifier.golden (1065 point(s), native-model translation)
@@ -237,24 +239,54 @@ $ cargo run -q -p xtask -- gen-golden
 [xtask] gen-golden: 6 circuit(s) regenerated from QSPICE (of 6 known)
 ```
 
+Every one of these node counts includes a source's own `I(<name>)` branch current alongside its
+node voltages (e.g. `divider.golden`'s 3rd entry is `I(V1)`, `mos_dc.golden`'s 4th/5th are
+`I(VDD)`/`I(VG)`) — not just node voltages, § "Branch currents are golden data too" below.
+
 And validating against it:
 
 ```console
 $ cargo run -q -p xtask -- validate
 [xtask] validate: running va-harness over the model zoo vs golden/ …
 [xtask]   PASS circuits/divider.net: error=0.000e0 (tol 1e-4)
-[xtask]   PASS circuits/mos_dc.net: error=1.977e-9 (tol 1e-4)
-[xtask]   PASS circuits/diode_iv.net: error=1.850e-16 (tol 1e-4)
-[xtask]   PASS circuits/rc_step.net: error=2.260e-5 (tol 1e-3)
-[xtask]   PASS circuits/rectifier.net: error=7.925e-4 (tol 1e-3)
-[xtask]   PASS circuits/ring_osc.net: error=1.923e-4 (tol 1e-3)
-[xtask] validate: 6 checked, 0 failed, 0 skipped (no golden)
+[xtask]   PASS circuits/mos_dc.net: error=1.490e-6 (tol 1e-4)
+[xtask]   PASS circuits/diode_iv.net: error=6.656e-5 (tol 1e-4)
+[xtask]   PASS circuits/rc_step.net: error=1.845e-5 (tol 1e-3)
+[xtask]   PASS circuits/rectifier.net: error=6.766e-4 (tol 1e-3)
+[xtask]   PASS circuits/ring_osc.net: error=1.799e-4 (tol 1e-3)
+[xtask] validate: 6 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
+[xtask] validate: convergence 6/6 (100.0%) — CLAUDE.md §7's convergence metric
 ```
 
-Every one of these is a real, unpadded margin — `rectifier.net`'s `7.925e-4` is the tightest,
+Every one of these is a real, unpadded margin — `rectifier.net`'s `6.766e-4` is the tightest,
 still comfortably under `TRAN_RMS`'s `1e-3` without any tolerance loosening. A deliberately-wrong
 golden value reports `FAIL` and a non-zero exit instead, confirmed the same way (plant a wrong
 value, re-run, restore it) for every golden shape.
+
+## Branch currents are golden data too
+
+Node voltages alone can hide a wrong model behind a directly-forced source: `circuits/
+diode_iv.net`'s only node, `in`, is forced straight to the swept value by `V1` regardless of
+whether the diode's `Is`/`N` are right at all — a `V(in)`-only golden comparison would pass even
+against a broken diode model. `va_cli::branch_currents` (built alongside `build_instances`)
+returns every `vsource` device's own name paired with its solved branch-current unknown index;
+`GoldenDc::from_operating_point`/`GoldenSweep::from_sweep`/`GoldenTran::from_waveform` all take
+this as a fourth argument and append one `I(<device name>)`-labeled entry per branch current
+after the node entries — the same flat `<name> <value>` file shape, so no change to
+`compare_dc`/`compare_dc_sweep`/`compare_tran` or the `.golden` parse/render format itself was
+needed. `xtask`'s own QSPICE-side mapping recognizes an already-`"I(<name>)"`-shaped entry and
+looks it up literally (QSPICE spells a device's own current the same way in its `.qraw` variable
+list) instead of wrapping it as `"V(...)"`.
+
+Regenerating all six golden files this way moved `mos_dc.net` and `diode_iv.net`'s own `error=`
+figures up (from `1.977e-9`/`1.850e-16`, voltage-only, to `1.490e-6`/`6.656e-5` above) — a good
+sign, not a regression: they're now genuinely checking `I(VDD)`/`I(VG)` and `I(V1)` against
+QSPICE, not just an echoed source voltage. Doing this also surfaced a real gap in
+`max_relative_error`'s own near-zero-reference floor: femtoamp-scale branch currents (e.g.
+`diode_iv.net`'s own `I(V1)` at `V1=0.1`, `~5e-13` A) are dominated by each simulator's own
+Newton-residual noise at that scale, not a real model disagreement, but the floor that used to
+guard node-voltage comparisons (`1e-12`) was too tight for that — `va_harness::metrics::
+REL_ERROR_FLOOR` is now `1e-8` (its own doc comment has the full derivation, point by point).
 
 ## Three SPICE gotchas found the hard way
 
@@ -300,28 +332,12 @@ generates rung 6's *golden reference only* over this shorter window; the tracked
 narrower, honestly-scoped claim about what a comparison against an unstable system can mean at
 all — not a loosened tolerance and not cherry-picked data.
 
-**Rung 2's golden comparison doesn't actually exercise the diode's own current.**
-`GoldenSweep`/`GoldenDc` record node *voltages* only, never branch currents.
-`circuits/diode_iv.net`'s only node (`in`) is directly forced by `V1`, so `V(in)` trivially
-equals the swept value regardless of whether the diode model is right at all — the real
-Shockley-law cross-check for that circuit remains `va-cli`'s own
-`diode_iv_sweep_solves_through_codegen_pipeline` test (a closed-form comparison), not this rung's
-golden comparison. Extending the golden format to carry branch/device currents is real future
-work.
-
 **No `golden/*.golden` file is fabricated, ever, for any circuit** — `CLAUDE.md` §7's "QSPICE is
 the oracle" rule means golden data must come from an *independent* simulator, not from this
 project's own hand-derived math, even when that math is verifiably correct.
 
-**A per-rung/convergence-fraction dashboard** (§7's fourth metric, "fraction of zoo circuits
-that reach a solution") doesn't exist — `validate`'s own pass/fail/skip tally is the closest
-thing today.
-
 ## What's next
 
-With all six ladder rungs formally passed, the two remaining, real gaps are:
-
-1. Extend the golden format to carry branch/device currents, so rung 2's comparison actually
-   exercises the diode's exponential law instead of trivially matching a forced node voltage.
-2. A per-rung/convergence-fraction dashboard over the whole model zoo, per `CLAUDE.md` §7's
-   fourth metric.
+With all six ladder rungs formally passed and rung 2's golden comparison now genuinely exercising
+the diode's own current (§ above), the harness's own remaining, real gaps are narrower —
+AC/noise validation (T5, a stated stretch goal) and continuing to widen the model zoo itself.

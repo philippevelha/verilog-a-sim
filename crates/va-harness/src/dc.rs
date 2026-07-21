@@ -17,7 +17,13 @@ pub fn run_dc(circuit: &str, model: Option<&str>) -> Result<GoldenDc, HarnessErr
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let op = va_cli::solve_dc(&net, &compiled).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    Ok(GoldenDc::from_operating_point(&net.node_order, &op.x))
+    let branch_currents = va_cli::branch_currents(&net, &compiled)
+        .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    Ok(GoldenDc::from_operating_point(
+        &net.node_order,
+        &op.x,
+        &branch_currents,
+    ))
 }
 
 /// Compare a freshly-computed DC operating point against its golden reference (§7's DC metric).
@@ -53,15 +59,19 @@ pub fn run_dc_sweep(circuit: &str, model: Option<&str>) -> Result<GoldenSweep, H
         .ok_or_else(|| HarnessError::Run(format!("{circuit}: no `.dc` sweep card")))?;
     let points = va_cli::solve_dc_sweep(&net, &compiled, &sweep)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    let n = net.node_order.len();
+    let branch_currents = va_cli::branch_currents(&net, &compiled)
+        .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    // Full solved vectors, not pre-truncated — `GoldenSweep::from_sweep` itself truncates to
+    // `node_order` and reaches into any branch-current index past it (§ its own doc comment).
     let rows: Vec<(f64, Vec<f64>)> = points
         .into_iter()
-        .map(|(value, op)| (value, op.x[..n].to_vec()))
+        .map(|(value, op)| (value, op.x))
         .collect();
     Ok(GoldenSweep::from_sweep(
         &sweep.source,
         &net.node_order,
         &rows,
+        &branch_currents,
     ))
 }
 
@@ -107,9 +117,14 @@ mod tests {
     #[test]
     fn run_dc_solves_the_divider() {
         let g = run_dc(&workspace_path("circuits/divider.net"), None).expect("solve divider");
-        assert_eq!(g.node_order, vec!["in", "mid"]);
+        assert_eq!(g.node_order, vec!["in", "mid", "I(V1)"]);
         assert!((g.values[0] - 1.0).abs() < 1e-9, "V(in) = {}", g.values[0]);
         assert!((g.values[1] - 0.5).abs() < 1e-9, "V(mid) = {}", g.values[1]);
+        assert!(
+            (g.values[2] - (-0.0005)).abs() < 1e-9,
+            "I(V1) = {}",
+            g.values[2]
+        );
     }
 
     #[test]
@@ -144,19 +159,19 @@ mod tests {
 
     #[test]
     fn run_dc_sweep_solves_the_diode_iv_curve() {
-        // `GoldenSweep` only records node *voltages*, not source branch currents (§
-        // `GoldenDc::from_operating_point`'s doc comment) — so the diode's own current, and the
-        // Shockley-law cross-check against it, is `va-cli`'s
-        // `diode_iv_sweep_solves_through_codegen_pipeline` test's job, not this one's. What this
-        // test checks is the plumbing: the right number of points, in order, with `V(in)`
-        // tracking the directly-forced source exactly at every one.
+        // `GoldenSweep` now records `V1`'s own branch current too (§ `GoldenSweep::from_sweep`'s
+        // doc comment), so this genuinely exercises the diode's Shockley law, not just the
+        // directly-forced `V(in)` — the full closed-form cross-check is still `va-cli`'s
+        // `diode_iv_sweep_solves_through_codegen_pipeline` test's job, but this test now checks
+        // `I(V1)` moves the right direction (increasingly negative as the diode turns on) rather
+        // than being silently dropped.
         let g = run_dc_sweep(
             &workspace_path("circuits/diode_iv.net"),
             Some(&workspace_path("models/diode.va")),
         )
         .expect("solve diode_iv sweep");
         assert_eq!(g.source, "V1");
-        assert_eq!(g.node_order, vec!["in"]);
+        assert_eq!(g.node_order, vec!["in", "I(V1)"]);
         assert_eq!(g.points.len(), 7); // 0.0, 0.1, ..., 0.6
         for (v, values) in &g.points {
             assert!(
@@ -165,6 +180,23 @@ mod tests {
                 values[0]
             );
         }
+        // V1=0.0 draws ~0 current; V1=0.6 forward-biases the diode hard, drawing much more —
+        // `I(V1)` is negative (§ va-cli's `VSource` stamp convention, same sign as the divider's
+        // own `I(V1) = -0.5mA`).
+        let i_at = |v: f64| {
+            g.points
+                .iter()
+                .find(|(sv, _)| (*sv - v).abs() < 1e-9)
+                .map(|(_, values)| values[1])
+                .unwrap_or_else(|| panic!("no sweep point at V1={v}"))
+        };
+        assert!(i_at(0.0).abs() < 1e-9, "I(V1) at V1=0.0 = {}", i_at(0.0));
+        assert!(
+            i_at(0.6) < i_at(0.3),
+            "I(V1) should get more negative as the diode turns on: I(0.3)={}, I(0.6)={}",
+            i_at(0.3),
+            i_at(0.6)
+        );
     }
 
     #[test]
