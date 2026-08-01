@@ -15,11 +15,12 @@
 //!   by the transient integrator via a companion model. DC ignores this channel.
 //!
 //! and to a third via the [`NoiseSink`] in [`ModelInstance::noise`] (§6 change, 2026-08-01):
-//! - **noise**: [`white_current`](NoiseSink::white_current), consumed by `va-acnoise`'s adjoint
-//!   noise analysis. Every other analysis ignores it. It is a separate channel rather than
-//!   something derived from the Jacobian because a device's noise is physics the matrices no
-//!   longer carry — see [`noise`]'s own module doc for why a resistor and a diode with equal
-//!   small-signal conductance are not equally noisy.
+//! - **noise**: [`white_current`](NoiseSink::white_current) (frequency-flat) and
+//!   [`flicker_current`](NoiseSink::flicker_current) (`coeff / f^exponent`), consumed by
+//!   `va-acnoise`'s adjoint noise analysis. Every other analysis ignores it. It is a separate
+//!   channel rather than something derived from the Jacobian because a device's noise is physics
+//!   the matrices no longer carry — see [`noise`]'s own module doc for why a resistor and a diode
+//!   with equal small-signal conductance are not equally noisy.
 
 #![forbid(unsafe_code)]
 
@@ -48,15 +49,17 @@ mod tests {
         let mut sink = CollectedNoise::default();
         r.noise(&[2.0], TEMP_NOMINAL, &mut sink);
         assert_eq!(sink.sources.len(), 1);
-        let (p, n, psd) = sink.sources[0];
+        let (p, n, source) = sink.sources[0];
         assert_eq!((p, n), (0, GROUND));
+        // White: the same at every frequency, so any probe frequency reads it.
+        let psd = source.psd_at(1.0);
         assert!((psd - 1.657_6e-23).abs() < 1e-27, "psd = {psd}");
 
         // Biasing it differently must not change the answer — thermal noise depends on the
         // conductance and temperature only, never on the current through it.
         let mut other = CollectedNoise::default();
         r.noise(&[100.0], TEMP_NOMINAL, &mut other);
-        assert_eq!(other.sources[0].2, psd);
+        assert_eq!(other.sources[0].2.psd_at(1.0), psd);
     }
 
     /// A diode's noise is shot, not thermal — the distinction [`crate::noise`]'s module doc
@@ -71,7 +74,7 @@ mod tests {
         let mut sink = CollectedNoise::default();
         d.noise(&[vd], TEMP_NOMINAL, &mut sink);
         assert_eq!(sink.sources.len(), 1);
-        let (_, _, psd) = sink.sources[0];
+        let psd = sink.sources[0].2.psd_at(1.0);
 
         let id = d.current(vd);
         assert!(
@@ -100,12 +103,16 @@ mod tests {
         assert_eq!(sink.sources[0].0, 0, "base source is across b-e");
         assert_eq!(sink.sources[0].1, GROUND);
         assert!(
-            (sink.sources[0].2 - 2.0 * crate::noise::ELEMENTARY_CHARGE * q.ib(vbe, vbc)).abs()
+            (sink.sources[0].2.psd_at(1.0)
+                - 2.0 * crate::noise::ELEMENTARY_CHARGE * q.ib(vbe, vbc))
+            .abs()
                 < 1e-30
         );
         assert_eq!(sink.sources[1].0, 1, "collector source is across c-e");
         assert!(
-            (sink.sources[1].2 - 2.0 * crate::noise::ELEMENTARY_CHARGE * q.ic(vbe, vbc)).abs()
+            (sink.sources[1].2.psd_at(1.0)
+                - 2.0 * crate::noise::ELEMENTARY_CHARGE * q.ic(vbe, vbc))
+            .abs()
                 < 1e-30
         );
     }

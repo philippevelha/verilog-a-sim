@@ -1,0 +1,27 @@
+// Physical and mathematical constants — the LRM-standard `constants.vams` header, minimal.
+//
+// `models/diode.va` has `include`d this file since it was written; until now the file did not
+// exist, which the preprocessor tolerates (a missing include is a warning, not an error) only
+// because no model actually used a macro from it. The noise models do (T5.2), so it is real now.
+//
+// Values are the exact SI 2019 definitions, deliberately matching `va_abi::noise`'s own
+// `BOLTZMANN`/`ELEMENTARY_CHARGE` constants to the last digit: a compiled `.va` model and the
+// hand-written `va-abi::reference` model of the same device must agree, and a mismatch here
+// would show up as an unexplained few-ppm difference in the noise golden comparison rather than
+// as an obvious error. The `external/constants.vams` shipped with real model libraries offers
+// several vintages of these values (`P_Q_SPICE`, `P_Q_NIST2010`, …); this file takes the modern
+// exact ones, which is also what QSPICE's own noise output is consistent with.
+
+`ifdef CONSTANTS_VAMS
+`else
+`define CONSTANTS_VAMS 1
+
+`define M_PI          3.14159265358979323846
+`define M_TWO_PI      6.28318530717958647693
+`define M_SQRT2       1.41421356237309504880
+
+`define P_Q           1.602176634e-19    // elementary charge, C (exact, SI 2019)
+`define P_K           1.380649e-23       // Boltzmann's constant, J/K (exact, SI 2019)
+`define P_CELSIUS0    273.15             // 0 degrees Celsius, in kelvin
+
+`endif

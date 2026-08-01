@@ -55,6 +55,7 @@ shared, demoable milestone that several theses light up at once.
 | T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section | ✅ |
 | T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; **golden gate closed 2026-08-01** — `.ac` card/`AC` source parsing, `va-cli::solve_ac`, `GoldenAc` + separate magnitude/phase verdicts, complex `.qraw` parsing, and both AC circuits green vs real QSPICE (`rc_ac` 1.3e-15, `diode_ac` 1.3e-5) | ✅ |
 | T5.2 — noise analysis | adjoint output-noise PSD (one `Aᵀy = e_out` solve per frequency gives every source's transfer impedance); Interface β gained a §6 noise channel (`NoiseSink` + `ModelInstance::noise`) since noise is physics the Jacobian doesn't carry; thermal/shot sources on `Resistor`/`Diode`/`Bjt`; validated vs closed form (`4kTR`), vs an RC-shaped spectrum, and vs real QSPICE golden (`diode_noise` 1.7e-5) | ✅ |
+| T5.3 — Verilog-A noise lowering (T1/T2) | `white_noise`/`flicker_noise` lower to real IR calls instead of folding to `0`; codegen splits them into the noise channel like `ddt`→charge, leaving `load` bit-identical; Interface β gained a §6 flicker channel; compiled-model gates vs QSPICE (`resistor_noise_va` exact, `diode_flicker` 1.7e-5 over a 209×-shaped spectrum) | ✅ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -1425,13 +1426,57 @@ per-device breakdown in the output; and no noise from `va-codegen`-generated mod
 Verilog-A's `white_noise()`/`flicker_noise()` are lowered — the reason the gate's circuit uses
 hand-written reference devices.
 
+**Two of those four closed 2026-08-01b (T1/T2 noise lowering)** — see the phase entry below.
+
 **Tutorial**: `t5-acnoise/02-noise.qmd`, written 2026-08-01 — carries the full adjoint
 derivation (why one solve per frequency suffices, and why it is the plain rather than the
 conjugate transpose), the argument for why noise needed its own ABI channel, and both
 green-but-meaningless-gate traps as a worked lesson about tolerance constants carrying implicit
 assumptions about scale.
 
-**T5 is complete.** Both phases are implemented, golden-gated, and documented.
+**T5.1 and T5.2 are complete** — both implemented, golden-gated, and documented.
+
+### Phase T5.3 — Verilog-A `white_noise()`/`flicker_noise()` lowering (T1/T2)
+
+**Implemented and golden-gated 2026-08-01b.** Closes the two limits T5.2 stated as "additive to
+fix": a `va-codegen`-compiled model now contributes real noise, and Interface β carries a
+flicker channel. They were the same gap seen from two ends — lowering `flicker_noise()` is
+pointless if the ABI can only carry white sources, and a flicker channel is untestable if no
+model can declare one — so they closed together.
+
+**T1 (`va-ir`/`va-frontend`)**: the frontend already *lexed* both functions and elaborated them
+to `Expr::Const(0.0)`. That fold was correct for DC/transient/AC and destroyed exactly the
+information noise analysis needs. Now `Builtin::WhiteNoise`/`FlickerNoise` are real IR calls
+carrying their argument expressions, with the optional string label dropped (no per-source
+breakdown is reported, and dropping it keeps every `Expr::Call` argument a number rather than a
+string). `noise_table` keeps the old fold — its piecewise-linear PSD has no ABI channel, and
+pretending otherwise would silently drop a declared source.
+
+**T2 (`va-codegen`)**: noise terms are split out of a contribution exactly as `ddt` is split into
+the charge channel — same `collect_terms` flattening, same "top-level additive term" rule. The
+LRM's "value is zero outside noise analysis" becomes a single `ad::eval` arm returning
+`Dual::constant(0.0)`, which is why adding a noise line to a model leaves its residual and
+Jacobian **bit-identical** (asserted directly in `va-codegen`'s tests). `GeneratedModel::noise`
+then walks the same control flow `load` does, so a source declared inside an `if` arm is emitted
+only when that arm is taken; `run` was refactored into a generic `walk` to share that traversal
+rather than duplicate it.
+
+**One deliberate non-feature**: a *scaled* or nested noise call (`2*white_noise(p)`) is
+**rejected at build time**, not accepted. A factor around the call would have to be applied as
+its square to the PSD, and a model author writing that almost certainly means "twice the power."
+Rather than guess, `validate` refuses — the alternative is a declared noise source that
+evaluates quietly to zero and contributes nothing.
+
+**Gated by two new circuits**, both driven through `--model` so the noise comes from the compiled
+`.va` alone: `resistor_noise_va.net` (compiled thermal noise, **exact** agreement with QSPICE)
+and `diode_flicker.net` (compiled shot + `1/f`, `1.7e-5`). The latter is the zoo's only *shaped*
+spectrum — 209× across the band — which is what gives it teeth: a white-only implementation
+would be ~99.5% wrong at 10 Hz. `models/constants.vams` is new (`diode.va` had `include`d it for
+months without it existing), with exact SI 2019 values matching `va_abi::noise`'s own so a
+compiled model and its hand-written counterpart agree to the last digit.
+
+**Remaining T5 limits**, unchanged: output-referred only, no per-device breakdown, and
+`noise_table` unlowered.
 
 ---
 

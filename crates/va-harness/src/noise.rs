@@ -180,24 +180,54 @@ mod tests {
         assert!(run_noise(&workspace_path("circuits/divider.net"), None).is_err());
     }
 
-    /// A compiled Verilog-A model contributes no noise sources yet (`white_noise()` isn't
-    /// lowered), so running this deck *through* `models/diode.va` must fail loudly rather than
-    /// silently reporting only the resistor's share — the failure mode
-    /// `circuits/diode_noise.net`'s own comment warns about.
+    /// A **compiled** Verilog-A model now contributes real noise sources — `white_noise()` is
+    /// lowered (T5.2's frontend/codegen work), so a deck whose only noisy device is a compiled
+    /// one produces a genuine spectrum instead of the error this test used to assert.
+    ///
+    /// The value is checkable in closed form: a diode alone across an ideal source sees the
+    /// source's zero small-signal impedance, so probing the diode's own node gives... nothing
+    /// useful. Hence a series resistor, making the transfer impedance `R ∥ rd` and the answer
+    /// the same shot-plus-thermal sum `circuits/diode_noise.net` gates — but reached entirely
+    /// through the compiled model rather than `va-abi`'s hand-written one.
     #[test]
-    fn run_noise_rejects_a_circuit_whose_only_noisy_device_is_a_compiled_model() {
-        let deck = "* compiled diode, no reference primitive\nV1 in gnd DC 0.7\n\
-                    D1 in gnd diode\n.noise V(in) V1 dec 10 10 1meg\n.end\n";
+    fn a_compiled_model_now_contributes_real_noise() {
+        let deck = "* compiled diode through a series resistor\nV1 in gnd DC 0.7\n\
+                    R1 in a 1000\nD1 a gnd diode\n.noise V(a) V1 dec 10 10 1meg\n.end\n";
         let dir = std::env::temp_dir().join("va_harness_noise_compiled_model_test");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let path = dir.join("compiled_only.net");
         std::fs::write(&path, deck).expect("write deck");
 
-        let err = run_noise(
+        let g = run_noise(
             path.to_str().unwrap(),
             Some(&workspace_path("models/diode.va")),
         )
-        .expect_err("a silently-zero spectrum must be an error");
+        .expect("a compiled model's white_noise() now reaches the noise channel");
+
+        // The same ~1.99e-18 V²/Hz `circuits/diode_noise.net` measures with the *reference*
+        // diode — the compiled and hand-written models agree, which is the real claim here.
+        let psd = g.points[0].1;
+        assert!(
+            (psd / 1.987_7e-18 - 1.0).abs() < 1e-3,
+            "psd = {psd}, expected ~1.9877e-18"
+        );
+    }
+
+    /// The "would be identically zero" guard is still live — it just no longer fires for a
+    /// compiled model that declares noise. A circuit of genuinely noiseless devices (an ideal
+    /// source and an ideal capacitor dissipate nothing and pass no carriers across a barrier)
+    /// must still be an error rather than a silently-zero spectrum.
+    #[test]
+    fn run_noise_still_rejects_a_genuinely_noiseless_circuit() {
+        let deck = "* nothing here has a noise mechanism\nV1 in gnd DC 1\n\
+                    C1 in gnd 1e-6\n.noise V(in) V1 dec 10 10 1meg\n.end\n";
+        let dir = std::env::temp_dir().join("va_harness_noiseless_circuit_test");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("noiseless.net");
+        std::fs::write(&path, deck).expect("write deck");
+
+        let err = run_noise(path.to_str().unwrap(), None)
+            .expect_err("a silently-zero spectrum must be an error");
         assert!(
             format!("{err}").contains("no device in this circuit contributes any noise"),
             "unexpected error: {err}"

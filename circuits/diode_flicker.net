@@ -1,0 +1,16 @@
+* Compiled-model flicker noise -- T5.2's flicker_noise() lowering gate.
+* The same bias network circuits/diode_noise.net uses, but D1 resolves to the compiled
+* models/diode_flicker.va, which declares both a shot and a 1/f source:
+*   I <+ white_noise(2*q*|Id|)                  -- flat
+*   I <+ flicker_noise(KF*|Id|^AF, 1.0)         -- KF*|Id|^AF / f
+* so the output spectrum is *shaped*, unlike every other noise circuit in the zoo: flicker
+* dominates the low end and the flat shot+thermal floor takes over above the corner. That shape
+* is what makes this a real test of the flicker channel -- a white-only implementation would
+* produce a flat spectrum and miss by orders of magnitude at 10 Hz.
+* QSPICE's own diode uses exactly this KF/AF parameterization (.model D(... KF AF)), so the
+* translation is one-to-one and the comparison is meaningful across the whole band.
+V1 in  gnd  DC 0.7
+R1 in  a    1000
+D1 a   gnd  diode_flicker
+.noise V(a) V1 dec 10 10 10meg
+.end

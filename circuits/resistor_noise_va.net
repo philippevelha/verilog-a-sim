@@ -1,0 +1,16 @@
+* Compiled-model thermal noise -- T5.2's white_noise() lowering gate.
+* Two resistors in series across a 1 V source, probed at their junction. Both resolve to the
+* *compiled* models/resistor.va (via --model), whose analog block declares its own
+*   I(p,n) <+ white_noise(4*`P_K*$temperature/R)
+* rather than to the hand-written va-abi::reference::Resistor. That is the whole point: before
+* T5.2's frontend/codegen work a compiled model contributed no noise at all, so this deck would
+* have measured an identically-zero spectrum.
+* The two sources add in power and reach the output through the same R1||R2, so the answer is
+* the textbook 4kT*(R1||R2), flat (nothing here is reactive):
+*   R1||R2 = 1k||3k = 750 ohm  ->  S(out) = 4kT*750 ~ 1.243e-17 V^2/Hz
+* Pure R/V, so QSPICE runs it with no model translation at all.
+V1 in  gnd  DC 1
+R1 in  a    1000
+R2 a   gnd  3000
+.noise V(a) V1 dec 10 10 10meg
+.end

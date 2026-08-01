@@ -43,7 +43,7 @@ pub mod ad;
 pub mod lower;
 
 use ad::{eval, Ctx, Dual};
-use lower::{Contribution, Lowered, LoweredStmt};
+use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -254,20 +254,36 @@ impl GeneratedModel {
         stmts: &[LoweredStmt],
         sink: &mut dyn StampSink,
     ) -> Result<(), CodegenError> {
+        self.walk(ctx, stmts, &mut |me, ctx, c| me.stamp(ctx, c, sink))
+    }
+
+    /// [`Self::run`]'s control-flow walk, with what happens at each contribution left to the
+    /// caller — so the noise channel ([`Self::noise`]) reaches exactly the same contributions,
+    /// under exactly the same taken-branch and loop-iteration semantics, without duplicating any
+    /// of that logic. `run` is the stamping caller; nothing else about it changed.
+    fn walk<F>(
+        &self,
+        ctx: &Ctx,
+        stmts: &[LoweredStmt],
+        on_contribute: &mut F,
+    ) -> Result<(), CodegenError>
+    where
+        F: FnMut(&Self, &Ctx, &Contribution),
+    {
         for stmt in stmts {
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => {
                     let d = eval(ctx, *rhs)?;
                     ctx.set_var(*lhs, d);
                 }
-                LoweredStmt::Contribute(c) => self.stamp(ctx, c, sink),
+                LoweredStmt::Contribute(c) => on_contribute(self, ctx, c),
                 LoweredStmt::If { cond, then_, else_ } => {
                     let taken = if eval(ctx, *cond)?.value != 0.0 {
                         then_
                     } else {
                         else_
                     };
-                    self.run(ctx, taken, sink)?;
+                    self.walk(ctx, taken, on_contribute)?;
                 }
                 LoweredStmt::Case {
                     selector,
@@ -284,12 +300,12 @@ impl GeneratedModel {
                             }
                         }
                     }
-                    self.run(ctx, taken, sink)?;
+                    self.walk(ctx, taken, on_contribute)?;
                 }
                 LoweredStmt::While { cond, body } => {
                     let mut iters = 0usize;
                     while eval(ctx, *cond)?.value != 0.0 {
-                        self.run(ctx, body, sink)?;
+                        self.walk(ctx, body, on_contribute)?;
                         iters += 1;
                         if iters > MAX_LOOP_ITERATIONS {
                             return Err(loop_iteration_cap_exceeded());
@@ -302,11 +318,11 @@ impl GeneratedModel {
                     step,
                     body,
                 } => {
-                    self.run(ctx, init, sink)?;
+                    self.walk(ctx, init, on_contribute)?;
                     let mut iters = 0usize;
                     while eval(ctx, *cond)?.value != 0.0 {
-                        self.run(ctx, body, sink)?;
-                        self.run(ctx, step, sink)?;
+                        self.walk(ctx, body, on_contribute)?;
+                        self.walk(ctx, step, on_contribute)?;
                         iters += 1;
                         if iters > MAX_LOOP_ITERATIONS {
                             return Err(loop_iteration_cap_exceeded());
@@ -319,7 +335,7 @@ impl GeneratedModel {
                         return Err(loop_iteration_cap_exceeded());
                     }
                     for _ in 0..(n.round().max(0.0) as usize) {
-                        self.run(ctx, body, sink)?;
+                        self.walk(ctx, body, on_contribute)?;
                     }
                 }
             }
@@ -363,7 +379,33 @@ impl GeneratedModel {
                 }
                 LoweredStmt::Contribute(c) => {
                     for term in &c.resistive {
+                        // A noise call still buried inside a resistive term was not recognized
+                        // as a top-level additive term, so `lower` could not pull it into the
+                        // noise channel and `ad::eval` will quietly evaluate it to zero —
+                        // declaring a noise source that silently contributes nothing. Reject it
+                        // here instead (§ `lower::noise_term_shape`'s own doc comment on why
+                        // scaled/nested shapes aren't guessed at).
+                        if lower::contains_noise_call(ctx.module, term.expr) {
+                            return Err(CodegenError::Unsupported(
+                                "white_noise/flicker_noise must be a top-level additive term of \
+                                 a contribution (a scaled or nested noise call would be silently \
+                                 dropped, since its PSD scales as the square of any factor \
+                                 around it)"
+                                    .to_string(),
+                            ));
+                        }
                         eval(ctx, term.expr)?;
+                    }
+                    for term in &c.noise {
+                        match *term {
+                            NoiseTerm::White { pwr } => {
+                                eval(ctx, pwr)?;
+                            }
+                            NoiseTerm::Flicker { pwr, exp } => {
+                                eval(ctx, pwr)?;
+                                eval(ctx, exp)?;
+                            }
+                        }
                     }
                     for term in &c.charge {
                         eval(ctx, term.expr)?;
@@ -728,6 +770,49 @@ impl ModelInstance for GeneratedModel {
         self.module.nodes.get(i).and_then(|n| n.abstol)
     }
 
+    /// Emit this model's own noise sources (T5.2) — Interface β's noise channel, fed from the
+    /// `white_noise`/`flicker_noise` calls `lower` split out of each contribution.
+    ///
+    /// Each source is placed across the branch its containing `<+` targets, which is exactly the
+    /// LRM's rule: a noise function written in a branch contribution *is* a source in parallel
+    /// with that branch. Its argument expressions are evaluated at the operating point `x`, so a
+    /// bias-dependent PSD (SPICE's `KF·I^AF`, a diode's `2q·Id`) comes out right; only the value
+    /// is used, never the gradient, since a noise source is an independent stochastic quantity
+    /// rather than a function of the solution vector.
+    ///
+    /// Walks the same control flow `load` does ([`Self::walk`]), so a source declared inside an
+    /// `if` arm is emitted only when that arm is the one taken at this operating point.
+    ///
+    /// `temp` is ignored: a Verilog-A model writes its own temperature dependence into the PSD
+    /// expression (typically via `$temperature`/`$vt`), rather than having a `4kT` applied for
+    /// it the way `va-abi`'s hand-written [`va_abi::reference::Resistor`] does.
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn va_abi::NoiseSink) {
+        let _ = temp;
+        let ctx = self.ctx(x, false);
+        // Post-validation the evaluations below cannot fail; a failure mid-walk simply stops
+        // emitting further sources, exactly as `load` stops stamping.
+        let _ = self.walk(&ctx, &self.lowered.stmts, &mut |me, ctx, c| {
+            if c.noise.is_empty() {
+                return;
+            }
+            let (gp, gn) = (me.terminals[c.p_slot], me.terminals[c.n_slot]);
+            for term in &c.noise {
+                match *term {
+                    NoiseTerm::White { pwr } => {
+                        if let Ok(p) = eval(ctx, pwr) {
+                            sink.white_current(gp, gn, p.value);
+                        }
+                    }
+                    NoiseTerm::Flicker { pwr, exp } => {
+                        if let (Ok(p), Ok(e)) = (eval(ctx, pwr), eval(ctx, exp)) {
+                            sink.flicker_current(gp, gn, p.value, e.value);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
         let ctx = self.ctx(x, false);
         self.stamp_branch_currents(x, sink);
@@ -754,8 +839,8 @@ mod tests {
     use super::*;
     use va_abi::stamps::DenseStamp;
     use va_ir::{
-        Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, FuncId, Function, Module,
-        NodeDecl, NodeId, Param, Stmt, VarDecl, VarId,
+        Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, ExprId, FuncId, Function,
+        Module, NodeDecl, NodeId, Param, Stmt, VarDecl, VarId,
     };
 
     /// Build the resistor IR: `I(p,n) <+ V(p,n) / R`, R defaulting to 1 kΩ.
@@ -3898,6 +3983,115 @@ mod tests {
 
         assert!(matches!(
             build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
+    /// Build a two-node module whose single flow contribution is `V(p,n)/R + <noise>`, where
+    /// `<noise>` is supplied by `make_noise` given the module under construction. Shared by the
+    /// noise-lowering tests below.
+    fn module_with_noise(make_noise: impl FnOnce(&mut Module) -> ExprId) -> Module {
+        let mut m = resistor_ir();
+        let noise = make_noise(&mut m);
+        let Some(Stmt::Contribute { value, .. }) = m.analog.last().cloned() else {
+            panic!("resistor_ir's last statement should be the contribution");
+        };
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, value, noise));
+        *m.analog.last_mut().unwrap() = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: sum,
+        };
+        m
+    }
+
+    /// A `white_noise` term reaches Interface β's noise channel with its argument evaluated at
+    /// the operating point — and, critically, leaves `load` untouched: the resistive stamp is
+    /// bit-identical to the same model without the noise term, which is the LRM's "value is zero
+    /// outside noise analysis" rule made concrete.
+    #[test]
+    fn white_noise_lowers_to_the_noise_channel_without_perturbing_load() {
+        let plain = resistor_ir();
+        let noisy = module_with_noise(|m| {
+            let pwr = m.push_expr(Expr::Const(4.2e-23));
+            m.push_expr(Expr::Call(Builtin::WhiteNoise, vec![pwr]))
+        });
+
+        let plain_inst = build_instance(&plain, &[0, 1], &mut 2).expect("plain builds");
+        let noisy_inst = build_instance(&noisy, &[0, 1], &mut 2).expect("noisy builds");
+
+        // Identical resistive stamps.
+        let x = [2.0, 0.0];
+        let (mut a, mut b) = (DenseStamp::new(2), DenseStamp::new(2));
+        plain_inst.load(&x, &mut a);
+        noisy_inst.load(&x, &mut b);
+        assert_eq!(
+            a.residual, b.residual,
+            "noise must not perturb the residual"
+        );
+        assert_eq!(
+            a.jacobian, b.jacobian,
+            "noise must not perturb the Jacobian"
+        );
+
+        // The plain model reports no sources; the noisy one reports exactly its declared PSD,
+        // across the contribution's own branch.
+        let mut sink = va_abi::noise::CollectedNoise::default();
+        plain_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
+        assert!(sink.sources.is_empty(), "{:?}", sink.sources);
+
+        let mut sink = va_abi::noise::CollectedNoise::default();
+        noisy_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
+        assert_eq!(sink.sources.len(), 1);
+        let (p, n, source) = sink.sources[0];
+        assert_eq!((p, n), (0, 1), "source sits across the contributed branch");
+        assert_eq!(source, va_abi::noise::NoiseSource::White { psd: 4.2e-23 });
+    }
+
+    /// A `flicker_noise` term carries both its numerator and its exponent through, and the
+    /// numerator is evaluated at the operating point — here `V(p,n)`, so the recorded
+    /// coefficient tracks the bias rather than being frozen at build time.
+    #[test]
+    fn flicker_noise_carries_a_bias_dependent_coefficient_and_its_exponent() {
+        let noisy = module_with_noise(|m| {
+            let v = m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }));
+            let exp = m.push_expr(Expr::Const(1.0));
+            m.push_expr(Expr::Call(Builtin::FlickerNoise, vec![v, exp]))
+        });
+        let inst = build_instance(&noisy, &[0, 1], &mut 2).expect("builds");
+
+        for bias in [2.0, 5.0] {
+            let mut sink = va_abi::noise::CollectedNoise::default();
+            inst.noise(&[bias, 0.0], va_abi::noise::TEMP_NOMINAL, &mut sink);
+            assert_eq!(
+                sink.sources[0].2,
+                va_abi::noise::NoiseSource::Flicker {
+                    coeff: bias,
+                    exponent: 1.0
+                },
+                "coefficient must track the operating point"
+            );
+        }
+    }
+
+    /// A noise call that isn't a bare top-level term can't be pulled into the noise channel, and
+    /// would otherwise evaluate quietly to zero — declaring a source that contributes nothing.
+    /// That must be a build error, not a silent drop (§ `lower::noise_term_shape`).
+    #[test]
+    fn a_scaled_noise_call_is_rejected_rather_than_silently_dropped() {
+        let scaled = module_with_noise(|m| {
+            let pwr = m.push_expr(Expr::Const(4.2e-23));
+            let call = m.push_expr(Expr::Call(Builtin::WhiteNoise, vec![pwr]));
+            let two = m.push_expr(Expr::Const(2.0));
+            m.push_expr(Expr::Binary(va_ir::BinOp::Mul, two, call))
+        });
+        assert!(matches!(
+            build_instance(&scaled, &[0, 1], &mut 2),
             Err(CodegenError::Unsupported(_))
         ));
     }

@@ -1,6 +1,8 @@
 // Linear resistor — bring-up model.
-// Matches the hand-written reference in va-abi (crates/va-abi/src/reference/resistor.rs).
+// Matches the hand-written reference in va-abi (crates/va-abi/src/reference/resistor.rs),
+// including its Johnson-Nyquist thermal noise.
 `include "disciplines.vams"
+`include "constants.vams"
 
 module resistor(p, n);
     inout p, n;
@@ -9,5 +11,10 @@ module resistor(p, n);
 
     analog begin
         I(p, n) <+ V(p, n) / R;
+        // Thermal (Johnson-Nyquist) noise: a 4kT/R A^2/Hz current source across the resistor.
+        // `white_noise` evaluates to zero in every analysis except noise (LRM 4.5.13), so this
+        // line leaves the DC/transient/AC answer bit-for-bit unchanged -- which is exactly why
+        // it can sit in the same analog block as the device's own DC behavior.
+        I(p, n) <+ white_noise(4.0 * `P_K * $temperature / R, "thermal");
     end
 endmodule

@@ -148,6 +148,8 @@ pub enum UnknownKind {
 pub trait NoiseSink {
     /// A white current-noise source of one-sided PSD `psd` (A²/Hz) across the branch `p`-`n`.
     fn white_current(&mut self, p: usize, n: usize, psd: f64);
+    /// A flicker source across `p`-`n`, PSD `coeff / f^exponent` (A²/Hz). Default: none.
+    fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {}
 }
 
 pub trait ModelInstance {
@@ -216,3 +218,28 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > `flicker_noise()` are not lowered yet — a circuit built from a compiled model therefore
 > computes zero noise, which is why the noise validation circuit uses the hand-written reference
 > devices. See `va_abi::noise`'s own module doc and `docs/roadmap.md`'s T5.2 section.
+
+> **Revision (§6 change, 2026-08-01b):** added `NoiseSink::flicker_current`, closing **both**
+> limits the revision immediately above stated — and it closed them together, because they were
+> the same gap seen from two ends. Lowering Verilog-A's `flicker_noise()` in `va-codegen` (T1/T2)
+> is pointless if the ABI can only carry white sources, and a flicker channel is untestable if no
+> model can declare one.
+>
+> `flicker_current(p, n, coeff, exponent)` describes a source whose one-sided PSD at frequency
+> `f` is `coeff / f^exponent`. The frequency dependence is carried as a **shape plus
+> coefficients** rather than as a closure or a pre-evaluated number: `coeff` already includes
+> whatever bias dependence the model applies (SPICE's `KF·I^AF`, evaluated at the operating
+> point), and only the `f` dependence is deferred to the analysis, which evaluates
+> `NoiseSource::psd_at(f)` per sweep point. That keeps the channel a plain data contract with no
+> callbacks and no re-entry into the model per frequency.
+>
+> Another **default trait method**, so every sink written against the previous revision — and
+> every model that emits only white noise — kept compiling untouched; a white-only sink simply
+> drops flicker sources, and a test in `va_abi::noise` pins exactly that. The one non-additive
+> ripple is internal to `va-abi`: `CollectedNoise::sources` now records a `NoiseSource` enum
+> instead of a bare `f64` PSD, since a flicker source has no single PSD to record.
+>
+> `va-abi`'s own reference models still emit only white sources (a textbook resistor/diode/BJT
+> has no flicker term to declare); the channel's users are `va-codegen`-generated models, whose
+> `flicker_noise()` calls now reach it. See `docs/validation.md`'s flicker-gate section for the
+> QSPICE comparison this made possible.

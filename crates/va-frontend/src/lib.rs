@@ -80,7 +80,14 @@ mod tests {
     #[test]
     fn elaborates_resistor_model() {
         let src = include_str!("../../../models/resistor.va");
-        let design = super::compile(src).expect("resistor.va should elaborate");
+        // Through the include path, as the real pipeline does: the model `include`s
+        // `constants.vams` for `` `P_K `` (its thermal-noise term, T5.2).
+        let models = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))];
+        let design =
+            super::compile_with_includes(src, &models).expect("resistor.va should elaborate");
         assert_eq!(design.modules.len(), 1);
         assert_eq!(design.modules[0].name, "resistor");
     }

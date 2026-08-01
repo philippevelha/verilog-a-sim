@@ -1,0 +1,35 @@
+// Shockley diode with flicker (1/f) noise — T5.2's flicker-channel gate model.
+//
+// Deliberately a standalone copy of models/diode.va's equations plus a flicker term, rather
+// than a parameterization of it: this project's netlist format has no syntax for passing device
+// parameters (a `D` line names a model, nothing more), so a nonzero KF has to come from a
+// model file's own defaults. Keeping it separate leaves diode.va — used by circuits/diode_iv.net,
+// rectifier.net, and diode_ac.net — with the physically sane KF=0 default it should have.
+// The shared Is/N/Id equations are kept in sync by hand, the same way the QSPICE `.model` card
+// translations in xtask are.
+//
+// KF/AF match SPICE's own flicker parameterization exactly, which is what makes this checkable
+// against QSPICE's `.model D(... KF=1e-15 AF=1)` — its flicker PSD is KF*I^AF/f.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module diode_flicker(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+    parameter real Is = 1e-14 from (0:inf);   // saturation current, A
+    parameter real N  = 1.0   from (0:inf);   // ideality factor
+    parameter real KF = 1e-15 from [0:inf);   // flicker-noise coefficient
+    parameter real AF = 1.0   from (0:inf);   // flicker-noise current exponent
+
+    real Id;
+
+    analog begin
+        Id = Is * (exp(V(anode, cathode) / (N * $vt)) - 1.0);
+        I(anode, cathode) <+ Id;
+        I(anode, cathode) <+ white_noise(2.0 * `P_Q * abs(Id), "shot");
+        // Flicker: KF*|Id|^AF / f^1 A^2/Hz. The frequency dependence is the analysis's to apply
+        // (Interface beta carries the exponent, not a per-frequency value); everything else --
+        // including the bias dependence through Id -- is evaluated at the operating point.
+        I(anode, cathode) <+ flicker_noise(KF * pow(abs(Id), AF), 1.0, "flicker");
+    end
+endmodule

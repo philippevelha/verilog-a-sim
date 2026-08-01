@@ -77,14 +77,36 @@ const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
 /// (§ `va_abi::noise`). The deck's `diode` therefore has to resolve to the hand-written
 /// `va-abi::reference::Diode`, which does implement Interface β's noise channel — see
 /// `circuits/diode_noise.net`'s own header comment.
-const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[("circuits/diode_noise.net", None)];
+const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
+    ("circuits/diode_noise.net", None),
+    ("circuits/resistor_noise_va.net", Some("models/resistor.va")),
+    (
+        "circuits/diode_flicker.net",
+        Some("models/diode_flicker.va"),
+    ),
+];
 
-/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.noise` circuits (T5.2). The deck names a
-/// `diode` model QSPICE has no idea about, so it takes the same one-to-one `IS`/`N` translation
-/// every other diode circuit here does — a noise analysis linearizes the very same model
-/// equations, and derives its shot noise from the very same DC current.
-const QSPICE_NOISE_MODEL_TRANSLATIONS: &[(&str, &str)] =
-    &[("circuits/diode_noise.net", ".model diode D(IS=1e-14 N=1)")];
+/// Like [`QSPICE_NATIVE_CIRCUITS`], for a `.noise` circuit needing no `.model` translation:
+/// `resistor_noise_va.net` is pure `R`/`V`, even though *this* project drives it through a
+/// compiled `models/resistor.va` (the point of that circuit is the compiled model's own
+/// `white_noise()`; QSPICE just needs a plain resistor to compare against).
+const QSPICE_NATIVE_NOISE_CIRCUITS: &[&str] = &["circuits/resistor_noise_va.net"];
+
+/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.noise` circuits that name a custom model
+/// (T5.2). Both are one-to-one: a noise analysis linearizes the very same model equations, and
+/// derives its shot noise from the very same DC current.
+///
+/// `diode_flicker.net` additionally carries `KF`/`AF` — SPICE's own flicker parameterization,
+/// which `models/diode_flicker.va` deliberately mirrors (`flicker_noise(KF*|Id|^AF, 1.0)`), so
+/// the comparison is meaningful across the whole band rather than only where flicker is
+/// negligible.
+const QSPICE_NOISE_MODEL_TRANSLATIONS: &[(&str, &str)] = &[
+    ("circuits/diode_noise.net", ".model diode D(IS=1e-14 N=1)"),
+    (
+        "circuits/diode_flicker.net",
+        ".model diode_flicker D(IS=1e-14 N=1 KF=1e-15 AF=1)",
+    ),
+];
 
 /// Tally shared across [`validate`]'s DC/sweep/tran passes — distinguishes *three* different
 /// outcomes, not two, per `CLAUDE.md` §7's four metrics: a circuit can have no golden yet
@@ -839,38 +861,13 @@ fn gen_golden() -> Result<()> {
 
     // `.noise` circuits (T5.2): like `.ac`, no cold-start rewrite — a noise analysis is a
     // linearization about the DC operating point, so QSPICE's "solve DC first" is exactly right.
+    for &circuit in QSPICE_NATIVE_NOISE_CIRCUITS {
+        let native_deck = rewrite_gnd_to_zero(&read_circuit(&root, circuit)?);
+        generated += gen_noise_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
+    }
     for &(circuit, model_card) in QSPICE_NOISE_MODEL_TRANSLATIONS {
-        let deck = read_circuit(&root, circuit)?;
-        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
-        let output = net
-            .noise
-            .as_ref()
-            .with_context(|| format!("{circuit} has no `.noise` card"))?
-            .output
-            .clone();
-        let stem = Path::new(circuit)
-            .file_stem()
-            .context("circuit path has no file stem")?
-            .to_string_lossy()
-            .into_owned();
-        let native_deck = translate_for_qspice(&deck, model_card);
-
-        // A `.noise` `.qraw` is `Flags: real` and point-major — the same shape `.dc`/`.tran`
-        // produce, so it reuses `run_qspice_sweep` rather than needing its own reader.
-        let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
-            .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
-        let golden = golden_noise_from_qraw(&raw, &output)
-            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
-
-        let golden_path = golden_dir.join(format!("{stem}.golden"));
-        std::fs::write(&golden_path, golden.render())
-            .with_context(|| format!("writing {}", golden_path.display()))?;
-        eprintln!(
-            "[xtask]   wrote {} ({} frequency point(s), noise PSD at V({output}))",
-            golden_path.display(),
-            golden.points.len()
-        );
-        generated += 1;
+        let native_deck = translate_for_qspice(&read_circuit(&root, circuit)?, model_card);
+        generated += gen_noise_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -923,6 +920,52 @@ fn gen_ac_golden(
         golden_path.display(),
         golden.points.len(),
         golden.node_order.len()
+    );
+    Ok(1)
+}
+
+/// Run one already-translated `.noise` deck through QSPICE and write its golden file, returning
+/// `1` so the caller can fold it into its own generated count — the noise analogue of
+/// [`gen_ac_golden`], and factored out for the same reason (the native and model-translated
+/// passes differ only in how the deck text was prepared).
+///
+/// No cold-start rewrite, like `.ac`: a noise analysis is *defined* as a linearization about the
+/// DC operating point, so QSPICE's own "solve DC first" is exactly what's wanted.
+fn gen_noise_golden(
+    qspice: &Path,
+    root: &Path,
+    tmp: &Path,
+    circuit: &str,
+    native_deck: &str,
+) -> Result<u32> {
+    let deck = read_circuit(root, circuit)?;
+    let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+    let output = net
+        .noise
+        .as_ref()
+        .with_context(|| format!("{circuit} has no `.noise` card"))?
+        .output
+        .clone();
+    let stem = Path::new(circuit)
+        .file_stem()
+        .context("circuit path has no file stem")?
+        .to_string_lossy()
+        .into_owned();
+
+    // A `.noise` `.qraw` is `Flags: real` and point-major — the same shape `.dc`/`.tran`
+    // produce, so it reuses `run_qspice_sweep` rather than needing its own reader.
+    let raw = run_qspice_sweep(qspice, native_deck, tmp, &stem)
+        .with_context(|| format!("running QSPICE on {circuit}"))?;
+    let golden = golden_noise_from_qraw(&raw, &output)
+        .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+    let golden_path = root.join("golden").join(format!("{stem}.golden"));
+    std::fs::write(&golden_path, golden.render())
+        .with_context(|| format!("writing {}", golden_path.display()))?;
+    eprintln!(
+        "[xtask]   wrote {} ({} frequency point(s), noise PSD at V({output}))",
+        golden_path.display(),
+        golden.points.len()
     );
     Ok(1)
 }

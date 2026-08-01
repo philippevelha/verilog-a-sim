@@ -93,6 +93,31 @@ gaps, not codegen ones) and `docs/roadmap.md`'s own dated "Language coverage" ch
 a real, honest gap in *this specific deliverable*, not a silently-abandoned promise — the
 underlying tracking need is met, just not in the shape T2.3 originally called for.
 
+## A third channel, on the same pattern (added 2026-08-01b)
+
+The resistive/charge split this chapter describes turned out to generalize. When `va-codegen`
+learned to lower Verilog-A's `white_noise()`/`flicker_noise()` (T5.3), the mechanism was
+**exactly** the one already here: `collect_terms` flattens a contribution into signed additive
+terms, and a term that matches a recognized shape is pulled into its own channel instead of the
+residual. `ddt(q)` → charge; `white_noise(pwr)` → noise.
+
+Three things carried over unchanged, which is the useful part of the analogy:
+
+- **The "top-level additive term" rule.** Just as `ddt` must be a top-level term to be
+  recognized, so must a noise call. Both fall through to the resistive channel otherwise.
+- **The value-at-load question.** `ddt`'s answer is "it never has one — error if evaluated";
+  a noise call's is "zero in every analysis except noise" (LRM §4.5.13), a single `ad::eval` arm.
+  That difference is why adding a noise line to a model leaves `load` bit-identical while a
+  misplaced `ddt` is a hard error.
+- **Refusing to guess at a scaled shape.** `charge_term_shape` *does* flatten parameter-only
+  scaling around a `ddt`, because `k·ddt(q)` unambiguously means `ddt(k·q)` for constant `k`.
+  The noise channel deliberately does **not**: a factor around a noise call would have to be
+  applied as its *square* to a PSD, so `2*white_noise(p)` is rejected at build time rather than
+  silently interpreted. Same principle — recognize only what is unambiguous — reaching opposite
+  conclusions because the physics differs.
+
+See `t5-acnoise/02-noise.qmd` for what consumes the channel.
+
 ## What's next
 
 `t3-core/01-mna.qmd` — assembling every device's stamps into one linear system.

@@ -1027,15 +1027,24 @@ including the ones with no implemented behavior at all.
 
 - **Purpose and Static Nature**: Simulation-time in full Verilog-AMS — the three noise sources
   feed a noise-analysis PSD computation, and `ac_stim` contributes a stimulus only during AC
-  analysis. v0 has neither noise analysis nor AC analysis (`va-acnoise` is the stretch-goal crate
-  for both), so all four fold to a compile-time `0.0`: correct, not just convenient, since none
-  of them has any effect on a DC operating point regardless.
+  analysis. **Updated 2026-08-01 (T5.2):** `white_noise`/`flicker_noise` are now genuinely
+  lowered, since `va-acnoise` implements noise analysis and Interface β carries a noise channel.
+  `noise_table` and `ac_stim` still fold to `0.0` — `noise_table`'s piecewise-linear PSD has no
+  ABI channel to carry it, and `ac_stim` has no effect on a DC operating point.
 - **Declaration and Assignment**: Called as `white_noise(pwr[, "name"])` /
   `flicker_noise(pwr, exp[, "name"])` / `noise_table(...)` / `ac_stim([mag[, phase[, type]]])`.
-- **Expressions and Evaluation**: Elaborated to `Expr::Const(0.0)` unconditionally — their
-  string label and numeric arguments are parsed but never evaluated.
+- **Expressions and Evaluation**: `white_noise`/`flicker_noise` elaborate to
+  `Expr::Call(Builtin::WhiteNoise | Builtin::FlickerNoise, args)` with their numeric arguments
+  preserved and their optional string label dropped (this project reports a summed spectrum, not
+  a per-source breakdown). Their *value* is `0` in every analysis except noise — produced by
+  `va-codegen`, which splits them out of a contribution into the noise channel exactly as it
+  splits `ddt` into the charge channel — so a model may declare its noise inline in the same
+  `<+` that carries its DC behavior without perturbing any DC/transient/AC answer. A missing
+  required argument is a clear elaboration error, not a silent zero. `noise_table`/`ac_stim`
+  remain elaborated to `Expr::Const(0.0)`, arguments unevaluated.
 - **Structural and Analog Usage**: Analog-block only (they appear on the right-hand side of a
-  `<+` contribution, contributing zero under v0's DC-only model).
+  `<+` contribution; the branch that contribution targets is the branch the noise source is
+  placed across).
 - **Comparison with Traditional Constructs**: No general-purpose-language analogue — a
   stochastic-process source or a frequency-domain stimulus is intrinsic to circuit noise/AC
   analysis.
@@ -1230,7 +1239,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `exclude` | Range-clause keyword, §1.4 | `exclude value` / `exclude (lo:hi)` | Const-evaluated then discarded | Module-level (parameter ranges) | No C analogue (closest: a validated-range precondition, minus the "hole" it punches out) |
 | `exp` | Dynamic/static dual, §1.5 | `exp(x)` call | Exponential | Analog expr / const context | C `exp()` |
 | `final_step` | Reserved, no grammar production as a bare word outside `@()`; realistically only appears inside the discarded `@(final_step)` | Global analog event: fires once at analysis end | N/A | Analog-block only (event control) | No C analogue (closest: an `atexit()` hook) |
-| `flicker_noise` | Folds to constant `0.0`, §1.5 | `flicker_noise(pwr, exp[, "name"])` call | Const-folded to `0.0` | Analog-block only | No general-purpose analogue |
+| `flicker_noise` | Dynamic (noise-channel), §1.5 | `flicker_noise(pwr, exp[, "name"])` call | Lowers to `Builtin::FlickerNoise(pwr, exp)`; value `0` outside noise analysis, PSD `pwr/f^exp` within it | Analog-block only | No general-purpose analogue |
 | `floor` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `floor(x)` call | Round toward −∞ | Analog expr / const context | C `floor()` |
 | `flow` | A discipline attribute keyword (§1.5), fully parsed and given real effect | `flow Nature;` inside a `discipline` body | Parsed into `DisciplineDecl::flow`; also calls `Parser::register_access` (§2.17), binding that nature's `access` name as a recognized `Flow`-kind access function | Module preamble | Names the conserved "current-like" quantity of a discipline; no C analogue |
 | `for` | Simulation-time (or elaboration-time when genvar-driven), §1.5/Part 2 §2.14 | `for (init; cond; step) body` | Dynamic, or const-evaluated if genvar-driven | Analog-block only | C `for` — with the added genvar-unrolling mode C has no concept of |
@@ -1341,7 +1350,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `weak0` | Reserved, no grammar production (net strength: weak drive to 0) | N/A | N/A | Digital net-strength only | No C analogue |
 | `weak1` | Reserved, no grammar production (net strength: weak drive to 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `while` | Simulation-time control flow, §1.5 | `while (cond) body` | Dynamic condition | Analog-block only | C `while` |
-| `white_noise` | Folds to constant `0.0`, §1.5 | `white_noise(pwr[, "name"])` call | Const-folded to `0.0` | Analog-block only | No general-purpose analogue |
+| `white_noise` | Dynamic (noise-channel), §1.5 | `white_noise(pwr[, "name"])` call | Lowers to `Builtin::WhiteNoise(pwr)`; value `0` outside noise analysis, PSD `pwr` within it | Analog-block only | No general-purpose analogue |
 | `wire` | Reserved, no grammar production (default digital net type) | N/A | N/A | Digital structural only | Closest to a C wire/signal — this project always requires an explicit `electrical`/`thermal` discipline instead |
 | `wor` | Reserved, no grammar production (wired-OR net type) | N/A | N/A | Digital structural only | No C analogue |
 | `xnor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a ^ b)`, minus gate timing |

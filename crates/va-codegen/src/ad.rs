@@ -596,6 +596,19 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
                 "ddt must appear as a top-level contribution term, not inside an expression",
             ))
         }
+        // LRM §4.5.13: a noise function's *value* is zero in every analysis except noise. This
+        // is the arm that makes that true — a model may declare its noise inline in the same
+        // `<+` that carries its DC behavior without perturbing any DC/transient/AC answer.
+        //
+        // A gradient of zero is right as well as convenient: the noise source is an independent
+        // stochastic quantity, not a function of the solution vector, so it contributes nothing
+        // to the Jacobian either.
+        //
+        // Reaching here at all means the call was *not* pulled into the noise channel by
+        // `lower::noise_term_shape` (which only recognizes a bare top-level term), so the
+        // source would be silently dropped. `GeneratedModel::validate` rejects that case up
+        // front rather than letting it evaluate quietly to zero here.
+        Builtin::WhiteNoise | Builtin::FlickerNoise => Dual::constant(0.0, count),
     })
 }
 

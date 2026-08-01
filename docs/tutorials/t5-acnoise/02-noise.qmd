@@ -122,6 +122,35 @@ phase, which taking `|Z_k|²` afterwards would then largely hide.
 never has to reconcile the residual channel's own current-injection sign convention — a
 reconciliation that *would* have been necessary if noise reported amplitudes rather than powers.
 
+### Where the sources come from
+
+Two places, and the second one is newer than this chapter's first draft.
+
+**Hand-written `va-abi::reference` devices** override `noise` directly in Rust, as the table
+below shows.
+
+**Compiled Verilog-A models** declare their own, inline in the analog block:
+
+```verilog
+analog begin
+    I(p, n) <+ V(p, n) / R;
+    I(p, n) <+ white_noise(4.0 * `P_K * $temperature / R, "thermal");
+end
+```
+
+That second line is the LRM's own idiom, and it works because a noise function's *value* is zero
+in every analysis except noise (LRM §4.5.13) — so it perturbs no DC, transient, or AC answer.
+`va-codegen` makes that literal: `ad::eval` returns `Dual::constant(0.0)` for both noise
+builtins, and `lower` splits the call out of the contribution into a separate channel, exactly
+the way it already splits `ddt` into the charge channel. Adding a noise line to a model leaves
+its residual and Jacobian **bit-identical**, which `va-codegen`'s own tests assert directly.
+
+The one shape deliberately *not* accepted is a scaled or nested call like `2*white_noise(p)`:
+a factor around the call would have to be applied as its **square** to the PSD, and an author
+writing that almost certainly means "twice the power." Rather than guess, the build rejects it —
+the alternative is a declared noise source that quietly evaluates to zero and contributes
+nothing. (§ `docs/roadmap.md`'s T5.3.)
+
 ## The code
 
 Interface β's new channel — the entire addition, in `va-abi`:
@@ -130,6 +159,9 @@ Interface β's new channel — the entire addition, in `va-abi`:
 pub trait NoiseSink {
     /// A white current-noise source of one-sided PSD `psd` (A²/Hz) across the branch `p`-`n`.
     fn white_current(&mut self, p: usize, n: usize, psd: f64);
+    /// A flicker source across `p`-`n`, PSD `coeff / f^exponent`. Default: none.  (Added
+    /// 2026-08-01b, when `flicker_noise()` lowering gave it a first user.)
+    fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {}
 }
 
 pub trait ModelInstance {
@@ -139,6 +171,11 @@ pub trait ModelInstance {
     fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) { let _ = (x, temp, sink); }
 }
 ```
+
+A source is carried as a **shape plus coefficients**, not a pre-evaluated number — that is what
+lets one collection pass serve a whole frequency sweep. `coeff` already includes the model's own
+bias dependence (SPICE's `KF·I^AF`, evaluated at the operating point); only the `f` dependence is
+deferred, and the analysis evaluates `NoiseSource::psd_at(f)` per point.
 
 The two mechanisms, as plain functions so they can be tested directly rather than only through a
 device:
@@ -177,11 +214,11 @@ for &freq in &f {
     let omega = 2.0 * PI * freq;
     let y = solve_block_embedded(&g, &c, dim, omega, &e_out, /* transpose = */ true)?;
     let total = collected.sources.iter()
-        .map(|&(p, n, s)| {
+        .map(|&(p, n, source)| {
             let (pre, pim) = at(&y, p);      // `at` folds a ground index to 0
             let (nre, nim) = at(&y, n);
-            let (zre, zim) = (pre - nre, pim - nim);   // Z_k = y_p − y_n
-            (zre * zre + zim * zim) * s                // |Z_k|² · S_k
+            let (zre, zim) = (pre - nre, pim - nim);        // Z_k = y_p − y_n
+            (zre * zre + zim * zim) * source.psd_at(freq)   // |Z_k|² · S_k(f)
         })
         .sum();
     psd.push(total);
@@ -247,17 +284,20 @@ it is ~33%. Both are three orders outside the `1e-3` band.
 
 Both were live here, and neither announces itself.
 
-**A compiled model contributes no noise at all.** Verilog-A's `white_noise()`/`flicker_noise()`
-are not lowered by `va-codegen` yet, so a `--model`-compiled device takes the trait default and
-emits nothing. Had the noise circuit been written the way `circuits/diode_ac.net` is — with
-`--model models/diode.va` — it would have silently measured *only the resistor's* share and still
-looked like a working test. So the deck uses the hand-written `va-abi::reference::Diode` on
-purpose, `va-cli::solve_noise` refuses to report an identically-zero spectrum rather than let
-that failure mode pass as a result, and a test pins the refusal:
+**A compiled model contributes no noise at all** — true when this gate was built, since
+Verilog-A's `white_noise()`/`flicker_noise()` were not yet lowered, so a `--model`-compiled
+device took the trait default and emitted nothing. Had the noise circuit been written the way
+`circuits/diode_ac.net` is — with `--model models/diode.va` — it would have silently measured
+*only the resistor's* share and still looked like a working test. So the deck uses the
+hand-written `va-abi::reference::Diode` on purpose, and `va-cli::solve_noise` refuses to report
+an identically-zero spectrum rather than let that failure mode pass as a result. *(Lowering
+landed 2026-08-01b, so a compiled model is no longer silent — but the guard stays, and now
+covers a genuinely noiseless circuit instead:)*
 
 ```console
 $ cargo test -p va-harness noise::
-test noise::tests::run_noise_rejects_a_circuit_whose_only_noisy_device_is_a_compiled_model ... ok
+test noise::tests::a_compiled_model_now_contributes_real_noise ... ok
+test noise::tests::run_noise_still_rejects_a_genuinely_noiseless_circuit ... ok
 ```
 
 **The DC error metric makes a PSD comparison vacuous.** `metrics::REL_ERROR_FLOOR` is `1e-8`,
@@ -278,14 +318,13 @@ gate into decoration.
 
 ## Limitations
 
-All four are deliberate, and all four are additive to fix — none requires this design reshaped:
+*(Updated 2026-08-01b: two of the four below are now closed — see "What's next".)*
 
-- **White sources only.** `white_current` is the one channel; flicker (`1/f`) noise has no
-  representation. A `flicker_current` sibling would be the next Interface β revision, of exactly
-  the same shape as this one. QSPICE emits a `1overf` column per device, identically zero for
-  every model this project ships (none declares a `KF`/`AF` coefficient), so the gap costs
-  nothing against the current gate — and would cost correctness the moment a flicker-bearing
-  model is added.
+- ~~**White sources only.**~~ **Closed.** `flicker_current` joined the channel when
+  `va-codegen` learned to lower `flicker_noise()`; a source is now carried as a *shape*
+  (`NoiseSource::White`/`Flicker`) that the sweep evaluates per frequency.
+- ~~**No noise from generated models.**~~ **Closed.** Verilog-A's `white_noise()`/
+  `flicker_noise()` are lowered; a compiled `.va` model contributes real sources.
 - **Output-referred only.** No input-referred spectrum (`S_out / |H|²`). That needs the forward
   AC transfer function from a designated input source, which `va-acnoise::ac` can already
   compute; it simply isn't folded in. The `.noise` card's input-source name is parsed and stored
@@ -293,8 +332,8 @@ All four are deliberate, and all four are additive to fix — none requires this
 - **No per-device breakdown.** `NoiseSpectrum` reports the total at each frequency, not one column
   per contributing device the way QSPICE's `onoise_<dev>` columns do. The per-source
   contributions exist inside `run`'s loop; nothing but their sum is retained.
-- **No noise from generated models**, as above — the one limitation that is a *missing feature
-  elsewhere* (T1/T2 lowering) rather than a scoping decision taken here.
+- **`noise_table` is not lowered.** Its piecewise-linear PSD has no ABI channel; the frontend
+  still folds it to zero rather than pretend otherwise.
 
 `total` deserves its own note: it is trapezoidal quadrature in *linear* frequency over
 logarithmically-spaced points, which is exact for a flat spectrum (hence checkable against
@@ -303,15 +342,21 @@ statistic, not the gated quantity — `docs/validation.md` compares the spectrum
 
 ## What's next
 
-T5 is the end of its own chain; nothing downstream depends on this. The natural continuations, in
-rough order of value:
+*(Updated 2026-08-01b.)* The first two continuations this section used to list are **done**,
+and they turned out to be one piece of work rather than two: lowering `flicker_noise()` is
+pointless if the ABI can only carry white sources, and a flicker channel is untestable if no
+model can declare one. Both landed together — Verilog-A's `white_noise()`/`flicker_noise()` are
+lowered through T1/T2, and Interface β gained `flicker_current`. A compiled `models/resistor.va`
+now declares its own `4kT/R` and a `models/diode_flicker.va` its own `KF·|Id|^AF / f`, both gated
+against QSPICE. See `docs/roadmap.md`'s T5.3 section.
 
-1. **Lower Verilog-A's `white_noise()`/`flicker_noise()`** in T1/T2, which would let a *compiled*
-   compact model contribute noise and remove the most surprising limitation above.
-2. **A flicker channel**, genuinely blocked on (1) — there is no `KF` to read until a model can
-   declare one.
-3. **Input-referred noise**, the smallest of the three: one forward AC solve per frequency, on
-   machinery that already exists.
+What remains, in rough order of value:
 
-See `docs/roadmap.md`'s T5.2 section for the full account, and `docs/validation.md`'s noise-gate
-section for the measured numbers and the reasoning behind the `1e-3` band.
+1. **Input-referred noise** — one forward AC solve per frequency, on machinery that already
+   exists; the `.noise` card's input-source name is already parsed for it.
+2. **A per-device breakdown**, matching QSPICE's `onoise_<dev>` columns. The contributions
+   already exist inside `run`'s loop; only the reporting shape is missing.
+3. **`noise_table` lowering**, which needs a third sink method for a piecewise-linear PSD.
+
+See `docs/roadmap.md`'s T5.2/T5.3 sections for the full account, and `docs/validation.md`'s
+noise-gate sections for the measured numbers and the reasoning behind the `1e-3` band.

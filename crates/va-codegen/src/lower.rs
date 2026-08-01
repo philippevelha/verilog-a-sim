@@ -184,7 +184,38 @@ pub struct ChargeTerm {
     pub coeffs: Vec<(ExprId, bool)>,
 }
 
-/// A single branch contribution, split into resistive and charge channels.
+/// One additive **noise-channel** term: a `white_noise(pwr)` or `flicker_noise(pwr, exp)` call
+/// appearing as a top-level additive term of a contribution (T5.2).
+///
+/// Split out of the resistive channel for exactly the reason [`ChargeTerm`] is: the containing
+/// `<+` carries two different physical statements at once, and only one of them belongs in the
+/// residual. A noise call's *value* is zero in every analysis except noise (LRM §4.5.13), so
+/// leaving it in the resistive channel would be harmless-but-pointless arithmetic; pulling it
+/// out is what lets `crate::GeneratedModel::noise` find the arguments at all.
+///
+/// Unlike a `ChargeTerm`, no `sign` is recorded: a noise source's contribution to the output is
+/// weighted by `|Z|²`, so the sign of the term it was written with cannot affect any result
+/// (§ `va_acnoise::noise`). Nor are scaling coefficients flattened out the way `ChargeTerm`
+/// does — a scaled `2*white_noise(p)` is not a recognized shape (see [`noise_term_shape`]),
+/// because the scaling would have to be squared to be applied correctly and silently getting
+/// that wrong is worse than rejecting it.
+#[derive(Clone, Copy, Debug)]
+pub enum NoiseTerm {
+    /// `white_noise(pwr)` — the PSD expression.
+    White {
+        /// The power-spectral-density argument (A²/Hz for a flow contribution).
+        pwr: ExprId,
+    },
+    /// `flicker_noise(pwr, exp)` — the PSD numerator and the frequency exponent.
+    Flicker {
+        /// The numerator, including any bias dependence the model wrote.
+        pwr: ExprId,
+        /// The frequency exponent (`1.0` for textbook `1/f`).
+        exp: ExprId,
+    },
+}
+
+/// A single branch contribution, split into resistive, charge, and noise channels.
 #[derive(Clone, Debug)]
 pub struct Contribution {
     /// Which branch this contribution targets — consulted only to accumulate a flow
@@ -203,6 +234,9 @@ pub struct Contribution {
     pub resistive: Vec<Term>,
     /// `ddt` terms summed into the charge/charge-Jacobian channel.
     pub charge: Vec<ChargeTerm>,
+    /// `white_noise`/`flicker_noise` terms emitted into the noise channel (T5.2). Empty for the
+    /// overwhelming majority of contributions.
+    pub noise: Vec<NoiseTerm>,
 }
 
 /// One branch that receives a potential (voltage) contribution somewhere in the module, and
@@ -873,6 +907,7 @@ fn lower_stmt(
 
             let mut resistive = Vec::new();
             let mut charge = Vec::new();
+            let mut noise = Vec::new();
             for term in terms {
                 // A bare variable read that was last assigned a `ddt` shape substitutes to that
                 // shape here, so `real dqdt; dqdt = ddt(q); I <+ dqdt + …;` folds into the charge
@@ -881,6 +916,12 @@ fn lower_stmt(
                     Expr::Var(id) => ddt_vars.get(&id.0).copied().unwrap_or(term.expr),
                     _ => term.expr,
                 };
+                // Noise first: a `white_noise`/`flicker_noise` call is never also a charge shape,
+                // and checking it first keeps the charge path exactly as it was.
+                if let Some(nt) = noise_term_shape(module, shape_expr)? {
+                    noise.push(nt);
+                    continue;
+                }
                 match charge_term_shape(module, shape_expr, param_only)? {
                     Some((expr, coeffs)) => charge.push(ChargeTerm {
                         sign: term.sign,
@@ -903,6 +944,7 @@ fn lower_stmt(
                 branch_slot,
                 resistive,
                 charge,
+                noise,
             }));
             Ok(())
         }
@@ -1182,6 +1224,51 @@ fn charge_term_shape(
             Ok(None)
         }
         _ => Ok(None),
+    }
+}
+
+/// If `expr` is a bare `white_noise(pwr)` or `flicker_noise(pwr, exp)` call, return the matching
+/// [`NoiseTerm`]; `Ok(None)` for anything else.
+///
+/// Deliberately recognizes only the **bare** call, unlike [`charge_term_shape`], which flattens
+/// any depth of parameter-only scaling around a `ddt`. A noise source's contribution to the
+/// output is weighted by `|Z|²`, so a scale factor `k` written around the call would have to be
+/// applied as `k²` to the PSD — and a model author writing `2*white_noise(p)` almost certainly
+/// means "twice the power," not "four times." Rather than guess, an unrecognized shape falls
+/// through to the resistive channel, where the noise call evaluates to its LRM-mandated `0` and
+/// the source is simply never declared. That is a silent drop, so [`crate::GeneratedModel`]
+/// additionally rejects any noise call left nested in a resistive term (see its `validate`).
+fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, CodegenError> {
+    match module.expr(expr) {
+        Expr::Call(Builtin::WhiteNoise, args) if args.len() == 1 => {
+            Ok(Some(NoiseTerm::White { pwr: args[0] }))
+        }
+        Expr::Call(Builtin::WhiteNoise, _) => {
+            Err(unsupported("white_noise expects exactly one argument"))
+        }
+        Expr::Call(Builtin::FlickerNoise, args) if args.len() == 2 => {
+            Ok(Some(NoiseTerm::Flicker {
+                pwr: args[0],
+                exp: args[1],
+            }))
+        }
+        Expr::Call(Builtin::FlickerNoise, _) => Err(unsupported(
+            "flicker_noise expects exactly two arguments (power, exponent)",
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// Whether `expr` contains a noise call anywhere in its tree — used to reject a noise source
+/// buried where [`noise_term_shape`] cannot pull it out (e.g. `2*white_noise(p)` or
+/// `sin(white_noise(p))`), rather than silently contributing nothing.
+pub(crate) fn contains_noise_call(module: &Module, expr: ExprId) -> bool {
+    match module.expr(expr) {
+        Expr::Call(Builtin::WhiteNoise | Builtin::FlickerNoise, _) => true,
+        Expr::Call(_, args) => args.iter().any(|&a| contains_noise_call(module, a)),
+        Expr::Unary(_, e) => contains_noise_call(module, *e),
+        Expr::Binary(_, l, r) => contains_noise_call(module, *l) || contains_noise_call(module, *r),
+        _ => false,
     }
 }
 

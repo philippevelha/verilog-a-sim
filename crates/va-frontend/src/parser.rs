@@ -1575,6 +1575,22 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
 
+    /// `models/`, as an include-path root. Every model there `` `include ``s `disciplines.vams`
+    /// and `constants.vams` from alongside itself; a test that lexes/parses a model without
+    /// resolving those would hit an unexpanded `` `P_K ``/`` `P_Q `` directive rather than the
+    /// number the real pipeline sees (`va_cli::load` passes the model file's own directory).
+    fn models_dir() -> Vec<std::path::PathBuf> {
+        vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))]
+    }
+
+    /// Preprocess a `models/*.va` source the way the real pipeline does.
+    fn preprocess_model(src: &str) -> String {
+        crate::preprocess::preprocess(src, &models_dir()).expect("preprocess model")
+    }
+
     fn parse_src(src: &str) -> ModuleAst {
         let toks = lex(src).expect("lex");
         parse(&toks)
@@ -1586,7 +1602,9 @@ mod tests {
 
     #[test]
     fn resistor_model() {
-        let m = parse_src(include_str!("../../../models/resistor.va"));
+        let m = parse_src(&preprocess_model(include_str!(
+            "../../../models/resistor.va"
+        )));
         assert_eq!(m.name, "resistor");
         assert_eq!(m.ports, vec!["p", "n"]);
 
@@ -1616,7 +1634,8 @@ mod tests {
                 _ => None,
             })
             .expect("analog block");
-        assert_eq!(analog.len(), 1);
+        // Ohm's law, then the thermal-noise contribution (T5.2).
+        assert_eq!(analog.len(), 2);
         match &analog[0] {
             Stmt::Contribute { target, value } => {
                 assert_eq!(target.kind, AccessKind::Flow);
@@ -1626,6 +1645,16 @@ mod tests {
                 assert!(matches!(m.expr(*value), ExprAst::Binary(BinOp::Div, _, _)));
             }
             other => panic!("expected a contribution, got {other:?}"),
+        }
+        match &analog[1] {
+            Stmt::Contribute { value, .. } => {
+                assert!(
+                    matches!(m.expr(*value), ExprAst::Call { name, .. } if name == "white_noise"),
+                    "expected a white_noise call, got {:?}",
+                    m.expr(*value)
+                );
+            }
+            other => panic!("expected a noise contribution, got {other:?}"),
         }
     }
 
@@ -1655,7 +1684,7 @@ mod tests {
 
     #[test]
     fn diode_uses_exp_and_sysfunc() {
-        let m = parse_src(include_str!("../../../models/diode.va"));
+        let m = parse_src(&preprocess_model(include_str!("../../../models/diode.va")));
         assert_eq!(m.name, "diode");
         // Two parameters Is and N.
         let params: Vec<_> = m

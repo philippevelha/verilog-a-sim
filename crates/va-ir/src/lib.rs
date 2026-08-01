@@ -357,6 +357,24 @@ pub enum Builtin {
     Vt,
     /// `$temperature` — ambient temperature.
     Temperature,
+    /// `white_noise(pwr)` — a frequency-flat noise source of power spectral density `pwr`,
+    /// in the units of the contribution it appears in (A²/Hz in a flow contribution).
+    ///
+    /// **Evaluates to `0` in every analysis except noise** (LRM §4.5.13), which is what lets a
+    /// model declare its noise inline in the same `<+` contribution that carries its DC
+    /// behavior without perturbing any DC/transient/AC answer. `va-codegen` splits these out of
+    /// a contribution's expression into their own channel, exactly as it does `Ddt`.
+    ///
+    /// The LRM's optional trailing name argument (`white_noise(pwr, "thermal")`) is a label for
+    /// per-source reporting; it is dropped during elaboration, since this project reports only a
+    /// summed output spectrum (§ `va_acnoise::noise`'s stated limitations).
+    WhiteNoise,
+    /// `flicker_noise(pwr, exp)` — a noise source with power spectral density `pwr / f^exp`.
+    ///
+    /// Same "zero outside noise analysis" rule and same dropped-label treatment as
+    /// [`Builtin::WhiteNoise`]. Carries exactly two arguments after elaboration: the
+    /// bias-dependent numerator and the frequency exponent.
+    FlickerNoise,
 }
 
 // ---------------------------------------------------------------------------------------

@@ -1454,16 +1454,41 @@ impl Elaborator<'_> {
                 let active = self.analysis_matches(args)?;
                 Expr::Const(if active { 1.0 } else { 0.0 })
             }
-            // Small-signal noise sources and `ac_stim` (an AC-only stimulus) contribute nothing
-            // to a DC operating point; fold to zero (their string label and arguments are not
-            // evaluated). `bound_step` is a transient-timestep hint with no DC meaning at all —
-            // same fold, on the rare chance it appears in expression position rather than as
-            // the bare statement `parse_bound_step_stmt` already handles (see `crate::parser`).
+            // `white_noise(pwr[, "name"])` / `flicker_noise(pwr, exp[, "name"])` (LRM §4.5.13)
+            // lower to real IR calls rather than folding away (T5.2's compiled-model noise): the
+            // *value* of a noise function is zero in every analysis except noise, but that zero
+            // is `va-codegen`'s to produce when it evaluates the resistive channel — the
+            // arguments have to survive elaboration for the noise channel to have anything to
+            // read. Their optional trailing string label is dropped here (this project reports a
+            // summed spectrum, not a per-source breakdown), which also keeps every `Expr::Call`
+            // argument a real number rather than a string.
+            ExprAst::Call { name, args } if name == "white_noise" => {
+                let pwr = *args
+                    .first()
+                    .ok_or_else(|| elab("`white_noise` requires a power argument".to_string()))?;
+                let pwr = self.lower_expr(pwr)?;
+                Expr::Call(Builtin::WhiteNoise, vec![pwr])
+            }
+            ExprAst::Call { name, args } if name == "flicker_noise" => {
+                let pwr = *args
+                    .first()
+                    .ok_or_else(|| elab("`flicker_noise` requires a power argument".to_string()))?;
+                let exp = *args.get(1).ok_or_else(|| {
+                    elab("`flicker_noise` requires a frequency-exponent argument".to_string())
+                })?;
+                let pwr = self.lower_expr(pwr)?;
+                let exp = self.lower_expr(exp)?;
+                Expr::Call(Builtin::FlickerNoise, vec![pwr, exp])
+            }
+            // `noise_table` (a piecewise-linear PSD over frequency) has no Interface β channel to
+            // carry it, so it keeps the old fold-to-zero — honest, since the alternative would be
+            // silently dropping a declared noise source that *looks* lowered. `ac_stim` (an
+            // AC-only stimulus) contributes nothing to a DC operating point; `bound_step` is a
+            // transient-timestep hint with no DC meaning at all — same fold, on the rare chance
+            // it appears in expression position rather than as the bare statement
+            // `parse_bound_step_stmt` already handles (see `crate::parser`).
             ExprAst::Call { name, .. }
-                if matches!(
-                    name.as_str(),
-                    "white_noise" | "flicker_noise" | "noise_table" | "ac_stim" | "bound_step"
-                ) =>
+                if matches!(name.as_str(), "noise_table" | "ac_stim" | "bound_step") =>
             {
                 Expr::Const(0.0)
             }
@@ -3143,6 +3168,22 @@ mod tests {
         parser::{parse, parse_with_disciplines},
     };
 
+    /// `models/`, as an include-path root. Every model there `` `include ``s `disciplines.vams`
+    /// and `constants.vams` from alongside itself; a test that lexes/parses a model without
+    /// resolving those would hit an unexpanded `` `P_K ``/`` `P_Q `` directive rather than the
+    /// number the real pipeline sees (`va_cli::load` passes the model file's own directory).
+    fn models_dir() -> Vec<std::path::PathBuf> {
+        vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))]
+    }
+
+    /// Preprocess a `models/*.va` source the way the real pipeline does.
+    fn preprocess_model(src: &str) -> String {
+        crate::preprocess::preprocess(src, &models_dir()).expect("preprocess model")
+    }
+
     fn elaborate_src(src: &str) -> Module {
         let toks = lex(src).expect("lex");
         let asts = parse(&toks).expect("parse");
@@ -3164,7 +3205,9 @@ mod tests {
 
     #[test]
     fn resistor_elaborates() {
-        let m = elaborate_src(include_str!("../../../models/resistor.va"));
+        let m = elaborate_src(&preprocess_model(include_str!(
+            "../../../models/resistor.va"
+        )));
         assert_eq!(m.name, "resistor");
         assert_eq!(m.nodes.len(), 2);
         assert_eq!(m.ports.len(), 2);
@@ -3177,7 +3220,10 @@ mod tests {
         assert_eq!(r.min, Some(0.0)); // from (0:inf)
         assert_eq!(r.max, None); // inf → unbounded
 
-        assert_eq!(m.analog.len(), 1);
+        // Two contributions: Ohm's law, then the thermal-noise source (T5.2). The noise one
+        // carries a real `Builtin::WhiteNoise` call rather than folding to zero — its *value* is
+        // zero outside a noise analysis, but that is `va-codegen`'s doing, not the frontend's.
+        assert_eq!(m.analog.len(), 2);
         match &m.analog[0] {
             va_ir::Stmt::Contribute { target, value } => {
                 assert_eq!(target.kind, AccessKind::Flow);
@@ -3187,6 +3233,18 @@ mod tests {
                 ));
             }
             other => panic!("expected a contribution, got {other:?}"),
+        }
+        match &m.analog[1] {
+            va_ir::Stmt::Contribute { target, value } => {
+                assert_eq!(target.kind, AccessKind::Flow);
+                assert!(
+                    matches!(m.expr(*value), Expr::Call(va_ir::Builtin::WhiteNoise, args)
+                        if args.len() == 1),
+                    "expected a white_noise call, got {:?}",
+                    m.expr(*value)
+                );
+            }
+            other => panic!("expected a noise contribution, got {other:?}"),
         }
     }
 
@@ -3471,7 +3529,7 @@ mod tests {
 
     #[test]
     fn diode_maps_exp_and_vt() {
-        let m = elaborate_src(include_str!("../../../models/diode.va"));
+        let m = elaborate_src(&preprocess_model(include_str!("../../../models/diode.va")));
         assert_eq!(m.params.len(), 2);
         // $vt → Builtin::Vt, exp(...) → Builtin::Exp.
         assert!(m
@@ -3699,7 +3757,9 @@ mod tests {
 
     #[test]
     fn probe_resolves_to_param_and_branch() {
-        let m = elaborate_src(include_str!("../../../models/resistor.va"));
+        let m = elaborate_src(&preprocess_model(include_str!(
+            "../../../models/resistor.va"
+        )));
         // The divisor of I <+ V/R must be Param(R).
         let div = m
             .exprs
@@ -3854,24 +3914,76 @@ mod tests {
     }
 
     #[test]
-    fn simparam_folds_to_default_and_noise_to_zero() {
-        // `$simparam("gmin", 1e-9)` folds to its default; `white_noise(...)` folds to 0 in DC.
+    fn simparam_folds_to_default_and_noise_lowers_to_a_call() {
+        // `$simparam("gmin", 1e-9)` folds to its default; `white_noise(...)` lowers to a real
+        // `Builtin::WhiteNoise` call carrying its power argument (T5.2 — `va-codegen` needs the
+        // argument to reach the noise channel; the *value* being zero outside noise analysis is
+        // codegen's job, not a fold here).
         let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin", 1e-9) * V(a, b) + white_noise(1.0, "thermal"); end endmodule"#;
         let m = elaborate_src(src);
         assert!(m
             .exprs
             .iter()
             .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 1e-9)));
-        // No string literal survives into the IR (no Call to white_noise either).
         assert!(m
             .analog
             .iter()
             .any(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
+        // The call survives, with exactly one argument — its `"thermal"` label dropped, so no
+        // string literal reaches the IR.
+        let white = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::WhiteNoise, args) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("white_noise lowers to a WhiteNoise call");
+        assert_eq!(white.len(), 1, "the string label must be dropped");
+        assert!(
+            matches!(m.expr(white[0]), va_ir::Expr::Const(v) if *v == 1.0),
+            "the power argument must survive elaboration"
+        );
 
         // The default may be any expression, not just a constant.
         let src = r#"module t(a, b); electrical a, b; parameter real g = 1e-3; analog begin I(a, b) <+ $simparam("gmin", g) * V(a, b); end endmodule"#;
         let m = elaborate_src(src);
         assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Param(_))));
+
+        // `flicker_noise(pwr, exp)` keeps both arguments, in order.
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ flicker_noise(1e-19, 1.0, "1overf"); end endmodule"#;
+        let m = elaborate_src(src);
+        let flicker = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::FlickerNoise, args) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("flicker_noise lowers to a FlickerNoise call");
+        assert_eq!(flicker.len(), 2, "power and exponent, label dropped");
+        assert!(matches!(m.expr(flicker[0]), va_ir::Expr::Const(v) if *v == 1e-19));
+        assert!(matches!(m.expr(flicker[1]), va_ir::Expr::Const(v) if *v == 1.0));
+
+        // A noise call missing a required argument is a clear error, not a silent zero.
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ flicker_noise(1e-19); end endmodule"#;
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
+
+        // `noise_table` has no ABI channel to carry it, so it still folds to zero.
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + noise_table(1.0); end endmodule"#;
+        let m = elaborate_src(src);
+        assert!(
+            !m.exprs
+                .iter()
+                .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::WhiteNoise, _))),
+            "noise_table must not masquerade as a white source"
+        );
 
         // `$simparam` with no default is an error (unknown parameter).
         let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin") * V(a, b); end endmodule"#;

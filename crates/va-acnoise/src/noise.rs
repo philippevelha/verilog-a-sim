@@ -46,7 +46,7 @@
 
 use crate::ac::{linearize, solve_block_embedded, AcSweep, Complex};
 use crate::AcNoiseError;
-use va_abi::noise::{NoiseSink, TEMP_NOMINAL};
+use va_abi::noise::{NoiseSink, NoiseSource, TEMP_NOMINAL};
 use va_abi::ModelInstance;
 
 /// Output noise power spectral density over frequency.
@@ -64,21 +64,40 @@ pub struct NoiseSpectrum {
     pub total: f64,
 }
 
-/// Collects noise sources as `(p, n, psd)` while each instance emits them.
+/// Collects noise sources as `(p, n, source)` while each instance emits them.
+///
+/// A source is kept as its **shape** ([`NoiseSource`]) rather than a single number, because a
+/// flicker source's PSD depends on frequency: the sweep evaluates `source.psd_at(f)` per point,
+/// while the transfer impedance `Z` it is weighted by comes from that point's own adjoint solve.
 #[derive(Default)]
 struct SourceList {
-    sources: Vec<(usize, usize, f64)>,
+    sources: Vec<(usize, usize, NoiseSource)>,
+}
+
+impl SourceList {
+    /// Record a source unless it is identically powerless at every frequency.
+    ///
+    /// A zero-power source contributes nothing to any output and would only cost a subtraction
+    /// per frequency — drop it here rather than in the hot loop. (A reverse-biased junction at
+    /// exactly zero current, or a model with a zero `KF`, both land here.)
+    fn push(&mut self, p: usize, n: usize, source: NoiseSource) {
+        let powerless = match source {
+            NoiseSource::White { psd } => psd <= 0.0,
+            NoiseSource::Flicker { coeff, .. } => coeff <= 0.0,
+        };
+        if !powerless {
+            self.sources.push((p, n, source));
+        }
+    }
 }
 
 impl NoiseSink for SourceList {
     fn white_current(&mut self, p: usize, n: usize, psd: f64) {
-        // A source with no power contributes nothing to any output and would only cost a
-        // subtraction per frequency — drop it here rather than in the hot loop. (A reverse-biased
-        // junction at exactly zero current, or a `va-codegen` model taking the channel's default,
-        // both land here.)
-        if psd > 0.0 {
-            self.sources.push((p, n, psd));
-        }
+        self.push(p, n, NoiseSource::White { psd });
+    }
+
+    fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {
+        self.push(p, n, NoiseSource::Flicker { coeff, exponent });
     }
 }
 
@@ -136,12 +155,14 @@ pub fn run(
         let total: f64 = collected
             .sources
             .iter()
-            .map(|&(p, n, s)| {
+            .map(|&(p, n, source)| {
                 let (pre, pim) = at(&y, p);
                 let (nre, nim) = at(&y, n);
-                // Z_k = y_p - y_n; the contribution is |Z_k|² · S_k.
+                // Z_k = y_p - y_n; the contribution is |Z_k|² · S_k(f). The transfer impedance
+                // is frequency-dependent through the adjoint solve, and `S_k` is too for a
+                // flicker source — hence `psd_at(freq)` rather than a precomputed number.
                 let (zre, zim) = (pre - nre, pim - nim);
-                (zre * zre + zim * zim) * s
+                (zre * zre + zim * zim) * source.psd_at(freq)
             })
             .sum();
         psd.push(total);
@@ -348,6 +369,94 @@ mod tests {
             run_at_nominal_temp(&insts, &[5.0, 0.0], 2, flat_sweep(), 0).expect("noise solves");
         assert!(spectrum.psd.iter().all(|&p| p == 0.0), "{:?}", spectrum.psd);
         assert_eq!(spectrum.total, 0.0);
+    }
+
+    /// A flicker source must fall a decade in power per decade of frequency, *through the whole
+    /// analysis* — not merely in `NoiseSource::psd_at`. A hand-built instance emits one directly,
+    /// so this tests the sweep's per-frequency evaluation rather than any particular device.
+    #[test]
+    fn a_flicker_source_rolls_off_as_one_over_f() {
+        struct FlickerOnly {
+            terminals: [usize; 2],
+        }
+        impl ModelInstance for FlickerOnly {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+                // A 1 S conductance to ground, so the transfer impedance is exactly 1 Ω and the
+                // output PSD is the source PSD unchanged — isolating the frequency shape.
+                sink.jacobian(0, 0, 1.0);
+            }
+            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+                sink.flicker_current(0, GROUND, 1e-19, 1.0);
+            }
+        }
+
+        let dev = FlickerOnly {
+            terminals: [0, GROUND],
+        };
+        let insts: [&dyn ModelInstance; 1] = [&dev];
+        let sweep = AcSweep {
+            fstart: 10.0,
+            fstop: 1e4,
+            points_per_decade: 1,
+        };
+        let spectrum = run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0).expect("noise solves");
+
+        // 10, 100, 1k, 10k Hz -> 1e-20, 1e-21, 1e-22, 1e-23 V²/Hz.
+        assert_eq!(spectrum.f.len(), 4);
+        for (&f, &p) in spectrum.f.iter().zip(&spectrum.psd) {
+            let expected = 1e-19 / f;
+            assert!(
+                (p / expected - 1.0).abs() < 1e-9,
+                "f={f}: psd = {p}, expected {expected}"
+            );
+        }
+    }
+
+    /// White and flicker sources on the same branch add in power, and their sum crosses over:
+    /// flicker dominates at low frequency, white at high. This is the shape every real
+    /// `1/f`-plus-thermal device has, and it fails if either channel is dropped.
+    #[test]
+    fn white_and_flicker_sum_with_a_crossover() {
+        struct Both {
+            terminals: [usize; 2],
+        }
+        impl ModelInstance for Both {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+                sink.jacobian(0, 0, 1.0);
+            }
+            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+                sink.white_current(0, GROUND, 1e-22);
+                sink.flicker_current(0, GROUND, 1e-19, 1.0);
+            }
+        }
+        let dev = Both {
+            terminals: [0, GROUND],
+        };
+        let insts: [&dyn ModelInstance; 1] = [&dev];
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0).expect("noise solves");
+
+        for (&f, &p) in spectrum.f.iter().zip(&spectrum.psd) {
+            let expected = 1e-22 + 1e-19 / f;
+            assert!(
+                (p / expected - 1.0).abs() < 1e-9,
+                "f={f}: psd = {p}, expected {expected}"
+            );
+        }
+        // The corner is at f = 1e-19/1e-22 = 1000 Hz: flicker-dominated below, white above.
+        let first = spectrum.psd[0];
+        let last = *spectrum.psd.last().unwrap();
+        assert!(first > 10.0 * 1e-22, "low end should be flicker-dominated");
+        assert!(
+            (last / 1e-22 - 1.0).abs() < 1e-3,
+            "high end should be white-dominated: {last}"
+        );
     }
 
     #[test]

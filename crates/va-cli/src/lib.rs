@@ -926,6 +926,23 @@ fn report_transient(net: &Netlist, wf: &Waveform) {
 mod tests {
     use super::*;
 
+    /// `models/`, as an include-path root — every model there `include`s `disciplines.vams`
+    /// and `constants.vams` from alongside itself, exactly as the real pipeline resolves them
+    /// (`va_cli::load` passes the model file's own directory). A test compiling a model with
+    /// bare `va_frontend::compile` would fail on an undefined `` `P_K ``/`` `P_Q `` macro.
+    fn models_dir() -> Vec<std::path::PathBuf> {
+        vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))]
+    }
+
+    /// Compile a `models/*.va` source the way the real pipeline does.
+    fn compile_model(src: &str, what: &str) -> va_frontend::CompiledDesign {
+        va_frontend::compile_with_includes(src, &models_dir())
+            .unwrap_or_else(|e| panic!("compile {what}: {e}"))
+    }
+
     #[test]
     fn analysis_default_is_dc() {
         assert_eq!(Analysis::default(), Analysis::Dc);
@@ -1030,7 +1047,7 @@ mod tests {
     #[test]
     fn diode_iv_sweep_solves_through_codegen_pipeline() {
         let src = include_str!("../../../models/diode.va");
-        let design = va_frontend::compile(src).expect("compile diode.va");
+        let design = compile_model(src, "diode.va");
         assert_eq!(design.modules.len(), 1);
         assert_eq!(design.modules[0].name, "diode");
 
@@ -1070,7 +1087,7 @@ mod tests {
     #[test]
     fn mos_dc_solves_through_codegen_pipeline() {
         let src = include_str!("../../../models/mosfet.va");
-        let design = va_frontend::compile(src).expect("compile mosfet.va");
+        let design = compile_model(src, "mosfet.va");
         assert_eq!(design.modules.len(), 1);
         assert_eq!(design.modules[0].name, "mosfet");
 
@@ -1123,7 +1140,7 @@ mod tests {
     fn divider_solves_through_codegen_pipeline() {
         // Compile the real resistor.va and use the generated model for the R devices.
         let src = include_str!("../../../models/resistor.va");
-        let design = va_frontend::compile(src).expect("compile resistor.va");
+        let design = compile_model(src, "resistor.va");
         assert_eq!(design.modules.len(), 1);
         assert_eq!(design.modules[0].name, "resistor");
         let op = solve_divider(&design.modules);
@@ -1299,7 +1316,7 @@ mod tests {
     #[test]
     fn diode_ac_solves_through_the_codegen_pipeline_at_its_bias() {
         let src = include_str!("../../../models/diode.va");
-        let design = va_frontend::compile(src).expect("compile diode.va");
+        let design = compile_model(src, "diode.va");
         let deck = include_str!("../../../circuits/diode_ac.net");
         let net = va_netlist::parser::parse(deck).expect("parse diode_ac");
 

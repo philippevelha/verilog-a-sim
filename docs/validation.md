@@ -59,10 +59,10 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/{divider,mos_dc,diode_iv,rc_step,rectifier,ring_osc,rc_ac,diode_ac,diode_noise}.golden`
-are all real, QSPICE-generated data (`cargo xtask gen-golden`) — every one of `xtask`'s known
-circuits has a committed golden reference, closing the "which circuits aren't regenerated yet"
-gap this file used to track.
+`golden/*.golden` — all eleven — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`{divider, mos_dc, diode_iv, rc_step, rectifier, ring_osc, rc_ac, diode_ac, diode_noise,
+resistor_noise_va, diode_flicker}`. Every one of `xtask`'s known circuits has a committed golden
+reference, closing the "which circuits aren't regenerated yet" gap this file used to track.
 
 ### The AC gate (added 2026-08-01)
 
@@ -126,6 +126,42 @@ band-integrated total (`4.4584 µV` rms) matching QSPICE's own printed figure ex
 3. **The teeth are in the shot term.** Dropping the diode's noise entirely leaves the resistor's
    `6.62e-19`, a 67% error; computing it as `4kTg` instead of `2q·I_d` is off by exactly 2× on
    that term, ~33%. Both are three to four orders outside the `1e-3` band.
+
+### Compiled-model noise: the `white_noise()`/`flicker_noise()` gates (added 2026-08-01b)
+
+The noise gate above uses `va-abi`'s *hand-written* devices, because when it was built a
+`va-codegen`-compiled model contributed no noise at all. Lowering Verilog-A's `white_noise()`
+and `flicker_noise()` (T1/T2) closed that, and two further circuits gate the result — both
+driven through `--model`, so the noise comes from the compiled `.va` and nothing else.
+
+**`circuits/resistor_noise_va.net`** — two resistors (1 kΩ, 3 kΩ) across a 1 V source, probed at
+their junction, both resolving to the compiled `models/resistor.va` and its
+`white_noise(4*`P_K*$temperature/R)`. The sources add in power through the same `R1∥R2`, giving
+the textbook `4kT·750Ω = 1.2432e-17` V²/Hz, flat. Measured against golden: **`0.0` — exact**.
+That is not a zero-versus-zero artifact: the golden carries a real `1.24321e-17` at every point,
+and both simulators compute it from constants that now agree to the last digit
+(`models/constants.vams` takes the exact SI 2019 values, deliberately matching
+`va_abi::noise`'s own). Pure `R`/`V`, so QSPICE needs no `.model` translation.
+
+**`circuits/diode_flicker.net`** — the `diode_noise.net` bias network with `D1` resolving to
+`models/diode_flicker.va`, which declares both a shot source and
+`flicker_noise(KF*|Id|^AF, 1.0)`. Measured: **`1.7e-5`**, the same as the shot-only gate, which
+is what one expects when both terms scale with the same solved `Id`.
+
+This is the only **shaped** spectrum in the zoo — `4.156e-16` V²/Hz at 10 Hz falling to
+`1.988e-18` at 10 MHz, a factor of **209** across the band, crossing over from flicker-dominated
+to the flat shot+thermal floor. That shape is what gives the gate teeth: a white-only
+implementation would produce a flat spectrum and be **~99.5% wrong at 10 Hz**, three orders
+outside the `1e-3` band. QSPICE's own diode uses exactly the same `KF`/`AF` parameterization
+(its `1overf` column steps `4.1365e-16 → e-17 → e-18` per decade, confirmed by probing a real
+run), so `models/diode_flicker.va` mirrors it one-to-one and the comparison is meaningful across
+the whole band rather than only where flicker is negligible.
+
+`models/diode_flicker.va` is a standalone copy of `diode.va`'s equations plus the flicker term
+rather than a parameterization of it, because this project's netlist format has no syntax for
+passing device parameters — a `D` line names a model and nothing more — so a nonzero `KF` has to
+come from a model file's own defaults. Keeping it separate leaves `diode.va` with the physically
+sane `KF = 0` its other three circuits want.
 
 ## Bring-up ladder
 
