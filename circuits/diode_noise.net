@@ -1,0 +1,18 @@
+* Resistor thermal + diode shot noise -- T5.2's noise bring-up circuit.
+* A 0.7 V source feeds a forward-biased diode through a 1 kOhm resistor; the output probe sits
+* at their junction, where both devices' noise appears through the same transfer impedance
+* Z = R1 || rd (rd = 1/gd, the diode's own small-signal resistance at its solved bias).
+* Both of CLAUDE.md's stated noise mechanisms are exercised at once, and they are comparable in
+* size here, so neither can hide the other:
+*   R1 thermal: 4kT/R1 = 1.6576e-23 A^2/Hz
+*   D1 shot:    2*q*Id  ~ 3.3e-23 A^2/Hz at Id ~ 0.1 mA
+*   S(out) = (4kT/R1 + 2*q*Id) * Z^2 ~ 1.99e-18 V^2/Hz, flat (no reactance in this circuit)
+* NOTE: no `--model` is used, deliberately. Verilog-A's white_noise()/flicker_noise() are not
+* lowered by va-codegen yet, so a compiled diode would contribute *no* noise at all and this
+* deck would measure only R1's. `D1 ... diode` therefore resolves to the hand-written
+* va-abi::reference::Diode (same Is/N), which does implement Interface beta's noise channel.
+V1 in  gnd  DC 0.7
+R1 in  a    1000
+D1 a   gnd  diode
+.noise V(a) V1 dec 10 10 10meg
+.end

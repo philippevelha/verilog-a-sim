@@ -33,7 +33,7 @@ fn print_usage() {
     eprintln!(
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
-         va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran] [--plot <out.svg>]\n    \
+         va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran|--noise] [--plot <out.svg>]\n    \
          va-cli check <model.va|dir> [more…]   Run the frontend over models, report gaps\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
@@ -60,6 +60,8 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         Analysis::Transient
     } else if args.iter().any(|a| a == "--ac") {
         Analysis::Ac
+    } else if args.iter().any(|a| a == "--noise") {
+        Analysis::Noise
     } else {
         Analysis::Dc
     };

@@ -17,4 +17,14 @@ pub enum AcNoiseError {
     /// The DC operating point required to linearize about could not be found.
     #[error(transparent)]
     Core(#[from] va_core::CoreError),
+    /// A noise analysis named an output unknown outside the system it is analyzing — the
+    /// adjoint right-hand side `e_output` would be all zeros, silently reporting zero noise for
+    /// every source rather than the requested output's real spectrum.
+    #[error("noise output unknown {index} is outside the {dim}-unknown system")]
+    InvalidOutput {
+        /// The requested output's global unknown index.
+        index: usize,
+        /// The system dimension it had to be below.
+        dim: usize,
+    },
 }

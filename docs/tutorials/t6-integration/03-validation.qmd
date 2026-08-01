@@ -339,5 +339,11 @@ project's own hand-derived math, even when that math is verifiably correct.
 ## What's next
 
 With all six ladder rungs formally passed and rung 2's golden comparison now genuinely exercising
-the diode's own current (§ above), the harness's own remaining, real gaps are narrower —
-AC/noise validation (T5, a stated stretch goal) and continuing to widen the model zoo itself.
+the diode's own current (§ above), the harness's own remaining, real gaps are narrower.
+
+*(Updated 2026-08-01.)* AC/noise validation — the larger of the two gaps this section used to
+name — is now closed: `GoldenAc`/`GoldenNoise` join `GoldenDc`/`GoldenSweep`/`GoldenTran`, with
+`ac::compare_ac` returning separate magnitude and phase verdicts and `noise::compare_noise`
+using a PSD-scaled error metric rather than the circuit-scale one (see
+`t5-acnoise/02-noise.qmd` for why reusing it would have made that gate vacuous). What remains is
+continuing to widen the model zoo itself.

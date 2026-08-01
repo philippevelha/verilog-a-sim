@@ -29,7 +29,9 @@
 //!   excitation ([`crate::AcSpec`]). Only the `dec` sweep type is parsed (see
 //!   [`crate::AcSweepCard`]'s own limitations), and a source's AC phase defaults to 0°.
 
-use crate::{AcSpec, AcSweepCard, AnalysisCard, DcSweep, Device, Netlist, NetlistError, Waveform};
+use crate::{
+    AcSpec, AcSweepCard, AnalysisCard, DcSweep, Device, Netlist, NetlistError, NoiseCard, Waveform,
+};
 use va_abi::reference::GROUND;
 
 /// Parse a netlist deck into a [`Netlist`].
@@ -74,6 +76,7 @@ fn parse_card(net: &mut Netlist, body: &str) {
         "dc" => AnalysisCard::Dc,
         "tran" => AnalysisCard::Tran,
         "ac" => AnalysisCard::Ac,
+        "noise" => AnalysisCard::Noise,
         _ => return, // `.end`, `.model`, etc. — ignored in v0.
     };
     // The first analysis card wins.
@@ -130,6 +133,46 @@ fn parse_card(net: &mut Netlist, body: &str) {
             }
         }
     }
+    // `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` (T5.2) — SPICE's
+    // standard positional noise card: an output *probe*, an input source, then the same
+    // frequency-grid spec `.ac` takes (and the same `dec`-only limitation).
+    if card == AnalysisCard::Noise {
+        let is_dec = toks.get(3).is_some_and(|t| t.eq_ignore_ascii_case("dec"));
+        if let (Some(output), Some(source), true, Some(ppd), Some(fstart), Some(fstop)) = (
+            toks.get(1).and_then(|t| parse_voltage_probe(t)),
+            toks.get(2).map(|s| s.to_string()),
+            is_dec,
+            toks.get(4).and_then(|v| parse_value(v)),
+            toks.get(5).and_then(|v| parse_value(v)),
+            toks.get(6).and_then(|v| parse_value(v)),
+        ) {
+            if ppd >= 1.0 {
+                net.noise = Some(NoiseCard {
+                    output,
+                    source,
+                    points_per_decade: ppd as usize,
+                    fstart,
+                    fstop,
+                });
+            }
+        }
+    }
+}
+
+/// Unwrap a `V(<node>)` output probe into the bare node name, case-insensitively on the `V`.
+///
+/// `None` for anything not shaped that way — including SPICE's differential `V(a,b)` form, which
+/// this project's noise analysis has no representation for (its output is a single unknown
+/// index, not a difference of two).
+fn parse_voltage_probe(tok: &str) -> Option<String> {
+    let rest = tok
+        .strip_prefix("V(")
+        .or_else(|| tok.strip_prefix("v("))?
+        .strip_suffix(')')?;
+    if rest.is_empty() || rest.contains(',') {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 /// Parse one element line into a [`Device`], interning its terminal nets.
@@ -440,6 +483,46 @@ mod tests {
         let net = parse("* t\nV1 in 0 AC 1\n.ac lin 100 1 1meg\n.end\n").expect("parse");
         assert_eq!(net.analysis, AnalysisCard::Ac);
         assert_eq!(net.ac, None);
+    }
+
+    #[test]
+    fn noise_card_parses_probe_source_and_grid() {
+        let net = parse("* t\nV1 in 0 DC 0.7\nR1 in a 1k\n.noise V(a) V1 dec 10 10 10meg\n.end\n")
+            .expect("parse");
+        assert_eq!(net.analysis, AnalysisCard::Noise);
+        assert_eq!(
+            net.noise,
+            Some(NoiseCard {
+                output: "a".to_string(),
+                source: "V1".to_string(),
+                points_per_decade: 10,
+                fstart: 10.0,
+                fstop: 1e7,
+            })
+        );
+    }
+
+    #[test]
+    fn voltage_probes_that_this_analysis_cannot_represent_are_rejected() {
+        assert_eq!(parse_voltage_probe("V(out)"), Some("out".to_string()));
+        assert_eq!(parse_voltage_probe("v(out)"), Some("out".to_string()));
+        // A differential probe has no single output unknown to take — must not silently become
+        // `V(a)` or a node literally named "a,b".
+        assert_eq!(parse_voltage_probe("V(a,b)"), None);
+        assert_eq!(parse_voltage_probe("V()"), None);
+        assert_eq!(parse_voltage_probe("out"), None);
+        assert_eq!(parse_voltage_probe("I(V1)"), None);
+    }
+
+    #[test]
+    fn a_deck_with_no_noise_card_has_no_noise_spec() {
+        let net = parse("* t\nR1 a 0 1k\n.op\n.end\n").expect("parse");
+        assert_eq!(net.noise, None);
+        // A `lin` grid is recognized as noise analysis but leaves nothing parseable, exactly as
+        // for `.ac`.
+        let lin = parse("* t\nR1 a 0 1k\n.noise V(a) V1 lin 100 10 1meg\n.end\n").expect("parse");
+        assert_eq!(lin.analysis, AnalysisCard::Noise);
+        assert_eq!(lin.noise, None);
     }
 
     #[test]

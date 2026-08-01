@@ -37,6 +37,8 @@ pub enum AnalysisCard {
     Tran,
     /// `.ac` — AC small-signal.
     Ac,
+    /// `.noise` — small-signal noise (T5.2).
+    Noise,
 }
 
 /// A parsed circuit: the node map, the device records to instantiate, and the analysis card.
@@ -69,6 +71,33 @@ pub struct Netlist {
     /// parse, or one requesting a sweep type other than `dec` — `va-cli` reports that clearly
     /// rather than silently sweeping a different grid than the deck asked for.
     pub ac: Option<AcSweepCard>,
+    /// `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` spec (T5.2), on the
+    /// same "must fully parse or it's `None`" terms as [`Self::ac`].
+    pub noise: Option<NoiseCard>,
+}
+
+/// A `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (T5.2): sweep the
+/// small-signal output noise PSD at node `output`, linearized about the DC operating point.
+///
+/// The frequency grid is specified exactly as [`AcSweepCard`]'s is, and carries the same
+/// `dec`-only limitation for the same reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NoiseCard {
+    /// The output node's name, unwrapped from the card's own `V(<name>)` spelling.
+    pub output: String,
+    /// The input source's name, as SPICE's `.noise` card requires positionally.
+    ///
+    /// Retained but **not used** by v1's output-referred analysis: it exists to reference the
+    /// output noise back to the input (`S_in = S_out / |H|²`), which `va_acnoise::noise` does
+    /// not compute (§ its own stated limitations). Parsed anyway so a standard SPICE deck is
+    /// accepted unchanged and so the field is already here when input-referral lands.
+    pub source: String,
+    /// Frequency points per decade.
+    pub points_per_decade: usize,
+    /// Start frequency (Hz).
+    pub fstart: f64,
+    /// Stop frequency (Hz).
+    pub fstop: f64,
 }
 
 /// An `.ac dec <points-per-decade> <fstart> <fstop>` sweep spec (T5): solve the small-signal

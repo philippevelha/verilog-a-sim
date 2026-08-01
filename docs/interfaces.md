@@ -144,6 +144,12 @@ pub enum UnknownKind {
     Branch, // a constraint row (e.g. a source's V(p)-V(n)=value); never shunt this
 }
 
+// va-abi/src/noise.rs
+pub trait NoiseSink {
+    /// A white current-noise source of one-sided PSD `psd` (A²/Hz) across the branch `p`-`n`.
+    fn white_current(&mut self, p: usize, n: usize, psd: f64);
+}
+
 pub trait ModelInstance {
     /// Global unknown indices this instance contributes to (nodes + internal unknowns).
     fn unknowns(&self) -> &[usize];
@@ -153,6 +159,9 @@ pub trait ModelInstance {
     fn unknown_abstol(&self, i: usize) -> Option<f64> { None }
     /// Evaluate at solution vector `x`; emit residual + Jacobian (+ charge in transient).
     fn load(&self, x: &[f64], sink: &mut dyn StampSink);
+    /// Emit this instance's own noise sources at `x` and temperature `temp` (K).
+    /// Default: none (a noiseless element).
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {}
 }
 ```
 
@@ -182,3 +191,28 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > `newton::solve_from`'s per-unknown convergence check now consults instead of always using
 > `NewtonConfig::abstol` — see `docs/roadmap.md` backlog item 5 for the full account and its
 > stated v1 limits (no flow-nature/branch-unknown wiring; the residual-norm gate stays global).
+
+> **Revision (§6 change, 2026-08-01):** added the **noise channel** — a new `NoiseSink` trait
+> (`va-abi/src/noise.rs`) and `ModelInstance::noise`, a third **default trait method** in the
+> same additive shape as the two above, so every existing implementor kept compiling untouched.
+> This unblocks T5.2's adjoint noise analysis (`va_acnoise::noise`).
+>
+> **Why a new channel rather than deriving noise from the Jacobian.** A device's noise is
+> physics the assembled matrices no longer carry. A 200 Ω resistor and a diode biased to a 200 Ω
+> small-signal resistance stamp *identical* `G` entries, but the resistor's noise is thermal
+> (`4kTg`, bias-independent) and the diode's is shot (`2q|Id|`, bias-dependent) — for that pair
+> they differ by exactly a factor of two, and in general by whatever the bias makes them. Only
+> the instance knows which it is, the same argument `UnknownKind` rests on: invisible from a
+> global index, or here from a matrix entry, because it depends on what the device *is*.
+>
+> Overridden by `va-abi::reference`'s `Resistor` (thermal), `Diode` and `Bjt` (shot). Kept at the
+> default — genuinely correct, not a stub — by `Capacitor` and `VSource`: an ideal reactance
+> dissipates nothing and passes no carriers across a barrier, so it has neither noise mechanism.
+>
+> **Stated limits of this v1 channel**, both deliberate and both additive to fix later:
+> `white_current` is the only source kind, so flicker (`1/f`) noise has no representation (a
+> `flicker_current` sibling would be the next revision of exactly this shape); and
+> `va-codegen`-generated models take the default, since Verilog-A's `white_noise()`/
+> `flicker_noise()` are not lowered yet — a circuit built from a compiled model therefore
+> computes zero noise, which is why the noise validation circuit uses the hand-written reference
+> devices. See `va_abi::noise`'s own module doc and `docs/roadmap.md`'s T5.2 section.

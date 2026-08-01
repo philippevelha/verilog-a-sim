@@ -50,11 +50,11 @@ shared, demoable milestone that several theses light up at once.
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; 16 tests | 🟢 |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
-| T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, and `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
-| T6.2 — CLI wiring (DC + sweep + transient + AC) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), and `--ac` small-signal sweeps through the real pipeline | 🟢 |
+| T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
+| T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline | 🟢 |
 | T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section | ✅ |
 | T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; **golden gate closed 2026-08-01** — `.ac` card/`AC` source parsing, `va-cli::solve_ac`, `GoldenAc` + separate magnitude/phase verdicts, complex `.qraw` parsing, and both AC circuits green vs real QSPICE (`rc_ac` 1.3e-15, `diode_ac` 1.3e-5) | ✅ |
-| T5.2 — noise analysis | crate stub only (`todo!()`) | ⬜ |
+| T5.2 — noise analysis | adjoint output-noise PSD (one `Aᵀy = e_out` solve per frequency gives every source's transfer impedance); Interface β gained a §6 noise channel (`NoiseSink` + `ModelInstance::noise`) since noise is physics the Jacobian doesn't carry; thermal/shot sources on `Resistor`/`Diode`/`Bjt`; validated vs closed form (`4kTR`), vs an RC-shaped spectrum, and vs real QSPICE golden (`diode_noise` 1.7e-5) | ✅ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -1376,13 +1376,62 @@ second is the one with teeth: its passband gain depends exponentially on the sol
 agreeing that closely constrains the DC point, the AD-derived Jacobian, and the linearization
 together. `noise.rs` (T5.2) remains untouched.
 
-**Still outstanding for T5.1**: the `t5-acnoise` tutorial.
+**Tutorial**: `t5-acnoise/01-ac.qmd`, written 2026-08-01 — covers the linearization, the
+`2n×2n` block embedding that avoids a complex-linear-algebra dependency, both QSPICE `.qraw`
+findings, and why the AC metric is two bands rather than one.
 
 ### Phase T5.2 — Noise analysis
-- Per-element noise sources → output PSD; adjoint method for transfer functions (`noise.rs`).
-- **Validation gate:** resistor thermal noise / diode shot noise PSD within band vs golden.
-- **Tutorial:** `t5-acnoise/02-noise.qmd` — noise-source models, the adjoint derivation, the
-  output-referred PSD plot.
+
+**Implemented and golden-gated 2026-08-01** — was a `todo!()` stub. `cargo xtask validate` now
+checks a real noise spectrum against real QSPICE golden (9/9 circuits, 100% convergence).
+
+**This needed a §6 change to Interface β first**, the first one since 2026-07-09: a device's
+noise is physics the assembled matrices no longer carry, so it cannot be derived after the fact.
+A 200 Ω resistor and a diode biased to a 200 Ω small-signal resistance stamp *identical* `G`
+entries, yet the resistor's noise is thermal (`4kTg`, bias-independent) and the diode's is shot
+(`2q|Id|`, bias-dependent) — for that pair they differ by exactly 2×. So `va-abi` gained a
+`NoiseSink` trait and a `ModelInstance::noise` **default method**, in the same additive shape as
+`unknown_kind`/`unknown_abstol`: every existing implementor kept compiling untouched. `Resistor`
+overrides it (thermal), `Diode` and `Bjt` (shot); `Capacitor` and `VSource` keep the default,
+which for them is the physically right answer rather than a stub. See `docs/interfaces.md`'s
+Revision block for the full rationale and the channel's stated limits.
+
+**The adjoint, and why it's worth the indirection.** Output PSD is `Σ_k |Z_k(jω)|²·S_k` over
+uncorrelated sources. The direct route costs one linear solve *per source per frequency*: inject
+a unit current across source `k`, read the output. The adjoint gets all of them from **one**
+solve per frequency — solving `Aᵀ·y = e_out` makes every transfer impedance a subtraction,
+`Z_k = y_p − y_n`, because `e_outᵀ·A⁻¹ = (A⁻ᵀ·e_out)ᵀ = yᵀ`. Note it is the *plain* transpose,
+not the conjugate one: the identity is bilinear, nothing here is a complex inner product. The
+`2n×2n` real block embedding T5.1 already used for the complex solve was factored out and reused
+with the blocks transposed, so there remains exactly one place in the codebase where the
+complex-to-real convention lives.
+
+**Validated at three levels, not just against golden.** Closed form first: a lone resistor's
+output PSD is `4kTR` — a check with real content, since the source is `4kT/R` and the transfer
+impedance is `R`, so `R` *inverts* between them and getting either wrong yields `4kT/R` or
+`4kTR³`. Then an RC low-pass shaping that same thermal noise by `1/(1+(ωRC)²)`, which is what
+exercises the charge channel's contribution to the adjoint (with `C` ignored the spectrum would
+come out flat). Then the real circuit against hand-derived physics, and finally against QSPICE.
+
+**Measured**: `circuits/diode_noise.net` at `1.7e-5` relative on the PSD (tol `1e-3`), with the
+absolute value `1.9877e-18` V²/Hz agreeing with QSPICE to five figures and the integrated total
+`4.4584 µV` rms matching QSPICE's own printed figure exactly. See `docs/validation.md`'s
+noise-gate section for why the gate has teeth and the two traps it avoids (a compiled model
+silently contributing no noise; the circuit-scale error floor making a PSD comparison vacuous).
+
+**Stated limits, all deliberate and all additive to fix**: white sources only (no flicker
+channel); output-referred only (no `S_out/|H|²` input-referral, which QSPICE does report); no
+per-device breakdown in the output; and no noise from `va-codegen`-generated models until
+Verilog-A's `white_noise()`/`flicker_noise()` are lowered — the reason the gate's circuit uses
+hand-written reference devices.
+
+**Tutorial**: `t5-acnoise/02-noise.qmd`, written 2026-08-01 — carries the full adjoint
+derivation (why one solve per frequency suffices, and why it is the plain rather than the
+conjugate transpose), the argument for why noise needed its own ABI channel, and both
+green-but-meaningless-gate traps as a worked lesson about tolerance constants carrying implicit
+assumptions about scale.
+
+**T5 is complete.** Both phases are implemented, golden-gated, and documented.
 
 ---
 
@@ -1703,12 +1752,12 @@ reported. `validate()`'s own final report now prints the convergence fraction as
 ```console
 $ cargo run -q -p xtask -- validate
 ...
-[xtask] validate: 8 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
-[xtask] validate: convergence 8/8 (100.0%) — CLAUDE.md §7's convergence metric
+[xtask] validate: 9 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
+[xtask] validate: convergence 9/9 (100.0%) — CLAUDE.md §7's convergence metric
 ```
 
-Every known circuit converges today (8/8 as of 2026-08-01 — six ladder rungs plus T5's two AC
-circuits; unsurprising, since every one of them already passes
+Every known circuit converges today (9/9 as of 2026-08-01 — six ladder rungs plus T5's two AC
+circuits and one noise circuit; unsurprising, since every one of them already passes
 golden, a strictly harder bar), so this reads `100.0%` right now; the real deliverable is the
 *mechanism* — verified with a genuinely non-convergent synthetic circuit (two nets joined by a
 resistor with no path to ground anywhere, confirmed to produce `CoreError::Singular` via

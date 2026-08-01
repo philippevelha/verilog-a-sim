@@ -10,6 +10,7 @@ pub mod ac;
 pub mod dc;
 pub mod golden;
 pub mod metrics;
+pub mod noise;
 pub mod tran;
 
 use thiserror::Error;
@@ -67,6 +68,16 @@ pub mod tol {
     /// unity a relative magnitude error and an absolute phase error in radians are directly
     /// comparable perturbations of the same complex value.
     pub const AC_PHASE_RAD: f64 = 1e-4;
+    /// Noise: max relative error on the output PSD, over every swept frequency.
+    ///
+    /// Looser than [`DC_REL`] at `1e-3`, and deliberately so rather than by measurement drift: a
+    /// noise PSD is a *derived* quantity two levels removed from the operating point — it is
+    /// `Σ|Z|²·S`, where the transfer impedance `Z` carries the AC path's own error squared and
+    /// each source PSD `S` carries the DC bias's error through `2q·Id`. Demanding `1e-4` of a
+    /// product of squares of quantities each held to `1e-4` would be asking for better agreement
+    /// than the inputs have. The measured error on `circuits/diode_noise.net` is `1.7e-5`, well
+    /// inside this band (§ `docs/validation.md`'s noise-gate section).
+    pub const NOISE_PSD_REL: f64 = 1e-3;
 }
 
 /// Outcome of comparing one analysis against its golden reference.

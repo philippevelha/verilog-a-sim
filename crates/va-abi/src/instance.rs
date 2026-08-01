@@ -1,5 +1,6 @@
 //! The [`ModelInstance`] trait — the unit `va-core` solves on.
 
+use crate::noise::NoiseSink;
 use crate::stamps::StampSink;
 
 /// The structural role of one entry in [`ModelInstance::unknowns`], distinguishing a KCL
@@ -73,4 +74,24 @@ pub trait ModelInstance {
     /// the charge channel; DC analyses simply ignore it. `x` is indexed by global unknown
     /// index — read your terminals via the indices returned by [`Self::unknowns`].
     fn load(&self, x: &[f64], sink: &mut dyn StampSink);
+
+    /// Emit this instance's own **noise sources** at operating point `x` and temperature `temp`
+    /// (K) into `sink` — Interface β's noise channel (§4/§6 additive change, 2026-08-01; see
+    /// [`crate::noise`] for what a source means and what this channel deliberately cannot
+    /// express).
+    ///
+    /// Default: **no sources**, i.e. a noiseless element. That is physically correct for an
+    /// ideal capacitor and an ideal voltage source (neither dissipates, so neither has
+    /// Johnson-Nyquist noise, and neither passes carriers across a barrier, so neither has shot
+    /// noise), and it is the honest — if incomplete — answer for a `va-codegen`-generated model,
+    /// whose Verilog-A `white_noise()`/`flicker_noise()` calls are not lowered yet. A device
+    /// that *does* have noise overrides this: [`crate::reference::Resistor`] (thermal),
+    /// [`crate::reference::Diode`] and [`crate::reference::Bjt`] (shot).
+    ///
+    /// Kept a default method for the same reason [`Self::unknown_kind`] and
+    /// [`Self::unknown_abstol`] are (`docs/bridges/interface-beta-abi.md` §8): every existing
+    /// implementor keeps compiling untouched.
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
+        let _ = (x, temp, sink);
+    }
 }

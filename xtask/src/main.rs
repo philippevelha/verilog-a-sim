@@ -70,6 +70,22 @@ const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/diode_ac.net", Some("models/diode.va")),
 ];
 
+/// The `.noise` circuits `validate`/`gen-golden` know how to drive (T5.2).
+///
+/// `model` is `None` and **must stay** `None`: Verilog-A's `white_noise()`/`flicker_noise()`
+/// aren't lowered by `va-codegen` yet, so a compiled device contributes no noise sources at all
+/// (§ `va_abi::noise`). The deck's `diode` therefore has to resolve to the hand-written
+/// `va-abi::reference::Diode`, which does implement Interface β's noise channel — see
+/// `circuits/diode_noise.net`'s own header comment.
+const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[("circuits/diode_noise.net", None)];
+
+/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.noise` circuits (T5.2). The deck names a
+/// `diode` model QSPICE has no idea about, so it takes the same one-to-one `IS`/`N` translation
+/// every other diode circuit here does — a noise analysis linearizes the very same model
+/// equations, and derives its shot noise from the very same DC current.
+const QSPICE_NOISE_MODEL_TRANSLATIONS: &[(&str, &str)] =
+    &[("circuits/diode_noise.net", ".model diode D(IS=1e-14 N=1)")];
+
 /// Tally shared across [`validate`]'s DC/sweep/tran passes — distinguishes *three* different
 /// outcomes, not two, per `CLAUDE.md` §7's four metrics: a circuit can have no golden yet
 /// ([`Self::skipped`]), fail to converge at all ([`Self::not_converged`] — §7's own "convergence:
@@ -291,6 +307,41 @@ fn validate_ac_circuits(root: &Path) -> Result<Tally> {
     Ok(tally)
 }
 
+/// Like [`validate_dc_circuits`], for every known `.noise` circuit (T5.2).
+fn validate_noise_circuits(root: &Path) -> Result<Tally> {
+    let mut tally = Tally::default();
+    for &(circuit, model) in NOISE_CIRCUITS {
+        let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
+        if !golden_path.is_file() {
+            eprintln!(
+                "[xtask]   skip {circuit}: no golden reference at {}",
+                golden_path.display()
+            );
+            tally.skipped += 1;
+            continue;
+        }
+
+        let golden = va_harness::golden::GoldenNoise::read(&golden_path)
+            .with_context(|| format!("reading golden reference for {circuit}"))?;
+        let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+        let model_str = model_path
+            .as_deref()
+            .map(|p| p.to_str().context("non-UTF8 model path"))
+            .transpose()?;
+        let Some(got) = try_solve(
+            circuit,
+            || va_harness::noise::run_noise(circuit_str, model_str),
+            &mut tally,
+        ) else {
+            continue;
+        };
+        let verdict = va_harness::noise::compare_noise(&got, &golden)
+            .with_context(|| format!("comparing {circuit} against golden"))?;
+        report_verdict(circuit, verdict, &mut tally);
+    }
+    Ok(tally)
+}
+
 /// Print one AC circuit's PASS/FAIL line and fold a golden mismatch into `tally`. Distinct from
 /// [`report_verdict`] because §7's AC metric is genuinely two numbers against two bands
 /// (magnitude *and* phase — see `va_harness::ac::AcVerdict`), and reporting only one of them
@@ -345,6 +396,7 @@ fn validate() -> Result<()> {
     tally.merge(validate_sweep_circuits(&root)?);
     tally.merge(validate_tran_circuits(&root)?);
     tally.merge(validate_ac_circuits(&root)?);
+    tally.merge(validate_noise_circuits(&root)?);
 
     eprintln!(
         "[xtask] validate: {} checked, {} failed golden, {} did not converge, {} skipped (no golden)",
@@ -785,11 +837,51 @@ fn gen_golden() -> Result<()> {
         generated += gen_ac_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
     }
 
+    // `.noise` circuits (T5.2): like `.ac`, no cold-start rewrite — a noise analysis is a
+    // linearization about the DC operating point, so QSPICE's "solve DC first" is exactly right.
+    for &(circuit, model_card) in QSPICE_NOISE_MODEL_TRANSLATIONS {
+        let deck = read_circuit(&root, circuit)?;
+        let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {circuit}"))?;
+        let output = net
+            .noise
+            .as_ref()
+            .with_context(|| format!("{circuit} has no `.noise` card"))?
+            .output
+            .clone();
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+        let native_deck = translate_for_qspice(&deck, model_card);
+
+        // A `.noise` `.qraw` is `Flags: real` and point-major — the same shape `.dc`/`.tran`
+        // produce, so it reuses `run_qspice_sweep` rather than needing its own reader.
+        let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit} (native translation)"))?;
+        let golden = golden_noise_from_qraw(&raw, &output)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} frequency point(s), noise PSD at V({output}))",
+            golden_path.display(),
+            golden.points.len()
+        );
+        generated += 1;
+    }
+
     let _ = std::fs::remove_dir_all(&tmp);
 
     eprintln!(
         "[xtask] gen-golden: {generated} circuit(s) regenerated from QSPICE (of {} known)",
-        DC_CIRCUITS.len() + SWEEP_CIRCUITS.len() + TRAN_CIRCUITS.len() + AC_CIRCUITS.len()
+        DC_CIRCUITS.len()
+            + SWEEP_CIRCUITS.len()
+            + TRAN_CIRCUITS.len()
+            + AC_CIRCUITS.len()
+            + NOISE_CIRCUITS.len()
     );
     Ok(())
 }
@@ -1144,6 +1236,43 @@ fn golden_ac_from_qraw(
     })
 }
 
+/// The `.qraw` variable QSPICE writes the total output noise PSD to.
+///
+/// A `.noise` run also emits one `V(onoise_<device>)` column per contributing device (and
+/// `V(inoise_spectrum)`, the input-referred spectrum), all of which this project ignores: its own
+/// [`va_harness::golden::GoldenNoise`] records the summed output spectrum only, matching what
+/// `va_acnoise::noise` computes (§ its stated limitations — no per-device breakdown, no
+/// input-referral). Confirmed against a real run: the per-device columns sum exactly to this one.
+const QSPICE_ONOISE_TOTAL: &str = "V(onoise_spectrum)";
+
+/// Map a parsed `.noise` `.qraw` onto a [`va_harness::golden::GoldenNoise`], keyed by frequency.
+///
+/// A noise `.qraw` is `Flags: real` and point-major, so it needs no complex parsing at all —
+/// [`parse_qraw_sweep`] reads it unchanged, and only the *column selection* is noise-specific.
+fn golden_noise_from_qraw(
+    raw: &QspiceRawSweep,
+    output: &str,
+) -> Result<va_harness::golden::GoldenNoise> {
+    let freq_idx = raw
+        .variables
+        .iter()
+        .position(|v| v.eq_ignore_ascii_case("frequency"))
+        .context("QSPICE noise output has no `Frequency` variable")?;
+    let psd_idx = raw
+        .variables
+        .iter()
+        .position(|v| v.eq_ignore_ascii_case(QSPICE_ONOISE_TOTAL))
+        .with_context(|| format!("QSPICE noise output has no `{QSPICE_ONOISE_TOTAL}` variable"))?;
+    Ok(va_harness::golden::GoldenNoise {
+        output: output.to_string(),
+        points: raw
+            .points
+            .iter()
+            .map(|row| (row[freq_idx], row[psd_idx]))
+            .collect(),
+    })
+}
+
 /// Look up each of `node_order`'s labels in `variables`/`row` — shared by [`golden_dc_from_qraw`]
 /// and [`golden_sweep_from_qraw`]. QSPICE's own variable ordering isn't assumed to match
 /// `node_order`'s (it happened to, for `divider.net`, but nothing guarantees that in general).
@@ -1389,11 +1518,11 @@ mod tests {
         // `TRAN_CIRCUITS`/`AC_CIRCUITS` has real, committed QSPICE golden (all six ladder rungs,
         // plus T5's two AC circuits) — `divider.net`/`rc_step.net`/`rc_ac.net` unmodified
         // (`QSPICE_NATIVE_CIRCUITS`/`QSPICE_NATIVE_TRAN_CIRCUITS`/`QSPICE_NATIVE_AC_CIRCUITS`);
-        // `mos_dc.net`/`diode_iv.net`/`rectifier.net`/`ring_osc.net`/`diode_ac.net` from a
-        // native-model translation (`ring_osc.net`'s golden additionally truncated to
-        // `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is skipped
-        // anymore; `validate` must pass all eight for real.
-        validate().expect("validate should pass: all eight known circuits have real golden");
+        // `mos_dc.net`/`diode_iv.net`/`rectifier.net`/`ring_osc.net`/`diode_ac.net`/
+        // `diode_noise.net` from a native-model translation (`ring_osc.net`'s golden additionally
+        // truncated to `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is
+        // skipped anymore; `validate` must pass all nine for real.
+        validate().expect("validate should pass: all nine known circuits have real golden");
     }
 
     #[test]
@@ -1694,6 +1823,38 @@ mod tests {
             golden.points,
             vec![(1.0, vec![(0.99, -0.006), (-3.9e-8, -6.2e-6)])]
         );
+    }
+
+    #[test]
+    fn golden_noise_from_qraw_picks_the_total_spectrum_column() {
+        // A real `.noise` run's variable list: per-device columns *and* the summed total, plus
+        // the input-referred spectrum. Only the total is taken — picking a per-device column by
+        // accident would silently golden a fraction of the real noise.
+        let raw = QspiceRawSweep {
+            variables: vec![
+                "Frequency".to_string(),
+                "V(onoise_r1)".to_string(),
+                "V(onoise_d1)".to_string(),
+                "V(onoise_spectrum)".to_string(),
+                "V(inoise_spectrum)".to_string(),
+            ],
+            points: vec![
+                vec![10.0, 6.62e-19, 1.325e-18, 1.9877e-18, 4.975e-17],
+                vec![100.0, 6.62e-19, 1.325e-18, 1.9877e-18, 4.975e-17],
+            ],
+        };
+        let golden = golden_noise_from_qraw(&raw, "a").expect("map");
+        assert_eq!(golden.output, "a");
+        assert_eq!(golden.points, vec![(10.0, 1.9877e-18), (100.0, 1.9877e-18)]);
+    }
+
+    #[test]
+    fn golden_noise_from_qraw_errors_without_a_total_column() {
+        let raw = QspiceRawSweep {
+            variables: vec!["Frequency".to_string(), "V(onoise_r1)".to_string()],
+            points: vec![vec![10.0, 6.62e-19]],
+        };
+        assert!(golden_noise_from_qraw(&raw, "a").is_err());
     }
 
     #[test]

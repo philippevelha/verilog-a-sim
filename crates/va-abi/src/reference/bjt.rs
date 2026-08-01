@@ -1,6 +1,7 @@
 //! Three-terminal NPN bipolar junction transistor reference model (simplified Ebers-Moll).
 
 use crate::instance::ModelInstance;
+use crate::noise::{shot_current_psd, NoiseSink};
 use crate::stamps::StampSink;
 
 /// An NPN BJT, simplified (textbook) Ebers-Moll: `Ib = Ibe + Ibc`, `Ic = Icc - Ibc`, where
@@ -95,6 +96,31 @@ impl ModelInstance for Bjt {
         sink.jacobian(e, b, -(gbe + gf - gr));
         sink.jacobian(e, c, -gr);
         sink.jacobian(e, e, gbe + gf);
+    }
+
+    /// Shot noise on both terminal currents: `2q|Ib|` across the base-emitter junction and
+    /// `2q|Ic|` across the collector-emitter path — SPICE's own BJT noise model minus the parts
+    /// this device doesn't have (no `RB`/`RC`/`RE` thermal noise, since it has no ohmic
+    /// parasitics; no flicker, since it declares no `KF`/`AF` and [`crate::noise`] has no
+    /// flicker channel).
+    ///
+    /// The two sources are treated as uncorrelated, which is the standard assumption at the
+    /// frequencies this simplified model is meaningful at (§ [`crate::noise`]'s module doc).
+    ///
+    /// **Not covered by the golden gate.** `docs/validation.md`'s noise circuit exercises the
+    /// resistor's thermal and the diode's shot noise against QSPICE; this override follows the
+    /// same textbook `2qI` form and is unit-tested against it directly, but no committed golden
+    /// checks a noisy BJT circuit yet.
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
+        let _ = temp;
+        let [b, c, e] = self.terminals;
+        let vb = x.get(b).copied().unwrap_or(0.0);
+        let vc = x.get(c).copied().unwrap_or(0.0);
+        let ve = x.get(e).copied().unwrap_or(0.0);
+        let (vbe, vbc) = (vb - ve, vb - vc);
+
+        sink.white_current(b, e, shot_current_psd(self.ib(vbe, vbc)));
+        sink.white_current(c, e, shot_current_psd(self.ic(vbe, vbc)));
     }
 }
 

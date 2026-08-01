@@ -142,12 +142,7 @@ pub fn run(
 }
 
 /// Solve `(G + jω·C)·X = excitation` at one angular frequency `ω`, via the real `2n × 2n`
-/// block embedding:
-///
-/// ```text
-/// [ G       -ω·C ] [ Re(X) ]   [ Re(B) ]
-/// [ ω·C      G   ] [ Im(X) ] = [ Im(B) ]
-/// ```
+/// block embedding (see [`solve_block_embedded`]).
 fn solve_at(
     g: &[f64],
     c: &[f64],
@@ -155,13 +150,40 @@ fn solve_at(
     omega: f64,
     excitation: &[Complex],
 ) -> Result<Vec<Complex>, AcNoiseError> {
+    solve_block_embedded(g, c, dim, omega, excitation, false)
+}
+
+/// Solve `A·X = rhs` (or `Aᵀ·X = rhs` when `transpose`) for `A = G + jω·C`, via the real
+/// `2n × 2n` block embedding:
+///
+/// ```text
+/// [ G       -ω·C ] [ Re(X) ]   [ Re(B) ]
+/// [ ω·C      G   ] [ Im(X) ] = [ Im(B) ]
+/// ```
+///
+/// `transpose` transposes `G` and `C` as it fills the blocks, which embeds `Aᵀ` rather than `A`
+/// — note this is the plain transpose, **not** the conjugate transpose, which is what an adjoint
+/// noise analysis actually wants ([`crate::noise::run`]'s own doc comment derives why).
+///
+/// Shared by [`ac::run`](run) and [`crate::noise::run`] so there is exactly one place where the
+/// complex-to-real embedding convention lives; a sign error here would otherwise have to be
+/// found twice.
+pub(crate) fn solve_block_embedded(
+    g: &[f64],
+    c: &[f64],
+    dim: usize,
+    omega: f64,
+    rhs: &[Complex],
+    transpose: bool,
+) -> Result<Vec<Complex>, AcNoiseError> {
     let n = dim;
     let m = 2 * n;
     let mut a = vec![0.0; m * m];
     for i in 0..n {
         for j in 0..n {
-            let gij = g[i * n + j];
-            let cij = c[i * n + j];
+            let src = if transpose { j * n + i } else { i * n + j };
+            let gij = g[src];
+            let cij = c[src];
             a[i * m + j] = gij;
             a[i * m + (n + j)] = -omega * cij;
             a[(n + i) * m + j] = omega * cij;
@@ -169,7 +191,7 @@ fn solve_at(
         }
     }
     let mut b = vec![0.0; m];
-    for (i, &(re, im)) in excitation.iter().enumerate() {
+    for (i, &(re, im)) in rhs.iter().enumerate() {
         b[i] = re;
         b[n + i] = im;
     }

@@ -2,6 +2,7 @@
 
 use super::{stamp_conductance, voltage_across};
 use crate::instance::ModelInstance;
+use crate::noise::{shot_current_psd, NoiseSink};
 use crate::stamps::StampSink;
 
 /// Default thermal voltage `kT/q` at the project's nominal simulation temperature, 300.15 K
@@ -60,6 +61,21 @@ impl ModelInstance for Diode {
         let i = self.current(vd);
         let g = self.conductance(vd);
         stamp_conductance(sink, p, n, i, g);
+    }
+
+    /// Shot noise: a `2q|Id|` A²/Hz white current source across the junction, where `Id` is the
+    /// *DC* current at the operating point `x` — so unlike a resistor's thermal noise this is
+    /// bias-dependent, and a diode's noise is **not** the `4kTg` its small-signal conductance
+    /// would suggest (§ [`crate::noise`]'s module doc).
+    ///
+    /// No thermal noise from a series resistance: this model has none (§ its own limitations).
+    /// QSPICE reports that as a separate `onoise_<dev>.rs` column, identically zero for a `.model
+    /// D` card with no `RS` — which is exactly what this model translates to.
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
+        let _ = temp;
+        let [p, n] = self.terminals;
+        let vd = voltage_across(x, p, n);
+        sink.white_current(p, n, shot_current_psd(self.current(vd)));
     }
 }
 

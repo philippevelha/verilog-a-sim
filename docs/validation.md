@@ -11,10 +11,19 @@ and compares to committed `golden/` outputs.
 | DC           | max relative I–V error on the operating point/sweep | ≤ 1e-4            |
 | Transient    | waveform RMS error (after shared-timebase resample) | ≤ 1e-3            |
 | AC           | max relative magnitude error / max absolute phase error | ≤ 1e-4 · ≤ 1e-4 rad |
+| Noise        | max relative error on the output PSD                | ≤ 1e-3            |
 | Convergence  | fraction of zoo circuits that reach a solution      | track upward      |
 
 These mirror the constants in `va-harness` (`tol::DC_REL`, `tol::TRAN_RMS`, `tol::AC_MAG_REL`,
-`tol::AC_PHASE_RAD`). Tune here as the zoo grows; record any change with its justification.
+`tol::AC_PHASE_RAD`, `tol::NOISE_PSD_REL`). Tune here as the zoo grows; record any change with
+its justification.
+
+**Updated 2026-08-01: the noise row is new** (T5.2). Its band is `1e-3`, looser than DC's `1e-4`
+deliberately rather than by drift: a noise PSD is a *derived* quantity two levels removed from
+the operating point — `Σ|Z|²·S`, where the transfer impedance `Z` carries the AC path's error
+squared and each source PSD carries the DC bias's error through `2q·Id`. Demanding `1e-4` of a
+product of squares of quantities each held to `1e-4` would be asking for better agreement than
+the inputs have. Measured: `1.7e-5`.
 
 **Updated 2026-08-01: all four metrics are now real, golden-gated implementations** — the AC row
 above is no longer "band-dependent"/unwired. Its previously-stated band is now two concrete
@@ -50,10 +59,10 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/{divider,mos_dc,diode_iv,rc_step,rectifier,ring_osc,rc_ac,diode_ac}.golden` are all real,
-QSPICE-generated data (`cargo xtask gen-golden`) — every one of `xtask`'s known circuits has a
-committed golden reference, closing the "which circuits aren't regenerated yet" gap this file
-used to track.
+`golden/{divider,mos_dc,diode_iv,rc_step,rectifier,ring_osc,rc_ac,diode_ac,diode_noise}.golden`
+are all real, QSPICE-generated data (`cargo xtask gen-golden`) — every one of `xtask`'s known
+circuits has a committed golden reference, closing the "which circuits aren't regenerated yet"
+gap this file used to track.
 
 ### The AC gate (added 2026-08-01)
 
@@ -90,6 +99,33 @@ angle differences are wrapped into `(−π, π]`, so a reference sitting on the 
 `rc_ac.net`'s own `I(V1)` approaches `−180°` at high frequency — doesn't report a ~2π "error"
 for a negligible disagreement; and points whose reference magnitude is below `REL_ERROR_FLOOR`
 are skipped entirely, since the phase of a value at both simulators' noise floor is arbitrary.
+
+### The noise gate (added 2026-08-01)
+
+One circuit, `circuits/diode_noise.net`: a 0.7 V source feeding a forward-biased diode through a
+1 kΩ resistor, probed at their junction, swept 10 Hz–10 MHz. It exercises **both** noise
+mechanisms `CLAUDE.md` §7 names, at comparable size so neither can hide the other —
+`4kT/R₁ = 1.66e-23` A²/Hz from the resistor and `2q·I_d ≈ 3.3e-23` A²/Hz from the diode, each
+reaching the output through the same `Z = R₁ ∥ r_d`. Measured against golden: **`1.7e-5`**, with
+the absolute value (`1.9877e-18` V²/Hz, flat) agreeing with QSPICE to five figures and the
+band-integrated total (`4.4584 µV` rms) matching QSPICE's own printed figure exactly.
+
+**Three things about this gate are worth knowing before changing it:**
+
+1. **It must not use a `--model` compiled diode.** Verilog-A's `white_noise()`/`flicker_noise()`
+   are not lowered by `va-codegen` yet, so a compiled device contributes *no* noise sources
+   (`va_abi::noise`'s stated limitation). The deck's `D1` deliberately resolves to the
+   hand-written `va-abi::reference::Diode` instead. `va-cli::solve_noise` refuses to report an
+   identically-zero spectrum rather than let that failure mode pass as a result, and
+   `va-harness`'s own test suite pins that refusal.
+2. **The metric is not the DC one.** `metrics::REL_ERROR_FLOOR` is `1e-8`, calibrated for volts
+   and milliamps. Applied to a `~2e-18` V²/Hz PSD it would divide every point by the floor and
+   report `~1e-10` no matter how wrong the answer — a **vacuous** gate. `max_relative_psd_error`
+   floors relative to the spectrum's own peak (`1e-12` of it) instead, and a unit test asserts
+   the general metric really would have hidden a doubled spectrum.
+3. **The teeth are in the shot term.** Dropping the diode's noise entirely leaves the resistor's
+   `6.62e-19`, a 67% error; computing it as `4kTg` instead of `2q·I_d` is off by exactly 2× on
+   that term, ~33%. Both are three to four orders outside the `1e-3` band.
 
 ## Bring-up ladder
 

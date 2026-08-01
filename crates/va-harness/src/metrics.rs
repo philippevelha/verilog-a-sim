@@ -32,6 +32,28 @@ const REL_ERROR_FLOOR: f64 = 1e-8;
 ///
 /// [`HarnessError::LengthMismatch`] if the series differ in length.
 pub fn max_relative_error(got: &[f64], reference: &[f64]) -> Result<f64, HarnessError> {
+    max_relative_error_with_floor(got, reference, REL_ERROR_FLOOR)
+}
+
+/// [`max_relative_error`] with an explicit near-zero denominator floor instead of
+/// [`REL_ERROR_FLOOR`].
+///
+/// Exists because that constant is calibrated for **circuit-scale** quantities — volts and
+/// milliamps — where `1e-8` is "indistinguishable from zero." A quantity living on a completely
+/// different scale needs its own floor, and silently reusing `1e-8` for one would not merely be
+/// imprecise, it would make the comparison **vacuous**: a noise PSD of `2e-18` V²/Hz divided by
+/// a `1e-8` floor yields `~1e-10` no matter how wrong the value is, so every point would pass.
+/// [`max_relative_psd_error`] is the caller that needs this; the floor is a parameter rather
+/// than a second constant so the choice is visible at the call site.
+///
+/// # Errors
+///
+/// [`HarnessError::LengthMismatch`] if the series differ in length.
+pub fn max_relative_error_with_floor(
+    got: &[f64],
+    reference: &[f64],
+    floor: f64,
+) -> Result<f64, HarnessError> {
     if got.len() != reference.len() {
         return Err(HarnessError::LengthMismatch {
             got: got.len(),
@@ -41,8 +63,41 @@ pub fn max_relative_error(got: &[f64], reference: &[f64]) -> Result<f64, Harness
     Ok(got
         .iter()
         .zip(reference)
-        .map(|(&g, &r)| (g - r).abs() / r.abs().max(REL_ERROR_FLOOR))
+        .map(|(&g, &r)| (g - r).abs() / r.abs().max(floor))
         .fold(0.0_f64, f64::max))
+}
+
+/// How far below a noise spectrum's own peak a point may sit before it stops being compared —
+/// [`max_relative_psd_error`]'s floor, expressed *relative to the band* rather than as an
+/// absolute number.
+///
+/// A PSD has no fixed scale (thermal noise at the output of a 1 kΩ resistor is `~1.6e-17`
+/// V²/Hz; through a divider it can be many orders lower), so an absolute floor would be either
+/// vacuous or crushing depending on the circuit. `1e-12` of the band's own peak is a point
+/// contributing a *trillionth* of the spectrum's largest value — far below anything the
+/// integrated total notices, and comfortably below where two simulators' own round-off differs.
+const PSD_FLOOR_RELATIVE_TO_PEAK: f64 = 1e-12;
+
+/// Maximum relative error between a computed and a golden noise spectrum (the noise metric).
+///
+/// Identical in spirit to [`max_relative_error`], but with the denominator floored relative to
+/// the reference spectrum's own peak ([`PSD_FLOOR_RELATIVE_TO_PEAK`]) instead of at a fixed
+/// circuit-scale constant — see [`max_relative_error_with_floor`] for why reusing the latter
+/// would silently make every comparison pass.
+///
+/// # Errors
+///
+/// [`HarnessError::LengthMismatch`] if the series differ in length.
+pub fn max_relative_psd_error(got: &[f64], reference: &[f64]) -> Result<f64, HarnessError> {
+    let peak = reference.iter().fold(0.0_f64, |m, &r| m.max(r.abs()));
+    // An all-zero reference spectrum has no scale to floor against; fall back to comparing
+    // against absolute zero, where any nonzero `got` is (correctly) an infinite relative error.
+    let floor = if peak > 0.0 {
+        peak * PSD_FLOOR_RELATIVE_TO_PEAK
+    } else {
+        f64::MIN_POSITIVE
+    };
+    max_relative_error_with_floor(got, reference, floor)
 }
 
 /// Maximum relative magnitude error between two complex series (half of the AC metric).
@@ -213,6 +268,52 @@ mod tests {
         // suppress the check entirely.
         let rel = max_relative_error(&[1e-3], &[0.0]).unwrap();
         assert!(rel > crate::tol::DC_REL, "rel = {rel}");
+    }
+
+    /// The regression this metric exists to prevent: at noise-PSD scale, the circuit-scale
+    /// floor makes a *completely wrong* answer look perfect.
+    #[test]
+    fn psd_error_is_not_vacuous_at_noise_scale() {
+        // `got` is double `reference` — a 100% error that must be reported as 1.0.
+        let reference = [2e-18, 2e-18];
+        let got = [4e-18, 4e-18];
+
+        let honest = max_relative_psd_error(&got, &reference).unwrap();
+        assert!((honest - 1.0).abs() < 1e-12, "psd error = {honest}");
+
+        // The same comparison through the circuit-scale floor reports ~2e-10 — inside every
+        // tolerance in `tol`, i.e. a silently passing gate. This asserts the trap is real, so
+        // the specialized metric can't be "simplified" back into the general one.
+        let vacuous = max_relative_error(&got, &reference).unwrap();
+        assert!(
+            vacuous < crate::tol::DC_REL,
+            "expected the circuit-scale floor to hide this error, got {vacuous}"
+        );
+    }
+
+    #[test]
+    fn psd_error_floors_points_far_below_the_bands_peak() {
+        // The second point sits 1e-15 of the band's peak, i.e. well under the 1e-12-of-peak
+        // floor. Its raw relative disagreement is a factor of 5 (400%); floored against
+        // `peak * 1e-12 = 1e-30` it becomes `4e-33 / 1e-30 = 4e-3`. The floor's job is to scale
+        // an unresolvable point's error down in proportion to how far below the band it is —
+        // not to zero it — so the exact floored value is what's asserted.
+        let reference = [1e-18, 1e-33];
+        let got = [1e-18, 5e-33];
+        let err = max_relative_psd_error(&got, &reference).unwrap();
+        assert!((err - 4e-3).abs() < 1e-12, "err = {err}");
+        // Unfloored, that same point would have read 4.0 — three orders worse.
+        let unfloored = max_relative_error_with_floor(&got, &reference, 0.0).unwrap();
+        assert!((unfloored - 4.0).abs() < 1e-9, "unfloored = {unfloored}");
+
+        // Push it further under the floor and the reported error shrinks with it, reaching
+        // genuinely negligible for a point a millionth of the way there.
+        let err = max_relative_psd_error(&[1e-18, 5e-39], &[1e-18, 1e-39]).unwrap();
+        assert!(err < 1e-8, "err = {err}");
+
+        // A disagreement at the peak itself is always fully reported, floor or no floor.
+        let err = max_relative_psd_error(&[1.5e-18, 1e-33], &reference).unwrap();
+        assert!((err - 0.5).abs() < 1e-12, "err = {err}");
     }
 
     #[test]

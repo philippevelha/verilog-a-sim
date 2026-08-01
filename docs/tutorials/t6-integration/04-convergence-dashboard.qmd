@@ -96,13 +96,15 @@ eprintln!(
 ```console
 $ cargo run -q -p xtask -- validate
 ...
-[xtask] validate: 6 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
-[xtask] validate: convergence 6/6 (100.0%) — CLAUDE.md §7's convergence metric
+[xtask] validate: 9 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
+[xtask] validate: convergence 9/9 (100.0%) — CLAUDE.md §7's convergence metric
 ```
 
-Every known circuit converges today — every ladder rung already passes golden, a strictly harder
-bar than merely converging, so `100.0%` is the honest, unsurprising current reading. The real
-test exercises the *mechanism*, not the (trivial, all-passing) current zoo:
+Every known circuit converges today — the six ladder rungs plus T5's two AC circuits and one
+noise circuit, every one of which already passes golden, a strictly harder bar than merely
+converging — so `100.0%` is the honest, unsurprising current reading. (This read `6/6` when the
+dashboard was built; the denominator grows as the zoo does, which is the point.) The real test
+exercises the *mechanism*, not the (trivial, all-passing) current zoo:
 
 ```console
 $ cargo test -p xtask try_solve_tracks_a_non_convergent_circuit_without_erroring
@@ -129,8 +131,13 @@ checked first.
 
 ## What's next
 
-With three of `CLAUDE.md` §7's four metrics now real (DC, transient, convergence — AC/noise
-stays `todo!()` per `t5-acnoise`'s own honest status) and all six ladder rungs formally passing,
-the one remaining gap this dashboard doesn't touch is tracked in `t6-integration/03-validation.qmd`:
-extending the golden format to carry branch/device currents, so rung 2's comparison actually
-exercises the diode's exponential law instead of trivially matching a forced node voltage.
+*(Updated 2026-08-01.)* Both gaps this section used to name are now closed. The golden format
+carries branch/device currents, so rung 2's comparison genuinely exercises the diode's
+exponential law rather than trivially matching a forced node voltage
+(`t6-integration/03-validation.qmd`); and **all four** of `CLAUDE.md` §7's metrics are real —
+AC and noise are no longer `todo!()` but implemented and golden-gated
+(`t5-acnoise/01-ac.qmd`, `t5-acnoise/02-noise.qmd`), which is why the tally above now runs over
+nine circuits rather than six.
+
+The dashboard's own mechanism is unchanged by any of that: each new analysis simply added a
+`validate_*_circuits` pass that folds its own `Tally` into the same total.

@@ -2,6 +2,7 @@
 
 use super::{stamp_conductance, voltage_across};
 use crate::instance::ModelInstance;
+use crate::noise::{thermal_current_psd, NoiseSink};
 use crate::stamps::StampSink;
 
 /// A linear resistor `I = (V(p) - V(n)) / R` between two global unknowns.
@@ -39,5 +40,14 @@ impl ModelInstance for Resistor {
         let v = voltage_across(x, p, n);
         let i = self.g * v;
         stamp_conductance(sink, p, n, i, self.g);
+    }
+
+    /// Johnson-Nyquist thermal noise: a `4kTG` A²/Hz white current source across the resistor,
+    /// independent of the current flowing through it and of the operating point entirely (hence
+    /// `x` unused). This is the one noise source in this crate that a *linear* device has.
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
+        let _ = x;
+        let [p, n] = self.terminals;
+        sink.white_current(p, n, thermal_current_psd(self.g, temp));
     }
 }

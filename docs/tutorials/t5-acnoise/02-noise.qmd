@@ -4,63 +4,314 @@ subtitle: "T5 · Phase T5.2 · `va-acnoise::noise`"
 ---
 
 ::: {.callout-note}
-**Status: honestly unimplemented — a stretch goal, per `CLAUDE.md` §1, that stayed one, and
-blocked on `t5-acnoise/01-ac.qmd` besides.** Same real, compiling stub shape as AC linearization;
-`run` itself is `todo!()`.
+**Status: code complete and golden-gated** (2026-08-01). `noise::run` is real, validated three
+ways — against closed form, against a frequency-shaped spectrum, and against QSPICE golden — and
+`cargo xtask validate` checks it on every run. Getting here required the first change to
+Interface β since 2026-07-09; that change, and why it was unavoidable, is most of this chapter.
 :::
 
 ## Goal
 
-Propagate every device's own noise source through the linearized (AC) circuit to one
-output-referred power spectral density, via the adjoint method.
+Answer "how much noise comes out of this circuit, at each frequency?" — propagate every device's
+own intrinsic noise through the linearized circuit to a single output-referred power spectral
+density.
 
 ## Where it fits
 
 ```
- ac::AcSweep + an output unknown ──► [noise::run] ──► NoiseSpectrum{f, psd, total}
+ DC operating point ──► [linearize] ──► G, C
+                                         │
+ per-device noise sources ───────────────┼──► [noise::run] ──► NoiseSpectrum{f, psd, total}
+ (Interface β's noise channel)           │
+                          one adjoint solve per frequency
 ```
 
-This phase depends on T5.1 existing first — noise propagation needs the same frequency-swept
-linearization AC analysis would build, there's no separate small-signal machinery to construct
-twice.
+This phase sits on top of T5.1: the `G`/`C` matrices it linearizes into are exactly the ones
+`t5-acnoise/01-ac.qmd` builds, and the complex solver is literally the same function. What noise
+adds is a *second* kind of information from each device — one the AC analysis never needed.
 
-## The idea (as designed, not yet built)
+## The idea
 
-The adjoint method computes one output's sensitivity to *every* noise source in a single solve
-per frequency, rather than one solve per source — the standard reason SPICE-family simulators
-use it instead of a naive source-by-source sweep. `docs/validation.md`'s own stated first target
-is the simplest possible case to validate against: a single resistor's Johnson-Nyquist thermal
-noise, `4kTR` (V²/Hz), a closed-form answer with no reference simulator needed to check the very
-first result against.
+### Why noise needed a new ABI channel
+
+The tempting shortcut is to derive noise from what the solver already has. A resistor's thermal
+noise is `4kTg`, and `g` is sitting right there in the Jacobian — so why not read it out of `G`
+and leave the frozen interface alone?
+
+Because **`G` doesn't know what kind of device produced it.** Consider two devices at the same
+operating point: a 200 Ω resistor, and a diode biased so that its own small-signal resistance
+`rd = 1/gd` is also 200 Ω. They stamp *identical* entries into `G`. Their noise is not identical,
+and not even similar in character:
+
+| device | mechanism | depends on |
+|---|---|---|
+| resistor | thermal, `4kTg` | conductance and temperature only |
+| diode | shot, `2q·|Id|` | the DC current through it |
+
+For that particular pair the two differ by exactly a factor of two (`2q·Id / (4kT·Id/Vt) = 1/2`,
+since `gd = Id/Vt`), and in general by whatever the bias makes them. A rule like "noise is `4kTg`
+applied to every diagonal entry" would be silently, physically wrong for exactly the nonlinear
+devices that matter most in a real circuit — and silently wrong is the failure mode this project
+works hardest to avoid.
+
+So noise is **physics the matrices no longer carry**, and only the instance itself knows it. That
+is precisely the argument `UnknownKind` already rests on (§ `shared/01-interfaces.qmd`): some
+facts are invisible from a global index — or here, from a matrix entry — because they depend on
+what the device *is*, not on what it contributed.
+
+Hence a §6 coordinated change: a `NoiseSink` trait and a `ModelInstance::noise` method, made a
+**default method** in the same additive shape as `unknown_kind` and `unknown_abstol` before it,
+so every existing implementor kept compiling untouched.
+
+### Every source is a current source, and they add in power
+
+The small-signal noise model is standard: a noisy two-terminal device is its noiseless
+small-signal equivalent (already in `G`/`C`) **plus a current source in parallel**, described by
+its one-sided PSD in A²/Hz. Two devices' sources are assumed **uncorrelated**, which is what lets
+the analysis add their contributions as *powers* rather than amplitudes.
+
+That assumption holds for thermal and shot noise in the devices modeled here, and it is stated
+explicitly because a more complete model would violate it — a full BSIM's induced gate noise is
+correlated with its channel noise, and summing those in power would be wrong.
+
+### The adjoint method, derived
+
+Output PSD is a transfer-weighted sum over sources:
+
+```
+S_out(ω) = Σ_k |Z_k(jω)|² · S_k        where  Z_k = ∂V(out) / ∂I_k
+```
+
+The obvious way to get each `Z_k` is to inject a unit current across source `k`'s branch and read
+the output. Writing the small-signal system as `A·X = B` with `A = G + jωC`, a unit current across
+`(p, n)` means `B = e_p − e_n`, so:
+
+```
+Z_k = e_outᵀ · A⁻¹ · (e_p − e_n)
+```
+
+That is **one linear solve per source, per frequency**. A circuit with 50 noisy devices over 60
+frequency points costs 3000 solves.
+
+The adjoint trick is to notice that `e_outᵀ · A⁻¹` is the *same factor* in every one of those
+expressions, so it can be computed once. Define the adjoint vector `y` by:
+
+```
+Aᵀ · y = e_out
+```
+
+Then `e_outᵀ·A⁻¹ = (A⁻ᵀ·e_out)ᵀ = yᵀ`, and every transfer impedance collapses to a subtraction:
+
+```
+Z_k = yᵀ · (e_p − e_n) = y_p − y_n
+```
+
+**One solve per frequency, regardless of how many noise sources the circuit has.** The same
+50-device circuit now costs 60 solves rather than 3000. This is why every SPICE-family simulator
+uses the adjoint here instead of a source-by-source sweep.
+
+Two details are easy to get subtly wrong, so both are worth pinning down:
+
+**It is the plain transpose, not the conjugate transpose.** "Adjoint" in a Hilbert-space setting
+usually means the conjugate transpose, and reaching for `Aᴴ` here is a natural reflex. But the
+identity above is *bilinear* — nothing in it is a complex inner product — so `Aᵀ` is what the
+algebra actually asks for. Using `Aᴴ` would conjugate the reactive part and quietly mirror every
+phase, which taking `|Z_k|²` afterwards would then largely hide.
+
+**The overall sign of `Z_k` doesn't matter.** Only `|Z_k|²` reaches the answer, so this module
+never has to reconcile the residual channel's own current-injection sign convention — a
+reconciliation that *would* have been necessary if noise reported amplitudes rather than powers.
 
 ## The code
 
+Interface β's new channel — the entire addition, in `va-abi`:
+
 ```rust
-pub struct NoiseSpectrum {
-    pub f: Vec<f64>,
-    pub psd: Vec<f64>,     // V²/Hz or A²/Hz
-    pub total: f64,        // integrated over the swept band
+pub trait NoiseSink {
+    /// A white current-noise source of one-sided PSD `psd` (A²/Hz) across the branch `p`-`n`.
+    fn white_current(&mut self, p: usize, n: usize, psd: f64);
 }
 
-pub fn run(_x_dc: &[f64], _sweep: AcSweep, _output: usize) -> Result<NoiseSpectrum, AcNoiseError> {
-    todo!("T5: adjoint noise propagation to the output PSD")
+pub trait ModelInstance {
+    // ... load(), unknowns(), unknown_kind(), unknown_abstol() as before ...
+
+    /// Default: no sources — a noiseless element.
+    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) { let _ = (x, temp, sink); }
 }
 ```
+
+The two mechanisms, as plain functions so they can be tested directly rather than only through a
+device:
+
+```rust
+pub fn thermal_current_psd(g: f64, temp: f64) -> f64 { 4.0 * BOLTZMANN * temp * g }
+pub fn shot_current_psd(i: f64) -> f64 { 2.0 * ELEMENTARY_CHARGE * i.abs() }
+```
+
+Which reference models override the default is itself a modeling statement:
+
+| model | override | why |
+|---|---|---|
+| `Resistor` | thermal `4kTg` | dissipative; the one *linear* device with noise |
+| `Diode` | shot `2q·|Id|` | carriers crossing a junction barrier |
+| `Bjt` | shot on `Ib` **and** `Ic` | two terminal currents, two barriers |
+| `Capacitor` | *(default: none)* | ideal reactance dissipates nothing |
+| `VSource` | *(default: none)* | ideal source: no barrier, no dissipation |
+
+Those last two are not stubs. An ideal capacitor genuinely has no noise mechanism — taking the
+default *is* the physically correct answer for it.
+
+And the analysis loop, short precisely because the adjoint did the work:
+
+```rust
+let (g, c) = linearize(instances, x_dc, dim);
+let mut collected = SourceList::default();
+for inst in instances {
+    inst.noise(x_dc, temp, &mut collected);
+}
+
+let mut e_out = vec![(0.0, 0.0); dim];
+e_out[output] = (1.0, 0.0);          // the probe that makes `y` specific to this output
+
+for &freq in &f {
+    let omega = 2.0 * PI * freq;
+    let y = solve_block_embedded(&g, &c, dim, omega, &e_out, /* transpose = */ true)?;
+    let total = collected.sources.iter()
+        .map(|&(p, n, s)| {
+            let (pre, pim) = at(&y, p);      // `at` folds a ground index to 0
+            let (nre, nim) = at(&y, n);
+            let (zre, zim) = (pre - nre, pim - nim);   // Z_k = y_p − y_n
+            (zre * zre + zim * zim) * s                // |Z_k|² · S_k
+        })
+        .sum();
+    psd.push(total);
+}
+```
+
+`solve_block_embedded` is T5.1's own complex solver, factored out and given a `transpose` flag —
+so the `2n×2n` real block embedding of a complex system still lives in exactly one place in the
+codebase. A sign error in that convention would otherwise have to be found twice.
 
 ## It works
 
-It doesn't, yet:
+Three levels of validation, deliberately, because each catches something the others cannot.
+
+**1 — closed form.** A lone resistor's output PSD is `4kTR`:
 
 ```console
 $ cargo test -p va-acnoise noise::
-test noise::tests::resistor_thermal_noise ... ignored, T5: resistor thermal-noise PSD matches 4kTR vs golden
+test noise::tests::lone_resistor_output_psd_is_4ktr ... ok
+test noise::tests::parallel_resistors_sum_in_power ... ok
+test noise::tests::rc_lowpass_shapes_thermal_noise ... ok
+test noise::tests::resistor_plus_diode_matches_hand_derivation ... ok
+test noise::tests::total_is_the_rms_of_the_integrated_psd ... ok
+test noise::tests::temperature_reaches_the_sources ... ok
+test noise::tests::a_noiseless_circuit_yields_a_zero_spectrum ... ok
+test noise::tests::an_output_outside_the_system_is_an_error ... ok
 ```
+
+`4kTR` looks trivial but has real content: the *source* is `4kT/R` while the *transfer impedance*
+is `R`, so `R` inverts between the two. Getting either half wrong yields `4kT/R` or `4kTR³` —
+not something a plausible-looking answer can hide.
+
+**2 — frequency shaping.** `rc_lowpass_shapes_thermal_noise` checks that an RC network shapes that
+same thermal noise by `1/(1+(ωRC)²)`. This is the test that exercises the **charge channel's**
+contribution to the adjoint solve: with `C` ignored the spectrum would come out flat, and every
+closed-form check above would still pass.
+
+**3 — QSPICE golden.** `circuits/diode_noise.net` — a 0.7 V source feeding a forward-biased diode
+through 1 kΩ, probed at the junction:
+
+```console
+$ cargo run -q -p va-cli -- sim circuits/diode_noise.net --noise
+Noise analysis at V(a) (61 point(s), f=1e1 to 1e7 Hz):
+  f=1.000000e1Hz  S=1.987747e-18 V^2/Hz  (1.409875e-9 V/sqrt(Hz))
+  ...
+  total integrated output noise = 4.458413e-6 V rms
+
+$ cargo run -q -p xtask -- validate
+[xtask]   PASS circuits/diode_noise.net: error=1.693e-5 (tol 1e-3)
+[xtask] validate: convergence 9/9 (100.0%) — CLAUDE.md §7's convergence metric
+```
+
+QSPICE independently reports `1.98771e-18` V²/Hz and prints a total of `4.45838 µV` rms — five
+figures on the spectrum, and an exact match on the integrated total.
+
+That circuit was chosen so **both** mechanisms `CLAUDE.md` §7 names are exercised at comparable
+size, and neither can hide the other: `4kT/R₁ = 1.66e-23` A²/Hz from the resistor against
+`2q·Id ≈ 3.3e-23` A²/Hz from the diode, each reaching the output through the same `Z = R₁ ∥ rd`.
+Drop the diode's noise entirely and the error is 67%; compute it as `4kTg` instead of `2q·Id` and
+it is ~33%. Both are three orders outside the `1e-3` band.
+
+### Two traps, either of which would have produced a green but meaningless gate
+
+Both were live here, and neither announces itself.
+
+**A compiled model contributes no noise at all.** Verilog-A's `white_noise()`/`flicker_noise()`
+are not lowered by `va-codegen` yet, so a `--model`-compiled device takes the trait default and
+emits nothing. Had the noise circuit been written the way `circuits/diode_ac.net` is — with
+`--model models/diode.va` — it would have silently measured *only the resistor's* share and still
+looked like a working test. So the deck uses the hand-written `va-abi::reference::Diode` on
+purpose, `va-cli::solve_noise` refuses to report an identically-zero spectrum rather than let
+that failure mode pass as a result, and a test pins the refusal:
+
+```console
+$ cargo test -p va-harness noise::
+test noise::tests::run_noise_rejects_a_circuit_whose_only_noisy_device_is_a_compiled_model ... ok
+```
+
+**The DC error metric makes a PSD comparison vacuous.** `metrics::REL_ERROR_FLOOR` is `1e-8`,
+calibrated for volts and milliamps — quantities where `1e-8` really is "indistinguishable from
+zero." Applied to a `~2e-18` V²/Hz spectrum it divides *every* point by that floor and reports
+`~1e-10` no matter how wrong the answer is. Every point passes, always. The fix is a metric whose
+floor is relative to the spectrum's own peak rather than absolute, plus a test asserting that the
+general metric really would have hidden a doubled spectrum — so it cannot quietly be "simplified"
+back into it later:
+
+```console
+test metrics::tests::psd_error_is_not_vacuous_at_noise_scale ... ok
+```
+
+The lesson generalizes well past noise: **a tolerance constant carries an implicit assumption
+about scale**, and reusing one across quantities that differ by ten orders of magnitude turns a
+gate into decoration.
 
 ## Limitations
 
-Everything, same as `t5-acnoise/01-ac.qmd` — no partial capability exists to caveat around.
+All four are deliberate, and all four are additive to fix — none requires this design reshaped:
+
+- **White sources only.** `white_current` is the one channel; flicker (`1/f`) noise has no
+  representation. A `flicker_current` sibling would be the next Interface β revision, of exactly
+  the same shape as this one. QSPICE emits a `1overf` column per device, identically zero for
+  every model this project ships (none declares a `KF`/`AF` coefficient), so the gap costs
+  nothing against the current gate — and would cost correctness the moment a flicker-bearing
+  model is added.
+- **Output-referred only.** No input-referred spectrum (`S_out / |H|²`). That needs the forward
+  AC transfer function from a designated input source, which `va-acnoise::ac` can already
+  compute; it simply isn't folded in. The `.noise` card's input-source name is parsed and stored
+  for exactly this reason, and currently goes unused.
+- **No per-device breakdown.** `NoiseSpectrum` reports the total at each frequency, not one column
+  per contributing device the way QSPICE's `onoise_<dev>` columns do. The per-source
+  contributions exist inside `run`'s loop; nothing but their sum is retained.
+- **No noise from generated models**, as above — the one limitation that is a *missing feature
+  elsewhere* (T1/T2 lowering) rather than a scoping decision taken here.
+
+`total` deserves its own note: it is trapezoidal quadrature in *linear* frequency over
+logarithmically-spaced points, which is exact for a flat spectrum (hence checkable against
+QSPICE's printed figure) and progressively coarse for a steeply rolling-off one. It is a summary
+statistic, not the gated quantity — `docs/validation.md` compares the spectrum point by point.
 
 ## What's next
 
-Nothing downstream in this crate depends on it; T5 is the end of its own chain. See
-`docs/roadmap.md`'s T5 section for the fallback deliverable if no student ever picks this up.
+T5 is the end of its own chain; nothing downstream depends on this. The natural continuations, in
+rough order of value:
+
+1. **Lower Verilog-A's `white_noise()`/`flicker_noise()`** in T1/T2, which would let a *compiled*
+   compact model contribute noise and remove the most surprising limitation above.
+2. **A flicker channel**, genuinely blocked on (1) — there is no `KF` to read until a model can
+   declare one.
+3. **Input-referred noise**, the smallest of the three: one forward AC solve per frequency, on
+   machinery that already exists.
+
+See `docs/roadmap.md`'s T5.2 section for the full account, and `docs/validation.md`'s noise-gate
+section for the measured numbers and the reasoning behind the `1e-3` band.

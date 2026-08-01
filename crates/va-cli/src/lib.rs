@@ -50,6 +50,8 @@ pub enum Analysis {
     Transient,
     /// AC small-signal analysis.
     Ac,
+    /// Small-signal noise analysis (T5.2).
+    Noise,
 }
 
 /// Parse `netlist` and, if `model` is given, compile it through the real frontend → codegen
@@ -127,6 +129,9 @@ pub fn run_sim(
         let response = solve_ac(&net, &compiled)?;
         let currents = branch_currents(&net, &compiled)?;
         report_ac(&net, &currents, &response);
+    } else if analysis == Analysis::Noise {
+        let spectrum = solve_noise(&net, &compiled)?;
+        report_noise(&net, &spectrum);
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
         report_sweep(&net, sweep, &points);
@@ -318,6 +323,9 @@ fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
     if net.analysis == AnalysisCard::Ac && analysis != Analysis::Ac {
         bail!("deck requests AC analysis (`.ac`); pass `--ac` to run it");
     }
+    if net.analysis == AnalysisCard::Noise && analysis != Analysis::Noise {
+        bail!("deck requests noise analysis (`.noise`); pass `--noise` to run it");
+    }
     if analysis == Analysis::Transient && net.tran.is_none() {
         bail!(
             "transient analysis requested but the deck has no parseable \
@@ -329,6 +337,13 @@ fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
             "AC analysis requested but the deck has no parseable \
              `.ac dec <points-per-decade> <fstart> <fstop>` card (only the `dec` sweep type \
              is supported)"
+        );
+    }
+    if analysis == Analysis::Noise && net.noise.is_none() {
+        bail!(
+            "noise analysis requested but the deck has no parseable \
+             `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (only the \
+             `dec` sweep type and a single-node `V(<out>)` probe are supported)"
         );
     }
     Ok(())
@@ -609,6 +624,70 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
     va_acnoise::ac::run(&refs, &op.x, dim, sweep, &excitation).context("AC sweep failed")
 }
 
+/// Build every device instance, solve the DC operating point, and sweep the small-signal output
+/// noise PSD over the deck's `.noise` grid (T5.2).
+///
+/// The output node named by the deck's `V(<out>)` probe is resolved to its global unknown index
+/// here — a name that isn't a net in this circuit is a clear error rather than a silently
+/// mis-probed spectrum. Noise sources come from Interface β's noise channel
+/// (`va_abi::ModelInstance::noise`), so a device that doesn't implement it contributes nothing;
+/// notably **every `va-codegen`-compiled model is silent today** (Verilog-A's `white_noise()`/
+/// `flicker_noise()` are not lowered), which is why a meaningful noise deck uses the hand-written
+/// reference primitives rather than a `--model` compiled one. Rather than let that produce a
+/// quietly-zero spectrum, this reports an error when the circuit has no noise sources at all.
+///
+/// # Errors
+///
+/// If the deck has no parseable `.noise` card, its output probe names an unknown net, the DC
+/// operating-point solve diverges, no device in the circuit contributes any noise, or an adjoint
+/// solve is singular at some frequency.
+pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noise::NoiseSpectrum> {
+    let card = net.noise.as_ref().context(
+        "noise analysis requires a `.noise V(<out>) <source> dec <ppd> <fstart> <fstop>` card",
+    )?;
+    let output = *net.nodes.get(&card.output).with_context(|| {
+        format!(
+            "`.noise` probes V({}), which is not a net in this circuit (nets: {})",
+            card.output,
+            net.node_order.join(", ")
+        )
+    })?;
+
+    let (instances, dim, _currents) = build_instances(net, compiled)?;
+    let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
+    let op = operating_point(&refs, dim, NewtonConfig::default())
+        .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
+
+    if !has_noise_sources(&refs, &op.x) {
+        bail!(
+            "no device in this circuit contributes any noise, so the spectrum would be \
+             identically zero — note that Verilog-A `white_noise()`/`flicker_noise()` is not \
+             lowered yet, so a `--model`-compiled device is silent (see va_abi::noise)"
+        );
+    }
+
+    let sweep = va_acnoise::ac::AcSweep {
+        fstart: card.fstart,
+        fstop: card.fstop,
+        points_per_decade: card.points_per_decade,
+    };
+    va_acnoise::noise::run_at_nominal_temp(&refs, &op.x, dim, sweep, output)
+        .context("noise sweep failed")
+}
+
+/// Whether any instance emits at least one noise source at operating point `x` (§
+/// [`solve_noise`]'s own "a silently zero spectrum is worse than an error" check).
+fn has_noise_sources(instances: &[&dyn ModelInstance], x: &[f64]) -> bool {
+    let mut probe = va_abi::noise::CollectedNoise::default();
+    for inst in instances {
+        inst.noise(x, va_abi::noise::TEMP_NOMINAL, &mut probe);
+        if !probe.sources.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Turn one parsed [`Device`] into a loadable instance, preferring a matching compiled
 /// Verilog-A model and falling back to the reference primitives. Returns the device's own
 /// branch-current global index too, if it claimed one (`Some` only for a `vsource` — the only
@@ -800,6 +879,29 @@ fn report_ac(net: &Netlist, currents: &[(String, usize)], response: &va_acnoise:
         );
         println!("  f={f:.6e}Hz  {}", cols.join("  "));
     }
+}
+
+/// Print the noise spectrum: one line per frequency, the output PSD in V²/Hz alongside the more
+/// commonly-read amplitude density V/√Hz (just its square root — printed because datasheets and
+/// noise plots are conventionally in nV/√Hz, not V²/Hz), then the band-integrated RMS total.
+fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
+    let output = net.noise.as_ref().map(|c| c.output.as_str()).unwrap_or("?");
+    println!(
+        "Noise analysis at V({output}) ({} point(s), f={:e} to {:e} Hz):",
+        spectrum.f.len(),
+        spectrum.f.first().copied().unwrap_or(0.0),
+        spectrum.f.last().copied().unwrap_or(0.0)
+    );
+    for (f, psd) in spectrum.f.iter().zip(&spectrum.psd) {
+        println!(
+            "  f={f:.6e}Hz  S={psd:.6e} V^2/Hz  ({:.6e} V/sqrt(Hz))",
+            psd.sqrt()
+        );
+    }
+    println!(
+        "  total integrated output noise = {:.6e} V rms",
+        spectrum.total
+    );
 }
 
 /// Print the transient waveform: one line per accepted timepoint, every node's voltage.
