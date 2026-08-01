@@ -122,6 +122,39 @@ phase, which taking `|Z_k|²` afterwards would then largely hide.
 never has to reconcile the residual channel's own current-injection sign convention — a
 reconciliation that *would* have been necessary if noise reported amplitudes rather than powers.
 
+### Input-referred noise, for free
+
+The adjoint vector answers a second question at no extra cost, which is worth seeing because the
+naive estimate is so much worse.
+
+Referring output noise back to an input means dividing by the squared gain from that input:
+
+```
+S_in(ω) = S_out(ω) / |H(jω)|²        where  H = V(out) / V(input source)
+```
+
+The obvious way to get `H` is a forward AC solve per frequency — a second linear system alongside
+the adjoint one, doubling the cost of the sweep. But `H` is *already a component of `y`*. An ideal
+voltage source of AC magnitude 1 excites the system with `B = e_k` at its own branch-current row
+`k` (a source's stimulus is purely a right-hand-side term — § `t5-acnoise/01-ac.qmd`), so:
+
+```
+H = e_outᵀ · A⁻¹ · e_k = yᵀ · e_k = y_k
+```
+
+Reading the adjoint vector at the input source's branch row *is* the forward gain. Input-referral
+costs one division per frequency, not a second solve.
+
+This was worth checking before trusting: the QSPICE probe that motivated the feature reports an
+`inoise/onoise` ratio of `25.0306`, implying `|H| = 0.199878` — which matches
+`golden/diode_ac.golden`'s independently-computed AC gain for the same network to six figures.
+
+Two details are recorded rather than assumed. A frequency at which the input cannot reach the
+output (`H = 0`) reports **infinity**, not zero: referring noise to an unreachable input is
+genuinely undefined, and a zero would read as "no noise" — the opposite of the truth. And the
+band-integrated total *skips* non-finite points rather than becoming `NaN`, so one degenerate
+frequency doesn't destroy the summary for the whole sweep.
+
 ### Where the sources come from
 
 Two places, and the second one is newer than this chapter's first draft.
@@ -325,10 +358,8 @@ gate into decoration.
   (`NoiseSource::White`/`Flicker`) that the sweep evaluates per frequency.
 - ~~**No noise from generated models.**~~ **Closed.** Verilog-A's `white_noise()`/
   `flicker_noise()` are lowered; a compiled `.va` model contributes real sources.
-- **Output-referred only.** No input-referred spectrum (`S_out / |H|²`). That needs the forward
-  AC transfer function from a designated input source, which `va-acnoise::ac` can already
-  compute; it simply isn't folded in. The `.noise` card's input-source name is parsed and stored
-  for exactly this reason, and currently goes unused.
+- ~~**Output-referred only.**~~ **Closed** (2026-08-01c) — and it turned out to need no second
+  solve at all; see "Input-referred noise, for free" above.
 - **No per-device breakdown.** `NoiseSpectrum` reports the total at each frequency, not one column
   per contributing device the way QSPICE's `onoise_<dev>` columns do. The per-source
   contributions exist inside `run`'s loop; nothing but their sum is retained.
@@ -350,13 +381,15 @@ lowered through T1/T2, and Interface β gained `flicker_current`. A compiled `mo
 now declares its own `4kT/R` and a `models/diode_flicker.va` its own `KF·|Id|^AF / f`, both gated
 against QSPICE. See `docs/roadmap.md`'s T5.3 section.
 
-What remains, in rough order of value:
+*(Updated 2026-08-01c.)* Input-referred noise is **done**, and cost less than this section
+predicted: it was budgeted as "one forward AC solve per frequency" and turned out to need no
+solve at all, since the gain is already a component of the adjoint vector (§ above).
 
-1. **Input-referred noise** — one forward AC solve per frequency, on machinery that already
-   exists; the `.noise` card's input-source name is already parsed for it.
-2. **A per-device breakdown**, matching QSPICE's `onoise_<dev>` columns. The contributions
+What remains:
+
+1. **A per-device breakdown**, matching QSPICE's `onoise_<dev>` columns. The contributions
    already exist inside `run`'s loop; only the reporting shape is missing.
-3. **`noise_table` lowering**, which needs a third sink method for a piecewise-linear PSD.
+2. **`noise_table` lowering**, which needs a third sink method for a piecewise-linear PSD.
 
 See `docs/roadmap.md`'s T5.2/T5.3 sections for the full account, and `docs/validation.md`'s
 noise-gate sections for the measured numbers and the reasoning behind the `1e-3` band.

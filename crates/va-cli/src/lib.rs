@@ -629,7 +629,8 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
 ///
 /// The output node named by the deck's `V(<out>)` probe is resolved to its global unknown index
 /// here — a name that isn't a net in this circuit is a clear error rather than a silently
-/// mis-probed spectrum. Noise sources come from Interface β's noise channel
+/// mis-probed spectrum — and so is the card's input source, which adds the input-referred
+/// spectrum. Noise sources come from Interface β's noise channel
 /// (`va_abi::ModelInstance::noise`), so a device that doesn't implement it contributes nothing;
 /// notably **every `va-codegen`-compiled model is silent today** (Verilog-A's `white_noise()`/
 /// `flicker_noise()` are not lowered), which is why a meaningful noise deck uses the hand-written
@@ -653,7 +654,32 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         )
     })?;
 
-    let (instances, dim, _currents) = build_instances(net, compiled)?;
+    let (instances, dim, currents) = build_instances(net, compiled)?;
+    // The `.noise` card's input source, resolved to its own branch-current row — the row an AC
+    // stimulus would excite, and therefore (§ `va_acnoise::noise`) the row of the adjoint vector
+    // that already holds the forward gain. Only a `vsource` has such a row, so naming anything
+    // else is a clear error rather than a silently output-referred-only answer.
+    let input = currents
+        .iter()
+        .find(|(name, _)| *name == card.source)
+        .map(|&(_, branch)| branch);
+    if input.is_none() {
+        bail!(
+            "`.noise` names `{}` as its input source, which is not a voltage source in this \
+             circuit (sources: {})",
+            card.source,
+            if currents.is_empty() {
+                "none".to_string()
+            } else {
+                currents
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, NewtonConfig::default())
         .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
@@ -671,7 +697,7 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         fstop: card.fstop,
         points_per_decade: card.points_per_decade,
     };
-    va_acnoise::noise::run_at_nominal_temp(&refs, &op.x, dim, sweep, output)
+    va_acnoise::noise::run_at_nominal_temp(&refs, &op.x, dim, sweep, output, input)
         .context("noise sweep failed")
 }
 
@@ -885,16 +911,23 @@ fn report_ac(net: &Netlist, currents: &[(String, usize)], response: &va_acnoise:
 /// commonly-read amplitude density V/√Hz (just its square root — printed because datasheets and
 /// noise plots are conventionally in nV/√Hz, not V²/Hz), then the band-integrated RMS total.
 fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
-    let output = net.noise.as_ref().map(|c| c.output.as_str()).unwrap_or("?");
+    let card = net.noise.as_ref();
+    let output = card.map(|c| c.output.as_str()).unwrap_or("?");
+    let source = card.map(|c| c.source.as_str()).unwrap_or("?");
     println!(
         "Noise analysis at V({output}) ({} point(s), f={:e} to {:e} Hz):",
         spectrum.f.len(),
         spectrum.f.first().copied().unwrap_or(0.0),
         spectrum.f.last().copied().unwrap_or(0.0)
     );
-    for (f, psd) in spectrum.f.iter().zip(&spectrum.psd) {
+    for (i, (f, psd)) in spectrum.f.iter().zip(&spectrum.psd).enumerate() {
+        // The input-referred column exists only when the card named a resolvable source.
+        let referred = match spectrum.input_psd.get(i) {
+            Some(inp) => format!("  Sin={inp:.6e} V^2/Hz"),
+            None => String::new(),
+        };
         println!(
-            "  f={f:.6e}Hz  S={psd:.6e} V^2/Hz  ({:.6e} V/sqrt(Hz))",
+            "  f={f:.6e}Hz  S={psd:.6e} V^2/Hz  ({:.6e} V/sqrt(Hz)){referred}",
             psd.sqrt()
         );
     }
@@ -902,6 +935,12 @@ fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
         "  total integrated output noise = {:.6e} V rms",
         spectrum.total
     );
+    if !spectrum.input_psd.is_empty() {
+        println!(
+            "  total integrated input-referred noise (at {source}) = {:.6e} V rms",
+            spectrum.input_total
+        );
+    }
 }
 
 /// Print the transient waveform: one line per accepted timepoint, every node's voltage.

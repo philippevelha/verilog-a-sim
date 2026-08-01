@@ -33,13 +33,31 @@
 //! `|Z_k|²` reaches the answer, which is why this module doesn't have to reconcile the residual
 //! channel's own current-injection sign convention.)
 //!
+//! # Input-referred noise, for free
+//!
+//! The adjoint vector turns out to answer a second question at no extra cost. Referring output
+//! noise back to an input means dividing by the squared gain from that input:
+//!
+//! ```text
+//! S_in(ω) = S_out(ω) / |H(jω)|²        where  H = V(out) / V(input source)
+//! ```
+//!
+//! and `H` is *already* a component of `y`. An ideal voltage source of AC magnitude 1 excites
+//! the system with `B = e_k` at its own branch-current row `k` (§ `va_cli::solve_ac` — a
+//! source's stimulus is purely an RHS term), so
+//!
+//! ```text
+//! H = e_outᵀ · A⁻¹ · e_k = yᵀ · e_k = y_k
+//! ```
+//!
+//! — the adjoint vector read at the input source's branch row. The same one solve per frequency
+//! that gives every noise source its transfer impedance also gives the forward gain, so
+//! input-referral costs one extra division per point rather than a second linear solve.
+//!
 //! # Limitations
 //!
-//! - **Output-referred only.** No input-referred spectrum (`S_out / |H|²`); that needs the
-//!   forward AC transfer function from a designated input source, which [`crate::ac`] can
-//!   compute but this module deliberately doesn't fold in for v1. QSPICE reports both.
-//! - **White sources only, and no noise from compiled models** — both inherited from Interface
-//!   β's noise channel; see `va_abi::noise`'s own module doc for what that costs and why.
+//! - **White and flicker sources only, and only what a model declares** — inherited from
+//!   Interface β's noise channel; see `va_abi::noise`'s own module doc.
 //! - **No per-device breakdown.** [`NoiseSpectrum`] reports the total at each frequency, not
 //!   one column per contributing device (QSPICE emits `onoise_<dev>` columns too). The
 //!   per-source contributions exist inside [`run`]'s loop; nothing but the sum is retained.
@@ -49,7 +67,8 @@ use crate::AcNoiseError;
 use va_abi::noise::{NoiseSink, NoiseSource, TEMP_NOMINAL};
 use va_abi::ModelInstance;
 
-/// Output noise power spectral density over frequency.
+/// Output noise power spectral density over frequency, and — when an input source was named —
+/// the same noise referred back to that input.
 #[derive(Clone, Debug, Default)]
 pub struct NoiseSpectrum {
     /// Frequency points (Hz).
@@ -62,6 +81,19 @@ pub struct NoiseSpectrum {
     /// `sqrt(∫ psd df)`, the quantity QSPICE prints as "Total integrated output-referenced
     /// noise". See [`integrate_rms`] for the quadrature used and its accuracy caveat.
     pub total: f64,
+    /// Input-referred noise PSD at each frequency, V²/Hz (`psd / |H|²`) — matching QSPICE's own
+    /// `inoise_spectrum`. **Empty** when [`run`] was given no input source, which is the honest
+    /// representation of "this question wasn't asked" rather than a column of zeros.
+    ///
+    /// A frequency at which the input has no path to the output (`H = 0`) reports
+    /// [`f64::INFINITY`]: referring output noise to an input that cannot reach the output is
+    /// genuinely undefined, and a zero there would read as "no noise", which is the opposite of
+    /// the truth.
+    pub input_psd: Vec<f64>,
+    /// [`Self::input_psd`] integrated to an RMS voltage, as [`Self::total`] is for the output.
+    /// `0.0` when no input source was given. Non-finite points are skipped by the quadrature
+    /// (see [`integrate_rms`]).
+    pub input_total: f64,
 }
 
 /// Collects noise sources as `(p, n, source)` while each instance emits them.
@@ -108,13 +140,18 @@ fn at(y: &[Complex], i: usize) -> Complex {
     y.get(i).copied().unwrap_or((0.0, 0.0))
 }
 
-/// Compute the output-referred noise spectrum about DC point `x_dc` over `sweep`, with the
-/// output taken at global unknown index `output`.
+/// Compute the noise spectrum about DC point `x_dc` over `sweep`, with the output taken at
+/// global unknown index `output`.
 ///
 /// `instances` and `x_dc` are the same linearization inputs [`crate::ac::run`] takes; `temp` is
 /// the simulation temperature in kelvin that thermal sources are evaluated at (pass
 /// [`va_abi::noise::TEMP_NOMINAL`] for the project's nominal 300.15 K). One adjoint solve is
 /// performed per frequency point (this module's own doc comment derives why one suffices).
+///
+/// `input` optionally names an AC source's **branch-current row**, which adds the
+/// input-referred spectrum ([`NoiseSpectrum::input_psd`]) at the cost of one division per
+/// frequency — see this module's doc comment for why no second solve is needed. Pass `None` to
+/// compute the output-referred spectrum alone.
 ///
 /// A circuit whose devices report no noise sources at all is not an error — it yields an
 /// identically zero spectrum, which is the correct answer for, say, an ideal-source-and-
@@ -122,7 +159,7 @@ fn at(y: &[Complex], i: usize) -> Complex {
 ///
 /// # Errors
 ///
-/// [`AcNoiseError::InvalidOutput`] if `output` is not an unknown of this system;
+/// [`AcNoiseError::InvalidOutput`] if `output` (or `input`) is not an unknown of this system;
 /// [`AcNoiseError::Core`] from the underlying adjoint solve (one per frequency point).
 pub fn run(
     instances: &[&dyn ModelInstance],
@@ -130,10 +167,16 @@ pub fn run(
     dim: usize,
     sweep: AcSweep,
     output: usize,
+    input: Option<usize>,
     temp: f64,
 ) -> Result<NoiseSpectrum, AcNoiseError> {
     if output >= dim {
         return Err(AcNoiseError::InvalidOutput { index: output, dim });
+    }
+    if let Some(k) = input {
+        if k >= dim {
+            return Err(AcNoiseError::InvalidOutput { index: k, dim });
+        }
     }
 
     let (g, c) = linearize(instances, x_dc, dim);
@@ -149,6 +192,7 @@ pub fn run(
 
     let f = sweep.frequencies();
     let mut psd = Vec::with_capacity(f.len());
+    let mut input_psd = Vec::with_capacity(if input.is_some() { f.len() } else { 0 });
     for &freq in &f {
         let omega = 2.0 * std::f64::consts::PI * freq;
         let y = solve_block_embedded(&g, &c, dim, omega, &e_out, true)?;
@@ -166,10 +210,29 @@ pub fn run(
             })
             .sum();
         psd.push(total);
+
+        // The forward gain from the input source, read straight out of the adjoint vector at
+        // that source's own branch row (this module's doc comment derives `H = y_k`).
+        if let Some(k) = input {
+            let (hre, him) = at(&y, k);
+            let gain_sq = hre * hre + him * him;
+            input_psd.push(if gain_sq > 0.0 {
+                total / gain_sq
+            } else {
+                f64::INFINITY
+            });
+        }
     }
 
     let total = integrate_rms(&f, &psd);
-    Ok(NoiseSpectrum { f, psd, total })
+    let input_total = integrate_rms(&f, &input_psd);
+    Ok(NoiseSpectrum {
+        f,
+        psd,
+        total,
+        input_psd,
+        input_total,
+    })
 }
 
 /// Convenience wrapper over [`run`] at the project's nominal temperature
@@ -184,8 +247,9 @@ pub fn run_at_nominal_temp(
     dim: usize,
     sweep: AcSweep,
     output: usize,
+    input: Option<usize>,
 ) -> Result<NoiseSpectrum, AcNoiseError> {
-    run(instances, x_dc, dim, sweep, output, TEMP_NOMINAL)
+    run(instances, x_dc, dim, sweep, output, input, TEMP_NOMINAL)
 }
 
 /// Integrate a PSD over its frequency points and return the RMS value `sqrt(∫ psd df)`.
@@ -197,14 +261,23 @@ pub fn run_at_nominal_temp(
 /// response is smallest. It is a summary statistic, not the gated quantity: `docs/validation.md`
 /// compares the *spectrum* against golden, point by point.
 ///
-/// Returns `0.0` for fewer than two points (nothing to integrate over).
+/// Returns `0.0` for fewer than two points (nothing to integrate over), which is also the
+/// answer for an empty spectrum — the case [`NoiseSpectrum::input_psd`] is in when no input
+/// source was named.
+///
+/// A trapezoid touching a non-finite sample is **skipped** rather than propagating `inf`/`NaN`
+/// through the whole integral: an input-referred spectrum reports `f64::INFINITY` at any
+/// frequency where the input cannot reach the output, and one such point would otherwise make
+/// the entire band's total meaningless. Skipping understates the total there, which the caller
+/// can see for itself in the per-frequency `input_psd`.
 fn integrate_rms(f: &[f64], psd: &[f64]) -> f64 {
-    if f.len() < 2 {
+    if f.len() < 2 || psd.len() < 2 {
         return 0.0;
     }
     let power: f64 = f
         .windows(2)
         .zip(psd.windows(2))
+        .filter(|(_, pw)| pw[0].is_finite() && pw[1].is_finite())
         .map(|(fw, pw)| 0.5 * (pw[0] + pw[1]) * (fw[1] - fw[0]))
         .sum();
     power.max(0.0).sqrt()
@@ -237,7 +310,7 @@ mod tests {
         let res = Resistor::new(0, GROUND, r);
         let insts: [&dyn ModelInstance; 1] = [&res];
         let spectrum =
-            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0).expect("noise solves");
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
 
         let expected = 4.0 * BOLTZMANN * TEMP_NOMINAL * r;
         assert!(!spectrum.psd.is_empty());
@@ -260,7 +333,7 @@ mod tests {
         let b = Resistor::new(0, GROUND, r2);
         let insts: [&dyn ModelInstance; 2] = [&a, &b];
         let spectrum =
-            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0).expect("noise solves");
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
 
         let r_par = r1 * r2 / (r1 + r2);
         let expected = 4.0 * BOLTZMANN * TEMP_NOMINAL * r_par;
@@ -282,7 +355,7 @@ mod tests {
         let capacitor = Capacitor::new(0, GROUND, cap);
         let insts: [&dyn ModelInstance; 2] = [&res, &capacitor];
         let spectrum =
-            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0).expect("noise solves");
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
 
         let s0 = 4.0 * BOLTZMANN * TEMP_NOMINAL * r;
         for (&f, &p) in spectrum.f.iter().zip(&spectrum.psd) {
@@ -320,7 +393,7 @@ mod tests {
         let z = 1.0 / (1.0 / r + gd); // R ∥ rd, the impedance seen at node `a`
 
         let spectrum =
-            run_at_nominal_temp(&insts, &op.x, 3, flat_sweep(), 1).expect("noise solves");
+            run_at_nominal_temp(&insts, &op.x, 3, flat_sweep(), 1, None).expect("noise solves");
 
         let thermal = 4.0 * BOLTZMANN * TEMP_NOMINAL / r;
         let shot = 2.0 * ELEMENTARY_CHARGE * id;
@@ -347,7 +420,8 @@ mod tests {
         let res = Resistor::new(0, GROUND, r);
         let insts: [&dyn ModelInstance; 1] = [&res];
         let sweep = flat_sweep();
-        let spectrum = run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0).expect("noise solves");
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0, None).expect("noise solves");
 
         let s = 4.0 * BOLTZMANN * TEMP_NOMINAL * r;
         let expected = (s * (sweep.fstop - sweep.fstart)).sqrt();
@@ -365,8 +439,8 @@ mod tests {
         let v1 = VSource::new(0, GROUND, 1, 5.0);
         let cap = Capacitor::new(0, GROUND, 1e-6);
         let insts: [&dyn ModelInstance; 2] = [&v1, &cap];
-        let spectrum =
-            run_at_nominal_temp(&insts, &[5.0, 0.0], 2, flat_sweep(), 0).expect("noise solves");
+        let spectrum = run_at_nominal_temp(&insts, &[5.0, 0.0], 2, flat_sweep(), 0, None)
+            .expect("noise solves");
         assert!(spectrum.psd.iter().all(|&p| p == 0.0), "{:?}", spectrum.psd);
         assert_eq!(spectrum.total, 0.0);
     }
@@ -402,7 +476,8 @@ mod tests {
             fstop: 1e4,
             points_per_decade: 1,
         };
-        let spectrum = run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0).expect("noise solves");
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0, None).expect("noise solves");
 
         // 10, 100, 1k, 10k Hz -> 1e-20, 1e-21, 1e-22, 1e-23 V²/Hz.
         assert_eq!(spectrum.f.len(), 4);
@@ -440,7 +515,7 @@ mod tests {
         };
         let insts: [&dyn ModelInstance; 1] = [&dev];
         let spectrum =
-            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0).expect("noise solves");
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
 
         for (&f, &p) in spectrum.f.iter().zip(&spectrum.psd) {
             let expected = 1e-22 + 1e-19 / f;
@@ -459,12 +534,123 @@ mod tests {
         );
     }
 
+    /// Input-referral against a closed form: a resistive divider from the source to the output
+    /// has gain `H = R2/(R1+R2)`, so the input-referred noise is the output noise divided by
+    /// `H²` — a *larger* number, since referring noise back through an attenuating network
+    /// magnifies it.
+    ///
+    /// The gain is read out of the adjoint vector rather than solved for separately (this
+    /// module's doc comment derives `H = y_k`), so this also verifies that identity holds
+    /// against an independently-known value.
+    #[test]
+    fn input_referral_divides_by_the_squared_forward_gain() {
+        let (r1, r2) = (1000.0, 3000.0);
+        // Unknowns: 0 = in, 1 = a (output), 2 = V1's branch current.
+        let v1 = VSource::new(0, GROUND, 2, 1.0);
+        let top = Resistor::new(0, 1, r1);
+        let bot = Resistor::new(1, GROUND, r2);
+        let insts: [&dyn ModelInstance; 3] = [&v1, &top, &bot];
+
+        let spectrum = run_at_nominal_temp(&insts, &[1.0, 0.75, 0.0], 3, flat_sweep(), 1, Some(2))
+            .expect("noise solves");
+
+        let h = r2 / (r1 + r2); // 0.75
+        assert_eq!(spectrum.input_psd.len(), spectrum.psd.len());
+        for (&out, &inp) in spectrum.psd.iter().zip(&spectrum.input_psd) {
+            let expected = out / (h * h);
+            assert!(
+                (inp / expected - 1.0).abs() < 1e-9,
+                "input-referred {inp}, expected {expected}"
+            );
+            // Referring back through an attenuator magnifies: 1/0.75² ≈ 1.78×.
+            assert!(inp > out);
+        }
+
+        // The output spectrum itself is unchanged by asking the extra question.
+        let alone = run_at_nominal_temp(&insts, &[1.0, 0.75, 0.0], 3, flat_sweep(), 1, None)
+            .expect("noise solves");
+        assert_eq!(alone.psd, spectrum.psd);
+        assert!(
+            alone.input_psd.is_empty() && alone.input_total == 0.0,
+            "no input source named -> no input-referred column, not a column of zeros"
+        );
+    }
+
+    /// With no attenuation between input and output (`H = 1`), input- and output-referred
+    /// spectra coincide — the degenerate case that would hide a wrong `H` in the test above if
+    /// it were the only one.
+    #[test]
+    fn unity_gain_makes_input_and_output_referral_agree() {
+        // A single resistor from the source to an otherwise-open output node: no current flows,
+        // so V(out) = V(in) exactly (H = 1), yet the node is *not* the source-forced one, so it
+        // has a real impedance (R, looking back through the resistor into the source's own zero
+        // impedance) and a real 4kTR of noise. Probing the forced node instead would give an
+        // output PSD of exactly zero — correct, since an ideal source shorts it, but useless as
+        // a ratio test.
+        let r = 1000.0;
+        // Unknowns: 0 = in (forced), 1 = out, 2 = V1's branch current.
+        let v1 = VSource::new(0, GROUND, 2, 1.0);
+        let res = Resistor::new(0, 1, r);
+        let insts: [&dyn ModelInstance; 2] = [&v1, &res];
+        let spectrum = run_at_nominal_temp(&insts, &[1.0, 1.0, 0.0], 3, flat_sweep(), 1, Some(2))
+            .expect("solves");
+
+        let expected = 4.0 * BOLTZMANN * TEMP_NOMINAL * r;
+        assert!(
+            (spectrum.psd[0] - expected).abs() < 1e-24,
+            "output psd {} , expected 4kTR = {expected}",
+            spectrum.psd[0]
+        );
+        for (&out, &inp) in spectrum.psd.iter().zip(&spectrum.input_psd) {
+            assert!((inp / out - 1.0).abs() < 1e-9, "out {out}, in {inp}");
+        }
+        assert!((spectrum.input_total / spectrum.total - 1.0).abs() < 1e-9);
+    }
+
+    /// A frequency where the input cannot reach the output has undefined input-referred noise.
+    /// Reporting `0` there would read as "no noise" — the opposite of the truth — so it is
+    /// `INFINITY`, and the integrated total skips it rather than becoming `NaN`.
+    #[test]
+    fn a_zero_gain_point_is_infinite_and_does_not_poison_the_total() {
+        // The source's branch row is not connected to the output node at all: an isolated noisy
+        // resistor at node 0, and a source across node 1, which node 0 never sees.
+        let r = Resistor::new(0, GROUND, 1000.0);
+        let v1 = VSource::new(1, GROUND, 2, 1.0);
+        let insts: [&dyn ModelInstance; 2] = [&r, &v1];
+        let spectrum = run_at_nominal_temp(&insts, &[0.0, 0.0, 0.0], 3, flat_sweep(), 0, Some(2))
+            .expect("solves");
+
+        assert!(
+            spectrum.input_psd.iter().all(|p| p.is_infinite()),
+            "expected an undefined input referral, got {:?}",
+            &spectrum.input_psd[..3]
+        );
+        assert!(
+            spectrum.input_total.is_finite(),
+            "one undefined point must not make the whole total NaN: {}",
+            spectrum.input_total
+        );
+        // The output spectrum is still the ordinary 4kTR.
+        let expected = 4.0 * BOLTZMANN * TEMP_NOMINAL * 1000.0;
+        assert!((spectrum.psd[0] - expected).abs() < 1e-24);
+    }
+
+    #[test]
+    fn an_input_outside_the_system_is_an_error() {
+        let res = Resistor::new(0, GROUND, 1000.0);
+        let insts: [&dyn ModelInstance; 1] = [&res];
+        assert!(matches!(
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, Some(7)),
+            Err(AcNoiseError::InvalidOutput { index: 7, dim: 1 })
+        ));
+    }
+
     #[test]
     fn an_output_outside_the_system_is_an_error() {
         let res = Resistor::new(0, GROUND, 1000.0);
         let insts: [&dyn ModelInstance; 1] = [&res];
         assert!(matches!(
-            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 5),
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 5, None),
             Err(AcNoiseError::InvalidOutput { index: 5, dim: 1 })
         ));
     }
@@ -475,8 +661,8 @@ mod tests {
     fn temperature_reaches_the_sources() {
         let res = Resistor::new(0, GROUND, 1000.0);
         let insts: [&dyn ModelInstance; 1] = [&res];
-        let cold = run(&insts, &[0.0], 1, flat_sweep(), 0, 150.0).expect("solves");
-        let hot = run(&insts, &[0.0], 1, flat_sweep(), 0, 300.0).expect("solves");
+        let cold = run(&insts, &[0.0], 1, flat_sweep(), 0, None, 150.0).expect("solves");
+        let hot = run(&insts, &[0.0], 1, flat_sweep(), 0, None, 300.0).expect("solves");
         assert!(
             (hot.psd[0] / cold.psd[0] - 2.0).abs() < 1e-9,
             "hot/cold = {}",

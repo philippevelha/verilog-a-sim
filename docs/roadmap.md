@@ -56,6 +56,7 @@ shared, demoable milestone that several theses light up at once.
 | T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; **golden gate closed 2026-08-01** — `.ac` card/`AC` source parsing, `va-cli::solve_ac`, `GoldenAc` + separate magnitude/phase verdicts, complex `.qraw` parsing, and both AC circuits green vs real QSPICE (`rc_ac` 1.3e-15, `diode_ac` 1.3e-5) | ✅ |
 | T5.2 — noise analysis | adjoint output-noise PSD (one `Aᵀy = e_out` solve per frequency gives every source's transfer impedance); Interface β gained a §6 noise channel (`NoiseSink` + `ModelInstance::noise`) since noise is physics the Jacobian doesn't carry; thermal/shot sources on `Resistor`/`Diode`/`Bjt`; validated vs closed form (`4kTR`), vs an RC-shaped spectrum, and vs real QSPICE golden (`diode_noise` 1.7e-5) | ✅ |
 | T5.3 — Verilog-A noise lowering (T1/T2) | `white_noise`/`flicker_noise` lower to real IR calls instead of folding to `0`; codegen splits them into the noise channel like `ddt`→charge, leaving `load` bit-identical; Interface β gained a §6 flicker channel; compiled-model gates vs QSPICE (`resistor_noise_va` exact, `diode_flicker` 1.7e-5 over a 209×-shaped spectrum) | ✅ |
+| T5.4 — input-referred noise | `S_in = S_out/|H|²`, with `H = y_k` read straight out of the adjoint vector at the input source's branch row — no second solve; golden format gained a second column, scored separately from the output one; verified against QSPICE's `inoise_spectrum` and its printed 22.3055 µV total | ✅ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -1475,8 +1476,41 @@ would be ~99.5% wrong at 10 Hz. `models/constants.vams` is new (`diode.va` had `
 months without it existing), with exact SI 2019 values matching `va_abi::noise`'s own so a
 compiled model and its hand-written counterpart agree to the last digit.
 
-**Remaining T5 limits**, unchanged: output-referred only, no per-device breakdown, and
-`noise_table` unlowered.
+**Remaining T5 limits after this phase**: output-referred only, no per-device breakdown, and
+`noise_table` unlowered. The first of those closed next — see T5.4.
+
+### Phase T5.4 — Input-referred noise
+
+**Implemented and golden-gated 2026-08-01c.** `S_in = S_out / |H|²`, matching QSPICE's own
+`inoise_spectrum`.
+
+**It needed no second linear solve**, which is the interesting part. The forward gain from the
+`.noise` card's input source is *already* a component of the adjoint vector T5.2 solves for: an
+ideal source of AC magnitude 1 excites the system at its own branch-current row `k`, so
+`H = e_outᵀ·A⁻¹·e_k = yᵀ·e_k = y_k`. The same `y` that gives every noise source its transfer
+impedance gives the forward gain by indexing. Input-referral is one division per frequency.
+
+The `.noise` card's input-source name — parsed since T5.2 and deliberately unused, with a doc
+comment saying it was there for exactly this — is now resolved to that branch row. Naming
+something that isn't a voltage source is a clear error rather than a silently output-only answer.
+
+**Verified before any golden existed**, against the QSPICE probe that motivated the feature: its
+`inoise/onoise` ratio of `25.0306` implies `|H| = 0.199878`, matching
+`golden/diode_ac.golden`'s independently-computed AC gain for the same network to six figures;
+the integrated total agrees at `22.30538 µV` rms against QSPICE's printed `22.3055 µV`.
+
+**The golden format gained a column** (`@noise <output> <source>`, rows
+`<f> <output psd> <input psd>`), and the two columns are scored **separately**, each against its
+own peak: the input-referred column is larger by `1/|H|²`, so a shared near-zero floor would be
+set by whichever is bigger and under-check the other. An input-referred-only failure is
+diagnostic — it implicates the transfer function, since nothing else distinguishes the columns.
+A zero-gain frequency reports `inf` rather than `0` (referring noise to an unreachable input is
+undefined; `0` would read as "no noise"), and the integrated total skips non-finite points.
+
+One measured number moved: `resistor_noise_va.net` was exactly `0.0` and is now `1.4e-16`, since
+the new column is a division. Still machine precision.
+
+**Remaining T5 limits**: no per-device breakdown, and `noise_table` unlowered.
 
 ---
 

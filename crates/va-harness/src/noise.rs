@@ -22,17 +22,18 @@ use crate::{metrics, tol, HarnessError, Verdict};
 pub fn run_noise(circuit: &str, model: Option<&str>) -> Result<GoldenNoise, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    let output = net
+    let card = net
         .noise
-        .as_ref()
-        .map(|c| c.output.clone())
+        .clone()
         .ok_or_else(|| HarnessError::Run(format!("{circuit}: no `.noise` card")))?;
     let spectrum =
         va_cli::solve_noise(&net, &compiled).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     Ok(GoldenNoise::from_spectrum(
-        &output,
+        &card.output,
+        &card.source,
         &spectrum.f,
         &spectrum.psd,
+        &spectrum.input_psd,
     ))
 }
 
@@ -49,32 +50,39 @@ const FREQ_MATCH_REL: f64 = 1e-9;
 /// their spectra would silently diff unrelated quantities; [`HarnessError::LengthMismatch`] if
 /// some golden frequency has no counterpart in the computed sweep.
 pub fn compare_noise(got: &GoldenNoise, golden: &GoldenNoise) -> Result<Verdict, HarnessError> {
-    if got.output != golden.output {
+    if got.output != golden.output || got.source != golden.source {
         return Err(HarnessError::NodeOrderMismatch {
-            got: vec![got.output.clone()],
-            expected: vec![golden.output.clone()],
+            got: vec![got.output.clone(), got.source.clone()],
+            expected: vec![golden.output.clone(), golden.source.clone()],
         });
     }
 
-    let mut got_psd = Vec::with_capacity(golden.points.len());
-    let mut golden_psd = Vec::with_capacity(golden.points.len());
-    for (freq, psd) in &golden.points {
-        let matched = got
-            .points
-            .iter()
-            .find(|(f, _)| (f - freq).abs() <= freq.abs().max(f64::MIN_POSITIVE) * FREQ_MATCH_REL);
-        let Some((_, got_value)) = matched else {
+    let mut got_out = Vec::with_capacity(golden.points.len());
+    let mut golden_out = Vec::with_capacity(golden.points.len());
+    let mut got_in = Vec::with_capacity(golden.points.len());
+    let mut golden_in = Vec::with_capacity(golden.points.len());
+    for &(freq, psd, input) in &golden.points {
+        let matched = got.points.iter().find(|(f, _, _)| {
+            (f - freq).abs() <= freq.abs().max(f64::MIN_POSITIVE) * FREQ_MATCH_REL
+        });
+        let Some(&(_, got_out_value, got_in_value)) = matched else {
             return Err(HarnessError::LengthMismatch {
                 got: got.points.len(),
                 expected: golden.points.len(),
             });
         };
-        got_psd.push(*got_value);
-        golden_psd.push(*psd);
+        got_out.push(got_out_value);
+        golden_out.push(psd);
+        got_in.push(got_in_value);
+        golden_in.push(input);
     }
 
-    let error = metrics::max_relative_psd_error(&got_psd, &golden_psd)?;
-    Ok(Verdict::new(error, tol::NOISE_PSD_REL))
+    // Each column is scored against **its own** peak rather than the two flattened together:
+    // the input-referred column is larger than the output one by `1/|H|²`, so a shared floor
+    // would be set by whichever column happens to be bigger and would under-check the other.
+    let out_error = metrics::max_relative_psd_error(&got_out, &golden_out)?;
+    let in_error = metrics::max_relative_psd_error(&got_in, &golden_in)?;
+    Ok(Verdict::new(out_error.max(in_error), tol::NOISE_PSD_REL))
 }
 
 #[cfg(test)]
@@ -93,11 +101,12 @@ mod tests {
         let g = run_noise(&workspace_path("circuits/diode_noise.net"), None)
             .expect("solve diode_noise");
         assert_eq!(g.output, "a");
+        assert_eq!(g.source, "V1");
         assert_eq!(g.points.len(), 61); // 10 Hz .. 10 MHz at 10/decade, inclusive
 
         // Flat: every point equals the first (no reactance to shape it).
         let first = g.points[0].1;
-        for (f, psd) in &g.points {
+        for (f, psd, _) in &g.points {
             assert!(
                 (psd / first - 1.0).abs() < 1e-12,
                 "f={f}: psd = {psd}, expected flat at {first}"
@@ -124,8 +133,9 @@ mod tests {
     fn compare_noise_fails_for_a_doubled_spectrum() {
         let got = run_noise(&workspace_path("circuits/diode_noise.net"), None).expect("solve");
         let mut golden = got.clone();
-        for (_, psd) in &mut golden.points {
+        for (_, psd, input) in &mut golden.points {
             *psd *= 2.0;
+            *input *= 2.0;
         }
         let verdict = compare_noise(&got, &golden).expect("compare");
         assert!(!verdict.passed, "error = {}", verdict.error);
@@ -140,11 +150,17 @@ mod tests {
     fn compare_noise_tolerates_a_computed_sweep_with_extra_frequencies() {
         let got = GoldenNoise {
             output: "a".to_string(),
-            points: vec![(10.0, 2e-18), (100.0, 2e-18), (1000.0, 2e-18)],
+            source: "V1".to_string(),
+            points: vec![
+                (10.0, 2e-18, 5e-17),
+                (100.0, 2e-18, 5e-17),
+                (1000.0, 2e-18, 5e-17),
+            ],
         };
         let golden = GoldenNoise {
             output: "a".to_string(),
-            points: vec![(10.0, 2e-18), (1000.0, 2e-18)],
+            source: "V1".to_string(),
+            points: vec![(10.0, 2e-18, 5e-17), (1000.0, 2e-18, 5e-17)],
         };
         assert!(compare_noise(&got, &golden).expect("compare").passed);
     }
@@ -153,11 +169,13 @@ mod tests {
     fn compare_noise_errors_when_a_golden_frequency_is_missing() {
         let got = GoldenNoise {
             output: "a".to_string(),
-            points: vec![(10.0, 2e-18)],
+            source: "V1".to_string(),
+            points: vec![(10.0, 2e-18, 5e-17)],
         };
         let golden = GoldenNoise {
             output: "a".to_string(),
-            points: vec![(10.0, 2e-18), (100.0, 2e-18)],
+            source: "V1".to_string(),
+            points: vec![(10.0, 2e-18, 5e-17), (100.0, 2e-18, 5e-17)],
         };
         assert!(compare_noise(&got, &golden).is_err());
     }
@@ -166,11 +184,13 @@ mod tests {
     fn compare_noise_rejects_a_different_output_probe() {
         let got = GoldenNoise {
             output: "a".to_string(),
-            points: vec![(10.0, 2e-18)],
+            source: "V1".to_string(),
+            points: vec![(10.0, 2e-18, 5e-17)],
         };
         let golden = GoldenNoise {
             output: "b".to_string(),
-            points: vec![(10.0, 2e-18)],
+            source: "V1".to_string(),
+            points: vec![(10.0, 2e-18, 5e-17)],
         };
         assert!(compare_noise(&got, &golden).is_err());
     }

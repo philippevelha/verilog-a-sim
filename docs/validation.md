@@ -11,7 +11,7 @@ and compares to committed `golden/` outputs.
 | DC           | max relative I–V error on the operating point/sweep | ≤ 1e-4            |
 | Transient    | waveform RMS error (after shared-timebase resample) | ≤ 1e-3            |
 | AC           | max relative magnitude error / max absolute phase error | ≤ 1e-4 · ≤ 1e-4 rad |
-| Noise        | max relative error on the output PSD                | ≤ 1e-3            |
+| Noise        | max relative error on the output *and* input-referred PSD | ≤ 1e-3      |
 | Convergence  | fraction of zoo circuits that reach a solution      | track upward      |
 
 These mirror the constants in `va-harness` (`tol::DC_REL`, `tol::TRAN_RMS`, `tol::AC_MAG_REL`,
@@ -137,9 +137,11 @@ driven through `--model`, so the noise comes from the compiled `.va` and nothing
 **`circuits/resistor_noise_va.net`** — two resistors (1 kΩ, 3 kΩ) across a 1 V source, probed at
 their junction, both resolving to the compiled `models/resistor.va` and its
 `white_noise(4*`P_K*$temperature/R)`. The sources add in power through the same `R1∥R2`, giving
-the textbook `4kT·750Ω = 1.2432e-17` V²/Hz, flat. Measured against golden: **`0.0` — exact**.
-That is not a zero-versus-zero artifact: the golden carries a real `1.24321e-17` at every point,
-and both simulators compute it from constants that now agree to the last digit
+the textbook `4kT·750Ω = 1.2432e-17` V²/Hz, flat. Measured against golden: **`1.4e-16`** —
+machine precision. (It was exactly `0.0` until the input-referred column joined the comparison;
+that column is a division, which costs a few last bits.) The agreement is not a
+zero-versus-zero artifact: the golden carries a real `1.24321e-17` at every point, and both
+simulators compute it from constants that now agree to the last digit
 (`models/constants.vams` takes the exact SI 2019 values, deliberately matching
 `va_abi::noise`'s own). Pure `R`/`V`, so QSPICE needs no `.model` translation.
 
@@ -162,6 +164,35 @@ rather than a parameterization of it, because this project's netlist format has 
 passing device parameters — a `D` line names a model and nothing more — so a nonzero `KF` has to
 come from a model file's own defaults. Keeping it separate leaves `diode.va` with the physically
 sane `KF = 0` its other three circuits want.
+
+### Input-referred noise (added 2026-08-01c)
+
+Every noise golden file now carries **two** value columns — the output PSD and that same noise
+referred back to the `.noise` card's input source, `S_in = S_out / |H|²` — matching QSPICE's own
+`onoise_spectrum`/`inoise_spectrum` pair. The header names both ends: `@noise <output> <source>`.
+
+**It costs no extra solve.** The forward gain is already a component of the adjoint vector the
+analysis solves for anyway: an ideal source of AC magnitude 1 excites the system at its own
+branch row `k`, so `H = e_outᵀ·A⁻¹·e_k = yᵀ·e_k = y_k`. Input-referral is therefore one division
+per frequency, not a second linear system. See `t5-acnoise/02-noise.qmd` for the derivation.
+
+Verified before any golden existed, against the QSPICE probe that motivated it: the probe's
+`inoise/onoise` ratio is `25.0306`, implying `|H| = 0.199878` — which matches
+`golden/diode_ac.golden`'s independently-computed AC gain for the same network to six figures.
+The integrated total agrees too: this project reports `22.30538 µV` rms against QSPICE's printed
+`22.3055 µV`.
+
+**The two columns are scored separately**, each against its own peak, rather than flattened into
+one series. The input-referred column is larger than the output one by `1/|H|²`, so a shared
+near-zero floor would be set by whichever column happens to be bigger and would under-check the
+other. The reported verdict is the worse of the two — and an input-referred-only failure is
+diagnostic in itself, implicating the *transfer function* rather than the noise sources, since
+the two columns differ by nothing else.
+
+A frequency at which the input cannot reach the output reports `inf` rather than `0`: referring
+noise to an input with no path to the output is genuinely undefined, and a zero there would read
+as "no noise", the opposite of the truth. The integrated total skips non-finite points instead of
+becoming `NaN`.
 
 ## Bring-up ladder
 
