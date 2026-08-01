@@ -1,7 +1,8 @@
 //! Drive a DC operating point ([`run_dc`]/[`compare_dc`], § ladder rungs 1/5) or a `.dc` sweep
 //! ([`run_dc_sweep`]/[`compare_dc_sweep`], § ladder rung 2) through `va-cli` and compare it
-//! against golden. A transient waveform isn't wired to golden yet — see `docs/roadmap.md`'s
-//! T6.3 notes.
+//! against golden. The other two analyses have their own modules with their own alignment
+//! concerns: [`crate::tran`] (resampled onto a shared timebase) and [`crate::ac`] (matched by
+//! frequency, complex-valued).
 
 use crate::golden::{GoldenDc, GoldenSweep};
 use crate::{metrics, tol, HarnessError, Verdict};

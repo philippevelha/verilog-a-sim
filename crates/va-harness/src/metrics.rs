@@ -45,6 +45,69 @@ pub fn max_relative_error(got: &[f64], reference: &[f64]) -> Result<f64, Harness
         .fold(0.0_f64, f64::max))
 }
 
+/// Maximum relative magnitude error between two complex series (half of the AC metric).
+///
+/// `|z|` is compared exactly the way [`max_relative_error`] compares a real quantity, including
+/// its [`REL_ERROR_FLOOR`] guard on a near-zero reference.
+///
+/// # Errors
+///
+/// [`HarnessError::LengthMismatch`] if the series differ in length.
+pub fn max_magnitude_error(
+    got: &[(f64, f64)],
+    reference: &[(f64, f64)],
+) -> Result<f64, HarnessError> {
+    let magnitudes = |s: &[(f64, f64)]| -> Vec<f64> {
+        s.iter()
+            .map(|&(re, im)| (re * re + im * im).sqrt())
+            .collect()
+    };
+    max_relative_error(&magnitudes(got), &magnitudes(reference))
+}
+
+/// Maximum absolute phase error (radians) between two complex series — the other half of the AC
+/// metric.
+///
+/// Two details make this different from a plain `max |∠got − ∠ref|`:
+///
+/// - **Wrapping.** Phase is an angle: `+179°` and `−179°` differ by 2°, not 358°. The difference
+///   is wrapped into `(−π, π]` before its magnitude is taken, so a reference point sitting right
+///   at the ±180° branch cut (e.g. `circuits/rc_ac.net`'s own `I(V1)`, which approaches −180° at
+///   high frequency) doesn't report a ~2π error for a negligible real disagreement.
+/// - **A magnitude floor.** The phase of a near-zero complex value is arbitrary — its real and
+///   imaginary parts are both at the two simulators' own Newton/round-off noise floor, so their
+///   ratio carries no information. Points whose *reference* magnitude is under
+///   [`REL_ERROR_FLOOR`] are skipped entirely rather than contributing meaningless angles. This
+///   is the same judgment [`max_relative_error`]'s own floor makes, applied to the quantity
+///   phase is actually sensitive to.
+///
+/// Returns `0.0` if every point is floored out (nothing meaningful to disagree about).
+///
+/// # Errors
+///
+/// [`HarnessError::LengthMismatch`] if the series differ in length.
+pub fn max_phase_error(got: &[(f64, f64)], reference: &[(f64, f64)]) -> Result<f64, HarnessError> {
+    if got.len() != reference.len() {
+        return Err(HarnessError::LengthMismatch {
+            got: got.len(),
+            expected: reference.len(),
+        });
+    }
+    let mut worst = 0.0_f64;
+    for (&(gre, gim), &(rre, rim)) in got.iter().zip(reference) {
+        if (rre * rre + rim * rim).sqrt() < REL_ERROR_FLOOR {
+            continue;
+        }
+        let mut diff = gim.atan2(gre) - rim.atan2(rre);
+        diff = diff.rem_euclid(2.0 * std::f64::consts::PI);
+        if diff > std::f64::consts::PI {
+            diff -= 2.0 * std::f64::consts::PI;
+        }
+        worst = worst.max(diff.abs());
+    }
+    Ok(worst)
+}
+
 /// Root-mean-square error between two waveforms sharing a timebase (the transient metric).
 ///
 /// `rms = sqrt(mean_i (got_i - ref_i)^2)` — a plain absolute RMS over already-aligned samples;
@@ -150,6 +213,58 @@ mod tests {
         // suppress the check entirely.
         let rel = max_relative_error(&[1e-3], &[0.0]).unwrap();
         assert!(rel > crate::tol::DC_REL, "rel = {rel}");
+    }
+
+    #[test]
+    fn max_magnitude_error_compares_moduli_not_components() {
+        // Same magnitude (1), opposite components: a *magnitude* comparison sees no error at all
+        // — the phase metric is what catches this pair, and does (below).
+        let rel = max_magnitude_error(&[(0.0, 1.0)], &[(1.0, 0.0)]).unwrap();
+        assert!(rel < 1e-12, "rel = {rel}");
+        // A genuine magnitude difference is still caught.
+        let rel = max_magnitude_error(&[(2.0, 0.0)], &[(1.0, 0.0)]).unwrap();
+        assert!((rel - 1.0).abs() < 1e-12, "rel = {rel}");
+    }
+
+    #[test]
+    fn max_phase_error_is_zero_for_identical_series() {
+        let s = [(1.0, 0.0), (0.0, 1.0), (-1.0, -1.0)];
+        assert_eq!(max_phase_error(&s, &s).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn max_phase_error_wraps_across_the_branch_cut() {
+        // +179° vs -179°: 2° apart, not 358°. `circuits/rc_ac.net`'s own `I(V1)` sits right here
+        // at high frequency (approaching -180°), so without wrapping a negligible disagreement
+        // would report a ~2π "error".
+        let a = 179.0_f64.to_radians();
+        let b = (-179.0_f64).to_radians();
+        let got = max_phase_error(&[(a.cos(), a.sin())], &[(b.cos(), b.sin())]).unwrap();
+        assert!(
+            (got - 2.0_f64.to_radians()).abs() < 1e-12,
+            "got {got} rad ({}°)",
+            got.to_degrees()
+        );
+    }
+
+    #[test]
+    fn max_phase_error_skips_points_below_the_magnitude_floor() {
+        // A reference at the noise floor has an arbitrary phase — comparing it would report a
+        // large, meaningless angle error (here the two are a full 90° apart).
+        let got = max_phase_error(&[(0.0, 1e-15)], &[(1e-15, 0.0)]).unwrap();
+        assert_eq!(got, 0.0);
+        // The same 90° disagreement at a real, above-floor magnitude is genuinely reported.
+        let got = max_phase_error(&[(0.0, 1.0)], &[(1.0, 0.0)]).unwrap();
+        assert!(
+            (got - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+            "got {got}"
+        );
+    }
+
+    #[test]
+    fn complex_metrics_reject_a_length_mismatch() {
+        assert!(max_magnitude_error(&[(1.0, 0.0)], &[]).is_err());
+        assert!(max_phase_error(&[(1.0, 0.0)], &[]).is_err());
     }
 
     #[test]

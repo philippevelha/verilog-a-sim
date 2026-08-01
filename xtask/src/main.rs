@@ -60,6 +60,16 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/ring_osc.net", None),
 ];
 
+/// The `.ac` small-signal circuits `validate`/`gen-golden` know how to drive (T5).
+/// `rc_ac.net` is a pure `R`/`C`/`V` deck solved by `va-abi`'s reference primitives;
+/// `diode_ac.net` linearizes a compiled `models/diode.va` about a real forward bias, so its
+/// golden comparison genuinely checks the AD-derived small-signal conductance, not just R/C
+/// stamps.
+const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
+    ("circuits/rc_ac.net", None),
+    ("circuits/diode_ac.net", Some("models/diode.va")),
+];
+
 /// Tally shared across [`validate`]'s DC/sweep/tran passes — distinguishes *three* different
 /// outcomes, not two, per `CLAUDE.md` §7's four metrics: a circuit can have no golden yet
 /// ([`Self::skipped`]), fail to converge at all ([`Self::not_converged`] — §7's own "convergence:
@@ -246,6 +256,58 @@ fn validate_tran_circuits(root: &Path) -> Result<Tally> {
     Ok(tally)
 }
 
+/// Like [`validate_dc_circuits`], for every known `.ac` small-signal circuit (T5).
+fn validate_ac_circuits(root: &Path) -> Result<Tally> {
+    let mut tally = Tally::default();
+    for &(circuit, model) in AC_CIRCUITS {
+        let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
+        if !golden_path.is_file() {
+            eprintln!(
+                "[xtask]   skip {circuit}: no golden reference at {}",
+                golden_path.display()
+            );
+            tally.skipped += 1;
+            continue;
+        }
+
+        let golden = va_harness::golden::GoldenAc::read(&golden_path)
+            .with_context(|| format!("reading golden reference for {circuit}"))?;
+        let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+        let model_str = model_path
+            .as_deref()
+            .map(|p| p.to_str().context("non-UTF8 model path"))
+            .transpose()?;
+        let Some(got) = try_solve(
+            circuit,
+            || va_harness::ac::run_ac(circuit_str, model_str),
+            &mut tally,
+        ) else {
+            continue;
+        };
+        let verdict = va_harness::ac::compare_ac(&got, &golden)
+            .with_context(|| format!("comparing {circuit} against golden"))?;
+        report_ac_verdict(circuit, verdict, &mut tally);
+    }
+    Ok(tally)
+}
+
+/// Print one AC circuit's PASS/FAIL line and fold a golden mismatch into `tally`. Distinct from
+/// [`report_verdict`] because §7's AC metric is genuinely two numbers against two bands
+/// (magnitude *and* phase — see `va_harness::ac::AcVerdict`), and reporting only one of them
+/// would hide half of what was actually checked. Counts as a single failed circuit either way,
+/// not one per failing half.
+fn report_ac_verdict(circuit: &str, verdict: va_harness::ac::AcVerdict, tally: &mut Tally) {
+    let status = if verdict.passed() { "PASS" } else { "FAIL" };
+    eprintln!(
+        "[xtask]   {status} {circuit}: |mag| error={:.3e} (tol {:.0e}), phase error={:.3e} rad \
+         (tol {:.0e})",
+        verdict.magnitude.error, verdict.magnitude.tol, verdict.phase.error, verdict.phase.tol
+    );
+    if !verdict.passed() {
+        tally.failed += 1;
+    }
+}
+
 /// Print one circuit's PASS/FAIL line and fold a golden-mismatch into `tally`. Only called for a
 /// circuit that already converged ([`try_solve`] returned `Some`) — `tally.checked` was already
 /// incremented there, not here.
@@ -264,9 +326,9 @@ fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally
     }
 }
 
-/// Run the validation harness over every known circuit (DC, `.dc`-sweep, and `.tran`) and report
-/// pass/fail/skip, plus `CLAUDE.md` §7's fourth metric — the convergence fraction (T6.4) — as its
-/// own line, distinct from the golden-comparison pass/fail count.
+/// Run the validation harness over every known circuit (DC, `.dc`-sweep, `.tran`, and `.ac`) and
+/// report pass/fail/skip, plus `CLAUDE.md` §7's fourth metric — the convergence fraction (T6.4) —
+/// as its own line, distinct from the golden-comparison pass/fail count.
 ///
 /// # Errors
 ///
@@ -282,6 +344,7 @@ fn validate() -> Result<()> {
     let mut tally = validate_dc_circuits(&root)?;
     tally.merge(validate_sweep_circuits(&root)?);
     tally.merge(validate_tran_circuits(&root)?);
+    tally.merge(validate_ac_circuits(&root)?);
 
     eprintln!(
         "[xtask] validate: {} checked, {} failed golden, {} did not converge, {} skipped (no golden)",
@@ -371,6 +434,21 @@ const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str, Option<f64>)] = &[
         Some(RING_OSC_GOLDEN_TSTOP),
     ),
 ];
+
+/// Like [`QSPICE_NATIVE_CIRCUITS`], for the `.ac` small-signal circuits (T5):
+/// `circuits/rc_ac.net` is a pure `R`/`C`/`V` deck needing no model translation, just complex
+/// `.qraw` parsing ([`parse_qraw_ac`]). It is still passed through [`rewrite_gnd_to_zero`] — a
+/// topology-neutral normalization this project's own net interning already performs, so applying
+/// it costs nothing and sidesteps QSPICE's own `gnd`-aliasing quirk without having to reason
+/// about which element kinds are affected.
+const QSPICE_NATIVE_AC_CIRCUITS: &[&str] = &["circuits/rc_ac.net"];
+
+/// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.ac` circuits (T5) that reference a custom
+/// `.va` model. The same one-to-one `IS`/`N` diode translation applies — an AC analysis
+/// linearizes the very same model equations a DC solve evaluates, so a translation faithful for
+/// `circuits/diode_iv.net` is faithful here too.
+const QSPICE_AC_MODEL_TRANSLATIONS: &[(&str, &str)] =
+    &[("circuits/diode_ac.net", ".model diode D(IS=1e-14 N=1)")];
 
 /// The `.tran` cutoff used *only* when generating rung 6's golden reference — deliberately
 /// shorter than `circuits/ring_osc.net`'s own `.tran 100u 0.2` card, which stays at `0.2` s so
@@ -694,13 +772,90 @@ fn gen_golden() -> Result<()> {
         );
         generated += 1;
     }
+    // `.ac` circuits (T5): no cold-start rewrite (an AC analysis is *defined* as a linearization
+    // about the DC operating point — unlike `.tran`, where this project's own zero-vector start
+    // had to be forced on QSPICE), just the `gnd` normalization and, where needed, the same
+    // native `.model` translation every other analysis uses.
+    for &circuit in QSPICE_NATIVE_AC_CIRCUITS {
+        let native_deck = rewrite_gnd_to_zero(&read_circuit(&root, circuit)?);
+        generated += gen_ac_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
+    }
+    for &(circuit, model_card) in QSPICE_AC_MODEL_TRANSLATIONS {
+        let native_deck = translate_for_qspice(&read_circuit(&root, circuit)?, model_card);
+        generated += gen_ac_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
+    }
+
     let _ = std::fs::remove_dir_all(&tmp);
 
     eprintln!(
         "[xtask] gen-golden: {generated} circuit(s) regenerated from QSPICE (of {} known)",
-        DC_CIRCUITS.len() + SWEEP_CIRCUITS.len() + TRAN_CIRCUITS.len()
+        DC_CIRCUITS.len() + SWEEP_CIRCUITS.len() + TRAN_CIRCUITS.len() + AC_CIRCUITS.len()
     );
     Ok(())
+}
+
+/// Read a circuit deck from the workspace root.
+fn read_circuit(root: &Path, circuit: &str) -> Result<String> {
+    std::fs::read_to_string(root.join(circuit)).with_context(|| format!("reading {circuit}"))
+}
+
+/// Run one already-translated `.ac` deck through QSPICE and write its golden file, returning `1`
+/// so the caller can fold it into its own generated count. Factored out (unlike the DC/sweep/tran
+/// passes above, which each inline their own copy of this shape) because the native and
+/// model-translated AC passes differ *only* in how the deck text was prepared.
+fn gen_ac_golden(
+    qspice: &Path,
+    root: &Path,
+    tmp: &Path,
+    circuit: &str,
+    native_deck: &str,
+) -> Result<u32> {
+    let stem = Path::new(circuit)
+        .file_stem()
+        .context("circuit path has no file stem")?
+        .to_string_lossy()
+        .into_owned();
+
+    let raw = run_qspice_ac(qspice, native_deck, tmp, &stem)
+        .with_context(|| format!("running QSPICE on {circuit}"))?;
+    let node_order = golden_node_order(root, circuit)
+        .with_context(|| format!("resolving branch currents for {circuit}"))?;
+    let golden = golden_ac_from_qraw(&raw, &node_order)
+        .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+    let golden_path = root.join("golden").join(format!("{stem}.golden"));
+    std::fs::write(&golden_path, golden.render())
+        .with_context(|| format!("writing {}", golden_path.display()))?;
+    eprintln!(
+        "[xtask]   wrote {} ({} frequency point(s), {} column(s))",
+        golden_path.display(),
+        golden.points.len(),
+        golden.node_order.len()
+    );
+    Ok(1)
+}
+
+/// Like [`run_qspice_sweep`], for an `.ac` deck — same invocation, complex `.qraw` payload
+/// ([`parse_qraw_ac`]).
+fn run_qspice_ac(qspice: &Path, deck: &str, workdir: &Path, stem: &str) -> Result<QspiceRawAc> {
+    let cir_path = workdir.join(format!("{stem}.cir"));
+    std::fs::write(&cir_path, deck).context("writing scratch .cir")?;
+    let status = Command::new(qspice)
+        .arg(
+            cir_path
+                .file_name()
+                .context("scratch .cir has no filename")?,
+        )
+        .current_dir(workdir)
+        .status()
+        .context("launching QSPICE64.exe")?;
+    if !status.success() {
+        bail!("QSPICE exited with {status}");
+    }
+    let qraw_path = workdir.join(format!("{stem}.qraw"));
+    let bytes = std::fs::read(&qraw_path)
+        .with_context(|| format!("QSPICE did not produce {}", qraw_path.display()))?;
+    parse_qraw_ac(&bytes)
 }
 
 /// Run `deck` (a `.op`/no-sweep-`.dc` netlist, already confirmed QSPICE-native — see
@@ -776,6 +931,22 @@ struct QspiceRawSweep {
     /// empirically: a real QSPICE `.dc V1 0 0.6 0.1` run's binary payload is laid out as 7
     /// consecutive 6-value rows, not 6 consecutive 7-value columns).
     points: Vec<Vec<f64>>,
+}
+
+/// One QSPICE `.qraw` file's contents for an `.ac` run (T5) — the only analysis whose payload is
+/// **complex** (`Flags: complex` in the header).
+///
+/// Its layout is not simply "twice as many f64s": confirmed empirically against a real
+/// `.ac dec 2 1 1meg` run of `circuits/rc_ac.net`, a 5-variable 12-point file carries 108 f64s,
+/// i.e. **9** per point — the `Frequency` abscissa is stored as a single real value, and only the
+/// remaining 4 variables get a `(re, im)` pair each. A naive "every variable is complex" read
+/// (10 per point) would silently misalign every value after the first.
+struct QspiceRawAc {
+    /// Variable names in declared order **excluding** the `Frequency` abscissa, so an index into
+    /// this lines up directly with an index into each point's own complex value list.
+    variables: Vec<String>,
+    /// `(frequency, one complex value per `variables` entry)`, in point-major order.
+    points: Vec<(f64, Vec<(f64, f64)>)>,
 }
 
 /// Shared `.qraw` header parse: variable names plus the declared point count and the raw binary
@@ -901,6 +1072,76 @@ fn parse_qraw_sweep(bytes: &[u8]) -> Result<QspiceRawSweep> {
         })
         .collect();
     Ok(QspiceRawSweep { variables, points })
+}
+
+/// Parse an `.ac` (complex) `.qraw` file — see [`QspiceRawAc`] for the layout and why it isn't
+/// just [`parse_qraw_sweep`] with doubled values.
+///
+/// # Errors
+///
+/// If [`parse_qraw_header`] fails, the file has zero points or no variables beyond the abscissa,
+/// or the binary payload is shorter than the header promises.
+fn parse_qraw_ac(bytes: &[u8]) -> Result<QspiceRawAc> {
+    let (mut variables, n_points, payload) = parse_qraw_header(bytes)?;
+    if n_points == 0 {
+        bail!("`.qraw` declares 0 points");
+    }
+    if variables.len() < 2 {
+        bail!("`.qraw` declares no AC variables beyond the frequency abscissa");
+    }
+    // Drop the abscissa (`Frequency`), which is stored as one real value per point.
+    variables.remove(0);
+    let n_complex = variables.len();
+    let per_point = 1 + 2 * n_complex;
+    if payload.len() < n_points * per_point * 8 {
+        bail!(
+            "`.qraw` binary payload is {} byte(s), too short for {n_points} point(s) of 1 real \
+             frequency + {n_complex} complex value(s) each",
+            payload.len()
+        );
+    }
+    let f64_at = |i: usize| {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&payload[i * 8..i * 8 + 8]);
+        f64::from_le_bytes(b)
+    };
+    let points = (0..n_points)
+        .map(|p| {
+            let base = p * per_point;
+            let values = (0..n_complex)
+                .map(|v| (f64_at(base + 1 + 2 * v), f64_at(base + 2 + 2 * v)))
+                .collect();
+            (f64_at(base), values)
+        })
+        .collect();
+    Ok(QspiceRawAc { variables, points })
+}
+
+/// Map a parsed `.ac` `.qraw` onto this project's own `node_order`, keyed by each point's own
+/// frequency — the AC analogue of [`golden_tran_from_qraw`]/[`golden_sweep_from_qraw`]. Labels
+/// resolve exactly as they do for every other analysis ([`node_values_from_row`]'s own
+/// `V(<node>)` / literal `I(<device>)` convention), just yielding complex values.
+fn golden_ac_from_qraw(
+    raw: &QspiceRawAc,
+    node_order: &[String],
+) -> Result<va_harness::golden::GoldenAc> {
+    let points = raw
+        .points
+        .iter()
+        .map(|(freq, row)| {
+            // Compare component-wise by reusing the real lookup twice rather than duplicating
+            // the label convention: one pass over the real parts, one over the imaginary.
+            let re: Vec<f64> = row.iter().map(|&(re, _)| re).collect();
+            let im: Vec<f64> = row.iter().map(|&(_, im)| im).collect();
+            let re = node_values_from_row(&raw.variables, &re, node_order)?;
+            let im = node_values_from_row(&raw.variables, &im, node_order)?;
+            Ok((*freq, re.into_iter().zip(im).collect()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(va_harness::golden::GoldenAc {
+        node_order: node_order.to_vec(),
+        points,
+    })
 }
 
 /// Look up each of `node_order`'s labels in `variables`/`row` — shared by [`golden_dc_from_qraw`]
@@ -1145,13 +1386,14 @@ mod tests {
     #[test]
     fn validate_passes_with_all_known_circuits_golden() {
         // The project's actual current state: every circuit in `DC_CIRCUITS`/`SWEEP_CIRCUITS`/
-        // `TRAN_CIRCUITS` now has real, committed QSPICE golden (all six ladder rungs) —
-        // `divider.net`/`rc_step.net` unmodified (`QSPICE_NATIVE_CIRCUITS`/
-        // `QSPICE_NATIVE_TRAN_CIRCUITS`); `mos_dc.net`/`diode_iv.net`/`rectifier.net`/
-        // `ring_osc.net` from a native-model translation (`ring_osc.net`'s golden additionally
-        // truncated to `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is
-        // skipped anymore; `validate` must pass all six for real.
-        validate().expect("validate should pass: all six known circuits have real golden");
+        // `TRAN_CIRCUITS`/`AC_CIRCUITS` has real, committed QSPICE golden (all six ladder rungs,
+        // plus T5's two AC circuits) — `divider.net`/`rc_step.net`/`rc_ac.net` unmodified
+        // (`QSPICE_NATIVE_CIRCUITS`/`QSPICE_NATIVE_TRAN_CIRCUITS`/`QSPICE_NATIVE_AC_CIRCUITS`);
+        // `mos_dc.net`/`diode_iv.net`/`rectifier.net`/`ring_osc.net`/`diode_ac.net` from a
+        // native-model translation (`ring_osc.net`'s golden additionally truncated to
+        // `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is skipped
+        // anymore; `validate` must pass all eight for real.
+        validate().expect("validate should pass: all eight known circuits have real golden");
     }
 
     #[test]
@@ -1371,6 +1613,97 @@ mod tests {
         };
         let node_order = vec!["in".to_string()];
         assert!(golden_sweep_from_qraw(&raw, "V1", &node_order).is_err());
+    }
+
+    /// Build a synthetic complex (`.ac`) `.qraw` byte buffer with the layout a real QSPICE AC run
+    /// produces (confirmed against an actual run of `circuits/rc_ac.net`): one **real** frequency
+    /// value per point, then a `(re, im)` pair per remaining variable.
+    fn synthetic_qraw_ac(vars: &[&str], rows: &[(f64, Vec<(f64, f64)>)]) -> Vec<u8> {
+        let mut header = String::new();
+        header.push_str("Title: * synthetic ac\n");
+        header.push_str("Plotname: AC Analysis\n");
+        header.push_str("Flags: complex\n");
+        header.push_str(&format!("No. Variables: {}\n", vars.len()));
+        header.push_str(&format!("No. Points: {}                    \n", rows.len()));
+        header.push_str("Variables:\n");
+        for (i, name) in vars.iter().enumerate() {
+            header.push_str(&format!("\t{i}\t{name}\tvoltage\n"));
+        }
+        header.push_str("Binary:\n");
+        let mut bytes = header.into_bytes();
+        for (freq, values) in rows {
+            bytes.extend_from_slice(&freq.to_le_bytes());
+            for (re, im) in values {
+                bytes.extend_from_slice(&re.to_le_bytes());
+                bytes.extend_from_slice(&im.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn parse_qraw_ac_reads_a_real_abscissa_and_complex_values() {
+        // The whole point of `QspiceRawAc`'s layout note: 2 points × (1 real + 2 complex) = 10
+        // f64s, *not* 12. A naive all-complex read would misalign everything after the first
+        // value — so this asserts the exact values land where they belong.
+        let bytes = synthetic_qraw_ac(
+            &["Frequency", "V(out)", "I(V1)"],
+            &[
+                (1.0, vec![(0.99, -0.006), (-3.9e-8, -6.2e-6)]),
+                (10.0, vec![(0.9, -0.06), (-3.9e-7, -6.2e-5)]),
+            ],
+        );
+        let raw = parse_qraw_ac(&bytes).expect("parse");
+        // The `Frequency` abscissa is dropped from `variables` so indices line up with values.
+        assert_eq!(raw.variables, vec!["V(out)", "I(V1)"]);
+        assert_eq!(raw.points.len(), 2);
+        assert_eq!(raw.points[0].0, 1.0);
+        assert_eq!(raw.points[0].1, vec![(0.99, -0.006), (-3.9e-8, -6.2e-6)]);
+        assert_eq!(raw.points[1].0, 10.0);
+        assert_eq!(raw.points[1].1, vec![(0.9, -0.06), (-3.9e-7, -6.2e-5)]);
+    }
+
+    #[test]
+    fn parse_qraw_ac_rejects_a_truncated_payload() {
+        let mut bytes = synthetic_qraw_ac(
+            &["Frequency", "V(out)"],
+            &[(1.0, vec![(0.99, -0.006)]), (10.0, vec![(0.9, -0.06)])],
+        );
+        bytes.truncate(bytes.len() - 4); // half of the last imaginary part missing
+        assert!(parse_qraw_ac(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_qraw_ac_rejects_a_file_with_only_an_abscissa() {
+        let bytes = synthetic_qraw_ac(&["Frequency"], &[(1.0, vec![])]);
+        assert!(parse_qraw_ac(&bytes).is_err());
+    }
+
+    #[test]
+    fn golden_ac_from_qraw_looks_up_by_name_regardless_of_order() {
+        // QSPICE's own variable order needn't match this project's `node_order`, and a branch
+        // current is looked up literally as `I(V1)` while a node becomes `V(out)`.
+        let raw = QspiceRawAc {
+            variables: vec!["I(V1)".to_string(), "V(out)".to_string()],
+            points: vec![(1.0, vec![(-3.9e-8, -6.2e-6), (0.99, -0.006)])],
+        };
+        let node_order = vec!["out".to_string(), "I(V1)".to_string()];
+        let golden = golden_ac_from_qraw(&raw, &node_order).expect("map");
+        assert_eq!(golden.node_order, node_order);
+        assert_eq!(
+            golden.points,
+            vec![(1.0, vec![(0.99, -0.006), (-3.9e-8, -6.2e-6)])]
+        );
+    }
+
+    #[test]
+    fn golden_ac_from_qraw_errors_on_a_missing_node() {
+        let raw = QspiceRawAc {
+            variables: vec!["V(out)".to_string()],
+            points: vec![(1.0, vec![(0.99, -0.006)])],
+        };
+        let node_order = vec!["out".to_string(), "missing".to_string()];
+        assert!(golden_ac_from_qraw(&raw, &node_order).is_err());
     }
 
     #[test]

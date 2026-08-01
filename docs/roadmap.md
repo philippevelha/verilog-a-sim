@@ -50,10 +50,10 @@ shared, demoable milestone that several theses light up at once.
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; 16 tests | 🟢 |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
-| T6.1 — netlist parser | R/C/D/M/V elements (`M` = 3-terminal model-referencing device, § rung 5), dot-cards incl. `.tran` timing and `.dc <source> <start> <stop> <step>` sweep; `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
-| T6.2 — CLI wiring (DC + sweep + transient) | `va-cli sim` drives a DC operating point, a `.dc` sweep, and `.tran` (incl. `SIN`-sourced circuits like the rectifier) through the real pipeline | 🟢 |
+| T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, and `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
+| T6.2 — CLI wiring (DC + sweep + transient + AC) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), and `--ac` small-signal sweeps through the real pipeline | 🟢 |
 | T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section | ✅ |
-| T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; RC low-pass validated to 1e-6 vs closed form (2026-07-21) | 🟢 |
+| T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; **golden gate closed 2026-08-01** — `.ac` card/`AC` source parsing, `va-cli::solve_ac`, `GoldenAc` + separate magnitude/phase verdicts, complex `.qraw` parsing, and both AC circuits green vs real QSPICE (`rc_ac` 1.3e-15, `diode_ac` 1.3e-5) | ✅ |
 | T5.2 — noise analysis | crate stub only (`todo!()`) | ⬜ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
@@ -1338,11 +1338,45 @@ literal duplicate when repeated-multiplication float drift left the loop's own l
 ULPs short of it (`100.00000000000003` vs `100.0`) instead of recognizing it as the same point —
 fixed by snapping within a relative tolerance instead of requiring bit-exact equality.
 
-**Outstanding**: the stated validation gate (RC/RLC vs *golden*) and the tutorial still await
-`va-cli`/`va-harness`/`xtask` AC wiring (a netlist `.ac` card, a golden AC format, a QSPICE `.ac`
-translation) — not attempted here, matching how rung 5/6's "implementation reach" and "golden
-gate" were tracked as separate, sequential closures earlier in T6.3. `noise.rs` (T5.2) is
-untouched.
+**Golden gate closed 2026-08-01** — the outstanding `va-cli`/`va-harness`/`xtask` AC wiring this
+entry used to list is done, and `cargo xtask validate` now checks AC against real QSPICE golden
+alongside DC and transient (8/8 circuits, 100% convergence). What that took, end to end:
+
+- **`va-netlist`**: `.ac dec <points-per-decade> <fstart> <fstop>` → `Netlist::ac`
+  (`AcSweepCard`), and a `V` line's `AC <magnitude> [phase]` → `Device::ac` (`AcSpec`).
+  Deliberately only `dec` is accepted: `AcSweep::frequencies` produces a per-decade grid, so
+  parsing `lin`/`oct` would promise a grid the analysis can't produce — those leave `net.ac` as
+  `None` and `va-cli` says so plainly.
+- **`va-cli`**: `solve_ac` solves the DC operating point, builds the complex excitation vector
+  from each AC-marked source's own branch-current row, and sweeps. The `gate_analysis` rejection
+  of AC decks is gone, replaced by the same deck-says-X/you-asked-for-Y checks `.tran` already
+  had. A deck whose sources carry no `AC` token is a clear error, not an all-zero answer.
+- **`va-harness`**: `GoldenAc` (an `@ac`-marked table, two columns per name for re/im — lossless,
+  with magnitude/phase derived at comparison time) plus `ac::{run_ac, compare_ac}` returning an
+  `AcVerdict` with *separate* magnitude and phase verdicts, since §7's AC metric is genuinely two
+  bands, not one.
+- **`xtask`**: complex `.qraw` parsing and an `AC_CIRCUITS` pass in both `validate` and
+  `gen-golden`.
+
+**Two empirical findings worth keeping** (both confirmed against real QSPICE runs, neither
+guessable from the format docs):
+
+1. An `.ac` `.qraw` payload is *not* uniformly complex despite its `Flags: complex` header. A
+   5-variable 12-point file carries 108 f64s — **9 per point**, not 10: the `Frequency` abscissa
+   is one real value and only the remaining variables get `(re, im)` pairs. A naive all-complex
+   read misaligns every value after the first.
+2. QSPICE's own frequency grid has an off-by-one at the top end (60 points where the clean grid
+   has 61, dropping `10^5.9`). `compare_ac` matches by frequency rather than imitating it — see
+   `docs/validation.md`'s AC-gate section for both, and for the measured errors.
+
+**Measured against golden**: `rc_ac.net` at magnitude `1.3e-15` / phase `1.7e-13` rad (machine
+precision — the same linear system on both sides); `diode_ac.net`, which linearizes a compiled
+`models/diode.va` about a real forward bias, at magnitude `1.3e-5` / phase `6.4e-6` rad. The
+second is the one with teeth: its passband gain depends exponentially on the solved bias, so
+agreeing that closely constrains the DC point, the AD-derived Jacobian, and the linearization
+together. `noise.rs` (T5.2) remains untouched.
+
+**Still outstanding for T5.1**: the `t5-acnoise` tutorial.
 
 ### Phase T5.2 — Noise analysis
 - Per-element noise sources → output PSD; adjoint method for transfer functions (`noise.rs`).
@@ -1669,11 +1703,12 @@ reported. `validate()`'s own final report now prints the convergence fraction as
 ```console
 $ cargo run -q -p xtask -- validate
 ...
-[xtask] validate: 6 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
-[xtask] validate: convergence 6/6 (100.0%) — CLAUDE.md §7's convergence metric
+[xtask] validate: 8 checked, 0 failed golden, 0 did not converge, 0 skipped (no golden)
+[xtask] validate: convergence 8/8 (100.0%) — CLAUDE.md §7's convergence metric
 ```
 
-Every known circuit converges today (6/6, unsurprising — every ladder rung already passes
+Every known circuit converges today (8/8 as of 2026-08-01 — six ladder rungs plus T5's two AC
+circuits; unsurprising, since every one of them already passes
 golden, a strictly harder bar), so this reads `100.0%` right now; the real deliverable is the
 *mechanism* — verified with a genuinely non-convergent synthetic circuit (two nets joined by a
 resistor with no path to ground anywhere, confirmed to produce `CoreError::Singular` via

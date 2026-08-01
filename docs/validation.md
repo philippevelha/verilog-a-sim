@@ -10,22 +10,24 @@ and compares to committed `golden/` outputs.
 |--------------|-----------------------------------------------------|-------------------|
 | DC           | max relative I–V error on the operating point/sweep | ≤ 1e-4            |
 | Transient    | waveform RMS error (after shared-timebase resample) | ≤ 1e-3            |
-| AC           | magnitude/phase error within a stated band          | band-dependent    |
+| AC           | max relative magnitude error / max absolute phase error | ≤ 1e-4 · ≤ 1e-4 rad |
 | Convergence  | fraction of zoo circuits that reach a solution      | track upward      |
 
-These mirror the constants in `va-harness` (`tol::DC_REL`, `tol::TRAN_RMS`). Tune here as the
-zoo grows; record any change with its justification.
+These mirror the constants in `va-harness` (`tol::DC_REL`, `tol::TRAN_RMS`, `tol::AC_MAG_REL`,
+`tol::AC_PHASE_RAD`). Tune here as the zoo grows; record any change with its justification.
+
+**Updated 2026-08-01: all four metrics are now real, golden-gated implementations** — the AC row
+above is no longer "band-dependent"/unwired. Its previously-stated band is now two concrete
+numbers checked by `cargo xtask validate`: max relative error on the response **magnitude**
+(`1e-4`, the same band as DC — an AC solve reuses the very Jacobian a DC solve assembles, so
+there is no reason to accept a looser one) and max absolute error on its **phase** (`1e-4` rad
+≈ `0.0057°`). They are reported and enforced separately (`va_harness::ac::AcVerdict`): a
+magnitude that tracks golden while the phase drifts is a different bug (a wrong reactive/charge
+stamp) from the reverse (a wrong conductance), and collapsing them into one number would hide
+which happened.
 
 **Updated 2026-07-18: three of the four metrics are real, verified implementations now,** not
-`todo!()` stubs (AC/noise remains a stretch goal per `CLAUDE.md` §1 and `t5-acnoise`'s own
-honest status — see `docs/roadmap.md`'s T5 section):
-
-**Updated 2026-07-21: T5.1's AC linearization (`va_acnoise::ac`) is now real code**, validated
-against a closed-form RC low-pass transfer function to `1e-6` — no longer a bare `todo!()`. The
-**AC row above is still not a `va-harness`/golden metric**, though: no `.ac` netlist card,
-QSPICE-side `.ac` translation, or `xtask`/`va-cli` wiring exists yet, so nothing plugs this into
-`cargo xtask validate`'s convergence/error reporting the way DC and transient are. See
-`docs/roadmap.md`'s T5.1 entry for the full account.
+`todo!()` stubs:
 
 - **DC** (`va_harness::metrics::max_relative_error`) and **transient** (`rms_error`, plus the
   `resample_linear` shared-timebase step two independent adaptive-timestep integrators need) —
@@ -48,10 +50,46 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/{divider,mos_dc,diode_iv,rc_step,rectifier,ring_osc}.golden` are all real, QSPICE-
-generated data (`cargo xtask gen-golden`) — every one of `xtask`'s known circuits now has a
+`golden/{divider,mos_dc,diode_iv,rc_step,rectifier,ring_osc,rc_ac,diode_ac}.golden` are all real,
+QSPICE-generated data (`cargo xtask gen-golden`) — every one of `xtask`'s known circuits has a
 committed golden reference, closing the "which circuits aren't regenerated yet" gap this file
 used to track.
+
+### The AC gate (added 2026-08-01)
+
+Two circuits, chosen so the pair separates "the complex solve works" from "the model's own
+small-signal behavior is right":
+
+- **`circuits/rc_ac.net`** — the same 1 kΩ/1 µF network `rc_step.net` drives in the time domain,
+  swept 1 Hz–1 MHz at 10 points/decade. Pure `R`/`C`/`V`, so QSPICE runs it with no model
+  translation at all. Measured against golden: **magnitude `1.3e-15`, phase `1.7e-13` rad** —
+  machine precision, as it should be for two simulators assembling the identical linear system.
+- **`circuits/diode_ac.net`** — a compiled `models/diode.va` forward-biased through a 1 kΩ
+  resistor with a 100 nF load, swept 10 Hz–10 MHz. Measured: **magnitude `1.3e-5`, phase
+  `6.4e-6` rad**, the same order as `diode_iv.net`'s own DC `6.7e-5` and traceable to the same
+  cause (both simulators' diode temperature conventions), not to the AC path.
+
+The second circuit is what gives the gate teeth. Its passband gain is the small-signal divider
+`1/(1 + R1·gd)`, and `gd = Is/(N·Vt)·exp(Vd/(N·Vt))` depends *exponentially* on the solved bias:
+at the golden's own measured gain of `0.19988`, a mere 1% error in `Vd` would move `gd` by ~46%
+and the gain far outside `1e-4`. Agreeing to `1.3e-5` therefore constrains the DC operating
+point, `va-codegen`'s AD-derived Jacobian, and the linearization that consumes it, all at once —
+`rc_ac.net` alone would only have exercised `R`/`C` stamps.
+
+**Two grids, matched by frequency.** Asked for `.ac dec 10 1 1meg`, QSPICE emits **60** points —
+`10^(k/10)` for `k = 0..=58`, then jumps straight to `fstop`, silently dropping `10^5.9 ≈
+794.3 kHz` (confirmed empirically against a real run). `va_acnoise::ac::AcSweep::frequencies`
+emits the mathematically clean **61**, both endpoints included. Rather than teach this project's
+sweep to reproduce QSPICE's off-by-one, `va_harness::ac::compare_ac` aligns the two by frequency
+and compares every golden point exactly — no interpolation, since the grids genuinely coincide
+wherever they overlap (unlike the transient case, where two adaptive integrators share no
+timebase at all and resampling is unavoidable).
+
+**Phase needs two guards the other metrics don't** (`va_harness::metrics::max_phase_error`):
+angle differences are wrapped into `(−π, π]`, so a reference sitting on the ±180° branch cut —
+`rc_ac.net`'s own `I(V1)` approaches `−180°` at high frequency — doesn't report a ~2π "error"
+for a negligible disagreement; and points whose reference magnitude is below `REL_ERROR_FLOOR`
+are skipped entirely, since the phase of a value at both simulators' noise floor is arbitrary.
 
 ## Bring-up ladder
 

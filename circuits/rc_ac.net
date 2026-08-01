@@ -1,0 +1,13 @@
+* RC low-pass AC response — T5's AC bring-up circuit.
+* The same 1 kOhm / 1 uF network circuits/rc_step.net drives in the time domain (RC = 1 ms),
+* now excited by a 1 V small-signal source and swept over frequency instead.
+* The source's DC value is 0: an AC analysis linearizes about the operating point, and for a
+* purely linear network that point is irrelevant to the answer (the transfer function is the
+* same at any bias) -- so the deck states the simplest one rather than an arbitrary bias.
+* Expected: H(jw) = V(out)/V(in) = 1/(1 + jwRC), i.e. -3 dB at f = 1/(2*pi*RC) = 159.15 Hz,
+*   magnitude rolling off at -20 dB/decade with phase approaching -90 deg.
+V1 in  gnd  DC 0 AC 1
+R1 in  out  1000
+C1 out gnd  1e-6
+.ac dec 10 1 1meg
+.end

@@ -24,8 +24,12 @@
 //!   value, solving a fresh operating point at each step ([`crate::DcSweep`]) — only a linear
 //!   sweep of a single source, no nested/multi-source sweeps and no `.dc` with no arguments
 //!   (a source-list sweep) as some SPICE dialects also accept.
+//! - `.ac dec <points-per-decade> <fstart> <fstop>` (T5) requests a small-signal AC sweep
+//!   ([`crate::AcSweepCard`]); a `V` line's own `AC <magnitude> [phase]` tokens supply the
+//!   excitation ([`crate::AcSpec`]). Only the `dec` sweep type is parsed (see
+//!   [`crate::AcSweepCard`]'s own limitations), and a source's AC phase defaults to 0°.
 
-use crate::{AnalysisCard, DcSweep, Device, Netlist, NetlistError, Waveform};
+use crate::{AcSpec, AcSweepCard, AnalysisCard, DcSweep, Device, Netlist, NetlistError, Waveform};
 use va_abi::reference::GROUND;
 
 /// Parse a netlist deck into a [`Netlist`].
@@ -105,6 +109,27 @@ fn parse_card(net: &mut Netlist, body: &str) {
             });
         }
     }
+    // `.ac dec <points-per-decade> <fstart> <fstop>` (T5) — SPICE's standard positional AC sweep
+    // spec. Only `dec` is accepted (§ this module's own doc comment and `crate::AcSweepCard`'s):
+    // an `oct`/`lin` card leaves `net.ac` as `None`, so `va-cli` reports "no parseable `.ac`
+    // card" rather than silently solving a decade grid the deck never asked for.
+    if card == AnalysisCard::Ac {
+        let is_dec = toks.get(1).is_some_and(|t| t.eq_ignore_ascii_case("dec"));
+        if let (true, Some(ppd), Some(fstart), Some(fstop)) = (
+            is_dec,
+            toks.get(2).and_then(|v| parse_value(v)),
+            toks.get(3).and_then(|v| parse_value(v)),
+            toks.get(4).and_then(|v| parse_value(v)),
+        ) {
+            if ppd >= 1.0 {
+                net.ac = Some(AcSweepCard {
+                    points_per_decade: ppd as usize,
+                    fstart,
+                    fstop,
+                });
+            }
+        }
+    }
 }
 
 /// Parse one element line into a [`Device`], interning its terminal nets.
@@ -145,6 +170,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 terminals: vec![p, n],
                 value: Some(value),
                 waveform: None,
+                ac: None,
             })
         }
         'D' => {
@@ -158,6 +184,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 terminals: vec![p, n],
                 value: None,
                 waveform: None,
+                ac: None,
             })
         }
         // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
@@ -176,6 +203,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 terminals: vec![d, g, s],
                 value: None,
                 waveform: None,
+                ac: None,
             })
         }
         'V' => {
@@ -184,12 +212,14 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
             let n = intern(net, toks[2]);
             let value = parse_source_value(&toks[3..]);
             let waveform = parse_source_waveform(&toks[3..]);
+            let ac = parse_source_ac(&toks[3..]);
             Ok(Device {
                 name,
                 model: "vsource".to_string(),
                 terminals: vec![p, n],
                 value: Some(value),
                 waveform,
+                ac,
             })
         }
         // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
@@ -208,6 +238,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 terminals: vec![c, b, e],
                 value: None,
                 waveform: None,
+                ac: None,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -275,6 +306,25 @@ fn parse_source_waveform(rest: &[&str]) -> Option<Waveform> {
     }
 }
 
+/// Parse a `V` line's `AC <magnitude> [phase]` tokens, or `None` for a source with no `AC` token.
+///
+/// Position-independent within the trailing tokens, matching SPICE: `V1 in 0 DC 0.7 AC 1` and
+/// `V1 in 0 AC 1 DC 0.7` mean the same thing, and the `AC` token can equally follow a
+/// `SIN(...)` waveform. The magnitude must parse; a missing/unparseable one yields `None` (a
+/// bare `AC` with no value is not a 1 V default here — SPICE dialects disagree on that, and a
+/// silent implicit magnitude would be a surprising way to excite a circuit). The phase is
+/// optional and defaults to 0°; a non-numeric token in that position (e.g. the `DC` of a
+/// trailing `AC 1 DC 0.7`) is simply not a phase.
+fn parse_source_ac(rest: &[&str]) -> Option<AcSpec> {
+    let i = rest.iter().position(|t| t.eq_ignore_ascii_case("ac"))?;
+    let magnitude = rest.get(i + 1).and_then(|v| parse_value(v))?;
+    let phase_deg = rest.get(i + 2).and_then(|v| parse_value(v)).unwrap_or(0.0);
+    Some(AcSpec {
+        magnitude,
+        phase_deg,
+    })
+}
+
 /// Parse a numeric literal with an optional SPICE engineering suffix.
 ///
 /// Recognized suffixes (case-insensitive): `T G MEG K M U N P F A`. Note `MEG` is `1e6`
@@ -338,5 +388,65 @@ mod tests {
         assert_eq!(parse_source_value(&["DC", "1.0"]), 1.0);
         assert_eq!(parse_source_value(&["SIN(0", "5", "1k)"]), 0.0);
         assert_eq!(parse_source_value(&["2.5"]), 2.5);
+    }
+
+    #[test]
+    fn source_ac_specs() {
+        assert_eq!(
+            parse_source_ac(&["DC", "0.7", "AC", "1"]),
+            Some(AcSpec {
+                magnitude: 1.0,
+                phase_deg: 0.0
+            })
+        );
+        // Order-independent, and an explicit phase is picked up.
+        assert_eq!(
+            parse_source_ac(&["AC", "2", "90", "DC", "0.7"]),
+            Some(AcSpec {
+                magnitude: 2.0,
+                phase_deg: 90.0
+            })
+        );
+        // A trailing non-numeric token is not a phase — `DC` here must not become `0.7`'s phase
+        // slot or, worse, parse as some number.
+        assert_eq!(
+            parse_source_ac(&["AC", "1", "DC", "0.7"]),
+            Some(AcSpec {
+                magnitude: 1.0,
+                phase_deg: 0.0
+            })
+        );
+        // No AC token at all, and a bare `AC` with no magnitude, are both "no excitation".
+        assert_eq!(parse_source_ac(&["DC", "5"]), None);
+        assert_eq!(parse_source_ac(&["AC"]), None);
+    }
+
+    #[test]
+    fn ac_card_parses_only_a_dec_sweep() {
+        let net = parse("* t\nV1 in 0 AC 1\n.ac dec 10 1 1meg\n.end\n").expect("parse");
+        assert_eq!(net.analysis, AnalysisCard::Ac);
+        assert_eq!(
+            net.ac,
+            Some(AcSweepCard {
+                points_per_decade: 10,
+                fstart: 1.0,
+                fstop: 1e6,
+            })
+        );
+
+        // `lin`/`oct` are recognized as *AC analysis* but leave no parseable sweep — the
+        // frequency grid `va_acnoise::ac::AcSweep` produces is per-decade only, so promising a
+        // linear grid here would be a lie (§ `crate::AcSweepCard`'s own limitations).
+        let net = parse("* t\nV1 in 0 AC 1\n.ac lin 100 1 1meg\n.end\n").expect("parse");
+        assert_eq!(net.analysis, AnalysisCard::Ac);
+        assert_eq!(net.ac, None);
+    }
+
+    #[test]
+    fn a_deck_with_no_ac_card_has_no_ac_sweep() {
+        let net = parse("* t\nR1 a 0 1k\n.op\n.end\n").expect("parse");
+        assert_eq!(net.ac, None);
+        let v = parse("* t\nV1 a 0 DC 5\n.op\n.end\n").expect("parse");
+        assert_eq!(v.devices[0].ac, None);
     }
 }

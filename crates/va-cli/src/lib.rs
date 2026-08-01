@@ -14,8 +14,9 @@
 //! first parameter. Devices with no matching compiled model fall back to the hand-written
 //! reference primitives in `va-abi`.
 //!
-//! DC (`.op`) and transient (`.tran <tstep> <tstop>`) are implemented; AC decks are rejected
-//! with a clear message. Transient always starts from the zero vector — v0 has no `.ic`/`UIC`
+//! DC (`.op`/`.dc`), transient (`.tran <tstep> <tstop>`), and small-signal AC
+//! (`.ac dec <points-per-decade> <fstart> <fstop>`, T5) are implemented; noise is not.
+//! Transient always starts from the zero vector — v0 has no `.ic`/`UIC`
 //! support. A `V` source with a bare `DC <value>` combined with that cold start *is* the step
 //! response — the only shape a constant source could produce. A `V` source with a `SIN(...)`
 //! waveform is genuinely time-varying: since `va_abi::ModelInstance::load` has no time
@@ -122,6 +123,10 @@ pub fn run_sim(
             plot::plot_transient(path, &net, &wf).with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote transient plot to {path}");
         }
+    } else if analysis == Analysis::Ac {
+        let response = solve_ac(&net, &compiled)?;
+        let currents = branch_currents(&net, &compiled)?;
+        report_ac(&net, &currents, &response);
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
         report_sweep(&net, sweep, &points);
@@ -304,19 +309,26 @@ fn check_group(group: &[(String, std::path::PathBuf)]) -> usize {
     passed
 }
 
-/// Reject analyses v0 does not implement (AC), and mismatches between what the deck's own
-/// dot-card requests and what the caller asked to run.
+/// Reject mismatches between what the deck's own dot-card requests and what the caller asked to
+/// run, and analyses the deck doesn't carry the parameters for.
 fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
-    if net.analysis == AnalysisCard::Ac || analysis == Analysis::Ac {
-        bail!("AC analysis is not implemented in v0; only DC and transient are supported");
-    }
     if net.analysis == AnalysisCard::Tran && analysis != Analysis::Transient {
         bail!("deck requests transient analysis (`.tran`); pass `--tran` to run it");
+    }
+    if net.analysis == AnalysisCard::Ac && analysis != Analysis::Ac {
+        bail!("deck requests AC analysis (`.ac`); pass `--ac` to run it");
     }
     if analysis == Analysis::Transient && net.tran.is_none() {
         bail!(
             "transient analysis requested but the deck has no parseable \
              `.tran <tstep> <tstop>` card"
+        );
+    }
+    if analysis == Analysis::Ac && net.ac.is_none() {
+        bail!(
+            "AC analysis requested but the deck has no parseable \
+             `.ac dec <points-per-decade> <fstart> <fstop>` card (only the `dec` sweep type \
+             is supported)"
         );
     }
     Ok(())
@@ -522,6 +534,81 @@ pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
     .context("transient integration failed")
 }
 
+/// Build the complex small-signal excitation vector (`b` in `(G + jω·C)·X = b`) for `net`'s own
+/// AC sources, given every `vsource` device's assigned branch-current index (`currents`, §
+/// [`branch_currents`]).
+///
+/// A source's `AC <magnitude> [phase]` spec becomes a single entry at its **own branch-current
+/// row** — the same row its DC constraint (`V(p)-V(n) = value`) is stamped on. That row's
+/// Jacobian entries are already captured in `G`, so the stimulus is purely an RHS term (§
+/// `va_acnoise::ac::run`'s own doc comment); a source with no `AC` token contributes nothing but
+/// still holds its terminals to a zero small-signal difference through that same row, exactly as
+/// SPICE does.
+///
+/// # Errors
+///
+/// If no source in the deck carries an `AC` spec at all — the resulting system would be
+/// homogeneous, solving to an all-zero response at every frequency, which is a silently useless
+/// answer rather than a meaningful one.
+fn ac_excitation(
+    net: &Netlist,
+    currents: &[(String, usize)],
+    dim: usize,
+) -> Result<Vec<va_acnoise::ac::Complex>> {
+    let mut excitation = vec![(0.0, 0.0); dim];
+    let mut driven = 0usize;
+    for (name, branch) in currents {
+        let Some(dev) = net.devices.iter().find(|d| &d.name == name) else {
+            continue;
+        };
+        if let Some(ac) = dev.ac {
+            let phase = ac.phase_deg.to_radians();
+            excitation[*branch] = (ac.magnitude * phase.cos(), ac.magnitude * phase.sin());
+            driven += 1;
+        }
+    }
+    if driven == 0 {
+        bail!(
+            "AC analysis needs at least one source with an `AC <magnitude>` spec; none of this \
+             deck's {} voltage source(s) has one (the response would be identically zero)",
+            currents.len()
+        );
+    }
+    Ok(excitation)
+}
+
+/// Build every device instance, solve the DC operating point, and sweep the small-signal AC
+/// response over the deck's `.ac dec <points-per-decade> <fstart> <fstop>` grid (T5).
+///
+/// The DC solve is not incidental: `va_acnoise::ac::linearize` captures `G`/`C` from each
+/// instance's own Jacobian *at that point*, so a nonlinear device's small-signal behavior (a
+/// diode's `gd = Is/(N·Vt)·exp(V/(N·Vt))`, say) is only right if the bias it was linearized
+/// about is. `pub` so `va-harness` can get the numeric response back directly (§ golden
+/// comparison), the same reason `solve_dc`/`solve_dc_sweep`/`solve_transient` are.
+///
+/// # Errors
+///
+/// If the deck has no parseable `.ac` card, no AC-excited source ([`ac_excitation`]), the DC
+/// operating-point solve diverges, or the complex solve is singular at some frequency.
+pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::AcResponse> {
+    let card = net
+        .ac
+        .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
+
+    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
+    let op = operating_point(&refs, dim, NewtonConfig::default())
+        .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
+    let excitation = ac_excitation(net, &currents, dim)?;
+
+    let sweep = va_acnoise::ac::AcSweep {
+        fstart: card.fstart,
+        fstop: card.fstop,
+        points_per_decade: card.points_per_decade,
+    };
+    va_acnoise::ac::run(&refs, &op.x, dim, sweep, &excitation).context("AC sweep failed")
+}
+
 /// Turn one parsed [`Device`] into a loadable instance, preferring a matching compiled
 /// Verilog-A model and falling back to the reference primitives. Returns the device's own
 /// branch-current global index too, if it claimed one (`Some` only for a `vsource` — the only
@@ -677,6 +764,41 @@ fn report_sweep(
             }
         }
         println!();
+    }
+}
+
+/// Print the AC sweep: one line per frequency, every node's magnitude and phase, then every
+/// source branch current's. Magnitude/phase rather than the raw real/imaginary parts, since that
+/// is what a Bode reading of the result actually wants (`va-harness`'s golden comparison keeps
+/// the complex values instead — nothing is lost, the two forms are equivalent).
+///
+/// `currents` is [`branch_currents`]' own `(name, global index)` map rather than this function
+/// re-deriving indices by counting `vsource` devices the way [`report`]/[`report_sweep`] do — a
+/// compiled Verilog-A model can claim internal unknowns of its own from the same counter (§
+/// [`build_instances`]), so "one branch row per source, contiguously after the nodes" is only
+/// true for a deck of pure primitives.
+fn report_ac(net: &Netlist, currents: &[(String, usize)], response: &va_acnoise::ac::AcResponse) {
+    use va_acnoise::ac::{magnitude, phase};
+    println!(
+        "AC analysis ({} point(s), f={:e} to {:e} Hz):",
+        response.f.len(),
+        response.f.first().copied().unwrap_or(0.0),
+        response.f.last().copied().unwrap_or(0.0)
+    );
+    let polar = |z| format!("{:.6e}∠{:.2}°", magnitude(z), phase(z).to_degrees());
+    for (f, x) in response.f.iter().zip(&response.x) {
+        let mut cols: Vec<String> = net
+            .node_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("V({name})={}", polar(x[i])))
+            .collect();
+        cols.extend(
+            currents
+                .iter()
+                .map(|(name, idx)| format!("I({name})={}", polar(x[*idx]))),
+        );
+        println!("  f={f:.6e}Hz  {}", cols.join("  "));
     }
 }
 
@@ -1006,6 +1128,116 @@ mod tests {
         let deck = include_str!("../../../circuits/rectifier.net");
         let net = va_netlist::parser::parse(deck).expect("parse rectifier");
         assert!(gate_analysis(&net, Analysis::Dc).is_err());
+    }
+
+    #[test]
+    fn ac_deck_needs_the_ac_flag_and_an_ac_card() {
+        let deck = include_str!("../../../circuits/rc_ac.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rc_ac");
+        assert_eq!(net.analysis, AnalysisCard::Ac);
+        // The deck says `.ac`, so a default DC run must not silently solve something else.
+        assert!(gate_analysis(&net, Analysis::Dc).is_err());
+        gate_analysis(&net, Analysis::Ac).expect("AC analysis is accepted");
+
+        // Asking for AC on a deck with no `.ac` card is a clear error, not a guessed grid.
+        let divider = va_netlist::parser::parse(include_str!("../../../circuits/divider.net"))
+            .expect("parse divider");
+        assert!(gate_analysis(&divider, Analysis::Ac).is_err());
+    }
+
+    /// End-to-end AC (T5) through the real pipeline: parse `rc_ac.net`, build reference
+    /// instances, solve the DC point, linearize, sweep. Checked against the closed-form
+    /// `H(jω) = 1/(1 + jωRC)` the network itself implements — the same closed form
+    /// `va_acnoise::ac`'s own unit test uses, but reached here from a netlist file exactly the
+    /// way `va-cli sim circuits/rc_ac.net --ac` does, through `.ac`/`AC 1` deck parsing and the
+    /// branch-row excitation vector rather than a hand-built instance list.
+    #[test]
+    fn rc_ac_solves_through_the_real_pipeline() {
+        let deck = include_str!("../../../circuits/rc_ac.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rc_ac");
+        let response = solve_ac(&net, &[]).expect("AC sweep");
+
+        let in_idx = net.node_order.iter().position(|n| n == "in").unwrap();
+        let out_idx = net.node_order.iter().position(|n| n == "out").unwrap();
+        assert_eq!(response.f.len(), response.x.len());
+        assert!(response.f.len() > 50, "1 Hz..1 MHz at 10/decade");
+
+        let (r, c) = (1000.0, 1e-6);
+        for (&f, x) in response.f.iter().zip(&response.x) {
+            // The source itself is held at exactly its own 1 V∠0° excitation.
+            let (in_re, in_im) = x[in_idx];
+            assert!(
+                (in_re - 1.0).abs() < 1e-9 && in_im.abs() < 1e-9,
+                "V(in) at f={f} = {in_re}+{in_im}j, expected 1+0j"
+            );
+
+            let wrc = 2.0 * PI * f * r * c;
+            let expected_mag = 1.0 / (1.0 + wrc * wrc).sqrt();
+            let expected_phase = -wrc.atan();
+            let got_mag = va_acnoise::ac::magnitude(x[out_idx]);
+            let got_phase = va_acnoise::ac::phase(x[out_idx]);
+            assert!(
+                (got_mag - expected_mag).abs() < 1e-9,
+                "f={f}: |V(out)| = {got_mag}, expected {expected_mag}"
+            );
+            assert!(
+                (got_phase - expected_phase).abs() < 1e-9,
+                "f={f}: ∠V(out) = {got_phase}, expected {expected_phase}"
+            );
+        }
+    }
+
+    /// End-to-end AC through the codegen pipeline at a *nonlinear* operating point (T5):
+    /// `circuits/diode_ac.net` compiles `models/diode.va` and biases `D1` at ~0.7 V, so the
+    /// answer depends on the diode's own AD-derived small-signal conductance
+    /// `gd = Is/(N·Vt)·exp(Vd/(N·Vt))`, not just R/C stamps. Checked against the closed form for
+    /// the resulting `R1`-into-`(rd ∥ C1)` network, computed from the *solved* diode voltage
+    /// (which is itself an operating-point result, not a hand-assumed 0.7 V — `R1` drops some of
+    /// the source's 0.7 V).
+    #[test]
+    fn diode_ac_solves_through_the_codegen_pipeline_at_its_bias() {
+        let src = include_str!("../../../models/diode.va");
+        let design = va_frontend::compile(src).expect("compile diode.va");
+        let deck = include_str!("../../../circuits/diode_ac.net");
+        let net = va_netlist::parser::parse(deck).expect("parse diode_ac");
+
+        let op = solve_dc(&net, &design.modules).expect("DC bias");
+        let a_idx = net.node_order.iter().position(|n| n == "a").unwrap();
+        let vd = op.x[a_idx];
+        // A forward-biased diode sits in the usual few-hundred-mV band, well under the source's
+        // own 0.7 V (R1 drops the rest) — confirms this is a genuinely nonlinear bias point, not
+        // a degenerate one where the check below would pass trivially.
+        assert!(
+            (0.3..0.7).contains(&vd),
+            "V(a) = {vd}, expected a real forward bias"
+        );
+
+        let response = solve_ac(&net, &design.modules).expect("AC sweep");
+        // diode.va's own defaults (Is = 1e-14, N = 1) and va-codegen's thermal voltage.
+        let gd = 1e-14 / va_codegen::VT * (vd / va_codegen::VT).exp();
+        let (r1, c1) = (1000.0, 1e-7);
+        for (&f, x) in response.f.iter().zip(&response.x) {
+            // Small-signal divider: V(a)/V(in) = Y_load⁻¹ / (R1 + Y_load⁻¹) with
+            // Y_load = gd + jωC1, i.e. V(a)/V(in) = 1 / (1 + R1·(gd + jωC1)).
+            let (dre, dim) = (1.0 + r1 * gd, r1 * 2.0 * PI * f * c1);
+            let expected_mag = 1.0 / (dre * dre + dim * dim).sqrt();
+            let got_mag = va_acnoise::ac::magnitude(x[a_idx]);
+            assert!(
+                (got_mag - expected_mag).abs() <= 1e-6 * expected_mag.max(1e-12),
+                "f={f}: |V(a)| = {got_mag}, expected {expected_mag}"
+            );
+        }
+    }
+
+    #[test]
+    fn ac_analysis_needs_an_excited_source() {
+        // Same RC network, but the source carries no `AC` token: the system is homogeneous and
+        // would solve to an all-zero response at every frequency. That's a clear error, not a
+        // silently useless answer.
+        let deck = "* no ac source\nV1 in gnd DC 1\nR1 in out 1000\nC1 out gnd 1e-6\n\
+                    .ac dec 10 1 1meg\n.end\n";
+        let net = va_netlist::parser::parse(deck).expect("parse");
+        assert!(solve_ac(&net, &[]).is_err());
     }
 
     /// End-to-end transient through the real pipeline: parse `rc_step.net`, build reference

@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ac;
 pub mod dc;
 pub mod golden;
 pub mod metrics;
@@ -53,6 +54,19 @@ pub mod tol {
     pub const DC_REL: f64 = 1e-4;
     /// Transient: waveform RMS error after a shared-timebase resample.
     pub const TRAN_RMS: f64 = 1e-3;
+    /// AC: max relative error on the response *magnitude*, over every frequency and every
+    /// node/branch-current column. Held to the same band as [`DC_REL`] — an AC solve reuses the
+    /// very Jacobian a DC solve assembles, so there is no reason to accept a looser one.
+    pub const AC_MAG_REL: f64 = 1e-4;
+    /// AC: max absolute error on the response *phase*, in radians (`1e-4 rad ≈ 0.0057°`), over
+    /// every frequency and every column whose reference magnitude is above the metric's own
+    /// noise floor (§ [`crate::metrics::max_phase_error`]).
+    ///
+    /// Stated in radians rather than degrees because that is the unit the phase is computed in;
+    /// the band is deliberately the same number as [`AC_MAG_REL`], since for a response of order
+    /// unity a relative magnitude error and an absolute phase error in radians are directly
+    /// comparable perturbations of the same complex value.
+    pub const AC_PHASE_RAD: f64 = 1e-4;
 }
 
 /// Outcome of comparing one analysis against its golden reference.

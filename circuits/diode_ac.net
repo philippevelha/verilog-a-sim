@@ -1,0 +1,14 @@
+* Forward-biased diode small-signal AC response — T5's nonlinear AC circuit.
+* Unlike circuits/rc_ac.net (linear at every bias), this deck's answer depends on the DC
+* operating point: the diode's small-signal conductance gd = dI/dV = Is/(N*Vt) * exp(V/(N*Vt))
+* is what the AC solve linearizes to, so this genuinely exercises the compiled model's own
+* AD-derived Jacobian (va-codegen) at a nonzero bias, not just R/C stamps.
+* V1 biases through R1; the diode and C1 sit at node `a` as the load.
+* Expected: a low-pass whose passband gain is the resistive divider rd/(R1+rd) formed by the
+*   diode's own small-signal resistance rd = 1/gd, rolling off above 1/(2*pi*(R1||rd)*C1).
+V1 in  gnd  DC 0.7 AC 1
+R1 in  a    1000
+D1 a   gnd  diode
+C1 a   gnd  1e-7
+.ac dec 10 10 10meg
+.end

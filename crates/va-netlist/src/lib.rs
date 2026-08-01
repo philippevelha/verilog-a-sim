@@ -64,6 +64,43 @@ pub struct Netlist {
     /// value parsed (§ ladder rung 2). `None` for a deck with no `.dc` card, one whose tokens
     /// didn't parse, or a plain `.op` card — those solve a single operating point instead.
     pub dc: Option<DcSweep>,
+    /// `.ac dec <points-per-decade> <fstart> <fstop>` sweep spec (T5), if an AC card was present
+    /// and every value parsed. `None` for a deck with no `.ac` card, one whose tokens didn't
+    /// parse, or one requesting a sweep type other than `dec` — `va-cli` reports that clearly
+    /// rather than silently sweeping a different grid than the deck asked for.
+    pub ac: Option<AcSweepCard>,
+}
+
+/// An `.ac dec <points-per-decade> <fstart> <fstop>` sweep spec (T5): solve the small-signal
+/// response at logarithmically-spaced frequencies, linearized about the DC operating point.
+///
+/// # Limitations
+///
+/// Only SPICE's `dec` (per-decade) sweep type is parsed — not `oct` or `lin`. That matches what
+/// `va_acnoise::ac::AcSweep` itself implements, so accepting `lin` here would promise a grid the
+/// analysis can't actually produce.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcSweepCard {
+    /// Frequency points per decade.
+    pub points_per_decade: usize,
+    /// Start frequency (Hz).
+    pub fstart: f64,
+    /// Stop frequency (Hz).
+    pub fstop: f64,
+}
+
+/// A voltage source's small-signal AC excitation (`AC <magnitude> [phase]` on a `V` line).
+///
+/// Entirely independent of the source's DC value: SPICE's own convention is that `V1 in 0 DC 0.7
+/// AC 1` biases the circuit at 0.7 V *and* injects a 1 V small-signal stimulus, with the AC
+/// magnitude never affecting the operating point it is linearized about.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcSpec {
+    /// Small-signal magnitude (V).
+    pub magnitude: f64,
+    /// Phase, in **degrees** (SPICE's own unit for this token), converted to radians only at the
+    /// point the complex excitation vector is built (`va-cli::solve_ac`).
+    pub phase_deg: f64,
 }
 
 /// A `.dc <source> <start> <stop> <step>` sweep spec (§ ladder rung 2): step `source`'s DC value
@@ -102,6 +139,11 @@ pub struct Device {
     /// (e.g. `SIN(...)`). `None` for a plain `DC <value>`/bare-number source, or for any
     /// non-source device.
     pub waveform: Option<Waveform>,
+    /// The small-signal `AC <magnitude> [phase]` excitation a `V` line specifies (T5). `None`
+    /// for a source with no `AC` token — such a source still stamps its DC constraint row during
+    /// an AC analysis (holding its two terminals at a fixed small-signal difference of zero), it
+    /// just contributes nothing to the excitation vector.
+    pub ac: Option<AcSpec>,
 }
 
 /// A time-domain source waveform beyond a bare DC value.
