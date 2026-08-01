@@ -955,16 +955,19 @@ fn gen_noise_golden(
     // produce, so it reuses `run_qspice_sweep` rather than needing its own reader.
     let raw = run_qspice_sweep(qspice, native_deck, tmp, &stem)
         .with_context(|| format!("running QSPICE on {circuit}"))?;
-    let golden = golden_noise_from_qraw(&raw, &output, &source)
+    let devices = golden_noise_devices(root, circuit)
+        .with_context(|| format!("resolving noise contributors for {circuit}"))?;
+    let golden = golden_noise_from_qraw(&raw, &output, &source, &devices)
         .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
 
     let golden_path = root.join("golden").join(format!("{stem}.golden"));
     std::fs::write(&golden_path, golden.render())
         .with_context(|| format!("writing {}", golden_path.display()))?;
     eprintln!(
-        "[xtask]   wrote {} ({} frequency point(s), noise PSD at V({output}))",
+        "[xtask]   wrote {} ({} frequency point(s), noise PSD at V({output}), {} device(s))",
         golden_path.display(),
-        golden.points.len()
+        golden.points.len(),
+        golden.devices.len()
     );
     Ok(1)
 }
@@ -1295,10 +1298,18 @@ const QSPICE_INOISE_TOTAL: &str = "V(inoise_spectrum)";
 ///
 /// A noise `.qraw` is `Flags: real` and point-major, so it needs no complex parsing at all —
 /// [`parse_qraw_sweep`] reads it unchanged, and only the *column selection* is noise-specific.
+/// `devices` names each noise-contributing device in **this project's** own spelling (`R1`,
+/// `D1`), resolved by [`golden_noise_devices`]; QSPICE spells the matching column
+/// `V(onoise_r1)`, lowercased, so the lookup is case-insensitive like every other one here.
+///
+/// QSPICE also emits per-*mechanism* sub-columns for a device (`V(onoise_d1.id)`,
+/// `V(onoise_d1.1overf)`, `V(onoise_d1.rs)`); only the aggregate `V(onoise_d1)` is read, since
+/// this project attributes noise per device rather than per mechanism (§ `va_acnoise::noise`).
 fn golden_noise_from_qraw(
     raw: &QspiceRawSweep,
     output: &str,
     source: &str,
+    devices: &[String],
 ) -> Result<va_harness::golden::GoldenNoise> {
     let column = |label: &str| -> Result<usize> {
         raw.variables
@@ -1309,15 +1320,53 @@ fn golden_noise_from_qraw(
     let freq_idx = column("Frequency")?;
     let psd_idx = column(QSPICE_ONOISE_TOTAL)?;
     let input_idx = column(QSPICE_INOISE_TOTAL)?;
+    let device_idx: Vec<usize> = devices
+        .iter()
+        .map(|d| column(&format!("V(onoise_{d})")))
+        .collect::<Result<_>>()?;
     Ok(va_harness::golden::GoldenNoise {
         output: output.to_string(),
         source: source.to_string(),
+        devices: devices.to_vec(),
         points: raw
             .points
             .iter()
-            .map(|row| (row[freq_idx], row[psd_idx], row[input_idx]))
+            .map(|row| {
+                (
+                    row[freq_idx],
+                    row[psd_idx],
+                    row[input_idx],
+                    device_idx.iter().map(|&i| row[i]).collect(),
+                )
+            })
             .collect(),
     })
+}
+
+/// The devices that contribute noise in `circuit`, in this project's own naming and in the order
+/// its own analysis reports them.
+///
+/// Resolved by *running* the analysis, because only a solve knows which devices actually
+/// contribute — a reverse-biased junction at zero current, or a model with `KF = 0`, emits
+/// nothing and correctly gets no column. This mirrors [`golden_node_order`], which likewise
+/// loads the circuit through the real pipeline so the golden file's own columns match exactly
+/// what `validate` will later compare against.
+fn golden_noise_devices(root: &Path, circuit: &str) -> Result<Vec<String>> {
+    let circuit_path = root.join(circuit);
+    let circuit_str = circuit_path.to_str().context("non-UTF8 circuit path")?;
+    let model_path = va_model_for(circuit).map(|m| root.join(m));
+    let model_str = model_path
+        .as_deref()
+        .map(|p| p.to_str().context("non-UTF8 model path"))
+        .transpose()?;
+    let (net, compiled) = va_cli::load(circuit_str, model_str)
+        .with_context(|| format!("loading {circuit} for noise-contributor resolution"))?;
+    let spectrum = va_cli::solve_noise(&net, &compiled)
+        .with_context(|| format!("solving {circuit} for noise-contributor resolution"))?;
+    Ok(va_cli::noise_contributors(&net, &spectrum)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// Look up each of `node_order`'s labels in `variables`/`row` — shared by [`golden_dc_from_qraw`]
@@ -1362,6 +1411,8 @@ fn va_model_for(circuit: &str) -> Option<&'static str> {
         .iter()
         .chain(SWEEP_CIRCUITS)
         .chain(TRAN_CIRCUITS)
+        .chain(AC_CIRCUITS)
+        .chain(NOISE_CIRCUITS)
         .find(|(c, _)| *c == circuit)
         .and_then(|&(_, m)| m)
 }
@@ -1872,43 +1923,67 @@ mod tests {
         );
     }
 
-    #[test]
-    fn golden_noise_from_qraw_picks_the_two_total_columns() {
-        // A real `.noise` run's variable list: per-device columns *and* the two summed totals.
-        // Only the totals are taken — picking a per-device column by accident would silently
-        // golden a fraction of the real noise.
-        let raw = QspiceRawSweep {
+    /// A real `.noise` variable list, including the per-*mechanism* sub-columns QSPICE emits for
+    /// a device. The aggregate `V(onoise_d1)` is the one taken; picking `V(onoise_d1.id)` by
+    /// accident would silently golden a fraction of that device's real noise.
+    fn synthetic_noise_qraw() -> QspiceRawSweep {
+        QspiceRawSweep {
             variables: vec![
                 "Frequency".to_string(),
                 "V(onoise_r1)".to_string(),
+                "V(onoise_d1.id)".to_string(),
+                "V(onoise_d1.1overf)".to_string(),
                 "V(onoise_d1)".to_string(),
                 "V(onoise_spectrum)".to_string(),
                 "V(inoise_spectrum)".to_string(),
             ],
             points: vec![
-                vec![10.0, 6.62e-19, 1.325e-18, 1.9877e-18, 4.975e-17],
-                vec![100.0, 6.62e-19, 1.325e-18, 1.9877e-18, 4.975e-17],
+                vec![
+                    10.0, 6.62e-19, 1.0e-18, 3.25e-19, 1.325e-18, 1.9877e-18, 4.975e-17,
+                ],
+                vec![
+                    100.0, 6.62e-19, 1.0e-18, 3.25e-19, 1.325e-18, 1.9877e-18, 4.975e-17,
+                ],
             ],
-        };
-        let golden = golden_noise_from_qraw(&raw, "a", "V1").expect("map");
+        }
+    }
+
+    #[test]
+    fn golden_noise_from_qraw_picks_the_totals_and_per_device_columns() {
+        let raw = synthetic_noise_qraw();
+        let devices = vec!["R1".to_string(), "D1".to_string()];
+        let golden = golden_noise_from_qraw(&raw, "a", "V1", &devices).expect("map");
         assert_eq!(golden.output, "a");
         assert_eq!(golden.source, "V1");
+        assert_eq!(golden.devices, devices);
+        // Per-device columns are the *aggregates*, not the `.id`/`.1overf` sub-mechanisms — and
+        // the lookup is case-insensitive, since QSPICE lowercases device names.
         assert_eq!(
             golden.points,
             vec![
-                (10.0, 1.9877e-18, 4.975e-17),
-                (100.0, 1.9877e-18, 4.975e-17)
+                (10.0, 1.9877e-18, 4.975e-17, vec![6.62e-19, 1.325e-18]),
+                (100.0, 1.9877e-18, 4.975e-17, vec![6.62e-19, 1.325e-18])
             ]
         );
     }
 
     #[test]
+    fn golden_noise_from_qraw_errors_on_a_device_with_no_column() {
+        let raw = synthetic_noise_qraw();
+        // `Q9` isn't in this run at all — better to fail than to emit a zero column that would
+        // read as "this device is silent".
+        let devices = vec!["R1".to_string(), "Q9".to_string()];
+        assert!(golden_noise_from_qraw(&raw, "a", "V1", &devices).is_err());
+    }
+
+    #[test]
     fn golden_noise_from_qraw_errors_without_a_total_column() {
+        let none: [String; 0] = [];
         let raw = QspiceRawSweep {
             variables: vec!["Frequency".to_string(), "V(onoise_r1)".to_string()],
             points: vec![vec![10.0, 6.62e-19]],
         };
-        assert!(golden_noise_from_qraw(&raw, "a", "V1").is_err());
+        assert!(golden_noise_from_qraw(&raw, "a", "V1", &none).is_err());
 
         // Present output total, missing input-referred total — also an error, rather than a
         // golden file with a silently-zero second column.
@@ -1916,7 +1991,7 @@ mod tests {
             variables: vec!["Frequency".to_string(), "V(onoise_spectrum)".to_string()],
             points: vec![vec![10.0, 1.9877e-18]],
         };
-        assert!(golden_noise_from_qraw(&raw, "a", "V1").is_err());
+        assert!(golden_noise_from_qraw(&raw, "a", "V1", &none).is_err());
     }
 
     #[test]

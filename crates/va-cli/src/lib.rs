@@ -701,6 +701,33 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         .context("noise sweep failed")
 }
 
+/// Name each contributor in a solved [`va_acnoise::noise::NoiseSpectrum`]'s per-device
+/// breakdown, pairing every entry with the netlist device that produced it.
+///
+/// **The mapping is positional**, and that is sound for one specific reason:
+/// [`build_instances`] pushes exactly one instance per `net.devices` entry, in order, so
+/// `instances[i]` is always `net.devices[i]`. `va-acnoise` tags each noise source with the index
+/// of the instance that emitted it (it has no other identity to work with — a
+/// `va_abi::ModelInstance` has no name), and this function turns that index back into a name.
+///
+/// An index with no corresponding device is skipped rather than guessed at or panicked on: it
+/// would mean the 1:1 invariant above had been broken, and silently mislabelling someone else's
+/// noise is worse than omitting a row.
+pub fn noise_contributors(
+    net: &Netlist,
+    spectrum: &va_acnoise::noise::NoiseSpectrum,
+) -> Vec<(String, Vec<f64>)> {
+    spectrum
+        .per_instance
+        .iter()
+        .filter_map(|(idx, series)| {
+            net.devices
+                .get(*idx)
+                .map(|dev| (dev.name.clone(), series.clone()))
+        })
+        .collect()
+}
+
 /// Whether any instance emits at least one noise source at operating point `x` (§
 /// [`solve_noise`]'s own "a silently zero spectrum is worse than an error" check).
 fn has_noise_sources(instances: &[&dyn ModelInstance], x: &[f64]) -> bool {
@@ -940,6 +967,33 @@ fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
             "  total integrated input-referred noise (at {source}) = {:.6e} V rms",
             spectrum.input_total
         );
+    }
+
+    // Per-device breakdown, ordered loudest-first — the actionable form of "where is my noise
+    // coming from?". Reported as each device's share of the band-integrated power, which is the
+    // question a designer is usually asking; the per-frequency detail is in the table above.
+    let contributors = noise_contributors(net, spectrum);
+    if !contributors.is_empty() {
+        let mut shares: Vec<(String, f64)> = contributors
+            .iter()
+            .map(|(name, series)| {
+                // Integrate this device's own share on the same trapezoidal grid the totals use.
+                let power: f64 = spectrum
+                    .f
+                    .windows(2)
+                    .zip(series.windows(2))
+                    .map(|(fw, sw)| 0.5 * (sw[0] + sw[1]) * (fw[1] - fw[0]))
+                    .sum();
+                (name.clone(), power.max(0.0))
+            })
+            .collect();
+        shares.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let sum: f64 = shares.iter().map(|(_, p)| p).sum();
+        println!("  per-device contribution to the integrated output noise:");
+        for (name, power) in shares {
+            let pct = if sum > 0.0 { 100.0 * power / sum } else { 0.0 };
+            println!("    {name:<8} {:.6e} V rms  ({pct:5.1}%)", power.sqrt());
+        }
     }
 }
 

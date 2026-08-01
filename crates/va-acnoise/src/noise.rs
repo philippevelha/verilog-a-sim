@@ -54,13 +54,29 @@
 //! that gives every noise source its transfer impedance also gives the forward gain, so
 //! input-referral costs one extra division per point rather than a second linear solve.
 //!
+//! # Per-device attribution
+//!
+//! [`NoiseSpectrum::per_instance`] breaks the total down by *which device produced it* — the
+//! answer to "where is my noise coming from?", and the one a designer actually acts on.
+//!
+//! Device identity does not come from Interface β: a [`ModelInstance`] has no name, and
+//! [`va_abi::NoiseSink`] receives only `(p, n, psd)`. It comes from **position** instead. This
+//! module calls `inst.noise(..)` over `instances` in order, so it knows which instance emitted
+//! each source and tags it with that index; the caller, which built the instance list, maps the
+//! index back to a device name (`va_cli::noise_contributors`). No ABI change was needed, and the
+//! attribution is exact rather than inferred from topology — two identical resistors in
+//! parallel stay distinguishable, which a `(p, n)`-keyed grouping could never manage.
+//!
+//! Attribution is **per device, not per mechanism**: a diode contributing both shot and flicker
+//! noise reports one combined figure. QSPICE additionally splits its own `onoise_d1` into
+//! `onoise_d1.id`/`onoise_d1.1overf`/`onoise_d1.rs`; reproducing that split would mean naming
+//! each model's internal call sites, which this project has no representation for.
+//!
 //! # Limitations
 //!
 //! - **White and flicker sources only, and only what a model declares** — inherited from
 //!   Interface β's noise channel; see `va_abi::noise`'s own module doc.
-//! - **No per-device breakdown.** [`NoiseSpectrum`] reports the total at each frequency, not
-//!   one column per contributing device (QSPICE emits `onoise_<dev>` columns too). The
-//!   per-source contributions exist inside [`run`]'s loop; nothing but the sum is retained.
+//! - **No per-mechanism split within a device**, as above.
 
 use crate::ac::{linearize, solve_block_embedded, AcSweep, Complex};
 use crate::AcNoiseError;
@@ -94,6 +110,17 @@ pub struct NoiseSpectrum {
     /// `0.0` when no input source was given. Non-finite points are skipped by the quadrature
     /// (see [`integrate_rms`]).
     pub input_total: f64,
+    /// Per-device output-noise breakdown: `(index into the `instances` slice, that instance's
+    /// own contribution over [`Self::f`])`, ascending by index and listing **only** instances
+    /// that emitted at least one source.
+    ///
+    /// Summing these across instances reproduces [`Self::psd`] exactly — they are the same
+    /// per-source terms, bucketed rather than accumulated straight into the total.
+    ///
+    /// The index is positional because that is the only identity available at this layer (§ this
+    /// module's doc comment); a caller that built the instance list maps it back to a device
+    /// name.
+    pub per_instance: Vec<(usize, Vec<f64>)>,
 }
 
 /// Collects noise sources as `(p, n, source)` while each instance emits them.
@@ -103,7 +130,12 @@ pub struct NoiseSpectrum {
 /// while the transfer impedance `Z` it is weighted by comes from that point's own adjoint solve.
 #[derive(Default)]
 struct SourceList {
-    sources: Vec<(usize, usize, NoiseSource)>,
+    /// `(emitting instance index, p, n, source)`.
+    sources: Vec<(usize, usize, usize, NoiseSource)>,
+    /// The instance currently being polled — stamped onto every source it emits, which is how
+    /// per-device attribution happens without the ABI carrying any identity (§ this module's
+    /// doc comment).
+    current: usize,
 }
 
 impl SourceList {
@@ -111,15 +143,25 @@ impl SourceList {
     ///
     /// A zero-power source contributes nothing to any output and would only cost a subtraction
     /// per frequency — drop it here rather than in the hot loop. (A reverse-biased junction at
-    /// exactly zero current, or a model with a zero `KF`, both land here.)
+    /// exactly zero current, or a model with a zero `KF`, both land here.) A device whose every
+    /// source is dropped this way simply doesn't appear in the per-device breakdown, which is
+    /// the right answer: it contributes nothing.
     fn push(&mut self, p: usize, n: usize, source: NoiseSource) {
         let powerless = match source {
             NoiseSource::White { psd } => psd <= 0.0,
             NoiseSource::Flicker { coeff, .. } => coeff <= 0.0,
         };
         if !powerless {
-            self.sources.push((p, n, source));
+            self.sources.push((self.current, p, n, source));
         }
+    }
+
+    /// The distinct instance indices that emitted at least one source, ascending.
+    fn contributors(&self) -> Vec<usize> {
+        let mut ids: Vec<usize> = self.sources.iter().map(|&(i, ..)| i).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 }
 
@@ -181,8 +223,16 @@ pub fn run(
 
     let (g, c) = linearize(instances, x_dc, dim);
     let mut collected = SourceList::default();
-    for inst in instances {
+    for (i, inst) in instances.iter().enumerate() {
+        collected.current = i;
         inst.noise(x_dc, temp, &mut collected);
+    }
+    let contributors = collected.contributors();
+    // Position within `contributors` for each instance index, so the hot loop can bucket by a
+    // direct array index rather than searching per source.
+    let mut bucket_of = vec![usize::MAX; instances.len()];
+    for (slot, &id) in contributors.iter().enumerate() {
+        bucket_of[id] = slot;
     }
 
     // The adjoint right-hand side: a unit "probe" at the output unknown, the one thing that
@@ -193,22 +243,27 @@ pub fn run(
     let f = sweep.frequencies();
     let mut psd = Vec::with_capacity(f.len());
     let mut input_psd = Vec::with_capacity(if input.is_some() { f.len() } else { 0 });
+    let mut per_instance: Vec<Vec<f64>> = vec![Vec::with_capacity(f.len()); contributors.len()];
     for &freq in &f {
         let omega = 2.0 * std::f64::consts::PI * freq;
         let y = solve_block_embedded(&g, &c, dim, omega, &e_out, true)?;
-        let total: f64 = collected
-            .sources
-            .iter()
-            .map(|&(p, n, source)| {
-                let (pre, pim) = at(&y, p);
-                let (nre, nim) = at(&y, n);
-                // Z_k = y_p - y_n; the contribution is |Z_k|² · S_k(f). The transfer impedance
-                // is frequency-dependent through the adjoint solve, and `S_k` is too for a
-                // flicker source — hence `psd_at(freq)` rather than a precomputed number.
-                let (zre, zim) = (pre - nre, pim - nim);
-                (zre * zre + zim * zim) * source.psd_at(freq)
-            })
-            .sum();
+
+        let mut buckets = vec![0.0; contributors.len()];
+        for &(id, p, n, source) in &collected.sources {
+            let (pre, pim) = at(&y, p);
+            let (nre, nim) = at(&y, n);
+            // Z_k = y_p - y_n; the contribution is |Z_k|² · S_k(f). The transfer impedance is
+            // frequency-dependent through the adjoint solve, and `S_k` is too for a flicker
+            // source — hence `psd_at(freq)` rather than a precomputed number.
+            let (zre, zim) = (pre - nre, pim - nim);
+            buckets[bucket_of[id]] += (zre * zre + zim * zim) * source.psd_at(freq);
+        }
+        // The total is the sum of the per-device buckets, computed once rather than
+        // independently — so the breakdown and the total cannot drift apart.
+        let total: f64 = buckets.iter().sum();
+        for (slot, value) in buckets.into_iter().enumerate() {
+            per_instance[slot].push(value);
+        }
         psd.push(total);
 
         // The forward gain from the input source, read straight out of the adjoint vector at
@@ -232,6 +287,7 @@ pub fn run(
         total,
         input_psd,
         input_total,
+        per_instance: contributors.into_iter().zip(per_instance).collect(),
     })
 }
 
@@ -532,6 +588,112 @@ mod tests {
             (last / 1e-22 - 1.0).abs() < 1e-3,
             "high end should be white-dominated: {last}"
         );
+    }
+
+    /// The per-device breakdown must attribute each share to the right device *and* sum back to
+    /// the total. Two parallel resistors of different value at the same node give unequal,
+    /// individually-known shares: each contributes `4kT/R · Z²` with the same `Z = R1∥R2`, so
+    /// the 1 kΩ contributes three times what the 3 kΩ does.
+    #[test]
+    fn per_device_shares_are_attributed_and_sum_to_the_total() {
+        let (r1, r2) = (1000.0, 3000.0);
+        let a = Resistor::new(0, GROUND, r1);
+        let b = Resistor::new(0, GROUND, r2);
+        let insts: [&dyn ModelInstance; 2] = [&a, &b];
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
+
+        assert_eq!(spectrum.per_instance.len(), 2);
+        assert_eq!(spectrum.per_instance[0].0, 0, "instance 0 is the 1 kΩ");
+        assert_eq!(spectrum.per_instance[1].0, 1, "instance 1 is the 3 kΩ");
+
+        let z = 1.0 / (1.0 / r1 + 1.0 / r2);
+        for (idx, r) in [(0usize, r1), (1usize, r2)] {
+            let expected = 4.0 * BOLTZMANN * TEMP_NOMINAL / r * z * z;
+            let got = spectrum.per_instance[idx].1[0];
+            assert!(
+                (got / expected - 1.0).abs() < 1e-9,
+                "instance {idx}: {got}, expected {expected}"
+            );
+        }
+        // The smaller resistor is the noisier one, by exactly R2/R1 = 3.
+        let ratio = spectrum.per_instance[0].1[0] / spectrum.per_instance[1].1[0];
+        assert!((ratio - 3.0).abs() < 1e-9, "ratio = {ratio}");
+
+        // And the shares reconstruct the total at every frequency.
+        for (i, &t) in spectrum.psd.iter().enumerate() {
+            let sum: f64 = spectrum.per_instance.iter().map(|(_, s)| s[i]).sum();
+            assert!((sum / t - 1.0).abs() < 1e-12, "sum {sum} vs total {t}");
+        }
+    }
+
+    /// Two **identical** resistors stay separate entries. This is the case a `(p, n)`-keyed
+    /// grouping could never handle — both sources sit across the same branch with the same PSD —
+    /// and it is why attribution is positional (§ this module's doc comment).
+    #[test]
+    fn identical_devices_remain_distinguishable() {
+        let a = Resistor::new(0, GROUND, 1000.0);
+        let b = Resistor::new(0, GROUND, 1000.0);
+        let insts: [&dyn ModelInstance; 2] = [&a, &b];
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
+        assert_eq!(spectrum.per_instance.len(), 2, "must not merge into one");
+        assert_eq!(
+            spectrum.per_instance[0].1[0], spectrum.per_instance[1].1[0],
+            "identical devices contribute equally"
+        );
+    }
+
+    /// A noiseless device is absent from the breakdown rather than present with zeros — the
+    /// breakdown lists contributors, and `VSource`/`Capacitor` are not among them.
+    #[test]
+    fn noiseless_devices_are_omitted_from_the_breakdown() {
+        // Unknowns: 0 = in, 1 = out, 2 = V1's branch current. Only the resistor is noisy.
+        let v1 = VSource::new(0, GROUND, 2, 1.0);
+        let res = Resistor::new(0, 1, 1000.0);
+        let cap = Capacitor::new(1, GROUND, 1e-9);
+        let insts: [&dyn ModelInstance; 3] = [&v1, &res, &cap];
+        let spectrum = run_at_nominal_temp(&insts, &[1.0, 1.0, 0.0], 3, flat_sweep(), 1, None)
+            .expect("noise solves");
+        assert_eq!(spectrum.per_instance.len(), 1);
+        assert_eq!(
+            spectrum.per_instance[0].0, 1,
+            "the resistor is instance 1, and is the only contributor"
+        );
+    }
+
+    /// A device carrying *both* a white and a flicker source reports them as one combined
+    /// figure — attribution is per device, not per mechanism (§ this module's doc comment).
+    #[test]
+    fn one_device_with_two_mechanisms_reports_one_combined_share() {
+        struct Both {
+            terminals: [usize; 2],
+        }
+        impl ModelInstance for Both {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+                sink.jacobian(0, 0, 1.0);
+            }
+            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+                sink.white_current(0, GROUND, 1e-22);
+                sink.flicker_current(0, GROUND, 1e-19, 1.0);
+            }
+        }
+        let dev = Both {
+            terminals: [0, GROUND],
+        };
+        let insts: [&dyn ModelInstance; 1] = [&dev];
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, flat_sweep(), 0, None).expect("noise solves");
+        assert_eq!(spectrum.per_instance.len(), 1, "one device, one entry");
+        // Its single entry is the sum of both mechanisms (Z = 1 Ω here).
+        for (i, &f) in spectrum.f.iter().enumerate() {
+            let expected = 1e-22 + 1e-19 / f;
+            let got = spectrum.per_instance[0].1[i];
+            assert!((got / expected - 1.0).abs() < 1e-9, "f={f}: {got}");
+        }
     }
 
     /// Input-referral against a closed form: a resistive divider from the source to the output

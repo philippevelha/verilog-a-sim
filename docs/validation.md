@@ -11,7 +11,7 @@ and compares to committed `golden/` outputs.
 | DC           | max relative I–V error on the operating point/sweep | ≤ 1e-4            |
 | Transient    | waveform RMS error (after shared-timebase resample) | ≤ 1e-3            |
 | AC           | max relative magnitude error / max absolute phase error | ≤ 1e-4 · ≤ 1e-4 rad |
-| Noise        | max relative error on the output *and* input-referred PSD | ≤ 1e-3      |
+| Noise        | max relative error on the output, input-referred, *and* per-device PSD | ≤ 1e-3 |
 | Convergence  | fraction of zoo circuits that reach a solution      | track upward      |
 
 These mirror the constants in `va-harness` (`tol::DC_REL`, `tol::TRAN_RMS`, `tol::AC_MAG_REL`,
@@ -193,6 +193,39 @@ A frequency at which the input cannot reach the output reports `inf` rather than
 noise to an input with no path to the output is genuinely undefined, and a zero there would read
 as "no noise", the opposite of the truth. The integrated total skips non-finite points instead of
 becoming `NaN`.
+
+### Per-device noise attribution (added 2026-08-01d)
+
+Every noise golden file now also carries **one column per contributing device**, matching
+QSPICE's own `onoise_<dev>` columns. The header names them: `@noise <output> <source> R1 D1`.
+
+**Where device identity comes from.** Not from Interface β — a `ModelInstance` has no name, and
+`NoiseSink` receives only `(p, n, psd)`. It comes from **position**: `va-acnoise` polls
+instances in order and tags each source with the emitting instance's index, and `va-cli` maps
+that index back to a device name, which is sound because `build_instances` pushes exactly one
+instance per netlist device in order. No ABI change was needed, and the attribution is *exact*
+rather than inferred from topology — two identical resistors in parallel stay distinguishable,
+which a `(p, n)`-keyed grouping could never manage. A test pins that case.
+
+**Attribution is per device, not per mechanism.** A diode contributing both shot and flicker
+noise reports one combined figure. QSPICE splits its own `onoise_d1` further into
+`onoise_d1.id`/`.1overf`/`.rs`; reproducing that would mean naming each model's internal call
+sites, which this project has no representation for. Only the aggregate column is read.
+
+**The gate got stricter, and the numbers moved to prove it.** `diode_noise.net` went from
+`1.7e-5` to **`2.6e-5`** — not a regression: each column is now scored on its own, so errors
+that partially cancelled inside the summed total no longer can. Every column is floored against
+its *own* peak for the same reason the two totals already were: a quiet device's column can sit
+orders below the total, and a shared floor set by the biggest column would under-check the rest.
+
+**The breakdown demonstrates its own value on `diode_flicker.net`**, where the two columns
+separate cleanly: `D1` falls from `4.15e-16` to `1.33e-18` across the band while `R1` stays flat
+at `6.62e-19`. The `1/f` roll-off is visibly *in the diode*, which the summed total could only
+imply.
+
+The per-device columns sum to the output total by construction — they are the same terms,
+bucketed rather than accumulated straight. Committing both is deliberate redundancy: a golden
+diff then shows *which* device's contribution moved, not merely that the total did.
 
 ## Bring-up ladder
 

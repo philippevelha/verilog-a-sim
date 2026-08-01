@@ -57,6 +57,7 @@ shared, demoable milestone that several theses light up at once.
 | T5.2 — noise analysis | adjoint output-noise PSD (one `Aᵀy = e_out` solve per frequency gives every source's transfer impedance); Interface β gained a §6 noise channel (`NoiseSink` + `ModelInstance::noise`) since noise is physics the Jacobian doesn't carry; thermal/shot sources on `Resistor`/`Diode`/`Bjt`; validated vs closed form (`4kTR`), vs an RC-shaped spectrum, and vs real QSPICE golden (`diode_noise` 1.7e-5) | ✅ |
 | T5.3 — Verilog-A noise lowering (T1/T2) | `white_noise`/`flicker_noise` lower to real IR calls instead of folding to `0`; codegen splits them into the noise channel like `ddt`→charge, leaving `load` bit-identical; Interface β gained a §6 flicker channel; compiled-model gates vs QSPICE (`resistor_noise_va` exact, `diode_flicker` 1.7e-5 over a 209×-shaped spectrum) | ✅ |
 | T5.4 — input-referred noise | `S_in = S_out/|H|²`, with `H = y_k` read straight out of the adjoint vector at the input source's branch row — no second solve; golden format gained a second column, scored separately from the output one; verified against QSPICE's `inoise_spectrum` and its printed 22.3055 µV total | ✅ |
+| T5.5 — per-device noise attribution | one column per contributing device, matching QSPICE's `onoise_<dev>`; identity is **positional** (instances are polled in order and tagged), so two identical parallel devices stay distinguishable where a `(p,n)` grouping could not; each column scored against its own peak, which made the gate stricter (`diode_noise` 1.7e-5 → 2.6e-5) | ✅ |
 
 **Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
 
@@ -1510,7 +1511,48 @@ undefined; `0` would read as "no noise"), and the integrated total skips non-fin
 One measured number moved: `resistor_noise_va.net` was exactly `0.0` and is now `1.4e-16`, since
 the new column is a division. Still machine precision.
 
-**Remaining T5 limits**: no per-device breakdown, and `noise_table` unlowered.
+**Remaining T5 limits after this phase**: no per-device breakdown, and `noise_table` unlowered.
+The first of those closed next — see T5.5.
+
+### Phase T5.5 — Per-device noise attribution
+
+**Implemented and golden-gated 2026-08-01d.** The output spectrum now breaks down by *which
+device produced it* — the answer to "where is my noise coming from?", and the one a designer
+acts on. Matches QSPICE's own `onoise_<dev>` columns.
+
+**Device identity came from position, not from the ABI.** A `va_abi::ModelInstance` has no name
+and `NoiseSink` receives only `(p, n, psd)`, so there was a real question of where attribution
+could come from without a third §6 change. The answer: `va-acnoise` polls instances in order and
+tags each source with the emitting instance's index; `va-cli` maps that index back to a device
+name, which is sound because `build_instances` pushes exactly one instance per netlist device,
+in order. That coupling was previously implicit and is now stated and guarded in
+`va_cli::noise_contributors`.
+
+Positional attribution is also *exact* where a topological one would fail: two identical
+resistors in parallel emit sources with the same `(p, n)` and the same PSD, and stay
+distinguishable anyway. A test pins that.
+
+**Attribution is per device, not per mechanism** — a diode contributing both shot and flicker
+noise reports one combined figure. QSPICE splits `onoise_d1` further into `.id`/`.1overf`/`.rs`;
+reproducing that would mean naming each model's internal call sites, which this project has no
+representation for. Only the aggregate column is read from QSPICE.
+
+**The gate got stricter and the numbers moved to say so**: `diode_noise.net` went from `1.7e-5`
+to `2.6e-5`, because each column is now scored on its own and errors that partially cancelled
+inside the summed total no longer can. Every column is floored against its own peak — a quiet
+device's column can sit orders below the total, so a shared floor would under-check it.
+
+**It demonstrates its own value on `diode_flicker.net`**: `D1` falls from `4.15e-16` to
+`1.33e-18` across the band while `R1` stays flat at `6.62e-19`, so the `1/f` roll-off is visibly
+*in the diode* — something the summed total could only imply.
+
+One latent bug fixed on the way: `xtask::va_model_for` never chained `AC_CIRCUITS` or
+`NOISE_CIRCUITS`, so golden generation for those loaded them *without* their `--model`. It
+happened to work because every affected device had a `va-abi` reference fallback; it would have
+failed outright for `diode_flicker`, whose model has none.
+
+**Remaining T5 limit**: `noise_table` unlowered (it needs a third `NoiseSink` method for a
+piecewise-linear PSD).
 
 ---
 

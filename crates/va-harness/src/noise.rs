@@ -28,12 +28,14 @@ pub fn run_noise(circuit: &str, model: Option<&str>) -> Result<GoldenNoise, Harn
         .ok_or_else(|| HarnessError::Run(format!("{circuit}: no `.noise` card")))?;
     let spectrum =
         va_cli::solve_noise(&net, &compiled).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    let contributors = va_cli::noise_contributors(&net, &spectrum);
     Ok(GoldenNoise::from_spectrum(
         &card.output,
         &card.source,
         &spectrum.f,
         &spectrum.psd,
         &spectrum.input_psd,
+        &contributors,
     ))
 }
 
@@ -50,39 +52,60 @@ const FREQ_MATCH_REL: f64 = 1e-9;
 /// their spectra would silently diff unrelated quantities; [`HarnessError::LengthMismatch`] if
 /// some golden frequency has no counterpart in the computed sweep.
 pub fn compare_noise(got: &GoldenNoise, golden: &GoldenNoise) -> Result<Verdict, HarnessError> {
-    if got.output != golden.output || got.source != golden.source {
+    // The probed output, the input source, and the set of contributing devices must all match.
+    // A differing device list means the two runs disagree about *which* devices are noisy — a
+    // real finding, and one that comparing whatever columns happen to line up would hide.
+    if got.output != golden.output || got.source != golden.source || got.devices != golden.devices {
+        let label = |g: &GoldenNoise| {
+            let mut v = vec![g.output.clone(), g.source.clone()];
+            v.extend(g.devices.iter().cloned());
+            v
+        };
         return Err(HarnessError::NodeOrderMismatch {
-            got: vec![got.output.clone(), got.source.clone()],
-            expected: vec![golden.output.clone(), golden.source.clone()],
+            got: label(got),
+            expected: label(golden),
         });
     }
 
-    let mut got_out = Vec::with_capacity(golden.points.len());
-    let mut golden_out = Vec::with_capacity(golden.points.len());
-    let mut got_in = Vec::with_capacity(golden.points.len());
-    let mut golden_in = Vec::with_capacity(golden.points.len());
-    for &(freq, psd, input) in &golden.points {
-        let matched = got.points.iter().find(|(f, _, _)| {
+    let n_cols = 2 + golden.devices.len();
+    let mut got_cols: Vec<Vec<f64>> = vec![Vec::with_capacity(golden.points.len()); n_cols];
+    let mut golden_cols: Vec<Vec<f64>> = vec![Vec::with_capacity(golden.points.len()); n_cols];
+    for (freq, psd, input, per_device) in &golden.points {
+        let matched = got.points.iter().find(|(f, _, _, _)| {
             (f - freq).abs() <= freq.abs().max(f64::MIN_POSITIVE) * FREQ_MATCH_REL
         });
-        let Some(&(_, got_out_value, got_in_value)) = matched else {
+        let Some((_, got_out, got_in, got_per_device)) = matched else {
             return Err(HarnessError::LengthMismatch {
                 got: got.points.len(),
                 expected: golden.points.len(),
             });
         };
-        got_out.push(got_out_value);
-        golden_out.push(psd);
-        got_in.push(got_in_value);
-        golden_in.push(input);
+        if got_per_device.len() != per_device.len() {
+            return Err(HarnessError::LengthMismatch {
+                got: got_per_device.len(),
+                expected: per_device.len(),
+            });
+        }
+        got_cols[0].push(*got_out);
+        golden_cols[0].push(*psd);
+        got_cols[1].push(*got_in);
+        golden_cols[1].push(*input);
+        for (i, (g, r)) in got_per_device.iter().zip(per_device).enumerate() {
+            got_cols[2 + i].push(*g);
+            golden_cols[2 + i].push(*r);
+        }
     }
 
-    // Each column is scored against **its own** peak rather than the two flattened together:
-    // the input-referred column is larger than the output one by `1/|H|²`, so a shared floor
-    // would be set by whichever column happens to be bigger and would under-check the other.
-    let out_error = metrics::max_relative_psd_error(&got_out, &golden_out)?;
-    let in_error = metrics::max_relative_psd_error(&got_in, &golden_in)?;
-    Ok(Verdict::new(out_error.max(in_error), tol::NOISE_PSD_REL))
+    // Every column is scored against **its own** peak rather than all of them flattened
+    // together. The columns live on genuinely different scales — the input-referred one is
+    // larger than the output one by `1/|H|²`, and a quiet device's column can be orders below
+    // the total — so a shared near-zero floor would be set by whichever column happens to be
+    // biggest and would under-check all the others. The verdict is the worst column.
+    let mut error = 0.0_f64;
+    for (g, r) in got_cols.iter().zip(&golden_cols) {
+        error = error.max(metrics::max_relative_psd_error(g, r)?);
+    }
+    Ok(Verdict::new(error, tol::NOISE_PSD_REL))
 }
 
 #[cfg(test)]
@@ -106,7 +129,7 @@ mod tests {
 
         // Flat: every point equals the first (no reactance to shape it).
         let first = g.points[0].1;
-        for (f, psd, _) in &g.points {
+        for (f, psd, _, _) in &g.points {
             assert!(
                 (psd / first - 1.0).abs() < 1e-12,
                 "f={f}: psd = {psd}, expected flat at {first}"
@@ -133,9 +156,12 @@ mod tests {
     fn compare_noise_fails_for_a_doubled_spectrum() {
         let got = run_noise(&workspace_path("circuits/diode_noise.net"), None).expect("solve");
         let mut golden = got.clone();
-        for (_, psd, input) in &mut golden.points {
+        for (_, psd, input, per_device) in &mut golden.points {
             *psd *= 2.0;
             *input *= 2.0;
+            for v in per_device {
+                *v *= 2.0;
+            }
         }
         let verdict = compare_noise(&got, &golden).expect("compare");
         assert!(!verdict.passed, "error = {}", verdict.error);
@@ -151,16 +177,18 @@ mod tests {
         let got = GoldenNoise {
             output: "a".to_string(),
             source: "V1".to_string(),
+            devices: Vec::new(),
             points: vec![
-                (10.0, 2e-18, 5e-17),
-                (100.0, 2e-18, 5e-17),
-                (1000.0, 2e-18, 5e-17),
+                (10.0, 2e-18, 5e-17, vec![]),
+                (100.0, 2e-18, 5e-17, vec![]),
+                (1000.0, 2e-18, 5e-17, vec![]),
             ],
         };
         let golden = GoldenNoise {
             output: "a".to_string(),
             source: "V1".to_string(),
-            points: vec![(10.0, 2e-18, 5e-17), (1000.0, 2e-18, 5e-17)],
+            devices: Vec::new(),
+            points: vec![(10.0, 2e-18, 5e-17, vec![]), (1000.0, 2e-18, 5e-17, vec![])],
         };
         assert!(compare_noise(&got, &golden).expect("compare").passed);
     }
@@ -170,12 +198,14 @@ mod tests {
         let got = GoldenNoise {
             output: "a".to_string(),
             source: "V1".to_string(),
-            points: vec![(10.0, 2e-18, 5e-17)],
+            devices: Vec::new(),
+            points: vec![(10.0, 2e-18, 5e-17, vec![])],
         };
         let golden = GoldenNoise {
             output: "a".to_string(),
             source: "V1".to_string(),
-            points: vec![(10.0, 2e-18, 5e-17), (100.0, 2e-18, 5e-17)],
+            devices: Vec::new(),
+            points: vec![(10.0, 2e-18, 5e-17, vec![]), (100.0, 2e-18, 5e-17, vec![])],
         };
         assert!(compare_noise(&got, &golden).is_err());
     }
@@ -185,12 +215,14 @@ mod tests {
         let got = GoldenNoise {
             output: "a".to_string(),
             source: "V1".to_string(),
-            points: vec![(10.0, 2e-18, 5e-17)],
+            devices: Vec::new(),
+            points: vec![(10.0, 2e-18, 5e-17, vec![])],
         };
         let golden = GoldenNoise {
             output: "b".to_string(),
             source: "V1".to_string(),
-            points: vec![(10.0, 2e-18, 5e-17)],
+            devices: Vec::new(),
+            points: vec![(10.0, 2e-18, 5e-17, vec![])],
         };
         assert!(compare_noise(&got, &golden).is_err());
     }

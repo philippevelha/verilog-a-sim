@@ -122,6 +122,36 @@ phase, which taking `|Z_k|²` afterwards would then largely hide.
 never has to reconcile the residual channel's own current-injection sign convention — a
 reconciliation that *would* have been necessary if noise reported amplitudes rather than powers.
 
+### Attributing noise to devices
+
+Knowing the total is rarely what a designer wants; knowing *which device* dominates it is. The
+breakdown falls out of the same loop, but there is a real question first: **where does device
+identity come from?**
+
+Not from Interface β. A `ModelInstance` has no name, and `NoiseSink` receives only
+`(p, n, psd)`. Nothing in the noise channel says who emitted a source.
+
+The tempting answer is to group by branch — sources across the same `(p, n)` are "the same
+device". That is wrong in a way that would rarely show up and never be noticed: **two identical
+resistors in parallel** emit sources with the same terminals *and* the same PSD, and would
+silently merge into one row.
+
+The identity is **positional** instead. This module polls instances in order, so it knows which
+one it is asking; it stamps that index onto every source that instance emits. The caller, which
+built the instance list from the netlist, maps the index back to a device name. Sound because
+`va-cli::build_instances` pushes exactly one instance per device in order — a coupling that was
+implicit until this feature made it load-bearing, and is now stated and guarded in
+`va_cli::noise_contributors`.
+
+Attribution is **per device, not per mechanism**: a diode contributing both shot and flicker
+noise reports one combined figure. QSPICE splits its own `onoise_d1` further into
+`onoise_d1.id`/`.1overf`/`.rs`; reproducing that would mean naming each model's internal call
+sites, which this project has no representation for.
+
+The buckets are summed to produce the total rather than the total being computed separately, so
+the breakdown and the total cannot drift apart — a test asserts they reconcile at every
+frequency.
+
 ### Input-referred noise, for free
 
 The adjoint vector answers a second question at no extra cost, which is worth seeing because the
@@ -360,9 +390,8 @@ gate into decoration.
   `flicker_noise()` are lowered; a compiled `.va` model contributes real sources.
 - ~~**Output-referred only.**~~ **Closed** (2026-08-01c) — and it turned out to need no second
   solve at all; see "Input-referred noise, for free" above.
-- **No per-device breakdown.** `NoiseSpectrum` reports the total at each frequency, not one column
-  per contributing device the way QSPICE's `onoise_<dev>` columns do. The per-source
-  contributions exist inside `run`'s loop; nothing but their sum is retained.
+- ~~**No per-device breakdown.**~~ **Closed** (2026-08-01d) — see "Attributing noise to devices"
+  above.
 - **`noise_table` is not lowered.** Its piecewise-linear PSD has no ABI channel; the frontend
   still folds it to zero rather than pretend otherwise.
 
@@ -385,11 +414,8 @@ against QSPICE. See `docs/roadmap.md`'s T5.3 section.
 predicted: it was budgeted as "one forward AC solve per frequency" and turned out to need no
 solve at all, since the gain is already a component of the adjoint vector (§ above).
 
-What remains:
-
-1. **A per-device breakdown**, matching QSPICE's `onoise_<dev>` columns. The contributions
-   already exist inside `run`'s loop; only the reporting shape is missing.
-2. **`noise_table` lowering**, which needs a third sink method for a piecewise-linear PSD.
+What remains is **`noise_table` lowering**, which needs a third `NoiseSink` method for a
+piecewise-linear PSD — the same additive shape `flicker_current` took.
 
 See `docs/roadmap.md`'s T5.2/T5.3 sections for the full account, and `docs/validation.md`'s
 noise-gate sections for the measured numbers and the reasoning behind the `1e-3` band.
