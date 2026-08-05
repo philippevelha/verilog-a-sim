@@ -19,3 +19,9 @@ Thumbs.db
 # working notes.
 /external/
 /docs/notes.txt
+
+# Language reference manuals (VAMS-LRM-2-4.pdf, OVI_VerilogA.pdf, veriaref.pdf) — ~6 MB of
+# third-party PDFs, kept locally because docs/token-reference.md and the T5 noise work are
+# written against their normative text, but not ours to redistribute. Fetch your own copies
+# into this directory; nothing in the build reads them.
+/references/
