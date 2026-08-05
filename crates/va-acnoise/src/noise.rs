@@ -80,7 +80,7 @@
 
 use crate::ac::{linearize, solve_block_embedded, AcSweep, Complex};
 use crate::AcNoiseError;
-use va_abi::noise::{NoiseSink, NoiseSource, TEMP_NOMINAL};
+use va_abi::noise::{NoiseSink, NoiseSource, TableInterp, TEMP_NOMINAL};
 use va_abi::ModelInstance;
 
 /// Output noise power spectral density over frequency, and — when an input source was named —
@@ -147,11 +147,7 @@ impl SourceList {
     /// source is dropped this way simply doesn't appear in the per-device breakdown, which is
     /// the right answer: it contributes nothing.
     fn push(&mut self, p: usize, n: usize, source: NoiseSource) {
-        let powerless = match source {
-            NoiseSource::White { psd } => psd <= 0.0,
-            NoiseSource::Flicker { coeff, .. } => coeff <= 0.0,
-        };
-        if !powerless {
+        if !source.is_powerless() {
             self.sources.push((self.current, p, n, source));
         }
     }
@@ -172,6 +168,10 @@ impl NoiseSink for SourceList {
 
     fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {
         self.push(p, n, NoiseSource::Flicker { coeff, exponent });
+    }
+
+    fn table_current(&mut self, p: usize, n: usize, points: &[(f64, f64)], interp: TableInterp) {
+        self.push(p, n, NoiseSource::table(points.to_vec(), interp));
     }
 }
 
@@ -249,7 +249,8 @@ pub fn run(
         let y = solve_block_embedded(&g, &c, dim, omega, &e_out, true)?;
 
         let mut buckets = vec![0.0; contributors.len()];
-        for &(id, p, n, source) in &collected.sources {
+        for (id, p, n, source) in &collected.sources {
+            let (id, p, n) = (*id, *p, *n);
             let (pre, pim) = at(&y, p);
             let (nre, nim) = at(&y, n);
             // Z_k = y_p - y_n; the contribution is |Z_k|² · S_k(f). The transfer impedance is
@@ -544,6 +545,67 @@ mod tests {
                 "f={f}: psd = {p}, expected {expected}"
             );
         }
+    }
+
+    /// A tabulated source must be interpolated *by the analysis*, per frequency — the same bar
+    /// the flicker test above sets. The table here is deliberately shaped and read at
+    /// frequencies that are all strictly *between* its points, so a "take the nearest point" or
+    /// "take the first power" implementation lands nowhere near the expected values.
+    #[test]
+    fn a_tabulated_source_is_interpolated_across_the_whole_sweep() {
+        struct TableOnly {
+            terminals: [usize; 2],
+        }
+        impl ModelInstance for TableOnly {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+                // 1 S to ground: transfer impedance exactly 1 Ω, so the output PSD *is* the
+                // source PSD and the frequency shape is what's under test.
+                sink.jacobian(0, 0, 1.0);
+            }
+            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+                sink.table_current(
+                    0,
+                    GROUND,
+                    &[(1.0, 1e-20), (1e3, 5e-20), (1e5, 1e-20)],
+                    TableInterp::Linear,
+                );
+            }
+        }
+
+        let dev = TableOnly {
+            terminals: [0, GROUND],
+        };
+        let insts: [&dyn ModelInstance; 1] = [&dev];
+        let sweep = AcSweep {
+            fstart: 10.0,
+            fstop: 1e4,
+            points_per_decade: 1,
+        };
+        let spectrum =
+            run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0, None).expect("noise solves");
+
+        assert_eq!(spectrum.f.len(), 4); // 10, 100, 1k, 10k Hz
+        for (&f, &p) in spectrum.f.iter().zip(&spectrum.psd) {
+            // The same piecewise-linear rule, written out independently here rather than by
+            // calling `table_psd_at` — otherwise this would only assert the analysis calls the
+            // helper, not that the helper is right.
+            let expected = if f <= 1e3 {
+                1e-20 + (5e-20 - 1e-20) * (f - 1.0) / (1e3 - 1.0)
+            } else {
+                5e-20 + (1e-20 - 5e-20) * (f - 1e3) / (1e5 - 1e3)
+            };
+            assert!(
+                (p / expected - 1.0).abs() < 1e-9,
+                "f={f}: psd = {p}, expected {expected}"
+            );
+        }
+        // The rising and falling segments really do rise and fall — a flat implementation
+        // returning one constant would pass none of this, but state it outright anyway.
+        assert!(spectrum.psd[0] < spectrum.psd[2], "{:?}", spectrum.psd);
+        assert!(spectrum.psd[3] < spectrum.psd[2], "{:?}", spectrum.psd);
     }
 
     /// White and flicker sources on the same branch add in power, and their sum crosses over:

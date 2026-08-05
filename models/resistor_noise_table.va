@@ -1,0 +1,46 @@
+// Linear resistor whose thermal noise is declared as a `noise_table` — T5.6's gate model.
+//
+// Same device as models/resistor.va, with one line changed: the Johnson-Nyquist source is
+// written as an interpolated (frequency, power) table instead of `white_noise(...)`. The
+// physics is identical (thermal noise is flat), which is exactly what makes this checkable
+// against QSPICE: a plain 1 kohm resistor is the oracle, and any error in the table path —
+// mis-paired values, an unsorted table, no clamping outside the tabulated range, a "use the
+// first power everywhere" shortcut — moves the answer off it.
+//
+// Three things about tables are worth knowing before copying this model:
+//
+//   1. A table is *constant data*, per the LRM (an array parameter or an array assignment
+//      pattern), so it is const-folded at elaboration. It therefore cannot track `$temperature`
+//      the way models/resistor.va's `white_noise` argument does — the nominal temperature is
+//      written as a parameter here and the model is only correct at that temperature. A
+//      temperature-dependent PSD wants `white_noise`, not a table.
+//   2. For the same reason it cannot track a netlist-overridden resistance. va-cli maps an
+//      `R` line's value onto a compiled model's *first* parameter at instance-build time, which
+//      is after the table was folded — so `R` below and the deck's resistor value have to
+//      agree. circuits/resistor_noise_table.net uses 1 kohm for both resistors for this reason,
+//      and says so.
+//   3. The tabulated band is deliberately *narrower* than the deck's 10 Hz - 10 MHz sweep, so
+//      the LRM's clamping rule ("for frequencies lower than the lowest frequency ... returns
+//      the power specified for the lowest frequency", and likewise above the highest) is
+//      exercised at both ends of every run rather than only in unit tests.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module resistor_noise_table(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R    = 1000.0 from (0:inf);   // resistance, ohms — see note 2 above
+    parameter real Tnom = 300.15 from (0:inf);   // table temperature, K — see note 1 above
+
+    analog begin
+        I(p, n) <+ V(p, n) / R;
+        // 4kT/R A^2/Hz, tabulated at 100 Hz / 1 kHz / 1 MHz. Flat by construction: thermal
+        // noise has no frequency dependence, so every point carries the same power and the
+        // interpolated answer between them is that same power again.
+        I(p, n) <+ noise_table({
+            1.0e2, 4.0 * `P_K * Tnom / R,
+            1.0e3, 4.0 * `P_K * Tnom / R,
+            1.0e6, 4.0 * `P_K * Tnom / R
+        }, "thermal");
+    end
+endmodule

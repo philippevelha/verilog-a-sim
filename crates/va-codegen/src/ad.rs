@@ -608,7 +608,9 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
         // `lower::noise_term_shape` (which only recognizes a bare top-level term), so the
         // source would be silently dropped. `GeneratedModel::validate` rejects that case up
         // front rather than letting it evaluate quietly to zero here.
-        Builtin::WhiteNoise | Builtin::FlickerNoise => Dual::constant(0.0, count),
+        Builtin::WhiteNoise | Builtin::FlickerNoise | Builtin::NoiseTable => {
+            Dual::constant(0.0, count)
+        }
     })
 }
 

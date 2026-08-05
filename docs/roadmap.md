@@ -26,9 +26,18 @@ shared, demoable milestone that several theses light up at once.
 
 ## Status at a glance
 
-> Updated 2026-07-18 (T6.1/T6.2/T6.3 rows only — the rest of this table predates this session's
-> ladder-rung/harness work and is not otherwise refreshed; see this file's later sections and
-> the *Cross-thesis milestones* table for current per-rung detail). Legend:
+> **Fully refreshed 2026-08-04** — every row below was re-derived from a real run that day, not
+> carried forward: `cargo test --workspace` (500 passed, 0 failed, 0 ignored; **516 after T5.6**
+> landed later the same day), `cargo fmt --check` + `cargo clippy --workspace --all-targets --
+> -D warnings` (both clean), `cargo xtask validate` (**11/11 circuits pass vs committed QSPICE
+> golden, convergence 11/11 = 100%** at the time of the refresh; **12/12** after T5.6 added
+> `resistor_noise_table` later the same day), `va-cli check external` (**114/150**
+> files pass the frontend — unmoved by T5.6, no corpus file calls `noise_table`), and a one-off
+> frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`). The
+> previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
+> corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
+> "no harness-vs-golden validation yet" and "no Quarto tutorials written yet" caveats had both
+> been false since 2026-07-18; and T6.4 was missing from the table entirely. Legend:
 > **✅ Complete** — code, tests, the validation gate, *and* the tutorial are all green.
 > **🟢 Code complete** — implementation + unit/FD tests committed and green (`fmt`,
 > `clippy -D warnings`, `test` clean), but at least one of {harness-vs-golden gate, Quarto
@@ -37,44 +46,56 @@ shared, demoable milestone that several theses light up at once.
 
 | Phase | What exists | Status |
 |-------|-------------|--------|
-| 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | 🟢 |
-| T1.1 — lexing | `logos` lexer over the subset; 8 tests | 🟢 |
-| T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity; 6 tests | 🟢 |
-| T1.3 — elaboration | AST → `va_ir::Module`; the three zoo models elaborate end-to-end; 6 tests | 🟢 |
-| T2.1 — AD core | forward-mode dual numbers over the IR arena; FD-checked | 🟢 |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients); 50/115 real corpus files pass frontend+codegen | 🟢 |
+| 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | ✅ |
+| T1.1 — lexing | `logos` lexer; 20 tests. **Gate green as originally scoped** (a fixed subset); `CLAUDE.md` §1 has since widened T1's target to the *full* Verilog-A token set, tracked live in `token-reference.md` + the corpus scan, not by this row | 🟢 |
+| T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
+| T1.3 — elaboration | AST → `va_ir::Module`; **114/150** real corpus files pass the full frontend (2026-08-04). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
+| T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients); **104/150 real corpus files pass frontend+codegen** (2026-08-04, re-measured — supersedes the old 50/115, which predated the corpus growing to 150 files). The 10-file gap between frontend and codegen is two categories only: `ddt` nested inside an expression (8) and a local variable read before assignment (2) | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
-| T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | 🟢 |
-| T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint | 🟢 |
-| T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids (helpers) | 🟢 |
-| T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; RC charging curve matches analytic to <1% | 🟢 |
-| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; 16 tests | 🟢 |
-| T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; 15 `va-transient` tests total | 🟢 |
-| T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | 🟢 |
-| T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline | 🟢 |
-| T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section | ✅ |
+| T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
+| T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
+| T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `mos_dc` 1.5e-6) | ✅ |
+| T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
+| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
+| T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 1.8e-4) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
+| T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
+| T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 12 golden gates runs through this path | ✅ |
+| T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section. As of 2026-08-04 the zoo has grown to **12 gated circuits, all green** (the six ladder rungs plus `rc_ac`, `diode_ac`, `diode_noise`, `resistor_noise_va`, `diode_flicker`, `resistor_noise_table`) | ✅ |
+| T6.4 — convergence dashboard | `xtask::Tally` separates `skipped`/`not_converged`/`failed`, and `try_solve` records a non-converging circuit instead of aborting the run — so `CLAUDE.md` §7's fourth metric is computable from a real run for the first time; `validate` prints **convergence 12/12 (100.0%)**; `t6-integration/04-convergence-dashboard.qmd` | ✅ |
 | T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; **golden gate closed 2026-08-01** — `.ac` card/`AC` source parsing, `va-cli::solve_ac`, `GoldenAc` + separate magnitude/phase verdicts, complex `.qraw` parsing, and both AC circuits green vs real QSPICE (`rc_ac` 1.3e-15, `diode_ac` 1.3e-5) | ✅ |
 | T5.2 — noise analysis | adjoint output-noise PSD (one `Aᵀy = e_out` solve per frequency gives every source's transfer impedance); Interface β gained a §6 noise channel (`NoiseSink` + `ModelInstance::noise`) since noise is physics the Jacobian doesn't carry; thermal/shot sources on `Resistor`/`Diode`/`Bjt`; validated vs closed form (`4kTR`), vs an RC-shaped spectrum, and vs real QSPICE golden (`diode_noise` 1.7e-5) | ✅ |
 | T5.3 — Verilog-A noise lowering (T1/T2) | `white_noise`/`flicker_noise` lower to real IR calls instead of folding to `0`; codegen splits them into the noise channel like `ddt`→charge, leaving `load` bit-identical; Interface β gained a §6 flicker channel; compiled-model gates vs QSPICE (`resistor_noise_va` exact, `diode_flicker` 1.7e-5 over a 209×-shaped spectrum) | ✅ |
 | T5.4 — input-referred noise | `S_in = S_out/|H|²`, with `H = y_k` read straight out of the adjoint vector at the input source's branch row — no second solve; golden format gained a second column, scored separately from the output one; verified against QSPICE's `inoise_spectrum` and its printed 22.3055 µV total | ✅ |
 | T5.5 — per-device noise attribution | one column per contributing device, matching QSPICE's `onoise_<dev>`; identity is **positional** (instances are polled in order and tagged), so two identical parallel devices stay distinguishable where a `(p,n)` grouping could not; each column scored against its own peak, which made the gate stricter (`diode_noise` 1.7e-5 → 2.6e-5) | ✅ |
+| T5.6 — `noise_table()` lowering | the last of Verilog-A's three noise builtins: Interface α gained `Builtin::NoiseTable` (the table flattened into sorted, const-folded `Const` arguments) and Interface β `NoiseSink::table_current` + `TableInterp` (both LRM interpolation rules implemented, though only `noise_table`'s spelling is lexed); all table validation happens once at elaboration, where a source file can be named; gated by `resistor_noise_table` at 1.9e-16 vs a plain QSPICE resistor pair, with the interpolation/clamping rules discriminated by shaped-table unit tests instead (a flat table cannot tell them apart) | ✅ |
 
-**Two caveats that keep every "🟢" honest** (per criteria 1–2 at the top):
+**The two caveats this section used to carry are both retired** (recorded here rather than
+deleted, because they governed how every earlier revision of the table was read): "no
+harness-vs-golden validation
+yet" was true until 2026-07-17 and is now false — `va-harness`, `golden/`, and the CLI are real,
+the oracle is QSPICE (not ngspice, switched in `f094bbe`), and 12 circuits are gated; "no Quarto
+tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.qmd` files under
+`docs/tutorials/` are written, so criterion 2 no longer blocks any ✅.
 
-1. **No harness-vs-golden validation yet.** `va-harness`, `golden/`, and the CLI are still
-   stubs, so the analysis crates are validated against *analytic values and inline unit
-   tests*, **not** against committed ngspice golden. The formal ladder-rung gates (rung 1 DC
-   ≤ 1e-4, etc.) cannot go green until T6 lands. Rungs below track *implementation*, not a
-   passed gate.
-2. **No Quarto tutorials written yet.** Only the `docs/tutorials/` scaffold exists. A phase
-   with green tests but no tutorial is explicitly *not finished* (criterion 2), which is why
-   nothing above is marked ✅.
+**What still keeps every remaining "🟢" honest**, as of 2026-08-04:
 
-Also approximated vs. the literal phase wording, and worth tightening later: T1.3 uses
-structural IR assertions rather than committed golden-IR snapshots; T2.2 checks the generated
-diode at an operating point + FD rather than a full committed sweep; T2/T3 currently run over
-hand-built IR / reference instances — the frontend→codegen→core path is not yet wired by a
-netlist driver (that is T6).
+1. **T1.1/T1.2 passed a gate that has since moved.** Both were scoped against a fixed
+   Verilog-A *subset*; `CLAUDE.md` §1 now targets the full language. Their implementations are
+   green against the original wording, but "done" for T1 is now measured by
+   `docs/token-reference.md` and the corpus scan, which are explicitly still growing.
+2. **T1.3's literal gate is unmet.** It names committed golden-IR snapshots for the three zoo
+   models; the tests assert IR *structure* instead. Cheap to close, not yet closed.
+3. **T2.2/T2.3 are not corpus-complete.** 104 of 150 corpus files build into a `ModelInstance`;
+   the 10-file frontend→codegen gap is `ddt` nested inside an expression (8 files) and a local
+   variable read before assignment (2). T2.2's own generated-diode check is an operating point
+   + FD rather than a full committed sweep.
+
+No longer true and removed from this list: "T2/T3 run over hand-built IR / reference instances —
+the frontend→codegen→core path is not yet wired by a netlist driver." `va-cli sim --model` has
+driven that full path since T6.2, and six of the eleven gated circuits exercise it end to end
+(`mos_dc`, `diode_iv`, `rectifier`, `diode_ac`, `resistor_noise_va`, `diode_flicker` — each
+prints its own `[va-cli] compiled Verilog-A module …` line during `xtask validate`).
 
 ---
 
@@ -89,21 +110,46 @@ prioritized backlog against it.
 not by guessing what's missing. Early passes under-sampled this — only
 `external/verilogaLib-master/` (11 files) plus `external/ekv3.va` — which both overstated the
 pass rate and missed real gaps those 12 files don't happen to exercise. The actual corpus is
-the **whole `external/` tree, ~118 `.va`/`.vams` files**: real industry-standard compact models
-(BSIM3/4/6/CMG/SOI/BULK, HiSIM/HiSIM-HV/SOI, HICUM L0/L2, PSP, EKV, VBIC, MOSVAR, JFET, MVSG,
-ASM-HEMT, and more), plus their shared headers/macro-definition/nature-definition fragments.
-Of the 118, roughly 20 are auxiliary include fragments (`*MacrosAndDefines*.va`,
+the **whole `external/` tree, 150 `.va`/`.vams` files** as of 2026-08-04 (it was ~118 when this
+paragraph was first written — the tree has grown since, so older counts below are against a
+smaller denominator and are kept as history, not restated): real industry-standard compact
+models (BSIM3/4/6/CMG/SOI/BULK, HiSIM/HiSIM-HV/SOI, HICUM L0/L2, PSP, EKV, VBIC, MOSVAR, JFET,
+MVSG, ASM-HEMT, and more), plus their shared headers/macro-definition/nature-definition
+fragments. A large minority are auxiliary include fragments (`*MacrosAndDefines*.va`,
 `constants.vams`, `disciplines.vams`, `ekv3_*_def*.va`, …) never meant to compile standalone —
 `va-cli check` naively tries anyway, so their "failures" are a scan artifact, not a language
 gap; don't read the raw pass count as a language-completeness percentage without excluding
-them. A second, distinct artifact category (8 more files, found this pass — see "Not chased,
-unclear if real" below): top-level `.va` files whose module body was itself split into a sibling
-`` `include ``d file that the corpus snapshot never shipped (the PSP102/103/104 family,
-`L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`) — these fail with a misleading "port has no
-discipline declaration" (an empty module body, not a language gap) and are excluded from the
-gap accounting below for the same reason as the ~20 fragments. As of this pass: **62/118 pass
-outright**, with the remainder split across real, now-categorized gaps below and the ~28
-expected non-language-gap failures.
+them. A second, distinct artifact category: top-level `.va` files whose module body was itself
+split into a sibling `` `include ``d file that the corpus snapshot never shipped (the
+PSP102/103/104 family, `L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`) — these fail with a
+misleading "port has no discipline declaration" (an empty module body, not a language gap) and
+are excluded from the gap accounting below for the same reason as the fragments.
+
+> **Re-measured 2026-08-04** (`va-cli check external`, plus a one-off frontend+codegen scan):
+> **114/150 pass the frontend**, **104/150 also build into a `ModelInstance`**. Every one of
+> the 36 frontend failures now falls into the two artifact categories above — there are **no
+> remaining uncategorized frontend failures in the tracked corpus**:
+>
+> - **19 — undefined macro** (`` `MAXA ``, `` `GMIN ``, `` `ONE3RD ``, `` `OPPATTR ``, …): an
+>   include fragment scanned standalone, whose macros are defined by the parent that includes
+>   it (`diode_cmc`, `juncap200`, `junction_v1_0_2`, `jfetidgIds`, `psphv`/`psphvrr`, `r3_cmc`,
+>   `sp_functions`, most of the `ekv3_*` family, and `verilogaLib-master/ctle.va`).
+> - **7 — "expected Module, found None/Some(Begin)"**: nature/discipline definition files and
+>   bare-statement fragments with no module of their own (both `disciplines.vams` copies,
+>   `ekv3_natures`, `ekv3_{extract_debug,extrinsic_diodes,gate_current,gidl}`).
+> - **10 — "port has no discipline declaration"**: the split-body PSP/UTSOI/`r2_cmc` family.
+>
+> `ctle.va` is the one entry worth a second look rather than a shrug: its `` `M_TWO_PI `` comes
+> from `constants.vams`, which does exist in the tree but not in `ctle.va`'s own folder, so it
+> is arguably an include-path question rather than a pure artifact — and the file separately has
+> a real pre-existing bug of its own (`gain` used but never declared, § the `laplace_zp` entry
+> below).
+>
+> The **10-file frontend→codegen gap** is likewise only two categories, both genuine and both
+> already named in T2.2's section: `ddt` appearing nested inside an expression rather than as a
+> top-level contribution term (8 — `HICUML0-2`, `hicumL0_v2p*`, `hicumL2*`, `ekv3`,
+> `mvsg_cmc_3.2.0`), and a local variable read before assignment (2 — `bsimsoi`,
+> `verilogaLib-master/amp_dynamic`).
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
 itself flagged): `genvar`/`generate` loops and vector nets (elaboration-time unrolling); the
@@ -507,8 +553,10 @@ docs/tutorials/
   is a clear error rather than an empty/misleading image). `.qmd` tutorials embed the emitted
   SVG as a plain markdown image, unchanged from the original plan. Verified against the
   rectifier: `cargo run -p va-cli -- sim circuits/rectifier.net --tran --plot rectifier.svg`.
-  *Outstanding:* a `va-harness` golden-comparison overlay plot (needs `va-harness` itself
-  first, still `todo!()` — T6.3) and a DC sweep plot (`sim`'s DC path doesn't sweep yet either).
+  *Outstanding (re-checked 2026-08-04, both still open — but the stated blockers are gone):* a
+  `va-harness` golden-comparison overlay plot and a DC sweep plot. `va-harness` is no longer
+  `todo!()` (T6.3 closed 2026-07-18) and `sim` does sweep now (`.dc` cards, T6.2), so both are
+  plain unwritten plotting code today, not blocked on anything.
 - **Standard skeleton** for each tutorial: *Goal* (one sentence) → *Where it fits* (the §2
   pipeline diagram, the relevant box highlighted) → *The idea* (theory, the equations, the
   design choice) → *The code* (the public API the student built, with the doc-comment
@@ -627,7 +675,8 @@ matches the code verbatim.
 **Fallback:** an AD-for-compact-models report (forward vs reverse, FD validation).
 
 ### Phase T2.1 — Evaluator & dual-number AD core
-> **Status: 🟢 code complete** — `va-codegen/src/ad.rs`: forward-mode `Dual` over the IR
+> **Status: ✅ complete** (marker refreshed 2026-08-04: the FD gate and
+> `t2-codegen/01-ad-core.qmd` are both green, which is this phase's whole bar) — `va-codegen/src/ad.rs`: forward-mode `Dual` over the IR
 > arena (`+ - * / neg`, `exp/ln/log10/sqrt/abs`, variable-exponent `pow`) with an eval `Ctx`.
 > Each operator is FD-checked (`div_matches_finite_difference`, `exp_chain_rule`).
 > `t2-codegen/01-ad-core.qmd` written 2026-07-18.
@@ -1005,6 +1054,22 @@ matches the code verbatim.
 > declarations themselves) that simply isn't present here; the rest are `ekv3*.va`/`r3_cmc.va`/
 > `psphv*.va` preprocessor-macro-ordering issues (a macro used before this scan's `` `include ``
 > chain reaches its `` `define ``).
+>
+> **Re-measured 2026-08-04, against the grown 150-file corpus: 104/150 pass frontend+codegen**
+> (of the 114 that pass the frontend). Note the denominator change — every count above this line
+> is against the older 115/118-file tree and is kept as history, not restated. The scan is a
+> one-off (`va_codegen::build_instance` over every module that elaborates, mirroring `va-cli
+> check`'s directory-grouped library); **`va-cli check` itself still reports only the frontend
+> count**, so re-deriving this number means re-running that scan by hand. Worth a `--codegen`
+> flag on `check` if this figure is going to be quoted regularly.
+>
+> The 10-file gap is exactly two categories, both long-standing and both by-design-for-now:
+> **`ddt` nested inside an expression** rather than as a top-level contribution term (8:
+> `HICUML0-2`, `hicumL0_v2p0p0`, `hicumL0_v2p1p0`, `hicumL2V2p4p0`, `hicumL2V3p0p0`,
+> `hicumL2_v310`, `ekv3`, `mvsg_cmc_3.2.0` — § this phase's "recognized only as a top-level
+> additive term" rule, and T2.3's restatement of it), and a **local variable read before
+> assignment** (2: `bsimsoi`, `verilogaLib-master/amp_dynamic`). Nothing else in the corpus
+> elaborates but fails to build.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.
@@ -1053,7 +1118,8 @@ matches the code verbatim.
 the reference models.
 
 ### Phase T3.1 — MNA assembly & dense linear solve
-> **Status: 🟢 code complete** — `va-core/src/mna.rs` `assemble` walks instances into the
+> **Status: ✅ complete** (marker refreshed 2026-08-04: exercised by all 12 gated
+> circuits) — `va-core/src/mna.rs` `assemble` walks instances into the
 > `System` sink (ground reduction via `row < dim`); `linsolve.rs` does a `faer` LU solve with
 > singularity detection (non-finite output or failed `A·x≈b` check). 6 tests.
 > `t3-core/01-mna.qmd` written 2026-07-18.
@@ -1064,7 +1130,8 @@ the reference models.
   linear resistor network by hand vs by code.
 
 ### Phase T3.2 — Newton & the resistor-divider rung
-> **Status: 🟢 code complete (harness gate pending)** — `va-core/src/newton.rs` Newton loop
+> **Status: ✅ complete** (2026-08-04: the "harness gate pending" qualifier is retired — rung 1
+> has been green against real QSPICE golden since 2026-07-17, `divider` at 0.0e0) — `va-core/src/newton.rs` Newton loop
 > (assemble → `J·dx=−f` → `x+=dx`), converging on residual≤abstol **or** relative update≤reltol.
 > The resistor divider solves to the analytic midpoint (`1.0 V`, < 1e-9). Rung 1's golden gate
 > has since formally passed for real, against QSPICE (2026-07-17, T6.3). `t3-core/02-newton.qmd`
@@ -1076,7 +1143,8 @@ the reference models.
   first green `va-harness` run.
 
 ### Phase T3.3 — Nonlinear DC, sweeps & convergence aids
-> **Status: 🟢 code complete (harness gate pending)** — nonlinear Newton converges on a
+> **Status: ✅ complete** (2026-08-04: gate closed — rungs 2 and 5 pass vs QSPICE golden,
+> `diode_iv` 6.7e-5 and `mos_dc` 1.5e-6) — nonlinear Newton converges on a
 > diode–resistor clamp from the zero guess (KCL balances < 1e-9); `dc.rs` provides
 > `operating_point` + `sweep`. `convergence.rs` ships `pnjlim`-style junction limiting
 > (`limit_junction`, plus `default_vcrit`) and a geometric `gmin` schedule (`gmin_for_step`).
@@ -1125,7 +1193,8 @@ the reference models.
 **Fallback:** a report on integration methods + LTE timestep control.
 
 ### Phase T4.1 — Fixed-step integration & the RC rung
-> **Status: 🟢 code complete (harness gate pending)** — `integrator.rs` implements both
+> **Status: ✅ complete** (2026-08-04: gate closed — rung 3, `rc_step` at 1.8e-5 vs QSPICE
+> golden) — `integrator.rs` implements both
 > `Method::BackwardEuler` and `Method::Trapezoidal` as a single companion-model abstraction:
 > both discretizations reduce to the same per-iteration nodal equation
 > `residual(x) + coeff·charge(x) + offset = 0` (`Companion::backward_euler`/`::trapezoidal`
@@ -1150,7 +1219,8 @@ the reference models.
   first transient waveform vs ngspice.
 
 ### Phase T4.2 — Adaptive timestep & LTE control
-> **Status: 🟢 code complete (harness gate pending)** — `run()` adapts `h` within
+> **Status: ✅ complete** (2026-08-04: gate closed — rung 4, `rectifier` at 6.8e-4 vs QSPICE
+> golden) — `run()` adapts `h` within
 > `[cfg.tstep_min, cfg.tstep]` via an **embedded-pair LTE estimate**, not a rigorous
 > divided-difference truncation-error calculation: every accepted step computes *both*
 > `BackwardEuler` and `Trapezoidal` from the same `(x_prev, h)` (one reported, one purely an
@@ -1195,7 +1265,9 @@ the reference models.
   the rectifier needs it.
 
 ### Phase T4.3 — Events & breakpoints
-> **Status: 🟢 code complete (harness gate blocked — see below, not just pending)** —
+> **Status: ✅ complete** (2026-08-04: the gate is neither blocked nor pending any more — the
+> blocker below was resolved 2026-07-09 by adding `va-abi::reference::Bjt`, and rung 6's
+> `ring_osc` now passes at 1.8e-4 vs QSPICE golden) —
 > `events::EventQueue` (already implemented, previously unwired) now genuinely drives
 > `integrator::run_with_events`: breakpoints clamp the adaptive step so it never overshoots a
 > forced timepoint (the underlying `h` schedule is untouched by the clamp, so a forced short
@@ -1552,7 +1624,79 @@ happened to work because every affected device had a `va-abi` reference fallback
 failed outright for `diode_flicker`, whose model has none.
 
 **Remaining T5 limit**: `noise_table` unlowered (it needs a third `NoiseSink` method for a
-piecewise-linear PSD).
+piecewise-linear PSD). *Closed 2026-08-04 — see T5.6, immediately below.*
+
+### Phase T5.6 — `noise_table()` lowering (T1/T2, Interface α+β)
+
+> **Status: ✅ complete (2026-08-04)** — Verilog-A's `noise_table()` (LRM §4.6.4.3) lowers
+> end to end and is golden-gated against QSPICE: `circuits/resistor_noise_table.net` passes at
+> **1.859e-16** relative, taking `cargo xtask validate` to **12 circuits, 12/12 convergence**.
+> This closes the last limit T5.5 stated, and with it the whole noise-function family — all
+> three of Verilog-A's noise builtins are now real.
+
+**Two coordinated interface changes**, both additive, both recorded in `docs/interfaces.md`:
+Interface α gained `Builtin::NoiseTable`, and Interface β gained `NoiseSink::table_current`
+plus a `TableInterp` enum. Each is one new variant/one default method, so nothing downstream
+needed touching to keep compiling.
+
+**Where the work actually goes: elaboration, not the ABI.** Unlike `white_noise`/`flicker_noise`,
+whose arguments are expressions evaluated per bias, a `noise_table`'s argument is *data* — the
+LRM restricts it to an array parameter or an array assignment pattern. So the frontend does
+everything table-shaped exactly once, at the one point that still has a source file to name in
+an error message: const-fold each entry, reject an odd count / a repeated frequency (the LRM
+demands uniqueness) / a negative frequency or power / the unimplemented file-name form, then
+**sort ascending** ("the simulator shall internally sort the pairs into ascending frequency if
+required"). Everything downstream reads a table that is already valid and ordered, and
+`va_abi::noise::table_psd_at` documents that as its precondition rather than re-checking it per
+frequency.
+
+**The table travels as flattened `Const` call arguments**, `Call(NoiseTable, [f1, p1, f2, p2, …])`
+— not as a new `Expr` variant owning a `Vec<(f64,f64)>`. That is the decision that kept this a
+one-variant IR change: every arena walk, clone and validity check in the pipeline already
+handles a `Call` with constant arguments. `NoiseTerm::Table` likewise stores the *call's*
+`ExprId` rather than an owned point list, so a `NoiseTerm` stays `Copy` however long the table
+is; `GeneratedModel::noise_table_points` re-reads the pairs out of the arena at emit time.
+
+**Both LRM interpolation rules went in together, deliberately.** `TableInterp::Linear`
+(`noise_table`, piecewise-linear in `f`) is what the lowered builtin uses; `TableInterp::Log`
+(`noise_table_log`, §4.6.4.4, piecewise-linear in `log₁₀ f`/`log₁₀ power`) is implemented and
+tested alongside it even though **`noise_table_log` is not yet a lexer token**. The reason is
+narrow and worth stating: the two functions differ only in that rule, so shipping one rule would
+have guaranteed a *fourth* §6 interface event the moment anyone wired the second spelling.
+Implementing both costs ~15 lines of `va-abi` and widens no user-visible surface — no new
+Verilog-A construct is accepted by this change.
+
+**Also normative, and easy to get backwards**: outside the tabulated range the LRM *clamps* to
+the nearest endpoint's power rather than extrapolating, and the log rule falls back to linear
+across any segment with a zero-power endpoint (`log(0)` is undefined, and a band where a model
+declares no noise is legal data). Both are tested; the fallback is per segment, so one zero
+point never degrades the rest of a table.
+
+**The gate, and an honest account of what it proves.** `models/resistor_noise_table.va` is
+`models/resistor.va` with its `white_noise(4kT/R)` rewritten as a three-point table of that same
+`4kT/R`, and `circuits/resistor_noise_table.net` puts two of them in series so the answer is the
+textbook `4kT·(R1‖R2)` — which a *plain QSPICE resistor pair* reproduces exactly, no `.model`
+translation needed. The comparison is essentially exact (1.9e-16), and it pins the whole path:
+frontend → IR → codegen → Interface β → adjoint solve → harness. But a flat table cannot tell
+the three interpolation rules apart — clamping and extrapolating agree on a constant — so
+**discriminating them is the unit tests' job**, and those use deliberately shaped tables: the
+LRM's own §4.6.4.3 example table read between decade points (which catches a log-interpolating
+implementation), a two-point `1/f` log table (Figure 4-9's own example), an unsorted table, a
+zero-power segment, and a `va-acnoise` sweep over a rise-then-fall table read entirely between
+its knots. A flat table is the only shape QSPICE has a native primitive to compare against at
+all; splitting the duties this way is the honest resolution, not a gap.
+
+**Two limitations this creates for model authors**, both stated in
+`models/resistor_noise_table.va`'s header because they are surprising: a const-folded table
+cannot track `$temperature` (so a table is only right at the temperature it was written for —
+use `white_noise` if the PSD must follow temperature), and it cannot track the resistance
+`va-cli` overrides onto a compiled model's first parameter from an `R` line, because that
+happens after elaboration. The gate deck uses two 1 kΩ resistors rather than the 1 k/3 k of
+`resistor_noise_va.net` for exactly this reason, and says so in its header.
+
+**No corpus movement, and that was expected**: not one of the 150 `external/` files calls
+`noise_table` (checked, not assumed). This closes a stated T5 limit and an LRM construct, not a
+corpus failure — the same reason `ground` declarations and escaped identifiers were added.
 
 ---
 
@@ -1564,7 +1708,8 @@ is the glue: it makes everyone else's work runnable and trustworthy.
 methodology + metrics report vs ngspice.
 
 ### Phase T6.1 — Netlist parser & the harness/metrics skeleton
-> **Status: 🟢 code complete (harness gate pending — see T6.3)** — `va-netlist/src/parser.rs`
+> **Status: ✅ complete** (2026-08-04: T6.3's gate is closed, and every one of the 12 gated
+> decks is parsed by this crate) — `va-netlist/src/parser.rs`
 > is a real line-oriented SPICE-flavored parser: `R`/`C`/`D`/`V` elements (SI-suffixed values,
 > `k`/`meg`/`u`/`n`/`p`/…), `0`/`gnd` as the reference sentinel, and dot-cards (`.op`/`.dc`/
 > `.tran`/`.ac`). **2026-07-06: `.tran <tstep> <tstop>` timing is now captured**
@@ -1580,7 +1725,8 @@ methodology + metrics report vs ngspice.
   onto Interface β instances.
 
 ### Phase T6.2 — CLI wiring & golden generation
-> **Status: 🟢 code complete (harness/golden-generation gate pending)** — `va-cli sim` already
+> **Status: ✅ complete** (2026-08-04: golden generation is real — `xtask gen-golden` shells out
+> to QSPICE, and all 12 gated circuits run through `va-cli sim`) — `va-cli sim` already
 > wired DC end to end before this pass: `--model <m.va>` compiles through the real
 > `va-frontend` → `va-codegen` pipeline (including module instantiation — see
 > `hierarchical_divider_solves_through_codegen_pipeline`), falling back to `va-abi` reference
@@ -1616,12 +1762,13 @@ methodology + metrics report vs ngspice.
   workflow.
 
 ### Phase T6.3 — Full validation harness & the metrics dashboard
-> **Status: 🟢 all six ladder rungs formally pass against real, committed QSPICE golden, as of
+> **Status: ✅ complete — all six ladder rungs formally pass against real, committed QSPICE golden, as of
 > 2026-07-18** (rung 6 closed last, and needed two real, sequential fixes — a genuine QSPICE
 > ground-aliasing bug for `Q`-element terminals, then an honest early-window comparison scoped to
 > where this circuit's unstable equilibrium stays deterministically comparable at all — § T4.3's
-> 2026-07-18 entries have the full account). The remaining gaps below (branch-current golden,
-> a convergence-fraction dashboard) are real but don't block any rung.
+> 2026-07-18 entries have the full account). The two gaps this note used to list as outstanding
+> have both since closed: branch-current golden (`e6b06b0`, real `I(device)` checks vs QSPICE)
+> and the convergence-fraction dashboard (`3d31a9f`, § T6.4).
 > `va-harness::metrics::{max_relative_error, rms_error}` are real implementations now (were
 > `todo!()`), including the near-zero-reference division guard `max_relative_error`'s own doc
 > comment always specified but never implemented; 10 tests. `va-harness::golden::GoldenDc` is a
@@ -1855,7 +2002,8 @@ methodology + metrics report vs ngspice.
   ladder-status dashboard; how "done" is measured.
 
 ### Phase T6.4 — Convergence-fraction dashboard
-> **Status: 🟢 code complete (2026-07-18)** — `CLAUDE.md` §7's fourth metric ("fraction of zoo
+> **Status: ✅ complete** (code 2026-07-18; marker refreshed 2026-08-04 — the dashboard now
+> reports 12/12, and `t6-integration/04-convergence-dashboard.qmd` is written) — `CLAUDE.md` §7's fourth metric ("fraction of zoo
 > circuits that reach a solution … it only ever needs to go up") had no real implementation
 > before this: a circuit that failed to *converge* at all (not just mismatch golden) propagated
 > a hard error out of `xtask::validate_{dc,sweep,tran}_circuits` via `?`, aborting the *entire*
@@ -1877,8 +2025,9 @@ $ cargo run -q -p xtask -- validate
 [xtask] validate: convergence 9/9 (100.0%) — CLAUDE.md §7's convergence metric
 ```
 
-Every known circuit converges today (9/9 as of 2026-08-01 — six ladder rungs plus T5's two AC
-circuits and one noise circuit; unsurprising, since every one of them already passes
+Every known circuit converges today (**12/12 as of 2026-08-04** — six ladder rungs plus T5's two
+AC circuits and four noise circuits; the transcript above is the 2026-08-01 run, kept verbatim
+rather than edited, from when the zoo was 9 circuits; unsurprising, since every one of them already passes
 golden, a strictly harder bar), so this reads `100.0%` right now; the real deliverable is the
 *mechanism* — verified with a genuinely non-convergent synthetic circuit (two nets joined by a
 resistor with no path to ground anywhere, confirmed to produce `CoreError::Singular` via
@@ -1912,7 +2061,12 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ✅ **formally passed** — green against `golden/ring_osc.golden` (1041 pts, an honestly-scoped 0.1s window — § T4.3's 2026-07-18 entry), real QSPICE output via a native `.model bjt NPN(...)` translation + a `gnd`-to-`0` ground-aliasing fix, now also checking `I(VCC)` (error=1.799e-4, tol 1e-3); `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` (full 0.2s) and `cargo test -p va-transient ring_oscillator_sustains_oscillation` (hand-built instances) both still demonstrate the full growing oscillation |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
-is available.
+is available. **These now exist and pass** (2026-08-01, § the T5 sections): six more gated
+circuits beyond the six rungs above — `rc_ac` (1.3e-15 magnitude, 1.7e-13 rad phase),
+`diode_ac` (1.3e-5 / 6.4e-6 rad), `diode_noise` (2.6e-5), `resistor_noise_va` (1.4e-16, a
+compiled Verilog-A `white_noise()`), `diode_flicker` (2.6e-5, compiled shot + 1/f over a
+209×-shaped spectrum), and `resistor_noise_table` (1.9e-16, a compiled `noise_table()`, added
+2026-08-04 with T5.6) — bringing `cargo xtask validate` to **12 circuits, all green**.
 
 > **All six ladder rungs are formally "passed"** as of 2026-07-18 — each has both real
 > implementation reach *and* a green `cargo xtask validate` against a committed, genuinely
@@ -1950,7 +2104,8 @@ against a hand-derived fixed point (`(VDD-Vd)/RD = 0.5·kp·(w/l)·Vov²·(1+λ�
 `Vd = 3.31/1.0169 = 3.254991…` for this circuit's values), not just against the tool's own output
 — `cargo test -p va-cli mos_dc_solves_through_codegen_pipeline` asserts this to `1e-6`.
 *Outstanding, same as every other rung*: the golden-vs-ngspice gate awaits T6.3; no `t1/t2`
-tutorial written yet.
+tutorial written yet. [Both closed since — the gate is green against **QSPICE** golden (the
+oracle switched in `f094bbe`) as of 2026-07-18, and all 21 tutorials are written.]
 
 **Ladder rung 2 (diode I–V, DC sweep): implementation reach closed 2026-07-13** — was the last
 rung marked "pieces work in isolation… not yet wired," since `va-cli` only ever solved a single
@@ -1971,10 +2126,12 @@ diode_iv_sweep_solves_through_codegen_pipeline` checks all 7 points against the 
 to) — not just against the tool's own output — confirming the sweep reproduces the textbook
 exponential I–V curve at every point, from `I(V1)≈0` at `V1=0` to `I(V1)≈-1.2e-4 A` at
 `V1=0.6`. *Outstanding*: only a single linear sweep of one source (no nested/multi-source
-sweeps); golden-vs-ngspice gate awaits T6.3; no `t1/t2` tutorial written yet. **With this, every
+sweeps); golden-vs-ngspice gate awaits T6.3; no `t1/t2` tutorial written yet. [Same correction
+as rung 5 above: gate green vs QSPICE golden since 2026-07-18, tutorials all written. Only the
+"single linear sweep of one source" limit still stands.] **With this, every
 ladder rung has reached "implementation reach" through the real pipeline** — the entire
-remaining bring-up-ladder gap, across every rung, is now uniformly the same one thing: `va-harness`
-(T6.3), not an unimplemented circuit.
+remaining bring-up-ladder gap, across every rung, was at that point uniformly the same one
+thing: `va-harness` (T6.3), not an unimplemented circuit. That gap has since closed too.
 
 ---
 

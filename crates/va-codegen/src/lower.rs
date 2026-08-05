@@ -213,6 +213,16 @@ pub enum NoiseTerm {
         /// The frequency exponent (`1.0` for textbook `1/f`).
         exp: ExprId,
     },
+    /// `noise_table({f1, p1, …})` — a tabulated PSD.
+    ///
+    /// Carries the **call expression itself** rather than an owned list of pairs, so a
+    /// `NoiseTerm` stays `Copy` however long the table is: the pairs already live in the module's
+    /// expression arena (as alternating `Const` arguments, § `va_ir::Builtin::NoiseTable`), and
+    /// re-reading them there at emit time costs one arena index.
+    Table {
+        /// The `Expr::Call(Builtin::NoiseTable, …)` node holding the flattened pairs.
+        call: ExprId,
+    },
 }
 
 /// A single branch contribution, split into resistive, charge, and noise channels.
@@ -1255,6 +1265,16 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
         Expr::Call(Builtin::FlickerNoise, _) => Err(unsupported(
             "flicker_noise expects exactly two arguments (power, exponent)",
         )),
+        // The table's own well-formedness (pairs, uniqueness, sort order) was settled at
+        // elaboration, where the source file could be named in the diagnostic; an odd argument
+        // count here would mean the IR was built by hand rather than by `va-frontend`, so it is
+        // still checked, just not re-explained.
+        Expr::Call(Builtin::NoiseTable, args) if args.len() % 2 == 0 => {
+            Ok(Some(NoiseTerm::Table { call: expr }))
+        }
+        Expr::Call(Builtin::NoiseTable, _) => Err(unsupported(
+            "noise_table expects an even number of arguments (alternating frequency and power)",
+        )),
         _ => Ok(None),
     }
 }
@@ -1264,7 +1284,7 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
 /// `sin(white_noise(p))`), rather than silently contributing nothing.
 pub(crate) fn contains_noise_call(module: &Module, expr: ExprId) -> bool {
     match module.expr(expr) {
-        Expr::Call(Builtin::WhiteNoise | Builtin::FlickerNoise, _) => true,
+        Expr::Call(Builtin::WhiteNoise | Builtin::FlickerNoise | Builtin::NoiseTable, _) => true,
         Expr::Call(_, args) => args.iter().any(|&a| contains_noise_call(module, a)),
         Expr::Unary(_, e) => contains_noise_call(module, *e),
         Expr::Binary(_, l, r) => contains_noise_call(module, *l) || contains_noise_call(module, *r),

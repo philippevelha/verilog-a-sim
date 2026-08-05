@@ -794,6 +794,69 @@ impl Elaborator<'_> {
         })
     }
 
+    /// Read, validate and sort a `noise_table()` argument into `(frequency Hz, power)` pairs
+    /// (LRM §4.6.4.3).
+    ///
+    /// Everything the LRM says about this table is checked here, at the one place that has a
+    /// source file to name in the diagnostic:
+    ///
+    /// - the input must be an array literal — the **file-name form** (`noise_table("f.tbl")`) is
+    ///   rejected with its own message rather than mis-parsed, since reading a table off disk at
+    ///   elaboration is a genuinely different feature (this crate never opens a file except for
+    ///   `` `include ``);
+    /// - the flattened list holds `(frequency, power)` **pairs**, so an odd length is an error;
+    /// - frequencies must be **unique** ("Each frequency value must be unique") and
+    ///   non-negative — a duplicate would make the interpolating segment zero-width and a
+    ///   negative frequency has no meaning in a noise sweep;
+    /// - powers must be non-negative, since a PSD is a power;
+    /// - the pairs are **sorted into ascending frequency** ("the simulator shall internally sort
+    ///   the pairs … if required"), which is the invariant `va_abi::noise::table_psd_at` reads
+    ///   the table under.
+    ///
+    /// An empty table is allowed through: it is a source with no power at any frequency, which
+    /// the noise analysis then drops. Rejecting it would be a stricter rule than the LRM states.
+    fn noise_table_points(&self, r: ExprRef) -> Result<Vec<(f64, f64)>, FrontendError> {
+        if let ExprAst::Str(_) = self.ast.expr(r) {
+            return Err(elab(
+                "`noise_table` with a file-name argument is not supported — give the table \
+                 inline as a `'{f1, p1, f2, p2, …}` array literal"
+                    .to_string(),
+            ));
+        }
+        let values = self.array_lit_values(r, "`noise_table`'s table")?;
+        if values.len() % 2 != 0 {
+            return Err(elab(format!(
+                "`noise_table`'s table must hold `(frequency, power)` pairs — got {} values (odd)",
+                values.len()
+            )));
+        }
+        let mut points: Vec<(f64, f64)> = Vec::with_capacity(values.len() / 2);
+        for pair in values.chunks(2) {
+            let (f, p) = (pair[0], pair[1]);
+            if f < 0.0 || !f.is_finite() {
+                return Err(elab(format!(
+                    "`noise_table` frequency {f} is not a finite, non-negative frequency in Hz"
+                )));
+            }
+            if p < 0.0 || !p.is_finite() {
+                return Err(elab(format!(
+                    "`noise_table` power {p} at {f} Hz is not a finite, non-negative power \
+                     spectral density"
+                )));
+            }
+            points.push((f, p));
+        }
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some(w) = points.windows(2).find(|w| w[0].0 == w[1].0) {
+            return Err(elab(format!(
+                "`noise_table` repeats the frequency {} Hz — the LRM requires each frequency in \
+                 a table to be unique",
+                w[0].0
+            )));
+        }
+        Ok(points)
+    }
+
     /// A `zero`/`pole` array literal's product term at Laplace s=0 (LRM §4.5.11.1-3):
     /// `zeta`/`rho` is a flattened list of `(re, im)` root pairs, one pair per zero/pole. Every
     /// root contributes a factor of `(1 - s/root)`, which is exactly `1` at s=0 for *any*
@@ -1480,16 +1543,31 @@ impl Elaborator<'_> {
                 let exp = self.lower_expr(exp)?;
                 Expr::Call(Builtin::FlickerNoise, vec![pwr, exp])
             }
-            // `noise_table` (a piecewise-linear PSD over frequency) has no Interface β channel to
-            // carry it, so it keeps the old fold-to-zero — honest, since the alternative would be
-            // silently dropping a declared noise source that *looks* lowered. `ac_stim` (an
-            // AC-only stimulus) contributes nothing to a DC operating point; `bound_step` is a
-            // transient-timestep hint with no DC meaning at all — same fold, on the rare chance
-            // it appears in expression position rather than as the bare statement
-            // `parse_bound_step_stmt` already handles (see `crate::parser`).
-            ExprAst::Call { name, .. }
-                if matches!(name.as_str(), "noise_table" | "ac_stim" | "bound_step") =>
-            {
+            // `noise_table(input[, "name"])` (LRM §4.6.4.3) lowers like the two noise builtins
+            // above, with one difference: its `input` is *data*, not an expression to evaluate
+            // per bias. The LRM's table is constant by construction (an array parameter or an
+            // array assignment pattern), so it is const-folded, validated, and sorted here —
+            // once — and travels as a flat, alternating `f, p, f, p, …` argument list
+            // (`Builtin::NoiseTable`'s own doc comment explains why that rather than a new
+            // `Expr` variant).
+            ExprAst::Call { name, args } if name == "noise_table" => {
+                let input = *args
+                    .first()
+                    .ok_or_else(|| elab("`noise_table` requires a table argument".to_string()))?;
+                let points = self.noise_table_points(input)?;
+                let ids = points
+                    .into_iter()
+                    .flat_map(|(f, p)| [f, p])
+                    .map(|v| self.out.push_expr(Expr::Const(v)))
+                    .collect();
+                Expr::Call(Builtin::NoiseTable, ids)
+            }
+            // `ac_stim` (an AC-only stimulus) contributes nothing to a DC operating point;
+            // `bound_step` is a transient-timestep hint with no DC meaning at all — both fold to
+            // zero, `bound_step` on the rare chance it appears in expression position rather
+            // than as the bare statement `parse_bound_step_stmt` already handles (see
+            // `crate::parser`).
+            ExprAst::Call { name, .. } if matches!(name.as_str(), "ac_stim" | "bound_step") => {
                 Expr::Const(0.0)
             }
             // `transition(value, delay, rise_time, fall_time)` and `slew(value, pos_rate,
@@ -3975,14 +4053,21 @@ mod tests {
             .expect("at least one module");
         assert!(elaborate(&ast).is_err());
 
-        // `noise_table` has no ABI channel to carry it, so it still folds to zero.
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + noise_table(1.0); end endmodule"#;
+        // `noise_table` lowers to its own builtin — never to a `WhiteNoise` call, whose flat
+        // shape would be a different (and wrong) spectrum.
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + noise_table({1.0, 2e-20, 10.0, 4e-20}); end endmodule"#;
         let m = elaborate_src(src);
         assert!(
             !m.exprs
                 .iter()
                 .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::WhiteNoise, _))),
             "noise_table must not masquerade as a white source"
+        );
+        assert!(
+            m.exprs
+                .iter()
+                .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::NoiseTable, _))),
+            "noise_table lowers to a NoiseTable call"
         );
 
         // `$simparam` with no default is an error (unknown parameter).
@@ -3994,6 +4079,141 @@ mod tests {
             .next()
             .expect("at least one module");
         assert!(elaborate(&ast).is_err());
+    }
+
+    /// Elaborate a module whose analog block is just `body`, returning the error message.
+    fn elaborate_err(src: &str) -> String {
+        let toks = lex(src).expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        elaborate(&ast)
+            .expect_err("expected an elaboration error")
+            .to_string()
+    }
+
+    /// The table survives elaboration as flattened, const-folded `f, p, f, p, …` arguments —
+    /// the shape `va-codegen` reads (§ `va_ir::Builtin::NoiseTable`).
+    #[test]
+    fn noise_table_lowers_to_flattened_constant_pairs() {
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table({1.0, 2e-20, 10.0, 4e-20}, "tbl"); end endmodule"#;
+        let m = elaborate_src(src);
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::NoiseTable, args) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("noise_table lowers to a NoiseTable call");
+        assert_eq!(args.len(), 4, "two pairs, the trailing label dropped");
+        let vals: Vec<f64> = args
+            .iter()
+            .map(|&id| match m.expr(id) {
+                va_ir::Expr::Const(v) => *v,
+                other => panic!("table entries must be constants, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(vals, vec![1.0, 2e-20, 10.0, 4e-20]);
+    }
+
+    /// The LRM makes sorting the simulator's job, so an out-of-order table is valid input that
+    /// must come out ascending — not an error, and not passed through unsorted (which would
+    /// silently invert every interpolated segment downstream).
+    #[test]
+    fn noise_table_is_sorted_into_ascending_frequency_at_elaboration() {
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table({100.0, 1e-22, 1.0, 1e-20, 10.0, 1e-21}); end endmodule"#;
+        let m = elaborate_src(src);
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::NoiseTable, args) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("a NoiseTable call");
+        let freqs: Vec<f64> = args
+            .chunks(2)
+            .map(|pair| match m.expr(pair[0]) {
+                va_ir::Expr::Const(v) => *v,
+                _ => panic!("constant"),
+            })
+            .collect();
+        assert_eq!(freqs, vec![1.0, 10.0, 100.0]);
+    }
+
+    /// Every malformed table the LRM rules out is a named elaboration error rather than a
+    /// silently-wrong spectrum. Each of these would otherwise "work" and produce nonsense.
+    #[test]
+    fn malformed_noise_tables_are_rejected_with_their_own_diagnostics() {
+        let cases = [
+            // An odd number of values cannot be (frequency, power) pairs.
+            (r#"noise_table({1.0, 2e-20, 10.0})"#, "pairs"),
+            // The LRM: "Each frequency value must be unique."
+            (r#"noise_table({1.0, 2e-20, 1.0, 4e-20})"#, "unique"),
+            // A PSD is a power; a negative one is not a table this can interpolate.
+            (r#"noise_table({1.0, -2e-20, 10.0, 4e-20})"#, "power"),
+            (r#"noise_table({-1.0, 2e-20, 10.0, 4e-20})"#, "frequency"),
+            // The file-name form is a separate, unimplemented feature — say so, rather than
+            // failing with an array-literal message that misdescribes what the author wrote.
+            (r#"noise_table("table.tbl")"#, "file-name"),
+            // A bare scalar is not a table at all.
+            (r#"noise_table(1.0)"#, "array-literal"),
+            // No argument at all.
+            (r#"noise_table()"#, "requires a table argument"),
+        ];
+        for (call, needle) in cases {
+            let src = format!(
+                "module t(a, b); electrical a, b; analog begin I(a, b) <+ {call}; end endmodule"
+            );
+            let msg = elaborate_err(&src);
+            assert!(
+                msg.contains(needle),
+                "`{call}` should be rejected mentioning `{needle}`, got: {msg}"
+            );
+        }
+    }
+
+    /// An empty table cannot be *written* — `{}` is not an expression this parser accepts (an
+    /// array literal needs at least one element), so the empty case never reaches elaboration
+    /// from source. It is still handled defensively downstream (`va_abi::noise::table_psd_at`
+    /// returns `0.0` for an empty table rather than indexing `first()`/`last()`), because a
+    /// table can also be built programmatically by a caller of that ABI.
+    #[test]
+    fn an_empty_noise_table_cannot_be_written_and_fails_at_the_parser() {
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table({}); end endmodule"#;
+        let toks = lex(src).expect("lex");
+        assert!(
+            parse(&toks).is_err(),
+            "`{{}}` is not a writable array literal"
+        );
+    }
+
+    /// The table may be written in terms of parameters and macro constants — it only has to be
+    /// *constant*, which is what const-folding it at elaboration checks. This is the shape
+    /// `models/resistor_noise_table.va` uses to write `4kT/R` without hard-coding the number.
+    #[test]
+    fn a_noise_table_may_be_built_from_parameter_expressions() {
+        let src = "module t(a, b); electrical a, b; parameter real R = 1000.0; \
+                   analog begin I(a, b) <+ noise_table({1.0, 4.0*1.380649e-23*300.15/R, \
+                   1e6, 4.0*1.380649e-23*300.15/R}); end endmodule";
+        let m = elaborate_src(src);
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::NoiseTable, args) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("a NoiseTable call");
+        let power = match m.expr(args[1]) {
+            va_ir::Expr::Const(v) => *v,
+            _ => panic!("constant"),
+        };
+        let want = 4.0 * 1.380_649e-23 * 300.15 / 1000.0;
+        assert!((power - want).abs() < 1e-30, "got {power}, want {want}");
     }
 
     #[test]

@@ -1029,8 +1029,10 @@ including the ones with no implemented behavior at all.
   feed a noise-analysis PSD computation, and `ac_stim` contributes a stimulus only during AC
   analysis. **Updated 2026-08-01 (T5.2):** `white_noise`/`flicker_noise` are now genuinely
   lowered, since `va-acnoise` implements noise analysis and Interface β carries a noise channel.
-  `noise_table` and `ac_stim` still fold to `0.0` — `noise_table`'s piecewise-linear PSD has no
-  ABI channel to carry it, and `ac_stim` has no effect on a DC operating point.
+  **Updated 2026-08-04 (T5.6):** `noise_table` is lowered too — Interface β gained a
+  `table_current` channel (§6) and Interface α a `Builtin::NoiseTable`. Only `ac_stim` still
+  folds to `0.0`, which has nothing to do with any missing channel: an AC stimulus has no effect
+  on a DC operating point. All three noise builtins are now real.
 - **Declaration and Assignment**: Called as `white_noise(pwr[, "name"])` /
   `flicker_noise(pwr, exp[, "name"])` / `noise_table(...)` / `ac_stim([mag[, phase[, type]]])`.
 - **Expressions and Evaluation**: `white_noise`/`flicker_noise` elaborate to
@@ -1040,8 +1042,27 @@ including the ones with no implemented behavior at all.
   `va-codegen`, which splits them out of a contribution into the noise channel exactly as it
   splits `ddt` into the charge channel — so a model may declare its noise inline in the same
   `<+` that carries its DC behavior without perturbing any DC/transient/AC answer. A missing
-  required argument is a clear elaboration error, not a silent zero. `noise_table`/`ac_stim`
-  remain elaborated to `Expr::Const(0.0)`, arguments unevaluated.
+  required argument is a clear elaboration error, not a silent zero.
+
+  `noise_table(input[, "name"])` elaborates to `Expr::Call(Builtin::NoiseTable, args)` where
+  `args` is the table **flattened** into alternating frequency/power constants, sorted ascending
+  (LRM §4.6.4.3: "the simulator shall internally sort the pairs"). Unlike the other two, its
+  argument is *data*, not an expression evaluated per bias: the LRM restricts a table to an array
+  parameter or an array assignment pattern, so it is const-folded once, at elaboration —
+  which also means a tabulated PSD **cannot track `$temperature`** or a netlist-overridden
+  parameter (`models/resistor_noise_table.va`'s header spells out what that costs a model
+  author). Everything the LRM says about the table is checked there, where a source file can be
+  named: an odd number of values, a repeated frequency, a negative frequency or power, and the
+  file-name form (`noise_table("t.tbl")`, unimplemented) each get their own message. Between
+  points the PSD is piecewise-linear **in frequency**, and outside the tabulated range it is
+  clamped to the nearest endpoint's power rather than extrapolated
+  (`va_abi::noise::table_psd_at`). `ac_stim` alone still elaborates to `Expr::Const(0.0)`,
+  arguments unevaluated.
+
+  `noise_table_log` (LRM §4.6.4.4, the same table interpolated in `log₁₀ f`/`log₁₀ power`) is
+  **not a recognized token** — the interpolation rule itself is implemented and tested in
+  `va_abi::noise` (`TableInterp::Log`), so wiring it is a lexer/elaboration change with no
+  interface revision behind it.
 - **Structural and Analog Usage**: Analog-block only (they appear on the right-hand side of a
   `<+` contribution; the branch that contribution targets is the branch the noise source is
   placed across).
@@ -1285,7 +1306,8 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `nature` | Genuinely parsed into `NatureDecl` (§1.5, `Parser::parse_nature`) | `nature name [;] ... endnature` | Its `units`/`access`/`abstol`/`idt_nature`/`ddt_nature` attributes are all parsed (§1.5) | Module preamble | Closest to a C units-of-measure/tolerance struct |
 | `negedge` | Reserved, no grammar production as a bare word outside `@()`; would appear as `@(negedge sig)`, itself discarded wholesale | Digital falling-edge event trigger | N/A | Digital event control only | No C analogue |
 | `nmos` | Reserved, no grammar production (NMOS switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
-| `noise_table` | Folds to constant `0.0`, §1.5 | `noise_table(table_or_array[, "name"])` call | Const-folded to `0.0` | Analog-block only | No general-purpose analogue |
+| `noise_table` | Lowered to `Builtin::NoiseTable` (§1.5, T5.6) | `noise_table({f1, p1, f2, p2, …}[, "name"])` call | Table const-folded, validated and sorted at elaboration; PSD interpolated piecewise-linearly in `f`, clamped outside the range; value `0` outside noise analysis | Analog-block only | No general-purpose analogue |
+| `noise_table_log` | **Not lexed** — not in the keyword table; `TableInterp::Log` implements its rule ABI-side already (§1.5) | `noise_table_log(…)` call | N/A | Analog-block only | No general-purpose analogue |
 | `nor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a \|\| b)`, minus gate timing |
 | `not` | Reserved, no grammar production (digital *inverter gate* primitive — distinct from the `!` operator, `Token::Not`) | N/A | N/A | Digital gate level only | Loosely C's `!x` as a value, but as a timed gate instance instead of an operator |
 | `notif0` | Reserved, no grammar production (tristate inverter, active-low enable) | N/A | N/A | Digital gate level only | No C analogue |

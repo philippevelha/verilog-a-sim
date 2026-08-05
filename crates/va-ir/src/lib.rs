@@ -375,6 +375,20 @@ pub enum Builtin {
     /// [`Builtin::WhiteNoise`]. Carries exactly two arguments after elaboration: the
     /// bias-dependent numerator and the frequency exponent.
     FlickerNoise,
+    /// `noise_table('{f1, p1, f2, p2, …})` — a noise source whose power spectral density is the
+    /// piecewise-linear interpolation of the given `(frequency, power)` pairs (LRM §4.6.4.3).
+    ///
+    /// Same "zero outside noise analysis" rule and same dropped-label treatment as
+    /// [`Builtin::WhiteNoise`]. Carries the table **flattened** — an even number of arguments,
+    /// alternating frequency and power, already **sorted by ascending frequency** and
+    /// const-folded by elaboration (the LRM makes both the sort and the constant-ness the
+    /// simulator's job, and doing them once here keeps every consumer a straight read).
+    ///
+    /// A table is deliberately *not* a distinct `Expr` variant carrying a `Vec<(f64, f64)>`:
+    /// keeping it as ordinary `Const` arguments to an ordinary `Call` means every existing
+    /// arena walk, clone, and pretty-print handles it with no change at all (Interface α
+    /// change, 2026-08-04 — see `docs/interfaces.md`).
+    NoiseTable,
 }
 
 // ---------------------------------------------------------------------------------------

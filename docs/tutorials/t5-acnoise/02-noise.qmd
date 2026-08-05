@@ -392,8 +392,15 @@ gate into decoration.
   solve at all; see "Input-referred noise, for free" above.
 - ~~**No per-device breakdown.**~~ **Closed** (2026-08-01d) — see "Attributing noise to devices"
   above.
-- **`noise_table` is not lowered.** Its piecewise-linear PSD has no ABI channel; the frontend
-  still folds it to zero rather than pretend otherwise.
+- ~~**`noise_table` is not lowered.**~~ **Closed** (2026-08-04) — `table_current` joined the
+  channel as its third method and `NoiseSource` gained a `Table { points, interp }` variant.
+  What remains is narrower and stated on purpose: a table is *constant data* per the LRM, so a
+  tabulated PSD cannot track `$temperature` or a netlist-overridden parameter the way a
+  `white_noise()` argument can; and `noise_table_log` has no lexer token yet, though its
+  interpolation rule is already implemented and tested ABI-side.
+- **Sources are still assumed mutually uncorrelated** — unchanged since the first revision, and
+  the one limit no addition so far has touched. A full BSIM's induced gate noise would violate
+  it, and there is no way to declare a correlation coefficient between two sources.
 
 `total` deserves its own note: it is trapezoidal quadrature in *linear* frequency over
 logarithmically-spaced points, which is exact for a flat spectrum (hence checkable against
@@ -414,8 +421,26 @@ against QSPICE. See `docs/roadmap.md`'s T5.3 section.
 predicted: it was budgeted as "one forward AC solve per frequency" and turned out to need no
 solve at all, since the gain is already a component of the adjoint vector (§ above).
 
-What remains is **`noise_table` lowering**, which needs a third `NoiseSink` method for a
-piecewise-linear PSD — the same additive shape `flicker_current` took.
+*(Updated 2026-08-04.)* **`noise_table` lowering is done too**, and it did take the additive
+shape this section predicted — a third `NoiseSink` method, `table_current`. Two things about it
+were not predicted here, and are the parts worth carrying forward:
 
-See `docs/roadmap.md`'s T5.2/T5.3 sections for the full account, and `docs/validation.md`'s
-noise-gate sections for the measured numbers and the reasoning behind the `1e-3` band.
+1. **A table is data, not a shape plus coefficients.** White and flicker are closed-form laws: a
+   sink stores one or two numbers and evaluates a formula per frequency. A table *is* the data,
+   so it is passed by slice and owned by the sink — which cost `NoiseSource` its `Copy`, the
+   only non-additive ripple in the whole change.
+2. **The validation split is unusual and deliberate.** QSPICE has no primitive with an arbitrary
+   PSD, so the only table it can act as an oracle for is a *flat* one — on which clamping and
+   extrapolating agree. The golden gate therefore pins the level and the end-to-end path
+   exactly, and the interpolation rules are pinned by shaped-table unit tests instead. When a
+   gate can only exercise a code path rather than discriminate it, say which — a green number
+   that proves less than it appears to is worse than no number.
+
+With this, **all three of Verilog-A's noise builtins are real**. The next thing in this area is
+`noise_table_log` (LRM §4.6.4.4), which needs only a lexer token and an elaboration arm — its
+interpolation rule already ships in `va_abi::noise` (`TableInterp::Log`), tested against the
+LRM's own Figure 4-9 example, precisely so wiring it costs no further interface revision.
+
+See `docs/roadmap.md`'s T5.2/T5.3/T5.6 sections for the full account, and
+`docs/validation.md`'s noise-gate sections for the measured numbers and the reasoning behind the
+`1e-3` band.

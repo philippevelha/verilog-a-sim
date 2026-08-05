@@ -1,0 +1,31 @@
+* Compiled-model tabulated noise -- T5.6's noise_table() lowering gate.
+* Two 1k resistors in series across a 1 V source, probed at their junction. Both resolve to the
+* *compiled* models/resistor_noise_table.va (via --model), whose analog block declares its
+* thermal noise as
+*   I(p,n) <+ noise_table({1e2, 4kT/R, 1e3, 4kT/R, 1e6, 4kT/R})
+* rather than as white_noise(). Before noise_table() was lowered this deck measured an
+* identically-zero spectrum, the same way circuits/resistor_noise_va.net did before T5.3.
+*
+* Why both resistors are 1k, and not 1k/3k like resistor_noise_va.net: a table is constant data
+* the frontend const-folds at elaboration, so it cannot follow the per-device resistance va-cli
+* overrides onto the model's first parameter afterwards. Both devices must therefore use the
+* model's own default R -- see models/resistor_noise_table.va's note 2.
+*
+* The two sources add in power and reach the output through the same R1||R2 = 500 ohm, so the
+* answer is the textbook 4kT*(R1||R2), flat (nothing here is reactive):
+*   S(out) = 4kT*500 ~ 8.289e-18 V^2/Hz
+* The sweep runs 10 Hz - 10 MHz while the table only spans 100 Hz - 1 MHz, so every run walks
+* all three of the LRM's code paths: clamp below 100 Hz, interpolate in between, clamp above
+* 1 MHz. Be clear about what that does and doesn't prove, though -- the table is *flat*, so
+* clamping and extrapolating would give the same answer here; this deck pins the absolute level
+* and the end-to-end path (frontend -> IR -> codegen -> Interface beta -> adjoint -> harness)
+* exactly, while telling the three interpolation rules apart is the job of the shaped tables in
+* va-abi's and va-acnoise's unit tests. A flat table is the only shape QSPICE has a native
+* primitive to compare against at all, which is why the split of duties is this way round.
+*
+* Pure R/V, so QSPICE runs it with no model translation at all.
+V1 in  gnd  DC 1
+R1 in  a    1000
+R2 a   gnd  1000
+.noise V(a) V1 dec 10 10 10meg
+.end

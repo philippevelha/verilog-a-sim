@@ -49,8 +49,8 @@ mod tests {
         let mut sink = CollectedNoise::default();
         r.noise(&[2.0], TEMP_NOMINAL, &mut sink);
         assert_eq!(sink.sources.len(), 1);
-        let (p, n, source) = sink.sources[0];
-        assert_eq!((p, n), (0, GROUND));
+        let (p, n, source) = &sink.sources[0];
+        assert_eq!((*p, *n), (0, GROUND));
         // White: the same at every frequency, so any probe frequency reads it.
         let psd = source.psd_at(1.0);
         assert!((psd - 1.657_6e-23).abs() < 1e-27, "psd = {psd}");

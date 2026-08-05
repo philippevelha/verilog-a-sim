@@ -59,10 +59,11 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all eleven — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`golden/*.golden` — all twelve — are real, QSPICE-generated data (`cargo xtask gen-golden`):
 `{divider, mos_dc, diode_iv, rc_step, rectifier, ring_osc, rc_ac, diode_ac, diode_noise,
-resistor_noise_va, diode_flicker}`. Every one of `xtask`'s known circuits has a committed golden
-reference, closing the "which circuits aren't regenerated yet" gap this file used to track.
+resistor_noise_va, diode_flicker, resistor_noise_table}`. Every one of `xtask`'s known circuits
+has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
+file used to track.
 
 ### The AC gate (added 2026-08-01)
 
@@ -164,6 +165,36 @@ rather than a parameterization of it, because this project's netlist format has 
 passing device parameters — a `D` line names a model and nothing more — so a nonzero `KF` has to
 come from a model file's own defaults. Keeping it separate leaves `diode.va` with the physically
 sane `KF = 0` its other three circuits want.
+
+### Compiled-model noise: the `noise_table()` gate (added 2026-08-04)
+
+**`circuits/resistor_noise_table.net`** completes the set — the third and last of Verilog-A's
+noise builtins (T5.6). Two 1 kΩ resistors across a 1 V source, both resolving to the compiled
+`models/resistor_noise_table.va`, whose thermal source is written as a three-point table of
+`4kT/R` instead of a `white_noise()` call. The sources add in power through `R1∥R2 = 500 Ω`,
+giving a flat `4kT·500Ω = 8.288e-18` V²/Hz that a **plain QSPICE resistor pair reproduces
+exactly** — no `.model` translation, the same arrangement `resistor_noise_va.net` uses.
+Measured: **`1.9e-16`**, machine precision on the same terms as that gate.
+
+Both resistors are 1 kΩ rather than the 1 k/3 k of `resistor_noise_va.net` for a reason worth
+knowing before writing a tabulated model: **a table is const-folded at elaboration**, so it can
+follow neither `$temperature` nor the per-device resistance `va-cli` overrides onto a compiled
+model's first parameter afterwards. That is the LRM's own restriction (a table is an array
+parameter or an assignment pattern, i.e. constant data), not a shortcut here — but it makes a
+1 k/3 k deck silently wrong in a way a `white_noise()` deck is not.
+
+**What this gate does and does not prove.** The deck's table spans 100 Hz – 1 MHz while the
+sweep runs 10 Hz – 10 MHz, so every run walks all three of the LRM's code paths — clamp low,
+interpolate, clamp high. But the table is *flat*, and on a constant table clamping and
+extrapolating agree, so the gate pins the **absolute level and the end-to-end path** (frontend →
+IR → codegen → Interface β → adjoint → harness) rather than the interpolation rules themselves.
+Telling those apart is done by unit tests over deliberately shaped tables: the LRM's own
+§4.6.4.3 example table read *between* decade points (which catches a log-interpolating
+implementation), its Figure 4-9 two-point `1/f` log table, an unsorted table, a zero-power
+segment, and a `va-acnoise` sweep over a rise-then-fall table read entirely between its knots.
+A flat table is the only shape QSPICE has a native primitive to compare against at all, so
+splitting the duties this way is the honest resolution rather than a hole — stated here so
+nobody later reads `1.9e-16` as evidence the interpolator is right.
 
 ### Input-referred noise (added 2026-08-01c)
 

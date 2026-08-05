@@ -123,6 +123,23 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > `Current`'s `abstol`): only a `Node`-kind unknown (a KCL potential) has a natural per-`NodeDecl`
 > home for one.
 
+> **Revision (§6 change, 2026-08-04):** added `Builtin::NoiseTable`, the IR spelling of
+> Verilog-A's `noise_table()` (LRM §4.6.4.3). Additive in the strictest sense — one new variant
+> on an existing enum, matched exhaustively in exactly two places (`va-codegen`'s `ad::eval`,
+> where it evaluates to `0.0` like the other two noise builtins, and `lower::noise_term_shape`,
+> which pulls it into the noise channel).
+>
+> The table travels as the call's **flattened, sorted, const-folded arguments** —
+> `Call(NoiseTable, [Const(f1), Const(p1), Const(f2), Const(p2), …])` — rather than as a new
+> `Expr` variant owning a `Vec<(f64, f64)>`. That choice is what keeps this a one-variant change:
+> every arena walk, clone, validity check and pretty-printer in the pipeline already handles a
+> `Call` with constant arguments, so none of them needed touching. `va-frontend` does all the
+> table-shaped work once, at elaboration, where it still has a source file to name in an error
+> message: it const-folds each entry, rejects an odd count, a duplicate frequency (the LRM
+> requires uniqueness), a negative frequency or power, and the file-name form of the argument;
+> then sorts the pairs ascending, which is the invariant `va_abi::noise::table_psd_at` reads them
+> under. See Interface β's matching `table_current` revision, below.
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models
@@ -150,6 +167,9 @@ pub trait NoiseSink {
     fn white_current(&mut self, p: usize, n: usize, psd: f64);
     /// A flicker source across `p`-`n`, PSD `coeff / f^exponent` (A²/Hz). Default: none.
     fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {}
+    /// A tabulated source across `p`-`n`: `(frequency, power)` pairs, ascending, interpolated
+    /// per `interp` (linear in `f` or in `log f`). Default: none.
+    fn table_current(&mut self, p: usize, n: usize, points: &[(f64, f64)], interp: TableInterp) {}
 }
 
 pub trait ModelInstance {
@@ -243,3 +263,33 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > has no flicker term to declare); the channel's users are `va-codegen`-generated models, whose
 > `flicker_noise()` calls now reach it. See `docs/validation.md`'s flicker-gate section for the
 > QSPICE comparison this made possible.
+
+> **Revision (§6 change, 2026-08-04):** added `NoiseSink::table_current` and the `TableInterp`
+> enum, closing the last stated limit of the noise channel — Verilog-A's `noise_table()`
+> (LRM §4.6.4.3), a PSD given as interpolated `(frequency, power)` pairs. Same shape as the two
+> revisions above: a **default trait method**, so every existing sink and every model that emits
+> no table kept compiling untouched, and a sink that ignores tables silently drops them (pinned
+> by a test in `va_abi::noise`).
+>
+> **Why a table is data, not two more coefficients.** White and flicker are *closed-form*
+> shapes — a sink stores one or two numbers and evaluates the formula per frequency. A table
+> has no formula; it is the data. So `table_current` takes the points by slice and the sink owns
+> a copy, and `NoiseSource` gains a `Table { points, interp }` variant. That is the one
+> non-additive ripple, again internal to `va-abi`: **`NoiseSource` is no longer `Copy`**, since a
+> table owns a `Vec`. The three call sites that destructured it by value now borrow instead; no
+> clone happens inside any frequency loop.
+>
+> `TableInterp` carries both of the LRM's interpolation rules — `Linear` (`noise_table`,
+> piecewise-linear in `f`) and `Log` (`noise_table_log`, piecewise-linear in `log₁₀ f` and
+> `log₁₀ power`, §4.6.4.4). Both are implemented and tested in `va_abi::noise::table_psd_at`.
+> Only `Linear` currently has a Verilog-A spelling that reaches it: `noise_table_log` is not yet
+> a recognized token in `va-frontend`, so wiring it is a frontend change with **no further
+> Interface β revision needed** — which is exactly why both rules went in together rather than
+> forcing a fourth §6 event later.
+>
+> **Stated limits of this revision:** a table is constant data (the LRM's own restriction — an
+> array parameter or an array assignment pattern), so a tabulated PSD cannot track `$temperature`
+> or a netlist-overridden parameter the way a `white_noise()` argument can; correlation between
+> sources is still unrepresentable, unchanged from the first revision. See `va_abi::noise`'s
+> module doc, `docs/roadmap.md`'s T5.6 section, and `models/resistor_noise_table.va`'s header
+> for what that means for a model author.

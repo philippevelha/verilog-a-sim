@@ -19,19 +19,23 @@
 //! shot noise in the devices this crate models, and stated here because it is an assumption a
 //! correlated-source model (e.g. a full BSIM's induced gate noise) would violate.
 //!
-//! # Two source kinds
+//! # Three source kinds
 //!
 //! [`NoiseSink::white_current`] is frequency-flat; [`NoiseSink::flicker_current`] is
 //! `coeff / f^exponent`, the `1/f`-family shape (§6 change, 2026-08-01 — added when
-//! `va-codegen` learned to lower Verilog-A's `flicker_noise()`). Splitting them by *shape*
-//! rather than passing a closure keeps the channel a plain data contract: a sink stores two
-//! numbers and evaluates the shape itself, so nothing here has to be re-entered per frequency.
+//! `va-codegen` learned to lower Verilog-A's `flicker_noise()`); [`NoiseSink::table_current`] is
+//! an arbitrary PSD given as interpolated `(frequency, power)` pairs (§6 change, 2026-08-04 —
+//! added when `va-codegen` learned to lower Verilog-A's `noise_table()`). Splitting them by
+//! *shape* rather than passing a closure keeps the channel a plain data contract: a sink stores
+//! the coefficients (or the table) and evaluates the shape itself, so nothing here has to be
+//! re-entered per frequency.
 //!
 //! # Limitations
 //!
-//! - **These two shapes only.** Verilog-A's `noise_table()` (a piecewise-linear PSD over
-//!   frequency) has no representation; it stays folded to zero in the frontend. A third sink
-//!   method would be the additive way to add it.
+//! - **These three shapes only.** They cover every noise function Verilog-A defines
+//!   (LRM §4.6.4) except the file-input form of `noise_table()`, which is a frontend question
+//!   (reading a `.tbl` file) rather than an ABI one — the table reaches this channel the same
+//!   way either way.
 //! - **Uncorrelated sources only**, as above — there is no way to declare that two sources
 //!   share a correlation coefficient.
 
@@ -76,6 +80,42 @@ pub trait NoiseSink {
     fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {
         let _ = (p, n, coeff, exponent);
     }
+
+    /// A **tabulated** current-noise source across the branch `p`-`n`, whose one-sided PSD is
+    /// given by `points` — `(frequency Hz, power A²/Hz)` pairs interpolated per `interp`
+    /// (Verilog-A's `noise_table()`/`noise_table_log()`, LRM §4.6.4.3/§4.6.4.4).
+    ///
+    /// `points` **must be sorted by ascending frequency with no duplicates**; the LRM makes
+    /// sorting the simulator's job, and this project does it once at elaboration (where the
+    /// table is const-folded) rather than per emission. [`NoiseSource::table`] enforces the
+    /// invariant for anything built through it. Outside the tabulated range the PSD is clamped
+    /// to the nearest endpoint's power, per the LRM.
+    ///
+    /// Unlike the other two channels there are no coefficients to evaluate at the operating
+    /// point: an LRM table is constant data (an array parameter or an assignment pattern), so a
+    /// tabulated source is bias-independent by construction.
+    ///
+    /// Default: **no source**, on the same "an existing sink needs no change" grounds as
+    /// [`NoiseSink::flicker_current`].
+    fn table_current(&mut self, p: usize, n: usize, points: &[(f64, f64)], interp: TableInterp) {
+        let _ = (p, n, points, interp);
+    }
+}
+
+/// How a tabulated PSD is interpolated between its `(frequency, power)` points.
+///
+/// The two rules are the difference between Verilog-A's `noise_table()` and
+/// `noise_table_log()`, which are otherwise the same function over the same data
+/// (LRM §4.6.4.3/§4.6.4.4, and its Figure 4-9 comparing them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableInterp {
+    /// Piecewise linear in `(f, power)` — `noise_table()`. Straight segments on a *linear*
+    /// plot, which is why the LRM's own Figure 4-9 shows it drooping between decade points
+    /// where a `1/f` law would be straight.
+    Linear,
+    /// Piecewise linear in `(log₁₀ f, log₁₀ power)` — `noise_table_log()`. Straight segments on
+    /// a *log-log* plot, so two points suffice to describe an exact power law.
+    Log,
 }
 
 /// Thermal (Johnson-Nyquist) current-noise PSD of a conductance `g` (S) at temperature `temp`
@@ -109,9 +149,57 @@ pub fn flicker_psd_at(coeff: f64, exponent: f64, f: f64) -> f64 {
     coeff / f.powf(exponent)
 }
 
+/// PSD at frequency `f` of a table of `(frequency, power)` pairs, per `interp`
+/// (LRM §4.6.4.3/§4.6.4.4).
+///
+/// `points` must be sorted by ascending frequency (§ [`NoiseSink::table_current`]); an unsorted
+/// table would silently produce a wrong interpolation rather than an error, which is why the
+/// sort happens once, at the single place tables are built. Outside the tabulated range the
+/// nearest endpoint's power is returned — the LRM's own clamping rule, not an extrapolation. An
+/// empty table has no power at any frequency and yields `0.0`.
+///
+/// [`TableInterp::Log`] falls back to linear interpolation across any segment whose endpoints
+/// are not both strictly positive in frequency *and* power: `log(0)` is undefined, and a table
+/// point at zero power is legal data (a band where the model declares no noise). The fallback is
+/// per segment, so one such point never degrades the rest of the table.
+pub fn table_psd_at(points: &[(f64, f64)], interp: TableInterp, f: f64) -> f64 {
+    let (Some(&(f_lo, p_lo)), Some(&(f_hi, p_hi))) = (points.first(), points.last()) else {
+        return 0.0;
+    };
+    if f <= f_lo {
+        return p_lo;
+    }
+    if f >= f_hi {
+        return p_hi;
+    }
+    // The bracketing segment: the last point at or below `f`, and the one after it. Linear scan
+    // rather than a binary search — an LRM noise table is a handful of points, and the
+    // straight-line loop is the cheaper of the two at that size.
+    let seg = points
+        .windows(2)
+        .find(|w| w[0].0 <= f && f <= w[1].0)
+        .expect("f lies strictly inside the tabulated range, so some segment brackets it");
+    let ((f1, p1), (f2, p2)) = (seg[0], seg[1]);
+    if f2 == f1 {
+        return p1;
+    }
+    let log_ok = interp == TableInterp::Log && f1 > 0.0 && p1 > 0.0 && p2 > 0.0;
+    if log_ok {
+        // P = 10^( log p1 + (log p2 - log p1)·(log f - log f1)/(log f2 - log f1) ), verbatim from
+        // the LRM's §4.6.4.4 formula.
+        let (lf1, lf2, lf) = (f1.log10(), f2.log10(), f.log10());
+        let (lp1, lp2) = (p1.log10(), p2.log10());
+        return 10f64.powf(lp1 + (lp2 - lp1) * (lf - lf1) / (lf2 - lf1));
+    }
+    p1 + (p2 - p1) * (f - f1) / (f2 - f1)
+}
+
 /// One noise source, as collected from an instance — kept as its *shape* plus coefficients
 /// rather than a number, so a frequency sweep can evaluate it per point.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Not `Copy`: [`NoiseSource::Table`] owns its points (§6 change, 2026-08-04). Cloning happens
+/// once per source at collection time, never inside a frequency loop.
+#[derive(Clone, Debug, PartialEq)]
 pub enum NoiseSource {
     /// Frequency-flat: `psd` A²/Hz at every frequency.
     White {
@@ -125,14 +213,50 @@ pub enum NoiseSource {
         /// Frequency exponent (`1.0` for textbook `1/f`).
         exponent: f64,
     },
+    /// An interpolated table of `(frequency Hz, power A²/Hz)` pairs — Verilog-A's
+    /// `noise_table()`/`noise_table_log()`.
+    Table {
+        /// The pairs, **sorted by ascending frequency** (§ [`NoiseSource::table`]).
+        points: Vec<(f64, f64)>,
+        /// Which interpolation rule applies between them.
+        interp: TableInterp,
+    },
 }
 
 impl NoiseSource {
+    /// Build a [`NoiseSource::Table`], establishing the ascending-frequency invariant
+    /// [`table_psd_at`] relies on.
+    ///
+    /// The LRM makes sorting the simulator's responsibility ("the simulator shall internally
+    /// sort the pairs into ascending frequency if required"), so an out-of-order table is valid
+    /// input, not an error. Duplicate frequencies are *not* rejected here — the LRM forbids them
+    /// and this project rejects them where the diagnostic is useful (at elaboration, naming the
+    /// source file), while `table_psd_at` degrades gracefully if one slips through, returning
+    /// the first of the two powers rather than dividing by a zero-width segment.
+    pub fn table(mut points: Vec<(f64, f64)>, interp: TableInterp) -> Self {
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        NoiseSource::Table { points, interp }
+    }
+
     /// This source's one-sided PSD (A²/Hz) at frequency `f` (Hz).
     pub fn psd_at(&self, f: f64) -> f64 {
-        match *self {
-            NoiseSource::White { psd } => psd,
-            NoiseSource::Flicker { coeff, exponent } => flicker_psd_at(coeff, exponent, f),
+        match self {
+            NoiseSource::White { psd } => *psd,
+            NoiseSource::Flicker { coeff, exponent } => flicker_psd_at(*coeff, *exponent, f),
+            NoiseSource::Table { points, interp } => table_psd_at(points, *interp, f),
+        }
+    }
+
+    /// Whether this source has zero power at *every* frequency — a source an analysis can drop
+    /// without changing any result.
+    ///
+    /// Not simply "is the coefficient zero": a table is powerless only if every one of its
+    /// points is, and an empty table is powerless too.
+    pub fn is_powerless(&self) -> bool {
+        match self {
+            NoiseSource::White { psd } => *psd <= 0.0,
+            NoiseSource::Flicker { coeff, .. } => *coeff <= 0.0,
+            NoiseSource::Table { points, .. } => points.iter().all(|&(_, p)| p <= 0.0),
         }
     }
 }
@@ -154,6 +278,11 @@ impl NoiseSink for CollectedNoise {
     fn flicker_current(&mut self, p: usize, n: usize, coeff: f64, exponent: f64) {
         self.sources
             .push((p, n, NoiseSource::Flicker { coeff, exponent }));
+    }
+
+    fn table_current(&mut self, p: usize, n: usize, points: &[(f64, f64)], interp: TableInterp) {
+        self.sources
+            .push((p, n, NoiseSource::table(points.to_vec(), interp)));
     }
 }
 
@@ -238,6 +367,119 @@ mod tests {
         sink.white_current(0, 1, 4e-23);
         sink.flicker_current(0, 1, 1e-19, 1.0);
         assert_eq!(sink.0, vec![4e-23]);
+    }
+
+    /// The LRM's own §4.6.4.3 example table (its `noise_table_input.tbl` listing, whose powers
+    /// double per decade), interpolated at a frequency *between* two decade points. Linear
+    /// interpolation is linear in `f`, not in `log f` — at 55 Hz, five-ninths of the way from
+    /// 10 Hz to 100 Hz *in frequency*, the power is five-ninths of the way from 3.31516e-23 to
+    /// 6.63632e-23. A log-interpolating implementation would instead return ~4.9e-23 (half a
+    /// decade up), which is the specific wrong answer this pins against.
+    #[test]
+    fn linear_table_interpolates_in_frequency_not_in_log_frequency() {
+        let points = vec![
+            (1.0e0, 1.657_580e-23),
+            (1.0e1, 3.315_160e-23),
+            (1.0e2, 6.636_320e-23),
+            (1.0e3, 1.326_064e-22),
+        ];
+        let got = table_psd_at(&points, TableInterp::Linear, 55.0);
+        let frac = (55.0 - 10.0) / (100.0 - 10.0);
+        let want = 3.315_160e-23 + frac * (6.636_320e-23 - 3.315_160e-23);
+        assert!((got - want).abs() < 1e-30, "got {got}, want {want}");
+        // And it is emphatically *not* the geometric midpoint a log rule would give.
+        let log_answer = (3.315_160e-23f64 * 6.636_320e-23).sqrt();
+        assert!((got - log_answer).abs() > 1e-25);
+    }
+
+    /// Exact tabulated points come back exactly — no interpolation error at a knot.
+    #[test]
+    fn table_returns_its_own_points_exactly() {
+        let points = vec![(1.0, 2e-20), (10.0, 5e-20), (100.0, 1e-20)];
+        for &(f, p) in &points {
+            assert_eq!(table_psd_at(&points, TableInterp::Linear, f), p);
+        }
+    }
+
+    /// The LRM clamps outside the tabulated range rather than extrapolating: below the lowest
+    /// frequency the lowest point's power, above the highest the highest point's.
+    #[test]
+    fn table_clamps_outside_its_range_instead_of_extrapolating() {
+        let points = vec![(10.0, 4e-20), (100.0, 1e-20)];
+        assert_eq!(table_psd_at(&points, TableInterp::Linear, 1.0), 4e-20);
+        assert_eq!(table_psd_at(&points, TableInterp::Linear, 0.0), 4e-20);
+        assert_eq!(table_psd_at(&points, TableInterp::Linear, 1e9), 1e-20);
+        // A downward-extrapolating implementation would have gone negative above 133 Hz.
+        assert!(table_psd_at(&points, TableInterp::Linear, 1e9) > 0.0);
+    }
+
+    /// `noise_table_log`'s rule: two points describe an exact power law, so a `1/f` table
+    /// reproduces `1/f` at every intermediate frequency — the LRM's Figure 4-9 point.
+    #[test]
+    fn log_table_reproduces_a_power_law_from_two_points() {
+        let points = vec![(1.0, 1.0), (1e6, 1e-6)];
+        for f in [2.0, 37.0, 1e3, 4.2e4] {
+            let got = table_psd_at(&points, TableInterp::Log, f);
+            assert!(
+                (got - 1.0 / f).abs() < 1e-12 * (1.0 / f),
+                "at {f} Hz got {got}, want {}",
+                1.0 / f
+            );
+        }
+        // The same two points read linearly are a straight line on a *linear* plot, which at
+        // 1 kHz is still essentially the 1.0 endpoint — three orders away from the log answer.
+        let lin = table_psd_at(&points, TableInterp::Linear, 1e3);
+        assert!(lin > 0.99, "linear interpolation gave {lin}");
+    }
+
+    /// A zero-power table point is legal data; `log(0)` is not. That segment interpolates
+    /// linearly instead of producing `NaN`/`-inf`, and only that segment.
+    #[test]
+    fn log_table_falls_back_to_linear_across_a_zero_power_point() {
+        let points = vec![(1.0, 0.0), (10.0, 1e-20), (100.0, 1e-22)];
+        let across_zero = table_psd_at(&points, TableInterp::Log, 5.5);
+        assert!(across_zero.is_finite(), "got {across_zero}");
+        assert!((across_zero - 0.5e-20).abs() < 1e-33, "got {across_zero}");
+        // The next segment still interpolates logarithmically: 1e-21 at the geometric midpoint.
+        let log_segment = table_psd_at(&points, TableInterp::Log, (10.0f64 * 100.0).sqrt());
+        assert!((log_segment - 1e-21).abs() < 1e-33, "got {log_segment}");
+    }
+
+    /// An unsorted table is legal input the simulator must sort (LRM §4.6.4.3) — the constructor
+    /// is where that happens, so nothing downstream has to re-check.
+    #[test]
+    fn table_source_sorts_its_points_by_ascending_frequency() {
+        let src = NoiseSource::table(
+            vec![(100.0, 1e-22), (1.0, 1e-20), (10.0, 1e-21)],
+            TableInterp::Linear,
+        );
+        let NoiseSource::Table { points, .. } = &src else {
+            panic!("built a table");
+        };
+        assert_eq!(points[0].0, 1.0);
+        assert_eq!(points[2].0, 100.0);
+        // And it evaluates as if it had been written in order.
+        assert_eq!(src.psd_at(1.0), 1e-20);
+        assert_eq!(src.psd_at(0.1), 1e-20);
+    }
+
+    /// An empty table is powerless everywhere rather than a panic on `first()`/`last()`.
+    #[test]
+    fn empty_table_has_no_power_and_does_not_panic() {
+        assert_eq!(table_psd_at(&[], TableInterp::Linear, 1e3), 0.0);
+        assert!(NoiseSource::table(vec![], TableInterp::Linear).is_powerless());
+    }
+
+    /// `is_powerless` is per-source, not per-coefficient: a table with any nonzero point carries
+    /// power even though most of it is zero.
+    #[test]
+    fn a_table_is_powerless_only_if_every_point_is() {
+        let all_zero = NoiseSource::table(vec![(1.0, 0.0), (10.0, 0.0)], TableInterp::Linear);
+        let one_point = NoiseSource::table(vec![(1.0, 0.0), (10.0, 1e-20)], TableInterp::Linear);
+        assert!(all_zero.is_powerless());
+        assert!(!one_point.is_powerless());
+        assert!(NoiseSource::White { psd: 0.0 }.is_powerless());
+        assert!(!NoiseSource::White { psd: 1e-20 }.is_powerless());
     }
 
     #[test]

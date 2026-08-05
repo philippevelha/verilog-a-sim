@@ -47,8 +47,9 @@ use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use thiserror::Error;
+use va_abi::noise::TableInterp;
 use va_abi::{ModelInstance, StampSink, UnknownKind};
-use va_ir::Module;
+use va_ir::{Builtin, Expr, ExprId, Module};
 
 /// Thermal voltage `kT/q` at [`TEMP`], in volts. Matches `va_abi::reference::diode::VT_NOMINAL`
 /// so a generated diode reproduces the reference diode's stamps.
@@ -405,6 +406,16 @@ impl GeneratedModel {
                                 eval(ctx, pwr)?;
                                 eval(ctx, exp)?;
                             }
+                            NoiseTerm::Table { call } => {
+                                // Every table entry, so an unevaluable one fails the build rather
+                                // than silently truncating the table at emit time.
+                                if let Expr::Call(Builtin::NoiseTable, args) = ctx.module.expr(call)
+                                {
+                                    for &arg in args {
+                                        eval(ctx, arg)?;
+                                    }
+                                }
+                            }
                         }
                     }
                     for term in &c.charge {
@@ -745,6 +756,28 @@ impl GeneratedModel {
             sink.residual(g, residual);
         }
     }
+
+    /// Read a `Builtin::NoiseTable` call's flattened arguments back into `(frequency, power)`
+    /// pairs for Interface β's noise channel.
+    ///
+    /// The arguments are constants by construction (`va-frontend` const-folds, validates and
+    /// sorts the table at elaboration — § `va_ir::Builtin::NoiseTable`), but they are evaluated
+    /// through the ordinary `eval` path anyway rather than pattern-matched as `Expr::Const`: an
+    /// IR built by some other producer may legitimately have a parameter reference there, and
+    /// evaluating it costs one arena read. `None` if any entry fails to evaluate, so a broken
+    /// table declares no source at all rather than a half-read one.
+    fn noise_table_points(&self, ctx: &Ctx<'_>, call: ExprId) -> Option<Vec<(f64, f64)>> {
+        let Expr::Call(Builtin::NoiseTable, args) = self.module.expr(call) else {
+            return None;
+        };
+        let mut points = Vec::with_capacity(args.len() / 2);
+        for pair in args.chunks(2) {
+            let [f, p] = pair else { return None };
+            let (f, p) = (eval(ctx, *f).ok()?, eval(ctx, *p).ok()?);
+            points.push((f.value, p.value));
+        }
+        Some(points)
+    }
 }
 
 impl ModelInstance for GeneratedModel {
@@ -771,7 +804,7 @@ impl ModelInstance for GeneratedModel {
     }
 
     /// Emit this model's own noise sources (T5.2) — Interface β's noise channel, fed from the
-    /// `white_noise`/`flicker_noise` calls `lower` split out of each contribution.
+    /// `white_noise`/`flicker_noise`/`noise_table` calls `lower` split out of each contribution.
     ///
     /// Each source is placed across the branch its containing `<+` targets, which is exactly the
     /// LRM's rule: a noise function written in a branch contribution *is* a source in parallel
@@ -806,6 +839,11 @@ impl ModelInstance for GeneratedModel {
                     NoiseTerm::Flicker { pwr, exp } => {
                         if let (Ok(p), Ok(e)) = (eval(ctx, pwr), eval(ctx, exp)) {
                             sink.flicker_current(gp, gn, p.value, e.value);
+                        }
+                    }
+                    NoiseTerm::Table { call } => {
+                        if let Some(points) = me.noise_table_points(ctx, call) {
+                            sink.table_current(gp, gn, &points, TableInterp::Linear);
                         }
                     }
                 }
@@ -4045,9 +4083,13 @@ mod tests {
         let mut sink = va_abi::noise::CollectedNoise::default();
         noisy_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
         assert_eq!(sink.sources.len(), 1);
-        let (p, n, source) = sink.sources[0];
-        assert_eq!((p, n), (0, 1), "source sits across the contributed branch");
-        assert_eq!(source, va_abi::noise::NoiseSource::White { psd: 4.2e-23 });
+        let (p, n, source) = &sink.sources[0];
+        assert_eq!(
+            (*p, *n),
+            (0, 1),
+            "source sits across the contributed branch"
+        );
+        assert_eq!(*source, va_abi::noise::NoiseSource::White { psd: 4.2e-23 });
     }
 
     /// A `flicker_noise` term carries both its numerator and its exponent through, and the
@@ -4077,6 +4119,76 @@ mod tests {
                 "coefficient must track the operating point"
             );
         }
+    }
+
+    /// A `noise_table` term reaches Interface β as a table of pairs — reassembled from the
+    /// flattened `Const` arguments — and, like the other two shapes, leaves `load` untouched.
+    #[test]
+    fn noise_table_lowers_to_a_tabulated_source_without_perturbing_load() {
+        let plain = resistor_ir();
+        let noisy = module_with_noise(|m| {
+            // 1 Hz → 4e-20, 10 Hz → 1e-20: a real slope, so a "flat, take the first power"
+            // implementation would be caught.
+            let args = [1.0, 4e-20, 10.0, 1e-20]
+                .into_iter()
+                .map(|v| m.push_expr(Expr::Const(v)))
+                .collect();
+            m.push_expr(Expr::Call(Builtin::NoiseTable, args))
+        });
+
+        let plain_inst = build_instance(&plain, &[0, 1], &mut 2).expect("plain builds");
+        let noisy_inst = build_instance(&noisy, &[0, 1], &mut 2).expect("noisy builds");
+
+        let x = [2.0, 0.0];
+        let (mut a, mut b) = (DenseStamp::new(2), DenseStamp::new(2));
+        plain_inst.load(&x, &mut a);
+        noisy_inst.load(&x, &mut b);
+        assert_eq!(
+            a.residual, b.residual,
+            "a table must not perturb the residual"
+        );
+        assert_eq!(
+            a.jacobian, b.jacobian,
+            "a table must not perturb the Jacobian"
+        );
+
+        let mut sink = va_abi::noise::CollectedNoise::default();
+        noisy_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
+        assert_eq!(sink.sources.len(), 1);
+        let (p, n, source) = &sink.sources[0];
+        assert_eq!(
+            (*p, *n),
+            (0, 1),
+            "source sits across the contributed branch"
+        );
+        assert_eq!(
+            *source,
+            va_abi::noise::NoiseSource::Table {
+                points: vec![(1.0, 4e-20), (10.0, 1e-20)],
+                interp: va_abi::noise::TableInterp::Linear,
+            }
+        );
+        // And it evaluates as a table, not as either endpoint: halfway *in frequency*.
+        let mid = source.psd_at(5.5);
+        assert!((mid - 2.5e-20).abs() < 1e-33, "got {mid}");
+    }
+
+    /// A table whose flattened arguments don't pair up cannot be a `(frequency, power)` list;
+    /// `va-frontend` never produces one, so this can only come from a hand-built IR — it is
+    /// still rejected rather than silently dropping the trailing value.
+    #[test]
+    fn an_odd_length_noise_table_is_a_build_error() {
+        let odd = module_with_noise(|m| {
+            let args = [1.0, 4e-20, 10.0]
+                .into_iter()
+                .map(|v| m.push_expr(Expr::Const(v)))
+                .collect();
+            m.push_expr(Expr::Call(Builtin::NoiseTable, args))
+        });
+        assert!(matches!(
+            build_instance(&odd, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
     }
 
     /// A noise call that isn't a bare top-level term can't be pulled into the noise channel, and

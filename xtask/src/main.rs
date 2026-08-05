@@ -72,11 +72,13 @@ const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
 
 /// The `.noise` circuits `validate`/`gen-golden` know how to drive (T5.2).
 ///
-/// `model` is `None` and **must stay** `None`: Verilog-A's `white_noise()`/`flicker_noise()`
-/// aren't lowered by `va-codegen` yet, so a compiled device contributes no noise sources at all
-/// (§ `va_abi::noise`). The deck's `diode` therefore has to resolve to the hand-written
-/// `va-abi::reference::Diode`, which does implement Interface β's noise channel — see
-/// `circuits/diode_noise.net`'s own header comment.
+/// `diode_noise.net`'s `model` is `None` **on purpose**: its `diode` resolves to the
+/// hand-written `va-abi::reference::Diode`, so this deck gates Interface β's noise channel
+/// independently of the compiler front end — see `circuits/diode_noise.net`'s own header
+/// comment. Every other entry is the opposite gate: a compiled Verilog-A model whose own
+/// `white_noise()`/`flicker_noise()`/`noise_table()` is the thing under test (T5.3, T5.6). That
+/// split is deliberate; a lowering bug that zeroed every compiled noise source would still leave
+/// `diode_noise.net` green.
 const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/diode_noise.net", None),
     ("circuits/resistor_noise_va.net", Some("models/resistor.va")),
@@ -84,13 +86,22 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
         "circuits/diode_flicker.net",
         Some("models/diode_flicker.va"),
     ),
+    (
+        "circuits/resistor_noise_table.net",
+        Some("models/resistor_noise_table.va"),
+    ),
 ];
 
 /// Like [`QSPICE_NATIVE_CIRCUITS`], for a `.noise` circuit needing no `.model` translation:
 /// `resistor_noise_va.net` is pure `R`/`V`, even though *this* project drives it through a
 /// compiled `models/resistor.va` (the point of that circuit is the compiled model's own
 /// `white_noise()`; QSPICE just needs a plain resistor to compare against).
-const QSPICE_NATIVE_NOISE_CIRCUITS: &[&str] = &["circuits/resistor_noise_va.net"];
+/// `resistor_noise_table.net` is the same arrangement for `noise_table()` (T5.6): its tabulated
+/// PSD is `4kT/R` at every point, so a plain QSPICE resistor is again the exact oracle.
+const QSPICE_NATIVE_NOISE_CIRCUITS: &[&str] = &[
+    "circuits/resistor_noise_va.net",
+    "circuits/resistor_noise_table.net",
+];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.noise` circuits that name a custom model
 /// (T5.2). Both are one-to-one: a noise analysis linearizes the very same model equations, and
