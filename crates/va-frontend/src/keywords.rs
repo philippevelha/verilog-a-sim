@@ -37,6 +37,12 @@
 //! under its conventional name) is common enough to be the single most common reservation
 //! conflict found.
 //!
+//! `noise_table_log` was added when its lowering landed (2026-08-05). It is genuinely in the
+//! Accellera LRM v2.4.0's own reserved list — right beside `noise_table` — and had simply been
+//! missed here, the same kind of omission as `floor`/`ceil`/`round` above; the LRM's own
+//! revision history dates the function itself to 2.4, which is likely why the older source
+//! document this table was first transcribed from doesn't carry it.
+//!
 //! `discrete`/`domain` (a `discipline` body's `domain discrete;`/`domain continuous;`
 //! attribute, § module preamble discipline/nature parsing) were added in the same pass real
 //! discipline/nature parsing landed — like `localparam`/`electrical`/`thermal` above, each has
@@ -88,7 +94,7 @@ impl std::fmt::Display for Keyword {
 /// `endmodule`, `exclude`, `from`, `genvar`, `ground`, `if`, `inf`, `inout`, `input`,
 /// `integer`, `localparam`, `module`, `output`, `parameter`, `real`, `thermal`) appear here for
 /// completeness but are tokenized directly.
-pub const RESERVED_WORDS: [&str; 182] = [
+pub const RESERVED_WORDS: [&str; 183] = [
     "abs",
     "abstol",
     "access",
@@ -198,6 +204,7 @@ pub const RESERVED_WORDS: [&str; 182] = [
     "negedge",
     "nmos",
     "noise_table",
+    "noise_table_log",
     "nor",
     "not",
     "notif0",

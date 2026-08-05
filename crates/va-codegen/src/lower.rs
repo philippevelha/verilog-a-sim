@@ -156,6 +156,7 @@
 
 use crate::CodegenError;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use va_abi::noise::TableInterp;
 use va_ir::{
     AccessKind, BinOp, BranchId, Builtin, Expr, ExprId, Module, NodeId, Stmt, UnOp, VarId,
 };
@@ -213,15 +214,19 @@ pub enum NoiseTerm {
         /// The frequency exponent (`1.0` for textbook `1/f`).
         exp: ExprId,
     },
-    /// `noise_table({f1, p1, …})` — a tabulated PSD.
+    /// `noise_table({f1, p1, …})`/`noise_table_log(…)` — a tabulated PSD.
     ///
     /// Carries the **call expression itself** rather than an owned list of pairs, so a
     /// `NoiseTerm` stays `Copy` however long the table is: the pairs already live in the module's
     /// expression arena (as alternating `Const` arguments, § `va_ir::Builtin::NoiseTable`), and
     /// re-reading them there at emit time costs one arena index.
     Table {
-        /// The `Expr::Call(Builtin::NoiseTable, …)` node holding the flattened pairs.
+        /// The `Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, …)` node holding the
+        /// flattened pairs.
         call: ExprId,
+        /// Which of the LRM's two interpolation rules applies — the *only* difference between
+        /// the two builtins, resolved here so nothing downstream has to re-inspect the call.
+        interp: TableInterp,
     },
 }
 
@@ -1269,11 +1274,18 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
         // elaboration, where the source file could be named in the diagnostic; an odd argument
         // count here would mean the IR was built by hand rather than by `va-frontend`, so it is
         // still checked, just not re-explained.
-        Expr::Call(Builtin::NoiseTable, args) if args.len() % 2 == 0 => {
-            Ok(Some(NoiseTerm::Table { call: expr }))
+        Expr::Call(b @ (Builtin::NoiseTable | Builtin::NoiseTableLog), args)
+            if args.len() % 2 == 0 =>
+        {
+            let interp = match b {
+                Builtin::NoiseTableLog => TableInterp::Log,
+                _ => TableInterp::Linear,
+            };
+            Ok(Some(NoiseTerm::Table { call: expr, interp }))
         }
-        Expr::Call(Builtin::NoiseTable, _) => Err(unsupported(
-            "noise_table expects an even number of arguments (alternating frequency and power)",
+        Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, _) => Err(unsupported(
+            "noise_table/noise_table_log expects an even number of arguments (alternating \
+             frequency and power)",
         )),
         _ => Ok(None),
     }
@@ -1284,7 +1296,13 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
 /// `sin(white_noise(p))`), rather than silently contributing nothing.
 pub(crate) fn contains_noise_call(module: &Module, expr: ExprId) -> bool {
     match module.expr(expr) {
-        Expr::Call(Builtin::WhiteNoise | Builtin::FlickerNoise | Builtin::NoiseTable, _) => true,
+        Expr::Call(
+            Builtin::WhiteNoise
+            | Builtin::FlickerNoise
+            | Builtin::NoiseTable
+            | Builtin::NoiseTableLog,
+            _,
+        ) => true,
         Expr::Call(_, args) => args.iter().any(|&a| contains_noise_call(module, a)),
         Expr::Unary(_, e) => contains_noise_call(module, *e),
         Expr::Binary(_, l, r) => contains_noise_call(module, *l) || contains_noise_call(module, *r),

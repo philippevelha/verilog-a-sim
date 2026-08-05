@@ -794,8 +794,10 @@ impl Elaborator<'_> {
         })
     }
 
-    /// Read, validate and sort a `noise_table()` argument into `(frequency Hz, power)` pairs
-    /// (LRM §4.6.4.3).
+    /// Read, validate and sort a `noise_table()`/`noise_table_log()` argument into
+    /// `(frequency Hz, power)` pairs (LRM §4.6.4.3/§4.6.4.4 — the two impose identical
+    /// requirements on the table itself and differ only in how it is interpolated later, so one
+    /// reader serves both; `what` names the one the author wrote, for the diagnostics).
     ///
     /// Everything the LRM says about this table is checked here, at the one place that has a
     /// source file to name in the diagnostic:
@@ -815,18 +817,17 @@ impl Elaborator<'_> {
     ///
     /// An empty table is allowed through: it is a source with no power at any frequency, which
     /// the noise analysis then drops. Rejecting it would be a stricter rule than the LRM states.
-    fn noise_table_points(&self, r: ExprRef) -> Result<Vec<(f64, f64)>, FrontendError> {
+    fn noise_table_points(&self, r: ExprRef, what: &str) -> Result<Vec<(f64, f64)>, FrontendError> {
         if let ExprAst::Str(_) = self.ast.expr(r) {
-            return Err(elab(
-                "`noise_table` with a file-name argument is not supported — give the table \
-                 inline as a `'{f1, p1, f2, p2, …}` array literal"
-                    .to_string(),
-            ));
+            return Err(elab(format!(
+                "`{what}` with a file-name argument is not supported — give the table \
+                 inline as a `{{f1, p1, f2, p2, …}}` array literal"
+            )));
         }
-        let values = self.array_lit_values(r, "`noise_table`'s table")?;
+        let values = self.array_lit_values(r, &format!("`{what}`'s table"))?;
         if values.len() % 2 != 0 {
             return Err(elab(format!(
-                "`noise_table`'s table must hold `(frequency, power)` pairs — got {} values (odd)",
+                "`{what}`'s table must hold `(frequency, power)` pairs — got {} values (odd)",
                 values.len()
             )));
         }
@@ -835,12 +836,12 @@ impl Elaborator<'_> {
             let (f, p) = (pair[0], pair[1]);
             if f < 0.0 || !f.is_finite() {
                 return Err(elab(format!(
-                    "`noise_table` frequency {f} is not a finite, non-negative frequency in Hz"
+                    "`{what}` frequency {f} is not a finite, non-negative frequency in Hz"
                 )));
             }
             if p < 0.0 || !p.is_finite() {
                 return Err(elab(format!(
-                    "`noise_table` power {p} at {f} Hz is not a finite, non-negative power \
+                    "`{what}` power {p} at {f} Hz is not a finite, non-negative power \
                      spectral density"
                 )));
             }
@@ -849,7 +850,7 @@ impl Elaborator<'_> {
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         if let Some(w) = points.windows(2).find(|w| w[0].0 == w[1].0) {
             return Err(elab(format!(
-                "`noise_table` repeats the frequency {} Hz — the LRM requires each frequency in \
+                "`{what}` repeats the frequency {} Hz — the LRM requires each frequency in \
                  a table to be unique",
                 w[0].0
             )));
@@ -1543,24 +1544,33 @@ impl Elaborator<'_> {
                 let exp = self.lower_expr(exp)?;
                 Expr::Call(Builtin::FlickerNoise, vec![pwr, exp])
             }
-            // `noise_table(input[, "name"])` (LRM §4.6.4.3) lowers like the two noise builtins
-            // above, with one difference: its `input` is *data*, not an expression to evaluate
-            // per bias. The LRM's table is constant by construction (an array parameter or an
-            // array assignment pattern), so it is const-folded, validated, and sorted here —
-            // once — and travels as a flat, alternating `f, p, f, p, …` argument list
-            // (`Builtin::NoiseTable`'s own doc comment explains why that rather than a new
-            // `Expr` variant).
-            ExprAst::Call { name, args } if name == "noise_table" => {
+            // `noise_table(input[, "name"])` (LRM §4.6.4.3) and `noise_table_log` (§4.6.4.4)
+            // lower like the two noise builtins above, with one difference: their `input` is
+            // *data*, not an expression to evaluate per bias. The LRM's table is constant by
+            // construction (an array parameter or an array assignment pattern), so it is
+            // const-folded, validated, and sorted here — once — and travels as a flat,
+            // alternating `f, p, f, p, …` argument list (`Builtin::NoiseTable`'s own doc
+            // comment explains why that rather than a new `Expr` variant). The two differ only
+            // in which interpolation rule the analysis applies between the points, which is
+            // carried by the builtin they lower to and nothing else.
+            ExprAst::Call { name, args }
+                if matches!(name.as_str(), "noise_table" | "noise_table_log") =>
+            {
                 let input = *args
                     .first()
-                    .ok_or_else(|| elab("`noise_table` requires a table argument".to_string()))?;
-                let points = self.noise_table_points(input)?;
+                    .ok_or_else(|| elab(format!("`{name}` requires a table argument")))?;
+                let points = self.noise_table_points(input, name)?;
                 let ids = points
                     .into_iter()
                     .flat_map(|(f, p)| [f, p])
                     .map(|v| self.out.push_expr(Expr::Const(v)))
                     .collect();
-                Expr::Call(Builtin::NoiseTable, ids)
+                let builtin = if name == "noise_table_log" {
+                    Builtin::NoiseTableLog
+                } else {
+                    Builtin::NoiseTable
+                };
+                Expr::Call(builtin, ids)
             }
             // `ac_stim` (an AC-only stimulus) contributes nothing to a DC operating point;
             // `bound_step` is a transient-timestep hint with no DC meaning at all — both fold to
@@ -4142,6 +4152,64 @@ mod tests {
             })
             .collect();
         assert_eq!(freqs, vec![1.0, 10.0, 100.0]);
+    }
+
+    /// `noise_table_log` is a *separate LRM function* (§4.6.4.4), not a flag on `noise_table`,
+    /// so it lowers to its own builtin — that variant is the only thing carrying "interpolate
+    /// logarithmically" downstream. The table itself is read by the same code, so a table that
+    /// is valid for one is valid for the other.
+    #[test]
+    fn noise_table_log_lowers_to_its_own_builtin() {
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table_log({1.0, 1.0, 1e6, 1e-6}); end endmodule"#;
+        let m = elaborate_src(src);
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::NoiseTableLog, args) => Some(args.clone()),
+                _ => None,
+            })
+            .expect("noise_table_log lowers to a NoiseTableLog call");
+        assert_eq!(args.len(), 4);
+        assert!(
+            !m.exprs
+                .iter()
+                .any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::NoiseTable, _))),
+            "the linear builtin must not stand in for the logarithmic one — they interpolate \
+             differently, and confusing them is silently wrong rather than loudly wrong"
+        );
+    }
+
+    /// It is a *reserved word* now, not just a recognized call name (LRM Annex B lists it beside
+    /// `noise_table`). A user variable of that name must therefore be rejected, exactly as one
+    /// named `noise_table` already was.
+    #[test]
+    fn noise_table_log_is_reserved_and_cannot_be_a_user_identifier() {
+        assert_eq!(
+            crate::keywords::Keyword::from_ident("noise_table_log").map(|k| k.as_str()),
+            Some("noise_table_log")
+        );
+        let src = "module t(a, b); electrical a, b; real noise_table_log; \
+                   analog begin I(a, b) <+ V(a, b); end endmodule";
+        let toks = lex(src).expect("lex");
+        assert!(
+            parse(&toks).is_err(),
+            "a reserved word cannot be declared as a variable"
+        );
+    }
+
+    /// Both spellings share one validator, so both reject the same malformed tables — and the
+    /// message names whichever one the author actually wrote, rather than always saying
+    /// `noise_table`.
+    #[test]
+    fn noise_table_log_shares_the_validator_and_is_named_in_its_own_diagnostics() {
+        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table_log({1.0, 2e-20, 1.0, 4e-20}); end endmodule"#;
+        let msg = elaborate_err(src);
+        assert!(msg.contains("unique"), "got: {msg}");
+        assert!(
+            msg.contains("noise_table_log"),
+            "the diagnostic should name the function written, got: {msg}"
+        );
     }
 
     /// Every malformed table the LRM rules out is a named elaboration error rather than a

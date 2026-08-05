@@ -396,8 +396,8 @@ gate into decoration.
   channel as its third method and `NoiseSource` gained a `Table { points, interp }` variant.
   What remains is narrower and stated on purpose: a table is *constant data* per the LRM, so a
   tabulated PSD cannot track `$temperature` or a netlist-overridden parameter the way a
-  `white_noise()` argument can; and `noise_table_log` has no lexer token yet, though its
-  interpolation rule is already implemented and tested ABI-side.
+  `white_noise()` argument can. (`noise_table_log` followed on 2026-08-05 and needed no
+  interface change at all — see below.)
 - **Sources are still assumed mutually uncorrelated** — unchanged since the first revision, and
   the one limit no addition so far has touched. A full BSIM's induced gate noise would violate
   it, and there is no way to declare a correlation coefficient between two sources.
@@ -436,11 +436,22 @@ were not predicted here, and are the parts worth carrying forward:
    gate can only exercise a code path rather than discriminate it, say which — a green number
    that proves less than it appears to is worse than no number.
 
-With this, **all three of Verilog-A's noise builtins are real**. The next thing in this area is
-`noise_table_log` (LRM §4.6.4.4), which needs only a lexer token and an elaboration arm — its
-interpolation rule already ships in `va_abi::noise` (`TableInterp::Log`), tested against the
-LRM's own Figure 4-9 example, precisely so wiring it costs no further interface revision.
+*(Updated 2026-08-05.)* `noise_table_log` (LRM §4.6.4.4) is **done too**, and it is the cleanest
+illustration in this whole thesis of why the previous entry's second point mattered: it cost a
+lexer token, a reserved word, one `Builtin` variant and an elaboration arm — **no Interface β
+revision at all**, because `TableInterp::Log` had shipped the day before precisely so that this
+change wouldn't need one. When you add a channel, implement the whole rule family it obviously
+belongs to; the marginal cost is a few lines, and the alternative is another coordinated
+interface event for every sibling that shows up later.
 
-See `docs/roadmap.md`'s T5.2/T5.3/T5.6 sections for the full account, and
+One thing it did turn up: `noise_table_log` was **missing from the reserved-word table**, though
+the LRM reserves it right beside `noise_table`. The table was transcribed from a document
+predating the function. Worth remembering when adding any LRM construct — check the
+reserved-word list, not just the grammar.
+
+With this, **every noise function Verilog-A defines is implemented**, including both of the
+LRM's interpolation rules.
+
+See `docs/roadmap.md`'s T5.2/T5.3/T5.6/T5.7 sections for the full account, and
 `docs/validation.md`'s noise-gate sections for the measured numbers and the reasoning behind the
 `1e-3` band.

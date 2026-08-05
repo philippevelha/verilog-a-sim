@@ -1,0 +1,21 @@
+* Compiled-model log-interpolated tabulated noise -- the noise_table_log() gate.
+* Byte-for-byte circuits/resistor_noise_table.net with the model swapped for
+* models/resistor_noise_table_log.va, whose only difference is `noise_table_log` in place of
+* `noise_table`. Two 1k resistors in series across a 1 V source, probed at their junction:
+*   S(out) = 4kT*(R1||R2) = 4kT*500 ~ 8.288e-18 V^2/Hz, flat
+* On a flat table the LRM's two interpolation rules must agree exactly, so this deck's golden is
+* the same physics as resistor_noise_table's -- deliberately, since that agreement is the thing
+* being checked. What it adds over that deck is that the *logarithmic* code path (logs, a power,
+* and the LRM's §4.6.4.4 formula) runs on every point of a real sweep against a real oracle,
+* where a NaN, an infinity or a last-bit-wrong exponentiation would show up.
+*
+* It does not check the interesting half of noise_table_log -- that two points describe an exact
+* power law. QSPICE has no arbitrary-PSD primitive to compare that against; it is pinned by unit
+* tests over the LRM's own Figure 4-9 example instead. See models/resistor_noise_table_log.va.
+*
+* Pure R/V, so QSPICE runs it with no model translation at all.
+V1 in  gnd  DC 1
+R1 in  a    1000
+R2 a   gnd  1000
+.noise V(a) V1 dec 10 10 10meg
+.end

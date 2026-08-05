@@ -1,0 +1,38 @@
+// Linear resistor whose thermal noise is declared as a `noise_table_log` — the log-interpolated
+// twin of models/resistor_noise_table.va (LRM §4.6.4.4 vs §4.6.4.3).
+//
+// Identical device, identical table, one word changed. That is the point: `noise_table_log`
+// differs from `noise_table` *only* in how the PSD is interpolated between the tabulated
+// frequencies, and a flat table is the one shape on which both rules must agree exactly. Any
+// difference in the measured spectrum would mean the log path is doing arithmetic it shouldn't.
+//
+// All three caveats in models/resistor_noise_table.va's header apply here unchanged: the table
+// is const-folded at elaboration, so it tracks neither `$temperature` nor a netlist-overridden
+// resistance, and the tabulated band is deliberately narrower than the deck's sweep so the
+// clamping rule runs on every point outside 100 Hz - 1 MHz.
+//
+// What this model does *not* demonstrate is the interesting half of `noise_table_log` — that
+// two points describe an exact power law (the LRM's own Figure 4-9). Nothing in QSPICE has an
+// arbitrary-PSD primitive to compare such a spectrum against, so that property is pinned by
+// unit tests instead: `va_abi::noise`'s `log_table_reproduces_a_power_law_from_two_points` uses
+// Figure 4-9's own `'{1,1, 1e6,1e-6}` example.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module resistor_noise_table_log(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R    = 1000.0 from (0:inf);   // resistance, ohms
+    parameter real Tnom = 300.15 from (0:inf);   // table temperature, K
+
+    analog begin
+        I(p, n) <+ V(p, n) / R;
+        // 4kT/R A^2/Hz, tabulated at 100 Hz / 1 kHz / 1 MHz — flat, so log-interpolating
+        // between equal powers must return that same power at every intermediate frequency.
+        I(p, n) <+ noise_table_log({
+            1.0e2, 4.0 * `P_K * Tnom / R,
+            1.0e3, 4.0 * `P_K * Tnom / R,
+            1.0e6, 4.0 * `P_K * Tnom / R
+        }, "thermal");
+    end
+endmodule

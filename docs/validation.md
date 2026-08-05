@@ -59,9 +59,9 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all twelve — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`golden/*.golden` — all thirteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
 `{divider, mos_dc, diode_iv, rc_step, rectifier, ring_osc, rc_ac, diode_ac, diode_noise,
-resistor_noise_va, diode_flicker, resistor_noise_table}`. Every one of `xtask`'s known circuits
+resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -195,6 +195,18 @@ segment, and a `va-acnoise` sweep over a rise-then-fall table read entirely betw
 A flat table is the only shape QSPICE has a native primitive to compare against at all, so
 splitting the duties this way is the honest resolution rather than a hole — stated here so
 nobody later reads `1.9e-16` as evidence the interpolator is right.
+
+**`circuits/resistor_noise_table_log.net` (added 2026-08-05)** is that deck with one word
+changed in the model — `noise_table_log` for `noise_table` (LRM §4.6.4.4 vs §4.6.4.3). Its
+golden is deliberately the *same physics*, because on a flat table the LRM's two interpolation
+rules must agree exactly and checking that they do is the point. Measured: **`1.9e-16`**,
+identical to the linear deck. What it adds is that the logarithmic path — logs, a power, and
+§4.6.4.4's formula — runs on every point of a real sweep against a real oracle, where a NaN, an
+infinity or a badly-conditioned exponentiation would surface. What it still cannot check is that
+two points describe an exact power law, the property that makes `noise_table_log` worth having:
+that stays pinned by the unit test over the LRM's own Figure 4-9 example (`{1,1, 1e6,1e-6}` →
+exactly `1/f`), plus a codegen test that the same table read under the two rules genuinely
+diverges between its knots (`1e-3` vs `~1.0` at 1 kHz) while agreeing at them.
 
 ### Input-referred noise (added 2026-08-01c)
 

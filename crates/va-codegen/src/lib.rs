@@ -47,7 +47,6 @@ use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use thiserror::Error;
-use va_abi::noise::TableInterp;
 use va_abi::{ModelInstance, StampSink, UnknownKind};
 use va_ir::{Builtin, Expr, ExprId, Module};
 
@@ -406,10 +405,13 @@ impl GeneratedModel {
                                 eval(ctx, pwr)?;
                                 eval(ctx, exp)?;
                             }
-                            NoiseTerm::Table { call } => {
+                            NoiseTerm::Table { call, .. } => {
                                 // Every table entry, so an unevaluable one fails the build rather
                                 // than silently truncating the table at emit time.
-                                if let Expr::Call(Builtin::NoiseTable, args) = ctx.module.expr(call)
+                                if let Expr::Call(
+                                    Builtin::NoiseTable | Builtin::NoiseTableLog,
+                                    args,
+                                ) = ctx.module.expr(call)
                                 {
                                     for &arg in args {
                                         eval(ctx, arg)?;
@@ -767,7 +769,8 @@ impl GeneratedModel {
     /// evaluating it costs one arena read. `None` if any entry fails to evaluate, so a broken
     /// table declares no source at all rather than a half-read one.
     fn noise_table_points(&self, ctx: &Ctx<'_>, call: ExprId) -> Option<Vec<(f64, f64)>> {
-        let Expr::Call(Builtin::NoiseTable, args) = self.module.expr(call) else {
+        let Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, args) = self.module.expr(call)
+        else {
             return None;
         };
         let mut points = Vec::with_capacity(args.len() / 2);
@@ -841,9 +844,9 @@ impl ModelInstance for GeneratedModel {
                             sink.flicker_current(gp, gn, p.value, e.value);
                         }
                     }
-                    NoiseTerm::Table { call } => {
+                    NoiseTerm::Table { call, interp } => {
                         if let Some(points) = me.noise_table_points(ctx, call) {
-                            sink.table_current(gp, gn, &points, TableInterp::Linear);
+                            sink.table_current(gp, gn, &points, interp);
                         }
                     }
                 }
@@ -4171,6 +4174,46 @@ mod tests {
         // And it evaluates as a table, not as either endpoint: halfway *in frequency*.
         let mid = source.psd_at(5.5);
         assert!((mid - 2.5e-20).abs() < 1e-33, "got {mid}");
+    }
+
+    /// The two table builtins differ only in the interpolation rule they hand to Interface β,
+    /// and that rule must survive lowering — a `noise_table_log` source emitted as `Linear`
+    /// would be wrong by orders of magnitude between its points while looking perfectly
+    /// plausible at every knot.
+    #[test]
+    fn noise_table_log_reaches_the_abi_carrying_the_logarithmic_rule() {
+        let build = |b: Builtin| {
+            module_with_noise(|m| {
+                let args = [1.0, 1.0, 1e6, 1e-6]
+                    .into_iter()
+                    .map(|v| m.push_expr(Expr::Const(v)))
+                    .collect();
+                m.push_expr(Expr::Call(b, args))
+            })
+        };
+        let expect_interp = |b: Builtin, want: va_abi::noise::TableInterp| {
+            let inst = build_instance(&build(b), &[0, 1], &mut 2).expect("builds");
+            let mut sink = va_abi::noise::CollectedNoise::default();
+            inst.noise(&[2.0, 0.0], va_abi::noise::TEMP_NOMINAL, &mut sink);
+            let va_abi::noise::NoiseSource::Table { interp, .. } = sink.sources[0].2 else {
+                panic!("a tabulated source");
+            };
+            assert_eq!(interp, want);
+            sink.sources[0].2.clone()
+        };
+
+        let lin = expect_interp(Builtin::NoiseTable, va_abi::noise::TableInterp::Linear);
+        let log = expect_interp(Builtin::NoiseTableLog, va_abi::noise::TableInterp::Log);
+
+        // Same points, same knots, genuinely different curve in between: at 1 kHz the log rule
+        // gives the 1/f value 1e-3, the linear rule is still essentially at its 1.0 endpoint.
+        assert_eq!(lin.psd_at(1.0), log.psd_at(1.0));
+        assert!(
+            (log.psd_at(1e3) - 1e-3).abs() < 1e-12,
+            "{}",
+            log.psd_at(1e3)
+        );
+        assert!(lin.psd_at(1e3) > 0.99, "{}", lin.psd_at(1e3));
     }
 
     /// A table whose flattened arguments don't pair up cannot be a `(frequency, power)` list;

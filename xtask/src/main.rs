@@ -90,6 +90,10 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
         "circuits/resistor_noise_table.net",
         Some("models/resistor_noise_table.va"),
     ),
+    (
+        "circuits/resistor_noise_table_log.net",
+        Some("models/resistor_noise_table_log.va"),
+    ),
 ];
 
 /// Like [`QSPICE_NATIVE_CIRCUITS`], for a `.noise` circuit needing no `.model` translation:
@@ -101,6 +105,7 @@ const NOISE_CIRCUITS: &[(&str, Option<&str>)] = &[
 const QSPICE_NATIVE_NOISE_CIRCUITS: &[&str] = &[
     "circuits/resistor_noise_va.net",
     "circuits/resistor_noise_table.net",
+    "circuits/resistor_noise_table_log.net",
 ];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.noise` circuits that name a custom model

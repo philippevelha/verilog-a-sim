@@ -1059,10 +1059,18 @@ including the ones with no implemented behavior at all.
   (`va_abi::noise::table_psd_at`). `ac_stim` alone still elaborates to `Expr::Const(0.0)`,
   arguments unevaluated.
 
-  `noise_table_log` (LRM §4.6.4.4, the same table interpolated in `log₁₀ f`/`log₁₀ power`) is
-  **not a recognized token** — the interpolation rule itself is implemented and tested in
-  `va_abi::noise` (`TableInterp::Log`), so wiring it is a lexer/elaboration change with no
-  interface revision behind it.
+  **Updated 2026-08-05:** `noise_table_log` (LRM §4.6.4.4, the same table interpolated in
+  `log₁₀ f`/`log₁₀ power`) is now lexed and lowered too. It was also **missing from
+  `RESERVED_WORDS`** — a genuine omission, since the Accellera LRM v2.4.0 reserves it right
+  beside `noise_table`; the older document this table was first transcribed from predates the
+  function, which is the likely reason. It lowers to its own `Builtin::NoiseTableLog` rather
+  than a flag on `NoiseTable`: the two are separate LRM functions with separate spellings, and
+  a flag would have to be smuggled in as a magic `Const` among real table data. Both share one
+  validator, so the same malformed tables are rejected either way, with the diagnostic naming
+  whichever spelling the author wrote. Between points the log rule is
+  `P = 10^(log p₁ + (log p₂ − log p₁)·(log f − log f₁)/(log f₂ − log f₁))`, verbatim from the
+  LRM; it falls back to linear interpolation across any segment whose endpoints are not both
+  strictly positive, since `log(0)` is undefined and a zero-power band is legal data.
 - **Structural and Analog Usage**: Analog-block only (they appear on the right-hand side of a
   `<+` contribution; the branch that contribution targets is the branch the noise source is
   placed across).
@@ -1307,7 +1315,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `negedge` | Reserved, no grammar production as a bare word outside `@()`; would appear as `@(negedge sig)`, itself discarded wholesale | Digital falling-edge event trigger | N/A | Digital event control only | No C analogue |
 | `nmos` | Reserved, no grammar production (NMOS switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `noise_table` | Lowered to `Builtin::NoiseTable` (§1.5, T5.6) | `noise_table({f1, p1, f2, p2, …}[, "name"])` call | Table const-folded, validated and sorted at elaboration; PSD interpolated piecewise-linearly in `f`, clamped outside the range; value `0` outside noise analysis | Analog-block only | No general-purpose analogue |
-| `noise_table_log` | **Not lexed** — not in the keyword table; `TableInterp::Log` implements its rule ABI-side already (§1.5) | `noise_table_log(…)` call | N/A | Analog-block only | No general-purpose analogue |
+| `noise_table_log` | Lowered to `Builtin::NoiseTableLog` (§1.5, 2026-08-05); also added to `RESERVED_WORDS`, where it had been missing | `noise_table_log({f1, p1, f2, p2, …}[, "name"])` call | Same table handling as `noise_table`; PSD interpolated piecewise-linearly in `log₁₀ f`/`log₁₀ power` (linear fallback across a non-positive segment), clamped outside the range | Analog-block only | No general-purpose analogue |
 | `nor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a \|\| b)`, minus gate timing |
 | `not` | Reserved, no grammar production (digital *inverter gate* primitive — distinct from the `!` operator, `Token::Not`) | N/A | N/A | Digital gate level only | Loosely C's `!x` as a value, but as a timed gate instance instead of an operator |
 | `notif0` | Reserved, no grammar production (tristate inverter, active-low enable) | N/A | N/A | Digital gate level only | No C analogue |

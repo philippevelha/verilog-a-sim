@@ -389,6 +389,16 @@ pub enum Builtin {
     /// arena walk, clone, and pretty-print handles it with no change at all (Interface α
     /// change, 2026-08-04 — see `docs/interfaces.md`).
     NoiseTable,
+    /// `noise_table_log('{f1, p1, f2, p2, …})` — the same table as [`Builtin::NoiseTable`],
+    /// interpolated piecewise-linearly in `log₁₀(frequency)`/`log₁₀(power)` instead of in
+    /// frequency and power directly (LRM §4.6.4.4).
+    ///
+    /// Identical in every other respect — same flattened, sorted, const-folded argument layout,
+    /// same "zero outside noise analysis" rule, same dropped label. A separate variant rather
+    /// than a flag argument because the two are separate LRM functions with separate spellings,
+    /// and because a flag would have to be encoded as a magic `Const` among real data
+    /// (Interface α change, 2026-08-05 — see `docs/interfaces.md`).
+    NoiseTableLog,
 }
 
 // ---------------------------------------------------------------------------------------

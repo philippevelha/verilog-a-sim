@@ -140,6 +140,20 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > then sorts the pairs ascending, which is the invariant `va_abi::noise::table_psd_at` reads them
 > under. See Interface β's matching `table_current` revision, below.
 
+> **Revision (§6 change, 2026-08-05):** added `Builtin::NoiseTableLog`, the IR spelling of
+> `noise_table_log()` (LRM §4.6.4.4) — the same table, interpolated in `log₁₀ f`/`log₁₀ power`.
+> Additive in exactly the same way as the revision above, and matched in exactly the same two
+> places. **No Interface β change was needed**: `TableInterp::Log` shipped with `table_current`
+> on 2026-08-04 precisely so that wiring the second spelling would cost no further coordination,
+> and it didn't.
+>
+> A separate variant rather than an interpolation flag argument: the two are separate LRM
+> functions with separate spellings, and a flag would have to be encoded as a magic `Const`
+> sitting among real `(frequency, power)` data — indistinguishable from a table entry to every
+> generic arena walk that currently needs no special case at all. `va-codegen`'s
+> `lower::NoiseTerm::Table` resolves the variant into a `TableInterp` once, at lowering, so
+> nothing downstream re-inspects the call.
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models
@@ -282,10 +296,10 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > `TableInterp` carries both of the LRM's interpolation rules — `Linear` (`noise_table`,
 > piecewise-linear in `f`) and `Log` (`noise_table_log`, piecewise-linear in `log₁₀ f` and
 > `log₁₀ power`, §4.6.4.4). Both are implemented and tested in `va_abi::noise::table_psd_at`.
-> Only `Linear` currently has a Verilog-A spelling that reaches it: `noise_table_log` is not yet
-> a recognized token in `va-frontend`, so wiring it is a frontend change with **no further
-> Interface β revision needed** — which is exactly why both rules went in together rather than
-> forcing a fourth §6 event later.
+> At the time of this revision only `Linear` had a Verilog-A spelling that reached it, both
+> rules going in together specifically so that wiring the second would need **no further
+> Interface β revision**. *(That bet paid off the next day: `noise_table_log` was lexed and
+> lowered on 2026-08-05 as an Interface α change alone — see the α revision of that date.)*
 >
 > **Stated limits of this revision:** a table is constant data (the LRM's own restriction — an
 > array parameter or an array assignment pattern), so a tabulated PSD cannot track `$temperature`

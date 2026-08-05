@@ -28,11 +28,12 @@ shared, demoable milestone that several theses light up at once.
 
 > **Fully refreshed 2026-08-04** — every row below was re-derived from a real run that day, not
 > carried forward: `cargo test --workspace` (500 passed, 0 failed, 0 ignored; **516 after T5.6**
-> landed later the same day), `cargo fmt --check` + `cargo clippy --workspace --all-targets --
-> -D warnings` (both clean), `cargo xtask validate` (**11/11 circuits pass vs committed QSPICE
-> golden, convergence 11/11 = 100%** at the time of the refresh; **12/12** after T5.6 added
-> `resistor_noise_table` later the same day), `va-cli check external` (**114/150**
-> files pass the frontend — unmoved by T5.6, no corpus file calls `noise_table`), and a one-off
+> landed later the same day, **520 after T5.7** on 2026-08-05), `cargo fmt --check` + `cargo
+> clippy --workspace --all-targets -- -D warnings` (both clean), `cargo xtask validate`
+> (**11/11 circuits pass vs committed QSPICE golden, convergence 11/11 = 100%** at the time of
+> the refresh; **12/12** after T5.6 added `resistor_noise_table` later the same day, **13/13**
+> after T5.7 added `resistor_noise_table_log`), `va-cli check external` (**114/150**
+> files pass the frontend — unmoved by either, no corpus file calls a table function), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
@@ -60,21 +61,22 @@ shared, demoable milestone that several theses light up at once.
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 1.8e-4) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
 | T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
-| T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 12 golden gates runs through this path | ✅ |
-| T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section. As of 2026-08-04 the zoo has grown to **12 gated circuits, all green** (the six ladder rungs plus `rc_ac`, `diode_ac`, `diode_noise`, `resistor_noise_va`, `diode_flicker`, `resistor_noise_table`) | ✅ |
-| T6.4 — convergence dashboard | `xtask::Tally` separates `skipped`/`not_converged`/`failed`, and `try_solve` records a non-converging circuit instead of aborting the run — so `CLAUDE.md` §7's fourth metric is computable from a real run for the first time; `validate` prints **convergence 12/12 (100.0%)**; `t6-integration/04-convergence-dashboard.qmd` | ✅ |
+| T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 13 golden gates runs through this path | ✅ |
+| T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section. As of 2026-08-04 the zoo has grown to **13 gated circuits, all green** (the six ladder rungs plus `rc_ac`, `diode_ac`, `diode_noise`, `resistor_noise_va`, `diode_flicker`, `resistor_noise_table`, `resistor_noise_table_log`) | ✅ |
+| T6.4 — convergence dashboard | `xtask::Tally` separates `skipped`/`not_converged`/`failed`, and `try_solve` records a non-converging circuit instead of aborting the run — so `CLAUDE.md` §7's fourth metric is computable from a real run for the first time; `validate` prints **convergence 13/13 (100.0%)**; `t6-integration/04-convergence-dashboard.qmd` | ✅ |
 | T5.1 — AC linearization | `ac::{linearize, run}`: `(G+jωC)` complex solve via a real 2n×2n block embedding + `va-core`'s dense LU; **golden gate closed 2026-08-01** — `.ac` card/`AC` source parsing, `va-cli::solve_ac`, `GoldenAc` + separate magnitude/phase verdicts, complex `.qraw` parsing, and both AC circuits green vs real QSPICE (`rc_ac` 1.3e-15, `diode_ac` 1.3e-5) | ✅ |
 | T5.2 — noise analysis | adjoint output-noise PSD (one `Aᵀy = e_out` solve per frequency gives every source's transfer impedance); Interface β gained a §6 noise channel (`NoiseSink` + `ModelInstance::noise`) since noise is physics the Jacobian doesn't carry; thermal/shot sources on `Resistor`/`Diode`/`Bjt`; validated vs closed form (`4kTR`), vs an RC-shaped spectrum, and vs real QSPICE golden (`diode_noise` 1.7e-5) | ✅ |
 | T5.3 — Verilog-A noise lowering (T1/T2) | `white_noise`/`flicker_noise` lower to real IR calls instead of folding to `0`; codegen splits them into the noise channel like `ddt`→charge, leaving `load` bit-identical; Interface β gained a §6 flicker channel; compiled-model gates vs QSPICE (`resistor_noise_va` exact, `diode_flicker` 1.7e-5 over a 209×-shaped spectrum) | ✅ |
 | T5.4 — input-referred noise | `S_in = S_out/|H|²`, with `H = y_k` read straight out of the adjoint vector at the input source's branch row — no second solve; golden format gained a second column, scored separately from the output one; verified against QSPICE's `inoise_spectrum` and its printed 22.3055 µV total | ✅ |
 | T5.5 — per-device noise attribution | one column per contributing device, matching QSPICE's `onoise_<dev>`; identity is **positional** (instances are polled in order and tagged), so two identical parallel devices stay distinguishable where a `(p,n)` grouping could not; each column scored against its own peak, which made the gate stricter (`diode_noise` 1.7e-5 → 2.6e-5) | ✅ |
-| T5.6 — `noise_table()` lowering | the last of Verilog-A's three noise builtins: Interface α gained `Builtin::NoiseTable` (the table flattened into sorted, const-folded `Const` arguments) and Interface β `NoiseSink::table_current` + `TableInterp` (both LRM interpolation rules implemented, though only `noise_table`'s spelling is lexed); all table validation happens once at elaboration, where a source file can be named; gated by `resistor_noise_table` at 1.9e-16 vs a plain QSPICE resistor pair, with the interpolation/clamping rules discriminated by shaped-table unit tests instead (a flat table cannot tell them apart) | ✅ |
+| T5.6 — `noise_table()` lowering | the last of Verilog-A's three noise builtins (see T5.7 for its log-interpolated twin): Interface α gained `Builtin::NoiseTable` (the table flattened into sorted, const-folded `Const` arguments) and Interface β `NoiseSink::table_current` + `TableInterp` (both LRM interpolation rules implemented, though only `noise_table`'s spelling is lexed); all table validation happens once at elaboration, where a source file can be named; gated by `resistor_noise_table` at 1.9e-16 vs a plain QSPICE resistor pair, with the interpolation/clamping rules discriminated by shaped-table unit tests instead (a flat table cannot tell them apart) | ✅ |
+| T5.7 — `noise_table_log()` lowering | the LRM's other table function (§4.6.4.4, log-log interpolation): lexed, added to `RESERVED_WORDS` (where it had been missing — the LRM does reserve it), and lowered to its own `Builtin::NoiseTableLog`. **Interface α only** — no β revision, because T5.6 shipped `TableInterp::Log` a day earlier for exactly this; gated by `resistor_noise_table_log` at 1.9e-16, whose golden is deliberately identical to the linear deck's, since on a flat table both rules must agree | ✅ |
 
 **The two caveats this section used to carry are both retired** (recorded here rather than
 deleted, because they governed how every earlier revision of the table was read): "no
 harness-vs-golden validation
 yet" was true until 2026-07-17 and is now false — `va-harness`, `golden/`, and the CLI are real,
-the oracle is QSPICE (not ngspice, switched in `f094bbe`), and 12 circuits are gated; "no Quarto
+the oracle is QSPICE (not ngspice, switched in `f094bbe`), and 13 circuits are gated; "no Quarto
 tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.qmd` files under
 `docs/tutorials/` are written, so criterion 2 no longer blocks any ✅.
 
@@ -1118,7 +1120,7 @@ matches the code verbatim.
 the reference models.
 
 ### Phase T3.1 — MNA assembly & dense linear solve
-> **Status: ✅ complete** (marker refreshed 2026-08-04: exercised by all 12 gated
+> **Status: ✅ complete** (marker refreshed 2026-08-04: exercised by all 13 gated
 > circuits) — `va-core/src/mna.rs` `assemble` walks instances into the
 > `System` sink (ground reduction via `row < dim`); `linsolve.rs` does a `faer` LU solve with
 > singularity detection (non-finite output or failed `A·x≈b` check). 6 tests.
@@ -1630,7 +1632,8 @@ piecewise-linear PSD). *Closed 2026-08-04 — see T5.6, immediately below.*
 
 > **Status: ✅ complete (2026-08-04)** — Verilog-A's `noise_table()` (LRM §4.6.4.3) lowers
 > end to end and is golden-gated against QSPICE: `circuits/resistor_noise_table.net` passes at
-> **1.859e-16** relative, taking `cargo xtask validate` to **12 circuits, 12/12 convergence**.
+> **1.859e-16** relative, taking `cargo xtask validate` to 12 circuits, 12/12 convergence (13
+> after T5.7, below).
 > This closes the last limit T5.5 stated, and with it the whole noise-function family — all
 > three of Verilog-A's noise builtins are now real.
 
@@ -1698,6 +1701,52 @@ happens after elaboration. The gate deck uses two 1 kΩ resistors rather than th
 `noise_table` (checked, not assumed). This closes a stated T5 limit and an LRM construct, not a
 corpus failure — the same reason `ground` declarations and escaped identifiers were added.
 
+### Phase T5.7 — `noise_table_log()` lowering (T1/T2, Interface α)
+
+> **Status: ✅ complete (2026-08-05)** — `noise_table_log()` (LRM §4.6.4.4) is lexed, reserved,
+> and lowered; `circuits/resistor_noise_table_log.net` passes at **1.859e-16** vs QSPICE,
+> taking `cargo xtask validate` to **13 circuits, 13/13 convergence**. With this, the noise
+> family is complete: every noise function Verilog-A defines is implemented, including both of
+> the LRM's interpolation rules.
+
+**It cost one Interface α variant and nothing else** — which was the whole point of shipping
+`TableInterp::{Linear, Log}` together in T5.6 a day earlier. Interface β was untouched, so this
+was not a coordinated multi-crate event at all; the bet that "both rules now, one spelling
+later" would avoid a fourth §6 change paid off exactly as stated.
+
+**It was also missing from `RESERVED_WORDS`** (182 → 183 words). That is a real omission rather
+than a deliberate exclusion: the Accellera LRM v2.4.0 reserves `noise_table_log` right beside
+`noise_table`, and the LRM's own revision history dates the *function* to 2.4 — so the older
+document this table was first transcribed from simply predates it. Same category as the
+`floor`/`ceil`/`round`/`int`/`limexp` additions earlier in T1.
+
+**A separate `Builtin` variant, not an interpolation flag.** The two are separate LRM functions
+with separate spellings, and a flag argument would have to be smuggled into the flattened
+argument list as a magic `Const` sitting among real `(frequency, power)` data — indistinguishable
+from a table entry to every generic arena walk that currently needs no special case at all.
+`lower::NoiseTerm::Table` resolves the variant to a `TableInterp` once, at lowering, so nothing
+downstream re-inspects the call.
+
+**One validator, two names.** Both spellings share `noise_table_points`, since the LRM imposes
+identical requirements on the table itself and differs only in interpolation — but the
+diagnostics now name whichever function the author actually wrote, rather than always saying
+`noise_table`. A test pins that, because a message naming the wrong function is the kind of
+small wrongness that survives for years.
+
+**The gate, and again what it does not prove.** `circuits/resistor_noise_table_log.net` is
+`resistor_noise_table.net` with one word changed in the model, and its golden is deliberately
+the *same physics*: on a flat table the LRM's two rules must agree exactly, and checking that
+they do is the point. What it adds over the linear deck is that the logarithmic path — logs, a
+power, and §4.6.4.4's formula — runs on every point of a real sweep against a real oracle, where
+a NaN, an infinity, or a badly-conditioned exponentiation would surface. It does **not** check
+the interesting half of `noise_table_log`, that two points describe an exact power law; QSPICE
+has no arbitrary-PSD primitive to compare that against, so it stays pinned by the unit test over
+the LRM's own Figure 4-9 example (`'{1,1, 1e6,1e-6}` → exactly `1/f`), alongside a codegen test
+that the same table read under the two rules genuinely diverges between its knots (`1e-3` vs
+`~1.0` at 1 kHz) while agreeing at them.
+
+**Still no corpus movement**: no `external/` file calls either table function.
+
 ---
 
 ## T6 — `va-netlist` + `va-cli` + `va-harness` (integration & validation)
@@ -1708,7 +1757,7 @@ is the glue: it makes everyone else's work runnable and trustworthy.
 methodology + metrics report vs ngspice.
 
 ### Phase T6.1 — Netlist parser & the harness/metrics skeleton
-> **Status: ✅ complete** (2026-08-04: T6.3's gate is closed, and every one of the 12 gated
+> **Status: ✅ complete** (2026-08-04: T6.3's gate is closed, and every one of the 13 gated
 > decks is parsed by this crate) — `va-netlist/src/parser.rs`
 > is a real line-oriented SPICE-flavored parser: `R`/`C`/`D`/`V` elements (SI-suffixed values,
 > `k`/`meg`/`u`/`n`/`p`/…), `0`/`gnd` as the reference sentinel, and dot-cards (`.op`/`.dc`/
@@ -1726,7 +1775,7 @@ methodology + metrics report vs ngspice.
 
 ### Phase T6.2 — CLI wiring & golden generation
 > **Status: ✅ complete** (2026-08-04: golden generation is real — `xtask gen-golden` shells out
-> to QSPICE, and all 12 gated circuits run through `va-cli sim`) — `va-cli sim` already
+> to QSPICE, and all 13 gated circuits run through `va-cli sim`) — `va-cli sim` already
 > wired DC end to end before this pass: `--model <m.va>` compiles through the real
 > `va-frontend` → `va-codegen` pipeline (including module instantiation — see
 > `hierarchical_divider_solves_through_codegen_pipeline`), falling back to `va-abi` reference
@@ -2003,7 +2052,7 @@ methodology + metrics report vs ngspice.
 
 ### Phase T6.4 — Convergence-fraction dashboard
 > **Status: ✅ complete** (code 2026-07-18; marker refreshed 2026-08-04 — the dashboard now
-> reports 12/12, and `t6-integration/04-convergence-dashboard.qmd` is written) — `CLAUDE.md` §7's fourth metric ("fraction of zoo
+> reports 13/13, and `t6-integration/04-convergence-dashboard.qmd` is written) — `CLAUDE.md` §7's fourth metric ("fraction of zoo
 > circuits that reach a solution … it only ever needs to go up") had no real implementation
 > before this: a circuit that failed to *converge* at all (not just mismatch golden) propagated
 > a hard error out of `xtask::validate_{dc,sweep,tran}_circuits` via `?`, aborting the *entire*
@@ -2025,8 +2074,8 @@ $ cargo run -q -p xtask -- validate
 [xtask] validate: convergence 9/9 (100.0%) — CLAUDE.md §7's convergence metric
 ```
 
-Every known circuit converges today (**12/12 as of 2026-08-04** — six ladder rungs plus T5's two
-AC circuits and four noise circuits; the transcript above is the 2026-08-01 run, kept verbatim
+Every known circuit converges today (**13/13 as of 2026-08-05** — six ladder rungs plus T5's two
+AC circuits and five noise circuits; the transcript above is the 2026-08-01 run, kept verbatim
 rather than edited, from when the zoo was 9 circuits; unsurprising, since every one of them already passes
 golden, a strictly harder bar), so this reads `100.0%` right now; the real deliverable is the
 *mechanism* — verified with a genuinely non-convergent synthetic circuit (two nets joined by a
@@ -2065,8 +2114,9 @@ is available. **These now exist and pass** (2026-08-01, § the T5 sections): six
 circuits beyond the six rungs above — `rc_ac` (1.3e-15 magnitude, 1.7e-13 rad phase),
 `diode_ac` (1.3e-5 / 6.4e-6 rad), `diode_noise` (2.6e-5), `resistor_noise_va` (1.4e-16, a
 compiled Verilog-A `white_noise()`), `diode_flicker` (2.6e-5, compiled shot + 1/f over a
-209×-shaped spectrum), and `resistor_noise_table` (1.9e-16, a compiled `noise_table()`, added
-2026-08-04 with T5.6) — bringing `cargo xtask validate` to **12 circuits, all green**.
+209×-shaped spectrum), `resistor_noise_table` (1.9e-16, a compiled `noise_table()`, added
+2026-08-04 with T5.6), and `resistor_noise_table_log` (1.9e-16, its `noise_table_log()` twin,
+2026-08-05 with T5.7) — bringing `cargo xtask validate` to **13 circuits, all green**.
 
 > **All six ladder rungs are formally "passed"** as of 2026-07-18 — each has both real
 > implementation reach *and* a green `cargo xtask validate` against a committed, genuinely

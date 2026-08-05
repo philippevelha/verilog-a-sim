@@ -241,6 +241,7 @@ pub enum Token {
     #[token("negedge", kw)]
     #[token("nmos", kw)]
     #[token("noise_table", kw)]
+    #[token("noise_table_log", kw)]
     #[token("nor", kw)]
     #[token("not", kw)]
     #[token("notif0", kw)]
