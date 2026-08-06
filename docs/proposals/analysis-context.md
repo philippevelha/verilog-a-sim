@@ -28,12 +28,16 @@ code.
 >    `token-reference.md`'s rows for that family were separately stale ("rejected at
 >    elaboration") and were corrected in the same pass.
 >
-> **§6's validation plan was not achievable as written**, and the shortfall is recorded rather
-> than papered over: the `$abstime`-vs-QSPICE-behavioral-source spike (§7 step 1, marked
-> "blocking") was **not run**. Tier A's new behaviour is unit-tested end-to-end through the real
-> pipeline against closed forms; the *regression floor* — every existing gate reproducing its
-> exact prior numbers — is what carries golden weight. `docs/validation.md` states the split
-> per property.
+> **§6/§7's blocking spike was run (2026-08-06), and §6's `$abstime` plan works as written.**
+> QSPICE's behavioral source does expose `time` (`B1 out 0 I=1*time`), so `$abstime` is now
+> **golden-gated** by `circuits/abstime_ramp.net` at error `4.382e-17`, zoo 14/14 — and it
+> discriminates, confirmed by watching it fail at `5.838e-1` with the original fold restored.
+> One thing §6 could not have predicted: `UIC` offsets QSPICE's own `time` by exactly 1e-7 s,
+> so this deck must skip the `cold_start_tran_deck` treatment every other transient gate needs.
+>
+> `analysis()`, `ac_stim` and `bound_step` remain **unit-tested, not golden-gated** — §6's
+> by-construction plan for `analysis()` was not pursued, and the other two have no QSPICE
+> counterpart drivable from a model. `docs/validation.md` states the split per property.
 
 ---
 

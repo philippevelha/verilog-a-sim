@@ -286,18 +286,56 @@ than no number because it looks like evidence).
 
 | Property | How it is validated | Strength |
 |---|---|---|
-| Every existing gate is unchanged | `cargo xtask validate` — all 13 circuits reproduce their **previously recorded numbers to the last digit**, including `rectifier.net` (6.766e-4), the one that exercised the now-deleted `run_dynamic` | Strongest available, and free |
+| Every existing gate is unchanged | `cargo xtask validate` — all 13 pre-existing circuits reproduce their **previously recorded numbers to the last digit**, including `rectifier.net` (6.766e-4), the one that exercised the now-deleted `run_dynamic` | Strongest available, and free |
+| **`$abstime` end to end** | **Golden-gated** against real QSPICE: `circuits/abstime_ramp.net` vs `golden/abstime_ramp.golden` (**error 4.382e-17**, tol 1e-3) | **Golden — a real oracle, see below** |
 | `analysis()` selects per analysis | End-to-end unit test: one compiled model is a plain resistor in DC and a resistor plus a known 1 mA offset in transient; each half is solved and checked against its own closed form | Unit, but end-to-end through the real pipeline |
 | `$abstime` tracks the clock | End-to-end unit test: a compiled `I <+ V/R + k·$abstime` ramp integrated over 1 ms, every accepted point checked against `−k·t·R`; DC reads exactly 0 V | Unit, closed-form |
 | `$abstime`/`analysis()` have zero Jacobian | Central finite difference, per `CLAUDE.md` §5 | Unit, and mandatory |
 | `ac_stim` sign and complex response | `va-acnoise` test: a model-supplied 1 A stimulus into R‖C, magnitude *and* phase checked against `−R/(1+jωRC)` at every swept point, with no netlist `AC` source anywhere | Unit, closed-form — and the sign is the part that is easy to get backwards |
 | `bound_step` caps the step | `va-transient` test: no accepted step may exceed the requested bound; a second test confirms a bound inside an `if` applies only when that arm runs | Unit, property-based |
 
-**The honest summary:** the regression floor is golden-gated and the new behavior is not. A
-future golden gate is possible for `$abstime` specifically — a current ramp has a QSPICE
-equivalent in a behavioral source (`B1 ... I=k*time`), which would let both sides compute the
-same waveform from independent descriptions. That spike has not been run, so it is listed here
-as a plan, not a result.
+**The honest summary:** the regression floor is golden-gated, `$abstime` is golden-gated, and
+the other three constructs are unit-tested only.
+
+### The `$abstime` gate (added 2026-08-06)
+
+The blocking spike the proposal called for **was run**, and it succeeded. QSPICE's behavioral
+source does expose `time`: `B1 out 0 I=1*time` into a 1 kΩ resistor reproduces `V = −1000·t`
+with **zero** error across all 1029 points. So `circuits/abstime_ramp.net` is a real gate — our
+side drives a compiled `models/abstime_ramp.va` (`I(p,n) <+ K*$abstime`) through the whole
+frontend → codegen → transient pipeline, QSPICE drives its own behavioral source, and the two
+descriptions share no code.
+
+Three things make it evidence rather than decoration:
+
+- **The sign convention maps one-to-one with no fixup.** Verilog-A's `I(p,n) <+ expr` and
+  SPICE's `B n+ n- I=expr` both drive current *out of* the first node, so the terminal order
+  carries over unchanged. Had a sign flip been needed to make it pass, that would have been
+  tuning, not translating.
+- **The deck is deliberately resistive-only.** Every timepoint is an exact algebraic solve, so
+  no integration error can contribute — a discrepancy can only come from `$abstime` itself.
+- **It discriminates, verified by deliberately breaking it.** Reintroducing the original fold
+  (`$abstime → 0.0`) moves the gate from `4.382e-17` to **`5.838e-1`**, ~580× over tolerance.
+  A gate that only ever passes proves nothing; this one was watched failing for the right
+  reason before being trusted.
+
+**A gotcha worth its own paragraph, because it nearly poisoned the gate.** `UIC` shifts QSPICE's
+own `time` variable by a fixed offset: with `.tran … UIC`, `I(B1) − time` is exactly `+1.0e-7`
+at *every* point; without `UIC` it is exactly `0.0`. Every other transient gate here goes
+through `cold_start_tran_deck`, which adds `UIC` on purpose (QSPICE otherwise solves the DC
+point first and disagrees with our cold start). This deck must **not**, and can safely skip it
+only because it contains nothing reactive — with no capacitor to seed, QSPICE's operating-point
+solve lands on the same `t = 0` state we start from. A future behavioral gate containing a
+reactive element would have to reconcile the two rather than inherit the exemption.
+
+**What this gate does not catch.** A sub-tolerance *time offset* would slip through: the 1e-7 s
+`UIC` shift is worth ~1e-4 V here, inside the 1e-3 tolerance. The gate is decisive about
+`$abstime` being dead, frozen, or wrongly scaled; it is not a clock-accuracy measurement.
+
+`analysis()`, `ac_stim` and `bound_step` remain unit-tested only. No single QSPICE construct
+corresponds to `analysis()` (the by-construction split described in the table above is the
+best available), and neither `ac_stim` nor `bound_step` has an expressible QSPICE counterpart
+driven from a model rather than a netlist.
 
 ## Bring-up ladder
 

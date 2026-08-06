@@ -2233,11 +2233,18 @@ clean, `va-cli check external` unmoved at 114/150 (the new hard errors — an un
 `analysis()` phase name, `bound_step` in expression position — reject nothing in the real
 corpus).
 
-**What is *not* claimed.** The new behaviour is **unit-tested, not golden-gated**; QSPICE cannot
-be a direct oracle because it does not consume our Verilog-A models. `validation.md`'s
-"Analysis-context constructs" section states exactly which property is checked how, and notes
-the one construct (`$abstime`) that could plausibly get a real golden gate later via a QSPICE
-behavioral source — a plan, not a result, since that spike has not been run.
+**`$abstime` is golden-gated (2026-08-06).** The proposal's blocking spike was run and
+succeeded: QSPICE's behavioral source does expose `time`, so `circuits/abstime_ramp.net` now
+compares a compiled `models/abstime_ramp.va` against a QSPICE `B1 out 0 I=1*time` deck —
+**error 4.382e-17**, and the zoo is **14/14**. It discriminates: reintroducing the original
+fold moves it to `5.838e-1`, ~580x over tolerance. A `UIC` gotcha found on the way is recorded
+in `validation.md` (it offsets QSPICE's own `time` by exactly 1e-7 s, which would have
+poisoned the very quantity under test).
+
+**What is still *not* claimed.** `analysis()`, `ac_stim` and `bound_step` remain **unit-tested,
+not golden-gated** — no QSPICE construct corresponds to them when driven from a model rather
+than a netlist. `validation.md`'s "Analysis-context constructs" section states exactly which
+property is checked how.
 
 **Tiers B and C remain open, and remain wrong:**
 

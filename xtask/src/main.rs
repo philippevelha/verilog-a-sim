@@ -58,6 +58,7 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_step.net", None),
     ("circuits/rectifier.net", Some("models/diode.va")),
     ("circuits/ring_osc.net", None),
+    ("circuits/abstime_ramp.net", Some("models/abstime_ramp.va")),
 ];
 
 /// The `.ac` small-signal circuits `validate`/`gen-golden` know how to drive (T5).
@@ -525,6 +526,37 @@ const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str, Option<f64>)] = &[
     ),
 ];
 
+/// `.tran` circuits whose Verilog-A device has **no** QSPICE `.model` equivalent, but whose
+/// *behavior* QSPICE can express with a behavioral source. Each entry is
+/// `(circuit, device-name prefix to replace, replacement line)`; the named device line is
+/// substituted outright rather than having a `.model` card appended beside it
+/// ([`substitute_device_line`]).
+///
+/// This is a different translation kind from [`QSPICE_TRAN_MODEL_TRANSLATIONS`], and the
+/// difference is the point. A `.model` translation says "the same device, described in QSPICE's
+/// own parameter language"; this says "a different description of the same *physics*". For
+/// `abstime_ramp.net` that is exactly what is wanted: nothing in QSPICE corresponds to a
+/// Verilog-A model reading `$abstime`, but a behavioral current source reading QSPICE's own
+/// `time` computes the identical waveform from a description that shares no code with ours.
+/// That independence is what makes the comparison evidence (§ `docs/validation.md`).
+///
+/// **These decks are deliberately not passed through [`cold_start_tran_deck`].** Verified
+/// 2026-08-06: `UIC` shifts QSPICE's own `time` variable by a fixed ~1e-7 s (`I(B1) − time`
+/// is exactly `+1.0e-7` at every point with `UIC`, and exactly `0.0` without it), which would
+/// inject a constant offset into the very quantity under test. Skipping it is safe here only
+/// because these decks carry nothing reactive — with no capacitor or inductor to seed, QSPICE's
+/// default operating-point solve lands on the same `t = 0` state our own cold start begins
+/// from. A future behavioral entry that *does* contain a reactive element would have to
+/// reconcile the two, not simply inherit this exemption.
+const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[(
+    "circuits/abstime_ramp.net",
+    "D1",
+    // `I(p,n) <+ K*$abstime` with K = 1 A/s. Verilog-A's `I(p,n)` and SPICE's `B n+ n- I=`
+    // share a sign convention (current out of the first node), so the terminal order carries
+    // over unchanged — no sign fixup, which is what keeps this a translation rather than a tuning.
+    "B1 out 0 I=1*time",
+)];
+
 /// Like [`QSPICE_NATIVE_CIRCUITS`], for the `.ac` small-signal circuits (T5):
 /// `circuits/rc_ac.net` is a pure `R`/`C`/`V` deck needing no model translation, just complex
 /// `.qraw` parsing ([`parse_qraw_ac`]). It is still passed through [`rewrite_gnd_to_zero`] — a
@@ -619,6 +651,42 @@ fn rewrite_gnd_to_zero(deck: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Replace the device line whose name is `device` with `replacement`, leaving every other line
+/// (including the title and comments) untouched, then normalize `gnd` to `0`.
+///
+/// Used by [`QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS`] for a device QSPICE has no `.model` for at
+/// all. Matching is on the whole first token, case-insensitively, so a device named `D1` does
+/// not match `D10`.
+///
+/// # Errors
+///
+/// If `device` names no line in `deck`. A silently-unsubstituted deck would run — QSPICE would
+/// simply solve the circuit without that device, since the original line references a model it
+/// has never heard of — and produce a plausible, entirely wrong golden file. That is exactly the
+/// failure mode `docs/…/no-fake-golden-data` exists to prevent, so it is an error, not a warning.
+fn substitute_device_line(deck: &str, device: &str, replacement: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut replaced = 0usize;
+    for line in deck.lines() {
+        let is_target = line
+            .split_whitespace()
+            .next()
+            .is_some_and(|tok| tok.eq_ignore_ascii_case(device))
+            && !line.trim_start().starts_with('*');
+        if is_target {
+            out.push_str(replacement);
+            replaced += 1;
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if replaced != 1 {
+        bail!("expected exactly one `{device}` device line to substitute, found {replaced}");
+    }
+    Ok(rewrite_gnd_to_zero(&out))
 }
 
 /// Rewrite `deck` into a QSPICE-runnable deck: insert `model_card`, widen any 3-terminal
@@ -825,6 +893,39 @@ fn gen_golden() -> Result<()> {
             .with_context(|| format!("writing {}", golden_path.display()))?;
         eprintln!(
             "[xtask]   wrote {} ({} point(s))",
+            golden_path.display(),
+            golden.points.len()
+        );
+        generated += 1;
+    }
+
+    for &(circuit, device, replacement) in QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS {
+        let circuit_path = root.join(circuit);
+        let deck =
+            std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
+        let stem = Path::new(circuit)
+            .file_stem()
+            .context("circuit path has no file stem")?
+            .to_string_lossy()
+            .into_owned();
+
+        // Deliberately no `cold_start_tran_deck` here — `UIC` offsets QSPICE's own `time`.
+        // See `QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS`' doc comment for the measurement.
+        let native_deck = substitute_device_line(&deck, device, replacement)
+            .with_context(|| format!("translating {circuit} for QSPICE"))?;
+
+        let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
+            .with_context(|| format!("running QSPICE on {circuit} (behavioral translation)"))?;
+        let node_order = golden_node_order(&root, circuit)
+            .with_context(|| format!("resolving branch currents for {circuit}"))?;
+        let golden = golden_tran_from_qraw(&raw, &node_order)
+            .with_context(|| format!("mapping QSPICE output to golden for {circuit}"))?;
+
+        let golden_path = golden_dir.join(format!("{stem}.golden"));
+        std::fs::write(&golden_path, golden.render())
+            .with_context(|| format!("writing {}", golden_path.display()))?;
+        eprintln!(
+            "[xtask]   wrote {} ({} point(s), behavioral-source translation)",
             golden_path.display(),
             golden.points.len()
         );
@@ -2054,6 +2155,37 @@ mod tests {
         assert_eq!(lines[1], "Q1 c b 0 bjt");
         // "background" contains "gnd" as a substring but must not be rewritten.
         assert_eq!(lines[2], "R1 0 background 1k");
+    }
+
+    /// The behavioral substitution replaces exactly the named device, leaves the title and
+    /// every other line alone, and normalizes `gnd` on the way through.
+    #[test]
+    fn substitute_device_line_replaces_exactly_the_named_device() {
+        let deck = "* D1 in a comment is not a device\n\
+                    D1 out gnd abstime_ramp\n\
+                    D10 out gnd other\n\
+                    R1 out gnd 1000\n\
+                    .tran 20u 1m\n.end\n";
+        let out = substitute_device_line(deck, "D1", "B1 out 0 I=1*time").expect("substitutes");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "* D1 in a comment is not a device");
+        assert_eq!(lines[1], "B1 out 0 I=1*time");
+        // `D10` must not match `D1` — whole-token comparison, not a prefix.
+        assert_eq!(lines[2], "D10 out 0 other");
+        assert_eq!(lines[3], "R1 out 0 1000");
+    }
+
+    /// A substitution that silently matched nothing would still produce a *runnable* deck —
+    /// QSPICE would solve the circuit without the device, since the untouched line names a
+    /// model it has never heard of — and write a plausible, entirely wrong golden file. That is
+    /// the `no-fake-golden-data` failure mode, so it must be an error.
+    #[test]
+    fn substitute_device_line_refuses_to_silently_match_nothing() {
+        let deck = "* title\nR1 out gnd 1000\n.tran 20u 1m\n.end\n";
+        assert!(substitute_device_line(deck, "D1", "B1 out 0 I=1*time").is_err());
+        // And refuses an ambiguous match rather than picking one.
+        let dup = "* title\nD1 a 0 m\nD1 b 0 m\n.end\n";
+        assert!(substitute_device_line(dup, "D1", "B1 out 0 I=1*time").is_err());
     }
 
     #[test]

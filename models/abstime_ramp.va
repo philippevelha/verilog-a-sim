@@ -1,0 +1,34 @@
+// Absolute-time current ramp — the `$abstime` golden gate's model (Tier A, 2026-08-06).
+//
+// A two-terminal current source whose current is a linear function of simulation time:
+//
+//     I(p, n) = K * $abstime          (amperes, K in A/s)
+//
+// It exists to make `$abstime` observable against an *independent* description of the same
+// physics. QSPICE cannot consume this file, but it can express the identical device with its
+// own behavioral source (`B1 p n I=K*time`), so both simulators compute the same waveform from
+// descriptions that share no code — which is the only thing that makes the comparison evidence
+// rather than a restatement.
+//
+// Deliberately carries **no reactive element and no bias dependence**. The whole circuit it
+// sits in is algebraic, so every accepted timepoint is an exact solve of `K*t + V/R = 0` with
+// no integration error of any kind. A discrepancy against golden can therefore only come from
+// `$abstime` itself — which is the point of a gate for `$abstime`. (It is also what lets the
+// QSPICE deck skip `UIC`; see `circuits/abstime_ramp.net`'s own header for why that matters
+// more than it looks.)
+//
+// Sign convention: Verilog-A's `I(p, n) <+ expr` drives `expr` amperes *out of* `p` and into
+// `n` — the same convention SPICE's `B<name> n+ n- I=expr` uses, so the two descriptions map
+// one-to-one with no sign fixup. With `n` grounded, a positive `K` therefore pulls `p`
+// *negative*: V(p) = −K·t·R.
+`include "disciplines.vams"
+
+module abstime_ramp(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real K = 1.0 from [0:inf);   // ramp rate, amperes per second
+
+    analog begin
+        I(p, n) <+ K * $abstime;
+    end
+endmodule

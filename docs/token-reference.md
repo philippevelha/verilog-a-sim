@@ -159,7 +159,14 @@ class of lexemes.
   `0.0` in a static, AC or noise solve, but as the LRM-correct *answer* for a solve with no time
   axis rather than an assumption baked in at elaboration. Its value is a constant with respect
   to the solution vector, so it carries a **zero gradient**, checked against a central finite
-  difference per `CLAUDE.md` §5. `$mfactor` (the instance multiplicity/`m=` factor)
+  difference per `CLAUDE.md` §5.
+
+  **Golden-gated against real QSPICE** (2026-08-06), alone among the four analysis-context
+  constructs: `circuits/abstime_ramp.net` drives a compiled `models/abstime_ramp.va`
+  (`I(p,n) <+ K*$abstime`) against a QSPICE behavioral source (`B1 out 0 I=1*time`) computing
+  the same ramp from an independent description — error `4.382e-17`. It discriminates:
+  restoring the old fold moves it to `5.838e-1`. See `docs/validation.md` for the deck's
+  resistive-only design and the `UIC`-shifts-`time` gotcha behind it. `$mfactor` (the instance multiplicity/`m=` factor)
   folds to `1.0`, its LRM default, since v0 has no netlist-driven instance parameters to override
   it; `$param_given(name)`/`$port_connected(name)` both fold to `0.0`/false — `name` is read
   directly off the AST as a bare parameter/port-name reference (validated against the module's

@@ -1,0 +1,20 @@
+* Absolute-time current ramp -- the $abstime golden gate (Tier A, 2026-08-06).
+* A compiled models/abstime_ramp.va (I = K*$abstime, K = 1 A/s) pulling current out of `out`,
+* loaded by a 1 kOhm resistor to ground. Purely algebraic:
+*   K*t + V(out)/R = 0   ->   V(out) = -K*t*R = -1000*t volts
+* so V(out) sweeps 0 V down to -1 V over the 1 ms window.
+*
+* Why this deck is resistive-only, deliberately:
+*   1. Every timepoint is an exact algebraic solve, so the comparison against golden measures
+*      $abstime and nothing else -- no integration error can contribute to it.
+*   2. With nothing reactive, QSPICE's default "solve the DC operating point first" lands on
+*      exactly the V(out)=0 our own cold start begins from, so the golden deck needs no `UIC`.
+*      That matters more than it looks: `UIC` shifts QSPICE's own `time` variable by a fixed
+*      ~1e-7 s (measured 2026-08-06 -- see docs/validation.md), which would have injected a
+*      constant offset into the very quantity under test.
+*
+* QSPICE reference: `B1 out 0 I=1*time` -- the same device, described independently.
+D1 out gnd abstime_ramp
+R1 out gnd 1000
+.tran 20u 1m
+.end
