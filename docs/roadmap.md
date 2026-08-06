@@ -58,7 +58,7 @@ shared, demoable milestone that several theses light up at once.
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `mos_dc` 1.5e-6) | ✅ |
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
-| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; `run_dynamic` rebuilds a time-varying source per step; **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
+| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 1.8e-4) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
 | T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
 | T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 13 golden gates runs through this path | ✅ |
@@ -1257,6 +1257,8 @@ the reference models.
 > subset of devices fresh at every step attempt (the value baked in fresh each time), while
 > everything else in the circuit stays a fixed, borrowed instance exactly as before —
 > `va-cli`'s `build_instances_split` is the one caller that needs this today.
+
+> **Superseded 2026-08-06:** `run_dynamic` and `build_instances_split` are **deleted**. Interface β now carries an `AnalysisCtx` (time + analysis kind), so a `SIN` source is an ordinary stateless `ModelInstance` reading `ctx.time` (`va_cli::WaveformSource`) and every device takes the same path — see this file's "Analysis context — Tier A" section. The reasoning below is kept as history; the mechanism it describes is gone.
 > *Outstanding:* a rigorous divided-difference LTE estimator to replace the embedded-pair
 > heuristic. `t4-transient/02-lte-timestep.qmd` written 2026-07-18 (rung 4's golden gate has
 > since formally passed for real too, against QSPICE, same date).
@@ -1796,6 +1798,8 @@ methodology + metrics report vs ngspice.
 > else uses — needed because Interface β has no time parameter for a device to read a
 > waveform from directly (§7, T4.2's update above). Verified against
 > `circuits/rectifier.net`: `cargo run -p va-cli -- sim circuits/rectifier.net --tran`
+
+> **Superseded 2026-08-06:** `run_dynamic` and `build_instances_split` are **deleted**. Interface β now carries an `AnalysisCtx` (time + analysis kind), so a `SIN` source is an ordinary stateless `ModelInstance` reading `ctx.time` (`va_cli::WaveformSource`) and every device takes the same path — see this file's "Analysis context — Tier A" section. The reasoning below is kept as history; the mechanism it describes is gone.
 > produces a textbook half-wave-rectified, RC-filtered waveform — `V(out)` never follows
 > `V(in)`'s swing to −5 V, peaks near 4.3 V (5 V minus a silicon diode drop), and shows the
 > expected ripple decay between cycles, all driven through the real frontend/netlist/core/
@@ -2182,6 +2186,74 @@ as rung 5 above: gate green vs QSPICE golden since 2026-07-18, tutorials all wri
 ladder rung has reached "implementation reach" through the real pipeline** — the entire
 remaining bring-up-ladder gap, across every rung, was at that point uniformly the same one
 thing: `va-harness` (T6.3), not an unimplemented circuit. That gap has since closed too.
+
+---
+
+## Analysis context — Tier A (delivered 2026-08-06)
+
+**A §6 coordinated change to *both* frozen interfaces**, and the first one to break an existing
+signature rather than add a defaulted method. Written up beforehand in
+`docs/proposals/analysis-context.md`; this section records what actually shipped.
+
+**The problem.** `va-frontend` const-folded a family of constructs on the basis that DC was the
+only analysis. T4 and T5 then landed and the folds were never revisited, so each had become a
+silent wrong answer *in an analysis that already existed*:
+
+| Construct | Folded to | Was wrong in |
+|---|---|---|
+| `analysis("tran")` | `false`, always | transient — the branch never fired |
+| `analysis("dc"/"static")` | `true`, always | transient — a DC-init branch fired at every timepoint |
+| `$abstime` | `0.0` | transient — every time-dependent model frozen at t=0 |
+| `ac_stim` | `0.0`, arguments discarded | AC — a model's own excitation contributed nothing |
+| `bound_step` | no-op | transient — the adaptive controller never saw the hint |
+
+The keystone was that `ModelInstance::load` carried no time, no frequency and no analysis kind,
+so a model *could not* be told what was running. **None of this was visible in `cargo xtask
+validate`** — all 13 gated circuits use textbook devices (R, C, diode, MOS, BJT) containing no
+analysis-dependent construct, so a green 13/13 was never evidence against any of it.
+
+**What shipped.** Interface β gained `AnalysisCtx { kind, time, temp }` on both `load` and
+`noise`, plus two defaulted `StampSink` channels (`excitation` for `ac_stim`, `bound_step`).
+Interface α gained `Builtin::{Abstime, Analysis, AcStim}`, `Stmt::BoundStep`, and the shared
+phase-name/bitmask encoding. See `interfaces.md`'s paired revisions of 2026-08-06 for the
+reasoning behind each design decision — particularly why there is deliberately **no `freq`
+field**, and why the phase bit order lives in `va-ir` rather than `va-abi`.
+
+**The clearest payoff: a workaround deleted.** `va_transient::integrator::run_dynamic` was a
+near-duplicate of `run_with_events` whose only reason to exist was re-boxing a freshly-valued
+`VSource` at every step *attempt*, because `load` had no time parameter. It is gone, along with
+`va_cli::build_instances_split` that fed it. A `SIN` source is now an ordinary stateless
+`ModelInstance` reading `ctx.time`; every device takes one path. That removes an allocation per
+timestep and ~100 lines of duplicated integrator.
+
+**Evidence it was behaviour-preserving:** all 13 golden gates reproduce their previously
+recorded numbers **to the last digit** — including `rectifier.net` at `6.766e-4`, the one gate
+that actually exercised `run_dynamic`. Workspace: 538 tests pass, `fmt`/`clippy -D warnings`
+clean, `va-cli check external` unmoved at 114/150 (the new hard errors — an unrecognized
+`analysis()` phase name, `bound_step` in expression position — reject nothing in the real
+corpus).
+
+**What is *not* claimed.** The new behaviour is **unit-tested, not golden-gated**; QSPICE cannot
+be a direct oracle because it does not consume our Verilog-A models. `validation.md`'s
+"Analysis-context constructs" section states exactly which property is checked how, and notes
+the one construct (`$abstime`) that could plausibly get a real golden gate later via a QSPICE
+behavioral source — a plan, not a result, since that spike has not been run.
+
+**Tiers B and C remain open, and remain wrong:**
+
+- **Tier B** — `transition`, `slew`, `absdelay`, `$limit`, `@(initial_step)`, `idt` with an
+  initial condition. These need per-instance **state across evaluations**, and Interface β is
+  deliberately stateless: `load` takes `&self`, and is re-entered per Newton iteration and again
+  on *rejected* timesteps that must not corrupt history. A state channel needs its own contract
+  answering who owns the storage and what is committed versus rolled back. That is a genuinely
+  harder design and was deliberately not smuggled into Tier A.
+- **Tier C** — `laplace_*`, `zi_*`, currently folded to their DC gain. A filter's small-signal
+  response is genuinely frequency-dependent, so this needs either per-frequency
+  re-linearization (an O(points) cost on every AC run) or a complex-valued channel on
+  Interface β. Adding `freq` to the context would not deliver it; the restructuring is the work.
+
+`docs/token-reference.md` marks both tiers as still-wrong **per construct**, rather than letting
+Tier A's arrival imply the whole family is fixed.
 
 ---
 

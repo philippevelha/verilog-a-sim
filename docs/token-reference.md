@@ -129,8 +129,9 @@ class of lexemes.
 - **Declaration and Assignment**: N/A.
 - **Expressions and Evaluation**: `ExprAst::Str` has no numeric value; `lower_expr` rejects it
   everywhere except as a system-task argument (`Stmt::Task`) or inside `analysis(...)`, whose
-  arguments the elaborator inspects directly as strings (`analysis_matches`) rather than
-  evaluating them as expressions.
+  arguments the elaborator inspects directly as strings (`Elaborator::phase_mask_of`, which
+  also serves `ac_stim`'s optional leading analysis name) rather than evaluating them as
+  expressions — folding them to a phase bitmask, the one place strings become numbers.
 - **Structural and Analog Usage**: Analog-block only in practice (`$strobe("...", ...)`,
   `analysis("dc")`) — there's no structural (module-level) use of a bare string in this subset.
 - **Comparison with Traditional Constructs**: Same lexical shape as a C string literal, but far
@@ -145,12 +146,20 @@ class of lexemes.
   simulation-time (`$strobe`, which is a documented no-op under v0's DC-only model).
 - **Declaration and Assignment**: Never declared — the `$`-prefixed namespace is entirely
   predefined by the LRM (Clause 9, "System tasks and functions").
-- **Expressions and Evaluation**: `$vt`/`$vt(T)` and `$temperature` are the only ones
-  elaboration actually turns into IR (`Builtin::Vt`, `Builtin::Temperature`); `$simparam` folds
+- **Expressions and Evaluation**: `$vt`/`$vt(T)`, `$temperature` and — **since 2026-08-06
+  (Tier A)** — `$abstime` are the ones elaboration actually turns into IR (`Builtin::Vt`,
+  `Builtin::Temperature`, `Builtin::Abstime`); `$simparam` folds
   to its `default` argument (or errors, matching the LRM's behavior for an unknown simulator
-  parameter with no default — v0 has no simulator-parameter store at all); `$abstime` (the
-  absolute simulation time) folds to a constant `0.0`, since v0 has no time axis at all and a DC
-  operating point is conventionally t=0; `$mfactor` (the instance multiplicity/`m=` factor)
+  parameter with no default — v0 has no simulator-parameter store at all).
+
+  `$abstime` (the absolute simulation time, LRM §9.17.1) **used to fold to a constant `0.0`**,
+  which was right while there was no time axis and became wrong the moment `va-transient`
+  landed: it froze every time-dependent model at t = 0. It now lowers to a zero-argument
+  `Builtin::Abstime` and reads `va_abi::AnalysisCtx::time` at each evaluation — still exactly
+  `0.0` in a static, AC or noise solve, but as the LRM-correct *answer* for a solve with no time
+  axis rather than an assumption baked in at elaboration. Its value is a constant with respect
+  to the solution vector, so it carries a **zero gradient**, checked against a central finite
+  difference per `CLAUDE.md` §5. `$mfactor` (the instance multiplicity/`m=` factor)
   folds to `1.0`, its LRM default, since v0 has no netlist-driven instance parameters to override
   it; `$param_given(name)`/`$port_connected(name)` both fold to `0.0`/false — `name` is read
   directly off the AST as a bare parameter/port-name reference (validated against the module's
@@ -1007,21 +1016,44 @@ including the ones with no implemented behavior at all.
 
 ### `Analysis`
 
-- **Purpose and Static Nature**: Folded to a compile-time constant under v0's DC-only model —
-  genuinely dynamic in full Verilog-AMS (querying which analysis is currently running), but
-  since v0 only ever runs a DC solve, `analysis("static"/"dc"/"ic"/"nodeset")` is always `1.0`
-  and every other phase name is always `0.0`.
+- **Purpose and Static Nature**: **Simulation-time. Updated 2026-08-06 (Tier A).** Genuinely
+  dynamic, as the LRM intends: it queries which analysis is currently running, and the answer is
+  now produced at evaluation, not at elaboration.
+
+  It used to be **const-folded** here — `analysis("static"/"dc"/"ic"/"nodeset")` always `1.0`,
+  every other phase name always `0.0` — which was correct while DC was the only analysis this
+  project had and became a silent wrong answer the moment `va-transient` and `va-acnoise`
+  landed: a DC-initialization branch fired at *every* transient timepoint, and an
+  `analysis("tran")` branch never fired at all. Interface β's analysis context
+  (`va_abi::AnalysisCtx`) is what made the fix possible; before it, a model could not be told
+  what was running.
 - **Declaration and Assignment**: Called as `analysis("phase"[, "phase", ...])`; each argument
-  must be a string literal (`analysis_matches` rejects a non-string argument).
-- **Expressions and Evaluation**: Evaluated once, at elaboration, to a fixed `Expr::Const` —
-  not re-evaluated per iteration, unlike a genuinely dynamic analog expression, even though its
-  *result* still participates in ordinary dynamic expressions around it.
+  must be a string literal (`Elaborator::phase_mask_of` rejects a non-string argument). The LRM's
+  recognized names are `static`, `ic`, `nodeset`, `dc`, `tran`, `ac`, `noise`; an unrecognized
+  name is a **hard elaboration error**, naming the offender, rather than a silent `false` — a
+  typo like `"transient"` for `"tran"` would otherwise disable its branch forever with no
+  diagnostic.
+- **Expressions and Evaluation**: Elaboration resolves the *string* arguments — the only part
+  that must happen there, since `Expr::Call` carries numeric expressions — into a **bitmask over
+  `va_ir::ANALYSIS_PHASES`**, and emits `Expr::Call(Builtin::Analysis, [Const(mask)])`. A mask
+  rather than a new string-carrying `Expr` variant, for the same reason `noise_table` flattens
+  its table into `Const` arguments: every existing arena walk, clone and validity check keeps
+  working untouched. `va-codegen`'s `ad::phase_mask_active` answers the mask against the running
+  analysis at load time, once per evaluation. `analysis(a, b)` is an *any-of* query (LRM §4.5.1),
+  so the mask ORs; `analysis()` with no arguments matches nothing.
+
+  The value is a constant with respect to the solution vector, so it carries a **zero gradient**
+  — verified against a central finite difference, per `CLAUDE.md` §5, not assumed.
+
+  `"ic"` and `"nodeset"` answer `false` in every analysis. That is a statement of fact, not an
+  approximation: this simulator has no initial-condition or nodeset phase, so no model can be
+  inside one.
 - **Structural and Analog Usage**: Analog-block only.
-- **Comparison with Traditional Constructs**: Closest to a C preprocessor `#ifdef
-  SIMULATING_DC`-style compile-time flag, except it's evaluated by the elaborator rather than a
-  textual preprocessor, and the same IR is (per the stated limitation) not reusable across
-  analyses — a fresh elaboration would be needed per analysis type in a hypothetical future
-  where v0 supports more than DC.
+- **Comparison with Traditional Constructs**: Now closest to a plain runtime predicate on
+  simulator state — `if (mode == TRANSIENT)` — rather than the compile-time `#ifdef` it used to
+  resemble. The same compiled IR is reusable across every analysis, which was the point: before
+  this change a hypothetical multi-analysis run would have needed a fresh elaboration per
+  analysis type.
 
 ### `White_noise` / `Flicker_noise` / `Noise_table` / `Ac_stim`
 
@@ -1030,9 +1062,13 @@ including the ones with no implemented behavior at all.
   analysis. **Updated 2026-08-01 (T5.2):** `white_noise`/`flicker_noise` are now genuinely
   lowered, since `va-acnoise` implements noise analysis and Interface β carries a noise channel.
   **Updated 2026-08-04 (T5.6):** `noise_table` is lowered too — Interface β gained a
-  `table_current` channel (§6) and Interface α a `Builtin::NoiseTable`. Only `ac_stim` still
-  folds to `0.0`, which has nothing to do with any missing channel: an AC stimulus has no effect
-  on a DC operating point. All three noise builtins are now real.
+  `table_current` channel (§6) and Interface α a `Builtin::NoiseTable`.
+  **Updated 2026-08-06 (Tier A): `ac_stim` is lowered too — all four are now real.** Its old
+  fold to a bare `Expr::Const(0.0)` had the right *value* for the wrong reason: an `ac_stim`'s
+  value genuinely is zero in every analysis, but it is zero because it belongs on the
+  **right-hand side** of `(G + jω·C)·X = B`, not because it contributes nothing. Folding it
+  discarded the magnitude and phase that are the entire point, leaving an AC-driven behavioral
+  model silently unexcited.
 - **Declaration and Assignment**: Called as `white_noise(pwr[, "name"])` /
   `flicker_noise(pwr, exp[, "name"])` / `noise_table(...)` / `ac_stim([mag[, phase[, type]]])`.
 - **Expressions and Evaluation**: `white_noise`/`flicker_noise` elaborate to
@@ -1056,8 +1092,25 @@ including the ones with no implemented behavior at all.
   file-name form (`noise_table("t.tbl")`, unimplemented) each get their own message. Between
   points the PSD is piecewise-linear **in frequency**, and outside the tabulated range it is
   clamped to the nearest endpoint's power rather than extrapolated
-  (`va_abi::noise::table_psd_at`). `ac_stim` alone still elaborates to `Expr::Const(0.0)`,
-  arguments unevaluated.
+  (`va_abi::noise::table_psd_at`).
+
+  `ac_stim([analysis_name[, mag[, phase]]])` (LRM §4.5.2) elaborates to
+  `Expr::Call(Builtin::AcStim, [Const(mask), mag, phase])` — **normalized to exactly three
+  arguments** whatever the source wrote, so no consumer re-derives the LRM's defaults
+  (`"ac"`, `1.0`, `0.0`). The leading argument is a phase bitmask, resolved exactly as
+  `analysis()`'s is, and recognized as an analysis name only when it is a string literal:
+  `ac_stim(1.0, 0.0)` is a magnitude and a phase, not a misparsed analysis name. `va-codegen`
+  splits the call out of its contribution into Interface β's `excitation` channel, exactly as it
+  splits `white_noise` into the noise channel and `ddt` into the charge channel — so the value
+  seen by `G` stays zero and the stimulus reaches `B` instead. The sign convention is
+  `residual`'s: `I(p,n) <+ ac_stim(mag, phase)` emits `+A` at `p` and `−A` at `n`, and
+  `va_acnoise::ac::run` negates it moving to the right-hand side.
+
+  Unlike a noise term, an `ac_stim` carries its **sign** through the split (`−ac_stim(1,0)` is a
+  genuinely opposite stimulus, whereas a noise source's sign is squared away by `|Z|²`).
+  Like a noise term, only the **bare** call is recognized: a scaled or nested `2*ac_stim(...)` is
+  a **build error**, not a silent drop — it would otherwise evaluate to its mandated zero and
+  vanish without trace.
 
   **Updated 2026-08-05:** `noise_table_log` (LRM §4.6.4.4, the same table interpolated in
   `log₁₀ f`/`log₁₀ power`) is now lexed and lowered too. It was also **missing from
@@ -1101,9 +1154,15 @@ including the ones with no implemented behavior at all.
 - **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
   right-hand side or an intermediate variable assignment.
 - **Comparison with Traditional Constructs**: No C/digital-Verilog analogue (a continuous-time
-  slew/delay filter needs a time axis neither has). Once `va-transient` exists, both would need
-  real handling there (they aren't just constant-folded away in a time-stepping solve) — this
-  DC-only fold is a stated, deliberate simplification, not a permanent design decision.
+  slew/delay filter needs a time axis neither has). **Still wrong in transient** — Tier B of
+  `docs/proposals/analysis-context.md`. `va-transient` exists now, so these are not
+  constant-folded away in a time-stepping solve: they *are* the dynamics, and folding them to
+  their input discards exactly what the model was written to express. The analysis context
+  Tier A added does not fix them, and was not expected to: they need the model to remember
+  something between evaluations, and Interface β is deliberately stateless (`load` takes
+  `&self`, and is re-entered per Newton iteration and again on rejected timesteps). A state
+  channel needs its own contract answering who owns the storage and what is committed versus
+  rolled back — a harder design than Tier A, deliberately not smuggled into it.
 
 ### `Absdelay`
 
@@ -1123,23 +1182,47 @@ including the ones with no implemented behavior at all.
   an empty argument list is a hard error.
 - **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
   right-hand side.
-- **Comparison with Traditional Constructs**: No C/digital-Verilog analogue. Once `va-transient`
-  exists, this would need real time-delay handling rather than a constant fold — a stated,
-  deliberate v0 simplification, not a permanent design decision.
+- **Comparison with Traditional Constructs**: No C/digital-Verilog analogue. Real time-delay
+  handling, not a constant fold, is what this needs. **Still wrong in transient** — Tier B of `docs/proposals/analysis-context.md`: this construct needs the model to *remember* something between evaluations (a slew accumulator, a delay line), and Interface β is deliberately stateless — `load` takes `&self` and may be re-entered on a rejected timestep. The analysis context Tier A added does not help; a state channel needs its own contract answering who owns the storage and what is committed versus rolled back.
 
 ### `Bound_step`
 
-- **Purpose and Static Nature**: A transient-timestep hint in full Verilog-AMS (requests the
-  simulator not step past a given interval, so it can resolve a known-fast event); has no
-  meaning at all under v0's DC-only model (there is no timestep to bound), so it's a documented
-  no-op rather than an error.
+- **Purpose and Static Nature**: **Simulation-time. Updated 2026-08-06 (Tier A).** A
+  transient-timestep hint (LRM §9.17.2): it requests that the simulator not step past a given
+  interval, so a model can force resolution of an event it knows is coming. It is now honoured.
+
+  It used to be a **documented no-op** — parsed, then discarded along with the system tasks —
+  which was defensible while there was no transient analysis to bound. Once there was one, the
+  hint was simply being thrown away.
 - **Declaration and Assignment**: Used as a bare statement, `bound_step(step);` — like a
   system-task call, not a value (`parse_stmt`'s dedicated `"bound_step"` arm parses it the same
-  way `$strobe(...)` is parsed, producing a `Stmt::Task`, which already elaborates to a no-op).
-  If it somehow appears in expression position instead, it also folds to `Expr::Const(0.0)`
-  (grouped with the noise-source builtins in `lower_expr`) rather than erroring.
-- **Expressions and Evaluation**: The step argument is parsed but never evaluated.
-- **Structural and Analog Usage**: Analog-block only, transient-specific.
+  way `$strobe(...)` is parsed, producing a `Stmt::Task`). Elaboration recognizes that task by
+  name and lowers it to its own `va_ir::Stmt::BoundStep(ExprId)`. Exactly one argument; a missing
+  or extra one is an elaboration error. In **expression** position it is now a hard error rather
+  than folding to `0.0`: it produces no value, and inventing one hid the mistake.
+- **Expressions and Evaluation**: The step argument is a genuine expression, evaluated during
+  the statement walk at each `load`. It stays a *statement inside the control-flow walk* rather
+  than becoming a module-level property because it may sit inside an `if` — whether a bound
+  applies at all can depend on the operating point, and this is the only representation that
+  preserves that. `va-codegen` accumulates the tightest request on its evaluation context and
+  emits it through Interface β's `StampSink::bound_step` at the end of `load`, **only** when the
+  analysis is transient; the integrator caps each step's landing time at the bound read from the
+  last *accepted* point (never a rejected candidate). Non-positive and non-finite requests are
+  discarded rather than honoured — the LRM gives them no meaning, and a zero bound would wedge
+  the timestep controller against its own floor. A positive but absurdly small bound is
+  **clamped to `TranConfig::tstep_min`** for the same reason: `bound_step(1e-15)` over a
+  millisecond window is 10¹² steps, which is a hang rather than an answer, and is far more
+  likely a unit error than a genuine requirement.
+
+  A bound only ever tightens: implementors take the minimum across every requesting model, so
+  one model can shorten the step and none can lengthen another's. It does not shrink the LTE
+  controller's own step size, so the controller grows back freely once the bound relaxes.
+
+  Rejected inside an `analog function` body: a function is pure and returns a value, with no
+  channel for a side effect, so accepting it there would silently discard a bound the author
+  believes is in force.
+- **Structural and Analog Usage**: Analog-block only, transient-specific — every other analysis
+  evaluates the argument and drops the bound, having no timestep to bound.
 - **Comparison with Traditional Constructs**: No general-purpose analogue — closest is a
   scheduler hint (e.g. a cooperative-multitasking `yield`), except this one bounds a numerical
   integrator's step size rather than yielding control.
@@ -1206,16 +1289,16 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | Token | Purpose & Static Nature | Declaration & Assignment | Expressions & Evaluation | Structural & Analog Usage | Comparison with Traditional Constructs |
 |---|---|---|---|---|---|
 | `abs` | Dynamic/static dual, see §1.5 Math builtins | `abs(x)` call | Absolute value, both paths | Analog expr / const context | C `fabs()`/`abs()` |
-| `absdelay` | Folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
+| `absdelay` | **Still wrong in transient (Tier B — needs per-instance state, not the analysis context)**; folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
 | `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`); round-trips into `va_ir::NodeDecl::abstol` and `va-core`'s per-unknown Newton convergence check (§ nature-metadata wiring) | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
 | `access` | Parsed into `NatureDecl::access` (§1.5), widens the recognized access-function set once bound by a `discipline` | Nature attribute `access = fn_name;` | Read as a plain identifier; has a real effect (§2.17) once a `discipline` binds this nature as `potential`/`flow` | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |
 | `acosh` | Dynamic/static dual, §1.5 | `acosh(x)` call | Inverse hyperbolic cosine | Analog expr / const context | C99 `acosh()` |
-| `ac_stim` | Folds to constant `0.0` (fixed — see §1.5); contributes nothing at DC regardless | `ac_stim(mag[, phase[, type]])` call | Const-folded to `0.0` | Analog-block only (AC analysis) | No analogue — AC-analysis is out of v0's DC-only scope (`CLAUDE.md` §1's "stretch") |
+| `ac_stim` | **Simulation-time** (Tier A, 2026-08-06) — a small-signal excitation on `B`, not a term in `G` | `ac_stim([analysis_name[, mag[, phase]]])` call | Lowers to `Builtin::AcStim` normalized to 3 args (phase mask, mag, phase); value always `0`, split into `StampSink::excitation` and applied only in AC | Analog-block only (AC analysis) | An independent source's AC spec, written inside the model instead of the netlist |
 | `aliasparam` | Elaboration-only, see §1.5 `Aliasparam` | `aliasparam name = target;` | Name resolution only | Module-level | C reference/alias |
 | `always` | Reserved, no grammar production — v0 has only the single `analog` block, no digital `always` | N/A | N/A | N/A | Digital Verilog's continuously-re-triggered procedural block; no direct C equivalent |
 | `analog` | Dedicated token, §1.4 | — | — | — | — |
-| `analysis` | Folds to DC constant, §1.5 | `analysis("phase",...)` call | Const-folded once | Analog-block only | Preprocessor-flag-like compile-time query |
+| `analysis` | **Simulation-time** (Tier A, 2026-08-06) — answers the analysis actually running | `analysis("phase",...)` call; string literals only, unknown name is an error | Phase names fold to a bitmask at elaboration; `Builtin::Analysis` answers it per evaluation, zero gradient | Analog-block only | A runtime predicate on simulator state (`mode == TRANSIENT`) |
 | `and` | Reserved, no grammar production (digital gate primitive: `and #delay g(out,a,b);`) | N/A in v0 | N/A | Structural-only, digital gate level; never analog | Verilog `and` gate; loosely C's `&&`/`&`, but with real gate timing that has no C analogue |
 | `asin` | Dynamic/static dual, §1.5 | `asin(x)` call | Inverse sine | Analog expr / const context | C `asin()` |
 | `asinh` | Dynamic/static dual, §1.5 | `asinh(x)` call | Inverse hyperbolic sine | Analog expr / const context | C99 `asinh()` |
@@ -1224,7 +1307,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `atan2` | Dynamic/static dual, §1.5 | `atan2(y, x)` call | Two-argument arctangent | Analog expr / const context | C `atan2()` |
 | `atanh` | Dynamic/static dual, §1.5 | `atanh(x)` call | Inverse hyperbolic tangent | Analog expr / const context | C99 `atanh()` |
 | `begin` | Dedicated token, §1.4 | — | — | — | — |
-| `bound_step` | A documented no-op (fixed — see §1.5); has no meaning under v0's DC-only model | `bound_step(step);` as a bare statement (parses like a system-task call) | Step argument parsed, never evaluated | Analog-block only, transient-specific | No analogue — timestep control is a transient-analysis concept `va-transient` doesn't expose to source yet |
+| `bound_step` | **Simulation-time** (Tier A, 2026-08-06) — honoured by the adaptive timestep controller | `bound_step(step);` as a bare statement (parses like a system-task call); an error in expression position | Lowers to `va_ir::Stmt::BoundStep`; argument evaluated per `load`, tightest request emitted via `StampSink::bound_step`, applied only in transient | Analog-block only, transient-specific | A scheduler hint, except it bounds an integrator's step size |
 | `branch` | Elaboration-only, see §1.5 `Branch` | `branch (a[,b]) name,...;` | Name/pair resolution | Module-level declaration; analog-block use | Named alias for a recurring access-function pair |
 | `buf` | Reserved, no grammar production (digital buffer gate primitive) | N/A | N/A | Digital gate level only | No C analogue (has real propagation delay) |
 | `bufif0` | Reserved, no grammar production (tristate buffer, active-low enable) | N/A | N/A | Digital gate level only | No C analogue |
@@ -1295,12 +1378,12 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `int` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `int(x)` call | Truncate toward zero | Analog expr / const context | C's `(int)` cast, but as a genuine callable function |
 | `integer` | Dedicated token, §1.4 | — | — | — | — |
 | `join` | Reserved, no grammar production (closes a digital `fork...join` block) | N/A | N/A | Digital procedural only | No C analogue |
-| `laplace_nd` | Parses as a call (`laplace_nd(in, num[, den])`); elaboration has no builtin → `unknown function` | Laplace-domain transfer-function filter, numerator/denominator coefficient form | Rejected at elaboration today | Analog-block only, signal-flow filter | No C analogue (a continuous-time transfer function) |
-| `laplace_np` | Same family as `laplace_nd`, pole/zero form | Laplace-domain filter, pole/zero form | Rejected at elaboration today | Analog-block only | No C analogue |
-| `laplace_zd` | Same family, Z-domain numerator/denominator form | Z-domain (discrete) filter | Rejected at elaboration today | Analog-block only | Closest: a digital IIR filter's difference equation, but expressed declaratively |
-| `laplace_zp` | Same family, Z-domain pole/zero form | Z-domain (discrete) filter | Rejected at elaboration today | Analog-block only | Same as `laplace_zd` |
+| `laplace_nd` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Parses as a call (`laplace_nd(in, num[, den])`); elaboration has no builtin → `unknown function` | Laplace-domain transfer-function filter, numerator/denominator coefficient form | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only, signal-flow filter | No C analogue (a continuous-time transfer function) |
+| `laplace_np` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Same family as `laplace_nd`, pole/zero form | Laplace-domain filter, pole/zero form | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | No C analogue |
+| `laplace_zd` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Same family, Z-domain numerator/denominator form | Z-domain (discrete) filter | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | Closest: a digital IIR filter's difference equation, but expressed declaratively |
+| `laplace_zp` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Same family, Z-domain pole/zero form | Z-domain (discrete) filter | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | Same as `laplace_zd` |
 | `large` | Reserved, no grammar production (net-strength charge-storage keyword, `trireg`-adjacent) | N/A | N/A | Digital net-strength only | No C analogue |
-| `last_crossing` | Parses as a call (`last_crossing(expr, dir)`); elaboration has no builtin → `unknown function` | Returns the simulation time of the last zero-crossing of `expr` | Rejected at elaboration today | Analog-block only | No C analogue |
+| `last_crossing` | Parses as a call (`last_crossing(expr, dir)`); elaboration has no builtin → `unknown function` | Returns the simulation time of the last zero-crossing of `expr` | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | No C analogue |
 | `limexp` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7); folds to plain `exp` | `limexp(x)` call | Exponential (no limiting modeled) | Analog expr / const context | A numerically-limited `exp` Newton-convergence aid; no C analogue |
 | `ln` | Dynamic/static dual, §1.5 | `ln(x)` call | Natural log | Analog expr / const context | C `log()` (note the naming swap vs. `log`/`log10` below) |
 | `localparam` | Dedicated token, §1.4 | — | — | — | — |
@@ -1347,7 +1430,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `scalared` | Reserved, no grammar production (net-vector storage-layout hint) | N/A | N/A | Digital structural only | No C analogue |
 | `sin` | Dynamic/static dual, §1.5 | `sin(x)` call | Sine | Analog expr / const context | C `sin()` |
 | `sinh` | Dynamic/static dual, §1.5 | `sinh(x)` call | Hyperbolic sine | Analog expr / const context | C `sinh()` |
-| `slew` | Folds to its `value` argument (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
+| `slew` | **Still wrong in transient (Tier B — needs per-instance state, not the analysis context)**; folds to its `value` argument (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
 | `small` | Reserved, no grammar production (net-strength charge-storage keyword) | N/A | N/A | Digital net-strength only | No C analogue |
 | `specify` | Reserved, no grammar production (opens a timing-check block, paired with `endspecify`) | N/A | N/A | Digital timing-check only | No C analogue |
 | `specparam` | Reserved, no grammar production (a parameter usable only inside a `specify` block) | N/A | N/A | Digital timing-check only | No C analogue |
@@ -1366,7 +1449,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `tran` | Reserved, no grammar production (bidirectional pass-switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif0` | Reserved, no grammar production (bidirectional pass switch, active-low enable) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif1` | Reserved, no grammar production (bidirectional pass switch, active-high enable) | N/A | N/A | Digital/switch-level only | No C analogue |
-| `transition` | Folds to its `value` argument (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
+| `transition` | **Still wrong in transient (Tier B — needs per-instance state, not the analysis context)**; folds to its `value` argument (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
 | `tri` | Reserved, no grammar production (default-strength tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `tri0` | Reserved, no grammar production (net type: pulls to 0 when undriven) | N/A | N/A | Digital structural only | No C analogue |
 | `tri1` | Reserved, no grammar production (net type: pulls to 1 when undriven) | N/A | N/A | Digital structural only | No C analogue |
@@ -1385,10 +1468,10 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `wor` | Reserved, no grammar production (wired-OR net type) | N/A | N/A | Digital structural only | No C analogue |
 | `xnor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a ^ b)`, minus gate timing |
 | `xor` | Reserved, no grammar production (digital gate primitive — distinct from any bitwise operator, which this subset doesn't implement at all) | N/A | N/A | Digital gate level only | Loosely C's `^`, but as a timed gate instance |
-| `zi_nd` | Parses as a call (`zi_nd(in, num, den[, ...])`); elaboration has no builtin → `unknown function` | Z-domain (discrete) IIR filter, numerator/denominator form | Rejected at elaboration today | Analog-block only, signal-flow filter | Closest: a digital IIR filter's difference equation, expressed declaratively |
-| `zi_np` | Same family, pole/zero form | Z-domain IIR filter, pole/zero form | Rejected at elaboration today | Analog-block only | Same as `zi_nd` |
-| `zi_zd` | Same family as `laplace_zd`/`zi_nd`, Z-domain-input numerator/denominator form | Z-domain IIR filter variant | Rejected at elaboration today | Analog-block only | Same as `zi_nd` |
-| `zi_zp` | Same family, Z-domain-input pole/zero form | Z-domain IIR filter variant | Rejected at elaboration today | Analog-block only | Same as `zi_nd` |
+| `zi_nd` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Parses as a call (`zi_nd(in, num, den[, ...])`); elaboration has no builtin → `unknown function` | Z-domain (discrete) IIR filter, numerator/denominator form | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only, signal-flow filter | Closest: a digital IIR filter's difference equation, expressed declaratively |
+| `zi_np` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Same family, pole/zero form | Z-domain IIR filter, pole/zero form | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | Same as `zi_nd` |
+| `zi_zd` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Same family as `laplace_zd`/`zi_nd`, Z-domain-input numerator/denominator form | Z-domain IIR filter variant | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | Same as `zi_nd` |
+| `zi_zp` | Folds to its **DC gain** at elaboration (`laplace_root_product_at_origin`). **Still wrong in AC** — Tier C of `docs/proposals/analysis-context.md`: a filter's small-signal response is genuinely frequency-dependent, which needs per-frequency re-linearization, not the analysis context Tier A added. Same family, Z-domain-input pole/zero form | Z-domain IIR filter variant | Const-folded to the DC gain; frequency dependence unimplemented | Analog-block only | Same as `zi_nd` |
 
 ## 1.7 `floor`/`ceil`/`round`/`int`/`limexp` — formerly non-reserved (fixed)
 

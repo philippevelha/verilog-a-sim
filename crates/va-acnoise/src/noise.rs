@@ -221,11 +221,17 @@ pub fn run(
         }
     }
 
-    let (g, c) = linearize(instances, x_dc, dim);
+    // A noise run linearizes under its *own* analysis kind, not AC's: a compiled model whose
+    // source distinguishes `analysis("noise")` from `analysis("ac")` must see the difference.
+    // `ac_stim` is deliberately ignored here — an applied stimulus is not a noise source, and
+    // this analysis's excitation is the adjoint probe at the output, built below.
+    let ctx = va_abi::AnalysisCtx::noise().with_temp(temp);
+    let lin = linearize(instances, x_dc, &ctx, dim);
+    let (g, c) = (lin.g, lin.c);
     let mut collected = SourceList::default();
     for (i, inst) in instances.iter().enumerate() {
         collected.current = i;
-        inst.noise(x_dc, temp, &mut collected);
+        inst.noise(x_dc, &ctx, &mut collected);
     }
     let contributors = collected.contributors();
     // Position within `contributors` for each instance index, so the hot loop can bucket by a
@@ -514,12 +520,17 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+            fn load(
+                &self,
+                _x: &[f64],
+                _ctx: &va_abi::AnalysisCtx,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
                 // A 1 S conductance to ground, so the transfer impedance is exactly 1 Ω and the
                 // output PSD is the source PSD unchanged — isolating the frequency shape.
                 sink.jacobian(0, 0, 1.0);
             }
-            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+            fn noise(&self, _x: &[f64], _ctx: &va_abi::AnalysisCtx, sink: &mut dyn NoiseSink) {
                 sink.flicker_current(0, GROUND, 1e-19, 1.0);
             }
         }
@@ -560,12 +571,17 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+            fn load(
+                &self,
+                _x: &[f64],
+                _ctx: &va_abi::AnalysisCtx,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
                 // 1 S to ground: transfer impedance exactly 1 Ω, so the output PSD *is* the
                 // source PSD and the frequency shape is what's under test.
                 sink.jacobian(0, 0, 1.0);
             }
-            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+            fn noise(&self, _x: &[f64], _ctx: &va_abi::AnalysisCtx, sink: &mut dyn NoiseSink) {
                 sink.table_current(
                     0,
                     GROUND,
@@ -620,10 +636,15 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+            fn load(
+                &self,
+                _x: &[f64],
+                _ctx: &va_abi::AnalysisCtx,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
                 sink.jacobian(0, 0, 1.0);
             }
-            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+            fn noise(&self, _x: &[f64], _ctx: &va_abi::AnalysisCtx, sink: &mut dyn NoiseSink) {
                 sink.white_current(0, GROUND, 1e-22);
                 sink.flicker_current(0, GROUND, 1e-19, 1.0);
             }
@@ -735,10 +756,15 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, _x: &[f64], sink: &mut dyn va_abi::StampSink) {
+            fn load(
+                &self,
+                _x: &[f64],
+                _ctx: &va_abi::AnalysisCtx,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
                 sink.jacobian(0, 0, 1.0);
             }
-            fn noise(&self, _x: &[f64], _temp: f64, sink: &mut dyn NoiseSink) {
+            fn noise(&self, _x: &[f64], _ctx: &va_abi::AnalysisCtx, sink: &mut dyn NoiseSink) {
                 sink.white_current(0, GROUND, 1e-22);
                 sink.flicker_current(0, GROUND, 1e-19, 1.0);
             }

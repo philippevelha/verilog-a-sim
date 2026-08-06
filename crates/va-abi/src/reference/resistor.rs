@@ -1,6 +1,7 @@
 //! Linear two-terminal resistor reference model.
 
 use super::{stamp_conductance, voltage_across};
+use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::noise::{thermal_current_psd, NoiseSink};
 use crate::stamps::StampSink;
@@ -35,7 +36,7 @@ impl ModelInstance for Resistor {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
         let [p, n] = self.terminals;
         let v = voltage_across(x, p, n);
         let i = self.g * v;
@@ -45,9 +46,9 @@ impl ModelInstance for Resistor {
     /// Johnson-Nyquist thermal noise: a `4kTG` A²/Hz white current source across the resistor,
     /// independent of the current flowing through it and of the operating point entirely (hence
     /// `x` unused). This is the one noise source in this crate that a *linear* device has.
-    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
+    fn noise(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn NoiseSink) {
         let _ = x;
         let [p, n] = self.terminals;
-        sink.white_current(p, n, thermal_current_psd(self.g, temp));
+        sink.white_current(p, n, thermal_current_psd(self.g, ctx.temp));
     }
 }

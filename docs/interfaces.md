@@ -154,6 +154,53 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > `lower::NoiseTerm::Table` resolves the variant into a `TableInterp` once, at lowering, so
 > nothing downstream re-inspects the call.
 
+> **Revision (§6 change, 2026-08-06):** added `Builtin::{Abstime, Analysis, AcStim}`,
+> `Stmt::BoundStep(ExprId)`, and the shared phase encoding `ANALYSIS_PHASES`/`phase_bit`/
+> `phase_mask`. This is **Tier A** of `docs/proposals/analysis-context.md` — the constructs that
+> are a pure function of *what analysis is running*, and nothing else. It lands together with
+> Interface β's analysis-context revision below; neither half is useful alone.
+>
+> These four used to be **const-folded at elaboration**, correctly, back when DC was the only
+> analysis this project had. Once `va-transient` and `va-acnoise` landed, each fold became a
+> silent wrong answer: `analysis("tran")` was permanently `false` and `analysis("dc")`
+> permanently `true`, so a DC-initialization branch fired at *every* transient timepoint while
+> the transient branch never fired at all; `$abstime` was pinned to `0.0`, freezing every
+> time-dependent model at t = 0; `ac_stim` folded to a bare `0.0`, discarding the magnitude and
+> phase that are the entire point of it; and `bound_step` was discarded with the system tasks.
+> None of this was visible in `cargo xtask validate`, because all 13 gated circuits use textbook
+> devices containing no analysis-dependent construct.
+>
+> **The phase encoding lives here, in Interface α, and that placement is forced.** `analysis()`'s
+> arguments are string literals (the LRM requires it), and `Expr::Call` carries `Vec<ExprId>` of
+> numeric expressions. Rather than add a string-carrying `Expr` variant — which would pollute
+> every arena walk in the pipeline for one construct — elaboration folds the argument list to a
+> **bitmask over `ANALYSIS_PHASES`**, exactly the trade `Builtin::NoiseTable` makes with its
+> flattened table, and for the same payoff: every existing walk, clone and validity check keeps
+> working untouched. The string-shaped work happens once, at the one place that can still name a
+> source file when a phase name is misspelled — and an unrecognized name is a **hard error**, not
+> a mask of zero, because a mask of zero would disable whatever branch it guards forever with no
+> diagnostic.
+>
+> The bit order therefore cannot live in `va-abi`: `va-frontend` produces the mask and may depend
+> only on `va-ir` (§3). `va-abi` answers the complementary runtime question from a `&str`
+> (`AnalysisKind::matches_phase`) and never needs to know which bit carries which name.
+> `va-codegen` — the one crate that depends on both — joins the two ends, in exactly one
+> function (`ad::phase_mask_active`). That split is what keeps the encoding defined once.
+>
+> `ac_stim` normalizes to **exactly three arguments** (mask, `mag`, `phase`) regardless of how
+> many the source wrote, so no consumer re-derives the LRM's defaults. `bound_step` is a
+> `Stmt`, not an `Expr`, because that is what it is: it produces no value and asks the simulator
+> for something. It stays a *statement in the control-flow walk* rather than a module-level
+> property because it may sit inside an `if` — whether a bound applies at all can depend on the
+> operating point.
+>
+> **Explicitly not delivered** (Tiers B and C of the same proposal): `transition`, `slew`,
+> `absdelay`, `$limit`, `@(initial_step)` and `idt` initial conditions still fold, because they
+> need per-instance *state* across evaluations and Interface β is deliberately stateless;
+> `laplace_*`/`zi_*` still fold to their DC gain, because they need per-frequency
+> re-linearization. `docs/token-reference.md` says so per construct rather than implying the
+> whole family is fixed.
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models
@@ -307,3 +354,78 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > sources is still unrepresentable, unchanged from the first revision. See `va_abi::noise`'s
 > module doc, `docs/roadmap.md`'s T5.6 section, and `models/resistor_noise_table.va`'s header
 > for what that means for a model author.
+
+> **Revision (§6 change, 2026-08-06):** added the **analysis context** — a new `AnalysisCtx`
+> struct (with `AnalysisKind`) threaded through **both** entry points:
+>
+> ```rust
+> pub enum AnalysisKind { Dc, Transient, Ac, Noise }
+>
+> pub struct AnalysisCtx {
+>     pub kind: AnalysisKind,
+>     pub time: f64,   // `$abstime`; 0.0 outside transient
+>     pub temp: f64,   // `$temperature`, in kelvin
+> }
+>
+> fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn StampSink);
+> fn noise(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn NoiseSink) { }
+> ```
+>
+> — plus two **defaulted** `StampSink` methods, `excitation(row, re, im)` and `bound_step(dt)`.
+> This is Interface β's half of Tier A; see Interface α's revision of the same date for the
+> problem being fixed and what is deliberately left unfixed.
+>
+> **This channel points the opposite way to the other three.** `UnknownKind`, `unknown_abstol`
+> and the noise channel all carry what only the *instance* knows upward into the solver. This
+> carries what only the *solver* knows downward into the instance. Without it a model could not
+> be told what was running, which is precisely why `va-frontend` had no option but to guess at
+> elaboration — and, when it was written, it guessed right.
+>
+> **This revision broke an existing signature rather than adding a defaulted method**, unlike the
+> four before it. That was deliberate. The previous revisions were genuinely optional additions;
+> this one is not. A defaulted `load_with_ctx` falling back to a context-free `load` would leave
+> two ways to write a model, one of which is quietly wrong in transient — and every implementor
+> seeing the context is the entire point. The blast radius was small and fully enumerated
+> beforehand: six production implementors, four production call sites, and mechanical test
+> updates. One PR, no adapters, no deprecation window; the trait is internal to this workspace.
+>
+> **There is no `freq` field, and its absence is load-bearing.** Nothing this channel serves is
+> frequency-dependent — `analysis("ac")` asks *which* analysis, not at what frequency — and
+> `ac::linearize` calls `load` exactly once, outside the frequency loop, because `G` and `C` are
+> frequency-independent by construction. A `freq` field would be meaningless at the one call site
+> that would most obviously want it, and *a field that is usually a lie is how the DC-only folds
+> happened in the first place*. Frequency arrives with Tier C, alongside the per-frequency
+> re-linearization that would make it true.
+>
+> **`temp` folded in from `noise`'s own argument.** `noise` took a bare `temp: f64`; unifying it
+> here means both entry points agree on where simulation conditions live, and gives `load` a
+> temperature it never had. *Compiled models do not read it yet*: `$temperature`/`$vt` still
+> resolve to the temperature the model was compiled at (`ad::Ctx::temp`), unchanged, because
+> re-sourcing them would move every compiled model's answer the moment a caller passes a
+> non-nominal temperature — a real improvement, and a separate change.
+>
+> **`excitation` is `ac_stim`'s channel, and its sign convention is `residual`'s, deliberately.**
+> A model writing `I(p,n) <+ ac_stim(mag, phase)` emits `+A` at `p` and `−A` at `n`, exactly as
+> it would stamp any other flow contribution, and need not know which side of the equals sign its
+> term lands on. Since the small-signal system is `(G + jω·C)·X = B`, the assembler moves it
+> across and **negates** it — the same relationship a `VSource` already has between its
+> `residual(b, vp − vn − value)` constraint row and the `+value` its AC excitation carries. A
+> stimulus is a constant, not a function of `x`, which is why it needs its own channel: emitted
+> through `residual` its value would be folded into `G` and double-counted.
+>
+> **`bound_step` is a hint, and only ever downward.** Implementors take the minimum of every
+> request received; one model can tighten the step, none can loosen another's bound. Non-positive
+> and non-finite requests are discarded rather than honored — the LRM gives them no meaning, and
+> a zero bound would wedge the timestep controller against its own floor. Because it is emitted
+> from the analog block it may sit inside an `if`, so an assembler must read it from the
+> evaluation at the **accepted** point, never from a rejected candidate.
+>
+> **The payoff, and the evidence.** `va_transient::integrator::run_dynamic` — a near-duplicate of
+> `run_with_events` that existed solely to re-box a freshly-parameterized `VSource` at every step
+> *attempt*, because `load` had no time parameter — is **deleted**, along with
+> `va_cli::build_instances_split` that fed it. A `SIN` source is now an ordinary stateless
+> `ModelInstance` (`va_cli::WaveformSource`) reading `ctx.time`, and every device takes one path.
+> That removes an allocation per timestep and roughly a hundred lines of duplicated integrator.
+> The check that it was behaviour-preserving: **all 13 golden gates reproduce their previous
+> numbers to the last recorded digit**, including `rectifier.net` (6.766e-4), the one gate that
+> actually exercised `run_dynamic`.

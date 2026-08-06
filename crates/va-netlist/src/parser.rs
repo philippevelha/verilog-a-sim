@@ -15,11 +15,11 @@
 //! - A `V` source accepts `DC <value>` or `SIN(off amp freq …)`. The latter's offset becomes
 //!   the DC value (what a DC operating point needs) *and* its full `(offset, amplitude, freq)`
 //!   is retained as [`crate::Device::waveform`] for a transient run to reproduce the actual
-//!   time dependence — `va_abi::ModelInstance::load` has no time parameter (Interface β has no
-//!   room for one — see `docs/bridges/interface-beta-abi.md` §7), so a transient consumer
-//!   reconstructs a fresh, differently-valued source each step instead
-//!   (`va_transient::integrator::run_dynamic`). SPICE's optional trailing `SIN` parameters
-//!   (delay, damping, phase) are not parsed.
+//!   time dependence. A consumer turns that into an ordinary stateless `ModelInstance` reading
+//!   the current time off `va_abi::ModelInstance::load`'s analysis context (§6 change,
+//!   2026-08-06 — `va_cli::WaveformSource`); the two facts stay consistent because the offset
+//!   *is* the waveform's value at `t = 0`, which is what a DC or AC solve reads. SPICE's
+//!   optional trailing `SIN` parameters (delay, damping, phase) are not parsed.
 //! - `.dc <source> <start> <stop> <step>` (§ ladder rung 2) sweeps one voltage source's DC
 //!   value, solving a fresh operating point at each step ([`crate::DcSweep`]) — only a linear
 //!   sweep of a single source, no nested/multi-source sweeps and no `.dc` with no arguments

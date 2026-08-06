@@ -270,6 +270,35 @@ The per-device columns sum to the output total by construction — they are the 
 bucketed rather than accumulated straight. Committing both is deliberate redundancy: a golden
 diff then shows *which* device's contribution moved, not merely that the total did.
 
+### Analysis-context constructs: what is gated and what is not (added 2026-08-06)
+
+Tier A of `docs/proposals/analysis-context.md` — `analysis()`, `$abstime`, `ac_stim`,
+`bound_step` — is **not golden-gated, and this section says so plainly rather than letting a
+green 13/13 imply otherwise.**
+
+**Why QSPICE cannot be the oracle here.** QSPICE does not consume our Verilog-A models, and our
+netlist grammar cannot express a behavioral model natively, so there is no deck that exercises
+these constructs on both sides. Hand-computing a golden file to fill the gap is forbidden
+(`no-fake-golden-data`: QSPICE is the sole oracle, and a plausible hand-derived number is worse
+than no number because it looks like evidence).
+
+**What *is* checked, and how strongly:**
+
+| Property | How it is validated | Strength |
+|---|---|---|
+| Every existing gate is unchanged | `cargo xtask validate` — all 13 circuits reproduce their **previously recorded numbers to the last digit**, including `rectifier.net` (6.766e-4), the one that exercised the now-deleted `run_dynamic` | Strongest available, and free |
+| `analysis()` selects per analysis | End-to-end unit test: one compiled model is a plain resistor in DC and a resistor plus a known 1 mA offset in transient; each half is solved and checked against its own closed form | Unit, but end-to-end through the real pipeline |
+| `$abstime` tracks the clock | End-to-end unit test: a compiled `I <+ V/R + k·$abstime` ramp integrated over 1 ms, every accepted point checked against `−k·t·R`; DC reads exactly 0 V | Unit, closed-form |
+| `$abstime`/`analysis()` have zero Jacobian | Central finite difference, per `CLAUDE.md` §5 | Unit, and mandatory |
+| `ac_stim` sign and complex response | `va-acnoise` test: a model-supplied 1 A stimulus into R‖C, magnitude *and* phase checked against `−R/(1+jωRC)` at every swept point, with no netlist `AC` source anywhere | Unit, closed-form — and the sign is the part that is easy to get backwards |
+| `bound_step` caps the step | `va-transient` test: no accepted step may exceed the requested bound; a second test confirms a bound inside an `if` applies only when that arm runs | Unit, property-based |
+
+**The honest summary:** the regression floor is golden-gated and the new behavior is not. A
+future golden gate is possible for `$abstime` specifically — a current ramp has a QSPICE
+equivalent in a behavioral source (`B1 ... I=k*time`), which would let both sides compute the
+same waveform from independent descriptions. That spike has not been run, so it is listed here
+as a plan, not a result.
+
 ## Bring-up ladder
 
 Each rung is a checkpoint; it is "passed" only when `va-harness` is green against golden:

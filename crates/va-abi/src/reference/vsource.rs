@@ -1,5 +1,6 @@
 //! Ideal DC voltage source reference primitive.
 
+use crate::analysis::AnalysisCtx;
 use crate::instance::{ModelInstance, UnknownKind};
 use crate::stamps::StampSink;
 
@@ -49,7 +50,7 @@ impl ModelInstance for VSource {
         }
     }
 
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
         let [p, n, b] = self.terminals;
         let vp = x.get(p).copied().unwrap_or(0.0);
         let vn = x.get(n).copied().unwrap_or(0.0);

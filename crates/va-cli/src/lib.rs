@@ -19,11 +19,11 @@
 //! Transient always starts from the zero vector — v0 has no `.ic`/`UIC`
 //! support. A `V` source with a bare `DC <value>` combined with that cold start *is* the step
 //! response — the only shape a constant source could produce. A `V` source with a `SIN(...)`
-//! waveform is genuinely time-varying: since `va_abi::ModelInstance::load` has no time
-//! parameter (Interface β has no room for one — `docs/bridges/interface-beta-abi.md` §7), it
-//! is reconstructed fresh every step with the value at that step's time baked in
-//! (`va_transient::integrator::run_dynamic`), rather than the fixed-`VSource` path every other
-//! device uses.
+//! waveform is genuinely time-varying, and becomes a [`WaveformSource`]: an ordinary
+//! `ModelInstance` that reads the current time off `va_abi::ModelInstance::load`'s analysis
+//! context. Until that context existed (§6 change, 2026-08-06) it could not, and the source had
+//! to be re-boxed at every step attempt through a parallel copy of the integrator; that copy is
+//! gone and every device now takes the same path.
 
 #![forbid(unsafe_code)]
 
@@ -37,7 +37,6 @@ use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
-use va_transient::events::EventQueue;
 use va_transient::integrator::{Method, TranConfig, Waveform};
 
 /// Which analysis to run for a `sim` invocation.
@@ -459,39 +458,42 @@ fn sweep_points(start: f64, stop: f64, step: f64) -> Vec<f64> {
     (0..=n).map(|i| start + step * i as f64).collect()
 }
 
-/// One `vsource` device's `(p, n, branch)` global indices plus the waveform it should be
-/// rebuilt from at each transient step (see [`build_instances_split`]).
-type TimeVaryingSource = (usize, usize, usize, va_netlist::Waveform);
+/// A `V` source whose value follows a netlist waveform (`SIN(...)`) rather than staying
+/// constant — an ideal [`VSource`] whose value is recomputed from the analysis context's
+/// current time on every evaluation.
+///
+/// This is still a **stateless** instance, which is what makes it legal under Interface β:
+/// `load` remains a pure function of `(x, ctx)`, returning identical stamps whenever it is
+/// called with identical arguments. It may be re-entered freely within a Newton iteration and
+/// on a rejected timestep, exactly like every other model.
+///
+/// Outside transient there is no time axis, so `ctx.time` is `0.0` and the source evaluates to
+/// its waveform's value at `t = 0` — the offset, which is precisely the DC value
+/// `va_netlist`'s parser already derives for the same device. A DC operating point and an AC
+/// linearization therefore see the same source they always did.
+struct WaveformSource {
+    terminals: [usize; 3], // [p, n, branch-current]
+    waveform: va_netlist::Waveform,
+}
 
-/// [`build_instances_split`]'s return: fixed device instances, time-varying source specs, and
-/// the total unknown count.
-type SplitInstances = (Vec<Box<dyn ModelInstance>>, Vec<TimeVaryingSource>, usize);
-
-/// Like [`build_instances`], but splits out any `vsource` device with a `SIN` waveform into
-/// its own list rather than baking a fixed DC value into it, since a transient run needs to
-/// reconstruct it fresh each step (this module's doc comment). Returns `(fixed, time_varying,
-/// dim)`: `time_varying` entries are `(p, n, branch, waveform)` — the same stable global
-/// indices a plain DC-valued `VSource` would have claimed, just not yet turned into one. `dim`
-/// and every other device's assigned indices are identical to what [`build_instances`] would
-/// produce for the same netlist (each vsource device claims exactly one unknown either way).
-fn build_instances_split(net: &Netlist, compiled: &[Module]) -> Result<SplitInstances> {
-    let mut next_unknown = net.node_order.len();
-    let mut fixed: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
-    let mut time_varying = Vec::new();
-
-    for dev in &net.devices {
-        if dev.model == "vsource" {
-            if let Some(waveform) = dev.waveform {
-                let branch = next_unknown;
-                next_unknown += 1;
-                time_varying.push((dev.terminals[0], dev.terminals[1], branch, waveform));
-                continue;
-            }
-        }
-        let (inst, _branch) = build_instance(dev, compiled, &mut next_unknown)?;
-        fixed.push(inst);
+impl ModelInstance for WaveformSource {
+    fn unknowns(&self) -> &[usize] {
+        &self.terminals
     }
-    Ok((fixed, time_varying, next_unknown))
+
+    fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+        // Delegated verbatim from `VSource`: index 2 is this source's own constraint row.
+        if i == 2 {
+            va_abi::UnknownKind::Branch
+        } else {
+            va_abi::UnknownKind::Node
+        }
+    }
+
+    fn load(&self, x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+        let [p, n, b] = self.terminals;
+        VSource::new(p, n, b, waveform_value(self.waveform, ctx.time)).load(x, ctx, sink)
+    }
 }
 
 /// Evaluate a parsed source waveform at time `t`.
@@ -509,11 +511,11 @@ fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
 /// `.tran <tstep> <tstop>` window.
 ///
 /// Always starts from the zero vector — v0 has no `.ic`/`UIC` support (this module's doc
-/// comment). For a deck with no time-varying source this is the ordinary fixed-instance path
-/// ([`va_transient::integrator::run`]); a `SIN`-sourced deck instead rebuilds that source fresh
-/// every step via [`va_transient::integrator::run_dynamic`]. `pub` so `va-harness` can get the
-/// numeric [`Waveform`] back directly (§ golden comparison), the same reason `solve_dc`/
-/// `solve_dc_sweep` are — rather than parsing [`run_sim`]'s printed stdout.
+/// comment). Every deck takes the same path ([`va_transient::integrator::run`]) whether or not
+/// it contains a time-varying source: a `SIN` source is a [`WaveformSource`], which reads the
+/// time from the analysis context like any other analysis-dependent model. `pub` so
+/// `va-harness` can get the numeric [`Waveform`] back directly (§ golden comparison), the same
+/// reason `solve_dc`/`solve_dc_sweep` are — rather than parsing [`run_sim`]'s printed stdout.
 pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
     let (tstep, tstop) = net
         .tran
@@ -528,25 +530,11 @@ pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
         lte_abstol: 1e-6,
     };
 
-    let (fixed, time_varying, dim) = build_instances_split(net, compiled)?;
+    let (instances, dim, _currents) = build_instances(net, compiled)?;
     let x0 = vec![0.0; dim];
-    let refs: Vec<&dyn ModelInstance> = fixed.iter().map(|b| b.as_ref()).collect();
+    let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
-    if time_varying.is_empty() {
-        return va_transient::integrator::run(&refs, dim, x0, cfg)
-            .context("transient integration failed");
-    }
-
-    va_transient::integrator::run_dynamic(dim, x0, cfg, &EventQueue::new(), &refs, |t| {
-        time_varying
-            .iter()
-            .map(|&(p, n, branch, waveform)| {
-                Box::new(VSource::new(p, n, branch, waveform_value(waveform, t)))
-                    as Box<dyn ModelInstance>
-            })
-            .collect()
-    })
-    .context("transient integration failed")
+    va_transient::integrator::run(&refs, dim, x0, cfg).context("transient integration failed")
 }
 
 /// Build the complex small-signal excitation vector (`b` in `(G + jω·C)·X = b`) for `net`'s own
@@ -733,7 +721,7 @@ pub fn noise_contributors(
 fn has_noise_sources(instances: &[&dyn ModelInstance], x: &[f64]) -> bool {
     let mut probe = va_abi::noise::CollectedNoise::default();
     for inst in instances {
-        inst.noise(x, va_abi::noise::TEMP_NOMINAL, &mut probe);
+        inst.noise(x, &va_abi::AnalysisCtx::noise(), &mut probe);
         if !probe.sources.is_empty() {
             return true;
         }
@@ -757,10 +745,17 @@ fn build_instance(
     if dev.model == "vsource" {
         let branch = *next_unknown;
         *next_unknown += 1;
-        return Ok((
-            Box::new(VSource::new(p, n, branch, dev.value.unwrap_or(0.0))),
-            Some(branch),
-        ));
+        // A `SIN(...)` source becomes a time-reading instance; every other source is constant.
+        // Both claim exactly one branch-current unknown, so the index assignment — and hence
+        // `dim` and every downstream device's indices — is the same either way.
+        let inst: Box<dyn ModelInstance> = match dev.waveform {
+            Some(waveform) => Box::new(WaveformSource {
+                terminals: [p, n, branch],
+                waveform,
+            }),
+            None => Box::new(VSource::new(p, n, branch, dev.value.unwrap_or(0.0))),
+        };
+        return Ok((inst, Some(branch)));
     }
 
     // Use the compiled Verilog-A model when its name matches the device's model.
@@ -1018,6 +1013,7 @@ fn report_transient(net: &Netlist, wf: &Waveform) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use va_abi::reference::GROUND;
 
     /// `models/`, as an include-path root — every model there `include`s `disciplines.vams`
     /// and `constants.vams` from alongside itself, exactly as the real pipeline resolves them
@@ -1039,6 +1035,115 @@ mod tests {
     #[test]
     fn analysis_default_is_dc() {
         assert_eq!(Analysis::default(), Analysis::Dc);
+    }
+
+    /// The whole Tier A pipeline, from Verilog-A source to a solved waveform: a model whose
+    /// current is a function of `$abstime` must produce a genuine ramp in transient and its
+    /// `t = 0` value at a DC operating point.
+    ///
+    /// This is the end-to-end statement of the fold that used to be wrong. `va-frontend` folded
+    /// `$abstime` to `0.0` at elaboration, so this model was a plain resistor at every timepoint
+    /// and the waveform below would have been flat.
+    #[test]
+    fn a_model_reading_abstime_ramps_in_transient_and_reads_zero_in_dc() {
+        // I(p,n) <+ V(p,n)/R + k*$abstime — a 1 mA/ms current ramp in parallel with 1 kΩ.
+        let design = compile_model(
+            "module ramp(p, n); electrical p, n; \
+             parameter real r = 1000; parameter real k = 1.0; \
+             analog I(p, n) <+ V(p, n) / r + k * $abstime; endmodule",
+            "ramp",
+        );
+        let module = design.modules.first().expect("one module").clone();
+
+        // The ramp source alone from node 0 to ground: V(0) = -k·t·R.
+        let (k, r) = (1.0, 1000.0);
+        let inst = va_codegen::build_instance(&module, &[0, GROUND], &mut 1).expect("builds");
+        let insts: [&dyn ModelInstance; 1] = [inst.as_ref()];
+
+        // DC: `$abstime` reads zero, so the ramp term vanishes and only V/R remains — a lone
+        // resistor to ground, which sits at 0 V.
+        let op = operating_point(&insts, 1, NewtonConfig::default()).expect("DC solves");
+        assert!(op.x[0].abs() < 1e-12, "DC point should be 0 V: {}", op.x[0]);
+
+        // Transient: V(t) = -k·t·R, checked at every accepted point against the closed form.
+        let cfg = TranConfig {
+            tstart: 0.0,
+            tstop: 1e-3,
+            tstep: 5e-5,
+            tstep_min: 1e-12,
+            method: Method::Trapezoidal,
+            lte_reltol: 1e-6,
+            lte_abstol: 1e-9,
+        };
+        let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
+        assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
+        for (&t, x) in wf.t.iter().zip(&wf.x) {
+            let expected = -k * t * r;
+            assert!(
+                (x[0] - expected).abs() < 1e-9,
+                "at t={t}: {} vs {expected}",
+                x[0]
+            );
+        }
+        // And it genuinely moved, rather than passing by staying at zero.
+        assert!(
+            (wf.x.last().unwrap()[0] + k * 1e-3 * r).abs() < 1e-9,
+            "final {}",
+            wf.x.last().unwrap()[0]
+        );
+    }
+
+    /// `analysis()` selects a different device in DC than in transient, through the real
+    /// pipeline. Each half has an independently-known answer, which is how this gets validated
+    /// without a single QSPICE construct corresponding to the model as a whole.
+    #[test]
+    fn a_model_branching_on_analysis_solves_differently_in_dc_and_transient() {
+        // A 1 kΩ resistor in DC; the same resistor plus a 1 mA offset in transient.
+        let design = compile_model(
+            r#"module gated(p, n); electrical p, n;
+               analog begin
+                 I(p, n) <+ V(p, n) / 1000.0;
+                 if (analysis("tran")) I(p, n) <+ 1e-3;
+               end
+               endmodule"#,
+            "gated",
+        );
+        let module = design.modules.first().expect("one module").clone();
+
+        // Drive it from a 0 V source so the branch current reads the device's own current.
+        let build = || {
+            let mut next = 1usize;
+            let dev = va_codegen::build_instance(&module, &[0, GROUND], &mut next).expect("builds");
+            let src = VSource::new(0, GROUND, next, 0.0);
+            (dev, src, next + 1)
+        };
+
+        let (dev, src, dim) = build();
+        let insts: [&dyn ModelInstance; 2] = [dev.as_ref(), &src];
+
+        // DC: the source holds node 0 at 0 V, so the resistor carries nothing.
+        let op = operating_point(&insts, dim, NewtonConfig::default()).expect("DC solves");
+        assert!(op.x[1].abs() < 1e-12, "DC source current: {}", op.x[1]);
+
+        // Transient: the offset branch now fires, and the source must sink exactly that 1 mA.
+        let cfg = TranConfig {
+            tstart: 0.0,
+            tstop: 1e-5,
+            tstep: 1e-6,
+            tstep_min: 1e-12,
+            method: Method::Trapezoidal,
+            lte_reltol: 1e-6,
+            lte_abstol: 1e-9,
+        };
+        let wf =
+            va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");
+        for x in wf.x.iter().skip(1) {
+            assert!(
+                (x[1] + 1e-3).abs() < 1e-9,
+                "transient source current should be -1 mA, got {}",
+                x[1]
+            );
+        }
     }
 
     #[test]

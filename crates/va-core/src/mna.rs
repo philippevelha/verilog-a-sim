@@ -5,7 +5,7 @@
 //! and the ground/reference reduction.
 
 use va_abi::stamps::StampSink;
-use va_abi::{ModelInstance, UnknownKind};
+use va_abi::{AnalysisCtx, ModelInstance, UnknownKind};
 
 /// The assembled dense MNA system for `dim` global unknowns.
 #[derive(Clone, Debug)]
@@ -123,14 +123,27 @@ impl StampSink for System {
     fn dcharge(&mut self, _row: usize, _col: usize, _value: f64) {}
 }
 
-/// Assemble all `instances` at solution `x` into a fresh [`System`].
+/// Assemble all `instances` at solution `x`, for the evaluation `ctx` describes, into a fresh
+/// [`System`].
 ///
 /// Allocates a zeroed [`System`] and lets every instance stamp its residual and Jacobian.
 /// The charge channel is dropped here (DC); the transient companion model (T4) consumes it.
-pub fn assemble(instances: &[&dyn ModelInstance], x: &[f64], dim: usize) -> System {
+///
+/// `ctx` is threaded through rather than fixed at [`va_abi::ANALYSIS_DC`] even though this
+/// crate only ever performs DC solves today: a model's stamps are a function of it (a compiled
+/// model calling `analysis()` or reading `$abstime` stamps differently under a different one),
+/// so an assembler that chose the context on the caller's behalf would be deciding something
+/// that is not its to decide. `va-transient` and `va-acnoise` maintain their own assemblers
+/// against this same trait for the same reason.
+pub fn assemble(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    dim: usize,
+) -> System {
     let mut sys = System::new(dim);
     for inst in instances {
-        inst.load(x, &mut sys);
+        inst.load(x, ctx, &mut sys);
     }
     sys
 }
@@ -139,13 +152,14 @@ pub fn assemble(instances: &[&dyn ModelInstance], x: &[f64], dim: usize) -> Syst
 mod tests {
     use super::*;
     use va_abi::reference::{Resistor, VSource, GROUND};
+    use va_abi::ANALYSIS_DC;
 
     #[test]
     fn sink_accumulates_resistor_stamp() {
         // A 1 kΩ resistor to ground at 1 V deposits 1 mA / 1 mS.
         let r = Resistor::new(0, GROUND, 1000.0);
         let mut sys = System::new(1);
-        r.load(&[1.0], &mut sys);
+        r.load(&[1.0], &ANALYSIS_DC, &mut sys);
         assert!((sys.residual[0] - 1e-3).abs() < 1e-15);
         assert!((sys.jacobian[0] - 1e-3).abs() < 1e-18);
     }
@@ -156,7 +170,7 @@ mod tests {
         let r1 = Resistor::new(0, GROUND, 1000.0);
         let r2 = Resistor::new(0, GROUND, 1000.0);
         let insts: [&dyn ModelInstance; 2] = [&r1, &r2];
-        let sys = assemble(&insts, &[1.0], 1);
+        let sys = assemble(&insts, &[1.0], &ANALYSIS_DC, 1);
         assert!((sys.residual[0] - 2e-3).abs() < 1e-15);
         assert!((sys.jacobian[0] - 2e-3).abs() < 1e-18);
     }

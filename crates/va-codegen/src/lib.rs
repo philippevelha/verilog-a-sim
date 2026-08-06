@@ -168,7 +168,12 @@ struct GeneratedModel {
 }
 
 impl GeneratedModel {
-    fn ctx<'a>(&'a self, x: &'a [f64], validating: bool) -> Ctx<'a> {
+    fn ctx<'a>(
+        &'a self,
+        x: &'a [f64],
+        analysis: &va_abi::AnalysisCtx,
+        validating: bool,
+    ) -> Ctx<'a> {
         // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
         // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't (and
         // shouldn't) need to know which of the two reasons gave this branch a slot.
@@ -203,6 +208,8 @@ impl GeneratedModel {
             terminals: &self.terminals,
             vt: self.vt,
             temp: self.temp,
+            analysis: *analysis,
+            bound_step: std::cell::Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots,
             idt_slots,
@@ -277,6 +284,10 @@ impl GeneratedModel {
                     ctx.set_var(*lhs, d);
                 }
                 LoweredStmt::Contribute(c) => on_contribute(self, ctx, c),
+                // Recorded on the context rather than handed to the callback: `walk` is shared
+                // with the noise channel, which has no stamp sink to emit into. `load` drains
+                // it once the walk is done (see `Ctx::request_bound_step`).
+                LoweredStmt::BoundStep(e) => ctx.request_bound_step(eval(ctx, *e)?.value),
                 LoweredStmt::If { cond, then_, else_ } => {
                     let taken = if eval(ctx, *cond)?.value != 0.0 {
                         then_
@@ -357,7 +368,12 @@ impl GeneratedModel {
     /// genuinely assigned in only one arm and read after the `if` would not be soundly caught
     /// here, a stated limitation, not a silent one).
     fn validate(&self) -> Result<(), CodegenError> {
-        let ctx = self.ctx(&[], true);
+        // A DC context, for the same reason the operating point is all-zero: this is a
+        // structural dry run, not a real evaluation, and it must reach every construct
+        // regardless of which analysis eventually runs. Nothing here depends on the answer —
+        // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
+        // only cares that they evaluate at all.
+        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, true);
         Self::validate_stmts(&ctx, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
@@ -394,7 +410,24 @@ impl GeneratedModel {
                                     .to_string(),
                             ));
                         }
+                        // Same trap, same treatment: an `ac_stim` still buried in a resistive
+                        // term was not pulled into the excitation channel, and `ad::eval` gives
+                        // it its LRM-mandated zero value — so the stimulus would vanish with no
+                        // diagnostic (§ `lower::ac_stim_term_shape`).
+                        if lower::contains_ac_stim_call(ctx.module, term.expr) {
+                            return Err(CodegenError::Unsupported(
+                                "ac_stim must be a top-level additive term of a contribution (a \
+                                 scaled or nested ac_stim would be silently dropped, since its \
+                                 value is zero in every analysis and only the split-out \
+                                 excitation channel carries it)"
+                                    .to_string(),
+                            ));
+                        }
                         eval(ctx, term.expr)?;
+                    }
+                    for term in &c.ac_stim {
+                        eval(ctx, term.mag)?;
+                        eval(ctx, term.phase)?;
                     }
                     for term in &c.noise {
                         match *term {
@@ -426,6 +459,12 @@ impl GeneratedModel {
                             eval(ctx, coeff)?;
                         }
                     }
+                }
+                // Validated by evaluation, like every other expression: a `bound_step` argument
+                // that cannot be evaluated must fail the build rather than be discovered
+                // mid-transient. Its *value* is discarded here — this dry run is not a timestep.
+                LoweredStmt::BoundStep(e) => {
+                    eval(ctx, *e)?;
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
                     eval(ctx, *cond)?;
@@ -564,6 +603,13 @@ impl GeneratedModel {
                         }
                     }
                 }
+
+                // `I(p,n) <+ ac_stim(...)`: a current stimulus, injected with the same sign
+                // convention the resistive channel above uses — out of `p`, into `n`.
+                if let Some((re, im)) = Self::ac_stim_excitation(ctx, &c.ac_stim) {
+                    sink.excitation(gp, re, im);
+                    sink.excitation(gn, -re, -im);
+                }
             }
             Some(local_slot) => {
                 if self.is_mixed_branch(local_slot) && ctx.mark_potential_used(local_slot) {
@@ -602,8 +648,45 @@ impl GeneratedModel {
                         }
                     }
                 }
+
+                // `V(p,n) <+ ac_stim(...)`: a voltage stimulus. The constraint row reads
+                // `V(p) − V(n) − expr = 0`, so the stimulus enters it negated — the same sign
+                // the resistive channel just above carries, for the same reason.
+                if let Some((re, im)) = Self::ac_stim_excitation(ctx, &c.ac_stim) {
+                    sink.excitation(gb, -re, -im);
+                }
             }
         }
+    }
+
+    /// Sum a contribution's `ac_stim` terms into one complex excitation `(re, im)`, or `None`
+    /// if none of them is active in the analysis `ctx` names.
+    ///
+    /// Each term contributes `sign · mag · e^{j·phase}`. The magnitude and phase expressions are
+    /// evaluated at the operating point — so a bias-dependent stimulus comes out right — but only
+    /// their **values** are used, never their gradients: an excitation is an independent applied
+    /// quantity, so it belongs on the right-hand side, not in `G`.
+    ///
+    /// A term whose phase set does not include the running analysis contributes nothing, which
+    /// is exactly the LRM's rule (§4.5.2) and the reason `ac_stim` can be written unconditionally
+    /// in a model that also has to produce a DC operating point.
+    fn ac_stim_excitation(ctx: &Ctx, terms: &[lower::AcStimTerm]) -> Option<(f64, f64)> {
+        let mut acc: Option<(f64, f64)> = None;
+        for term in terms {
+            if !ad::phase_mask_active(&ctx.analysis, term.phase_mask) {
+                continue;
+            }
+            // Post-validation these cannot fail; skipping a term that somehow does mirrors how
+            // every other channel here bails rather than stamping from a corrupt evaluation.
+            let (Ok(mag), Ok(phase)) = (eval(ctx, term.mag), eval(ctx, term.phase)) else {
+                continue;
+            };
+            let a = term.sign * mag.value;
+            let (re, im) = (a * phase.value.cos(), a * phase.value.sin());
+            let (are, aim) = acc.unwrap_or((0.0, 0.0));
+            acc = Some((are + re, aim + im));
+        }
+        acc
     }
 
     /// Stamp the constraint row's structural `V(p)-V(n)` term and the branch current's ordinary
@@ -819,12 +902,13 @@ impl ModelInstance for GeneratedModel {
     /// Walks the same control flow `load` does ([`Self::walk`]), so a source declared inside an
     /// `if` arm is emitted only when that arm is the one taken at this operating point.
     ///
-    /// `temp` is ignored: a Verilog-A model writes its own temperature dependence into the PSD
-    /// expression (typically via `$temperature`/`$vt`), rather than having a `4kT` applied for
-    /// it the way `va-abi`'s hand-written [`va_abi::reference::Resistor`] does.
-    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn va_abi::NoiseSink) {
-        let _ = temp;
-        let ctx = self.ctx(x, false);
+    /// `ctx.temp` is ignored: a Verilog-A model writes its own temperature dependence into the
+    /// PSD expression (typically via `$temperature`/`$vt`, which read the temperature this model
+    /// was compiled at — see [`ad::Ctx::temp`]), rather than having a `4kT` applied for it the
+    /// way `va-abi`'s hand-written [`va_abi::reference::Resistor`] does. Its `kind` is passed
+    /// through so a source whose PSD expression calls `analysis()` sees the truth.
+    fn noise(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::NoiseSink) {
+        let ctx = self.ctx(x, actx, false);
         // Post-validation the evaluations below cannot fail; a failure mid-walk simply stops
         // emitting further sources, exactly as `load` stops stamping.
         let _ = self.walk(&ctx, &self.lowered.stmts, &mut |me, ctx, c| {
@@ -854,8 +938,8 @@ impl ModelInstance for GeneratedModel {
         });
     }
 
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
-        let ctx = self.ctx(x, false);
+    fn load(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn StampSink) {
+        let ctx = self.ctx(x, actx, false);
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
@@ -872,6 +956,14 @@ impl ModelInstance for GeneratedModel {
         // existence solely to serve it (see `lower::NodeKclProbe`'s doc comment) — order doesn't
         // change its *own* stamp (it only reads `x`), but keeping it last mirrors the dependency.
         self.stamp_node_kcl_probes(x, sink);
+        // Last of all: any `bound_step(...)` the statement walk reached, and only in transient —
+        // no other analysis has a timestep to bound, so forwarding it elsewhere would be
+        // meaningless rather than merely harmless (§ `va_ir::Stmt::BoundStep`).
+        if actx.kind == va_abi::AnalysisKind::Transient {
+            if let Some(dt) = ctx.bound_step.get() {
+                sink.bound_step(dt);
+            }
+        }
     }
 }
 
@@ -879,6 +971,7 @@ impl ModelInstance for GeneratedModel {
 mod tests {
     use super::*;
     use va_abi::stamps::DenseStamp;
+    use va_abi::ANALYSIS_DC;
     use va_ir::{
         Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, ExprId, FuncId, Function,
         Module, NodeDecl, NodeId, Param, Stmt, VarDecl, VarId,
@@ -1111,7 +1204,7 @@ mod tests {
         let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
         let v = 0.6;
         let mut sink = DenseStamp::new(1);
-        inst.load(&[v], &mut sink);
+        inst.load(&[v], &ANALYSIS_DC, &mut sink);
 
         let (c0, c1) = (1e-12, 0.5e-12);
         let q_expected = c0 * v + c1 * v.cosh().ln();
@@ -1138,7 +1231,7 @@ mod tests {
         let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
         let charge_at = |v: f64| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[v], &mut s);
+            inst.load(&[v], &ANALYSIS_DC, &mut s);
             s.charge[0]
         };
 
@@ -1147,7 +1240,7 @@ mod tests {
         let fd = (charge_at(v + h) - charge_at(v - h)) / (2.0 * h);
 
         let mut sink = DenseStamp::new(1);
-        inst.load(&[v], &mut sink);
+        inst.load(&[v], &ANALYSIS_DC, &mut sink);
         let analytic = sink.dcharge[0];
 
         let rel = (analytic - fd).abs() / fd.abs();
@@ -1201,7 +1294,7 @@ mod tests {
 
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
-        inst.load(&[0.0], &mut sink);
+        inst.load(&[0.0], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.residual[0], 2.0);
     }
 
@@ -1327,7 +1420,7 @@ mod tests {
 
         // V(p,n) = +1 V: the `then` arm, conductance g_pos.
         let mut sink = DenseStamp::new(1);
-        inst.load(&[1.0], &mut sink);
+        inst.load(&[1.0], &ANALYSIS_DC, &mut sink);
         assert!((sink.residual[0] - g_pos).abs() / g_pos < 1e-12);
         assert!((sink.jac(0, 0) - g_pos).abs() / g_pos < 1e-12);
 
@@ -1335,7 +1428,7 @@ mod tests {
         // different Jacobian, proving the selected branch's own gradient is what's stamped,
         // not the other arm's.
         let mut sink = DenseStamp::new(1);
-        inst.load(&[-1.0], &mut sink);
+        inst.load(&[-1.0], &ANALYSIS_DC, &mut sink);
         assert!((sink.residual[0] + g_neg).abs() / g_neg < 1e-12);
         assert!((sink.jac(0, 0) - g_neg).abs() / g_neg < 1e-12);
     }
@@ -1407,7 +1500,7 @@ mod tests {
         // 1 kΩ from node 0 to ground (index 1 is out of range of a dim-1 system).
         let inst = build_instance(&resistor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
-        inst.load(&[2.0], &mut sink);
+        inst.load(&[2.0], &ANALYSIS_DC, &mut sink);
         // Same hand-checked values as va_abi's resistor_stamp_by_hand.
         assert!((sink.residual[0] - 2e-3).abs() < 1e-15);
         assert!((sink.jac(0, 0) - 1e-3).abs() < 1e-18);
@@ -1432,7 +1525,7 @@ mod tests {
     fn capacitor_stamps_only_charge() {
         let inst = build_instance(&capacitor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
-        inst.load(&[3.0], &mut sink);
+        inst.load(&[3.0], &ANALYSIS_DC, &mut sink);
         // Q = C*V = 1pF * 3V = 3e-12; dQ/dV = C = 1e-12. No resistive current.
         assert!((sink.charge[0] - 3e-12).abs() < 1e-24);
         assert!((sink.dcharge[0] - 1e-12).abs() < 1e-27);
@@ -1497,7 +1590,7 @@ mod tests {
 
         let (vp, vn, y) = (0.7, 0.0, 1.25);
         let mut sink = DenseStamp::new(4);
-        inst.load(&[vp, vn, 0.0, y], &mut sink);
+        inst.load(&[vp, vn, 0.0, y], &ANALYSIS_DC, &mut sink);
 
         // The accumulator's own row (global 3): residual = -(arg) = -(V(p,n)); jacobian w.r.t.
         // p/n = -1/+1; charge = Y itself; dcharge/dY = 1.
@@ -1562,7 +1655,7 @@ mod tests {
         // `idt`'s own contribution: it reads back as the accumulator's raw value (0.0 here,
         // since the codegen doesn't seed it from `ic`) -- building and loading without erroring
         // is the main point of this test.
-        inst.load(&[0.0, 0.0, 0.0, 0.0], &mut sink);
+        inst.load(&[0.0, 0.0, 0.0, 0.0], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.residual[2], 0.0);
     }
 
@@ -1612,7 +1705,7 @@ mod tests {
 
         let (y_a, y_b) = (2.0, 5.0);
         let mut sink = DenseStamp::new(5);
-        inst.load(&[0.0, 0.0, 0.0, y_a, y_b], &mut sink);
+        inst.load(&[0.0, 0.0, 0.0, y_a, y_b], &ANALYSIS_DC, &mut sink);
         // The constraint row reads `idt_a + idt_b` = y_a + y_b, not `2*` either one.
         assert!((sink.residual[2] - -(y_a + y_b)).abs() < 1e-12);
         // Each accumulator's own row is independent: both driven by the same argument (V(p,n)
@@ -1704,7 +1797,7 @@ mod tests {
         let (vp, vn, vout, vgnd) = (0.6, 0.1, 0.0, 0.0);
         let r_val = 1000.0;
         let mut sink = DenseStamp::new(6);
-        inst.load(&[vp, vn, vout, vgnd, 0.0, 0.0], &mut sink);
+        inst.load(&[vp, vn, vout, vgnd, 0.0, 0.0], &ANALYSIS_DC, &mut sink);
 
         // The accumulator's own row (slot 5): residual = x[5] - (vp-vn)/R; jacobian w.r.t. p/n.
         let total = (vp - vn) / r_val;
@@ -1795,7 +1888,11 @@ mod tests {
 
         let ib0 = 0.02;
         let mut sink = DenseStamp::new(8);
-        inst.load(&[0.6, 0.5, 0.5, 0.0, 0.0, ib0, 0.0, 0.0], &mut sink);
+        inst.load(
+            &[0.6, 0.5, 0.5, 0.0, 0.0, ib0, 0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut sink,
+        );
 
         // The probe's own row (slot 7): residual = x[7] - x[5] (branch 0's shared terminal is
         // its `n`, so its sign is `-1`), independent of whatever `x[7]` starts at.
@@ -1882,7 +1979,7 @@ mod tests {
 
         let (vp, vn, rs_val, ib) = (0.6, 0.1, 5.0, 0.05);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, ib], &mut sink);
+        inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut sink);
 
         // total = (vp-vn) - Rs*ib; residual[2] = ib - total; jacobian(2,2) = 1 - (-Rs) = 1+Rs.
         let total = (vp - vn) - rs_val * ib;
@@ -1902,7 +1999,7 @@ mod tests {
         let inst = build_instance(&diode_ir(), &[0, 1], &mut 2).unwrap();
         let vd = 0.6;
         let mut sink = DenseStamp::new(1);
-        inst.load(&[vd], &mut sink);
+        inst.load(&[vd], &ANALYSIS_DC, &mut sink);
 
         let is = 1e-14;
         let nvt = 1.0 * VT;
@@ -1919,7 +2016,7 @@ mod tests {
 
         let residual_at = |vd: f64| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[vd], &mut s);
+            inst.load(&[vd], &ANALYSIS_DC, &mut s);
             s.residual[0]
         };
 
@@ -1928,7 +2025,7 @@ mod tests {
         let fd = (residual_at(vd + h) - residual_at(vd - h)) / (2.0 * h);
 
         let mut sink = DenseStamp::new(1);
-        inst.load(&[vd], &mut sink);
+        inst.load(&[vd], &ANALYSIS_DC, &mut sink);
         let analytic = sink.jac(0, 0);
 
         let rel = (fd - analytic).abs() / analytic.abs();
@@ -2003,7 +2100,7 @@ mod tests {
 
         let (vp, vn, ib) = (5.0, 2.0, 1e-3);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, ib], &mut sink);
+        inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut sink);
 
         // Constraint row (global index 2): V(p) - V(n) - I(p,n)*R = 0.
         assert!((sink.residual[2] - (vp - vn - ib * r)).abs() < 1e-9);
@@ -2021,7 +2118,7 @@ mod tests {
         // §5: the self-referencing flow-probe gradient must match a central finite difference.
         let residual_at = |ib: f64| {
             let mut s = DenseStamp::new(3);
-            inst.load(&[vp, vn, ib], &mut s);
+            inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut s);
             s.residual[2]
         };
         let h = 1e-6;
@@ -2088,7 +2185,7 @@ mod tests {
 
         let ib = 0.4;
         let mut sink = DenseStamp::new(3);
-        inst.load(&[0.0, 0.0, ib], &mut sink);
+        inst.load(&[0.0, 0.0, ib], &ANALYSIS_DC, &mut sink);
 
         // The constraint row is `V(p)-V(n) - L*ddt(I(p,n)) = 0`; the structural `V(p)-V(n)`
         // part is stamped separately (`stamp_branch_currents`), so the remaining `-L*I(p,n)`
@@ -2174,7 +2271,7 @@ mod tests {
 
         let (vp, vn, stray_ib) = (5.0, 2.0, 42.0);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, stray_ib], &mut sink);
+        inst.load(&[vp, vn, stray_ib], &ANALYSIS_DC, &mut sink);
 
         // Ordinary resistor KCL at the nodes: I = (Vp-Vn)/rt.
         let expected_i = (vp - vn) / rt;
@@ -2199,7 +2296,7 @@ mod tests {
 
         let (vp, vn, ib) = (5.0, 2.0, 1e-3);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, ib], &mut sink);
+        inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut sink);
 
         // Constraint row: V(p) - V(n) - 0 = 0.
         assert!((sink.residual[2] - (vp - vn)).abs() < 1e-12);
@@ -2310,14 +2407,14 @@ mod tests {
         // sel=2.0 matches arm1's *second* label (1,2: ...) -- proves multi-label arms work.
         let inst = build_instance(&case_ir(2.0, g0, g1, gdef), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[1.0, 0.0], &mut sink);
+        inst.load(&[1.0, 0.0], &ANALYSIS_DC, &mut sink);
         assert!((sink.residual[0] - g1).abs() / g1 < 1e-12);
         assert!((sink.jac(0, 0) - g1).abs() / g1 < 1e-12);
 
         // sel=99.0 matches nothing -- falls through to `default`.
         let inst = build_instance(&case_ir(99.0, g0, g1, gdef), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[1.0, 0.0], &mut sink);
+        inst.load(&[1.0, 0.0], &ANALYSIS_DC, &mut sink);
         assert!((sink.residual[0] - gdef).abs() / gdef < 1e-12);
         assert!((sink.jac(0, 0) - gdef).abs() / gdef < 1e-12);
     }
@@ -2404,7 +2501,7 @@ mod tests {
         let inst = build_instance(&repeat_accumulate_ir(n, g), &[0, 1], &mut 2).unwrap();
 
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
         // acc after 3 iterations = 3*v; I = 3*g*v.
         let expected_i = n * g * v;
         assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
@@ -2414,7 +2511,7 @@ mod tests {
         // §5: the gradient accumulated *through* the loop must match a central finite difference.
         let residual_at = |v: f64| {
             let mut s = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &mut s);
+            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
             s.residual[0]
         };
         let h = 1e-6;
@@ -2528,7 +2625,7 @@ mod tests {
         let inst = build_instance(&for_accumulate_ir(n, g), &[0, 1], &mut 2).unwrap();
 
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
         let expected_i = n * g * v;
         assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
         let expected_g = n * g;
@@ -2606,7 +2703,7 @@ mod tests {
         let eps = 1e-3;
         let inst = build_instance(&halving_while_ir(eps), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.0, 0.0], &mut sink);
+        inst.load(&[0.0, 0.0], &ANALYSIS_DC, &mut sink);
 
         // Replicate the same loop in Rust to get the expected final `x`, rather than hardcoding
         // a magic constant.
@@ -2686,7 +2783,7 @@ mod tests {
         // `build_instance` still succeeds: validation only runs the loop body once.
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.0, 0.0], &mut sink);
+        inst.load(&[0.0, 0.0], &ANALYSIS_DC, &mut sink);
         // The post-loop contribution never ran, so the residual is untouched.
         assert_eq!(sink.residual[0], 0.0);
     }
@@ -2759,7 +2856,7 @@ mod tests {
         let inst = build_instance(&sq_function_ir(g), &[0, 1], &mut 2).unwrap();
 
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
         // I = g * sq(v) = g*v^2.
         let expected_i = g * v * v;
         assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
@@ -2770,7 +2867,7 @@ mod tests {
         // §5: cross-check against a central finite difference.
         let residual_at = |v: f64| {
             let mut s = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &mut s);
+            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
             s.residual[0]
         };
         let h = 1e-6;
@@ -2883,7 +2980,7 @@ mod tests {
         let inst = build_instance(&output_arg_function_ir(), &[0, 1], &mut 2).unwrap();
         let v = 2.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
 
         // I = sq_result + cube_result = v^2 + v^3.
         let expected_i = v * v + v * v * v;
@@ -2896,7 +2993,7 @@ mod tests {
         let h = 1e-6;
         let residual_at = |v: f64| {
             let mut s = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &mut s);
+            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
             s.residual[0]
         };
         let fd = (residual_at(v + h) - residual_at(v - h)) / (2.0 * h);
@@ -3016,7 +3113,7 @@ mod tests {
         let delta = 1.5;
         let inst = build_instance(&inout_arg_function_ir(delta), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.0, 0.0], &mut sink);
+        inst.load(&[0.0, 0.0], &ANALYSIS_DC, &mut sink);
         // counter_outer starts at 10.0, `bump` adds `delta` and writes the sum back.
         assert!((sink.residual[0] - (10.0 + delta)).abs() < 1e-9);
         // The contributed value came from `counter_outer` (a constant, not a node voltage), so
@@ -3360,7 +3457,7 @@ mod tests {
         ] {
             let inst = build_instance(&scaled_ddt_ir(c0, coeff, shape), &[0, 1], &mut 2).unwrap();
             let mut sink = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &mut sink);
+            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
             assert!((sink.charge[0] - expected_q).abs() / expected_q < 1e-9);
             assert!((sink.dcharge[0] - expected_dq).abs() / expected_dq < 1e-9);
             // No charge should leak onto the resistive residual channel.
@@ -3370,7 +3467,7 @@ mod tests {
             // difference on the charge value itself.
             let charge_at = |v: f64| {
                 let mut s = DenseStamp::new(2);
-                inst.load(&[v, 0.0], &mut s);
+                inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
                 s.charge[0]
             };
             let h = 1e-6;
@@ -3509,7 +3606,7 @@ mod tests {
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let (c0v, type_v, mv, v) = (1e-12, -1.0, 4.0, 0.7);
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
 
         let expected_q = type_v * mv * c0v * v;
         let expected_dq = type_v * mv * c0v;
@@ -3612,7 +3709,7 @@ mod tests {
         let inst = build_instance(&ddt_via_local_variable_ir(true), &[0, 1], &mut 2).unwrap();
         let (c0, g, v) = (1e-12, 2.0, 0.6);
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
 
         // The resistive term (`V(p,n)*g`) and the substituted `ddt(c0*V(p,n))` charge term must
         // both land correctly, exactly as if the source had written `I(p,n) <+ V(p,n)*g +
@@ -3635,7 +3732,7 @@ mod tests {
     fn ddt_via_local_variable_else_arm_does_not_need_it() {
         let inst = build_instance(&ddt_via_local_variable_ir(false), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.6, 0.0], &mut sink);
+        inst.load(&[0.6, 0.0], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.residual[0], 0.0);
         assert_eq!(sink.charge[0], 0.0);
     }
@@ -3743,7 +3840,7 @@ mod tests {
         // instead have produced a nonzero `charge[0]` here).
         let inst = build_instance(&reassigned_in_one_arm_only_ir(true), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.6, 0.0], &mut sink);
+        inst.load(&[0.6, 0.0], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.residual[0], 5.0);
         assert_eq!(sink.charge[0], 0.0);
 
@@ -3753,7 +3850,7 @@ mod tests {
         // would not have been.
         let inst = build_instance(&reassigned_in_one_arm_only_ir(false), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.6, 0.0], &mut sink);
+        inst.load(&[0.6, 0.0], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.residual[0], 0.0);
         assert_eq!(sink.charge[0], 0.0);
     }
@@ -3843,14 +3940,14 @@ mod tests {
         // V > 0: devsign = 1.
         let v = 3.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
         assert!((sink.charge[0] - c0 * v).abs() / (c0 * v) < 1e-9);
         assert!((sink.dcharge[0] - c0).abs() / c0 < 1e-9);
 
         // V < 0: devsign = -1.
         let v = -3.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
         let expected_q = -c0 * v;
         assert!((sink.charge[0] - expected_q).abs() / expected_q.abs() < 1e-9);
         assert!((sink.dcharge[0] + c0).abs() / c0 < 1e-9);
@@ -3942,7 +4039,7 @@ mod tests {
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let v = 3.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &mut sink);
+        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
         let b_value = (w / l) * 2.0;
         let expected_q = b_value * c0 * v;
         assert!((sink.charge[0] - expected_q).abs() / expected_q < 1e-9);
@@ -4066,8 +4163,8 @@ mod tests {
         // Identical resistive stamps.
         let x = [2.0, 0.0];
         let (mut a, mut b) = (DenseStamp::new(2), DenseStamp::new(2));
-        plain_inst.load(&x, &mut a);
-        noisy_inst.load(&x, &mut b);
+        plain_inst.load(&x, &ANALYSIS_DC, &mut a);
+        noisy_inst.load(&x, &ANALYSIS_DC, &mut b);
         assert_eq!(
             a.residual, b.residual,
             "noise must not perturb the residual"
@@ -4080,11 +4177,11 @@ mod tests {
         // The plain model reports no sources; the noisy one reports exactly its declared PSD,
         // across the contribution's own branch.
         let mut sink = va_abi::noise::CollectedNoise::default();
-        plain_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
+        plain_inst.noise(&x, &ANALYSIS_DC, &mut sink);
         assert!(sink.sources.is_empty(), "{:?}", sink.sources);
 
         let mut sink = va_abi::noise::CollectedNoise::default();
-        noisy_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
+        noisy_inst.noise(&x, &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.sources.len(), 1);
         let (p, n, source) = &sink.sources[0];
         assert_eq!(
@@ -4112,7 +4209,7 @@ mod tests {
 
         for bias in [2.0, 5.0] {
             let mut sink = va_abi::noise::CollectedNoise::default();
-            inst.noise(&[bias, 0.0], va_abi::noise::TEMP_NOMINAL, &mut sink);
+            inst.noise(&[bias, 0.0], &ANALYSIS_DC, &mut sink);
             assert_eq!(
                 sink.sources[0].2,
                 va_abi::noise::NoiseSource::Flicker {
@@ -4144,8 +4241,8 @@ mod tests {
 
         let x = [2.0, 0.0];
         let (mut a, mut b) = (DenseStamp::new(2), DenseStamp::new(2));
-        plain_inst.load(&x, &mut a);
-        noisy_inst.load(&x, &mut b);
+        plain_inst.load(&x, &ANALYSIS_DC, &mut a);
+        noisy_inst.load(&x, &ANALYSIS_DC, &mut b);
         assert_eq!(
             a.residual, b.residual,
             "a table must not perturb the residual"
@@ -4156,7 +4253,7 @@ mod tests {
         );
 
         let mut sink = va_abi::noise::CollectedNoise::default();
-        noisy_inst.noise(&x, va_abi::noise::TEMP_NOMINAL, &mut sink);
+        noisy_inst.noise(&x, &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.sources.len(), 1);
         let (p, n, source) = &sink.sources[0];
         assert_eq!(
@@ -4194,7 +4291,7 @@ mod tests {
         let expect_interp = |b: Builtin, want: va_abi::noise::TableInterp| {
             let inst = build_instance(&build(b), &[0, 1], &mut 2).expect("builds");
             let mut sink = va_abi::noise::CollectedNoise::default();
-            inst.noise(&[2.0, 0.0], va_abi::noise::TEMP_NOMINAL, &mut sink);
+            inst.noise(&[2.0, 0.0], &ANALYSIS_DC, &mut sink);
             let va_abi::noise::NoiseSource::Table { interp, .. } = sink.sources[0].2 else {
                 panic!("a tabulated source");
             };
@@ -4242,6 +4339,231 @@ mod tests {
         let scaled = module_with_noise(|m| {
             let pwr = m.push_expr(Expr::Const(4.2e-23));
             let call = m.push_expr(Expr::Call(Builtin::WhiteNoise, vec![pwr]));
+            let two = m.push_expr(Expr::Const(2.0));
+            m.push_expr(Expr::Binary(va_ir::BinOp::Mul, two, call))
+        });
+        assert!(matches!(
+            build_instance(&scaled, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Tier A: the analysis-context constructs (§6 change, 2026-08-06).
+    // -----------------------------------------------------------------------------------
+
+    /// The `1 kΩ` resistor with one extra additive term in its flow contribution. Same shape as
+    /// [`module_with_noise`], reused for the analysis-context builtins so each test differs only
+    /// in the term it adds.
+    fn resistor_plus(make_term: impl FnOnce(&mut Module) -> ExprId) -> Module {
+        module_with_noise(make_term)
+    }
+
+    fn phase_bit(name: &str) -> f64 {
+        f64::from(va_ir::phase_bit(name).expect("a listed phase name"))
+    }
+
+    /// `analysis("tran")` must answer the analysis actually running, not the one elaboration
+    /// guessed. This is the fold that used to make a DC-init branch fire at *every* transient
+    /// timepoint while the transient branch never fired at all.
+    #[test]
+    fn analysis_answers_the_running_analysis_rather_than_a_baked_in_constant() {
+        // I(p,n) <+ V(p,n)/R + analysis("tran") * 1e-3 — a 1 mA offset only during transient.
+        let m = resistor_plus(|m| {
+            let mask = m.push_expr(Expr::Const(phase_bit("tran")));
+            let call = m.push_expr(Expr::Call(Builtin::Analysis, vec![mask]));
+            let amp = m.push_expr(Expr::Const(1e-3));
+            m.push_expr(Expr::Binary(va_ir::BinOp::Mul, call, amp))
+        });
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+
+        let residual_under = |ctx: &va_abi::AnalysisCtx| {
+            let mut s = DenseStamp::new(1);
+            inst.load(&[1.0], ctx, &mut s);
+            s.residual[0]
+        };
+
+        // V/R at 1 V across 1 kΩ is 1 mA; the offset doubles it, but only in transient.
+        assert!((residual_under(&ANALYSIS_DC) - 1e-3).abs() < 1e-15);
+        assert!((residual_under(&va_abi::AnalysisCtx::ac()) - 1e-3).abs() < 1e-15);
+        assert!((residual_under(&va_abi::AnalysisCtx::transient(0.0)) - 2e-3).abs() < 1e-15);
+
+        // An any-of mask matches either named analysis, and neither of two unnamed ones.
+        let m2 = resistor_plus(|m| {
+            let mask = m.push_expr(Expr::Const(phase_bit("dc") + phase_bit("ac")));
+            let call = m.push_expr(Expr::Call(Builtin::Analysis, vec![mask]));
+            let amp = m.push_expr(Expr::Const(1e-3));
+            m.push_expr(Expr::Binary(va_ir::BinOp::Mul, call, amp))
+        });
+        let inst2 = build_instance(&m2, &[0, 1], &mut 2).expect("builds");
+        let r2 = |ctx: &va_abi::AnalysisCtx| {
+            let mut s = DenseStamp::new(1);
+            inst2.load(&[1.0], ctx, &mut s);
+            s.residual[0]
+        };
+        assert!((r2(&ANALYSIS_DC) - 2e-3).abs() < 1e-15);
+        assert!((r2(&va_abi::AnalysisCtx::ac()) - 2e-3).abs() < 1e-15);
+        assert!((r2(&va_abi::AnalysisCtx::transient(0.0)) - 1e-3).abs() < 1e-15);
+    }
+
+    /// `$abstime` tracks the context's time, and — §5's rule — contributes **zero** to the
+    /// Jacobian, confirmed against a central finite difference rather than assumed. Time is not
+    /// a function of the solution vector, so a nonzero gradient here would corrupt Newton.
+    #[test]
+    fn abstime_reads_the_clock_and_has_no_gradient() {
+        // I(p,n) <+ V(p,n)/R + 1e-3 * $abstime  (a 1 mA/s current ramp).
+        let k = 1e-3;
+        let m = resistor_plus(|m| {
+            let t = m.push_expr(Expr::Call(Builtin::Abstime, Vec::new()));
+            let k = m.push_expr(Expr::Const(k));
+            m.push_expr(Expr::Binary(va_ir::BinOp::Mul, k, t))
+        });
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+
+        let stamp_at = |ctx: &va_abi::AnalysisCtx, v: f64| {
+            let mut s = DenseStamp::new(1);
+            inst.load(&[v], ctx, &mut s);
+            s
+        };
+
+        // A static solve reads t = 0: the ramp term vanishes and the model is a plain resistor.
+        assert!((stamp_at(&ANALYSIS_DC, 1.0).residual[0] - 1e-3).abs() < 1e-15);
+        // In transient it tracks the clock, linearly and independently of bias.
+        for t in [0.0, 1e-6, 2.5e-3] {
+            let s = stamp_at(&va_abi::AnalysisCtx::transient(t), 1.0);
+            assert!(
+                (s.residual[0] - (1e-3 + k * t)).abs() < 1e-15,
+                "at t={t}: {}",
+                s.residual[0]
+            );
+        }
+
+        // §5: the Jacobian is still exactly the resistor's, at any time — central difference.
+        let ctx = va_abi::AnalysisCtx::transient(3.3e-3);
+        let h = 1e-6;
+        let fd =
+            (stamp_at(&ctx, 1.0 + h).residual[0] - stamp_at(&ctx, 1.0 - h).residual[0]) / (2.0 * h);
+        let analytic = stamp_at(&ctx, 1.0).jac(0, 0);
+        assert!((analytic - 1e-3).abs() < 1e-18, "analytic {analytic}");
+        assert!(
+            (analytic - fd).abs() < 1e-12,
+            "analytic {analytic} vs fd {fd}"
+        );
+    }
+
+    /// `ac_stim` reaches the excitation channel during AC and is silent everywhere else —
+    /// and, like a noise term, it never perturbs `load`'s resistive stamp. That combination is
+    /// what lets a model declare its AC drive unconditionally and still solve a DC point.
+    #[test]
+    fn ac_stim_excites_only_in_ac_and_leaves_the_resistive_stamp_alone() {
+        let plain = resistor_ir();
+        // I(p,n) <+ V(p,n)/R + ac_stim(2.0, π/2)  — a purely imaginary 2 A stimulus.
+        let (mag, ph) = (2.0, std::f64::consts::FRAC_PI_2);
+        let stim = resistor_plus(|m| {
+            let mask = m.push_expr(Expr::Const(phase_bit("ac")));
+            let mag = m.push_expr(Expr::Const(mag));
+            let ph = m.push_expr(Expr::Const(ph));
+            m.push_expr(Expr::Call(Builtin::AcStim, vec![mask, mag, ph]))
+        });
+
+        let plain_inst = build_instance(&plain, &[0, 1], &mut 2).expect("plain builds");
+        let stim_inst = build_instance(&stim, &[0, 1], &mut 2).expect("stim builds");
+
+        // Resistive stamps identical in every analysis — the stimulus is not in `G`.
+        for ctx in [
+            ANALYSIS_DC,
+            va_abi::AnalysisCtx::ac(),
+            va_abi::AnalysisCtx::transient(1e-6),
+        ] {
+            let (mut a, mut b) = (DenseStamp::new(1), DenseStamp::new(1));
+            plain_inst.load(&[1.0], &ctx, &mut a);
+            stim_inst.load(&[1.0], &ctx, &mut b);
+            assert_eq!(a.residual, b.residual, "residual differs under {ctx:?}");
+            assert_eq!(a.jacobian, b.jacobian, "jacobian differs under {ctx:?}");
+        }
+
+        // The excitation itself appears only in AC.
+        let excitation = |ctx: &va_abi::AnalysisCtx| {
+            let mut s = DenseStamp::new(1);
+            stim_inst.load(&[1.0], ctx, &mut s);
+            s.excitation[0]
+        };
+        assert_eq!(excitation(&ANALYSIS_DC), (0.0, 0.0));
+        assert_eq!(
+            excitation(&va_abi::AnalysisCtx::transient(1e-6)),
+            (0.0, 0.0)
+        );
+
+        let (re, im) = excitation(&va_abi::AnalysisCtx::ac());
+        assert!(re.abs() < 1e-15, "cos(π/2) should vanish, got {re}");
+        assert!((im - mag).abs() < 1e-15, "imag {im} vs {mag}");
+    }
+
+    /// `bound_step` reaches the timestep channel during transient and nowhere else — there is no
+    /// step to bound in a static or small-signal solve.
+    #[test]
+    fn bound_step_reaches_the_timestep_channel_only_in_transient() {
+        let mut m = resistor_ir();
+        let dt = m.push_expr(Expr::Const(2.5e-9));
+        m.analog.insert(0, Stmt::BoundStep(dt));
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+
+        let bound_under = |ctx: &va_abi::AnalysisCtx| {
+            let mut s = DenseStamp::new(1);
+            inst.load(&[1.0], ctx, &mut s);
+            s.bound_step
+        };
+        assert_eq!(
+            bound_under(&va_abi::AnalysisCtx::transient(0.0)),
+            Some(2.5e-9)
+        );
+        assert_eq!(bound_under(&ANALYSIS_DC), None);
+        assert_eq!(bound_under(&va_abi::AnalysisCtx::ac()), None);
+    }
+
+    /// A `bound_step` guarded by an `if` is a *conditional* request: it applies only when the
+    /// operating point selects the arm holding it. That is the whole reason it stays a statement
+    /// in the control-flow walk instead of becoming a module-level property.
+    #[test]
+    fn a_guarded_bound_step_applies_only_when_its_arm_runs() {
+        // if (V(p,n) > 0.5) bound_step(1n);
+        let mut m = resistor_ir();
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let half = m.push_expr(Expr::Const(0.5));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v, half));
+        let dt = m.push_expr(Expr::Const(1e-9));
+        m.analog.insert(
+            0,
+            Stmt::If {
+                cond,
+                then_: vec![Stmt::BoundStep(dt)],
+                else_: Vec::new(),
+            },
+        );
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+
+        let bound_at = |v: f64| {
+            let mut s = DenseStamp::new(1);
+            inst.load(&[v], &va_abi::AnalysisCtx::transient(0.0), &mut s);
+            s.bound_step
+        };
+        assert_eq!(bound_at(1.0), Some(1e-9));
+        assert_eq!(bound_at(0.1), None);
+    }
+
+    /// An `ac_stim` buried where the lowering can't split it out would evaluate to its
+    /// LRM-mandated zero and vanish without trace. Rejected at build time instead, exactly as a
+    /// scaled noise call is.
+    #[test]
+    fn a_scaled_ac_stim_is_rejected_rather_than_silently_dropped() {
+        let scaled = resistor_plus(|m| {
+            let mask = m.push_expr(Expr::Const(phase_bit("ac")));
+            let mag = m.push_expr(Expr::Const(1.0));
+            let ph = m.push_expr(Expr::Const(0.0));
+            let call = m.push_expr(Expr::Call(Builtin::AcStim, vec![mask, mag, ph]));
             let two = m.push_expr(Expr::Const(2.0));
             m.push_expr(Expr::Binary(va_ir::BinOp::Mul, two, call))
         });

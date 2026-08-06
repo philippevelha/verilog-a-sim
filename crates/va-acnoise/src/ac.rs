@@ -65,10 +65,21 @@ pub struct AcResponse {
 /// (`C = ∂charge/∂x`) matrices a [`ModelInstance::load`] stamps at a fixed operating point,
 /// dropping the residual/charge values themselves — irrelevant once linearized, since AC
 /// analysis only ever uses their derivatives.
-struct Linearization {
+///
+/// The one exception is [`Self::excitation`]: a model's own `ac_stim` is a *constant* complex
+/// term, so unlike the residual it survives linearization — it is the small-signal system's
+/// right-hand side rather than part of its matrix.
+#[derive(Clone, Debug)]
+pub struct Linearization {
     dim: usize,
-    g: Vec<f64>,
-    c: Vec<f64>,
+    /// Conductance matrix `G = ∂residual/∂x`, dense row-major `dim × dim`.
+    pub g: Vec<f64>,
+    /// Charge-Jacobian matrix `C = ∂charge/∂x`, dense row-major `dim × dim`.
+    pub c: Vec<f64>,
+    /// Each row's model-supplied `ac_stim`, in [`va_abi::StampSink::excitation`]'s
+    /// residual-side sign convention — so forming the system's right-hand side **negates** it.
+    /// All-zero unless some compiled model in `instances` calls `ac_stim`.
+    pub excitation: Vec<Complex>,
 }
 
 impl StampSink for Linearization {
@@ -87,25 +98,43 @@ impl StampSink for Linearization {
             self.c[row * self.dim + col] += value;
         }
     }
+
+    fn excitation(&mut self, row: usize, re: f64, im: f64) {
+        if row < self.dim {
+            self.excitation[row].0 += re;
+            self.excitation[row].1 += im;
+        }
+    }
 }
 
-/// Linearize `instances` about operating point `x_dc`, returning the dense `dim × dim`
-/// (row-major) conductance matrix `G` and charge-Jacobian matrix `C` such that the small-signal
-/// system at angular frequency `ω` is `(G + jω·C)·X(ω) = B(ω)`.
+/// Linearize `instances` about operating point `x_dc`, for the analysis `ctx` names, returning
+/// the dense `dim × dim` (row-major) `G` and `C` such that the small-signal system at angular
+/// frequency `ω` is `(G + jω·C)·X(ω) = B(ω)` — plus any `ac_stim` excitation the models
+/// themselves contribute to `B`.
+///
+/// `ctx` decides which analysis a compiled model believes it is being evaluated for: pass
+/// [`va_abi::AnalysisCtx::ac`] for an AC sweep and [`va_abi::AnalysisCtx::noise`] for a noise
+/// run, so that a model's `analysis("ac")`/`analysis("noise")` branches answer correctly. It
+/// carries no frequency, and this function is deliberately called **once**, outside any
+/// frequency loop: `G` and `C` are frequency-independent by construction. A frequency-dependent
+/// small-signal response (`laplace_*`, `zi_*`) would need per-frequency re-linearization, which
+/// this signature does not provide and does not pretend to.
 pub fn linearize(
     instances: &[&dyn ModelInstance],
     x_dc: &[f64],
+    ctx: &va_abi::AnalysisCtx,
     dim: usize,
-) -> (Vec<f64>, Vec<f64>) {
+) -> Linearization {
     let mut lin = Linearization {
         dim,
         g: vec![0.0; dim * dim],
         c: vec![0.0; dim * dim],
+        excitation: vec![(0.0, 0.0); dim],
     };
     for inst in instances {
-        inst.load(x_dc, &mut lin);
+        inst.load(x_dc, ctx, &mut lin);
     }
-    (lin.g, lin.c)
+    lin
 }
 
 /// Run an AC sweep about a precomputed DC operating point `x_dc`.
@@ -132,11 +161,21 @@ pub fn run(
     excitation: &[Complex],
 ) -> Result<AcResponse, AcNoiseError> {
     debug_assert_eq!(excitation.len(), dim, "excitation must cover every unknown");
-    let (g, c) = linearize(instances, x_dc, dim);
+    let lin = linearize(instances, x_dc, &va_abi::AnalysisCtx::ac(), dim);
+
+    // The netlist's own `AC mag phase` sources arrive already on the right-hand side; a model's
+    // `ac_stim` arrives in `residual`'s sign convention, so it crosses the equals sign here.
+    // Both are frequency-independent, so this sum is built once rather than per point.
+    let rhs: Vec<Complex> = excitation
+        .iter()
+        .zip(&lin.excitation)
+        .map(|(&(bre, bim), &(ere, eim))| (bre - ere, bim - eim))
+        .collect();
+
     let freqs = sweep.frequencies();
     let mut x = Vec::with_capacity(freqs.len());
     for &f in &freqs {
-        x.push(solve_at(&g, &c, dim, 2.0 * PI * f, excitation)?);
+        x.push(solve_at(&lin.g, &lin.c, dim, 2.0 * PI * f, &rhs)?);
     }
     Ok(AcResponse { f: freqs, x })
 }
@@ -251,6 +290,85 @@ mod tests {
             points_per_decade: 10,
         };
         assert!(sweep.frequencies().is_empty());
+    }
+
+    /// A model's own `ac_stim` drives the circuit through [`StampSink::excitation`], with no
+    /// netlist `AC` source anywhere — the path a behavioral Verilog-A model takes.
+    ///
+    /// The sign is the point of this test, and it is easy to get backwards. `I(p,n) <+ ac_stim`
+    /// pushes current **out of** `p`, so at DC an ideal 1 A stimulus across a 1 kΩ resistor to
+    /// ground holds that node at **−1000 V**, not +1000: the nodal equation is `V/R + I = 0`.
+    /// The excitation arrives in `residual`'s sign convention and [`run`] moves it across the
+    /// equals sign, so getting this right is what makes a compiled model's stimulus agree with a
+    /// netlist source's.
+    #[test]
+    fn a_model_supplied_ac_stim_drives_the_circuit_with_the_residual_sign_convention() {
+        /// A 1 A stimulus in parallel with a resistor — the `I(p,n) <+ V(p,n)/R + ac_stim(1,0)`
+        /// a compiled model produces, written directly against Interface β.
+        struct StimResistor {
+            terminals: [usize; 2],
+            r: f64,
+        }
+
+        impl ModelInstance for StimResistor {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn StampSink) {
+                let [p, n] = self.terminals;
+                Resistor::new(p, n, self.r).load(x, ctx, sink);
+                if ctx.kind == va_abi::AnalysisKind::Ac {
+                    sink.excitation(p, 1.0, 0.0);
+                    sink.excitation(n, -1.0, 0.0);
+                }
+            }
+        }
+
+        let (r, c) = (1000.0, 1e-9);
+        let stim = StimResistor {
+            terminals: [0, GROUND],
+            r,
+        };
+        let cap = Capacitor::new(0, GROUND, c);
+        let insts: [&dyn ModelInstance; 2] = [&stim, &cap];
+
+        let sweep = AcSweep {
+            fstart: 1e3,
+            fstop: 1e6,
+            points_per_decade: 4,
+        };
+        // No netlist excitation at all: everything driving this circuit comes from the model.
+        let resp = run(&insts, &[0.0], 1, sweep, &[(0.0, 0.0)]).expect("sweeps");
+
+        // A 1 A source into R‖C: V(jω) = −1 · R/(1 + jωRC).
+        for (&f, x) in resp.f.iter().zip(&resp.x) {
+            let wrc = 2.0 * PI * f * r * c;
+            let expected_mag = r / (1.0 + wrc * wrc).sqrt();
+            // Negative real gain rotated by −atan(ωRC): phase = π − atan(ωRC), wrapped.
+            let expected_phase = {
+                let p = PI - wrc.atan();
+                if p > PI {
+                    p - 2.0 * PI
+                } else {
+                    p
+                }
+            };
+            assert!(
+                (magnitude(x[0]) - expected_mag).abs() / expected_mag < 1e-9,
+                "at {f} Hz: |V| {} vs {expected_mag}",
+                magnitude(x[0])
+            );
+            assert!(
+                (phase(x[0]) - expected_phase).abs() < 1e-9,
+                "at {f} Hz: phase {} vs {expected_phase}",
+                phase(x[0])
+            );
+        }
+
+        // And it really is analysis-gated: the same instance excites nothing in a DC load.
+        let mut dc = va_abi::stamps::DenseStamp::new(1);
+        stim.load(&[0.0], &va_abi::ANALYSIS_DC, &mut dc);
+        assert_eq!(dc.excitation[0], (0.0, 0.0));
     }
 
     /// RC low-pass: `V(in)` driven by an ideal 1V-AC source through `R` into `C` to ground,

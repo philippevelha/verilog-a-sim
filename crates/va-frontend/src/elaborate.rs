@@ -1124,7 +1124,25 @@ impl Elaborator<'_> {
                 }
                 Ok(va_ir::Stmt::Block(inits))
             }
-            // System tasks (`$strobe`, `$finish`, …) have no effect on a DC solve.
+            // `bound_step(max_step);` parses as a bare call statement like a system task
+            // (§ `crate::parser`), but unlike one it has a real effect: it caps the next
+            // transient timestep. It used to be discarded with the rest of them; it now lowers
+            // to its own IR statement, which the transient integrator honours through
+            // `va_abi::StampSink`'s bound-step channel (§ `va_ir::Stmt::BoundStep`).
+            Stmt::Task { name, args } if name == "bound_step" => {
+                let arg = *args.first().ok_or_else(|| {
+                    elab("`bound_step` requires a maximum-timestep argument".to_string())
+                })?;
+                if args.len() > 1 {
+                    return Err(elab(
+                        "`bound_step` takes exactly one argument (the maximum timestep in \
+                         seconds)"
+                            .to_string(),
+                    ));
+                }
+                Ok(va_ir::Stmt::BoundStep(self.lower_expr(arg)?))
+            }
+            // Other system tasks (`$strobe`, `$finish`, …) have no effect on a solve.
             Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
             Stmt::Contribute { target, value } => {
                 // Constant/genvar-indexed terminals (or none at all) resolve straight to a
@@ -1364,15 +1382,17 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            // `$abstime` is the absolute simulation time. v0 is DC-only (no time axis at all —
-            // there is no transient solve for a "current time" to advance through), and a DC
-            // operating point is conventionally evaluated at t=0, so it folds to a constant 0.0
-            // rather than being rejected as unknown.
+            // `$abstime` is the absolute simulation time. It used to fold to a constant `0.0`
+            // here, correctly, back when DC was the only analysis there was; once `va-transient`
+            // landed that fold froze every time-dependent model at t=0. It now survives to the
+            // IR and reads the time from the analysis context at load (§ `va_ir::Builtin::
+            // Abstime`) — which still yields exactly `0.0` in a static solve, but as an answer
+            // rather than an assumption.
             ExprAst::SysFunc { name, args } if name == "abstime" => {
                 if !args.is_empty() {
                     return Err(elab("`$abstime` takes no arguments".to_string()));
                 }
-                Expr::Const(0.0)
+                Expr::Call(Builtin::Abstime, Vec::new())
             }
             // `$mfactor` is the instance multiplicity factor (device paralleling count, the
             // conventional `m=` netlist parameter). v0 has no netlist-driven instance
@@ -1512,11 +1532,18 @@ impl Elaborator<'_> {
             }
             ExprAst::Probe(access) => return self.lower_probe_expr(access),
             ExprAst::PortProbe { kind, port } => return self.lower_port_probe(*kind, port),
+            // `analysis("name", …)` queries which analysis is running. It used to fold to a
+            // constant here — `true` for the DC phases, `false` for everything else — which was
+            // right when DC was the only analysis and became a silent wrong answer the moment
+            // transient and AC existed: a DC-init branch fired at every timepoint and a
+            // `analysis("tran")` branch never fired at all. The phase *names* are still resolved
+            // here, because the LRM requires them to be string literals and this is the only
+            // place that can name a source file when one is misspelled; what survives is the
+            // resulting bitmask, answered against the real analysis at load time.
             ExprAst::Call { name, args } if name == "analysis" => {
-                // `analysis("name", …)` queries the current analysis. v0 is DC-only, so it
-                // folds to a constant: true for the DC/operating-point phases.
-                let active = self.analysis_matches(args)?;
-                Expr::Const(if active { 1.0 } else { 0.0 })
+                let mask = self.phase_mask_of(args, "analysis")?;
+                let mask = self.out.push_expr(Expr::Const(f64::from(mask)));
+                Expr::Call(Builtin::Analysis, vec![mask])
             }
             // `white_noise(pwr[, "name"])` / `flicker_noise(pwr, exp[, "name"])` (LRM §4.5.13)
             // lower to real IR calls rather than folding away (T5.2's compiled-model noise): the
@@ -1572,13 +1599,51 @@ impl Elaborator<'_> {
                 };
                 Expr::Call(builtin, ids)
             }
-            // `ac_stim` (an AC-only stimulus) contributes nothing to a DC operating point;
-            // `bound_step` is a transient-timestep hint with no DC meaning at all — both fold to
-            // zero, `bound_step` on the rare chance it appears in expression position rather
-            // than as the bare statement `parse_bound_step_stmt` already handles (see
-            // `crate::parser`).
-            ExprAst::Call { name, .. } if matches!(name.as_str(), "ac_stim" | "bound_step") => {
-                Expr::Const(0.0)
+            // `ac_stim([analysis_name [, mag [, phase]]])` (LRM §4.5.2) is a small-signal
+            // stimulus active only during the named analysis. It used to fold to zero, which is
+            // the right *value* in every analysis — but it is right for the wrong reason: an
+            // `ac_stim` is a right-hand-side excitation, and folding it away discarded the
+            // magnitude and phase that are the whole point, leaving an AC-driven behavioral
+            // model silently unexcited.
+            //
+            // Normalized here to exactly three arguments — a phase bitmask, `mag`, `phase` — so
+            // every consumer reads one shape regardless of how many the source wrote. The LRM's
+            // defaults are `"ac"`, `1.0` and `0.0`.
+            ExprAst::Call { name, args } if name == "ac_stim" => {
+                let (phases, rest): (&[ExprRef], &[ExprRef]) = match args.split_first() {
+                    Some((first, rest)) if matches!(self.ast.expr(*first), ExprAst::Str(_)) => {
+                        (std::slice::from_ref(first), rest)
+                    }
+                    // No leading string: every argument is numeric and the analysis defaults to
+                    // `"ac"`. `ac_stim(1.0, 0.0)` is by far the common spelling.
+                    _ => (&[], args),
+                };
+                let mask = if phases.is_empty() {
+                    va_ir::phase_bit("ac").expect("\"ac\" is a listed phase name")
+                } else {
+                    self.phase_mask_of(phases, "ac_stim")?
+                };
+                let mask = self.out.push_expr(Expr::Const(f64::from(mask)));
+                let mag = match rest.first() {
+                    Some(&e) => self.lower_expr(e)?,
+                    None => self.out.push_expr(Expr::Const(1.0)),
+                };
+                let phase = match rest.get(1) {
+                    Some(&e) => self.lower_expr(e)?,
+                    None => self.out.push_expr(Expr::Const(0.0)),
+                };
+                Expr::Call(Builtin::AcStim, vec![mask, mag, phase])
+            }
+            // `bound_step` in *expression* position. The LRM writes it as a statement, and
+            // `crate::parser` parses that form into `Stmt::Task`, which the statement lowering
+            // turns into `va_ir::Stmt::BoundStep`. Reaching here means it was written where a
+            // value is expected, which is not something to invent a value for.
+            ExprAst::Call { name, .. } if name == "bound_step" => {
+                return Err(elab(
+                    "`bound_step` is a statement, not a value: write `bound_step(expr);` on its \
+                     own rather than inside an expression"
+                        .to_string(),
+                ))
             }
             // `transition(value, delay, rise_time, fall_time)` and `slew(value, pos_rate,
             // neg_rate)` both smooth/limit a signal over time — genuinely time-domain
@@ -1843,20 +1908,28 @@ impl Elaborator<'_> {
 
     /// Whether an `analysis(...)` call is active under v0's DC-only model: true if any
     /// string argument names a DC/operating-point phase. Arguments must be string literals.
-    fn analysis_matches(&self, args: &[ExprRef]) -> Result<bool, FrontendError> {
-        const DC_PHASES: &[&str] = &["static", "dc", "ic", "nodeset"];
-        let mut matched = false;
+    fn phase_mask_of(&self, args: &[ExprRef], who: &str) -> Result<u32, FrontendError> {
+        let mut names = Vec::with_capacity(args.len());
         for &a in args {
             match self.ast.expr(a) {
-                ExprAst::Str(s) => matched |= DC_PHASES.contains(&s.as_str()),
+                ExprAst::Str(s) => names.push(s.as_str()),
                 _ => {
-                    return Err(elab(
-                        "`analysis` arguments must be string literals".to_string(),
-                    ))
+                    return Err(elab(format!(
+                        "`{who}` analysis-name arguments must be string literals"
+                    )))
                 }
             }
         }
-        Ok(matched)
+        // An unrecognized phase name is an error, not a mask of zero. Folding it to "matches
+        // nothing" would silently disable whatever branch it guards, forever, with no
+        // diagnostic — and a misspelling like `"transient"` for `"tran"` is exactly the kind of
+        // mistake that produces a plausible-looking but wrong waveform.
+        va_ir::phase_mask(names).map_err(|bad| {
+            elab(format!(
+                "`{who}`: `{bad}` is not a Verilog-A analysis name (expected one of {})",
+                va_ir::ANALYSIS_PHASES.join(", ")
+            ))
+        })
     }
 
     fn lower_access(&mut self, access: &ast::Access) -> Result<Access, FrontendError> {
@@ -2424,6 +2497,8 @@ impl Elaborator<'_> {
                         ));
                     }
                 }
+                // `bound_step` makes no contribution to any branch, so it adds no term here.
+                va_ir::Stmt::BoundStep(_) => {}
             }
         }
         Ok(())
@@ -2439,7 +2514,9 @@ impl Elaborator<'_> {
                 let branch = self.out.branches[target.branch.0 as usize];
                 branch.p == node || branch.n == node
             }
-            va_ir::Stmt::Contribute { .. } | va_ir::Stmt::Assign { .. } => false,
+            va_ir::Stmt::Contribute { .. }
+            | va_ir::Stmt::Assign { .. }
+            | va_ir::Stmt::BoundStep(_) => false,
             va_ir::Stmt::Block(body) => self.branch_flow_touches(node, body),
             va_ir::Stmt::If { then_, else_, .. } => {
                 self.branch_flow_touches(node, then_) || self.branch_flow_touches(node, else_)
@@ -2985,6 +3062,7 @@ fn remap_stmt(
             lhs: var_off[lhs.0 as usize],
             rhs: expr_off[rhs.0 as usize],
         },
+        va_ir::Stmt::BoundStep(e) => va_ir::Stmt::BoundStep(expr_off[e.0 as usize]),
         va_ir::Stmt::Block(body) => va_ir::Stmt::Block(recurse(body)),
         va_ir::Stmt::While { cond, body } => va_ir::Stmt::While {
             cond: expr_off[cond.0 as usize],
@@ -3662,15 +3740,20 @@ mod tests {
     }
 
     #[test]
-    fn abstime_folds_to_zero() {
-        // v0 has no time axis; a DC operating point is conventionally t=0.
+    fn abstime_survives_elaboration_instead_of_folding_to_zero() {
+        // The time is the *simulator's* to supply, so `$abstime` must reach the IR as a call
+        // and read it at load. It used to fold to a constant `0.0` here, which froze every
+        // time-dependent model at t=0 the moment transient analysis existed.
         let m = elaborate_src(
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + $abstime; end endmodule",
         );
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+        assert!(
+            m.exprs
+                .iter()
+                .any(|e| matches!(e, va_ir::Expr::Call(Builtin::Abstime, args) if args.is_empty())),
+            "no $abstime call survived: {:?}",
+            m.exprs
+        );
 
         // `$abstime` takes no arguments.
         let src =
@@ -4441,26 +4524,75 @@ mod tests {
     }
 
     #[test]
-    fn ac_stim_and_bound_step_fold_to_zero() {
-        // `ac_stim` only contributes during AC analysis (v0 is DC-only); `bound_step` is a
-        // transient-timestep hint with no DC meaning. Both fold to a constant zero in
-        // expression position.
-        let m = elaborate_src(
-            "module t(a, b); electrical a, b; \
-             analog begin I(a, b) <+ ac_stim(1.0, 0.0) + V(a, b); end endmodule",
-        );
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+    fn ac_stim_normalizes_to_a_mask_and_two_arguments() {
+        // Whatever the source writes, the IR carries exactly three arguments: a phase bitmask,
+        // a magnitude and a phase. The magnitude/phase used to be discarded entirely — the call
+        // folded to a bare `0.0` — which left an AC-driven behavioral model unexcited.
+        let ac = va_ir::phase_bit("ac").unwrap();
+        let stim = |src: &str| -> (u32, f64, f64) {
+            let m = elaborate_src(src);
+            let args = m
+                .exprs
+                .iter()
+                .find_map(|e| match e {
+                    va_ir::Expr::Call(Builtin::AcStim, args) => Some(args.clone()),
+                    _ => None,
+                })
+                .expect("an ac_stim call survives elaboration");
+            assert_eq!(args.len(), 3, "ac_stim must normalize to three arguments");
+            let konst = |i: usize| match m.expr(args[i]) {
+                va_ir::Expr::Const(v) => *v,
+                other => panic!("argument {i} is not constant: {other:?}"),
+            };
+            (konst(0) as u32, konst(1), konst(2))
+        };
 
-        // `bound_step(step);` as a bare statement is a documented no-op.
+        let head = "module t(a, b); electrical a, b; analog begin I(a, b) <+ ";
+        // Explicit magnitude and phase, analysis defaulting to "ac".
+        assert_eq!(
+            stim(&format!(
+                "{head} ac_stim(2.0, 0.5) + V(a, b); end endmodule"
+            )),
+            (ac, 2.0, 0.5)
+        );
+        // LRM defaults: magnitude 1.0, phase 0.0.
+        assert_eq!(
+            stim(&format!("{head} ac_stim() + V(a, b); end endmodule")),
+            (ac, 1.0, 0.0)
+        );
+        // A leading string names the analysis instead of being mistaken for a magnitude.
+        assert_eq!(
+            stim(&format!(
+                r#"{head} ac_stim("noise", 3.0) + V(a, b); end endmodule"#
+            )),
+            (va_ir::phase_bit("noise").unwrap(), 3.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn bound_step_lowers_to_its_own_statement_instead_of_a_no_op() {
+        // `bound_step(step);` used to be discarded with the system tasks. It now survives as a
+        // statement carrying its argument, so the transient controller can honour it.
         let m = elaborate_src(
             "module t(a, b); electrical a, b; \
              analog begin bound_step(1n); I(a, b) <+ V(a, b); end endmodule",
         );
         assert_eq!(m.analog.len(), 2);
-        assert!(matches!(m.analog[0], va_ir::Stmt::Block(ref b) if b.is_empty()));
+        let va_ir::Stmt::BoundStep(e) = m.analog[0] else {
+            panic!("expected a bound_step statement, got {:?}", m.analog[0]);
+        };
+        assert!(matches!(m.expr(e), va_ir::Expr::Const(v) if (*v - 1e-9).abs() < 1e-21));
+
+        // It is a statement, not a value: writing it in expression position is an error rather
+        // than a silent zero.
+        let src = "module t(a, b); electrical a, b; \
+                   analog begin I(a, b) <+ bound_step(1n) + V(a, b); end endmodule";
+        let ast = parse(&lex(src).expect("lex"))
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("at least one module");
+        assert!(elaborate(&ast).is_err());
     }
 
     #[test]

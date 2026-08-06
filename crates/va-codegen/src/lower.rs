@@ -230,7 +230,31 @@ pub enum NoiseTerm {
     },
 }
 
-/// A single branch contribution, split into resistive, charge, and noise channels.
+/// One `ac_stim(...)` call pulled out of a contribution — a small-signal excitation on the
+/// right-hand side of `(G + jω·C)·X = B`, never a term in `G`.
+///
+/// Split out for the same reason [`NoiseTerm`] is: the call's *value* is zero in every analysis
+/// (§ `va_ir::Builtin::AcStim`), so unless its arguments are captured here, nothing downstream
+/// could ever recover them. Unlike a noise term it carries a [`Self::sign`], because an
+/// excitation combines **linearly** — `−ac_stim(1,0)` is a genuinely opposite stimulus, whereas
+/// a noise source's sign is squared away by `|Z|²`.
+#[derive(Clone, Copy, Debug)]
+pub struct AcStimTerm {
+    /// `+1.0`/`−1.0` from the enclosing expression's sums and negations.
+    pub sign: f64,
+    /// Which analyses this stimulus is active in, as a bitmask over `va_ir::ANALYSIS_PHASES`
+    /// (`"ac"` unless the source named something else). Read from the call's already-folded
+    /// constant first argument at lowering time, so nothing downstream re-inspects the arena.
+    pub phase_mask: u32,
+    /// The magnitude argument. Evaluated at the operating point, so a bias-dependent magnitude
+    /// comes out right; only its value is used, never its gradient — a stimulus is an
+    /// independent quantity, not a function of the solution vector.
+    pub mag: ExprId,
+    /// The phase argument, in **radians**.
+    pub phase: ExprId,
+}
+
+/// A single branch contribution, split into resistive, charge, noise, and excitation channels.
 #[derive(Clone, Debug)]
 pub struct Contribution {
     /// Which branch this contribution targets — consulted only to accumulate a flow
@@ -252,6 +276,9 @@ pub struct Contribution {
     /// `white_noise`/`flicker_noise` terms emitted into the noise channel (T5.2). Empty for the
     /// overwhelming majority of contributions.
     pub noise: Vec<NoiseTerm>,
+    /// `ac_stim` terms emitted into the excitation channel during AC analysis. Empty for the
+    /// overwhelming majority of contributions.
+    pub ac_stim: Vec<AcStimTerm>,
 }
 
 /// One branch that receives a potential (voltage) contribution somewhere in the module, and
@@ -303,6 +330,14 @@ pub enum LoweredStmt {
     },
     /// A flow or potential contribution, already split into resistive/charge terms.
     Contribute(Contribution),
+    /// `bound_step(max_step);` — an upper bound on the next transient timestep, emitted into
+    /// `va_abi::StampSink`'s bound-step channel when a transient run evaluates it and dropped
+    /// in every other analysis (there is no timestep to bound).
+    ///
+    /// Kept as a statement through lowering rather than hoisted to a module-level property
+    /// because it may sit inside an `if`: whether the bound applies can depend on the operating
+    /// point, so it has to be reached by the same control-flow walk everything else is.
+    BoundStep(ExprId),
     /// `if (cond) { then_ } else { else_ }`. `crate::GeneratedModel::run` walks only the arm
     /// `cond` selects at the current operating point; `crate::GeneratedModel::validate` walks
     /// both (see this module's doc comment).
@@ -682,6 +717,8 @@ fn collect_flow_probe_branches_in_stmt(module: &Module, stmt: &Stmt, out: &mut B
     match stmt {
         Stmt::Contribute { value, .. } => collect_flow_probe_branches_in_expr(module, *value, out),
         Stmt::Assign { rhs, .. } => collect_flow_probe_branches_in_expr(module, *rhs, out),
+        // A `bound_step` argument is an ordinary expression and may probe like any other.
+        Stmt::BoundStep(e) => collect_flow_probe_branches_in_expr(module, *e, out),
         Stmt::Block(body) => collect_flow_probe_branches_in_stmts(module, body, out),
         Stmt::If { cond, then_, else_ } => {
             collect_flow_probe_branches_in_expr(module, *cond, out);
@@ -763,6 +800,7 @@ fn collect_idt_calls_in_stmt(module: &Module, stmt: &Stmt, out: &mut Vec<ExprId>
     match stmt {
         Stmt::Contribute { value, .. } => collect_idt_calls_in_expr(module, *value, out),
         Stmt::Assign { rhs, .. } => collect_idt_calls_in_expr(module, *rhs, out),
+        Stmt::BoundStep(e) => collect_idt_calls_in_expr(module, *e, out),
         Stmt::Block(body) => collect_idt_calls_in_stmts(module, body, out),
         Stmt::If { cond, then_, else_ } => {
             collect_idt_calls_in_expr(module, *cond, out);
@@ -865,6 +903,8 @@ fn collect_branch_kinds_one(stmt: &Stmt, flow: &mut BTreeSet<u32>, potential: &m
                 potential.insert(target.branch.0);
             }
         },
+        // `bound_step` targets no branch, so it classifies none.
+        Stmt::BoundStep(_) => {}
         Stmt::Block(body) => collect_branch_kinds(body, flow, potential),
         Stmt::If { then_, else_, .. } => {
             collect_branch_kinds(then_, flow, potential);
@@ -923,6 +963,7 @@ fn lower_stmt(
             let mut resistive = Vec::new();
             let mut charge = Vec::new();
             let mut noise = Vec::new();
+            let mut ac_stim = Vec::new();
             for term in terms {
                 // A bare variable read that was last assigned a `ddt` shape substitutes to that
                 // shape here, so `real dqdt; dqdt = ddt(q); I <+ dqdt + …;` folds into the charge
@@ -935,6 +976,18 @@ fn lower_stmt(
                 // and checking it first keeps the charge path exactly as it was.
                 if let Some(nt) = noise_term_shape(module, shape_expr)? {
                     noise.push(nt);
+                    continue;
+                }
+                // Same treatment, same reason: the call's value is zero, so its arguments have
+                // to be captured here or they are lost. `sign` is carried through because an
+                // excitation adds linearly (see `AcStimTerm`).
+                if let Some((phase_mask, mag, phase)) = ac_stim_term_shape(module, shape_expr)? {
+                    ac_stim.push(AcStimTerm {
+                        sign: term.sign,
+                        phase_mask,
+                        mag,
+                        phase,
+                    });
                     continue;
                 }
                 match charge_term_shape(module, shape_expr, param_only)? {
@@ -960,6 +1013,7 @@ fn lower_stmt(
                 resistive,
                 charge,
                 noise,
+                ac_stim,
             }));
             Ok(())
         }
@@ -983,6 +1037,10 @@ fn lower_stmt(
                     });
                 }
             }
+            Ok(())
+        }
+        Stmt::BoundStep(expr) => {
+            out.push(LoweredStmt::BoundStep(*expr));
             Ok(())
         }
         Stmt::Block(body) => {
@@ -1291,6 +1349,53 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
     }
 }
 
+/// If `expr` is a bare `ac_stim(mask, mag, phase)` call, return its `(phase_mask, mag, phase)`;
+/// `Ok(None)` for anything else.
+///
+/// Recognizes only the **bare** call, like [`noise_term_shape`] and unlike
+/// [`charge_term_shape`]. Here the restriction is conservatism rather than a correctness trap —
+/// an excitation *is* linear, so `2*ac_stim(1,0)` would have a well-defined meaning — but
+/// `collect_terms` flattens only sums and negations, so a general scaling coefficient has
+/// nowhere to go without the same coefficient-flattening machinery `charge_term_shape` carries.
+/// An unrecognized shape is **rejected** by `crate::GeneratedModel::validate` (via
+/// [`contains_ac_stim_call`]) rather than silently evaluating to zero and vanishing.
+///
+/// `va-frontend` normalizes every call to exactly three arguments with the mask already folded
+/// to a constant, so an argument count or shape other than that means the IR was built by hand.
+fn ac_stim_term_shape(
+    module: &Module,
+    expr: ExprId,
+) -> Result<Option<(u32, ExprId, ExprId)>, CodegenError> {
+    match module.expr(expr) {
+        Expr::Call(Builtin::AcStim, args) if args.len() == 3 => match module.expr(args[0]) {
+            Expr::Const(mask) => Ok(Some((*mask as u32, args[1], args[2]))),
+            _ => Err(unsupported(
+                "ac_stim's analysis-name argument must fold to a constant phase bitmask",
+            )),
+        },
+        Expr::Call(Builtin::AcStim, _) => Err(unsupported(
+            "ac_stim expects exactly three arguments after elaboration \
+             (phase bitmask, magnitude, phase)",
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// Whether `expr` contains an `ac_stim` call anywhere in its tree — used to reject a stimulus
+/// buried where [`ac_stim_term_shape`] cannot pull it out, rather than silently contributing
+/// nothing. The exact counterpart of [`contains_noise_call`].
+pub(crate) fn contains_ac_stim_call(module: &Module, expr: ExprId) -> bool {
+    match module.expr(expr) {
+        Expr::Call(Builtin::AcStim, _) => true,
+        Expr::Call(_, args) => args.iter().any(|&a| contains_ac_stim_call(module, a)),
+        Expr::Unary(_, e) => contains_ac_stim_call(module, *e),
+        Expr::Binary(_, l, r) => {
+            contains_ac_stim_call(module, *l) || contains_ac_stim_call(module, *r)
+        }
+        _ => false,
+    }
+}
+
 /// Whether `expr` contains a noise call anywhere in its tree — used to reject a noise source
 /// buried where [`noise_term_shape`] cannot pull it out (e.g. `2*white_noise(p)` or
 /// `sin(white_noise(p))`), rather than silently contributing nothing.
@@ -1395,6 +1500,8 @@ fn invalidate_ddt_vars(ddt_vars: &mut DdtVars, stmts: &[Stmt]) {
 fn collect_assigns_one(stmt: &Stmt, out: &mut Vec<(u32, ExprId)>) {
     match stmt {
         Stmt::Assign { lhs, rhs } => out.push((lhs.0, *rhs)),
+        // `bound_step` assigns nothing, so it invalidates no `ddt`-shape binding.
+        Stmt::BoundStep(_) => {}
         Stmt::Block(body) => collect_assigns(body, out),
         Stmt::If { then_, else_, .. } => {
             collect_assigns(then_, out);

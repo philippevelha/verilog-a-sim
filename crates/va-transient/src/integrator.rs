@@ -45,7 +45,7 @@
 use crate::events::EventQueue;
 use crate::TransientError;
 use va_abi::stamps::DenseStamp;
-use va_abi::ModelInstance;
+use va_abi::{AnalysisCtx, ModelInstance};
 use va_core::convergence;
 use va_core::linsolve;
 
@@ -205,11 +205,17 @@ const GROWTH_FACTOR: f64 = 1.5;
 const GROWTH_ERR_THRESHOLD: f64 = 0.5;
 const SHRINK_FACTOR: f64 = 0.5;
 
-/// Assemble every instance's stamps at `x` into a fresh dense sink.
-fn assemble(instances: &[&dyn ModelInstance], x: &[f64], dim: usize) -> DenseStamp {
+/// Assemble every instance's stamps at `x`, at absolute time `t`, into a fresh dense sink.
+///
+/// `t` becomes the [`AnalysisCtx::time`] every instance reads as `$abstime`, and the context's
+/// kind is [`va_abi::AnalysisKind::Transient`] — which is what a compiled model's `analysis()`
+/// call sees. This is the parameter whose absence used to force [`ModelInstance`]'s callers to
+/// rebuild a time-varying source from scratch at every step.
+fn assemble(instances: &[&dyn ModelInstance], x: &[f64], t: f64, dim: usize) -> DenseStamp {
+    let ctx = AnalysisCtx::transient(t);
     let mut sink = DenseStamp::new(dim);
     for inst in instances {
-        inst.load(x, &mut sink);
+        inst.load(x, &ctx, &mut sink);
     }
     sink
 }
@@ -224,6 +230,7 @@ fn newton_step(
     instances: &[&dyn ModelInstance],
     dim: usize,
     x_prev: &[f64],
+    t: f64,
     companion: &Companion,
 ) -> Result<Vec<f64>, TransientError> {
     const MAX_ITERS: usize = 100;
@@ -236,7 +243,9 @@ fn newton_step(
     let mut x = x_prev.to_vec();
     let mut last_residual = f64::INFINITY;
     for _ in 0..MAX_ITERS {
-        let sink = assemble(instances, &x, dim);
+        // Every iteration re-evaluates at the same candidate landing time `t`: the context is a
+        // property of the timepoint being solved for, not of how many iterations it takes.
+        let sink = assemble(instances, &x, t, dim);
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
         for i in 0..dim {
@@ -328,10 +337,14 @@ pub fn run_with_events(
     }
 
     let mut x = x0;
-    let initial = assemble(instances, &x, dim);
+    let initial = assemble(instances, &x, cfg.tstart, dim);
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
     let mut q_prev = initial.charge;
     let mut r_prev = initial.residual;
+    // A `bound_step` request read at the last accepted point (the initial condition, to start
+    // with). Re-read after every accept, never from a rejected candidate — see
+    // `va_abi::StampSink::bound_step`.
+    let mut step_bound = initial.bound_step;
 
     let mut t = cfg.tstart;
     let mut h = cfg.tstep;
@@ -339,18 +352,29 @@ pub fn run_with_events(
 
     while t < cfg.tstop {
         loop {
-            let mut t_next = (t + h).min(cfg.tstop);
+            // The LTE controller owns `h`; a model's `bound_step` caps how far this particular
+            // step may land without shrinking `h` itself, so the controller can still grow back
+            // freely once the bound relaxes.
+            //
+            // Floored at `cfg.tstep_min`, which is what that field is for. A bound is a
+            // *request*, not an accuracy requirement, so an unsatisfiable one is clamped rather
+            // than raising `TimestepUnderflow` the way the LTE path does — but it cannot be
+            // honoured below the floor: `bound_step(1e-15)` over a millisecond window is 10¹²
+            // steps, i.e. a hang, and a model that asks for it has almost certainly written a
+            // unit error rather than a genuine requirement.
+            let trial = step_bound.map_or(h, |b| h.min(b).max(cfg.tstep_min));
+            let mut t_next = (t + trial).min(cfg.tstop);
             if let Some(bp) = events.next_after(t) {
                 t_next = t_next.min(bp);
             }
             let step_h = t_next - t;
 
             let primary = Companion::for_method(cfg.method, &q_prev, &r_prev, step_h, &is_dynamic);
-            let x_primary = newton_step(instances, dim, &x, &primary)?;
+            let x_primary = newton_step(instances, dim, &x, t_next, &primary)?;
 
             let reference_companion =
                 Companion::for_method(reference, &q_prev, &r_prev, step_h, &is_dynamic);
-            let x_reference = newton_step(instances, dim, &x, &reference_companion)?;
+            let x_reference = newton_step(instances, dim, &x, t_next, &reference_companion)?;
 
             let err_ratio =
                 lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol);
@@ -359,129 +383,10 @@ pub fn run_with_events(
                 let x_before = std::mem::replace(&mut x, x_primary);
                 let t_before = t;
 
-                let sink = assemble(instances, &x, dim);
+                let sink = assemble(instances, &x, t_next, dim);
                 q_prev = sink.charge;
                 r_prev = sink.residual;
-
-                t = t_next;
-                waveform.t.push(t);
-                waveform.x.push(x.clone());
-
-                for (watch_idx, watch) in events.watches().iter().enumerate() {
-                    let before = x_before[watch.unknown] - watch.threshold;
-                    let after = x[watch.unknown] - watch.threshold;
-                    if before != 0.0 && (before > 0.0) != (after > 0.0) {
-                        let frac = before / (before - after);
-                        waveform
-                            .crossings
-                            .push((watch_idx, t_before + frac * (t - t_before)));
-                    }
-                }
-
-                if err_ratio < GROWTH_ERR_THRESHOLD {
-                    h = (h * GROWTH_FACTOR).min(cfg.tstep);
-                }
-                break;
-            }
-
-            let shrunk = h * SHRINK_FACTOR;
-            if shrunk < cfg.tstep_min {
-                return Err(TransientError::TimestepUnderflow { t });
-            }
-            h = shrunk;
-        }
-    }
-
-    Ok(waveform)
-}
-
-/// Integrate with most devices fixed but one or more rebuilt fresh at every step *attempt*
-/// (including LTE-rejection retries) — for a circuit containing a time-varying independent
-/// source. `time_varying` is called with the candidate landing time `t_next` and must return
-/// the device(s) valid at that instant (e.g. a `VSource` reconstructed with a freshly computed
-/// value); `fixed` is everything else, unchanged for the whole run.
-///
-/// This exists because [`va_abi::ModelInstance::load`] deliberately has no time parameter
-/// (Interface β's "no time, no frequency on the bridge" invariant —
-/// `docs/bridges/interface-beta-abi.md` §7): a time-varying source's only legitimate entry
-/// point is a fresh, differently-parameterized instance per step, not a stateful `load()`,
-/// which would violate `ModelInstance`'s purity invariant (the same `x` must always produce
-/// the same stamps). Rebuilding a plain, assertion-free constructor like `VSource::new` can't
-/// fail, so `time_varying` is infallible by construction, not because errors are swallowed —
-/// if a future time-varying device *can* fail to construct, this signature would need to
-/// change (a `va-transient`-internal decision, not an Interface β one).
-///
-/// Otherwise identical to [`run_with_events`] — same LTE control, same breakpoint/crossing
-/// handling, same errors. `q_prev`/`r_prev`/`is_dynamic` are computed once from the first
-/// build (`time_varying(cfg.tstart)` combined with `fixed`), on the assumption that which
-/// unknowns are dynamic vs. algebraic doesn't change as a time-varying source's value changes
-/// — true for every device this project can build today; only a device's structure, never its
-/// parameter value, determines that.
-pub fn run_dynamic(
-    dim: usize,
-    x0: Vec<f64>,
-    cfg: TranConfig,
-    events: &EventQueue,
-    fixed: &[&dyn ModelInstance],
-    mut time_varying: impl FnMut(f64) -> Vec<Box<dyn ModelInstance>>,
-) -> Result<Waveform, TransientError> {
-    if cfg.method == Method::Gear {
-        return Err(TransientError::UnsupportedMethod { method: cfg.method });
-    }
-
-    let mut waveform = Waveform {
-        t: vec![cfg.tstart],
-        x: vec![x0.clone()],
-        crossings: Vec::new(),
-    };
-    if dim == 0 {
-        return Ok(waveform);
-    }
-
-    let mut x = x0;
-    let tv0 = time_varying(cfg.tstart);
-    let mut refs0: Vec<&dyn ModelInstance> = fixed.to_vec();
-    refs0.extend(tv0.iter().map(|b| b.as_ref()));
-    let initial = assemble(&refs0, &x, dim);
-    let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
-    let mut q_prev = initial.charge;
-    let mut r_prev = initial.residual;
-    drop(refs0);
-    drop(tv0);
-
-    let mut t = cfg.tstart;
-    let mut h = cfg.tstep;
-    let reference = reference_method(cfg.method);
-
-    while t < cfg.tstop {
-        loop {
-            let mut t_next = (t + h).min(cfg.tstop);
-            if let Some(bp) = events.next_after(t) {
-                t_next = t_next.min(bp);
-            }
-            let step_h = t_next - t;
-
-            let tv = time_varying(t_next);
-            let mut refs: Vec<&dyn ModelInstance> = fixed.to_vec();
-            refs.extend(tv.iter().map(|b| b.as_ref()));
-
-            let primary = Companion::for_method(cfg.method, &q_prev, &r_prev, step_h, &is_dynamic);
-            let x_primary = newton_step(&refs, dim, &x, &primary)?;
-
-            let reference_companion =
-                Companion::for_method(reference, &q_prev, &r_prev, step_h, &is_dynamic);
-            let x_reference = newton_step(&refs, dim, &x, &reference_companion)?;
-
-            let err_ratio =
-                lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol);
-
-            if err_ratio <= 1.0 {
-                let x_before = std::mem::replace(&mut x, x_primary);
-                let t_before = t;
-
-                let sink = assemble(&refs, &x, dim);
-                q_prev = sink.charge;
-                r_prev = sink.residual;
+                step_bound = sink.bound_step;
 
                 t = t_next;
                 waveform.t.push(t);
@@ -810,37 +715,62 @@ mod tests {
         assert_eq!(wf_a.x, wf_b.x);
     }
 
+    /// A sinusoidal voltage source that reads its own value off the analysis context, which is
+    /// the whole point of that context existing: before it, the only way to drive a circuit
+    /// with a time-varying source was `run_dynamic`, a near-duplicate of [`run_with_events`]
+    /// that re-boxed a freshly-parameterized [`va_abi::reference::VSource`] at every step
+    /// attempt. This is the replacement, and it is an ordinary stateless `ModelInstance`:
+    /// `load` is still a pure function of its arguments, `ctx.time` simply became one of them.
+    struct SinSource {
+        terminals: [usize; 3],
+        amplitude: f64,
+        freq: f64,
+    }
+
+    impl SinSource {
+        fn value_at(&self, t: f64) -> f64 {
+            self.amplitude * (2.0 * std::f64::consts::PI * self.freq * t).sin()
+        }
+    }
+
+    impl ModelInstance for SinSource {
+        fn unknowns(&self) -> &[usize] {
+            &self.terminals
+        }
+
+        fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+            if i == 2 {
+                va_abi::UnknownKind::Branch
+            } else {
+                va_abi::UnknownKind::Node
+            }
+        }
+
+        fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+            let [p, n, b] = self.terminals;
+            va_abi::reference::VSource::new(p, n, b, self.value_at(ctx.time)).load(x, ctx, sink)
+        }
+    }
+
     #[test]
-    fn run_dynamic_tracks_a_sinusoidal_source_through_a_resistive_divider() {
+    fn a_context_reading_source_tracks_its_waveform_through_a_resistive_divider() {
         // No capacitor anywhere: every row is algebraic, so V(mid) must exactly track
         // v_source(t)/2 at every accepted point regardless of method or step history --
-        // isolating the time-varying-rebuild mechanism from LTE/dynamics entirely.
-        let amplitude = 10.0;
+        // isolating the time-forwarding mechanism from LTE/dynamics entirely.
         let freq = 1000.0; // 1 kHz, period = 1 ms
         let period = 1.0 / freq;
-        let source_at = |t: f64| amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
+        let src = SinSource {
+            terminals: [0, va_abi::reference::GROUND, 2],
+            amplitude: 10.0,
+            freq,
+        };
 
         let r1 = va_abi::reference::Resistor::new(0, 1, 1000.0);
         let r2 = va_abi::reference::Resistor::new(1, va_abi::reference::GROUND, 1000.0);
-        let fixed: [&dyn ModelInstance; 2] = [&r1, &r2];
+        let insts: [&dyn ModelInstance; 3] = [&src, &r1, &r2];
 
         let cfg = default_cfg(2.0 * period, period / 20.0, Method::BackwardEuler);
-        let wf = run_dynamic(
-            3,
-            vec![0.0, 0.0, 0.0],
-            cfg,
-            &crate::events::EventQueue::new(),
-            &fixed,
-            |t| {
-                vec![Box::new(va_abi::reference::VSource::new(
-                    0,
-                    va_abi::reference::GROUND,
-                    2,
-                    source_at(t),
-                )) as Box<dyn ModelInstance>]
-            },
-        )
-        .expect("integrates");
+        let wf = run(&insts, 3, vec![0.0, 0.0, 0.0], cfg).expect("integrates");
 
         assert!(
             wf.t.len() > 10,
@@ -848,7 +778,7 @@ mod tests {
             wf.t.len()
         );
         for (&t, x) in wf.t.iter().zip(&wf.x) {
-            let expected = source_at(t);
+            let expected = src.value_at(t);
             assert!(
                 (x[0] - expected).abs() < 1e-9,
                 "node0 at t={t}: {} vs source {expected}",
@@ -861,6 +791,95 @@ mod tests {
                 expected / 2.0
             );
         }
+    }
+
+    /// A device asking for `bound_step` caps how far each step may land, without the LTE
+    /// controller having to reject anything. Checked as a property of the accepted grid — no
+    /// gap may exceed the bound — rather than by counting steps, which would just restate the
+    /// arithmetic.
+    #[test]
+    fn a_bound_step_request_caps_every_accepted_step() {
+        /// A plain 1 kΩ resistor that additionally requests a 1 µs ceiling every time it is
+        /// loaded.
+        struct BoundedResistor {
+            terminals: [usize; 2],
+            bound: f64,
+        }
+
+        impl ModelInstance for BoundedResistor {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+                va_abi::reference::Resistor::new(self.terminals[0], self.terminals[1], 1000.0)
+                    .load(x, ctx, sink);
+                sink.bound_step(self.bound);
+            }
+        }
+
+        let bound = 1e-6;
+        let src = va_abi::reference::VSource::new(0, va_abi::reference::GROUND, 1, 1.0);
+        let r = BoundedResistor {
+            terminals: [0, va_abi::reference::GROUND],
+            bound,
+        };
+        let insts: [&dyn ModelInstance; 2] = [&src, &r];
+
+        // `tstep` is 100x the bound, so without the bound being honored the very first step
+        // would land at 100 µs and the whole run would be two points.
+        let cfg = default_cfg(1e-4, 1e-4, Method::BackwardEuler);
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates");
+
+        for pair in wf.t.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap <= bound * (1.0 + 1e-9),
+                "step {gap} exceeds the requested bound {bound}"
+            );
+        }
+        // And it really did take the many small steps the bound implies, rather than stopping.
+        assert!(wf.t.len() > 90, "only {} points", wf.t.len());
+        assert_eq!(wf.t.last().copied(), Some(1e-4));
+    }
+
+    /// A bound below `tstep_min` is clamped to it rather than honoured literally. Honouring
+    /// `bound_step(1e-15)` over a millisecond window means 10¹² steps — a hang, not an answer —
+    /// and `tstep_min` is exactly the floor the caller configured to prevent that.
+    #[test]
+    fn a_bound_step_below_the_configured_floor_is_clamped_not_honoured() {
+        struct AbsurdlyBounded {
+            terminals: [usize; 2],
+        }
+
+        impl ModelInstance for AbsurdlyBounded {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+                va_abi::reference::Resistor::new(self.terminals[0], self.terminals[1], 1000.0)
+                    .load(x, ctx, sink);
+                sink.bound_step(1e-18);
+            }
+        }
+
+        let src = va_abi::reference::VSource::new(0, va_abi::reference::GROUND, 1, 1.0);
+        let r = AbsurdlyBounded {
+            terminals: [0, va_abi::reference::GROUND],
+        };
+        let insts: [&dyn ModelInstance; 2] = [&src, &r];
+
+        // tstop/tstep_min = 100 steps at the floor; the raw 1e-18 request would be 1e14.
+        let mut cfg = default_cfg(1e-4, 1e-4, Method::BackwardEuler);
+        cfg.tstep_min = 1e-6;
+
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates rather than hanging");
+        assert_eq!(wf.t.last().copied(), Some(1e-4));
+        // Clamped to the floor: ~100 steps, not 10¹⁴ and not a handful.
+        assert!(
+            (95..=110).contains(&wf.t.len()),
+            "expected ~100 floor-sized steps, got {}",
+            wf.t.len()
+        );
     }
 
     #[test]

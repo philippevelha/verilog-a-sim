@@ -21,14 +21,25 @@
 //!   channel rather than something derived from the Jacobian because a device's noise is physics
 //!   the matrices no longer carry — see [`noise`]'s own module doc for why a resistor and a diode
 //!   with equal small-signal conductance are not equally noisy.
+//!
+//! # The analysis context
+//!
+//! Both entry points also receive an [`AnalysisCtx`] (§6 change, 2026-08-05) describing the
+//! evaluation being asked for: which analysis is running, the absolute time, the temperature.
+//! It flows the opposite way to the three channels — those carry what only the *instance*
+//! knows upward, this carries what only the *solver* knows downward. Without it a compiled
+//! model could not implement `analysis()` or `$abstime` at all, and `va-frontend` had to guess
+//! their values at elaboration. See [`analysis`]'s module doc for what it deliberately omits.
 
 #![forbid(unsafe_code)]
 
+pub mod analysis;
 pub mod instance;
 pub mod noise;
 pub mod reference;
 pub mod stamps;
 
+pub use analysis::{AnalysisCtx, AnalysisKind, ANALYSIS_DC};
 pub use instance::{ModelInstance, UnknownKind};
 pub use noise::NoiseSink;
 pub use stamps::StampSink;
@@ -38,7 +49,7 @@ mod tests {
     use crate::noise::{CollectedNoise, TEMP_NOMINAL};
     use crate::reference::{diode::VT_NOMINAL, Bjt, Capacitor, Diode, Resistor, VSource, GROUND};
     use crate::stamps::DenseStamp;
-    use crate::ModelInstance;
+    use crate::{ModelInstance, ANALYSIS_DC};
 
     /// Hand-checked resistor thermal noise: `4kT/R` for a 1 kΩ resistor at 300.15 K is
     /// `1.6576e-23` A²/Hz — the same value QSPICE's own `onoise_r1` column implies for
@@ -47,7 +58,7 @@ mod tests {
     fn resistor_noise_is_thermal_and_bias_independent() {
         let r = Resistor::new(0, GROUND, 1000.0);
         let mut sink = CollectedNoise::default();
-        r.noise(&[2.0], TEMP_NOMINAL, &mut sink);
+        r.noise(&[2.0], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.sources.len(), 1);
         let (p, n, source) = &sink.sources[0];
         assert_eq!((*p, *n), (0, GROUND));
@@ -58,7 +69,7 @@ mod tests {
         // Biasing it differently must not change the answer — thermal noise depends on the
         // conductance and temperature only, never on the current through it.
         let mut other = CollectedNoise::default();
-        r.noise(&[100.0], TEMP_NOMINAL, &mut other);
+        r.noise(&[100.0], &ANALYSIS_DC, &mut other);
         assert_eq!(other.sources[0].2.psd_at(1.0), psd);
     }
 
@@ -72,7 +83,7 @@ mod tests {
         let d = Diode::new(0, GROUND, 1e-14, 1.0, VT_NOMINAL);
         let vd = 0.6;
         let mut sink = CollectedNoise::default();
-        d.noise(&[vd], TEMP_NOMINAL, &mut sink);
+        d.noise(&[vd], &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.sources.len(), 1);
         let psd = sink.sources[0].2.psd_at(1.0);
 
@@ -96,7 +107,7 @@ mod tests {
         let q = Bjt::new(0, 1, GROUND, 1e-15, 100.0, 1.0, VT_NOMINAL);
         let x = [0.7, 3.0];
         let mut sink = CollectedNoise::default();
-        q.noise(&x, TEMP_NOMINAL, &mut sink);
+        q.noise(&x, &ANALYSIS_DC, &mut sink);
         assert_eq!(sink.sources.len(), 2);
 
         let (vbe, vbc) = (0.7, 0.7 - 3.0);
@@ -122,8 +133,8 @@ mod tests {
     #[test]
     fn ideal_storage_and_sources_emit_no_noise() {
         let mut sink = CollectedNoise::default();
-        Capacitor::new(0, GROUND, 1e-6).noise(&[1.0], TEMP_NOMINAL, &mut sink);
-        VSource::new(0, GROUND, 1, 5.0).noise(&[1.0, 0.0], TEMP_NOMINAL, &mut sink);
+        Capacitor::new(0, GROUND, 1e-6).noise(&[1.0], &ANALYSIS_DC, &mut sink);
+        VSource::new(0, GROUND, 1, 5.0).noise(&[1.0, 0.0], &ANALYSIS_DC, &mut sink);
         assert!(sink.sources.is_empty(), "{:?}", sink.sources);
     }
 
@@ -133,7 +144,7 @@ mod tests {
     fn resistor_stamp_by_hand() {
         let r = Resistor::new(0, GROUND, 1000.0);
         let mut sink = DenseStamp::new(1);
-        r.load(&[2.0], &mut sink);
+        r.load(&[2.0], &ANALYSIS_DC, &mut sink);
 
         // I = V/R = 2 / 1000 = 2 mA into node 0.
         assert!((sink.residual[0] - 2e-3).abs() < 1e-15);

@@ -1,6 +1,7 @@
 //! Linear two-terminal capacitor reference model.
 
 use super::{stamp_charge, voltage_across};
+use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::stamps::StampSink;
 
@@ -34,7 +35,7 @@ impl ModelInstance for Capacitor {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
         let [p, n] = self.terminals;
         let v = voltage_across(x, p, n);
         let q = self.c * v;

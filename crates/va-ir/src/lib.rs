@@ -58,6 +58,51 @@ pub struct VarId(pub u32);
 pub struct FuncId(pub u32);
 
 // ---------------------------------------------------------------------------------------
+// Analysis phase names (the encoding behind `Builtin::Analysis` / `Builtin::AcStim`).
+// ---------------------------------------------------------------------------------------
+
+/// Every analysis phase name Verilog-A's `analysis()` accepts (LRM §4.5.1), in the bit order
+/// [`phase_bit`] assigns and [`Builtin::Analysis`]'s folded argument uses.
+///
+/// This list is the **canonical encoding** of an analysis-phase set, and it lives here rather
+/// than in `va-abi` for a dependency reason: `va-frontend` produces the bitmask and may depend
+/// only on this crate (§3), while `va-abi` answers the runtime question "is phase *named this*
+/// running" from a `&str` and never needs to know which bit carries it. `va-codegen`, the one
+/// crate that sees both, joins the two ends. Keeping the bit order in exactly one place is what
+/// stops the producer and the consumer from disagreeing about what bit 3 means.
+///
+/// Order is append-only: adding a name is harmless, reordering silently reinterprets every
+/// mask an older elaboration produced.
+pub const ANALYSIS_PHASES: [&str; 7] = ["static", "ic", "nodeset", "dc", "tran", "ac", "noise"];
+
+/// The single-bit mask for phase name `name`, or `None` if it is not an LRM phase name.
+///
+/// `None` is a diagnosable error at elaboration, not a mask of zero: a typo'd phase name that
+/// folded to "matches nothing" would disable a branch forever with no message.
+pub fn phase_bit(name: &str) -> Option<u32> {
+    ANALYSIS_PHASES
+        .iter()
+        .position(|p| *p == name)
+        .map(|bit| 1u32 << bit)
+}
+
+/// The set of phases named by `names`, as a bitmask over [`ANALYSIS_PHASES`].
+///
+/// `analysis("a", "b")` is an *any-of* query (LRM §4.5.1 — true if the current analysis matches
+/// **any** argument), so the mask ORs and its consumer must too.
+///
+/// # Errors
+///
+/// Returns the first unrecognized name, for the caller to report against a source location.
+pub fn phase_mask<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<u32, &'a str> {
+    let mut mask = 0;
+    for name in names {
+        mask |= phase_bit(name).ok_or(name)?;
+    }
+    Ok(mask)
+}
+
+// ---------------------------------------------------------------------------------------
 // Module — the top-level elaborated unit.
 // ---------------------------------------------------------------------------------------
 
@@ -357,6 +402,38 @@ pub enum Builtin {
     Vt,
     /// `$temperature` — ambient temperature.
     Temperature,
+    /// `$abstime` — absolute simulation time in seconds (LRM §9.17.1).
+    ///
+    /// Zero arguments. Survives elaboration rather than folding to `0.0` (Interface α change,
+    /// 2026-08-06): the value is a property of the *evaluation*, which only the simulator knows,
+    /// so it is read from the analysis context at load time (§ `va_abi::AnalysisCtx::time`).
+    Abstime,
+    /// `analysis("phase", …)` — whether one of the named analyses is currently running
+    /// (LRM §4.5.1).
+    ///
+    /// Carries **exactly one argument**: a [`Expr::Const`] bitmask over [`ANALYSIS_PHASES`],
+    /// folded from the call's string arguments at elaboration by [`phase_mask`]. The LRM
+    /// requires those arguments to be string literals, so the string-shaped work is done once,
+    /// at the one place that can still name a source file when a phase name is unrecognized.
+    ///
+    /// Folding to a mask rather than introducing a string-carrying [`Expr`] variant is the same
+    /// trade [`Builtin::NoiseTable`] makes with its flattened table: every existing arena walk,
+    /// clone and validity check keeps working unchanged.
+    Analysis,
+    /// `ac_stim([analysis_name [, mag [, phase]]])` — a small-signal stimulus that exists only
+    /// during the named analysis (LRM §4.5.2).
+    ///
+    /// Carries **exactly three arguments**, normalized at elaboration so every consumer reads
+    /// the same shape regardless of how many the source wrote: a [`Expr::Const`] phase bitmask
+    /// (as [`Builtin::Analysis`], defaulting to `"ac"`), then `mag` (default `1.0`) and `phase`
+    /// in radians (default `0.0`).
+    ///
+    /// Its **value is always zero** — in AC as much as in DC. That is not an approximation: an
+    /// `ac_stim` is a complex excitation on the right-hand side of `(G + jωC)·X = B`, not a term
+    /// in `G`, and `va-codegen` splits it out of the containing contribution into
+    /// `va_abi::StampSink`'s own excitation channel exactly as it splits `white_noise` out into
+    /// the noise channel. Leaving a nonzero value here would double-count it into `G`.
+    AcStim,
     /// `white_noise(pwr)` — a frequency-flat noise source of power spectral density `pwr`,
     /// in the units of the contribution it appears in (A²/Hz in a flow contribution).
     ///
@@ -439,6 +516,20 @@ pub enum Stmt {
         arms: Vec<CaseArm>,
         default: Vec<Stmt>,
     },
+    /// `bound_step(max_step);` — an upper bound (in seconds) on the *next* transient timestep
+    /// (LRM §9.17.2).
+    ///
+    /// A statement rather than an expression because that is how the LRM writes it and how
+    /// `va-frontend` parses it: it produces no value, it asks the simulator for something. The
+    /// request travels back out through `va_abi::StampSink`'s own bound-step channel during
+    /// `load`, which is why it is a statement in the analog block and not a property of the
+    /// module — it may sit inside an `if`, so whether it applies at all depends on the operating
+    /// point (Interface α change, 2026-08-06).
+    ///
+    /// It is a *hint*, and hints have no effect outside transient: every other analysis
+    /// evaluates the argument for its side effects and discards the bound, since there is no
+    /// timestep to bound.
+    BoundStep(ExprId),
 }
 
 /// One arm of a [`Stmt::Case`]: a set of label expressions and the body they select.
@@ -549,5 +640,30 @@ mod tests {
         assert_eq!(m.functions.len(), 1);
         assert!(matches!(m.expr(call), Expr::CallUser(FuncId(0), _)));
         assert!(matches!(m.analog[0], Stmt::Case { .. }));
+    }
+
+    /// The phase encoding is a wire format shared by `va-frontend` (producer) and `va-codegen`
+    /// (consumer). Every name must claim its own bit, and an unknown name must be reportable
+    /// rather than silently masking to nothing.
+    #[test]
+    fn every_phase_name_claims_a_distinct_bit() {
+        let mut seen = 0u32;
+        for name in ANALYSIS_PHASES {
+            let bit = phase_bit(name).expect("a listed name resolves");
+            assert_eq!(bit & seen, 0, "`{name}` reuses a bit");
+            seen |= bit;
+        }
+        assert_eq!(seen.count_ones(), ANALYSIS_PHASES.len() as u32);
+
+        assert_eq!(phase_bit("transient"), None);
+        assert_eq!(phase_mask(["dc", "tran"]), Ok(0b011000));
+        // An any-of query is an OR, so the mask of two names is the union of their bits.
+        assert_eq!(
+            phase_mask(["dc", "tran"]),
+            Ok(phase_bit("dc").unwrap() | phase_bit("tran").unwrap())
+        );
+        // The offender comes back out by name, so elaboration can point at it.
+        assert_eq!(phase_mask(["dc", "trans"]), Err("trans"));
+        assert_eq!(phase_mask([]), Ok(0));
     }
 }

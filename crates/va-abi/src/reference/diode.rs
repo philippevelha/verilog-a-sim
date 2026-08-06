@@ -1,6 +1,7 @@
 //! Two-terminal Shockley diode reference model.
 
 use super::{stamp_conductance, voltage_across};
+use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::noise::{shot_current_psd, NoiseSink};
 use crate::stamps::StampSink;
@@ -55,7 +56,7 @@ impl ModelInstance for Diode {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
         let [p, n] = self.terminals;
         let vd = voltage_across(x, p, n);
         let i = self.current(vd);
@@ -71,8 +72,8 @@ impl ModelInstance for Diode {
     /// No thermal noise from a series resistance: this model has none (§ its own limitations).
     /// QSPICE reports that as a separate `onoise_<dev>.rs` column, identically zero for a `.model
     /// D` card with no `RS` — which is exactly what this model translates to.
-    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
-        let _ = temp;
+    fn noise(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn NoiseSink) {
+        let _ = ctx;
         let [p, n] = self.terminals;
         let vd = voltage_across(x, p, n);
         sink.white_current(p, n, shot_current_psd(self.current(vd)));

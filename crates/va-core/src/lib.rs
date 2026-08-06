@@ -65,8 +65,13 @@ pub(crate) mod testutil {
                 .map(|&(_, abstol)| abstol)
                 .or_else(|| self.inner.unknown_abstol(i))
         }
-        fn load(&self, x: &[f64], sink: &mut dyn va_abi::stamps::StampSink) {
-            self.inner.load(x, sink)
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &va_abi::AnalysisCtx,
+            sink: &mut dyn va_abi::stamps::StampSink,
+        ) {
+            self.inner.load(x, ctx, sink)
         }
     }
 }

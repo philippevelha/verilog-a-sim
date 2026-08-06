@@ -120,7 +120,10 @@ fn solve_from(
 
     let mut last_residual = f64::INFINITY;
     for _ in 0..cfg.max_iters {
-        let mut sys = mna::assemble(instances, &x, dim);
+        // This crate solves DC operating points only (`crate::dc`), so the context is fixed
+        // here rather than plumbed in from the caller: an AC or noise run linearizes about a
+        // point this same DC solve produced, and asks its own analysis's question later.
+        let mut sys = mna::assemble(instances, &x, &va_abi::ANALYSIS_DC, dim);
         sys.shunt_gmin(&x, gmin, kinds);
         let residual_norm = inf_norm(&sys.residual);
 

@@ -14,7 +14,7 @@
 //! through the chain rule.
 
 use crate::CodegenError;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use va_ir::{BinOp, Builtin, Expr, ExprId, Function, Module, Stmt, UnOp, VarId};
 
@@ -279,7 +279,26 @@ pub struct Ctx<'a> {
     /// Thermal voltage for `$vt`.
     pub vt: f64,
     /// Ambient temperature for `$temperature`.
+    ///
+    /// Distinct from `analysis.temp`, deliberately and for now: this is the temperature the
+    /// model was *compiled* at (`crate::GeneratedModel::temp`), and it is what `$temperature`
+    /// and `$vt` read, exactly as before the analysis context existed. Sourcing them from the
+    /// simulator's own temperature instead is a real improvement and a separate change — it
+    /// would move every compiled model's answer the moment a caller passes a non-nominal
+    /// temperature, which is not something to fold silently into an unrelated one.
     pub temp: f64,
+    /// What the simulator says about the evaluation being performed — the analysis kind and
+    /// the absolute time, read by `$abstime`, `analysis()` and `ac_stim`.
+    pub analysis: va_abi::AnalysisCtx,
+    /// The tightest `bound_step(...)` request the statement walk has evaluated this
+    /// `load()`/`validate()` call, or `None` if none ran.
+    ///
+    /// Accumulated here rather than emitted straight into the [`va_abi::StampSink`] for the
+    /// same reason `flow_current_totals` is: `crate::GeneratedModel::walk` is shared with the
+    /// noise channel, which has no stamp sink, so its callback cannot own one. The requests
+    /// land here during the walk and `crate::GeneratedModel::load` drains them afterwards.
+    /// `Cell` rather than `RefCell` — an `Option<f64>` is `Copy`, so no borrow is needed.
+    pub bound_step: Cell<Option<f64>>,
     /// Local-variable bindings accumulated by sequential `Stmt::Assign` execution (the
     /// statement walk in `crate::GeneratedModel::load`/`validate`), keyed by `VarId`.
     /// Interior-mutable so it can be populated through a shared `&Ctx`: every recursive `eval`
@@ -336,6 +355,19 @@ impl Ctx<'_> {
             .insert(local_slot)
     }
 
+    /// Record a `bound_step(dt)` request, keeping the tightest seen so far.
+    ///
+    /// Non-positive and non-finite values are dropped here rather than passed on: the LRM gives
+    /// them no meaning, and a zero bound reaching the timestep controller would wedge it against
+    /// its own floor (`va_abi::StampSink::bound_step` makes the same check, independently —
+    /// this one keeps a bad request from displacing a good one recorded earlier).
+    pub fn request_bound_step(&self, dt: f64) {
+        if dt.is_finite() && dt > 0.0 {
+            self.bound_step
+                .set(Some(self.bound_step.get().map_or(dt, |cur| cur.min(dt))));
+        }
+    }
+
     /// Add `value` into the running resistive total for `branch` (by `BranchId.0`) — a branch
     /// may receive more than one flow contribution (`crate::lower::FlowCurrentAccumulator`'s
     /// `diode_basic.va` example has two), each folded in as it runs.
@@ -382,6 +414,25 @@ impl Ctx<'_> {
             .cloned()
             .ok_or_else(|| unsupported(&format!("variable #{} read before assignment", id.0)))
     }
+}
+
+/// Whether the analysis `analysis` describes is named by `mask`, a bitmask over
+/// [`va_ir::ANALYSIS_PHASES`].
+///
+/// **This function is the bridge between the two frozen interfaces**, and `va-codegen` is the
+/// only crate that can hold it: Interface α owns the mask encoding (`va-frontend` folds
+/// `analysis()`'s string arguments into one at elaboration) and Interface β owns the runtime
+/// answer (`va_abi::AnalysisKind::matches_phase`), and the two are leaf crates that cannot see
+/// each other. Keeping the join in exactly one place is what stops the bit order from being
+/// re-derived — and eventually mis-derived — somewhere else.
+///
+/// `analysis(...)` is an *any-of* query (LRM §4.5.1), so any single matching bit is enough; an
+/// empty mask matches nothing.
+pub fn phase_mask_active(analysis: &va_abi::AnalysisCtx, mask: u32) -> bool {
+    va_ir::ANALYSIS_PHASES
+        .iter()
+        .enumerate()
+        .any(|(bit, phase)| mask & (1 << bit) != 0 && analysis.kind.matches_phase(phase))
 }
 
 /// Evaluate `expr` under forward-mode AD in context `ctx`. A [`Expr::Var`] reads whatever
@@ -589,6 +640,41 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
             None => Dual::constant(ctx.vt, count),
         },
         Builtin::Temperature => Dual::constant(ctx.temp, count),
+        // The three analysis-context builtins. All are constants with respect to `x` — none is
+        // a function of the solution vector — so all carry a zero gradient, and `va-codegen`'s
+        // finite-difference tests confirm that rather than assuming it.
+        //
+        // `$abstime` is the absolute simulation time, `0.0` outside transient (the LRM-correct
+        // answer for a static solve, not a placeholder).
+        Builtin::Abstime => Dual::constant(ctx.analysis.time, count),
+        // `analysis(...)`'s string arguments were folded to a bitmask over
+        // `va_ir::ANALYSIS_PHASES` at elaboration; this is where that mask meets the analysis
+        // actually running. An any-of query, so any set bit naming the current analysis wins.
+        Builtin::Analysis => {
+            let mask = match args.first().map(|&a| ctx.module.expr(a)) {
+                Some(Expr::Const(m)) => *m as u32,
+                _ => {
+                    return Err(unsupported(
+                        "analysis() expects a single constant phase bitmask argument \
+                         (va-frontend folds its string arguments to one)",
+                    ))
+                }
+            };
+            Dual::constant(
+                if phase_mask_active(&ctx.analysis, mask) {
+                    1.0
+                } else {
+                    0.0
+                },
+                count,
+            )
+        }
+        // `ac_stim`'s *value* is zero in every analysis including AC — it is a right-hand-side
+        // excitation, not a term in `G`. `crate::lower` splits a recognized one out of its
+        // contribution into `va_abi::StampSink`'s excitation channel; reaching this arm at all
+        // means the call sits somewhere that split could not pull it out of, and
+        // `crate::GeneratedModel::validate` rejects that rather than letting it vanish.
+        Builtin::AcStim => Dual::constant(0.0, count),
         // `idt` never reaches here — `eval`'s own `Expr::Call` match intercepts it before this
         // function is even called (see `eval`'s `Builtin::Idt` arm).
         Builtin::Ddt | Builtin::Idt => {
@@ -693,6 +779,15 @@ fn exec_stmt(ctx: &Ctx, stmt: &Stmt) -> Result<(), CodegenError> {
             Ok(())
         }
         Stmt::Block(body) => exec_stmts(ctx, body),
+        // `bound_step` inside an analog function body is rejected rather than ignored. An
+        // analog function is pure — it computes a value from its arguments — and this statement
+        // is a request to the simulator, which is a side effect a function has no channel for:
+        // `call_function` returns a `Dual`, not a stamp sink. Accepting it silently would
+        // discard a timestep bound the model author believes is in force.
+        Stmt::BoundStep(_) => Err(unsupported(
+            "bound_step is not allowed inside an analog function body (a function is pure; \
+             write it in the analog block instead)",
+        )),
         Stmt::If { cond, then_, else_ } => {
             if ctx.validating {
                 eval(ctx, *cond)?;
@@ -891,6 +986,8 @@ mod tests {
             terminals: &[],
             vt: crate::VT,
             temp: crate::TEMP,
+            analysis: va_abi::ANALYSIS_DC,
+            bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
@@ -942,6 +1039,8 @@ mod tests {
             terminals: &terminals,
             vt: vt_ref,
             temp: temp_ref,
+            analysis: va_abi::ANALYSIS_DC,
+            bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
@@ -1023,6 +1122,8 @@ mod tests {
             terminals: &terminals,
             vt: 0.0,
             temp: 0.0,
+            analysis: va_abi::ANALYSIS_DC,
+            bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
@@ -1099,6 +1200,8 @@ mod tests {
             terminals: &terminals,
             vt,
             temp: crate::TEMP,
+            analysis: va_abi::ANALYSIS_DC,
+            bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
@@ -1134,6 +1237,8 @@ mod tests {
             terminals: &[],
             vt: 0.0,
             temp: 0.0,
+            analysis: va_abi::ANALYSIS_DC,
+            bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
@@ -1156,6 +1261,8 @@ mod tests {
             terminals: &[],
             vt: 0.0,
             temp: 0.0,
+            analysis: va_abi::ANALYSIS_DC,
+            bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),

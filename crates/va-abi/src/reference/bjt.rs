@@ -1,5 +1,6 @@
 //! Three-terminal NPN bipolar junction transistor reference model (simplified Ebers-Moll).
 
+use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::noise::{shot_current_psd, NoiseSink};
 use crate::stamps::StampSink;
@@ -61,7 +62,7 @@ impl ModelInstance for Bjt {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink) {
+    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
         let [b, c, e] = self.terminals;
         let vb = x.get(b).copied().unwrap_or(0.0);
         let vc = x.get(c).copied().unwrap_or(0.0);
@@ -111,8 +112,8 @@ impl ModelInstance for Bjt {
     /// resistor's thermal and the diode's shot noise against QSPICE; this override follows the
     /// same textbook `2qI` form and is unit-tested against it directly, but no committed golden
     /// checks a noisy BJT circuit yet.
-    fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {
-        let _ = temp;
+    fn noise(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn NoiseSink) {
+        let _ = ctx;
         let [b, c, e] = self.terminals;
         let vb = x.get(b).copied().unwrap_or(0.0);
         let vc = x.get(c).copied().unwrap_or(0.0);
@@ -180,9 +181,10 @@ mod tests {
         // terms would be astronomically large and floating-point cancellation alone (not a
         // derivation error) could dwarf this test's tolerance.
         use crate::stamps::DenseStamp;
+        use crate::ANALYSIS_DC;
         let q = fixture();
         let mut sink = DenseStamp::new(3);
-        q.load(&[0.65, 1.35, 0.0], &mut sink);
+        q.load(&[0.65, 1.35, 0.0], &ANALYSIS_DC, &mut sink);
         for col in 0..3 {
             let sum: f64 = (0..3).map(|row| sink.jac(row, col)).sum();
             assert!(sum.abs() < 1e-12, "column {col} sums to {sum}, expected ~0");

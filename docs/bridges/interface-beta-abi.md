@@ -41,7 +41,16 @@ pub trait ModelInstance {
     fn unknown_kind(&self, i: usize) -> UnknownKind {      // default method, §6 2026-07-04
         UnknownKind::Node
     }
-    fn load(&self, x: &[f64], sink: &mut dyn StampSink);  // evaluate at x → stamps
+    // §6 2026-08-06: `ctx` says which analysis is running, at what time and temperature.
+    fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn StampSink);
+}
+
+pub enum AnalysisKind { Dc, Transient, Ac, Noise }
+
+pub struct AnalysisCtx {
+    pub kind: AnalysisKind,
+    pub time: f64,   // `$abstime`; 0.0 outside transient
+    pub temp: f64,   // `$temperature`, kelvin
 }
 
 pub trait StampSink {
@@ -49,15 +58,24 @@ pub trait StampSink {
     fn jacobian(&mut self, row: usize, col: usize, value: f64); // ∂residual[row]/∂x[col]
     fn charge(&mut self, row: usize, value: f64);              // Q at `row`   (transient)
     fn dcharge(&mut self, row: usize, col: usize, value: f64); // ∂Q[row]/∂x[col] (transient)
+    // Defaulted, §6 2026-08-06 — never called outside the analysis each serves.
+    fn excitation(&mut self, row: usize, re: f64, im: f64) {}  // `ac_stim`   (AC)
+    fn bound_step(&mut self, dt: f64) {}                       // `bound_step` (transient)
 }
 ```
 
-There are **two channels**:
+The two **matrix** channels every consumer assembles:
 
 - **resistive**: `residual` + `jacobian`. Used by DC, and as the conductive part of
   transient and the operating point for AC.
 - **charge**: `charge` + `dcharge`. Consumed by the transient integrator via a companion
   model. **DC ignores this channel entirely.**
+
+Plus three later, **defaulted** additions, each consumed by exactly one analysis and invisible
+to every other: the **noise** channel (a separate `NoiseSink` on `ModelInstance::noise`, §6
+2026-08-01 — see `../interfaces.md`), **`excitation`** (a model's own `ac_stim`, an RHS term in
+AC), and **`bound_step`** (a transient timestep hint, not a matrix entry at all). Defaulting
+them is what let each land without touching a single existing implementor.
 
 `va-abi` also ships `DenseStamp`, a dense reference `StampSink` for tests and the crate's own
 reference-model checks. Production assembly (sparse, ground-reduced) lives in `va-core`.
@@ -91,9 +109,13 @@ fixed at construction; `unknowns()` reports the set, and `x[idx]` reads a termin
 
 ### 4.2 The `load` contract
 
-5. **Purity.** `load` is a pure function of `(self, x)`. No interior mutability, no I/O, no
-   RNG, no dependence on call order. Calling it twice with the same `x` produces identical
-   stamps. (This is what lets Newton, AC, and finite-difference checks call it freely.)
+5. **Purity.** `load` is a pure function of `(self, x, ctx)`. No interior mutability, no I/O,
+   no RNG, no dependence on call order. Calling it twice with the same `x` and `ctx` produces
+   identical stamps. (This is what lets Newton, AC, and finite-difference checks call it
+   freely.) The analysis context (§6 2026-08-06) widened the *inputs* without weakening this:
+   a context is an argument, not remembered state, so a construct needing genuine history
+   across evaluations (`transition`, `slew`, `absdelay`) still cannot be built on this trait —
+   see `../proposals/analysis-context.md`'s Tier B.
 6. **Sign convention.** `residual(row, value)` is **current flowing into node `row`** (KCL
    residual). For the reference resistor at 2 V across 1 kΩ, `residual[0] = +2e-3` A. The
    Newton update solves `J Δx = −residual`; the sign here must match that.
@@ -158,9 +180,26 @@ For a capacitor, the same trace additionally fills `sink.charge` / `sink.dcharge
 - **Reference node only via sentinel.** There is no separate "this row is ground" flag;
   ground is purely the out-of-range index. Consumers must size `dim` so the sentinel cannot
   collide with a real unknown.
-- **No time, no frequency on the bridge.** `load` sees only `x`. Time-dependence enters
-  through the charge channel + the integrator; frequency enters in `va-acnoise` by
-  linearising the same stamps. The bridge stays analysis-agnostic.
+- **Time and analysis kind on the bridge; frequency still not.** *(Revised 2026-08-06 — this
+  invariant previously read "no time, no frequency on the bridge," and the first half of it is
+  no longer true.)* `load` sees `x` **and an `AnalysisCtx`** carrying which analysis is running,
+  the absolute time, and the temperature. Time-dependence in a *device* still enters through the
+  charge channel + the integrator — a capacitor is unchanged — but a model whose own equations
+  reference the clock or the analysis (`$abstime`, `analysis()`, `ac_stim`, `bound_step`) reads
+  them from the context. Without it, `va-frontend` had no choice but to fold those constructs at
+  elaboration, and every such fold became a silent wrong answer once T4/T5 landed.
+
+  **The bridge is no longer analysis-agnostic, and that was the point.** What it remains is
+  *stateless*: `load` is still a pure function of `(x, ctx)`, so the invariant above it is
+  untouched — a context is an input, not remembered state.
+
+  **Frequency is still absent, deliberately.** Nothing the context currently serves is
+  frequency-dependent, and `va_acnoise::ac::linearize` calls `load` exactly once, outside the
+  frequency loop, because `G` and `C` are frequency-independent by construction. A `freq` field
+  would be meaningless at the one call site that would most want it — and a field that is
+  usually a lie is precisely how the DC-only folds happened. It arrives with the
+  frequency-domain filters (`laplace_*`/`zi_*`) and the per-frequency re-linearization that
+  would make it true. See `../proposals/analysis-context.md`.
 
 ## 8. Evolution (per §6)
 
