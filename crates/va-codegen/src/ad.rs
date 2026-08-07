@@ -290,6 +290,19 @@ pub struct Ctx<'a> {
     /// What the simulator says about the evaluation being performed — the analysis kind and
     /// the absolute time, read by `$abstime`, `analysis()` and `ac_stim`.
     pub analysis: va_abi::AnalysisCtx,
+    /// This instance's state slots **as committed at the last accepted timepoint** — the
+    /// read half of Interface β's state channel (`va_abi::ModelState::get`).
+    pub state_prev: &'a [f64],
+    /// This evaluation's state proposal, pre-seeded from `state_prev`.
+    ///
+    /// Held here rather than as a borrowed `&mut va_abi::ModelState` for the same reason
+    /// `vars` is a `RefCell`: `eval` takes `&Ctx` all the way down, and a `transition`/`slew`
+    /// deep inside an expression must be able to record its new output. `crate::GeneratedModel::
+    /// load` drains this into the real `ModelState` once the walk finishes.
+    pub state_next: RefCell<Vec<f64>>,
+    /// Maps a `transition`/`slew` call site (by its own `ExprId.0`) to its base state slot
+    /// (`crate::lower::StatefulCall`).
+    pub state_slots: HashMap<u32, (crate::lower::StatefulKind, usize)>,
     /// The tightest `bound_step(...)` request the statement walk has evaluated this
     /// `load()`/`validate()` call, or `None` if none ran.
     ///
@@ -353,6 +366,18 @@ impl Ctx<'_> {
         self.mixed_branch_potential_used
             .borrow_mut()
             .insert(local_slot)
+    }
+
+    /// Read state slot `base + k` as committed at the last accepted timepoint.
+    pub fn state_get(&self, base: usize, k: usize) -> f64 {
+        self.state_prev.get(base + k).copied().unwrap_or(0.0)
+    }
+
+    /// Propose state slot `base + k` for this evaluation.
+    pub fn state_set(&self, base: usize, k: usize, v: f64) {
+        if let Some(cell) = self.state_next.borrow_mut().get_mut(base + k) {
+            *cell = v;
+        }
     }
 
     /// Record a `bound_step(dt)` request, keeping the tightest seen so far.
@@ -561,7 +586,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             }
             Ok(Dual { value, grad })
         }
-        Expr::Call(builtin, args) => eval_call(ctx, *builtin, args),
+        Expr::Call(builtin, args) => eval_call(ctx, expr, *builtin, args),
         Expr::CallUser(fid, args) => {
             let func = &ctx.module.functions[fid.0 as usize];
             call_function(ctx, func, args)
@@ -594,7 +619,16 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
     }
 }
 
-fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, CodegenError> {
+/// `site` is the call's own `ExprId` — needed only by the stateful constructs
+/// (`transition`/`slew`), which key their state slots on the call site so that the same
+/// function written twice keeps two independent histories (§ `crate::lower::StatefulCall`).
+fn eval_call(
+    ctx: &Ctx,
+    site: ExprId,
+    builtin: Builtin,
+    args: &[ExprId],
+) -> Result<Dual, CodegenError> {
+    let expr_id = site.0;
     let count = ctx.count();
     let arg = |i: usize| -> Result<Dual, CodegenError> {
         let id = args
@@ -675,6 +709,116 @@ fn eval_call(ctx: &Ctx, builtin: Builtin, args: &[ExprId]) -> Result<Dual, Codeg
         // means the call sits somewhere that split could not pull it out of, and
         // `crate::GeneratedModel::validate` rejects that rather than letting it vanish.
         Builtin::AcStim => Dual::constant(0.0, count),
+        // `@(initial_step)`'s desugared condition. Pure solver knowledge, no state, no gradient.
+        Builtin::InitialStep => Dual::constant(
+            if ctx.analysis.is_initial_step {
+                1.0
+            } else {
+                0.0
+            },
+            count,
+        ),
+        // `slew(value, pos_rate, neg_rate)` (LRM §4.5.6) — a rate limiter over the *committed*
+        // history. `y = clamp(value, y_prev − |neg|·Δt, y_prev + pos·Δt)`.
+        //
+        // The gradient is the correct piecewise one: while tracking, the output *is* the input
+        // and carries its gradient; while rate-limited, the output is pinned to a line through
+        // history and is momentarily independent of `x`, so the gradient is zero. Getting this
+        // wrong in either direction would give Newton a Jacobian inconsistent with the residual
+        // it is solving.
+        Builtin::Slew => {
+            let value = arg(0)?;
+            let (pos, neg) = (arg(1)?.value.abs(), arg(2)?.value.abs());
+            let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
+                return Err(unsupported("slew call site has no state slot allocated"));
+            };
+            // A static solve, and the first transient point, settle immediately — the
+            // LRM-correct steady state and the answer the old const-fold produced.
+            let y = if ctx.analysis.is_initial_step {
+                value.clone()
+            } else {
+                let dt = (ctx.analysis.time - ctx.state_get(base, 0)).max(0.0);
+                let y_prev = ctx.state_get(base, 1);
+                let (lo, hi) = (y_prev - neg * dt, y_prev + pos * dt);
+                if value.value > hi {
+                    Dual::constant(hi, count)
+                } else if value.value < lo {
+                    Dual::constant(lo, count)
+                } else {
+                    value.clone()
+                }
+            };
+            ctx.state_set(base, 0, ctx.analysis.time);
+            ctx.state_set(base, 1, y.value);
+            y
+        }
+        // `transition(value, delay, rise_time, fall_time)` (LRM §4.5.5) — ramps toward a new
+        // target over `rise`/`fall`, after `delay`.
+        //
+        // **This is an approximation of the LRM's event-scheduled semantics, and the difference
+        // is worth stating.** A conforming simulator schedules exact breakpoints at the ramp's
+        // corners so the waveform's kinks land on solved timepoints. Here the ramp is advanced
+        // by whatever step the LTE controller chose, and the model asks (via `bound_step`, at
+        // the call site in `crate::GeneratedModel::load`) for steps small enough to resolve it.
+        // The shape is right and the endpoints are right; the corners are rounded by at most one
+        // timestep.
+        Builtin::Transition => {
+            let value = arg(0)?;
+            let (delay, rise, fall) = (arg(1)?.value, arg(2)?.value.abs(), arg(3)?.value.abs());
+            let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
+                return Err(unsupported(
+                    "transition call site has no state slot allocated",
+                ));
+            };
+            if ctx.analysis.is_initial_step {
+                ctx.state_set(base, 0, ctx.analysis.time);
+                ctx.state_set(base, 1, value.value);
+                ctx.state_set(base, 2, value.value);
+                ctx.state_set(base, 3, 0.0);
+                ctx.state_set(base, 4, ctx.analysis.time);
+                return Ok(value);
+            }
+
+            let t = ctx.analysis.time;
+            let (t_prev, y_prev) = (ctx.state_get(base, 0), ctx.state_get(base, 1));
+            let (mut target, mut rate, mut t_start) = (
+                ctx.state_get(base, 2),
+                ctx.state_get(base, 3),
+                ctx.state_get(base, 4),
+            );
+
+            // A changed input starts a new transition: latch the target, the rate implied by
+            // this step's full amplitude, and when it may begin.
+            if value.value != target {
+                let span = if value.value >= y_prev { rise } else { fall };
+                target = value.value;
+                t_start = t + delay;
+                rate = if span > 0.0 {
+                    (target - y_prev).abs() / span
+                } else {
+                    f64::INFINITY // a zero rise/fall time is an instant jump, not a divide error
+                };
+            }
+
+            let y = if t < t_start {
+                y_prev // still inside `delay` — hold
+            } else {
+                let dt = (t - t_prev.max(t_start)).max(0.0);
+                let remaining = target - y_prev;
+                let step = (rate * dt).min(remaining.abs());
+                y_prev + step * remaining.signum()
+            };
+
+            ctx.state_set(base, 0, t);
+            ctx.state_set(base, 1, y);
+            ctx.state_set(base, 2, target);
+            ctx.state_set(base, 3, rate);
+            ctx.state_set(base, 4, t_start);
+            // Zero gradient: the output is pinned to history and a latched target, not to `x`
+            // at this instant. Once it reaches the target it stays there until the input
+            // changes again, at which point the *next* evaluation re-latches.
+            Dual::constant(y, count)
+        }
         // `idt` never reaches here — `eval`'s own `Expr::Call` match intercepts it before this
         // function is even called (see `eval`'s `Builtin::Idt` arm).
         Builtin::Ddt | Builtin::Idt => {
@@ -987,6 +1131,9 @@ mod tests {
             vt: crate::VT,
             temp: crate::TEMP,
             analysis: va_abi::ANALYSIS_DC,
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
             bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
@@ -1040,6 +1187,9 @@ mod tests {
             vt: vt_ref,
             temp: temp_ref,
             analysis: va_abi::ANALYSIS_DC,
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
             bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
@@ -1123,6 +1273,9 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             analysis: va_abi::ANALYSIS_DC,
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
             bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
@@ -1201,6 +1354,9 @@ mod tests {
             vt,
             temp: crate::TEMP,
             analysis: va_abi::ANALYSIS_DC,
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
             bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
@@ -1238,6 +1394,9 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             analysis: va_abi::ANALYSIS_DC,
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
             bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),
@@ -1262,6 +1421,9 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             analysis: va_abi::ANALYSIS_DC,
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
             bound_step: Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots: HashMap::new(),

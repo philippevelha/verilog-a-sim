@@ -434,6 +434,33 @@ pub enum Builtin {
     /// `va_abi::StampSink`'s own excitation channel exactly as it splits `white_noise` out into
     /// the noise channel. Leaving a nonzero value here would double-count it into `G`.
     AcStim,
+    /// `transition(value, delay, rise_time, fall_time)` — a piecewise-linear smoother for a
+    /// signal that changes in discrete steps (LRM §4.5.5).
+    ///
+    /// Carries **exactly four arguments**, normalized at elaboration (LRM defaults `0, 0, 0`).
+    /// Unlike every builtin before it, its value depends on the *past*: it ramps toward a new
+    /// target over `rise_time`/`fall_time` rather than following its input instantly, so
+    /// `va-codegen` allocates it per-call-site slots on Interface β's state channel
+    /// (`va_abi::ModelState`) and it evaluates from what was committed at the last accepted
+    /// timepoint.
+    ///
+    /// In a static solve it settles to `value` — the LRM-correct steady state, and the same
+    /// answer the old elaboration-time fold produced (Interface α change, 2026-08-06).
+    Transition,
+    /// `slew(value, pos_slew_rate, neg_slew_rate)` — a rate limiter (LRM §4.5.6).
+    ///
+    /// Carries **exactly three arguments**, normalized at elaboration; `neg_slew_rate` defaults
+    /// to `−pos_slew_rate`. `transition`'s continuous twin: same state channel, same
+    /// settle-to-input behavior in a static solve, but no discrete target to ramp toward — the
+    /// output simply tracks the input as fast as the rate allows.
+    Slew,
+    /// `@(initial_step)` — whether this is the first evaluation of the analysis (LRM §5.10.3).
+    ///
+    /// Zero arguments; reads `va_abi::AnalysisCtx::is_initial_step`. **Not** a state construct
+    /// despite arriving with them: the solver already knows, so nothing needs remembering. The
+    /// frontend wraps it into an ordinary `Stmt::If`, so the existing control-flow walk selects
+    /// the arm with no new statement kind.
+    InitialStep,
     /// `white_noise(pwr)` — a frequency-flat noise source of power spectral density `pwr`,
     /// in the units of the contribution it appears in (A²/Hz in a flow contribution).
     ///

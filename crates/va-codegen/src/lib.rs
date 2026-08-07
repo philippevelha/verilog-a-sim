@@ -172,6 +172,7 @@ impl GeneratedModel {
         &'a self,
         x: &'a [f64],
         analysis: &va_abi::AnalysisCtx,
+        state_prev: &'a [f64],
         validating: bool,
     ) -> Ctx<'a> {
         // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
@@ -209,6 +210,17 @@ impl GeneratedModel {
             vt: self.vt,
             temp: self.temp,
             analysis: *analysis,
+            state_prev,
+            // Pre-seeded from the committed state, so a `transition`/`slew` on a control-flow
+            // path this evaluation doesn't take leaves its history untouched rather than
+            // resetting it (the same rule `va_abi::state`'s consumer contract states).
+            state_next: RefCell::new(state_prev.to_vec()),
+            state_slots: self
+                .lowered
+                .stateful_calls
+                .iter()
+                .map(|c| (c.expr_id, (c.kind, c.base)))
+                .collect(),
             bound_step: std::cell::Cell::new(None),
             vars: RefCell::new(HashMap::new()),
             branch_current_slots,
@@ -373,7 +385,7 @@ impl GeneratedModel {
         // regardless of which analysis eventually runs. Nothing here depends on the answer —
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
-        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, true);
+        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], true);
         Self::validate_stmts(&ctx, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
@@ -908,7 +920,10 @@ impl ModelInstance for GeneratedModel {
     /// way `va-abi`'s hand-written [`va_abi::reference::Resistor`] does. Its `kind` is passed
     /// through so a source whose PSD expression calls `analysis()` sees the truth.
     fn noise(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::NoiseSink) {
-        let ctx = self.ctx(x, actx, false);
+        // No state: a noise analysis linearizes about a fixed operating point and has no
+        // accepted-timepoint sequence, so a `transition`/`slew` inside a PSD expression sees
+        // `is_initial_step` and settles to its input — the same steady-state reading DC gets.
+        let ctx = self.ctx(x, actx, &[], false);
         // Post-validation the evaluations below cannot fail; a failure mid-walk simply stops
         // emitting further sources, exactly as `load` stops stamping.
         let _ = self.walk(&ctx, &self.lowered.stmts, &mut |me, ctx, c| {
@@ -945,8 +960,7 @@ impl ModelInstance for GeneratedModel {
         state: &mut va_abi::ModelState,
         sink: &mut dyn StampSink,
     ) {
-        let _ = &state;
-        let ctx = self.ctx(x, actx, false);
+        let ctx = self.ctx(x, actx, state.committed(), false);
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
@@ -970,7 +984,56 @@ impl ModelInstance for GeneratedModel {
             if let Some(dt) = ctx.bound_step.get() {
                 sink.bound_step(dt);
             }
+            // A model mid-transition asks for steps fine enough to resolve its own ramp. Without
+            // this the ramp would be sampled at whatever points the LTE controller happened to
+            // choose — which, for a signal the controller sees as smooth, can be far too few.
+            if let Some(dt) = self.transition_step_bound(&ctx) {
+                sink.bound_step(dt);
+            }
         }
+        // Publish this evaluation's state proposal. Only committed if the consumer decides this
+        // was an accepted timepoint (§ `va_abi::state`).
+        for (slot, v) in ctx.state_next.borrow().iter().enumerate() {
+            state.set(slot, *v);
+        }
+    }
+
+    fn state_len(&self) -> usize {
+        self.lowered.state_len
+    }
+}
+
+impl GeneratedModel {
+    /// The tightest step bound any **in-flight** `transition` wants, or `None` if none is
+    /// ramping right now.
+    ///
+    /// `rise/8` resolves a ramp into roughly eight points, which is enough for the piecewise-
+    /// linear shape to survive comparison against an analytic reference without forcing tiny
+    /// steps through the long flat stretches on either side. A transition that has reached its
+    /// target asks for nothing, so the controller is free to grow the step straight back.
+    fn transition_step_bound(&self, ctx: &Ctx) -> Option<f64> {
+        const POINTS_PER_RAMP: f64 = 8.0;
+        let next = ctx.state_next.borrow();
+        let mut bound: Option<f64> = None;
+        for call in &self.lowered.stateful_calls {
+            if call.kind != lower::StatefulKind::Transition {
+                continue;
+            }
+            let (y, target, rate) = (
+                next.get(call.base + 1).copied().unwrap_or(0.0),
+                next.get(call.base + 2).copied().unwrap_or(0.0),
+                next.get(call.base + 3).copied().unwrap_or(0.0),
+            );
+            // Still travelling, and at a finite rate: ask for a step that samples the ramp.
+            if y != target && rate.is_finite() && rate > 0.0 {
+                let span = (target - y).abs() / rate;
+                let want = span / POINTS_PER_RAMP;
+                if want.is_finite() && want > 0.0 {
+                    bound = Some(bound.map_or(want, |b: f64| b.min(want)));
+                }
+            }
+        }
+        bound
     }
 }
 

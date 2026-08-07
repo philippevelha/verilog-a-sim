@@ -1161,15 +1161,16 @@ including the ones with no implemented behavior at all.
 - **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
   right-hand side or an intermediate variable assignment.
 - **Comparison with Traditional Constructs**: No C/digital-Verilog analogue (a continuous-time
-  slew/delay filter needs a time axis neither has). **Still wrong in transient** — Tier B of
-  `docs/proposals/analysis-context.md`. `va-transient` exists now, so these are not
-  constant-folded away in a time-stepping solve: they *are* the dynamics, and folding them to
-  their input discards exactly what the model was written to express. The analysis context
-  Tier A added does not fix them, and was not expected to: they need the model to remember
-  something between evaluations, and Interface β is deliberately stateless (`load` takes
-  `&self`, and is re-entered per Newton iteration and again on rejected timesteps). A state
-  channel needs its own contract answering who owns the storage and what is committed versus
-  rolled back — a harder design than Tier A, deliberately not smuggled into it.
+  slew/delay filter needs a time axis neither has). **Implemented 2026-08-07 (Tier B)** on
+  Interface β's per-instance state channel (`va_abi::state`, `docs/proposals/model-state.md`) —
+  the contract Tier A deliberately declined to smuggle in. Each call site gets its own state
+  slots keyed by `ExprId`, so the same function written twice keeps two independent histories.
+  `slew` is exact: `y = clamp(value, y_prev ± rate·Δt)`, with the correct piecewise gradient
+  (the input's while tracking, zero while rate-limited). **`transition` is an approximation and
+  is labelled one**: a conforming simulator schedules exact breakpoints at the ramp's corners,
+  while this advances the ramp over whatever step the LTE controller chose and asks — via Tier
+  A's `bound_step` — for steps fine enough to resolve it (~8 per ramp). The shape and endpoints
+  are right; the corners are rounded by at most one timestep.
 
 ### `Absdelay`
 
@@ -1190,7 +1191,35 @@ including the ones with no implemented behavior at all.
 - **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
   right-hand side.
 - **Comparison with Traditional Constructs**: No C/digital-Verilog analogue. Real time-delay
-  handling, not a constant fold, is what this needs. **Still wrong in transient** — Tier B of `docs/proposals/analysis-context.md`: this construct needs the model to *remember* something between evaluations (a slew accumulator, a delay line), and Interface β is deliberately stateless — `load` takes `&self` and may be re-entered on a rejected timestep. The analysis context Tier A added does not help; a state channel needs its own contract answering who owns the storage and what is committed versus rolled back.
+  handling, not a constant fold, is what this needs. **Still wrong in transient after Tier B**,
+  and not for want of a state channel: `absdelay` must produce `value(t − delay)`, and no
+  *fixed-size* state vector holds that — the number of samples inside the delay window depends
+  on the steps the LTE controller happens to choose. It needs an interpolated history buffer
+  with its own depth/accuracy story, which is a second design (`docs/proposals/model-state.md`
+  §1.3). The state channel is shaped so as not to preclude it. **Still wrong in transient** — Tier B of `docs/proposals/analysis-context.md`: this construct needs the model to *remember* something between evaluations (a slew accumulator, a delay line), and Interface β is deliberately stateless — `load` takes `&self` and may be re-entered on a rejected timestep. The analysis context Tier A added does not help; a state channel needs its own contract answering who owns the storage and what is committed versus rolled back.
+
+### `$limit` — deliberately out of Tier B's scope
+
+`$limit(V(a,b), "pnjlim", vt, vcrit)` still folds to its first argument, and after Tier B that
+is a **considered** decision rather than a gap.
+
+It is the **most-used** construct in the whole corpus (10 files, 72 call sites — more than
+`transition`, `absdelay` and `slew` combined), so excluding it needs saying plainly. Three
+reasons, all pointing the same way:
+
+1. **Its fold is not a wrong answer.** A converged Newton solve is a fixed point of the
+   *unlimited* equations; a limiter reshapes the iteration path toward that fixed point and
+   never moves it. So the fold costs convergence robustness on a hard circuit, not correctness —
+   unlike `transition`, where folding changes the waveform itself.
+2. **Its lifetime is the Newton iteration, not the timestep.** It wants the previous *iterate*
+   within one timepoint solve, which is never committed across accepted steps and never rolled
+   back. Interface β's state channel (`va_abi::state`) is the wrong shape for it by construction.
+3. **The solver already limits.** `va-core`'s Newton loop applies `convergence::limit_junction`
+   to every unknown, so the project is not un-limited today — it is limited *globally* rather
+   than where the model asked. The remaining work is "let a model direct the existing limiter",
+   which belongs with convergence work, not with a state channel.
+
+See `docs/proposals/model-state.md` §1.1.
 
 ### `Bound_step`
 
@@ -1296,7 +1325,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | Token | Purpose & Static Nature | Declaration & Assignment | Expressions & Evaluation | Structural & Analog Usage | Comparison with Traditional Constructs |
 |---|---|---|---|---|---|
 | `abs` | Dynamic/static dual, see §1.5 Math builtins | `abs(x)` call | Absolute value, both paths | Analog expr / const context | C `fabs()`/`abs()` |
-| `absdelay` | **Still wrong in transient (Tier B — needs per-instance state, not the analysis context)**; folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
+| `absdelay` | **Still wrong in transient** — needs an interpolated *history buffer*, not a fixed-size state vector (Tier B §1.3); folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
 | `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`); round-trips into `va_ir::NodeDecl::abstol` and `va-core`'s per-unknown Newton convergence check (§ nature-metadata wiring) | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
 | `access` | Parsed into `NatureDecl::access` (§1.5), widens the recognized access-function set once bound by a `discipline` | Nature attribute `access = fn_name;` | Read as a plain identifier; has a real effect (§2.17) once a `discipline` binds this nature as `potential`/`flow` | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |
@@ -1437,7 +1466,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `scalared` | Reserved, no grammar production (net-vector storage-layout hint) | N/A | N/A | Digital structural only | No C analogue |
 | `sin` | Dynamic/static dual, §1.5 | `sin(x)` call | Sine | Analog expr / const context | C `sin()` |
 | `sinh` | Dynamic/static dual, §1.5 | `sinh(x)` call | Hyperbolic sine | Analog expr / const context | C `sinh()` |
-| `slew` | **Still wrong in transient (Tier B — needs per-instance state, not the analysis context)**; folds to its `value` argument (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
+| `slew` | **Simulation-time** (Tier B, 2026-08-07) — evaluated against Interface β's state channel; `transition` is an approximation (no exact corner breakpoints) (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
 | `small` | Reserved, no grammar production (net-strength charge-storage keyword) | N/A | N/A | Digital net-strength only | No C analogue |
 | `specify` | Reserved, no grammar production (opens a timing-check block, paired with `endspecify`) | N/A | N/A | Digital timing-check only | No C analogue |
 | `specparam` | Reserved, no grammar production (a parameter usable only inside a `specify` block) | N/A | N/A | Digital timing-check only | No C analogue |
@@ -1456,7 +1485,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `tran` | Reserved, no grammar production (bidirectional pass-switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif0` | Reserved, no grammar production (bidirectional pass switch, active-low enable) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif1` | Reserved, no grammar production (bidirectional pass switch, active-high enable) | N/A | N/A | Digital/switch-level only | No C analogue |
-| `transition` | **Still wrong in transient (Tier B — needs per-instance state, not the analysis context)**; folds to its `value` argument (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
+| `transition` | **Simulation-time** (Tier B, 2026-08-07) — evaluated against Interface β's state channel; `transition` is an approximation (no exact corner breakpoints) (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
 | `tri` | Reserved, no grammar production (default-strength tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `tri0` | Reserved, no grammar production (net type: pulls to 0 when undriven) | N/A | N/A | Digital structural only | No C analogue |
 | `tri1` | Reserved, no grammar production (net type: pulls to 1 when undriven) | N/A | N/A | Digital structural only | No C analogue |

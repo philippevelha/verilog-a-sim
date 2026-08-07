@@ -537,6 +537,79 @@ pub struct Lowered {
     /// is the module's implicit ground reference (see [`NodeKclProbe`]), in ascending
     /// [`BranchId`] order, past every [`FlowCurrentAccumulator`] slot.
     pub node_kcl_probes: Vec<NodeKclProbe>,
+    /// One entry per `transition`/`slew` call site, in ascending [`ExprId`] order — see
+    /// [`StatefulCall`]. Maps a call site to its base offset in Interface β's per-instance
+    /// state channel (`va_abi::ModelState`).
+    pub stateful_calls: Vec<StatefulCall>,
+    /// Total `f64` slots this model needs on the state channel — the sum of every
+    /// [`StatefulCall`]'s width, and what `crate::GeneratedModel::state_len` reports.
+    pub state_len: usize,
+}
+
+/// Which time-domain construct a [`StatefulCall`] is, and how many state slots it needs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StatefulKind {
+    /// `slew(value, pos_rate, neg_rate)` — 2 slots: `(t_prev, y_prev)`.
+    Slew,
+    /// `transition(value, delay, rise, fall)` — 5 slots:
+    /// `(t_prev, y_prev, target, rate, t_start)`.
+    Transition,
+}
+
+impl StatefulKind {
+    /// Slots this kind occupies on the state channel.
+    pub fn width(self) -> usize {
+        match self {
+            StatefulKind::Slew => 2,
+            StatefulKind::Transition => 5,
+        }
+    }
+}
+
+/// One `transition`/`slew` call site and the state slots allocated to it.
+///
+/// **Per call site, not per construct**: the same `slew(V(a), r)` written twice is two
+/// independent limiters with independent history, exactly as two `idt` calls on the same
+/// argument are two independent accumulators ([`IdtAccumulator`]). Keying on `ExprId` is what
+/// makes that fall out — the arena already gave each written occurrence its own identity.
+///
+/// Slots are allocated in ascending `ExprId` order, which is a **deterministic** function of the
+/// IR alone. That matters more than it looks: the consumer's `committed` buffer is a flat array
+/// indexed by these offsets, so two evaluations of the same model must agree on the layout or a
+/// limiter would read another one's history.
+#[derive(Clone, Copy, Debug)]
+pub struct StatefulCall {
+    /// The call's own `ExprId.0`.
+    pub expr_id: u32,
+    /// Which construct, and hence how many slots.
+    pub kind: StatefulKind,
+    /// First slot index into this instance's own state region.
+    pub base: usize,
+}
+
+/// Collect every `transition`/`slew` call in the module's expression arena, in ascending
+/// `ExprId` order, assigning each its state slots.
+///
+/// Scans the **arena** rather than walking statements, deliberately: a call reached only from
+/// inside an `if` arm still needs a stable slot, because whether that arm runs can change
+/// between timepoints and its history must survive the steps where it does not.
+fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
+    let mut calls = Vec::new();
+    let mut next = 0usize;
+    for (i, expr) in module.exprs.iter().enumerate() {
+        let kind = match expr {
+            Expr::Call(Builtin::Slew, _) => StatefulKind::Slew,
+            Expr::Call(Builtin::Transition, _) => StatefulKind::Transition,
+            _ => continue,
+        };
+        calls.push(StatefulCall {
+            expr_id: i as u32,
+            kind,
+            base: next,
+        });
+        next += kind.width();
+    }
+    (calls, next)
 }
 
 /// Lower a module's analog block into a [`Lowered`] plan.
@@ -681,6 +754,8 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             &mut stmts,
         )?;
     }
+    let (stateful_calls, state_len) = collect_stateful_calls(module);
+
     Ok(Lowered {
         n_unknowns: next_slot,
         stmts,
@@ -688,6 +763,8 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         idt_accumulators,
         flow_current_accumulators,
         node_kcl_probes,
+        stateful_calls,
+        state_len,
     })
 }
 

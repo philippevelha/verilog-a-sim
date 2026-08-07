@@ -103,6 +103,16 @@ impl<'a> ModelState<'a> {
         self.len() == 0
     }
 
+    /// The whole committed slice, for an implementor that wants to read it in bulk rather than
+    /// slot by slot (`va-codegen` copies it once per evaluation to seed its proposal buffer).
+    ///
+    /// Read-only by construction — there is deliberately no `&mut` counterpart, because
+    /// mutating committed state in place is exactly what the read-old/write-new split exists to
+    /// prevent.
+    pub fn committed(&self) -> &[f64] {
+        self.prev
+    }
+
     /// Read slot `slot` **as committed at the last accepted timepoint**.
     ///
     /// Never reflects a [`Self::set`] made during this evaluation, or during any other

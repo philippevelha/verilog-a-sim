@@ -211,6 +211,21 @@ impl Parser<'_> {
 
     /// Consume tokens through the `)` matching an already-consumed `(`, honouring nesting.
     /// Used to skip the contents of an `@(...)` event expression.
+    /// Whether the event trigger starting at the current position (just past its `(`) is
+    /// exactly `initial_step`, without consuming anything.
+    ///
+    /// Deliberately narrow: only the bare trigger, not `initial_step or cross(...)`. A compound
+    /// trigger means "run at the initial step *and* at these other events", and answering it
+    /// with the initial-step arm alone would silently drop the rest — a wrong answer dressed as
+    /// support. Those keep the old run-unconditionally treatment until real event scheduling
+    /// exists.
+    fn trigger_names_initial_step(&self) -> bool {
+        matches!(
+            (self.toks.get(self.pos), self.toks.get(self.pos + 1)),
+            (Some(Token::Keyword(kw)), Some(Token::RParen)) if kw.as_str() == "initial_step"
+        )
+    }
+
     fn skip_balanced_parens(&mut self) -> Result<(), FrontendError> {
         let mut depth = 1usize;
         loop {
@@ -1075,14 +1090,39 @@ impl Parser<'_> {
                 Ok(Stmt::Block(Vec::new()))
             }
             Some(Token::Begin) => Ok(Stmt::Block(self.parse_block_or_single()?)),
-            // Event control `@(event) statement`. v0 discards the trigger and runs the
-            // controlled statement: correct for a DC operating point, where `initial_step`
-            // setup would run once anyway. (Proper event scheduling is a transient concern.)
+            // Event control `@(event) statement`.
+            //
+            // `@(initial_step)` is **desugared here into an ordinary `if`** whose condition is a
+            // synthetic `initial_step()` call (§6 change, 2026-08-06). That keeps the whole
+            // construct inside machinery that already exists — elaboration lowers the call to
+            // `va_ir::Builtin::InitialStep`, and every downstream control-flow walk selects the
+            // arm for free — with no new AST or IR statement kind. Until now the trigger was
+            // discarded and the body run unconditionally: right for a DC operating point (where
+            // the first step is the only step) and wrong in transient, where initialization code
+            // then re-ran at every single timepoint.
+            //
+            // Every other trigger keeps the old treatment, and it stays a stated limitation:
+            // `@(cross(...))`/`@(timer(...))` need genuine event scheduling, which is a
+            // transient-engine concern this project does not expose to source yet.
             Some(Token::At) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
+                let is_initial_step = self.trigger_names_initial_step();
                 self.skip_balanced_parens()?;
-                self.parse_stmt()
+                let body = self.parse_stmt()?;
+                if is_initial_step {
+                    let cond = self.push(ExprAst::Call {
+                        name: "initial_step".to_string(),
+                        args: Vec::new(),
+                    });
+                    Ok(Stmt::If {
+                        cond,
+                        then_: vec![body],
+                        else_: Vec::new(),
+                    })
+                } else {
+                    Ok(body)
+                }
             }
             // A block-local variable declaration, `real x, y;` / `integer i;`, or array
             // declaration, `real out_val[0:15];` (§ array variables).
@@ -2377,18 +2417,39 @@ mod tests {
     }
 
     #[test]
-    fn event_control_runs_the_controlled_statement() {
-        // `@(initial_step) begin … end` — the trigger is discarded; the body survives.
+    fn initial_step_desugars_into_a_guarded_if() {
+        // `@(initial_step) begin … end` becomes `if (initial_step()) begin … end`. It used to
+        // discard the trigger and run the body unconditionally — right for a DC operating point
+        // (the first step is the only step) and wrong in transient, where initialization then
+        // re-ran at every timepoint.
         let m = parse_src(
             "module t(a, b); electrical a, b; analog begin @(initial_step) begin x = 1.0; end I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
-        // The event-controlled block becomes a plain block of one assignment.
         match &body[0] {
-            Stmt::Block(inner) => assert!(matches!(inner[0], Stmt::Assign { .. })),
-            other => panic!("expected the controlled block, got {other:?}"),
+            Stmt::If { then_, else_, .. } => {
+                assert!(else_.is_empty());
+                assert!(matches!(&then_[0], Stmt::Block(inner)
+                    if matches!(inner[0], Stmt::Assign { .. })));
+            }
+            other => panic!("expected a guarded if, got {other:?}"),
         }
         assert!(matches!(body[1], Stmt::Contribute { .. }));
+    }
+
+    #[test]
+    fn a_non_initial_step_event_still_runs_unconditionally() {
+        // Only the bare `initial_step` trigger is recognized. Everything else keeps the old
+        // treatment rather than being silently mapped onto the initial-step arm, which would
+        // drop the events it actually names — see `trigger_names_initial_step`.
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0, 1)) begin x = 1.0; end I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        match &body[0] {
+            Stmt::Block(inner) => assert!(matches!(inner[0], Stmt::Assign { .. })),
+            other => panic!("expected the bare controlled block, got {other:?}"),
+        }
     }
 
     #[test]

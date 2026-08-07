@@ -1043,6 +1043,69 @@ mod tests {
         assert_eq!(Analysis::default(), Analysis::Dc);
     }
 
+    /// Tier B end to end: a compiled model whose output is `slew`-limited must follow the
+    /// closed-form ramp `min(target, rate·t)`, not its input.
+    ///
+    /// The circuit is deliberately algebraic (a current source into a resistor, nothing
+    /// reactive), so every point is an exact solve and any deviation is the state channel's
+    /// fault rather than integration error. This is the test that would catch the channel's two
+    /// characteristic bugs: committing state on a *rejected* candidate step (the ramp would run
+    /// fast, since rejected attempts would advance history) and reading `prev` from the wrong
+    /// timepoint (the slope would be wrong).
+    #[test]
+    fn a_slew_limited_model_follows_the_rate_limit_not_its_input() {
+        // I(p,n) <+ slew(K*$abstime, rate) with K = 10 A/s and rate = 1 A/s. The *input* ramps
+        // ten times faster than the limiter allows, so the output must follow `rate*t`, not
+        // `K*t` — a factor of ten apart, which is what makes this discriminating rather than
+        // merely consistent. Into 1 kΩ: V(out) = -1000*I.
+        let rate = 1.0; // A/s, the limit
+        let design = compile_model(
+            "module slewramp(p, n); electrical p, n; \
+             parameter real k = 10.0; parameter real rate = 1.0; \
+             analog I(p, n) <+ slew(k * $abstime, rate); endmodule",
+            "slewramp",
+        );
+        let module = design.modules.first().expect("one module").clone();
+
+        let mut next = 1usize;
+        let dev = va_codegen::build_instance(&module, &[0, GROUND], &mut next).expect("builds");
+        let r = va_abi::reference::Resistor::new(0, GROUND, 1000.0);
+        let insts: [&dyn ModelInstance; 2] = [dev.as_ref(), &r];
+
+        // DC: `$abstime` is 0 and the limiter settles to its input, so the whole thing is 0 V.
+        // The static answer is unmoved by Tier B, which is the point of `is_initial_step`.
+        let op = operating_point(&insts, 1, NewtonConfig::default()).expect("DC solves");
+        assert!(op.x[0].abs() < 1e-12, "DC should be 0 V: {}", op.x[0]);
+
+        let cfg = TranConfig {
+            tstart: 0.0,
+            tstop: 1e-3,
+            tstep: 2e-5,
+            tstep_min: 1e-12,
+            method: Method::Trapezoidal,
+            lte_reltol: 1e-6,
+            lte_abstol: 1e-12,
+        };
+        let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
+        assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
+
+        for (&t, x) in wf.t.iter().zip(&wf.x) {
+            let expected = -rate * t * 1000.0; // rate-limited, NOT k*t
+            assert!(
+                (x[0] - expected).abs() < 1e-9,
+                "at t={t}: {} vs rate-limited {expected} (unlimited would be {})",
+                x[0],
+                -10.0 * t * 1000.0
+            );
+        }
+        // And it genuinely moved: at 1 ms the limiter has reached 1 mA, a tenth of its input.
+        assert!(
+            (wf.x.last().unwrap()[0] + 1.0).abs() < 1e-9,
+            "final {}",
+            wf.x.last().unwrap()[0]
+        );
+    }
+
     /// The whole Tier A pipeline, from Verilog-A source to a solved waveform: a model whose
     /// current is a function of `$abstime` must produce a genuine ramp in transient and its
     /// `t = 0` value at a DC operating point.

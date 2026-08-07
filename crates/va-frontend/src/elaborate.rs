@@ -1651,11 +1651,56 @@ impl Elaborator<'_> {
             // steady state (there is no rate-of-change or delay history at a fixed operating
             // point), so they fold transparently to `value`; the rest of the arguments are
             // parsed but never evaluated (same treatment as the noise-source builtins above).
+            // The synthetic condition `crate::parser` desugars `@(initial_step) stmt` into. It
+            // is not user-writable syntax — `initial_step` is an event name, not a function —
+            // which is why this arm accepts no arguments and needs no diagnostic for them.
+            ExprAst::Call { name, args } if name == "initial_step" && args.is_empty() => {
+                Expr::Call(Builtin::InitialStep, Vec::new())
+            }
+            // `transition(value, delay, rise_time, fall_time)` (LRM §4.5.5) and
+            // `slew(value, pos_rate, neg_rate)` (§4.5.6) both smooth a signal over *time*. They
+            // used to fold transparently to `value` — correct in a static solve, where both
+            // settle to their input, and a silently wrong waveform in transient, where these
+            // *are* the dynamics the model was written to express.
+            //
+            // They now survive to the IR and evaluate against Interface β's state channel
+            // (§ `va_ir::Builtin::Transition`). Arity is normalized here, as `ac_stim`'s is, so
+            // no consumer re-derives the LRM's defaults: `transition` always carries four
+            // arguments (`delay`/`rise`/`fall` defaulting to 0) and `slew` always three, with
+            // `neg_rate` defaulting to `pos_rate` — the LRM's own rule that a single stated rate
+            // limits both directions symmetrically.
             ExprAst::Call { name, args } if matches!(name.as_str(), "transition" | "slew") => {
                 let value = *args
                     .first()
                     .ok_or_else(|| elab(format!("`{name}` requires at least a value argument")))?;
-                return self.lower_expr(value);
+                let value = self.lower_expr(value)?;
+                let mut arg_or = |i: usize, default: f64| -> Result<ExprId, FrontendError> {
+                    match args.get(i) {
+                        Some(&e) => self.lower_expr(e),
+                        None => Ok(self.out.push_expr(Expr::Const(default))),
+                    }
+                };
+                if name == "slew" {
+                    let pos = arg_or(1, f64::INFINITY)?;
+                    // The LRM's default for an omitted `neg_slew_rate` is the negation of the
+                    // positive one, i.e. a symmetric limit. Reuse the *same* `ExprId` rather
+                    // than a copied constant so a parameterised rate stays one expression.
+                    let neg = match args.get(2) {
+                        Some(&e) => self.lower_expr(e)?,
+                        None => pos,
+                    };
+                    Expr::Call(Builtin::Slew, vec![value, pos, neg])
+                } else {
+                    let delay = arg_or(1, 0.0)?;
+                    let rise = arg_or(2, 0.0)?;
+                    // An omitted `fall_time` equals `rise_time` (LRM §4.5.5) — again the same
+                    // `ExprId`, not a duplicate.
+                    let fall = match args.get(3) {
+                        Some(&e) => self.lower_expr(e)?,
+                        None => rise,
+                    };
+                    Expr::Call(Builtin::Transition, vec![value, delay, rise, fall])
+                }
             }
             // `absdelay(value, delay[, max_delay])` (LRM §4.5.9) delays `value` by a fixed
             // time — again genuinely time-domain, and again settles to its undelayed input in
@@ -4464,17 +4509,26 @@ mod tests {
     }
 
     #[test]
-    fn transition_folds_to_its_value_argument() {
-        // `transition(V(a,b), td, tr, tf)` settles to its input in DC steady state, so it
-        // folds transparently to `V(a,b)` — no `Call` node survives into the IR at all (the
-        // only call in this source was `transition` itself), and `td`/`tr` are never even
-        // lowered.
+    fn transition_survives_elaboration_with_four_normalized_arguments() {
+        // `transition` used to fold transparently to `V(a,b)` — right in a static solve, and a
+        // silently wrong waveform in transient, where the ramp *is* what the model expresses.
+        // It now reaches the IR with arity normalized, so no consumer re-derives the LRM's
+        // defaults: an omitted `fall_time` is the *same expression* as `rise_time` (§4.5.5).
         let m = elaborate_src(
             "module t(a, b); electrical a, b; parameter real td = 1n; parameter real tr = 1n; \
              analog begin I(a, b) <+ transition(V(a, b), td, tr); end endmodule",
         );
-        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
-        assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(Builtin::Transition, a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("a transition call survives elaboration");
+        assert_eq!(args.len(), 4, "transition must normalize to four arguments");
+        assert!(matches!(m.expr(args[0]), va_ir::Expr::Probe(_)));
+        assert_eq!(args[2], args[3], "an omitted fall_time reuses rise_time");
 
         // No value argument at all is an error.
         let src =
@@ -4489,15 +4543,25 @@ mod tests {
     }
 
     #[test]
-    fn slew_folds_to_its_value_argument() {
-        // `slew(V(a,b), rate)` has no rate-of-change to limit at a fixed DC operating point, so
-        // it folds transparently to `V(a,b)`, same treatment as `transition`.
+    fn slew_survives_elaboration_with_a_symmetric_default_rate() {
+        // Same un-folding as `transition`. An omitted `neg_slew_rate` is the *same expression*
+        // as the positive one (LRM §4.5.6's symmetric default), not a copied constant — so a
+        // parameterised rate stays one expression in the arena.
         let m = elaborate_src(
             "module t(a, b); electrical a, b; parameter real rate = 1e6; \
              analog begin I(a, b) <+ slew(V(a, b), rate); end endmodule",
         );
-        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
-        assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(Builtin::Slew, a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("a slew call survives elaboration");
+        assert_eq!(args.len(), 3, "slew must normalize to three arguments");
+        assert!(matches!(m.expr(args[0]), va_ir::Expr::Probe(_)));
+        assert_eq!(args[1], args[2], "an omitted neg rate reuses the pos rate");
     }
 
     #[test]

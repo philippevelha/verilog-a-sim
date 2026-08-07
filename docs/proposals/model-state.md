@@ -1,12 +1,30 @@
 # Proposal: a per-instance state channel on Interface β (Tier B)
 
-**Status:** proposed. **Date:** 2026-08-06.
+**Status:** **delivered 2026-08-07**, with the §8 non-goals intact. **Date:** 2026-08-06.
 **Affects:** `va-abi` (Interface β), `va-ir` (Interface α), `va-frontend`, `va-codegen`,
 `va-core`, `va-transient`, `va-acnoise`, `va-cli`.
 **CLAUDE.md §6 step 1** — the written description the rule requires before any code.
 **Follows:** `analysis-context.md`, whose Tier A shipped 2026-08-06. This is that document's
 Tier B, which it deliberately deferred as "a genuinely harder design … must not be smuggled
 into it."
+
+> **Delivered 2026-08-07.** The state channel, `transition`, `slew` and `@(initial_step)` are
+> implemented; §8's non-goals (`$limit`, `absdelay`, `idt` ICs, exact `transition` breakpoints)
+> all remain non-goals. All 14 golden gates unchanged to the last digit; 547 tests pass.
+>
+> **One thing shipped differently from §4's recommendation.** `@(initial_step)` needed no
+> `Builtin`-wrapped-by-the-frontend dance in the end: the *parser* desugars
+> `@(initial_step) stmt` straight into `if (initial_step()) stmt`, and elaboration lowers that
+> synthetic call to `Builtin::InitialStep`. Same outcome, one less moving part, and every
+> existing control-flow walk selects the arm for free.
+>
+> **§6's validation question was asked and answered "yes, but not worth it".** QSPICE's
+> behavioral sources do compute `min`/`limit`/`sdt` exactly, so a closed-form slew envelope
+> *could* be golden-gated — but that compares our recurrence against the analytic answer rather
+> than against an independent slew implementation, and the same property is asserted more
+> directly by an end-to-end unit test. `docs/validation.md` records the choice and, more
+> importantly, what stays uncovered: rollback-on-reject has no rejecting-circuit test, and
+> `transition` has no dedicated end-to-end test at all.
 
 ---
 

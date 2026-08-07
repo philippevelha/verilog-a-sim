@@ -2264,6 +2264,48 @@ Tier A's arrival imply the whole family is fixed.
 
 ---
 
+## Analysis context — Tier B: the state channel (delivered 2026-08-07)
+
+A second §6 change to Interface β, designed up front in `docs/proposals/model-state.md`.
+
+**The finding that shaped it: Tier B was not one problem.** `analysis-context.md` named six
+constructs as "need to remember something between timesteps". Measured against the corpus they
+split into four lifetimes and two failure modes:
+
+| Construct | Corpus | Needs | Fold's failure mode |
+|---|---|---|---|
+| `$limit` | **10 / 72** | previous Newton **iterate** | **converges worse — same answer** |
+| `absdelay` | 5 / 17 | unbounded **trajectory** | wrong answer |
+| `transition` | 7 / 14 | per-accepted-step state | wrong answer |
+| `slew` | 0 / 0 | per-accepted-step state | wrong answer |
+| `@(initial_step)` | 0 / 0 | **nothing** — the solver knows | body ran every timepoint |
+
+**Delivered:** the state channel (`state_len`, `ModelState`, `AnalysisCtx::is_initial_step`,
+`va-transient`'s commit/rollback), plus `transition`, `slew` and `@(initial_step)` un-folded.
+`@(initial_step)` is desugared in the parser into an ordinary `if (initial_step())`, so it
+needed no new AST or IR statement kind and the existing control-flow walk selects the arm.
+
+**Not delivered, each for its own reason** (not one blanket deferral):
+
+- **`$limit`** — the most-used construct in the corpus, excluded deliberately. Its fold costs
+  convergence robustness, **not correctness**: a converged Newton solve is a fixed point of the
+  *unlimited* equations. Its lifetime is the Newton iterate, and `va-core` already limits every
+  unknown globally. The real work is "let a model direct the existing limiter" — convergence
+  work, not a state channel.
+- **`absdelay`** — needs an interpolated history buffer; no fixed-size state vector holds a
+  trajectory.
+- **Exact `transition` breakpoints** — approximated with Tier A's `bound_step` (~8 points per
+  ramp) rather than scheduled corners. Labelled as an approximation at the construct.
+
+**Evidence:** 547 tests pass, fmt/clippy clean, and **all 14 golden gates reproduce their
+numbers to the last digit** — the state channel is inert for every model that declares no state,
+and `is_initial_step` keeps static solves bit-identical. The new behaviour is unit-tested, not
+golden-gated; `validation.md` states exactly what is and is not covered, including that
+rollback-on-reject is not exercised by a rejecting circuit and that `transition` has no
+dedicated end-to-end test yet.
+
+---
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

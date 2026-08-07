@@ -429,3 +429,49 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > The check that it was behaviour-preserving: **all 13 golden gates reproduce their previous
 > numbers to the last recorded digit**, including `rectifier.net` (6.766e-4), the one gate that
 > actually exercised `run_dynamic`.
+
+> **Revision (§6 change, 2026-08-07):** added the **per-instance state channel** — a defaulted
+> `ModelInstance::state_len() -> usize` and a `ModelState` threaded through `load`:
+>
+> ```rust
+> fn state_len(&self) -> usize { 0 }
+> fn load(&self, x: &[f64], ctx: &AnalysisCtx, state: &mut ModelState, sink: &mut dyn StampSink);
+> ```
+>
+> plus `AnalysisCtx::is_initial_step`. This is **Tier B** of `docs/proposals/model-state.md`,
+> which is itself the deferred half of the analysis-context proposal. It is what lets a compiled
+> model implement `transition` and `slew`.
+>
+> **Read-old, write-new — and this is what *preserves* `load`'s purity rather than weakening
+> it.** `ModelState::get` always reads the value committed at the last **accepted** timepoint;
+> `set` always writes a separate proposal buffer. A model therefore cannot observe another
+> iteration's proposal, so `load` remains a pure function of `(x, ctx, committed-state)`. What
+> changed is that it gained an output channel besides the sink.
+>
+> **The storage is solver-owned, and the alternative is worth naming.** Giving the model a
+> `RefCell<Vec<f64>>` is the tempting implementation and it breaks three consumers at once:
+> Newton re-enters `load` many times per timepoint (the equations would move under the solver);
+> the LTE controller solves every candidate step *twice* and discards rejected ones entirely (a
+> self-mutating model would commit history for a timepoint that never happened); and
+> finite-difference Jacobian checks perturb `x` and re-evaluate (the check would measure the
+> side effect). So the instance declares a size, the consumer allocates and slices, and only the
+> consumer decides when a proposal becomes history — `committed` on accept, nothing on reject,
+> and `scratch` re-seeded from `committed` before every sweep so an unwritten slot means
+> "unchanged" rather than inheriting a rejected candidate's value.
+>
+> **`is_initial_step` is always `true` in DC/AC/noise.** A static solve is definitionally its own
+> initial step, which is also what keeps `transition`/`slew` settling immediately to their input
+> there — the LRM-correct steady state, and bit-for-bit the answer the old elaboration-time folds
+> produced. That is why all 14 golden gates are unchanged by this revision.
+>
+> **Deliberately not in scope**, each for a *different* reason rather than one blanket
+> "later" — the decomposition is the proposal's main content:
+>
+> - **`$limit`** is the corpus's most-used construct (10 files / 72 uses) and is excluded because
+>   its fold is **not a wrong answer**: a converged Newton solve is a fixed point of the
+>   unlimited equations, so a limiter changes the path, not the answer. Its lifetime is the
+>   Newton *iterate*, not the timestep, so this channel is the wrong shape for it.
+> - **`absdelay`** needs an unbounded interpolated **trajectory**, which no fixed-size state
+>   vector holds. A second design; the channel is shaped not to preclude it.
+> - **True event-scheduled `transition`** — approximated here via `bound_step` rather than exact
+>   corner breakpoints, and `docs/token-reference.md` says so at the construct.

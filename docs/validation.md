@@ -337,6 +337,36 @@ corresponds to `analysis()` (the by-construction split described in the table ab
 best available), and neither `ac_stim` nor `bound_step` has an expressible QSPICE counterpart
 driven from a model rather than a netlist.
 
+### Tier B: the state channel, `transition` and `slew` (added 2026-08-07)
+
+**Unit-tested, not golden-gated**, and the reason is different from Tier A's.
+
+QSPICE *can* express these — its behavioral sources compute `min`/`limit`/`sdt` exactly
+(verified 2026-08-06: `sdt(2)` integrates to 4.6e-17 of `2t`) — so a `B1 o 0 V=min(1, R*time)`
+deck would reproduce a slew-limited ramp's closed-form envelope. What that comparison would
+check is *our numerical recurrence against the analytic answer*, which is genuinely useful but
+is not two independent implementations of slew limiting. It was not built because the same
+property is already asserted, more directly and without a QSPICE round-trip, by the end-to-end
+test below.
+
+| Property | How it is validated | Strength |
+|---|---|---|
+| Every existing gate is unchanged | `cargo xtask validate` — all **14** circuits reproduce their previous numbers to the last digit | Strongest available, and free |
+| `slew` rate-limits end to end | `va-cli` test: a compiled `slew(k·$abstime, rate)` with `k = 10·rate`, solved through the real pipeline; output must follow `rate·t`, **a factor of ten below its own input** | Unit, closed-form, strongly discriminating |
+| Static solves are unmoved | Same test's DC half: `is_initial_step` makes the limiter settle to its input, reproducing the old const-fold exactly | Unit |
+| Read-old/write-new | `va_abi::state` unit test: a `set` is invisible to a `get` in the same evaluation | Unit — the channel's defining invariant |
+| Unwritten slots mean "unchanged" | `va_abi::state` unit test on the consumer's pre-seed rule | Unit |
+
+**What is *not* covered, stated rather than implied.** The slew test's circuit is purely
+algebraic and its input is smooth, so the LTE controller almost certainly never rejects a step —
+which means **rollback-on-reject is not exercised by a rejecting circuit**. It rests on the
+`ModelState` unit tests and on the `StateBuffers` discipline being small enough to read. A
+circuit that forces rejections while carrying state would be a real addition.
+
+`transition` has **no** dedicated end-to-end test yet, only the shared channel's. It is also the
+one construct here implemented as an acknowledged approximation (no exact corner breakpoints),
+so it is the weakest link in this row and should be the next thing gated.
+
 ## Bring-up ladder
 
 Each rung is a checkpoint; it is "passed" only when `va-harness` is green against golden:
