@@ -4,6 +4,7 @@ use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::noise::{shot_current_psd, NoiseSink};
 use crate::stamps::StampSink;
+use crate::state::ModelState;
 
 /// An NPN BJT, simplified (textbook) Ebers-Moll: `Ib = Ibe + Ibc`, `Ic = Icc - Ibc`, where
 /// `Ibe = (Is/betaF)*(exp(Vbe/Vt)-1)`, `Ibc = (Is/betaR)*(exp(Vbc/Vt)-1)`, and
@@ -62,7 +63,13 @@ impl ModelInstance for Bjt {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        _ctx: &AnalysisCtx,
+        _state: &mut ModelState,
+        sink: &mut dyn StampSink,
+    ) {
         let [b, c, e] = self.terminals;
         let vb = x.get(b).copied().unwrap_or(0.0);
         let vc = x.get(c).copied().unwrap_or(0.0);
@@ -184,7 +191,12 @@ mod tests {
         use crate::ANALYSIS_DC;
         let q = fixture();
         let mut sink = DenseStamp::new(3);
-        q.load(&[0.65, 1.35, 0.0], &ANALYSIS_DC, &mut sink);
+        q.load(
+            &[0.65, 1.35, 0.0],
+            &ANALYSIS_DC,
+            &mut ModelState::stateless(),
+            &mut sink,
+        );
         for col in 0..3 {
             let sum: f64 = (0..3).map(|row| sink.jac(row, col)).sum();
             assert!(sum.abs() < 1e-12, "column {col} sums to {sum}, expected ~0");

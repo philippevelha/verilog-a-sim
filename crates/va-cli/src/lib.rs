@@ -490,9 +490,15 @@ impl ModelInstance for WaveformSource {
         }
     }
 
-    fn load(&self, x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+        state: &mut va_abi::ModelState,
+        sink: &mut dyn va_abi::StampSink,
+    ) {
         let [p, n, b] = self.terminals;
-        VSource::new(p, n, b, waveform_value(self.waveform, ctx.time)).load(x, ctx, sink)
+        VSource::new(p, n, b, waveform_value(self.waveform, ctx.time)).load(x, ctx, state, sink)
     }
 }
 

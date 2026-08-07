@@ -3,6 +3,7 @@
 use crate::analysis::AnalysisCtx;
 use crate::noise::NoiseSink;
 use crate::stamps::StampSink;
+use crate::state::ModelState;
 
 /// The structural role of one entry in [`ModelInstance::unknowns`], distinguishing a KCL
 /// node from a constraint row — needed by convergence aids (e.g. `va-core`'s `gmin` stepping)
@@ -89,10 +90,29 @@ pub trait ModelInstance {
     /// every implementor sees it.
     ///
     /// `load` may be called any number of times for the same `ctx` (once per Newton iteration,
-    /// and again on a rejected timestep). It must be a pure function of `(x, ctx)` — the
-    /// contract carries no state, so a construct needing history across evaluations
-    /// (`transition`, `slew`, `absdelay`, …) cannot be implemented on top of it.
-    fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn StampSink);
+    /// and again on a rejected timestep). It must be a pure function of
+    /// `(x, ctx, state-as-committed)` — see [`crate::state`] for why reading committed state
+    /// preserves that purity rather than weakening it, and what a consumer owes in return.
+    ///
+    /// `state` is this instance's own [`Self::state_len`] slots. Almost every model ignores it:
+    /// a resistor's `V/R` depends on nothing but `x`. It matters for a compiled model whose
+    /// source calls `transition` or `slew` — constructs whose value at this timepoint depends on
+    /// what happened at the last accepted one.
+    fn load(&self, x: &[f64], ctx: &AnalysisCtx, state: &mut ModelState, sink: &mut dyn StampSink);
+
+    /// Number of `f64` state slots this instance needs carried between accepted timepoints
+    /// (§6 change, 2026-08-06 — see [`crate::state`]).
+    ///
+    /// Default **0**: stateless, which is what every model in [`crate::reference`] and the
+    /// overwhelming majority of compiled models are. A consumer sums this over its instances
+    /// once, at setup, and slices one flat buffer per instance — the same "declare your size,
+    /// the consumer owns the array" shape [`Self::unknowns`] already uses for the solution
+    /// vector.
+    ///
+    /// Must be constant for the lifetime of the instance; a consumer reads it once.
+    fn state_len(&self) -> usize {
+        0
+    }
 
     /// Emit this instance's own **noise sources** at operating point `x` into `sink` —
     /// Interface β's noise channel (§4/§6 additive change, 2026-08-01; see [`crate::noise`] for

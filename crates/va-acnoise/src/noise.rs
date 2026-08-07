@@ -524,6 +524,7 @@ mod tests {
                 &self,
                 _x: &[f64],
                 _ctx: &va_abi::AnalysisCtx,
+                _st: &mut va_abi::ModelState,
                 sink: &mut dyn va_abi::StampSink,
             ) {
                 // A 1 S conductance to ground, so the transfer impedance is exactly 1 Ω and the
@@ -575,6 +576,7 @@ mod tests {
                 &self,
                 _x: &[f64],
                 _ctx: &va_abi::AnalysisCtx,
+                _st: &mut va_abi::ModelState,
                 sink: &mut dyn va_abi::StampSink,
             ) {
                 // 1 S to ground: transfer impedance exactly 1 Ω, so the output PSD *is* the
@@ -640,6 +642,7 @@ mod tests {
                 &self,
                 _x: &[f64],
                 _ctx: &va_abi::AnalysisCtx,
+                _st: &mut va_abi::ModelState,
                 sink: &mut dyn va_abi::StampSink,
             ) {
                 sink.jacobian(0, 0, 1.0);
@@ -760,6 +763,7 @@ mod tests {
                 &self,
                 _x: &[f64],
                 _ctx: &va_abi::AnalysisCtx,
+                _st: &mut va_abi::ModelState,
                 sink: &mut dyn va_abi::StampSink,
             ) {
                 sink.jacobian(0, 0, 1.0);

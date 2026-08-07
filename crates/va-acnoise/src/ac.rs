@@ -132,7 +132,7 @@ pub fn linearize(
         excitation: vec![(0.0, 0.0); dim],
     };
     for inst in instances {
-        inst.load(x_dc, ctx, &mut lin);
+        inst.load(x_dc, ctx, &mut va_abi::ModelState::stateless(), &mut lin);
     }
     lin
 }
@@ -314,9 +314,15 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn StampSink) {
+            fn load(
+                &self,
+                x: &[f64],
+                ctx: &va_abi::AnalysisCtx,
+                st: &mut va_abi::ModelState,
+                sink: &mut dyn StampSink,
+            ) {
                 let [p, n] = self.terminals;
-                Resistor::new(p, n, self.r).load(x, ctx, sink);
+                Resistor::new(p, n, self.r).load(x, ctx, st, sink);
                 if ctx.kind == va_abi::AnalysisKind::Ac {
                     sink.excitation(p, 1.0, 0.0);
                     sink.excitation(n, -1.0, 0.0);
@@ -367,7 +373,12 @@ mod tests {
 
         // And it really is analysis-gated: the same instance excites nothing in a DC load.
         let mut dc = va_abi::stamps::DenseStamp::new(1);
-        stim.load(&[0.0], &va_abi::ANALYSIS_DC, &mut dc);
+        stim.load(
+            &[0.0],
+            &va_abi::ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut dc,
+        );
         assert_eq!(dc.excitation[0], (0.0, 0.0));
     }
 

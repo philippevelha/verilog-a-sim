@@ -5,6 +5,7 @@ use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::noise::{thermal_current_psd, NoiseSink};
 use crate::stamps::StampSink;
+use crate::state::ModelState;
 
 /// A linear resistor `I = (V(p) - V(n)) / R` between two global unknowns.
 ///
@@ -36,7 +37,13 @@ impl ModelInstance for Resistor {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        _ctx: &AnalysisCtx,
+        _state: &mut ModelState,
+        sink: &mut dyn StampSink,
+    ) {
         let [p, n] = self.terminals;
         let v = voltage_across(x, p, n);
         let i = self.g * v;

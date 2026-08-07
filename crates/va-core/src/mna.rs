@@ -143,7 +143,7 @@ pub fn assemble(
 ) -> System {
     let mut sys = System::new(dim);
     for inst in instances {
-        inst.load(x, ctx, &mut sys);
+        inst.load(x, ctx, &mut va_abi::ModelState::stateless(), &mut sys);
     }
     sys
 }
@@ -159,7 +159,12 @@ mod tests {
         // A 1 kΩ resistor to ground at 1 V deposits 1 mA / 1 mS.
         let r = Resistor::new(0, GROUND, 1000.0);
         let mut sys = System::new(1);
-        r.load(&[1.0], &ANALYSIS_DC, &mut sys);
+        r.load(
+            &[1.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sys,
+        );
         assert!((sys.residual[0] - 1e-3).abs() < 1e-15);
         assert!((sys.jacobian[0] - 1e-3).abs() < 1e-18);
     }

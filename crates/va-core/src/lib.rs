@@ -58,6 +58,9 @@ pub(crate) mod testutil {
         fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
             self.inner.unknown_kind(i)
         }
+        fn state_len(&self) -> usize {
+            self.inner.state_len()
+        }
         fn unknown_abstol(&self, i: usize) -> Option<f64> {
             self.overrides
                 .iter()
@@ -69,9 +72,10 @@ pub(crate) mod testutil {
             &self,
             x: &[f64],
             ctx: &va_abi::AnalysisCtx,
+            state: &mut va_abi::ModelState,
             sink: &mut dyn va_abi::stamps::StampSink,
         ) {
-            self.inner.load(x, ctx, sink)
+            self.inner.load(x, ctx, state, sink)
         }
     }
 }

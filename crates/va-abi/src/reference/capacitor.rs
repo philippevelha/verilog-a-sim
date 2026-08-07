@@ -4,6 +4,7 @@ use super::{stamp_charge, voltage_across};
 use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::stamps::StampSink;
+use crate::state::ModelState;
 
 /// A linear capacitor `Q = C * (V(p) - V(n))` between two global unknowns.
 ///
@@ -35,7 +36,13 @@ impl ModelInstance for Capacitor {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        _ctx: &AnalysisCtx,
+        _state: &mut ModelState,
+        sink: &mut dyn StampSink,
+    ) {
         let [p, n] = self.terminals;
         let v = voltage_across(x, p, n);
         let q = self.c * v;

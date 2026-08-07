@@ -5,6 +5,7 @@ use crate::analysis::AnalysisCtx;
 use crate::instance::ModelInstance;
 use crate::noise::{shot_current_psd, NoiseSink};
 use crate::stamps::StampSink;
+use crate::state::ModelState;
 
 /// Default thermal voltage `kT/q` at the project's nominal simulation temperature, 300.15 K
 /// (27°C) — matches `va_codegen::TEMP`/`VT` and QSPICE's own default `TNOM` (`CLAUDE.md` §7's
@@ -56,7 +57,13 @@ impl ModelInstance for Diode {
         &self.terminals
     }
 
-    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        _ctx: &AnalysisCtx,
+        _state: &mut ModelState,
+        sink: &mut dyn StampSink,
+    ) {
         let [p, n] = self.terminals;
         let vd = voltage_across(x, p, n);
         let i = self.current(vd);

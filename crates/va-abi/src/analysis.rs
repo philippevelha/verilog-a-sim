@@ -103,6 +103,16 @@ pub struct AnalysisCtx {
     /// Folded in here rather than kept as `noise`'s own separate argument, so both entry points
     /// agree and `load` gains the temperature it never had.
     pub temp: f64,
+    /// Whether this is the **first evaluation** of the analysis — Verilog-A's
+    /// `@(initial_step)`, and the flag [`crate::state`]'s channel needs to know that `prev` is
+    /// zero-filled rather than meaningful.
+    ///
+    /// `true` for the first timepoint of a transient run, and **always `true` in DC, AC and
+    /// noise**: a static solve is definitionally its own initial step, having no earlier
+    /// timepoint to have followed. That is also what keeps a `slew`/`transition` settling
+    /// immediately to its input in a static solve — the LRM-correct steady-state answer, and
+    /// the same one this project produced when those constructs were const-folded.
+    pub is_initial_step: bool,
 }
 
 impl AnalysisCtx {
@@ -114,6 +124,7 @@ impl AnalysisCtx {
             kind: AnalysisKind::Dc,
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
+            is_initial_step: true,
         }
     }
 
@@ -123,6 +134,10 @@ impl AnalysisCtx {
             kind: AnalysisKind::Transient,
             time,
             temp: crate::noise::TEMP_NOMINAL,
+            // A caller that is genuinely at the first timepoint sets this with
+            // `with_initial_step`; defaulting to `false` makes the *safe* mistake, since a
+            // model then reads committed state instead of re-initialising mid-run.
+            is_initial_step: false,
         }
     }
 
@@ -134,6 +149,7 @@ impl AnalysisCtx {
             kind: AnalysisKind::Ac,
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
+            is_initial_step: true,
         }
     }
 
@@ -143,12 +159,21 @@ impl AnalysisCtx {
             kind: AnalysisKind::Noise,
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
+            is_initial_step: true,
         }
     }
 
     /// This context with its temperature replaced.
     pub const fn with_temp(self, temp: f64) -> Self {
         AnalysisCtx { temp, ..self }
+    }
+
+    /// This context marked as (or as not) the analysis's first evaluation.
+    pub const fn with_initial_step(self, is_initial_step: bool) -> Self {
+        AnalysisCtx {
+            is_initial_step,
+            ..self
+        }
     }
 }
 

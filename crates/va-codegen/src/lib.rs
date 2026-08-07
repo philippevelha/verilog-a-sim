@@ -938,7 +938,14 @@ impl ModelInstance for GeneratedModel {
         });
     }
 
-    fn load(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        actx: &va_abi::AnalysisCtx,
+        state: &mut va_abi::ModelState,
+        sink: &mut dyn StampSink,
+    ) {
+        let _ = &state;
         let ctx = self.ctx(x, actx, false);
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
@@ -1204,7 +1211,12 @@ mod tests {
         let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
         let v = 0.6;
         let mut sink = DenseStamp::new(1);
-        inst.load(&[v], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         let (c0, c1) = (1e-12, 0.5e-12);
         let q_expected = c0 * v + c1 * v.cosh().ln();
@@ -1231,7 +1243,12 @@ mod tests {
         let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
         let charge_at = |v: f64| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[v], &ANALYSIS_DC, &mut s);
+            inst.load(
+                &[v],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.charge[0]
         };
 
@@ -1240,7 +1257,12 @@ mod tests {
         let fd = (charge_at(v + h) - charge_at(v - h)) / (2.0 * h);
 
         let mut sink = DenseStamp::new(1);
-        inst.load(&[v], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         let analytic = sink.dcharge[0];
 
         let rel = (analytic - fd).abs() / fd.abs();
@@ -1294,7 +1316,12 @@ mod tests {
 
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
-        inst.load(&[0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert_eq!(sink.residual[0], 2.0);
     }
 
@@ -1420,7 +1447,12 @@ mod tests {
 
         // V(p,n) = +1 V: the `then` arm, conductance g_pos.
         let mut sink = DenseStamp::new(1);
-        inst.load(&[1.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[1.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert!((sink.residual[0] - g_pos).abs() / g_pos < 1e-12);
         assert!((sink.jac(0, 0) - g_pos).abs() / g_pos < 1e-12);
 
@@ -1428,7 +1460,12 @@ mod tests {
         // different Jacobian, proving the selected branch's own gradient is what's stamped,
         // not the other arm's.
         let mut sink = DenseStamp::new(1);
-        inst.load(&[-1.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[-1.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert!((sink.residual[0] + g_neg).abs() / g_neg < 1e-12);
         assert!((sink.jac(0, 0) - g_neg).abs() / g_neg < 1e-12);
     }
@@ -1500,7 +1537,12 @@ mod tests {
         // 1 kΩ from node 0 to ground (index 1 is out of range of a dim-1 system).
         let inst = build_instance(&resistor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
-        inst.load(&[2.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[2.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // Same hand-checked values as va_abi's resistor_stamp_by_hand.
         assert!((sink.residual[0] - 2e-3).abs() < 1e-15);
         assert!((sink.jac(0, 0) - 1e-3).abs() < 1e-18);
@@ -1525,7 +1567,12 @@ mod tests {
     fn capacitor_stamps_only_charge() {
         let inst = build_instance(&capacitor_ir(), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(1);
-        inst.load(&[3.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[3.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // Q = C*V = 1pF * 3V = 3e-12; dQ/dV = C = 1e-12. No resistive current.
         assert!((sink.charge[0] - 3e-12).abs() < 1e-24);
         assert!((sink.dcharge[0] - 1e-12).abs() < 1e-27);
@@ -1590,7 +1637,12 @@ mod tests {
 
         let (vp, vn, y) = (0.7, 0.0, 1.25);
         let mut sink = DenseStamp::new(4);
-        inst.load(&[vp, vn, 0.0, y], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vp, vn, 0.0, y],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // The accumulator's own row (global 3): residual = -(arg) = -(V(p,n)); jacobian w.r.t.
         // p/n = -1/+1; charge = Y itself; dcharge/dY = 1.
@@ -1655,7 +1707,12 @@ mod tests {
         // `idt`'s own contribution: it reads back as the accumulator's raw value (0.0 here,
         // since the codegen doesn't seed it from `ic`) -- building and loading without erroring
         // is the main point of this test.
-        inst.load(&[0.0, 0.0, 0.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0, 0.0, 0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert_eq!(sink.residual[2], 0.0);
     }
 
@@ -1705,7 +1762,12 @@ mod tests {
 
         let (y_a, y_b) = (2.0, 5.0);
         let mut sink = DenseStamp::new(5);
-        inst.load(&[0.0, 0.0, 0.0, y_a, y_b], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0, 0.0, 0.0, y_a, y_b],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // The constraint row reads `idt_a + idt_b` = y_a + y_b, not `2*` either one.
         assert!((sink.residual[2] - -(y_a + y_b)).abs() < 1e-12);
         // Each accumulator's own row is independent: both driven by the same argument (V(p,n)
@@ -1797,7 +1859,12 @@ mod tests {
         let (vp, vn, vout, vgnd) = (0.6, 0.1, 0.0, 0.0);
         let r_val = 1000.0;
         let mut sink = DenseStamp::new(6);
-        inst.load(&[vp, vn, vout, vgnd, 0.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vp, vn, vout, vgnd, 0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // The accumulator's own row (slot 5): residual = x[5] - (vp-vn)/R; jacobian w.r.t. p/n.
         let total = (vp - vn) / r_val;
@@ -1891,6 +1958,7 @@ mod tests {
         inst.load(
             &[0.6, 0.5, 0.5, 0.0, 0.0, ib0, 0.0, 0.0],
             &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
             &mut sink,
         );
 
@@ -1979,7 +2047,12 @@ mod tests {
 
         let (vp, vn, rs_val, ib) = (0.6, 0.1, 5.0, 0.05);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vp, vn, ib],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // total = (vp-vn) - Rs*ib; residual[2] = ib - total; jacobian(2,2) = 1 - (-Rs) = 1+Rs.
         let total = (vp - vn) - rs_val * ib;
@@ -1999,7 +2072,12 @@ mod tests {
         let inst = build_instance(&diode_ir(), &[0, 1], &mut 2).unwrap();
         let vd = 0.6;
         let mut sink = DenseStamp::new(1);
-        inst.load(&[vd], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vd],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         let is = 1e-14;
         let nvt = 1.0 * VT;
@@ -2016,7 +2094,12 @@ mod tests {
 
         let residual_at = |vd: f64| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[vd], &ANALYSIS_DC, &mut s);
+            inst.load(
+                &[vd],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.residual[0]
         };
 
@@ -2025,7 +2108,12 @@ mod tests {
         let fd = (residual_at(vd + h) - residual_at(vd - h)) / (2.0 * h);
 
         let mut sink = DenseStamp::new(1);
-        inst.load(&[vd], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vd],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         let analytic = sink.jac(0, 0);
 
         let rel = (fd - analytic).abs() / analytic.abs();
@@ -2100,7 +2188,12 @@ mod tests {
 
         let (vp, vn, ib) = (5.0, 2.0, 1e-3);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vp, vn, ib],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // Constraint row (global index 2): V(p) - V(n) - I(p,n)*R = 0.
         assert!((sink.residual[2] - (vp - vn - ib * r)).abs() < 1e-9);
@@ -2118,7 +2211,12 @@ mod tests {
         // §5: the self-referencing flow-probe gradient must match a central finite difference.
         let residual_at = |ib: f64| {
             let mut s = DenseStamp::new(3);
-            inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut s);
+            inst.load(
+                &[vp, vn, ib],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.residual[2]
         };
         let h = 1e-6;
@@ -2185,7 +2283,12 @@ mod tests {
 
         let ib = 0.4;
         let mut sink = DenseStamp::new(3);
-        inst.load(&[0.0, 0.0, ib], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0, 0.0, ib],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // The constraint row is `V(p)-V(n) - L*ddt(I(p,n)) = 0`; the structural `V(p)-V(n)`
         // part is stamped separately (`stamp_branch_currents`), so the remaining `-L*I(p,n)`
@@ -2271,7 +2374,12 @@ mod tests {
 
         let (vp, vn, stray_ib) = (5.0, 2.0, 42.0);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, stray_ib], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vp, vn, stray_ib],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // Ordinary resistor KCL at the nodes: I = (Vp-Vn)/rt.
         let expected_i = (vp - vn) / rt;
@@ -2296,7 +2404,12 @@ mod tests {
 
         let (vp, vn, ib) = (5.0, 2.0, 1e-3);
         let mut sink = DenseStamp::new(3);
-        inst.load(&[vp, vn, ib], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[vp, vn, ib],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // Constraint row: V(p) - V(n) - 0 = 0.
         assert!((sink.residual[2] - (vp - vn)).abs() < 1e-12);
@@ -2407,14 +2520,24 @@ mod tests {
         // sel=2.0 matches arm1's *second* label (1,2: ...) -- proves multi-label arms work.
         let inst = build_instance(&case_ir(2.0, g0, g1, gdef), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[1.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[1.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert!((sink.residual[0] - g1).abs() / g1 < 1e-12);
         assert!((sink.jac(0, 0) - g1).abs() / g1 < 1e-12);
 
         // sel=99.0 matches nothing -- falls through to `default`.
         let inst = build_instance(&case_ir(99.0, g0, g1, gdef), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[1.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[1.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert!((sink.residual[0] - gdef).abs() / gdef < 1e-12);
         assert!((sink.jac(0, 0) - gdef).abs() / gdef < 1e-12);
     }
@@ -2501,7 +2624,12 @@ mod tests {
         let inst = build_instance(&repeat_accumulate_ir(n, g), &[0, 1], &mut 2).unwrap();
 
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // acc after 3 iterations = 3*v; I = 3*g*v.
         let expected_i = n * g * v;
         assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
@@ -2511,7 +2639,12 @@ mod tests {
         // §5: the gradient accumulated *through* the loop must match a central finite difference.
         let residual_at = |v: f64| {
             let mut s = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
+            inst.load(
+                &[v, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.residual[0]
         };
         let h = 1e-6;
@@ -2625,7 +2758,12 @@ mod tests {
         let inst = build_instance(&for_accumulate_ir(n, g), &[0, 1], &mut 2).unwrap();
 
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         let expected_i = n * g * v;
         assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
         let expected_g = n * g;
@@ -2703,7 +2841,12 @@ mod tests {
         let eps = 1e-3;
         let inst = build_instance(&halving_while_ir(eps), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // Replicate the same loop in Rust to get the expected final `x`, rather than hardcoding
         // a magic constant.
@@ -2783,7 +2926,12 @@ mod tests {
         // `build_instance` still succeeds: validation only runs the loop body once.
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // The post-loop contribution never ran, so the residual is untouched.
         assert_eq!(sink.residual[0], 0.0);
     }
@@ -2856,7 +3004,12 @@ mod tests {
         let inst = build_instance(&sq_function_ir(g), &[0, 1], &mut 2).unwrap();
 
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // I = g * sq(v) = g*v^2.
         let expected_i = g * v * v;
         assert!((sink.residual[0] - expected_i).abs() / expected_i < 1e-12);
@@ -2867,7 +3020,12 @@ mod tests {
         // §5: cross-check against a central finite difference.
         let residual_at = |v: f64| {
             let mut s = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
+            inst.load(
+                &[v, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.residual[0]
         };
         let h = 1e-6;
@@ -2980,7 +3138,12 @@ mod tests {
         let inst = build_instance(&output_arg_function_ir(), &[0, 1], &mut 2).unwrap();
         let v = 2.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // I = sq_result + cube_result = v^2 + v^3.
         let expected_i = v * v + v * v * v;
@@ -2993,7 +3156,12 @@ mod tests {
         let h = 1e-6;
         let residual_at = |v: f64| {
             let mut s = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
+            inst.load(
+                &[v, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.residual[0]
         };
         let fd = (residual_at(v + h) - residual_at(v - h)) / (2.0 * h);
@@ -3113,7 +3281,12 @@ mod tests {
         let delta = 1.5;
         let inst = build_instance(&inout_arg_function_ir(delta), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.0, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.0, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         // counter_outer starts at 10.0, `bump` adds `delta` and writes the sum back.
         assert!((sink.residual[0] - (10.0 + delta)).abs() < 1e-9);
         // The contributed value came from `counter_outer` (a constant, not a node voltage), so
@@ -3457,7 +3630,12 @@ mod tests {
         ] {
             let inst = build_instance(&scaled_ddt_ir(c0, coeff, shape), &[0, 1], &mut 2).unwrap();
             let mut sink = DenseStamp::new(2);
-            inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+            inst.load(
+                &[v, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sink,
+            );
             assert!((sink.charge[0] - expected_q).abs() / expected_q < 1e-9);
             assert!((sink.dcharge[0] - expected_dq).abs() / expected_dq < 1e-9);
             // No charge should leak onto the resistive residual channel.
@@ -3467,7 +3645,12 @@ mod tests {
             // difference on the charge value itself.
             let charge_at = |v: f64| {
                 let mut s = DenseStamp::new(2);
-                inst.load(&[v, 0.0], &ANALYSIS_DC, &mut s);
+                inst.load(
+                    &[v, 0.0],
+                    &ANALYSIS_DC,
+                    &mut va_abi::ModelState::stateless(),
+                    &mut s,
+                );
                 s.charge[0]
             };
             let h = 1e-6;
@@ -3606,7 +3789,12 @@ mod tests {
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let (c0v, type_v, mv, v) = (1e-12, -1.0, 4.0, 0.7);
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         let expected_q = type_v * mv * c0v * v;
         let expected_dq = type_v * mv * c0v;
@@ -3709,7 +3897,12 @@ mod tests {
         let inst = build_instance(&ddt_via_local_variable_ir(true), &[0, 1], &mut 2).unwrap();
         let (c0, g, v) = (1e-12, 2.0, 0.6);
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
 
         // The resistive term (`V(p,n)*g`) and the substituted `ddt(c0*V(p,n))` charge term must
         // both land correctly, exactly as if the source had written `I(p,n) <+ V(p,n)*g +
@@ -3732,7 +3925,12 @@ mod tests {
     fn ddt_via_local_variable_else_arm_does_not_need_it() {
         let inst = build_instance(&ddt_via_local_variable_ir(false), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.6, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.6, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert_eq!(sink.residual[0], 0.0);
         assert_eq!(sink.charge[0], 0.0);
     }
@@ -3840,7 +4038,12 @@ mod tests {
         // instead have produced a nonzero `charge[0]` here).
         let inst = build_instance(&reassigned_in_one_arm_only_ir(true), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.6, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.6, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert_eq!(sink.residual[0], 5.0);
         assert_eq!(sink.charge[0], 0.0);
 
@@ -3850,7 +4053,12 @@ mod tests {
         // would not have been.
         let inst = build_instance(&reassigned_in_one_arm_only_ir(false), &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(2);
-        inst.load(&[0.6, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[0.6, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert_eq!(sink.residual[0], 0.0);
         assert_eq!(sink.charge[0], 0.0);
     }
@@ -3940,14 +4148,24 @@ mod tests {
         // V > 0: devsign = 1.
         let v = 3.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         assert!((sink.charge[0] - c0 * v).abs() / (c0 * v) < 1e-9);
         assert!((sink.dcharge[0] - c0).abs() / c0 < 1e-9);
 
         // V < 0: devsign = -1.
         let v = -3.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         let expected_q = -c0 * v;
         assert!((sink.charge[0] - expected_q).abs() / expected_q.abs() < 1e-9);
         assert!((sink.dcharge[0] + c0).abs() / c0 < 1e-9);
@@ -4039,7 +4257,12 @@ mod tests {
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let v = 3.0;
         let mut sink = DenseStamp::new(2);
-        inst.load(&[v, 0.0], &ANALYSIS_DC, &mut sink);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
         let b_value = (w / l) * 2.0;
         let expected_q = b_value * c0 * v;
         assert!((sink.charge[0] - expected_q).abs() / expected_q < 1e-9);
@@ -4163,8 +4386,18 @@ mod tests {
         // Identical resistive stamps.
         let x = [2.0, 0.0];
         let (mut a, mut b) = (DenseStamp::new(2), DenseStamp::new(2));
-        plain_inst.load(&x, &ANALYSIS_DC, &mut a);
-        noisy_inst.load(&x, &ANALYSIS_DC, &mut b);
+        plain_inst.load(
+            &x,
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut a,
+        );
+        noisy_inst.load(
+            &x,
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut b,
+        );
         assert_eq!(
             a.residual, b.residual,
             "noise must not perturb the residual"
@@ -4241,8 +4474,18 @@ mod tests {
 
         let x = [2.0, 0.0];
         let (mut a, mut b) = (DenseStamp::new(2), DenseStamp::new(2));
-        plain_inst.load(&x, &ANALYSIS_DC, &mut a);
-        noisy_inst.load(&x, &ANALYSIS_DC, &mut b);
+        plain_inst.load(
+            &x,
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut a,
+        );
+        noisy_inst.load(
+            &x,
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut b,
+        );
         assert_eq!(
             a.residual, b.residual,
             "a table must not perturb the residual"
@@ -4379,7 +4622,7 @@ mod tests {
 
         let residual_under = |ctx: &va_abi::AnalysisCtx| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[1.0], ctx, &mut s);
+            inst.load(&[1.0], ctx, &mut va_abi::ModelState::stateless(), &mut s);
             s.residual[0]
         };
 
@@ -4398,7 +4641,7 @@ mod tests {
         let inst2 = build_instance(&m2, &[0, 1], &mut 2).expect("builds");
         let r2 = |ctx: &va_abi::AnalysisCtx| {
             let mut s = DenseStamp::new(1);
-            inst2.load(&[1.0], ctx, &mut s);
+            inst2.load(&[1.0], ctx, &mut va_abi::ModelState::stateless(), &mut s);
             s.residual[0]
         };
         assert!((r2(&ANALYSIS_DC) - 2e-3).abs() < 1e-15);
@@ -4422,7 +4665,7 @@ mod tests {
 
         let stamp_at = |ctx: &va_abi::AnalysisCtx, v: f64| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[v], ctx, &mut s);
+            inst.load(&[v], ctx, &mut va_abi::ModelState::stateless(), &mut s);
             s
         };
 
@@ -4476,8 +4719,8 @@ mod tests {
             va_abi::AnalysisCtx::transient(1e-6),
         ] {
             let (mut a, mut b) = (DenseStamp::new(1), DenseStamp::new(1));
-            plain_inst.load(&[1.0], &ctx, &mut a);
-            stim_inst.load(&[1.0], &ctx, &mut b);
+            plain_inst.load(&[1.0], &ctx, &mut va_abi::ModelState::stateless(), &mut a);
+            stim_inst.load(&[1.0], &ctx, &mut va_abi::ModelState::stateless(), &mut b);
             assert_eq!(a.residual, b.residual, "residual differs under {ctx:?}");
             assert_eq!(a.jacobian, b.jacobian, "jacobian differs under {ctx:?}");
         }
@@ -4485,7 +4728,7 @@ mod tests {
         // The excitation itself appears only in AC.
         let excitation = |ctx: &va_abi::AnalysisCtx| {
             let mut s = DenseStamp::new(1);
-            stim_inst.load(&[1.0], ctx, &mut s);
+            stim_inst.load(&[1.0], ctx, &mut va_abi::ModelState::stateless(), &mut s);
             s.excitation[0]
         };
         assert_eq!(excitation(&ANALYSIS_DC), (0.0, 0.0));
@@ -4510,7 +4753,7 @@ mod tests {
 
         let bound_under = |ctx: &va_abi::AnalysisCtx| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[1.0], ctx, &mut s);
+            inst.load(&[1.0], ctx, &mut va_abi::ModelState::stateless(), &mut s);
             s.bound_step
         };
         assert_eq!(
@@ -4547,7 +4790,12 @@ mod tests {
 
         let bound_at = |v: f64| {
             let mut s = DenseStamp::new(1);
-            inst.load(&[v], &va_abi::AnalysisCtx::transient(0.0), &mut s);
+            inst.load(
+                &[v],
+                &va_abi::AnalysisCtx::transient(0.0),
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
             s.bound_step
         };
         assert_eq!(bound_at(1.0), Some(1e-9));

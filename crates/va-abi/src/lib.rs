@@ -38,11 +38,13 @@ pub mod instance;
 pub mod noise;
 pub mod reference;
 pub mod stamps;
+pub mod state;
 
 pub use analysis::{AnalysisCtx, AnalysisKind, ANALYSIS_DC};
 pub use instance::{ModelInstance, UnknownKind};
 pub use noise::NoiseSink;
 pub use stamps::StampSink;
+pub use state::ModelState;
 
 #[cfg(test)]
 mod tests {
@@ -144,7 +146,12 @@ mod tests {
     fn resistor_stamp_by_hand() {
         let r = Resistor::new(0, GROUND, 1000.0);
         let mut sink = DenseStamp::new(1);
-        r.load(&[2.0], &ANALYSIS_DC, &mut sink);
+        r.load(
+            &[2.0],
+            &ANALYSIS_DC,
+            &mut crate::ModelState::stateless(),
+            &mut sink,
+        );
 
         // I = V/R = 2 / 1000 = 2 mA into node 0.
         assert!((sink.residual[0] - 2e-3).abs() < 1e-15);

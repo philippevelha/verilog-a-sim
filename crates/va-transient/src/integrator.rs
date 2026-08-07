@@ -211,13 +211,91 @@ const SHRINK_FACTOR: f64 = 0.5;
 /// kind is [`va_abi::AnalysisKind::Transient`] — which is what a compiled model's `analysis()`
 /// call sees. This is the parameter whose absence used to force [`ModelInstance`]'s callers to
 /// rebuild a time-varying source from scratch at every step.
-fn assemble(instances: &[&dyn ModelInstance], x: &[f64], t: f64, dim: usize) -> DenseStamp {
-    let ctx = AnalysisCtx::transient(t);
+/// `state` carries Interface β's per-instance state channel (§6 change, 2026-08-06). See
+/// [`StateBuffers`] for the commit/rollback discipline this function is one half of.
+fn assemble(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    t: f64,
+    is_initial_step: bool,
+    dim: usize,
+    state: &mut StateBuffers,
+) -> DenseStamp {
+    let ctx = AnalysisCtx::transient(t).with_initial_step(is_initial_step);
+    // Every evaluation starts from the last *committed* state, so an unwritten slot means
+    // "unchanged" rather than inheriting whatever a rejected candidate proposed.
+    state.reset_scratch();
     let mut sink = DenseStamp::new(dim);
-    for inst in instances {
-        inst.load(x, &ctx, &mut sink);
+    for (i, inst) in instances.iter().enumerate() {
+        let (prev, next) = state.slices(i);
+        let mut st = va_abi::ModelState::new(prev, next);
+        inst.load(x, &ctx, &mut st, &mut sink);
     }
     sink
+}
+
+/// The consumer half of Interface β's state channel: one flat `committed` buffer holding state
+/// as of the last **accepted** timepoint, and one `scratch` buffer holding the current
+/// evaluation's proposal.
+///
+/// The split is what makes `load` safe to re-enter. Newton calls it many times per timepoint,
+/// the LTE controller solves every candidate step *twice* and throws rejected ones away
+/// entirely — so a model that mutated its own history in place would commit state for a
+/// timepoint that never happened (`va_abi::state`'s module doc spells this out). Here, nothing
+/// a model proposes becomes history until [`Self::commit`] is called, which happens exactly
+/// once per accepted step.
+struct StateBuffers {
+    /// Per-instance `[start, end)` bounds into both buffers; length `instances.len() + 1`.
+    offsets: Vec<usize>,
+    committed: Vec<f64>,
+    scratch: Vec<f64>,
+}
+
+impl StateBuffers {
+    /// Allocate from each instance's declared `state_len()`, read once here and never again.
+    fn new(instances: &[&dyn ModelInstance]) -> Self {
+        let mut offsets = Vec::with_capacity(instances.len() + 1);
+        let mut total = 0usize;
+        offsets.push(0);
+        for inst in instances {
+            total += inst.state_len();
+            offsets.push(total);
+        }
+        StateBuffers {
+            offsets,
+            committed: vec![0.0; total],
+            scratch: vec![0.0; total],
+        }
+    }
+
+    /// Whether any instance declared state at all — lets a run of ordinary devices skip the
+    /// per-evaluation copy entirely.
+    fn is_empty(&self) -> bool {
+        self.committed.is_empty()
+    }
+
+    fn reset_scratch(&mut self) {
+        if !self.is_empty() {
+            self.scratch.copy_from_slice(&self.committed);
+        }
+    }
+
+    /// Instance `i`'s committed slice and its proposal slice. Two different buffers, so the
+    /// borrow checker permits the simultaneous `&`/`&mut` — which is also exactly the
+    /// read-old/write-new invariant the contract requires.
+    fn slices(&mut self, i: usize) -> (&[f64], &mut [f64]) {
+        let (lo, hi) = (self.offsets[i], self.offsets[i + 1]);
+        (&self.committed[lo..hi], &mut self.scratch[lo..hi])
+    }
+
+    /// Promote the last evaluation's proposal to history. Called only from an **accepted**
+    /// timepoint, and only from the post-accept assemble — a full, fresh evaluation at the
+    /// accepted `x` and `t`, which is the one evaluation whose proposal is the real answer.
+    fn commit(&mut self) {
+        if !self.is_empty() {
+            self.committed.copy_from_slice(&self.scratch);
+        }
+    }
 }
 
 /// Solve one implicit step's nodal equation `residual(x) + coeff·charge(x) + offset = 0` for
@@ -226,11 +304,14 @@ fn assemble(instances: &[&dyn ModelInstance], x: &[f64], t: f64, dim: usize) -> 
 /// Structurally identical to `va-core`'s DC Newton loop (same convergence criteria, same
 /// [`convergence::limit_junction`] clamp), except the assembled system is the companion-model
 /// combination of the resistive and charge channels rather than the resistive channel alone.
+#[allow(clippy::too_many_arguments)]
 fn newton_step(
     instances: &[&dyn ModelInstance],
     dim: usize,
     x_prev: &[f64],
     t: f64,
+    is_initial_step: bool,
+    state: &mut StateBuffers,
     companion: &Companion,
 ) -> Result<Vec<f64>, TransientError> {
     const MAX_ITERS: usize = 100;
@@ -245,7 +326,7 @@ fn newton_step(
     for _ in 0..MAX_ITERS {
         // Every iteration re-evaluates at the same candidate landing time `t`: the context is a
         // property of the timepoint being solved for, not of how many iterations it takes.
-        let sink = assemble(instances, &x, t, dim);
+        let sink = assemble(instances, &x, t, is_initial_step, dim, state);
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
         for i in 0..dim {
@@ -337,7 +418,11 @@ pub fn run_with_events(
     }
 
     let mut x = x0;
-    let initial = assemble(instances, &x, cfg.tstart, dim);
+    let mut state = StateBuffers::new(instances);
+    // The one evaluation of the run that is genuinely the analysis's first: a stateful model
+    // seeds itself from its input here rather than from a zero-filled `prev`.
+    let initial = assemble(instances, &x, cfg.tstart, true, dim, &mut state);
+    state.commit();
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
     let mut q_prev = initial.charge;
     let mut r_prev = initial.residual;
@@ -370,11 +455,19 @@ pub fn run_with_events(
             let step_h = t_next - t;
 
             let primary = Companion::for_method(cfg.method, &q_prev, &r_prev, step_h, &is_dynamic);
-            let x_primary = newton_step(instances, dim, &x, t_next, &primary)?;
+            let x_primary = newton_step(instances, dim, &x, t_next, false, &mut state, &primary)?;
 
             let reference_companion =
                 Companion::for_method(reference, &q_prev, &r_prev, step_h, &is_dynamic);
-            let x_reference = newton_step(instances, dim, &x, t_next, &reference_companion)?;
+            let x_reference = newton_step(
+                instances,
+                dim,
+                &x,
+                t_next,
+                false,
+                &mut state,
+                &reference_companion,
+            )?;
 
             let err_ratio =
                 lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol);
@@ -383,7 +476,10 @@ pub fn run_with_events(
                 let x_before = std::mem::replace(&mut x, x_primary);
                 let t_before = t;
 
-                let sink = assemble(instances, &x, t_next, dim);
+                // The commit point: a full, fresh evaluation at the accepted `x` and `t`,
+                // whose proposal is the one that actually becomes history.
+                let sink = assemble(instances, &x, t_next, false, dim, &mut state);
+                state.commit();
                 q_prev = sink.charge;
                 r_prev = sink.residual;
                 step_bound = sink.bound_step;
@@ -746,9 +842,15 @@ mod tests {
             }
         }
 
-        fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &AnalysisCtx,
+            st: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::StampSink,
+        ) {
             let [p, n, b] = self.terminals;
-            va_abi::reference::VSource::new(p, n, b, self.value_at(ctx.time)).load(x, ctx, sink)
+            va_abi::reference::VSource::new(p, n, b, self.value_at(ctx.time)).load(x, ctx, st, sink)
         }
     }
 
@@ -810,9 +912,15 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+            fn load(
+                &self,
+                x: &[f64],
+                ctx: &AnalysisCtx,
+                st: &mut va_abi::ModelState,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
                 va_abi::reference::Resistor::new(self.terminals[0], self.terminals[1], 1000.0)
-                    .load(x, ctx, sink);
+                    .load(x, ctx, st, sink);
                 sink.bound_step(self.bound);
             }
         }
@@ -855,9 +963,15 @@ mod tests {
             fn unknowns(&self) -> &[usize] {
                 &self.terminals
             }
-            fn load(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::StampSink) {
+            fn load(
+                &self,
+                x: &[f64],
+                ctx: &AnalysisCtx,
+                st: &mut va_abi::ModelState,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
                 va_abi::reference::Resistor::new(self.terminals[0], self.terminals[1], 1000.0)
-                    .load(x, ctx, sink);
+                    .load(x, ctx, st, sink);
                 sink.bound_step(1e-18);
             }
         }

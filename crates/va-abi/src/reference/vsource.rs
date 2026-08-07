@@ -3,6 +3,7 @@
 use crate::analysis::AnalysisCtx;
 use crate::instance::{ModelInstance, UnknownKind};
 use crate::stamps::StampSink;
+use crate::state::ModelState;
 
 /// An ideal voltage source `V(p) − V(n) = value`, in the standard MNA branch-current
 /// formulation.
@@ -50,7 +51,13 @@ impl ModelInstance for VSource {
         }
     }
 
-    fn load(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn StampSink) {
+    fn load(
+        &self,
+        x: &[f64],
+        _ctx: &AnalysisCtx,
+        _state: &mut ModelState,
+        sink: &mut dyn StampSink,
+    ) {
         let [p, n, b] = self.terminals;
         let vp = x.get(p).copied().unwrap_or(0.0);
         let vn = x.get(n).copied().unwrap_or(0.0);
