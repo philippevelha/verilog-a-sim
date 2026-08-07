@@ -69,7 +69,28 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
 const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_ac.net", None),
     ("circuits/diode_ac.net", Some("models/diode.va")),
+    ("circuits/laplace_ac.net", Some("models/laplace_lowpass.va")),
 ];
+
+/// `.ac` circuits whose device has no QSPICE `.model` equivalent but whose *response* QSPICE can
+/// compute from ordinary components — the AC counterpart of
+/// [`QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS`], and the same `(circuit, device, replacement)` shape.
+///
+/// `laplace_ac.net` is the Tier C gate, and it is the strongest oracle of the three tiers:
+/// `laplace_nd(V(in), {1}, {1, tau})` **is** a one-pole lowpass, and QSPICE computes the
+/// identical response from a real `R` and `C` with `tau = R·C`. Neither side can be tuned toward
+/// the other without the discrepancy showing across the whole sweep — a rational function of `s`
+/// and two physical components are genuinely different arithmetic.
+///
+/// The replacement spans two lines, which [`substitute_device_line`] handles: one device line
+/// may become a whole subnetwork.
+const QSPICE_AC_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[(
+    "circuits/laplace_ac.net",
+    "M1",
+    // tau = R*C = 1k * 1u = 1 ms, matching models/laplace_lowpass.va's default.
+    "R1x in out 1000
+C1x out 0 1e-6",
+)];
 
 /// The `.noise` circuits `validate`/`gen-golden` know how to drive (T5.2).
 ///
@@ -973,6 +994,12 @@ fn gen_golden() -> Result<()> {
     }
     for &(circuit, model_card) in QSPICE_AC_MODEL_TRANSLATIONS {
         let native_deck = translate_for_qspice(&read_circuit(&root, circuit)?, model_card);
+        generated += gen_ac_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
+    }
+    for &(circuit, device, replacement) in QSPICE_AC_BEHAVIORAL_TRANSLATIONS {
+        let native_deck =
+            substitute_device_line(&read_circuit(&root, circuit)?, device, replacement)
+                .with_context(|| format!("translating {circuit} for QSPICE"))?;
         generated += gen_ac_golden(&qspice, &root, &tmp, circuit, &native_deck)?;
     }
 

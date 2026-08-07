@@ -193,13 +193,16 @@ For a capacitor, the same trace additionally fills `sink.charge` / `sink.dcharge
   *stateless*: `load` is still a pure function of `(x, ctx)`, so the invariant above it is
   untouched — a context is an input, not remembered state.
 
-  **Frequency is still absent, deliberately.** Nothing the context currently serves is
-  frequency-dependent, and `va_acnoise::ac::linearize` calls `load` exactly once, outside the
-  frequency loop, because `G` and `C` are frequency-independent by construction. A `freq` field
-  would be meaningless at the one call site that would most want it — and a field that is
-  usually a lie is precisely how the DC-only folds happened. It arrives with the
-  frequency-domain filters (`laplace_*`/`zi_*`) and the per-frequency re-linearization that
-  would make it true. See `../proposals/analysis-context.md`.
+  **Frequency arrived with Tier C (2026-08-07)**, and not before. It was withheld while
+  `va_acnoise::ac::linearize` called `load` exactly once, outside the frequency loop — a `freq`
+  field would have been meaningless at the one call site that would most want it, and a field
+  that is usually a lie is precisely how the DC-only folds happened. `ac::run` now re-linearizes
+  **per frequency point** whenever an instance reports `is_frequency_dependent`, which is what
+  makes `AnalysisCtx::freq` honest; an ordinary circuit still linearizes once and pays nothing.
+  See `../proposals/frequency-domain.md`.
+
+  A frequency-dependent model needs **no complex stamp channel**: at one `ω`, `H = a + jb` is
+  exactly the real pair `G = a`, `C = b/ω`, since the assembler forms `G + jω·C`.
 
 ## 8. Evolution (per §6)
 

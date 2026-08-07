@@ -2306,6 +2306,41 @@ dedicated end-to-end test yet.
 
 ---
 
+## Analysis context — Tier C: frequency-dependent stamps (delivered 2026-08-07)
+
+The last of the three tiers, and the one both earlier proposals called "largest". It turned out
+to be the **smallest**, because of one observation (`docs/proposals/frequency-domain.md` §1):
+
+> At a single frequency `ω`, a complex admittance `H = a + jb` is **exactly** the real pair
+> `G = a`, `C = b/ω`, since the assembler forms `G + jω·C`.
+
+So Interface β needed no complex channel — `jacobian`/`dcharge` already span the complex plane
+at a given frequency. All that was missing was telling the model *which* frequency
+(`AnalysisCtx::freq`, the field Tier A conditionally refused) and re-linearizing per point.
+
+**Delivered:** `laplace_nd`/`np`/`zd`/`zp` evaluated at `s = jω` in AC, root forms in product
+form (never expanded — the corpus has a 7-coefficient filter with values near `1e71`),
+coefficients kept as *expressions* so a netlist-overridden pole still moves.
+
+**Cost is opt-in.** `is_frequency_dependent()` defaults false, so an ordinary AC sweep still
+linearizes once and every pre-existing AC gate is bit-identical. Only a circuit with a real
+filter pays O(points).
+
+**Gated against real QSPICE at 1.361e-15** — `circuits/laplace_ac.net` vs an R-C network, zoo
+**15/15**. It discriminates: restoring the DC-gain fold moves it to `6.282e3`.
+
+**Not delivered, by evidence and by kind:**
+
+- **`zi_*`** — **zero** corpus uses in 150 files, and it needs a clock. Keeps its fold.
+- **Transient Laplace** — a convolution, not a stamping problem. DC and transient still get
+  `H(0)`, exactly as before; this tier makes AC right and says so rather than implying more.
+- **Laplace-shaped noise** — one real corpus use; belongs to the noise channel.
+
+With this, all three tiers of `analysis-context.md` are closed. `$limit` and `absdelay` remain
+the two named non-goals across the whole programme, each with its own recorded reason.
+
+---
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

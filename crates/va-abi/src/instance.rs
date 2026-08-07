@@ -114,6 +114,25 @@ pub trait ModelInstance {
         0
     }
 
+    /// Whether this instance's **small-signal** stamps depend on the frequency in
+    /// [`AnalysisCtx::freq`] (§6 change, 2026-08-07 — Tier C).
+    ///
+    /// Default **`false`**, which is right for every device whose `G` and `C` are constants:
+    /// a resistor, a capacitor, a linearized diode. Such a device's admittance already varies
+    /// with `ω` through the assembled `G + jω·C` — that is not what this asks. It asks whether
+    /// `G` and `C` *themselves* move, which happens only for a rational transfer function
+    /// (`laplace_*`), whose real and imaginary parts are genuinely different at each point.
+    ///
+    /// This is a **cost switch**, and that is why it exists rather than being assumed true.
+    /// `va_acnoise::ac::run` linearizes **once** when every instance reports `false` — the
+    /// behavior, and the exact numbers, that predate Tier C — and once *per frequency point*
+    /// as soon as any reports `true`. Making it opt-in keeps an ordinary AC sweep free.
+    ///
+    /// Must be constant for the lifetime of the instance; a consumer reads it once.
+    fn is_frequency_dependent(&self) -> bool {
+        false
+    }
+
     /// Emit this instance's own **noise sources** at operating point `x` into `sink` —
     /// Interface β's noise channel (§4/§6 additive change, 2026-08-01; see [`crate::noise`] for
     /// what a source means and what this channel deliberately cannot express).

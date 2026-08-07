@@ -254,6 +254,110 @@ pub struct AcStimTerm {
     pub phase: ExprId,
 }
 
+/// One `laplace_*` call pulled out of a contribution — a rational transfer function
+/// `H(s) = N(s)/D(s)` applied to `input` (Tier C, 2026-08-07).
+///
+/// The fourth construct to be split out of a contribution rather than evaluated in place, after
+/// `ddt` (charge), the noise family, and `ac_stim` — and for a reason peculiar to this one:
+/// `H(jω)` is **complex**, and `crate::ad::Dual` carries a real value and a real gradient. There
+/// is nowhere in an ordinary expression evaluation to put an imaginary part. Splitting it out
+/// lets `crate::GeneratedModel::stamp` place the real part in `G` and the imaginary part in `C`,
+/// where the assembled `G + jω·C` reconstitutes it exactly.
+#[derive(Clone, Debug)]
+pub struct LaplaceTerm {
+    /// `+1.0`/`−1.0` from the enclosing expression's sums and negations.
+    pub sign: f64,
+    /// The filtered input.
+    pub input: ExprId,
+    /// Whether the numerator list is `(re, im)` **roots** rather than polynomial coefficients.
+    pub num_is_roots: bool,
+    /// Whether the denominator list is roots.
+    pub den_is_roots: bool,
+    /// Numerator coefficients (lowest degree first) or flattened `(re, im)` zero pairs.
+    pub num: Vec<ExprId>,
+    /// Denominator coefficients or flattened `(re, im)` pole pairs.
+    pub den: Vec<ExprId>,
+}
+
+/// If `expr` is a bare `laplace_*` call, unpack its flattened argument layout
+/// (`[input, Const(num_len), num…, den…]`) into a [`LaplaceTerm`] shape.
+///
+/// Recognizes only the **bare** call, like every other split-out construct. A nested or scaled
+/// one is rejected by `crate::GeneratedModel::validate` rather than silently evaluating —
+/// `crate::ad::eval` has no real-valued answer for a complex gain, so letting one through would
+/// be a hard error at the worst possible moment instead of a build-time diagnostic.
+fn laplace_term_shape(
+    module: &Module,
+    expr: ExprId,
+    sign: f64,
+) -> Result<Option<LaplaceTerm>, CodegenError> {
+    let (builtin, args) = match module.expr(expr) {
+        Expr::Call(
+            b @ (Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp),
+            args,
+        ) => (*b, args),
+        _ => return Ok(None),
+    };
+    let num_is_roots = matches!(builtin, Builtin::LaplaceZd | Builtin::LaplaceZp);
+    let den_is_roots = matches!(builtin, Builtin::LaplaceNp | Builtin::LaplaceZp);
+
+    // `[input, Const(num_len), …]` — the separator is a `Const` by construction (va-frontend
+    // emits it), so anything else means the IR was built by hand.
+    let (Some(&input), Some(&len_id)) = (args.first(), args.get(1)) else {
+        return Err(unsupported("laplace call is missing its argument list"));
+    };
+    let Expr::Const(num_len) = module.expr(len_id) else {
+        return Err(unsupported(
+            "laplace call's numerator-length separator must be a constant",
+        ));
+    };
+    let num_len = *num_len as usize;
+    let rest = &args[2..];
+    if num_len > rest.len() {
+        return Err(unsupported(
+            "laplace numerator length exceeds its argument list",
+        ));
+    }
+    let (num, den) = rest.split_at(num_len);
+    if num.is_empty() || den.is_empty() {
+        return Err(unsupported(
+            "laplace needs at least one numerator and one denominator entry",
+        ));
+    }
+    // A root list is flattened `(re, im)` pairs, so an odd count means a malformed IR.
+    if (num_is_roots && num.len() % 2 != 0) || (den_is_roots && den.len() % 2 != 0) {
+        return Err(unsupported(
+            "a laplace zero/pole list must be an even number of (re, im) values",
+        ));
+    }
+    Ok(Some(LaplaceTerm {
+        sign,
+        input,
+        num_is_roots,
+        den_is_roots,
+        num: num.to_vec(),
+        den: den.to_vec(),
+    }))
+}
+
+/// Whether `expr` contains a `laplace_*` call anywhere in its tree — used to reject one buried
+/// where [`laplace_term_shape`] cannot pull it out, the exact counterpart of
+/// [`contains_noise_call`].
+pub(crate) fn contains_laplace_call(module: &Module, expr: ExprId) -> bool {
+    match module.expr(expr) {
+        Expr::Call(
+            Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp,
+            _,
+        ) => true,
+        Expr::Call(_, args) => args.iter().any(|&a| contains_laplace_call(module, a)),
+        Expr::Unary(_, e) => contains_laplace_call(module, *e),
+        Expr::Binary(_, l, r) => {
+            contains_laplace_call(module, *l) || contains_laplace_call(module, *r)
+        }
+        _ => false,
+    }
+}
+
 /// A single branch contribution, split into resistive, charge, noise, and excitation channels.
 #[derive(Clone, Debug)]
 pub struct Contribution {
@@ -279,6 +383,9 @@ pub struct Contribution {
     /// `ac_stim` terms emitted into the excitation channel during AC analysis. Empty for the
     /// overwhelming majority of contributions.
     pub ac_stim: Vec<AcStimTerm>,
+    /// `laplace_*` transfer functions applied to their inputs. Empty for the overwhelming
+    /// majority of contributions.
+    pub laplace: Vec<LaplaceTerm>,
 }
 
 /// One branch that receives a potential (voltage) contribution somewhere in the module, and
@@ -541,6 +648,10 @@ pub struct Lowered {
     /// [`StatefulCall`]. Maps a call site to its base offset in Interface β's per-instance
     /// state channel (`va_abi::ModelState`).
     pub stateful_calls: Vec<StatefulCall>,
+    /// Whether any contribution carries a [`LaplaceTerm`] — what
+    /// `crate::GeneratedModel::is_frequency_dependent` reports, and hence whether an AC sweep
+    /// pays for per-frequency re-linearization.
+    pub has_laplace: bool,
     /// Total `f64` slots this model needs on the state channel — the sum of every
     /// [`StatefulCall`]'s width, and what `crate::GeneratedModel::state_len` reports.
     pub state_len: usize,
@@ -593,6 +704,30 @@ pub struct StatefulCall {
 /// Scans the **arena** rather than walking statements, deliberately: a call reached only from
 /// inside an `if` arm still needs a stable slot, because whether that arm runs can change
 /// between timepoints and its history must survive the steps where it does not.
+/// Whether any lowered contribution anywhere in `stmts` carries a [`LaplaceTerm`].
+fn stmts_contain_laplace(stmts: &[LoweredStmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        LoweredStmt::Contribute(c) => !c.laplace.is_empty(),
+        LoweredStmt::If { then_, else_, .. } => {
+            stmts_contain_laplace(then_) || stmts_contain_laplace(else_)
+        }
+        LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => {
+            stmts_contain_laplace(body)
+        }
+        LoweredStmt::For {
+            init, step, body, ..
+        } => {
+            stmts_contain_laplace(init)
+                || stmts_contain_laplace(step)
+                || stmts_contain_laplace(body)
+        }
+        LoweredStmt::Case { arms, default, .. } => {
+            arms.iter().any(|a| stmts_contain_laplace(&a.body)) || stmts_contain_laplace(default)
+        }
+        LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => false,
+    })
+}
+
 fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
     let mut calls = Vec::new();
     let mut next = 0usize;
@@ -755,6 +890,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         )?;
     }
     let (stateful_calls, state_len) = collect_stateful_calls(module);
+    let has_laplace = stmts_contain_laplace(&stmts);
 
     Ok(Lowered {
         n_unknowns: next_slot,
@@ -765,6 +901,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         node_kcl_probes,
         stateful_calls,
         state_len,
+        has_laplace,
     })
 }
 
@@ -1041,6 +1178,7 @@ fn lower_stmt(
             let mut charge = Vec::new();
             let mut noise = Vec::new();
             let mut ac_stim = Vec::new();
+            let mut laplace = Vec::new();
             for term in terms {
                 // A bare variable read that was last assigned a `ddt` shape substitutes to that
                 // shape here, so `real dqdt; dqdt = ddt(q); I <+ dqdt + …;` folds into the charge
@@ -1067,6 +1205,12 @@ fn lower_stmt(
                     });
                     continue;
                 }
+                // Split before the charge check, like the others: a `laplace_*` is never also
+                // a `ddt` shape, and `ad::eval` has no real-valued answer for a complex gain.
+                if let Some(lt) = laplace_term_shape(module, shape_expr, term.sign)? {
+                    laplace.push(lt);
+                    continue;
+                }
                 match charge_term_shape(module, shape_expr, param_only)? {
                     Some((expr, coeffs)) => charge.push(ChargeTerm {
                         sign: term.sign,
@@ -1091,6 +1235,7 @@ fn lower_stmt(
                 charge,
                 noise,
                 ac_stim,
+                laplace,
             }));
             Ok(())
         }

@@ -17,16 +17,16 @@
 //!
 //! # What it is not
 //!
-//! **There is no `freq` field**, and its absence is deliberate. Nothing this channel currently
-//! serves is frequency-dependent — `analysis("ac")` asks which analysis is running, not at what
-//! frequency — and `va_acnoise::ac::linearize` calls `load` exactly *once*, outside the
-//! frequency loop, because `G` and `C` are frequency-independent by construction. A `freq` field
-//! would therefore be meaningless at the one call site that would most obviously want it. A
-//! field that is usually a lie is precisely how the DC-only folds happened in the first place.
+//! **[`AnalysisCtx::freq`] arrived with Tier C (2026-08-07), and not before.** Tier A
+//! deliberately omitted it, on the grounds that `va_acnoise::ac::linearize` called `load`
+//! exactly *once*, outside the frequency loop — so a `freq` field would have been meaningless
+//! at the one call site that would most obviously want it, and a field that is usually a lie is
+//! precisely how the DC-only folds happened in the first place. That refusal was conditional:
+//! frequency would arrive "together with the re-linearization that makes it meaningful".
 //!
-//! Frequency-domain constructs (`laplace_*`, `zi_*`, whose small-signal response genuinely does
-//! vary with `ω`) need per-frequency re-linearization or a complex-valued channel — a larger
-//! change that would bring its own honest `freq`. See `docs/proposals/analysis-context.md`.
+//! `va-acnoise` now re-linearizes **per frequency point** whenever some instance reports
+//! [`crate::ModelInstance::is_frequency_dependent`], which is what makes the field honest. A
+//! circuit of ordinary devices still linearizes once and pays nothing.
 //!
 //! Likewise this channel carries no **state**: `transition`, `slew`, `absdelay`, `$limit` and
 //! `@(initial_step)` need a model to remember something between evaluations, which needs its own
@@ -113,6 +113,18 @@ pub struct AnalysisCtx {
     /// immediately to its input in a static solve — the LRM-correct steady-state answer, and
     /// the same one this project produced when those constructs were const-folded.
     pub is_initial_step: bool,
+    /// Small-signal frequency in **hertz** — the `ω/2π` a frequency-dependent model needs to
+    /// evaluate its own transfer function.
+    ///
+    /// Meaningful only when `kind` is [`AnalysisKind::Ac`]; `0.0` in every other analysis, which
+    /// is the honest reading for a solve that has no frequency axis rather than a placeholder.
+    /// A DC operating point is `s = 0`, so a filter evaluating at `freq = 0.0` correctly reports
+    /// its DC gain.
+    ///
+    /// Only ever non-zero when the caller re-linearizes per point (§ this module's doc comment).
+    /// A model must therefore not assume distinct frequencies between evaluations: an AC run
+    /// over a circuit with no frequency-dependent instance still evaluates once, at `0.0`.
+    pub freq: f64,
 }
 
 impl AnalysisCtx {
@@ -125,6 +137,7 @@ impl AnalysisCtx {
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
+            freq: 0.0,
         }
     }
 
@@ -138,6 +151,7 @@ impl AnalysisCtx {
             // `with_initial_step`; defaulting to `false` makes the *safe* mistake, since a
             // model then reads committed state instead of re-initialising mid-run.
             is_initial_step: false,
+            freq: 0.0,
         }
     }
 
@@ -150,6 +164,7 @@ impl AnalysisCtx {
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
+            freq: 0.0,
         }
     }
 
@@ -160,12 +175,21 @@ impl AnalysisCtx {
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
+            freq: 0.0,
         }
     }
 
     /// This context with its temperature replaced.
     pub const fn with_temp(self, temp: f64) -> Self {
         AnalysisCtx { temp, ..self }
+    }
+
+    /// A small-signal AC context at frequency `freq` (Hz).
+    ///
+    /// The constructor a per-frequency re-linearization uses; [`Self::ac`] is this at `0.0`,
+    /// which is what a caller with no frequency-dependent instance still passes.
+    pub const fn ac_at(freq: f64) -> Self {
+        AnalysisCtx { freq, ..Self::ac() }
     }
 
     /// This context marked as (or as not) the analysis's first evaluation.

@@ -367,6 +367,37 @@ circuit that forces rejections while carrying state would be a real addition.
 one construct here implemented as an acknowledged approximation (no exact corner breakpoints),
 so it is the weakest link in this row and should be the next thing gated.
 
+### The `laplace_*` gate (added 2026-08-07) — the strongest oracle of the three tiers
+
+`circuits/laplace_ac.net` compares a compiled `models/laplace_lowpass.va`, written purely as
+Laplace transfer functions, against a QSPICE deck built from **a real R and a real C**:
+
+```
+error |mag| 1.361e-15, phase 1.690e-13 rad   (tol 1e-4)   — zoo 15/15
+```
+
+Why this is better evidence than the two tiers before it. Tier A's `$abstime` gate had QSPICE
+evaluate *the same formula* (`k*time`) in a different engine; Tier B had no oracle worth
+building. Here the two sides do **genuinely different arithmetic** — a rational function of `s`
+evaluated at `jω` on our side, two physical components solved as a network on QSPICE's — and
+they agree to machine precision at all 60 frequency points.
+
+**It discriminates, verified by deliberately breaking it.** Restoring the pre-Tier-C fold
+(evaluate `H` at `s = 0` always) moves the gate from `1.361e-15` to **`6.282e3`**, seven orders
+of magnitude over tolerance. A flat response versus a −20 dB/decade rolloff is not subtle.
+
+**One detail worth recording, because getting it wrong made the gate fail for the wrong
+reason.** The first version of the model implemented only the *voltage* transfer function, so it
+drew no input current — while the reference RC network loads its source. `V(out)` matched
+perfectly and the `I(V1)` column was 100% out. The fix was to model the divider's **input
+admittance** too, `Y(s) = sC/(1 + sτ)`, as a second Laplace form. That is not a workaround: the
+two circuits genuinely were not the same circuit until both observable properties matched, and
+the repaired model now exercises a numerator with a zero at the origin as a bonus.
+
+**What this gate does not cover:** DC and transient, where a Laplace filter still evaluates to
+`H(0)`. That is unchanged from before Tier C and is a stated limitation at the construct, not an
+oversight — a time-domain Laplace filter is a convolution.
+
 ## Bring-up ladder
 
 Each rung is a checkpoint; it is "passed" only when `va-harness` is green against golden:

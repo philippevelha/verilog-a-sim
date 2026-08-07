@@ -161,23 +161,44 @@ pub fn run(
     excitation: &[Complex],
 ) -> Result<AcResponse, AcNoiseError> {
     debug_assert_eq!(excitation.len(), dim, "excitation must cover every unknown");
-    let lin = linearize(instances, x_dc, &va_abi::AnalysisCtx::ac(), dim);
-
-    // The netlist's own `AC mag phase` sources arrive already on the right-hand side; a model's
-    // `ac_stim` arrives in `residual`'s sign convention, so it crosses the equals sign here.
-    // Both are frequency-independent, so this sum is built once rather than per point.
-    let rhs: Vec<Complex> = excitation
-        .iter()
-        .zip(&lin.excitation)
-        .map(|(&(bre, bim), &(ere, eim))| (bre - ere, bim - eim))
-        .collect();
-
     let freqs = sweep.frequencies();
+
+    // Does any instance's own `G`/`C` move with frequency (a `laplace_*` transfer function)?
+    // Almost never — so the default path linearizes **once**, which is both what every
+    // ordinary circuit needs and bit-for-bit what this function did before Tier C.
+    let per_point = instances.iter().any(|i| i.is_frequency_dependent());
+
     let mut x = Vec::with_capacity(freqs.len());
-    for &f in &freqs {
-        x.push(solve_at(&lin.g, &lin.c, dim, 2.0 * PI * f, &rhs)?);
+    if per_point {
+        // O(points) linearizations. Paid only by a circuit that actually contains a filter,
+        // which is why `is_frequency_dependent` is opt-in (§ `va_abi::ModelInstance`).
+        for &f in &freqs {
+            let lin = linearize(instances, x_dc, &va_abi::AnalysisCtx::ac_at(f), dim);
+            let rhs = combine_excitation(excitation, &lin.excitation);
+            x.push(solve_at(&lin.g, &lin.c, dim, 2.0 * PI * f, &rhs)?);
+        }
+    } else {
+        let lin = linearize(instances, x_dc, &va_abi::AnalysisCtx::ac(), dim);
+        let rhs = combine_excitation(excitation, &lin.excitation);
+        for &f in &freqs {
+            x.push(solve_at(&lin.g, &lin.c, dim, 2.0 * PI * f, &rhs)?);
+        }
     }
     Ok(AcResponse { f: freqs, x })
+}
+
+/// Sum the netlist's own `AC mag phase` sources with any model-supplied `ac_stim` into the
+/// system's right-hand side.
+///
+/// The netlist's contribution arrives already on the right-hand side; a model's `ac_stim`
+/// arrives in `residual`'s sign convention (§ [`va_abi::StampSink::excitation`]), so it crosses
+/// the equals sign here.
+fn combine_excitation(netlist: &[Complex], model: &[Complex]) -> Vec<Complex> {
+    netlist
+        .iter()
+        .zip(model)
+        .map(|(&(bre, bim), &(ere, eim))| (bre - ere, bim - eim))
+        .collect()
 }
 
 /// Solve `(G + jω·C)·X = excitation` at one angular frequency `ω`, via the real `2n × 2n`

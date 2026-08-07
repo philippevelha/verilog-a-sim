@@ -461,6 +461,34 @@ pub enum Builtin {
     /// frontend wraps it into an ordinary `Stmt::If`, so the existing control-flow walk selects
     /// the arm with no new statement kind.
     InitialStep,
+    /// `laplace_nd(value, num, den)` — a rational transfer function `H(s) = N(s)/D(s)` given as
+    /// polynomial coefficient lists in `s`, lowest degree first (LRM §4.5.11).
+    ///
+    /// Argument layout, flattened: `[value, Const(num_len), num_0, …, den_0, …]`. The `Const`
+    /// separator is how a flat list says where the numerator ends — the same trick
+    /// [`Builtin::NoiseTable`] uses to avoid an array-carrying [`Expr`] variant.
+    ///
+    /// Coefficients stay **lowered expressions, not const-folded numbers**: the corpus writes
+    /// them as parameter expressions, and a filter whose pole moves with a netlist-overridden
+    /// parameter is the normal case.
+    ///
+    /// Evaluated at `s = j·2π·freq` during AC and at `s = 0` (its DC gain) everywhere else —
+    /// the latter being exactly what this construct used to fold to at elaboration. Transient
+    /// still gets the DC gain: a time-domain Laplace filter is a convolution, which is a
+    /// different problem (see `docs/proposals/frequency-domain.md`).
+    LaplaceNd,
+    /// `laplace_np(value, num, poles)` — numerator coefficients over a **pole array**, the
+    /// poles flattened as `(re, im)` pairs. Same layout and rules as [`Builtin::LaplaceNd`].
+    LaplaceNp,
+    /// `laplace_zd(value, zeros, den)` — a **zero array** over denominator coefficients.
+    LaplaceZd,
+    /// `laplace_zp(value, zeros, poles)` — zero array over pole array.
+    ///
+    /// Root forms are evaluated in **product form**, `∏(1 − s/ζ) / ∏(1 − s/ρ)`, never expanded
+    /// into coefficients: expansion is worse conditioned (the corpus has a 7-coefficient filter
+    /// with values near `1e71`) and buys nothing. A root at the origin contributes a factor of
+    /// `s` rather than `(1 − s/ζ)`, which is what makes the DC gain `0` there.
+    LaplaceZp,
     /// `white_noise(pwr)` — a frequency-flat noise source of power spectral density `pwr`,
     /// in the units of the contribution it appears in (A²/Hz in a flow contribution).
     ///

@@ -1,0 +1,53 @@
+// One-pole lowpass, written as a Laplace transfer function — the `laplace_*` golden gate's
+// model (Tier C, 2026-08-07).
+//
+//     V(out) = laplace_nd(V(in), {1}, {1, tau})   =   V(in) / (1 + s*tau)
+//
+// It exists to make a frequency-dependent transfer function observable against an *independent*
+// description of the same physics. QSPICE cannot consume this file, but the filter this
+// implements is exactly what an ordinary R-C divider does, with `tau = R*C` — so both
+// simulators compute the same response from descriptions that share nothing: a rational
+// function of `s` here, two physical components there.
+//
+// That independence is what makes the comparison evidence. It is also the strongest oracle of
+// the three tiers: `$abstime` was checked against a QSPICE behavioral source evaluating the
+// same formula, and Tier B had no oracle worth building, but here the two sides do genuinely
+// different arithmetic and must still agree at every frequency in the sweep.
+//
+// Before Tier C this model was **flat**: `laplace_nd` folded to its DC gain `H(0) = 1` at
+// elaboration, so it behaved as a straight wire and the rolloff simply did not exist.
+//
+// # Limitations
+//
+// AC only. In DC and transient the filter still evaluates to its DC gain `H(0)` — a Laplace
+// filter in the time domain is a convolution, which needs a state-space realization this
+// project does not have (`docs/proposals/frequency-domain.md` §2). So a `.tran` run of this
+// model is a unity-gain buffer, not a filter, and is not claimed otherwise.
+`include "disciplines.vams"
+
+// Three terminals, with the reference explicit. A single-terminal access (`V(out)`) would make
+// elaboration intern its own implicit `gnd` node, which netlist instantiation then hands a fresh
+// *floating* global unknown — a singular matrix. Naming the reference is the fix, and it is a
+// pre-existing property of single-terminal accesses rather than anything to do with this filter.
+module laplace_lowpass(out, in, ref);
+    inout out, in, ref;
+    electrical out, in, ref;
+    parameter real tau = 1e-3 from (0:inf);   // time constant, seconds (= R*C)
+    parameter real c   = 1e-6 from (0:inf);   // the emulated shunt capacitance, farads
+
+    analog begin
+        // Two transfer functions, because the reference network has two observable properties
+        // and an honest comparison must match both.
+        //
+        // 1. The voltage transfer function: V(out)/V(in) = 1/(1 + s*tau).
+        V(out, ref) <+ laplace_nd(V(in, ref), {1}, {1, tau});
+        // 2. The *input admittance* the same R-C divider presents to whatever drives it,
+        //    Y(s) = sC/(1 + s*tau). Without this the model would be an ideal, infinite-input-
+        //    impedance filter drawing no current at all, and the golden comparison's own
+        //    `I(V1)` column would differ from the reference network's by 100% -- not because
+        //    the filter is wrong, but because the two circuits are not the same circuit.
+        //    Writing it out makes the emulation complete, and costs nothing: it is another
+        //    Laplace form, this time with a zero at the origin (numerator {0, c} = s*c).
+        I(in, ref) <+ laplace_nd(V(in, ref), {0, c}, {1, tau});
+    end
+endmodule

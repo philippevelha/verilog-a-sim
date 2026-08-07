@@ -1,0 +1,17 @@
+* Laplace one-pole lowpass, AC -- the laplace_* golden gate (Tier C, 2026-08-07).
+* A compiled models/laplace_lowpass.va drives V(out) = V(in)/(1 + s*tau) with tau = 1 ms,
+* excited by a 1 V small-signal source. Expected: -3 dB at f = 1/(2*pi*tau) = 159.15 Hz,
+* rolling off at -20 dB/decade with phase approaching -90 deg.
+*
+* The QSPICE reference replaces the whole device with `R 1k` + `C 1u` (tau = R*C = 1 ms) --
+* the same response computed from two physical components instead of a rational function of s,
+* which is what makes this an independent oracle rather than a restatement. The loading the
+* real RC network imposes on `in` is irrelevant to the comparison: V1 is an ideal source, so
+* V(in) is held at 1 either way and the transfer function V(out)/V(in) is identical.
+*
+* Before Tier C this deck would have read completely flat: laplace_nd folded to its DC gain of
+* 1 at elaboration, making the model a straight wire.
+V1 in  gnd  DC 0 AC 1
+M1 out in  gnd  laplace_lowpass
+.ac dec 10 1 1meg
+.end

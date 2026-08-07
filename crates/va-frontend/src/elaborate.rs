@@ -781,17 +781,22 @@ impl Elaborator<'_> {
         }
     }
 
-    /// [`Self::array_lit_values`], then require at least one coefficient and return only the
-    /// `s^0`/`z^0` (constant) one — a `laplace_nd`/`laplace_np`-style numerator or
-    /// `laplace_nd`/`laplace_zd`-style denominator only needs this one coefficient for its DC
-    /// (s=0) gain fold, since every higher-degree term vanishes at s=0.
-    fn array_lit_first(&self, r: ExprRef, what: &str) -> Result<f64, FrontendError> {
-        let values = self.array_lit_values(r, what)?;
-        values.first().copied().ok_or_else(|| {
-            elab(format!(
-                "{what} array literal must have at least one coefficient"
-            ))
-        })
+    /// Lower every element of a `{...}` array literal into the output arena, preserving them as
+    /// expressions rather than const-folding.
+    ///
+    /// Used by the `laplace_*` family, whose coefficients the corpus routinely writes as
+    /// parameter expressions (`` {1, `M_TWO_PI*Fgr} ``). Const-folding them here would freeze a
+    /// filter's poles at their declared defaults and silently ignore a netlist override.
+    fn array_lit_exprs(&mut self, r: ExprRef, what: &str) -> Result<Vec<ExprId>, FrontendError> {
+        let elems = match self.ast.expr(r) {
+            ExprAst::ArrayLit(elems) => elems.clone(),
+            _ => {
+                return Err(elab(format!(
+                    "{what} must be a `{{...}}` array-literal coefficient/root list"
+                )))
+            }
+        };
+        elems.iter().map(|&e| self.lower_expr(e)).collect()
     }
 
     /// Read, validate and sort a `noise_table()`/`noise_table_log()` argument into
@@ -856,29 +861,6 @@ impl Elaborator<'_> {
             )));
         }
         Ok(points)
-    }
-
-    /// A `zero`/`pole` array literal's product term at Laplace s=0 (LRM §4.5.11.1-3):
-    /// `zeta`/`rho` is a flattened list of `(re, im)` root pairs, one pair per zero/pole. Every
-    /// root contributes a factor of `(1 - s/root)`, which is exactly `1` at s=0 for *any*
-    /// nonzero root (real or complex — no complex arithmetic is ever needed for this fold), or
-    /// `0` for a root exactly at the origin `(0, 0)`: the LRM specifies that root's factor is
-    /// implemented as `s` instead of `(1 - s/root)` (avoiding the `s/0` singularity), which is
-    /// `0` at s=0. So the whole product is `0.0` if any root is exactly the origin, `1.0`
-    /// otherwise. Errors if the array's length is odd (roots must come in `(re, im)` pairs).
-    fn laplace_root_product_at_origin(&self, r: ExprRef, what: &str) -> Result<f64, FrontendError> {
-        let values = self.array_lit_values(r, what)?;
-        if values.len() % 2 != 0 {
-            return Err(elab(format!(
-                "{what} array literal must hold `(re, im)` pairs, one per root — got {} \
-                 elements (odd)",
-                values.len()
-            )));
-        }
-        let at_origin = values
-            .chunks(2)
-            .any(|pair| pair[0] == 0.0 && pair[1] == 0.0);
-        Ok(if at_origin { 0.0 } else { 1.0 })
     }
 
     /// A `zero`/`pole` array literal's product term at Z-domain z=1 (LRM §4.5.12.1-3) — the
@@ -1744,27 +1726,44 @@ impl Elaborator<'_> {
                         )))
                     }
                 };
+                let builtin = match name.as_str() {
+                    "laplace_nd" => Builtin::LaplaceNd,
+                    "laplace_np" => Builtin::LaplaceNp,
+                    "laplace_zd" => Builtin::LaplaceZd,
+                    _ => Builtin::LaplaceZp,
+                };
+                // Coefficients/roots survive as *lowered expressions*, not const-folded
+                // numbers: the corpus writes them as parameter expressions, and a filter whose
+                // pole moves with a netlist-overridden parameter is the normal case. The
+                // `Const(num_len)` separator is how a flat argument list says where the
+                // numerator ends (§ `va_ir::Builtin::LaplaceNd`).
+                let num_ids = self.array_lit_exprs(num, "numerator/zero")?;
+                let den_ids = self.array_lit_exprs(den, "denominator/pole")?;
+                if num_ids.is_empty() || den_ids.is_empty() {
+                    return Err(elab(format!(
+                        "`{name}` needs at least one numerator/zero and one denominator/pole                          entry"
+                    )));
+                }
+                // A zero/pole array is flattened `(re, im)` pairs, so an odd count is
+                // malformed. `va-codegen` checks this too, but the diagnostic is worth keeping
+                // here, where a source file can still be named — the same reason
+                // `noise_table`'s own well-formedness checks live at elaboration.
                 let numer_is_zeros = matches!(name.as_str(), "laplace_zd" | "laplace_zp");
                 let denom_is_poles = matches!(name.as_str(), "laplace_np" | "laplace_zp");
-                let numer0 = if numer_is_zeros {
-                    self.laplace_root_product_at_origin(num, "zero")?
-                } else {
-                    self.array_lit_first(num, "numerator")?
-                };
-                let denom0 = if denom_is_poles {
-                    self.laplace_root_product_at_origin(den, "pole")?
-                } else {
-                    self.array_lit_first(den, "denominator")?
-                };
-                if denom0 == 0.0 {
+                if (numer_is_zeros && num_ids.len() % 2 != 0)
+                    || (denom_is_poles && den_ids.len() % 2 != 0)
+                {
                     return Err(elab(format!(
-                        "`{name}`'s denominator is zero at s=0 (a pole at the origin, or an \
-                         explicit zero `s^0` coefficient): the DC gain is undefined"
+                        "`{name}`'s zero/pole array must hold an even number of values — they                          are flattened `(real, imaginary)` root pairs"
                     )));
                 }
                 let value_id = self.lower_expr(value)?;
-                let gain_id = self.out.push_expr(Expr::Const(numer0 / denom0));
-                Expr::Binary(va_ir::BinOp::Mul, value_id, gain_id)
+                let mut ids = Vec::with_capacity(num_ids.len() + den_ids.len() + 2);
+                ids.push(value_id);
+                ids.push(self.out.push_expr(Expr::Const(num_ids.len() as f64)));
+                ids.extend(num_ids);
+                ids.extend(den_ids);
+                Expr::Call(builtin, ids)
             }
             // `zi_nd(value, num, den, T[, tol[, t0]])` / `zi_np(value, num, pole, T[, ...])` /
             // `zi_zd(value, zero, den, T[, ...])` / `zi_zp(value, zero, pole, T[, ...])` (LRM
@@ -3549,31 +3548,91 @@ mod tests {
         assert!(matches!(m.analog[1], va_ir::Stmt::Contribute { .. }));
     }
 
-    #[test]
-    fn laplace_nd_folds_to_its_dc_gain() {
-        // `laplace_nd(V(a,b), {2, 0}, {2, 1})` (num[0]/den[0] = 2/2 = 1.0) — the exact
-        // `external/photonic/PhotoDetector.va`/`TunableFilter.va` shape (a normalized-gain
-        // low-pass filter), reduced to a `Binary(Mul, probe, Const(1.0))`.
-        let m = elaborate_src(
-            "module t(a, b); electrical a, b; \
-             analog I(a, b) <+ laplace_nd(V(a, b), {2, 0}, {2, 1}); endmodule",
-        );
-        match &m.analog[0] {
-            va_ir::Stmt::Contribute { value, .. } => match m.expr(*value) {
-                Expr::Binary(va_ir::BinOp::Mul, l, r) => {
-                    assert!(matches!(m.expr(*l), Expr::Probe(_)));
-                    assert!(matches!(m.expr(*r), Expr::Const(g) if (*g - 1.0).abs() < 1e-12));
-                }
-                other => panic!("expected a Mul-by-gain fold, got {other:?}"),
-            },
-            other => panic!("expected a contribution, got {other:?}"),
-        }
+    /// Elaborate one `laplace_*` contribution and return its `(builtin, args)`.
+    fn laplace_call(call: &str) -> (Builtin, Vec<va_ir::ExprId>, va_ir::Module) {
+        let m = elaborate_src(&format!(
+            "module t(a, b); electrical a, b; analog I(a, b) <+ {call}; endmodule"
+        ));
+        let found = m.exprs.iter().find_map(|e| match e {
+            Expr::Call(
+                b @ (Builtin::LaplaceNd
+                | Builtin::LaplaceNp
+                | Builtin::LaplaceZd
+                | Builtin::LaplaceZp),
+                a,
+            ) => Some((*b, a.clone())),
+            _ => None,
+        });
+        let (b, a) = found.expect("a laplace call survives elaboration");
+        (b, a, m)
     }
 
     #[test]
-    fn laplace_nd_zero_dc_denominator_is_an_error() {
+    fn laplace_survives_elaboration_with_its_coefficient_lists_intact() {
+        // `laplace_*` used to fold to its DC gain `H(0)` at elaboration, so every filter model
+        // read flat: a one-pole lowpass and a straight wire produced identical AC responses.
+        // It now reaches the IR whole, with `[value, Const(num_len), num…, den…]` — the flat
+        // layout a `Const` separator makes readable (§ `va_ir::Builtin::LaplaceNd`).
+        let (b, args, m) = laplace_call("laplace_nd(V(a, b), {2, 0}, {2, 1})");
+        assert_eq!(b, Builtin::LaplaceNd);
+        assert!(matches!(m.expr(args[0]), Expr::Probe(_)));
+        assert!(matches!(m.expr(args[1]), Expr::Const(n) if *n == 2.0));
+        assert_eq!(args.len(), 2 + 2 + 2, "value + separator + 2 num + 2 den");
+        let num: Vec<f64> = args[2..4]
+            .iter()
+            .map(|&i| match m.expr(i) {
+                Expr::Const(v) => *v,
+                o => panic!("{o:?}"),
+            })
+            .collect();
+        assert_eq!(num, vec![2.0, 0.0]);
+    }
+
+    #[test]
+    fn laplace_coefficients_stay_expressions_rather_than_folding() {
+        // The corpus writes coefficients as parameter expressions. Const-folding them here
+        // would freeze a filter's poles at their declared defaults and silently ignore a
+        // netlist override, so they are lowered as expressions and evaluated per instance.
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; parameter real tau = 1e-6;              analog I(a, b) <+ laplace_nd(V(a, b), {1}, {1, tau}); endmodule",
+        );
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                Expr::Call(Builtin::LaplaceNd, a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("a laplace call survives elaboration");
+        // args = [value, Const(1), num0, den0, den1]; `tau` must not have become a Const.
+        assert!(
+            matches!(m.expr(args[4]), Expr::Param(_)),
+            "tau should survive as a parameter reference, got {:?}",
+            m.expr(args[4])
+        );
+    }
+
+    #[test]
+    fn a_pole_at_the_origin_is_now_accepted() {
+        // An integrator, `H(s) = 1/s`. Elaboration used to *reject* this outright, because the
+        // DC-gain fold divided by zero — an artifact of folding, not a property of the filter.
+        // With the transfer function evaluated at `s = jω` it is perfectly well defined
+        // everywhere except DC, where `va-codegen` drops the term (see its `stamp_laplace`).
+        let (b, _, _) = laplace_call("laplace_np(V(a, b), {1}, {0, 0})");
+        assert_eq!(b, Builtin::LaplaceNp);
+
+        // Likewise a zero `s^0` denominator coefficient: `H(s) = 1/s` written the other way.
+        let (b, _, _) = laplace_call("laplace_nd(V(a, b), {1}, {0, 1})");
+        assert_eq!(b, Builtin::LaplaceNd);
+    }
+
+    #[test]
+    fn laplace_filter_odd_length_root_array_is_an_error() {
+        // Zero/pole arrays hold flattened `(re, im)` pairs, so an odd length is malformed. The
+        // check stays at elaboration — where a source file can still be named — even though
+        // `va-codegen` re-checks it (§ `lower::laplace_term_shape`).
         let src = "module t(a, b); electrical a, b; \
-                    analog I(a, b) <+ laplace_nd(V(a, b), {1}, {0, 1}); endmodule";
+                    analog I(a, b) <+ laplace_zp(V(a, b), {1, 0, 2}, {1, 0}); endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
         assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
@@ -3607,61 +3666,6 @@ mod tests {
             },
             other => panic!("expected a contribution, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn laplace_zp_matches_the_lrm_worked_example() {
-        // LRM §4.5.11.5's own example: `laplace_zp(V(in), '{-1,0}, '{-1,-1,-1,1})` implements
-        // H(s) = (1+s) / [(1+s/(1+j))(1+s/(1-j))]; H(0) = 1/(1*1) = 1 (a real zero at -1, a
-        // complex-conjugate pole pair at -1±j — neither at the origin, so every root's factor
-        // is 1 at s=0 regardless of it being real or complex).
-        let g = filter_gain("laplace_zp(V(a, b), {-1, 0}, {-1, -1, -1, 1})");
-        assert!((g - 1.0).abs() < 1e-12, "got {g}");
-    }
-
-    #[test]
-    fn laplace_np_matches_the_real_corpus_shape() {
-        // `external/angelov.va`/`angelov_gan.va`'s exact idiom: `laplace_np(noise, {1},
-        // {2*pi*Fgr, 0, -2*pi*Fgr, 0})` — a real numerator constant over two real, nonzero
-        // poles; H(0) = num[0] / (1*1) = 1.
-        let g = filter_gain("laplace_np(V(a, b), {1}, {6.28e9, 0.0, -6.28e9, 0.0})");
-        assert!((g - 1.0).abs() < 1e-12, "got {g}");
-    }
-
-    #[test]
-    fn laplace_zd_computes_zero_over_denominator_coefficient() {
-        // A real, non-origin zero at 1 (numerator fold = 1) over a denominator `{4, 1}`
-        // (den[0] = 4): H(0) = 1/4.
-        let g = filter_gain("laplace_zd(V(a, b), {1, 0}, {4, 1})");
-        assert!((g - 0.25).abs() < 1e-12, "got {g}");
-    }
-
-    #[test]
-    fn laplace_zero_at_origin_folds_to_zero_gain() {
-        // A zero exactly at the origin `(0, 0)` makes that root's factor `s`, which is `0` at
-        // s=0 — the whole numerator product collapses to 0, regardless of the (non-origin) pole.
-        let g = filter_gain("laplace_zp(V(a, b), {0, 0}, {1, 0})");
-        assert_eq!(g, 0.0);
-    }
-
-    #[test]
-    fn laplace_pole_at_origin_is_an_error() {
-        // A pole exactly at the origin makes the denominator's DC value 0 — undefined gain.
-        let src = "module t(a, b); electrical a, b; \
-                    analog I(a, b) <+ laplace_np(V(a, b), {1}, {0, 0}); endmodule";
-        let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
-        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
-    }
-
-    #[test]
-    fn laplace_filter_odd_length_root_array_is_an_error() {
-        // Zero/pole arrays must hold `(re, im)` pairs — an odd-length array is malformed.
-        let src = "module t(a, b); electrical a, b; \
-                    analog I(a, b) <+ laplace_zp(V(a, b), {1, 0, 2}, {1, 0}); endmodule";
-        let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
-        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
     }
 
     #[test]

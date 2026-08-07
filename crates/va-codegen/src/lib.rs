@@ -426,6 +426,15 @@ impl GeneratedModel {
                         // term was not pulled into the excitation channel, and `ad::eval` gives
                         // it its LRM-mandated zero value — so the stimulus would vanish with no
                         // diagnostic (§ `lower::ac_stim_term_shape`).
+                        // A laplace still buried in a resistive term could not be split out,
+                        // and `ad::eval` has no real-valued answer for a complex gain — so it
+                        // would be a hard error mid-solve rather than a build diagnostic.
+                        if lower::contains_laplace_call(ctx.module, term.expr) {
+                            return Err(CodegenError::Unsupported(
+                                "a laplace_* filter must be a top-level additive term of a                                  contribution (its gain is complex, so there is nowhere in an                                  ordinary expression to put it)"
+                                    .to_string(),
+                            ));
+                        }
                         if lower::contains_ac_stim_call(ctx.module, term.expr) {
                             return Err(CodegenError::Unsupported(
                                 "ac_stim must be a top-level additive term of a contribution (a \
@@ -440,6 +449,12 @@ impl GeneratedModel {
                     for term in &c.ac_stim {
                         eval(ctx, term.mag)?;
                         eval(ctx, term.phase)?;
+                    }
+                    for term in &c.laplace {
+                        eval(ctx, term.input)?;
+                        for &id in term.num.iter().chain(&term.den) {
+                            eval(ctx, id)?;
+                        }
                     }
                     for term in &c.noise {
                         match *term {
@@ -622,6 +637,10 @@ impl GeneratedModel {
                     sink.excitation(gp, re, im);
                     sink.excitation(gn, -re, -im);
                 }
+
+                if !c.laplace.is_empty() {
+                    self.stamp_laplace(ctx, &c.laplace, gp, gn, None, sink);
+                }
             }
             Some(local_slot) => {
                 if self.is_mixed_branch(local_slot) && ctx.mark_potential_used(local_slot) {
@@ -667,8 +686,114 @@ impl GeneratedModel {
                 if let Some((re, im)) = Self::ac_stim_excitation(ctx, &c.ac_stim) {
                     sink.excitation(gb, -re, -im);
                 }
+
+                if !c.laplace.is_empty() {
+                    self.stamp_laplace(ctx, &c.laplace, gb, gb, Some(gb), sink);
+                }
             }
         }
+    }
+
+    /// Stamp a contribution's `laplace_*` terms (Tier C).
+    ///
+    /// `gp`/`gn` are the global rows a *flow* contribution injects into; `gb` is `Some(row)` for
+    /// a potential contribution's constraint row, which takes the opposite sign — the same split
+    /// the resistive channel just above uses.
+    ///
+    /// **The whole design rests on one identity.** At a single frequency `ω`, a complex
+    /// admittance `H = a + jb` is exactly representable by the *real* pair `G = a`, `C = b/ω`,
+    /// because the assembler forms `G + jω·C = a + jb`. So no complex stamp channel is needed:
+    /// the existing `jacobian`/`dcharge` pair already spans the complex plane at any given
+    /// frequency. What Tier C added was only telling the model *which* frequency
+    /// (`AnalysisCtx::freq`) and re-linearizing per point.
+    ///
+    /// `ddt` is the special case `H(s) = s`, and the general rule reproduces it: `a = 0`,
+    /// `b = ω`, so `C += grad` — precisely what the charge channel already stamps.
+    ///
+    /// Outside AC (and at `ω = 0`, which no `AcSweep` produces but a caller could) the transfer
+    /// function collapses to its **real DC gain `H(0)`**, stamped resistively. That is exactly
+    /// what this construct folded to at elaboration before Tier C, which is why every existing
+    /// gate is unmoved — and it is also the honest transient answer only in the sense that it is
+    /// the *previous* answer: a time-domain Laplace filter is a convolution, and remains
+    /// unimplemented (`docs/proposals/frequency-domain.md` §2).
+    fn stamp_laplace(
+        &self,
+        ctx: &Ctx,
+        terms: &[lower::LaplaceTerm],
+        gp: usize,
+        gn: usize,
+        gb: Option<usize>,
+        sink: &mut dyn StampSink,
+    ) {
+        for term in terms {
+            let Ok(u) = eval(ctx, term.input) else {
+                continue;
+            };
+            let Some(num) = Self::eval_coeffs(ctx, &term.num) else {
+                continue;
+            };
+            let Some(den) = Self::eval_coeffs(ctx, &term.den) else {
+                continue;
+            };
+
+            let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
+            let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
+            let h = ad::laplace_at(
+                if ac { omega } else { 0.0 },
+                &num,
+                term.num_is_roots,
+                &den,
+                term.den_is_roots,
+            );
+            if !h.0.is_finite() || !h.1.is_finite() {
+                continue; // a denominator vanishing at this frequency: skip rather than poison
+            }
+
+            let (re, im) = (term.sign * h.0, term.sign * h.1);
+            for (slot, &dg) in u.grad.iter().enumerate() {
+                if dg == 0.0 {
+                    continue;
+                }
+                let gk = self.terminals[slot];
+                match gb {
+                    None => {
+                        sink.jacobian(gp, gk, re * dg);
+                        sink.jacobian(gn, gk, -re * dg);
+                        if ac {
+                            sink.dcharge(gp, gk, im / omega * dg);
+                            sink.dcharge(gn, gk, -im / omega * dg);
+                        }
+                    }
+                    Some(gb) => {
+                        sink.jacobian(gb, gk, -re * dg);
+                        if ac {
+                            sink.dcharge(gb, gk, -im / omega * dg);
+                        }
+                    }
+                }
+            }
+            // The residual only matters where a *value* does: AC keeps derivatives alone.
+            if !ac {
+                match gb {
+                    None => {
+                        sink.residual(gp, re * u.value);
+                        sink.residual(gn, -re * u.value);
+                    }
+                    Some(gb) => sink.residual(gb, -re * u.value),
+                }
+            }
+        }
+    }
+
+    /// Evaluate a coefficient/root list to plain numbers, or `None` if any entry fails.
+    ///
+    /// Only the *values* are used: a filter's coefficients come from parameters, not from the
+    /// solution vector, so their gradients are meaningless here. A coefficient that genuinely
+    /// depended on `x` would be a nonlinear filter, which is not what `laplace_*` describes.
+    fn eval_coeffs(ctx: &Ctx, ids: &[va_ir::ExprId]) -> Option<Vec<f64>> {
+        ids.iter()
+            .map(|&id| eval(ctx, id).ok().map(|d| d.value))
+            .collect()
     }
 
     /// Sum a contribution's `ac_stim` terms into one complex excitation `(re, im)`, or `None`
@@ -1000,6 +1125,14 @@ impl ModelInstance for GeneratedModel {
 
     fn state_len(&self) -> usize {
         self.lowered.state_len
+    }
+
+    /// A compiled model is frequency-dependent exactly when its source contains a `laplace_*`
+    /// filter: that is the only construct whose `G`/`C` themselves move with `ω`. Reporting it
+    /// is what makes `va_acnoise::ac::run` re-linearize per point — a cost no ordinary model
+    /// should pay, which is why this is opt-in rather than assumed.
+    fn is_frequency_dependent(&self) -> bool {
+        self.lowered.has_laplace
     }
 }
 

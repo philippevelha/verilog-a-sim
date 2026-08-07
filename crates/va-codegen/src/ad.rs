@@ -441,6 +441,82 @@ impl Ctx<'_> {
     }
 }
 
+/// A minimal complex number for evaluating a `laplace_*` transfer function. Kept local and
+/// dependency-free, matching `va_acnoise::ac::Complex`'s own `(re, im)` convention.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cx(pub f64, pub f64);
+
+impl Cx {
+    fn mul(self, o: Cx) -> Cx {
+        Cx(self.0 * o.0 - self.1 * o.1, self.0 * o.1 + self.1 * o.0)
+    }
+
+    fn div(self, o: Cx) -> Cx {
+        let d = o.0 * o.0 + o.1 * o.1;
+        Cx(
+            (self.0 * o.0 + self.1 * o.1) / d,
+            (self.1 * o.0 - self.0 * o.1) / d,
+        )
+    }
+}
+
+/// Evaluate a `laplace_*` transfer function `H(s)` at `s = j·omega`.
+///
+/// `num`/`den` are already-evaluated real numbers: either polynomial coefficients in `s`
+/// (lowest degree first) or flattened `(re, im)` root pairs, per the `*_is_roots` flags.
+///
+/// **Root forms are evaluated in product form**, `∏(1 − s/ζ)`, never expanded into
+/// coefficients: expansion is worse conditioned (the corpus carries a 7-coefficient filter with
+/// values near `1e71`) and buys nothing here. A root at the **origin** contributes a factor of
+/// `s` rather than `(1 − s/ζ)` — the LRM's own rule, and the one that makes a filter with a zero
+/// at the origin report a DC gain of exactly `0`.
+pub fn laplace_at(
+    omega: f64,
+    num: &[f64],
+    num_is_roots: bool,
+    den: &[f64],
+    den_is_roots: bool,
+) -> Cx {
+    let s = Cx(0.0, omega);
+
+    fn poly(s: Cx, coeffs: &[f64]) -> Cx {
+        // Horner from the top down, so `Σ c_k s^k` costs one mul/add per coefficient.
+        let mut acc = Cx(0.0, 0.0);
+        for &c in coeffs.iter().rev() {
+            acc = acc.mul(s);
+            acc.0 += c;
+        }
+        acc
+    }
+
+    fn roots(s: Cx, pairs: &[f64]) -> Cx {
+        let mut acc = Cx(1.0, 0.0);
+        for pair in pairs.chunks_exact(2) {
+            let r = Cx(pair[0], pair[1]);
+            if r == Cx(0.0, 0.0) {
+                // A root at the origin: the factor is `s`, not `1 − s/0`.
+                acc = acc.mul(s);
+            } else {
+                let one_minus = Cx(1.0, 0.0);
+                acc = acc.mul(Cx(one_minus.0 - s.div(r).0, one_minus.1 - s.div(r).1));
+            }
+        }
+        acc
+    }
+
+    let n = if num_is_roots {
+        roots(s, num)
+    } else {
+        poly(s, num)
+    };
+    let d = if den_is_roots {
+        roots(s, den)
+    } else {
+        poly(s, den)
+    };
+    n.div(d)
+}
+
 /// Whether the analysis `analysis` describes is named by `mask`, a bitmask over
 /// [`va_ir::ANALYSIS_PHASES`].
 ///
@@ -709,6 +785,17 @@ fn eval_call(
         // means the call sits somewhere that split could not pull it out of, and
         // `crate::GeneratedModel::validate` rejects that rather than letting it vanish.
         Builtin::AcStim => Dual::constant(0.0, count),
+        // A `laplace_*` reaching expression evaluation means `crate::lower` could not pull it
+        // out of its contribution — it was scaled, nested, or otherwise not a bare top-level
+        // term. There is no real-valued answer to give: `H(jω)` is complex, and a `Dual` carries
+        // a real value and a real gradient. `crate::GeneratedModel::validate` rejects this at
+        // build time so it never surfaces mid-solve.
+        Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp => {
+            return Err(unsupported(
+                "a laplace_* filter must be a top-level additive term of a contribution (its \
+                 gain is complex, so there is nowhere in an ordinary expression to put it)",
+            ))
+        }
         // `@(initial_step)`'s desugared condition. Pure solver knowledge, no state, no gradient.
         Builtin::InitialStep => Dual::constant(
             if ctx.analysis.is_initial_step {
@@ -1467,5 +1554,90 @@ mod tests {
         let h = 1e-6;
         let fd = (1.0 / (4.0 + h) - 1.0 / (4.0 - h)) / (2.0 * h);
         assert!((f.grad[0] - fd).abs() < 1e-7, "{} vs {}", f.grad[0], fd);
+    }
+}
+
+#[cfg(test)]
+mod laplace_tests {
+    use super::{laplace_at, Cx};
+
+    fn close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * b.abs().max(1.0)
+    }
+
+    /// The DC gains the elaboration-time fold used to compute, now produced by evaluating the
+    /// transfer function at `s = 0`. These are the *same numbers* the folded implementation
+    /// gave, which is why un-folding moved no existing result — the fold was a special case of
+    /// the general rule, not a different rule.
+    #[test]
+    fn dc_gain_reproduces_the_folds_it_replaced() {
+        // laplace_nd, num[0]/den[0] = 2/2.
+        let h = laplace_at(0.0, &[2.0, 0.0], false, &[2.0, 1.0], false);
+        assert!(close(h.0, 1.0, 1e-12) && h.1.abs() < 1e-12, "{h:?}");
+
+        // LRM §4.5.11.5's worked example: a real zero at -1 over a conjugate pole pair at -1±j.
+        // Every non-origin root's factor is 1 at s=0, so H(0) = 1.
+        let h = laplace_at(0.0, &[-1.0, 0.0], true, &[-1.0, -1.0, -1.0, 1.0], true);
+        assert!(close(h.0, 1.0, 1e-12) && h.1.abs() < 1e-12, "{h:?}");
+
+        // `external/angelov*.va`'s idiom: constant numerator over two real nonzero poles.
+        let h = laplace_at(0.0, &[1.0], false, &[6.28e9, 0.0, -6.28e9, 0.0], true);
+        assert!(close(h.0, 1.0, 1e-12), "{h:?}");
+
+        // laplace_zd: a real non-origin zero over den[0] = 4.
+        let h = laplace_at(0.0, &[1.0, 0.0], true, &[4.0, 1.0], false);
+        assert!(close(h.0, 0.25, 1e-12), "{h:?}");
+
+        // A zero exactly at the origin contributes a factor of `s`, which is 0 at DC.
+        let h = laplace_at(0.0, &[0.0, 0.0], true, &[1.0, 0.0], true);
+        assert_eq!(h, Cx(0.0, 0.0));
+    }
+
+    /// The property the DC fold could not express, and the reason Tier C exists: a one-pole
+    /// lowpass `1/(1 + sτ)` must roll off. Checked against the closed form at three decades.
+    #[test]
+    fn a_one_pole_lowpass_rolls_off() {
+        let tau = 1e-3;
+        for &f in &[1.0, 159.154_943_091_895_35, 1e4] {
+            let w = 2.0 * std::f64::consts::PI * f;
+            let h = laplace_at(w, &[1.0], false, &[1.0, tau], false);
+            // 1/(1 + jωτ)
+            let d = 1.0 + (w * tau) * (w * tau);
+            assert!(close(h.0, 1.0 / d, 1e-12), "re at {f}: {h:?}");
+            assert!(close(h.1, -w * tau / d, 1e-12), "im at {f}: {h:?}");
+        }
+        // At the corner (ω τ = 1) the magnitude is exactly 1/√2 — the -3 dB point.
+        let w = 1.0 / tau;
+        let h = laplace_at(w, &[1.0], false, &[1.0, tau], false);
+        let mag = (h.0 * h.0 + h.1 * h.1).sqrt();
+        assert!(close(mag, std::f64::consts::FRAC_1_SQRT_2, 1e-12), "{mag}");
+    }
+
+    /// The coefficient and root forms are two spellings of one filter, so they must agree
+    /// numerically at every frequency — a cross-check neither could give alone.
+    #[test]
+    fn coefficient_and_root_forms_agree() {
+        // 1/(1 + s/p) with p = -1000 as a pole array, vs {1, 1/1000} as coefficients... note
+        // the root form is (1 - s/ρ), so a pole at ρ = -1000 gives (1 + s/1000).
+        let tau = 1e-3;
+        for &f in &[10.0, 1e3, 1e5] {
+            let w = 2.0 * std::f64::consts::PI * f;
+            let by_coeffs = laplace_at(w, &[1.0], false, &[1.0, tau], false);
+            let by_roots = laplace_at(w, &[1.0], false, &[-1.0 / tau, 0.0], true);
+            assert!(close(by_coeffs.0, by_roots.0, 1e-12), "re at {f}");
+            assert!(close(by_coeffs.1, by_roots.1, 1e-12), "im at {f}");
+        }
+    }
+
+    /// `ddt` is the special case `H(s) = s`, and the general evaluator must reproduce it —
+    /// purely imaginary, magnitude `ω`. That is the consistency check tying this channel to the
+    /// charge channel it generalizes.
+    #[test]
+    fn a_differentiator_is_purely_imaginary() {
+        let w = 2.0 * std::f64::consts::PI * 500.0;
+        // H(s) = s, written as a zero at the origin over a unit denominator.
+        let h = laplace_at(w, &[0.0, 0.0], true, &[1.0], false);
+        assert!(h.0.abs() < 1e-9, "{h:?}");
+        assert!(close(h.1, w, 1e-12), "{h:?}");
     }
 }

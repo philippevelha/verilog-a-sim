@@ -475,3 +475,40 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 >   vector holds. A second design; the channel is shaped not to preclude it.
 > - **True event-scheduled `transition`** — approximated here via `bound_step` rather than exact
 >   corner breakpoints, and `docs/token-reference.md` says so at the construct.
+
+> **Revision (§6 change, 2026-08-07b):** added `AnalysisCtx::freq` and a defaulted
+> `ModelInstance::is_frequency_dependent() -> bool`. This is **Tier C** of
+> `docs/proposals/frequency-domain.md` — the last of the three tiers, and the one both earlier
+> proposals called "largest".
+>
+> **`freq` is the field Tier A refused, and the refusal was conditional.** That revision said a
+> `freq` field "would be meaningless at the one call site that would most obviously want it …
+> Frequency arrives with Tier C, together with the re-linearization that makes it meaningful."
+> `va_acnoise::ac::run` now re-linearizes per frequency point, so the field is honest. Both the
+> Tier A revision above and `docs/bridges/interface-beta-abi.md` §7 were updated rather than
+> left contradicting the code.
+>
+> **No complex stamp channel was needed, and that is the whole reason this tier turned out
+> small.** At a single frequency `ω`, any complex admittance `H = a + jb` is *exactly*
+> representable by the **real** pair `G = a`, `C = b/ω`, because the assembler forms
+> `G + jω·C = a + jb`. So `jacobian`/`dcharge` already span the complex plane at a given
+> frequency; all that was missing was telling the model which frequency. `ddt` is the special
+> case `H(s) = s` (`a = 0`, `b = ω`, so `C += grad`), which is a reassuring consistency check on
+> the general rule rather than a coincidence.
+>
+> **`is_frequency_dependent` is a cost switch, and it is opt-in on purpose.** When every
+> instance reports `false` — every ordinary circuit — `ac::run` linearizes **once**, exactly as
+> before, and the existing AC gates are bit-identical. Only a circuit containing a real filter
+> pays the O(points) cost. Assuming `true` would have taxed every AC sweep in the project for a
+> feature almost none of them use.
+>
+> **Deliberately not in scope:**
+>
+> - **`zi_*`** (the Z-domain family) — **zero** uses across all 150 corpus files, and it needs a
+>   sampling interval, i.e. a clock this simulator does not have.
+> - **Transient Laplace** — a convolution needing a state-space realization, not a stamping
+>   problem. In DC and transient a filter still evaluates to `H(0)`, exactly as before, so this
+>   tier makes AC right and leaves transient where it was. Stated at the construct in
+>   `docs/token-reference.md`, not implied.
+> - **Laplace-shaped noise** (`laplace_np(white_noise(...), …)`, one real corpus use) — the
+>   filter would have to multiply a PSD, which is the noise channel's business.

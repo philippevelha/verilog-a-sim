@@ -35,6 +35,12 @@ code.
 > One thing §6 could not have predicted: `UIC` offsets QSPICE's own `time` by exactly 1e-7 s,
 > so this deck must skip the `cold_start_tran_deck` treatment every other transient gate needs.
 >
+> **Tier B shipped 2026-08-07** (`model-state.md`) and **Tier C on 2026-08-07**
+> (`frequency-domain.md`), so all three tiers of §2 are now delivered. In particular §3's "no
+> `freq` field" was a *conditional* refusal — "frequency arrives with Tier C, together with the
+> re-linearization that makes it meaningful" — and Tier C supplied exactly that, so
+> `AnalysisCtx::freq` now exists and is honest.
+>
 > `analysis()`, `ac_stim` and `bound_step` remain **unit-tested, not golden-gated** — §6's
 > by-construction plan for `analysis()` was not pursued, and the other two have no QSPICE
 > counterpart drivable from a model. `docs/validation.md` states the split per property.
