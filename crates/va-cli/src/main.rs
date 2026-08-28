@@ -34,7 +34,7 @@ fn print_usage() {
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
          va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran|--noise] [--plot <out.svg>]\n    \
-         va-cli check <model.va|dir> [more…]   Run the frontend over models, report gaps\n\n\
+         va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
          --plot <out.svg>   Write an SVG plot of the transient waveform (--tran only)"
@@ -42,11 +42,19 @@ fn print_usage() {
 }
 
 /// The `check` subcommand: run the frontend over models/directories and report what fails.
+/// `--codegen` extends each file's verdict past elaboration into `va-codegen`, so the same
+/// command reports either the frontend or the frontend+codegen corpus figure.
 fn cmd_check(args: &[String]) -> Result<()> {
-    if args.is_empty() {
+    let codegen = args.iter().any(|a| a == "--codegen");
+    let paths: Vec<String> = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .collect();
+    if paths.is_empty() {
         bail!("expected at least one model file or directory");
     }
-    check_models(args)
+    check_models(&paths, codegen)
 }
 
 /// The `sim` subcommand: run a netlist through the pipeline.

@@ -97,10 +97,16 @@
 //! but genuinely `x`-dependent on some unrelated path stays rejected). [`charge_term_shape`] now
 //! recurses through arbitrarily many nested multiplications/divisions rather than inspecting only
 //! the immediate operands of the outermost one — `ekv26.va`'s `ddt(qjd)*TYPE*M` parses as
-//! `(ddt(qjd)*TYPE)*M`, two levels deep, and needed exactly this. `ddt` still may not appear
-//! nested any *other* way (inside a ternary, as another builtin's argument, etc.) — none of those
-//! shapes turned up anywhere in the same survey, so there was nothing concrete to scope a fix
-//! against.
+//! `(ddt(qjd)*TYPE)*M`, two levels deep, and needed exactly this. It also **distributes a
+//! coefficient over a parenthesised sum of `ddt`s** — `ekv3.va` writes its gate charge as
+//! `I(d,g) <+ SIGN_M * (d_gt_s*ddt(QD) + s_gt_d*ddt(QS)) * QON;`, which [`collect_terms`] cannot
+//! reach because the sum is nested inside the scaling, not at the top of the contribution. A sum
+//! distributes only when *every* one of its terms is itself a charge shape; a mixed
+//! `(resistive + ddt(q))*coeff` is left alone, since splitting it would mean synthesising a new
+//! `resistive*coeff` expression and this module only reads the IR arena. `ddt` still may not
+//! appear nested any *other* way (inside a ternary, as another builtin's argument, etc.) — none
+//! of those shapes turned up anywhere in the same survey, so there was nothing concrete to scope
+//! a fix against.
 //!
 //! A `ddt` result assigned to a plain local variable and read back later in a `<+`
 //! (`real dqdt; dqdt = ddt(q); I(p,n) <+ dqdt + …;` — seen in the wild specifically to work
@@ -1212,11 +1218,16 @@ fn lower_stmt(
                     continue;
                 }
                 match charge_term_shape(module, shape_expr, param_only)? {
-                    Some((expr, coeffs)) => charge.push(ChargeTerm {
-                        sign: term.sign,
-                        expr,
-                        coeffs,
-                    }),
+                    // One term can yield several charge terms: a scaled parenthesised sum
+                    // distributes over its `ddt`s (see `charge_term_shape`). Each shape's own
+                    // relative sign multiplies the enclosing term's.
+                    Some(shapes) => {
+                        charge.extend(shapes.into_iter().map(|(sign, expr, coeffs)| ChargeTerm {
+                            sign: term.sign * sign,
+                            expr,
+                            coeffs,
+                        }))
+                    }
                     None => resistive.push(term),
                 }
             }
@@ -1469,56 +1480,112 @@ fn collect_terms(module: &Module, expr: ExprId, sign: f64, out: &mut Vec<Term>) 
     }
 }
 
-/// A recognized `ddt` charge shape: the `ddt` call's own argument, plus every parameter-only
-/// scaling factor wrapping it, each paired with whether it divides (`true`) rather than
-/// multiplies (`false`). See [`charge_term_shape`].
-type ChargeShape = (ExprId, Vec<(ExprId, bool)>);
+/// A recognized `ddt` charge shape: a relative sign, the `ddt` call's own argument, and every
+/// parameter-only scaling factor wrapping it, each paired with whether it divides (`true`)
+/// rather than multiplies (`false`). See [`charge_term_shape`].
+///
+/// The sign is *relative to the enclosing term*: it accumulates the `-` of a subtraction or a
+/// unary negation found **inside** the term (only reachable under a scaling coefficient — a
+/// negation at the top of a contribution was already flattened by [`collect_terms`]), and the
+/// caller multiplies it by the term's own sign.
+type ChargeShape = (f64, ExprId, Vec<(ExprId, bool)>);
 
-/// If `expr` is `ddt(arg)` wrapped in any depth of parameter-only multiplication/division
-/// (`ddt(arg)`, `coeff*ddt(arg)`, `ddt(arg)*coeff`, `ddt(arg)/coeff`, `(ddt(arg)*coeff1)*coeff2`,
-/// `coeff1*coeff2*ddt(arg)`, ... — real models nest at least two multiplications deep, e.g.
-/// `ekv26.va`'s `ddt(qjd)*TYPE*M`, parsing as `(ddt(qjd)*TYPE)*M`), return `(arg, coeffs)` where
-/// `coeffs` lists every scaling factor found (in the order encountered), each paired with
-/// whether it divides (`true`) rather than multiplies (`false`). Returns `Ok(None)` for anything
-/// else — including a syntactically-plausible `coeff*ddt(arg)` whose `coeff` fails the
-/// parameter-only check ([`is_param_only`] given `param_only`), which falls back to being
-/// treated as an ordinary resistive term (and is rejected later, when `ad::eval` actually tries
-/// to evaluate the still-nested `ddt` call, by the same `CodegenError::Unsupported` this
-/// returned `None` to avoid pre-empting here).
+/// Recognize `expr` as one or more `ddt` charge terms, or `Ok(None)` if it is not a charge
+/// shape at all.
+///
+/// The accepted shapes are `ddt(arg)` wrapped in any depth of parameter-only
+/// multiplication/division (`coeff*ddt(arg)`, `ddt(arg)*coeff`, `ddt(arg)/coeff`,
+/// `(ddt(arg)*coeff1)*coeff2`, `coeff1*coeff2*ddt(arg)`, ... — real models nest at least two
+/// multiplications deep, e.g. `ekv26.va`'s `ddt(qjd)*TYPE*M`, parsing as `(ddt(qjd)*TYPE)*M`),
+/// **and any sum, difference or negation of such shapes**. The last of those is why this returns
+/// a `Vec`: a scaled parenthesised sum distributes over its terms.
+///
+/// Distributing matters because it is the shape real charge models are written in.
+/// `external/ekv3.va` contributes its gate charge as
+///
+/// ```text
+/// I(d, g) <+ SIGN_M * (d_gt_s * ddt(QD) + s_gt_d * ddt(QS)) * QON;
+/// ```
+///
+/// — a *sum* of two scaled `ddt` calls, itself scaled on both sides. [`collect_terms`] flattens
+/// only the top level of a contribution, so it cannot reach inside the parentheses, and the
+/// pre-distribution recognizer saw a `Mul` whose operands were an `Add` (not a `ddt` shape) and
+/// `QON` (not a `ddt` shape), returned `None`, and the contribution was rejected downstream.
+/// Recognizing the sum here yields `[(+1, QD, [d_gt_s, SIGN_M, QON]), (+1, QS, [s_gt_d, SIGN_M,
+/// QON])]`, exactly as if the model had written the distributed form by hand.
+///
+/// A sum is accepted **only when every one of its terms is itself a charge shape**. A mixed
+/// `(resistive + ddt(q)) * coeff` is deliberately *not* split: doing so would require
+/// synthesising a new `resistive * coeff` expression, and this module only ever reads the IR
+/// arena — it never writes to it. Such a term falls through to the resistive channel and is
+/// rejected downstream exactly as before.
+///
+/// Returns `Ok(None)` for anything else — including a syntactically-plausible `coeff*ddt(arg)`
+/// whose `coeff` fails the parameter-only check ([`is_param_only`] given `param_only`), which
+/// falls back to being treated as an ordinary resistive term (and is rejected later, when
+/// `ad::eval` actually tries to evaluate the still-nested `ddt` call, by the same
+/// `CodegenError::Unsupported` this returned `None` to avoid pre-empting here).
 fn charge_term_shape(
     module: &Module,
     expr: ExprId,
     param_only: &HashSet<u32>,
-) -> Result<Option<ChargeShape>, CodegenError> {
+) -> Result<Option<Vec<ChargeShape>>, CodegenError> {
     if let Some(arg) = ddt_arg(module, expr)? {
-        return Ok(Some((arg, Vec::new())));
+        return Ok(Some(vec![(1.0, arg, Vec::new())]));
     }
     match module.expr(expr) {
         Expr::Binary(BinOp::Mul, l, r) => {
-            if let Some((arg, mut coeffs)) = charge_term_shape(module, *l, param_only)? {
+            if let Some(mut shapes) = charge_term_shape(module, *l, param_only)? {
                 if is_param_only(module, *r, param_only) {
-                    coeffs.push((*r, false));
-                    return Ok(Some((arg, coeffs)));
+                    push_coeff(&mut shapes, *r, false);
+                    return Ok(Some(shapes));
                 }
             }
-            if let Some((arg, mut coeffs)) = charge_term_shape(module, *r, param_only)? {
+            if let Some(mut shapes) = charge_term_shape(module, *r, param_only)? {
                 if is_param_only(module, *l, param_only) {
-                    coeffs.push((*l, false));
-                    return Ok(Some((arg, coeffs)));
+                    push_coeff(&mut shapes, *l, false);
+                    return Ok(Some(shapes));
                 }
             }
             Ok(None)
         }
         Expr::Binary(BinOp::Div, l, r) => {
-            if let Some((arg, mut coeffs)) = charge_term_shape(module, *l, param_only)? {
+            if let Some(mut shapes) = charge_term_shape(module, *l, param_only)? {
                 if is_param_only(module, *r, param_only) {
-                    coeffs.push((*r, true));
-                    return Ok(Some((arg, coeffs)));
+                    push_coeff(&mut shapes, *r, true);
+                    return Ok(Some(shapes));
                 }
             }
             Ok(None)
         }
+        // A sum only distributes if *both* halves are charge shapes — see this function's doc
+        // comment for why a mixed resistive/charge sum cannot be split here.
+        Expr::Binary(op @ (BinOp::Add | BinOp::Sub), l, r) => {
+            let (Some(mut left), Some(right)) = (
+                charge_term_shape(module, *l, param_only)?,
+                charge_term_shape(module, *r, param_only)?,
+            ) else {
+                return Ok(None);
+            };
+            let flip = if matches!(op, BinOp::Sub) { -1.0 } else { 1.0 };
+            left.extend(right.into_iter().map(|(s, e, c)| (s * flip, e, c)));
+            Ok(Some(left))
+        }
+        Expr::Unary(UnOp::Neg, e) => Ok(charge_term_shape(module, *e, param_only)?.map(|shapes| {
+            shapes
+                .into_iter()
+                .map(|(s, e, c)| (-s, e, c))
+                .collect::<Vec<_>>()
+        })),
         _ => Ok(None),
+    }
+}
+
+/// Append one scaling factor to every shape in `shapes`, preserving the innermost-first order
+/// [`ChargeTerm::coeffs`] documents.
+fn push_coeff(shapes: &mut [ChargeShape], coeff: ExprId, divides: bool) {
+    for (_, _, coeffs) in shapes.iter_mut() {
+        coeffs.push((coeff, divides));
     }
 }
 

@@ -3999,6 +3999,160 @@ mod tests {
         assert_eq!(sink.residual[0], 0.0);
     }
 
+    /// Build `I(p,n) <+ sign * (a*ddt(c1*V(p,n)) - b*ddt(c2*V(p,n))) * qon;` — `ekv3.va`'s real
+    /// gate-charge shape (`I(d,g) <+ SIGN_M * (d_gt_s*ddt(QD) + s_gt_d*ddt(QS)) * QON;`), with
+    /// the inner `+` turned into a `-` so the distributed signs are actually discriminated
+    /// rather than both defaulting to `+1`.
+    ///
+    /// Params: 0 = `c1`, 1 = `c2`, 2 = `a`, 3 = `b`, 4 = `sign`, 5 = `qon`.
+    fn scaled_sum_of_ddts_ir() -> Module {
+        let mut m = Module::new("scaled_sum_of_ddts");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        let named = |name: &str, default: f64| Param {
+            name: name.into(),
+            default,
+            min: None,
+            max: None,
+        };
+        m.params = vec![
+            named("c1", 3e-12),
+            named("c2", 5e-12),
+            named("a", 2.0),
+            named("b", 7.0),
+            named("sign", -1.0),
+            named("qon", 0.25),
+        ];
+
+        let vprobe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let mul = |m: &mut Module, l, r| m.push_expr(Expr::Binary(va_ir::BinOp::Mul, l, r));
+        let param = |m: &mut Module, i| m.push_expr(Expr::Param(va_ir::ParamId(i)));
+
+        let c1 = param(&mut m, 0);
+        let q1 = mul(&mut m, c1, vprobe);
+        let ddt1 = m.push_expr(Expr::Call(Builtin::Ddt, vec![q1]));
+        let a = param(&mut m, 2);
+        let left = mul(&mut m, a, ddt1);
+
+        let c2 = param(&mut m, 1);
+        let q2 = mul(&mut m, c2, vprobe);
+        let ddt2 = m.push_expr(Expr::Call(Builtin::Ddt, vec![q2]));
+        let b = param(&mut m, 3);
+        let right = mul(&mut m, b, ddt2);
+
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Sub, left, right));
+        let sign = param(&mut m, 4);
+        let scaled = mul(&mut m, sign, sum);
+        let qon = param(&mut m, 5);
+        let value = mul(&mut m, scaled, qon);
+
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+        m
+    }
+
+    /// A coefficient scaling a parenthesised *sum* of `ddt`s must distribute over both of them.
+    /// Before this was recognized, `charge_term_shape` saw a `Mul` whose operands were an `Add`
+    /// (not a `ddt` shape) and `QON` (not a `ddt` shape), fell back to the resistive channel, and
+    /// `ad::eval` rejected the still-nested `ddt` — which is exactly why `external/ekv3.va`
+    /// failed `va-cli check --codegen`.
+    #[test]
+    fn a_coefficient_distributes_over_a_parenthesised_sum_of_ddts() {
+        let m = scaled_sum_of_ddts_ir();
+        let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
+
+        let (c1, c2, a, b, sign, qon) = (3e-12, 5e-12, 2.0, 7.0, -1.0, 0.25);
+        let v = 0.7;
+        let mut sink = DenseStamp::new(2);
+        inst.load(
+            &[v, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+
+        // sign*qon*(a*c1 - b*c2)*V, i.e. the hand-distributed form of the contribution.
+        let gain = sign * qon * (a * c1 - b * c2);
+        let expected_q = gain * v;
+        assert!(
+            (sink.charge[0] - expected_q).abs() / expected_q.abs() < 1e-9,
+            "charge {} != {expected_q}",
+            sink.charge[0]
+        );
+        assert!(
+            (sink.dcharge[0] - gain).abs() / gain.abs() < 1e-9,
+            "dcharge {} != {gain}",
+            sink.dcharge[0]
+        );
+        // Nothing may leak into the residual: the whole contribution is charge.
+        assert_eq!(sink.residual[0], 0.0);
+        // Node `n` is the mirror of node `p`.
+        assert!((sink.charge[1] + expected_q).abs() / expected_q.abs() < 1e-9);
+    }
+
+    /// The negative control for the test above: distribution applies only when *every* term of
+    /// the sum is a charge shape. `(g*V(p,n) + ddt(c*V(p,n))) * k` mixes a resistive term with a
+    /// charge one, and splitting it would mean synthesising a `g*V(p,n)*k` expression this crate
+    /// has no way to write into the IR arena — so it must stay rejected rather than silently
+    /// dropping the resistive half or the coefficient.
+    #[test]
+    fn a_coefficient_over_a_mixed_resistive_and_ddt_sum_is_still_rejected() {
+        let mut m = scaled_sum_of_ddts_ir();
+        // Rebuild the contribution as `(a*V(p,n) - b*ddt(c2*V(p,n))) * qon` — same skeleton, but
+        // the left half of the sum is now an ordinary resistive term.
+        let vprobe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let a = m.push_expr(Expr::Param(va_ir::ParamId(2)));
+        let left = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, a, vprobe));
+
+        let c2 = m.push_expr(Expr::Param(va_ir::ParamId(1)));
+        let q2 = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c2, vprobe));
+        let ddt2 = m.push_expr(Expr::Call(Builtin::Ddt, vec![q2]));
+        let b = m.push_expr(Expr::Param(va_ir::ParamId(3)));
+        let right = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, b, ddt2));
+
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Sub, left, right));
+        let qon = m.push_expr(Expr::Param(va_ir::ParamId(5)));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, sum, qon));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+
+        assert!(matches!(
+            build_instance(&m, &[0, 1], &mut 2),
+            Err(CodegenError::Unsupported(_))
+        ));
+    }
+
     /// `real t0; t0 = ddt(c0*V(p,n)); if (cond>0.0) begin I(p,n)<+V(p,n)*g+t0; end else
     /// I(p,n)<+0.0;` -- `angelov_gan.va`'s real `T0 = ddt(Ldc*I(rf,si)); // Avoid analog operator
     /// in if/else block` idiom: a `ddt` assigned to a local variable in a straight-line

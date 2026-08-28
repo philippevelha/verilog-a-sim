@@ -34,7 +34,9 @@ shared, demoable milestone that several theses light up at once.
 > the refresh; **12/12** after T5.6 added `resistor_noise_table` later the same day, **13/13**
 > after T5.7 added `resistor_noise_table_log`), `va-cli check external` (**114/150**
 > files pass the frontend — unmoved by either, no corpus file calls a table function), and a one-off
-> frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`). The
+> frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **105/150**
+> since 2026-08-29 — see this file's `ddt`-distribution entry, and note that the figure is now
+> re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
 > "no harness-vs-golden validation yet" and "no Quarto tutorials written yet" caveats had both
@@ -52,7 +54,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; **114/150** real corpus files pass the full frontend (2026-08-04). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients); **104/150 real corpus files pass frontend+codegen** (2026-08-04, re-measured — supersedes the old 50/115, which predated the corpus growing to 150 files). The 10-file gap between frontend and codegen is two categories only: `ddt` nested inside an expression (8) and a local variable read before assignment (2) | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **105/150 real corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-29; was 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). The 9-file gap between frontend and codegen is two categories only: `ddt` nested inside an expression (7) and a local variable read before assignment (2) | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -88,8 +90,8 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
    `docs/token-reference.md` and the corpus scan, which are explicitly still growing.
 2. **T1.3's literal gate is unmet.** It names committed golden-IR snapshots for the three zoo
    models; the tests assert IR *structure* instead. Cheap to close, not yet closed.
-3. **T2.2/T2.3 are not corpus-complete.** 104 of 150 corpus files build into a `ModelInstance`;
-   the 10-file frontend→codegen gap is `ddt` nested inside an expression (8 files) and a local
+3. **T2.2/T2.3 are not corpus-complete.** 105 of 150 corpus files build into a `ModelInstance`;
+   the 9-file frontend→codegen gap is `ddt` nested inside an expression (7 files) and a local
    variable read before assignment (2). T2.2's own generated-diode check is an operating point
    + FD rather than a full committed sweep.
 
@@ -147,11 +149,13 @@ are excluded from the gap accounting below for the same reason as the fragments.
 > a real pre-existing bug of its own (`gain` used but never declared, § the `laplace_zp` entry
 > below).
 >
-> The **10-file frontend→codegen gap** is likewise only two categories, both genuine and both
+> The **frontend→codegen gap** is likewise only two categories, both genuine and both
 > already named in T2.2's section: `ddt` appearing nested inside an expression rather than as a
-> top-level contribution term (8 — `HICUML0-2`, `hicumL0_v2p*`, `hicumL2*`, `ekv3`,
-> `mvsg_cmc_3.2.0`), and a local variable read before assignment (2 — `bsimsoi`,
-> `verilogaLib-master/amp_dynamic`).
+> top-level contribution term, and a local variable read before assignment (2 — `bsimsoi`,
+> `verilogaLib-master/amp_dynamic`). It was 10 files on 2026-08-04 and is **9 as of
+> 2026-08-29**: `ekv3` left the first category when `charge_term_shape` learned to distribute a
+> coefficient over a parenthesised sum of `ddt`s, leaving 7 (`HICUML0-2`, `hicumL0_v2p*`,
+> `hicumL2*`, `mvsg_cmc_3.2.0`).
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
 itself flagged): `genvar`/`generate` loops and vector nets (elaboration-time unrolling); the
@@ -1059,19 +1063,57 @@ matches the code verbatim.
 >
 > **Re-measured 2026-08-04, against the grown 150-file corpus: 104/150 pass frontend+codegen**
 > (of the 114 that pass the frontend). Note the denominator change — every count above this line
-> is against the older 115/118-file tree and is kept as history, not restated. The scan is a
+> is against the older 115/118-file tree and is kept as history, not restated. The scan was a
 > one-off (`va_codegen::build_instance` over every module that elaborates, mirroring `va-cli
-> check`'s directory-grouped library); **`va-cli check` itself still reports only the frontend
-> count**, so re-deriving this number means re-running that scan by hand. Worth a `--codegen`
-> flag on `check` if this figure is going to be quoted regularly.
+> check`'s directory-grouped library); **`va-cli check` itself reported only the frontend
+> count**, so re-deriving this number meant re-running that scan by hand.
 >
-> The 10-file gap is exactly two categories, both long-standing and both by-design-for-now:
-> **`ddt` nested inside an expression** rather than as a top-level contribution term (8:
+> **That flag now exists (2026-08-29).** `va-cli check <paths> --codegen` runs the same
+> directory-grouped library through `build_instance` and prints its own tally, tagging a
+> codegen-only failure `[cgen ]` so it is distinguishable from an `[elab ]` one at a glance. The
+> one-off scan is retired; both figures come from one command. A `va-cli` unit test
+> (`check_group_codegen_flag_is_a_strictly_later_stage`) pins the flag to being a *strictly
+> later stage* — a module that elaborates but that codegen rejects must count as passed without
+> it and failed with it — so the two numbers cannot silently become one measurement under two
+> names.
+>
+> **Re-measured with it, 2026-08-29: 105/150.** The 9-file gap is exactly two categories:
+> **`ddt` nested inside an expression** rather than as a top-level contribution term (7:
 > `HICUML0-2`, `hicumL0_v2p0p0`, `hicumL0_v2p1p0`, `hicumL2V2p4p0`, `hicumL2V3p0p0`,
-> `hicumL2_v310`, `ekv3`, `mvsg_cmc_3.2.0` — § this phase's "recognized only as a top-level
-> additive term" rule, and T2.3's restatement of it), and a **local variable read before
-> assignment** (2: `bsimsoi`, `verilogaLib-master/amp_dynamic`). Nothing else in the corpus
-> elaborates but fails to build.
+> `hicumL2_v310`, `mvsg_cmc_3.2.0` — § this phase's "recognized only as a top-level additive
+> term" rule, and T2.3's restatement of it), and a **local variable read before assignment** (2:
+> `bsimsoi`, `verilogaLib-master/amp_dynamic`). Nothing else in the corpus elaborates but fails
+> to build.
+>
+> **`ekv3.va` left the first category the same day.** Its gate charge is contributed as
+>
+> ```verilog
+> I(d, g) <+ SIGN_M * (d_gt_s * ddt(QD) + s_gt_d * ddt(QS)) * QON;
+> ```
+>
+> — a *sum* of `ddt` calls inside a parenthesis that is then scaled on both sides. `lower.rs`'s
+> `collect_terms` flattens only the top level of a contribution, so it never reached inside the
+> parentheses, and `charge_term_shape` saw a `Mul` whose operands were an `Add` (not a `ddt`
+> shape) and `QON` (not a `ddt` shape) — `None`, resistive channel, rejected downstream by
+> `ad::eval`. `charge_term_shape` now returns a **list** of shapes and recognizes `Add`/`Sub`/
+> unary negation, so a coefficient distributes over the sum: the contribution above yields
+> `[(+1, QD, [d_gt_s, SIGN_M, QON]), (+1, QS, [s_gt_d, SIGN_M, QON])]`, exactly the
+> hand-distributed form. All six coefficients here are provably parameter-only, so the existing
+> `is_param_only` rule (why a `ddt` coefficient may not depend on the unknowns — § this phase's
+> product-rule note) is unchanged; only the *shape* recognizer widened.
+>
+> A sum distributes **only when every one of its terms is itself a charge shape**. A mixed
+> `(resistive + ddt(q)) * coeff` stays rejected, because splitting it would mean synthesising a
+> new `resistive * coeff` expression and this crate only ever *reads* the IR arena — it has no
+> way to write one. That restriction has its own negative-control test
+> (`a_coefficient_over_a_mixed_resistive_and_ddt_sum_is_still_rejected`) so the widening cannot
+> quietly grow into dropping a resistive half or a coefficient.
+>
+> **Evidence.** Corpus 104/150 → **105/150** (`ekv3.va`, and only `ekv3.va`, moves). The
+> positive test was confirmed to discriminate by disabling the new `Add`/`Sub` arm and watching
+> it fail. Workspace: **550 tests pass** (was 547), `fmt`/`clippy -D warnings` clean, and all
+> **15 golden gates reproduce their previously recorded numbers to the last digit** — no zoo
+> model writes this shape, so the change is inert for every gated circuit.
 
 - Generate (or interpret) a `ModelInstance` from an elaborated `Module`: map `<+`
   contributions to residual stamps and their AD-derived Jacobian entries.

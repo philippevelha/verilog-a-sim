@@ -146,10 +146,17 @@ pub fn run_sim(
 /// `.va`/`.vams`). This is a diagnostic tool: it always returns `Ok`, reporting status to
 /// stdout, and is how we discover which Verilog-A constructs the v0 frontend is missing.
 ///
+/// With `codegen` set, every module that elaborates is additionally pushed through
+/// [`va_codegen::build_instance`], so the run measures the **frontend + codegen** figure
+/// (T2.2's corpus coverage) rather than the frontend one. That number was previously only
+/// obtainable from a one-off hand-written scan, which is precisely how it went stale between
+/// roadmap revisions; making it a flag on the same command keeps both figures re-derivable
+/// from one command.
+///
 /// # Errors
 ///
 /// Only if a directory cannot be read.
-pub fn check_models(paths: &[String]) -> Result<()> {
+pub fn check_models(paths: &[String], codegen: bool) -> Result<()> {
     // Each entry pairs a file with the root directory it was scanned from, so nested
     // library folders (e.g. `external/some-lib/`) can still resolve `` `include `` of
     // shared headers (`constants.vams`, `disciplines.vams`) that live at the scanned root.
@@ -193,9 +200,14 @@ pub fn check_models(paths: &[String]) -> Result<()> {
     let mut total = 0usize;
     for group in groups.into_values() {
         total += group.len();
-        passed += check_group(&group);
+        passed += check_group(&group, codegen);
     }
-    println!("\n{passed}/{total} files passed the frontend (lex → parse → elaborate)");
+    let stages = if codegen {
+        "the frontend + codegen (lex → parse → elaborate → build_instance)"
+    } else {
+        "the frontend (lex → parse → elaborate)"
+    };
+    println!("\n{passed}/{total} files passed {stages}");
     Ok(())
 }
 
@@ -272,8 +284,9 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<Vec<va_frontend
 /// successfully-parsed file against the *combined* list of all their modules, so an
 /// `Item::Instance` naming a module declared in a sibling file resolves
 /// (`elaborate_with_library`'s `library` argument doesn't care which file an entry came from).
-/// Returns how many files had every one of their own modules elaborate cleanly.
-fn check_group(group: &[(String, std::path::PathBuf)]) -> usize {
+/// Returns how many files had every one of their own modules elaborate cleanly — or, with
+/// `codegen` set, elaborate *and* build into a [`va_abi::ModelInstance`].
+fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> usize {
     let mut library: Vec<va_frontend::ast::ModuleAst> = Vec::new();
     // Each successfully-parsed file's own modules, as a `library` index range — avoids cloning
     // every `ModuleAst` a second time just to report per-file status.
@@ -292,6 +305,20 @@ fn check_group(group: &[(String, std::path::PathBuf)]) -> usize {
         for ast in &library[range] {
             match va_frontend::elaborate::elaborate_with_library(ast, &library) {
                 Ok(m) => {
+                    // Every node gets its own global unknown, so codegen sees the same shape it
+                    // would in a circuit where no terminal happens to be shared or grounded.
+                    // `build_instance` allocates its own extra unknowns past `next_unknown`.
+                    if codegen {
+                        let terminals: Vec<usize> = (0..m.nodes.len()).collect();
+                        let mut next_unknown = m.nodes.len();
+                        if let Err(e) =
+                            va_codegen::build_instance(&m, &terminals, &mut next_unknown)
+                        {
+                            println!("  [cgen ] {file}: module `{}`: {e}", m.name);
+                            all_ok = false;
+                            continue;
+                        }
+                    }
                     println!(
                         "  [ok   ] {file}: module `{}` ({} nodes, {} params, {} funcs)",
                         m.name,
@@ -1242,7 +1269,7 @@ mod tests {
             (leg_path.to_string_lossy().into_owned(), dir.clone()),
             (top_path.to_string_lossy().into_owned(), dir.clone()),
         ];
-        let passed = check_group(&group);
+        let passed = check_group(&group, false);
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(
@@ -1269,13 +1296,42 @@ mod tests {
         .unwrap();
 
         let group = vec![(top_path.to_string_lossy().into_owned(), dir.clone())];
-        let passed = check_group(&group);
+        let passed = check_group(&group, false);
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(
             passed, 0,
             "top.va's `leg` instance must not resolve with no leg.va present"
         );
+    }
+
+    #[test]
+    fn check_group_codegen_flag_is_a_strictly_later_stage() {
+        // The `--codegen` verdict must be a *superset* of the frontend one: a module that
+        // elaborates but that `va-codegen` rejects has to count as passed without the flag and
+        // failed with it. Without this, the two corpus figures could silently be the same
+        // measurement under two names.
+        let dir = std::env::temp_dir().join("va_cli_check_group_codegen_stage_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nested_ddt.va");
+        // `ddt` inside a function argument is a documented codegen limitation (`lower`'s module
+        // docs: `ddt` must be a top-level additive term of a contribution), but the frontend
+        // elaborates it fine — exactly the frontend/codegen gap this flag exists to measure.
+        std::fs::write(
+            &path,
+            "module m(p, n); electrical p, n; parameter real c = 1e-12; \
+             analog I(p, n) <+ exp(ddt(c * V(p, n))); endmodule",
+        )
+        .unwrap();
+
+        let group = vec![(path.to_string_lossy().into_owned(), dir.clone())];
+        let frontend_only = check_group(&group, false);
+        let with_codegen = check_group(&group, true);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(frontend_only, 1, "the module elaborates");
+        assert_eq!(with_codegen, 0, "but va-codegen rejects the nested `ddt`");
     }
 
     /// End-to-end DC: parse the divider deck, build reference instances, solve.
