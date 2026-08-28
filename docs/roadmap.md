@@ -2459,6 +2459,64 @@ its own bucket, so the accounting cannot quietly collapse back into one number.
 
 ---
 
+## A block-local declaration could silently capture a parameter (2026-08-29)
+
+Found while tracing why `external/bsimsoi.va` failed codegen with "variable #881 read before
+assignment". The codegen message was a symptom; the cause was in `va-frontend`, and it was not a
+coverage gap but a **silent wrong answer**.
+
+**The bug.** `Elaborator::vars` is a single flat, module-wide `name -> VarId` map, and neither
+`collect_vars_stmt` nor `lower_stmt` pushes or pops a scope at a `Stmt::Block`. A declaration
+inside `begin : blk ... end` therefore leaked over the *entire* analog block — including
+statements **before** the block, which no scoping rule could justify. Given
+
+```verilog
+parameter real k = 1000.0;
+analog begin
+  begin : inner  real k;  k = 1.0;  end
+  g = 1.0 / k;            // must divide by the parameter, 1000.0
+  I(p, n) <+ g * V(p, n);
+end
+```
+
+the read of `k` resolved to the block-local variable, and the device became a **1-ohm resistor
+instead of a 1-kilohm one, with no diagnostic anywhere**. In `bsimsoi.va` the same defect has a
+`begin : load` block declare `real ... MJSWG;`, hijacking the read of the `MJSWG` *parameter*
+about 2200 lines earlier at `B4SOIbodyJctGateSideSGradingCoeff = MJSWG;`. There it happened to
+surface as a codegen error only because nothing had assigned the variable yet; the neighbouring
+`... = MJSWGD;` works purely because no block-local `MJSWGD` exists. Had any assignment preceded
+the read, `bsimsoi` would have compiled and produced wrong junction-capacitance physics.
+
+**What shipped, and why it is a rejection rather than a fix.** Real block scoping means pushing
+and popping a scope in *both* passes — the pre-pass that allocates `VarId`s and the pass that
+resolves names — and keeping them in agreement. Getting that subtly wrong would introduce *new*
+silent mis-resolutions across the whole frontend, which is a strictly worse failure than the one
+being fixed. So the conservative half shipped: `declare_local_var` **rejects** the collision with
+an accurate message. Rejecting can only turn a wrong answer into a diagnostic, never the reverse.
+
+**The rejection is narrowed by nesting depth, so it does not undo the earlier fix it looks like
+it contradicts.** `analog begin : load real MJSWG; ... end`, where the named block *is* the whole
+analog block, already spans every statement its scope could reach — the flat map is
+indistinguishable from correct scoping there, and that shape stays supported (pinned by the
+pre-existing `block_local_variable_shadows_a_same_named_parameter`, which this change had to
+leave green). Only a declaration nested inside a block with statements outside it can capture a
+read it should not, and only that is refused.
+
+**Not addressed:** a block-local declaration colliding with an outer *variable* still aliases the
+two. It is the same absence of scoping, but both names denote a variable of the same type, so the
+failure mode is a shared slot rather than a read of an entirely different quantity. Recorded at
+`declare_local_var` as a known limitation. Real block scoping remains the open item.
+
+**Evidence:** exactly **one** corpus file changes verdict — `bsimsoi.va`, which was already
+failing, now failing at elaboration with a message that names `MJSWG` and the actual rule instead
+of an opaque "variable #881". Corpus totals unmoved (73/108 with `--codegen`). 553 tests pass
+(was 551), fmt/clippy clean, all 15 golden gates reproduce their recorded numbers to the last
+digit. Two new tests: the leaking shape is rejected, and — as the control that stops the
+rejection from being vacuous — the same shape *without* a name collision still elaborates with
+the outer read resolving to `Expr::Param`.
+
+---
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

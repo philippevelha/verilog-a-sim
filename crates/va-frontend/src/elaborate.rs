@@ -163,6 +163,7 @@ fn elaborate_inner(
         params: HashMap::new(),
         param_vals: HashMap::new(),
         vars: HashMap::new(),
+        block_depth: 0,
         funcs: HashMap::new(),
         branches: HashMap::new(),
         named_branches: HashMap::new(),
@@ -278,6 +279,11 @@ struct Elaborator<'a> {
     /// The variable name → id scope currently in effect. Holds module analog variables while
     /// lowering the analog block, and a function's local scope while lowering that function.
     vars: HashMap<String, VarId>,
+    /// How many `Stmt::Block`s deep the variable-collecting pre-pass currently is, counting the
+    /// analog block itself as 0. Only used to tell a declaration that spans the whole analog
+    /// block from one nested inside it, which is the difference between harmless and
+    /// leaking — see [`Elaborator::declare_local_var`].
+    block_depth: usize,
     funcs: HashMap<String, FuncId>,
     branches: HashMap<(u32, u32), BranchId>,
     /// Named branches declared with `branch (a, b) name;`, resolved to their [`BranchId`].
@@ -916,6 +922,10 @@ impl Elaborator<'_> {
         let items = self.ast;
         for item in &items.items {
             if let Item::Analog(stmt) = item {
+                // The analog block itself is depth 0: a declaration directly inside it spans
+                // the whole block, so it cannot leak anywhere its own scope doesn't already
+                // reach. See `declare_local_var`.
+                self.block_depth = 0;
                 self.collect_vars_stmt(stmt)?;
             }
         }
@@ -941,18 +951,71 @@ impl Elaborator<'_> {
 
     /// Register an explicit `real`/`integer` local declaration (`Stmt::VarDecl`) as a fresh
     /// variable — unlike [`Self::register_var`]'s auto-registration for a bare
-    /// (declaration-less) assignment target, an explicit declaration always introduces a *new*
-    /// identifier in this block's scope, per ordinary nested-scope shadowing, even when a
-    /// module-level parameter of the same name already exists. A real corpus pattern:
-    /// `external/bsimsoi.va`'s `begin : load ... real ... MJSWG; ... end` declares a local
-    /// `MJSWG` that shadows a same-named `` `MPRoo``-macro-declared module parameter for the
-    /// rest of that block — `register_var`'s "a same-named parameter means no new var needed"
-    /// heuristic is correct for its own weaker, no-declaration-required convenience (assigning
-    /// to an actual parameter is invalid Verilog-A, so that case is never a real shadow), but
-    /// wrong here, where the declaration is explicit and shadowing is exactly the point.
-    fn declare_local_var(&mut self, name: &str) {
+    /// (declaration-less) assignment target, an explicit declaration introduces a *new*
+    /// identifier, and `register_var`'s "a same-named parameter means no new var needed"
+    /// heuristic (sound for its own no-declaration-required convenience, since assigning to an
+    /// actual parameter is invalid Verilog-A and so never a real shadow) does not apply.
+    ///
+    /// # Why a parameter collision is rejected rather than shadowed
+    ///
+    /// Verilog-A says a declaration inside `begin : blk ... end` shadows an outer name **only
+    /// within that block**. This elaborator cannot express that: [`Self::vars`] is a single
+    /// flat, module-wide `name -> VarId` map, and neither the variable-collecting pre-pass
+    /// ([`Self::collect_vars_stmt`]) nor the lowering pass ([`Self::lower_stmt`]) pushes or pops
+    /// a scope at a `Stmt::Block`. A block-local declaration therefore leaks over the *entire*
+    /// analog block — including statements **before** the block, which no scoping rule could
+    /// justify.
+    ///
+    /// That was a silent wrong answer, not merely a coverage gap. Given
+    ///
+    /// ```verilog
+    /// parameter real k = 1000.0;
+    /// analog begin
+    ///   begin : inner  real k;  k = 1.0;  end
+    ///   g = 1.0 / k;          // must divide by the parameter, 1000.0
+    ///   I(p, n) <+ g * V(p, n);
+    /// end
+    /// ```
+    ///
+    /// the read of `k` resolved to the block-local variable and the device became a 1-ohm
+    /// resistor instead of a 1-kilohm one, with no diagnostic anywhere. `external/bsimsoi.va` is
+    /// the corpus instance: a `begin : load` block declares `real ... MJSWG;`, which hijacked
+    /// the read of the `MJSWG` *parameter* roughly 2200 lines earlier at
+    /// `B4SOIbodyJctGateSideSGradingCoeff = MJSWG;`. There it happened to surface as codegen's
+    /// "variable #881 read before assignment"; had any assignment preceded it, it would have
+    /// silently used the wrong value. The neighbouring line `... = MJSWGD;` works fine purely
+    /// because no block-local `MJSWGD` exists.
+    ///
+    /// Until block scoping is real (tracked in `docs/roadmap.md`), this rejects the collision
+    /// with an accurate message instead of mis-resolving it. Rejecting is the conservative half
+    /// of the fix: it can only turn a wrong answer into a diagnostic, never the reverse.
+    ///
+    /// The rejection is **narrowed to shadows that actually leak**, by nesting depth. A
+    /// declaration directly inside the analog block — `analog begin : load real MJSWG; ... end`,
+    /// where the named block *is* the whole analog block — already spans every statement its
+    /// scope could reach, so the flat map is indistinguishable from correct scoping and the
+    /// pattern stays supported (it is a real corpus shape, and
+    /// `block_local_variable_shadows_a_same_named_parameter` pins it). Only a declaration nested
+    /// inside a block that has statements outside it can capture a read it should not, and only
+    /// that is refused. Measured on the 150-file corpus: exactly one file changes verdict,
+    /// `bsimsoi.va`, which was already failing — with a misleading message.
+    ///
+    /// A collision with an outer *variable* is **not** rejected — it aliases the two, which is
+    /// also not real shadowing, but both names denote a variable of the same type, so the
+    /// failure mode is a shared slot rather than a read of an entirely different quantity.
+    /// That case is recorded as a known limitation rather than fixed here.
+    fn declare_local_var(&mut self, name: &str) -> Result<(), FrontendError> {
         if self.genvars.contains(name) {
-            return;
+            return Ok(());
+        }
+        // Depth 1 is the analog block itself (`collect_vars` resets to 0 and its `Stmt::Block`
+        // arm increments), so a declaration there already spans every statement it could leak
+        // to — that is the benign `analog begin : load real MJSWG; ... end` case, and it stays
+        // supported. Deeper than that, the shadow escapes its own block and is rejected.
+        if self.block_depth > 1 && self.params.contains_key(name) {
+            return Err(elab(format!(
+                "declaration of `{name}` inside a nested block shadows the module parameter of the same name, and block-scoped shadowing is not supported: this elaborator has one flat module-wide variable scope, so the declaration would capture reads of `{name}` elsewhere in the analog block, including before this block. Rename the local variable."
+            )));
         }
         if !self.vars.contains_key(name) {
             let id = VarId(self.out.vars.len() as u32);
@@ -961,6 +1024,7 @@ impl Elaborator<'_> {
             });
             self.vars.insert(name.to_string(), id);
         }
+        Ok(())
     }
 
     fn collect_vars_stmt(&mut self, stmt: &Stmt) -> Result<(), FrontendError> {
@@ -987,15 +1051,23 @@ impl Elaborator<'_> {
                             entry.name
                         )));
                     }
-                    self.declare_local_var(&entry.name);
+                    self.declare_local_var(&entry.name)?;
                 }
                 Ok(())
             }
             Stmt::Block(body) => {
+                // Depth is restored on the error path too, so a rejected declaration deep in
+                // one block cannot leave the counter skewed for anything that follows.
+                self.block_depth += 1;
+                let mut result = Ok(());
                 for s in body {
-                    self.collect_vars_stmt(s)?;
+                    result = self.collect_vars_stmt(s);
+                    if result.is_err() {
+                        break;
+                    }
                 }
-                Ok(())
+                self.block_depth -= 1;
+                result
             }
             Stmt::If { then_, else_, .. } => {
                 for s in then_ {
@@ -3392,6 +3464,98 @@ mod tests {
     /// Preprocess a `models/*.va` source the way the real pipeline does.
     fn preprocess_model(src: &str) -> String {
         crate::preprocess::preprocess(src, &models_dir()).expect("preprocess model")
+    }
+
+    /// A block-local declaration colliding with a module parameter must be **rejected**, not
+    /// silently resolved to the block-local variable.
+    ///
+    /// `self.vars` is one flat module-wide map with no push/pop at a `Stmt::Block`, so the
+    /// binding used to leak over the whole analog block — including statements *before* the
+    /// block. Here `g = 1.0 / k` after the block must not divide by the block-local `k = 1.0`:
+    /// doing so turns a 1-kilohm device into a 1-ohm one with no diagnostic. See
+    /// [`Elaborator::declare_local_var`] for the `external/bsimsoi.va` corpus instance.
+    #[test]
+    fn a_block_local_declaration_shadowing_a_parameter_is_rejected() {
+        let src = "module shadow(p, n);
+                   electrical p, n;
+                   parameter real k = 1000.0;
+                   real g;
+                   analog begin
+                     begin : inner
+                       real k;
+                       k = 1.0;
+                     end
+                     g = 1.0 / k;
+                     I(p, n) <+ g * V(p, n);
+                   end
+                   endmodule
+";
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let err = elaborate(&asts[0]).expect_err("must not elaborate silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shadows the module parameter"),
+            "the diagnostic must name the real problem, got: {msg}"
+        );
+        assert!(
+            msg.contains('k'),
+            "and name the offending identifier, got: {msg}"
+        );
+    }
+
+    /// The control for the test above: the same shape with **no** name collision must still
+    /// elaborate, and the outer read must resolve to the parameter. Without this, rejecting
+    /// every block-local declaration would pass the test above for the wrong reason.
+    #[test]
+    fn a_block_local_declaration_without_a_collision_still_elaborates() {
+        let m = elaborate_src(
+            "module noshadow(p, n);
+             electrical p, n;
+             parameter real k = 1000.0;
+             real g;
+             analog begin
+               begin : inner
+                 real tmp;
+                 tmp = 1.0;
+               end
+               g = 1.0 / k;
+               I(p, n) <+ g * V(p, n);
+             end
+             endmodule
+",
+        );
+        let g_id = m
+            .vars
+            .iter()
+            .position(|v| v.name == "g")
+            .expect("`g` is a variable") as u32;
+        let rhs = find_assign_rhs(&m.analog, g_id).expect("`g` is assigned");
+        let va_ir::Expr::Binary(_, _, divisor) = m.expr(rhs) else {
+            panic!("expected `1.0 / k`, got {:?}", m.expr(rhs));
+        };
+        assert!(
+            matches!(m.expr(*divisor), va_ir::Expr::Param(_)),
+            "`k` must resolve to the parameter, got {:?}",
+            m.expr(*divisor)
+        );
+    }
+
+    /// Depth-first search for the RHS of the last `Assign` to `var` in `stmts`.
+    fn find_assign_rhs(stmts: &[va_ir::Stmt], var: u32) -> Option<va_ir::ExprId> {
+        let mut found = None;
+        for s in stmts {
+            match s {
+                va_ir::Stmt::Assign { lhs, rhs } if lhs.0 == var => found = Some(*rhs),
+                va_ir::Stmt::Block(body) => {
+                    if let Some(r) = find_assign_rhs(body, var) {
+                        found = Some(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     fn elaborate_src(src: &str) -> Module {
