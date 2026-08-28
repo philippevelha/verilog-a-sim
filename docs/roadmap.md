@@ -2517,6 +2517,66 @@ the outer read resolving to `Expr::Param`.
 
 ---
 
+## A `ddt` bound in a branch could vanish from the charge channel (2026-08-29)
+
+The second silent wrong answer found the same day as the block-scoping one, and the same shape
+of fix. This one is in `va-codegen`.
+
+**The bug.** `DdtVars` — the tracking that lets `real dqdt; dqdt = ddt(q); I <+ dqdt;` fold into
+the charge channel — is forward and single-pass by design: entering a branch clones the map and
+the clone is discarded on exit, so a variable reassigned in only one arm never leaks a stale
+definition. Sound for *values*. But `external/hicumL0_v2p1p0.va` writes its self-heating
+capacitance as
+
+```verilog
+if (flsh == 0 || cth == 0.0)  I_cth = 0.0;
+else                          I_cth = ddt(cth*V(br_sht));
+...                                       // a *separate* if statement
+if (...) ... else begin
+  I(br_sht) <+ V(br_sht)/rth_t - pterm;
+  I(br_sht) <+ I_cth;                     // the ddt binding is long gone
+end
+```
+
+By the contribution the binding has been discarded, so `I_cth` lowered as an ordinary resistive
+term — **and it compiled**, because the other arm's `I_cth = 0.0` had emitted a real assignment,
+so the read was defined. The result: **no charge stamped at all**, the device's entire thermal
+capacitance gone, with no diagnostic anywhere. This is not the limitation the module already
+documented ("read as an ordinary value ... silently drops that read's assignment"); that one is
+about reads *outside* a `<+`. This is a read *at* a `<+`, which was supposed to work.
+
+**What shipped.** `invalidate_ddt_vars` now records which variables lost a `ddt` shape when a
+branch closed. That set is deliberately **not** cloned per branch — unlike `DdtVars` itself, a
+drop inside one arm must stay visible to everything after it. An ordinary assignment clears the
+mark (a real value supersedes the `ddt`, so `angelov_gan.va`-style scratch reuse of the same
+variable is unaffected). A `<+` reading a still-marked variable is **rejected**, naming what
+would be lost.
+
+Rejecting rather than supporting, again for a reason rather than convenience: the correct
+semantics here is a charge term contributed *only on one branch*, which needs the charge channel
+evaluated inside control flow — a real feature, not a recognizer tweak. Between compiling the
+wrong physics and refusing, refusing is the only honest option.
+
+**Evidence:** exactly one corpus file changes — `hicumL0_v2p1p0.va`, already failing on the
+separate port-probe issue below, which now reports the charge-drop first. Corpus totals unmoved
+(73/108 with `--codegen`), so nothing that previously built stopped building. 555 tests pass
+(was 553), fmt/clippy clean, all 15 golden gates bit-identical. Two tests: the branch-bound
+shape is refused, and — the control that stops the refusal from being vacuous — the same
+variable-indirection shape with the `ddt` assigned *outside* any branch still lowers and still
+stamps `Q = cth*V`.
+
+**Still open, and now the only blocker for six corpus files:** `va-frontend`'s `I(<port>)`
+probe fold (`lower_port_probe`/`collect_port_flow_contributions`) inlines the *raw* RHS of every
+flow contribution to a branch touching that node, `ddt(...)` terms included, into an `Add` chain
+assigned to a variable. The six HICUM files all do `IB = I(<b>);` where some of those
+contributions are charge terms, so codegen meets a `ddt` nested in an ordinary assignment. None
+of those files contains a nested `ddt` in its own source text — the nesting is manufactured by
+the fold. The fix is to give the fold the same carve-out `FlowCurrentAccumulator` already
+documents (sum only the *resistive* contributions); it is a `va-frontend` change and has not
+been attempted here.
+
+---
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

@@ -1465,6 +1465,83 @@ mod tests {
         assert_eq!(with_codegen, 0, "but va-codegen rejects the nested `ddt`");
     }
 
+    /// `hicumL0_v2p1p0.va`'s self-heating idiom: a `ddt` assigned to a local variable inside
+    /// one arm of an `if`, then contributed by a **later, separate** statement.
+    ///
+    /// `DdtVars` is forward and single-pass — entering a branch clones the map and discards the
+    /// clone on exit, so the `i_cth -> ddt(...)` binding is gone by the time `I(p,n) <+ i_cth;`
+    /// is reached. This used to lower as an ordinary resistive read and *compile*, because the
+    /// other arm's `i_cth = 0.0` did emit an assignment — silently stamping **no charge at
+    /// all**, so the device's entire thermal capacitance vanished with no diagnostic. It is now
+    /// refused instead, with a message naming the actual restriction.
+    #[test]
+    fn a_ddt_assigned_in_an_if_arm_and_contributed_later_is_refused_not_dropped() {
+        let src = "module thermal(p, n);
+                   electrical p, n;
+                   parameter real cth = 1e-9;
+                   parameter real flsh = 1;
+                   real i_cth;
+                   analog begin
+                     if (flsh == 0) begin
+                       i_cth = 0.0;
+                     end else begin
+                       i_cth = ddt(cth * V(p, n));
+                     end
+                     I(p, n) <+ i_cth;
+                   end
+                   endmodule
+";
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        let mut next = 2usize;
+        let msg = match va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("must not build: the charge term would be silently dropped"),
+        };
+        assert!(
+            msg.contains("silently dropped"),
+            "the diagnostic must say what would be lost, got: {msg}"
+        );
+    }
+
+    /// The control: the *same* variable-indirection shape with the `ddt` assigned **outside**
+    /// any branch still lowers, and still reaches the charge channel. Without this, the check
+    /// above could be passing because all `ddt`-via-variable support had been broken.
+    #[test]
+    fn a_ddt_assigned_outside_any_branch_still_reaches_the_charge_channel() {
+        let src = "module cap(p, n);
+                   electrical p, n;
+                   parameter real cth = 1e-9;
+                   real i_cth;
+                   analog begin
+                     i_cth = ddt(cth * V(p, n));
+                     I(p, n) <+ i_cth;
+                   end
+                   endmodule
+";
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        let mut next = 2usize;
+        let inst = va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next)
+            .expect("builds");
+
+        let mut sink = va_abi::stamps::DenseStamp::new(2);
+        inst.load(
+            &[1.0, 0.0],
+            &va_abi::ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+        let cth = 1e-9;
+        assert!(
+            (sink.charge[0] - cth * 1.0).abs() / cth < 1e-9,
+            "Q = cth*V must be stamped, got {}",
+            sink.charge[0]
+        );
+        assert!(
+            (sink.dcharge[0] - cth).abs() / cth < 1e-9,
+            "and dQ/dV = cth"
+        );
+    }
+
     #[test]
     fn a_dropped_include_and_a_module_less_file_are_not_counted_as_clean_passes() {
         // The corpus defect this accounting exists for: a vendor model whose entire body lives

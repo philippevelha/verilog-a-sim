@@ -121,7 +121,19 @@
 //! any branch/loop body clones the map, and the clone's mutations are discarded on exit rather
 //! than merged back, so a variable reassigned inside only one arm of an `if`/`case` (a common
 //! pattern — `T0` is reused for unrelated scratch values throughout `angelov_gan.va`) never lets
-//! a stale or wrong definition leak to code after the branch. A variable resolved this way is
+//! a stale or wrong definition leak to code after the branch.
+//!
+//! Discarding the clone is sound for *values*, but it used to lose a **charge term** without
+//! saying so. `hicumL0_v2p1p0.va` writes its self-heating capacitance as
+//! `if (...) I_cth = 0.0; else I_cth = ddt(cth*V(br_sht));` followed by a *separate* `if` whose
+//! arm contributes `I(br_sht) <+ I_cth;`. By then the `ddt` binding is gone, so the read lowered
+//! as an ordinary resistive term — and it *compiled*, because the other arm's `I_cth = 0.0` had
+//! emitted a real assignment. The device's entire thermal capacitance vanished silently. So
+//! `invalidate_ddt_vars` now records which variables lost a `ddt` shape (in a set that is
+//! deliberately **not** cloned per branch, unlike `DdtVars` itself, so the mark survives
+//! outward), an ordinary assignment clears the mark, and a `<+` that reads a still-marked
+//! variable is **rejected**. Guessing a missing reactive term is not an option, and neither is
+//! dropping one quietly. A variable resolved this way is
 //! *only* ever substituted at a `<+` site; if it's read as an ordinary value anywhere else while
 //! still holding a `ddt` shape, lowering silently drops that read's assignment (no
 //! `LoweredStmt::Assign` was ever emitted for it) rather than miscomputing — out of scope because
@@ -885,6 +897,10 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
 
     let mut stmts = Vec::new();
     let mut ddt_vars = HashMap::new();
+    // Variables whose `ddt` binding was discarded at the close of a branch/loop, and that no
+    // ordinary assignment has superseded since. Unlike `ddt_vars` this is never cloned per
+    // branch — a drop that happened inside one arm must stay visible to everything after it.
+    let mut dropped_ddt = HashSet::new();
     for stmt in &module.analog {
         lower_stmt(
             module,
@@ -892,6 +908,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             &slot_of_branch,
             &param_only,
             &mut ddt_vars,
+            &mut dropped_ddt,
             &mut stmts,
         )?;
     }
@@ -1171,6 +1188,7 @@ fn lower_stmt(
     slot_of_branch: &HashMap<u32, usize>,
     param_only: &HashSet<u32>,
     ddt_vars: &mut DdtVars,
+    dropped_ddt: &mut HashSet<u32>,
     out: &mut Vec<LoweredStmt>,
 ) -> Result<(), CodegenError> {
     match stmt {
@@ -1190,7 +1208,21 @@ fn lower_stmt(
                 // shape here, so `real dqdt; dqdt = ddt(q); I <+ dqdt + …;` folds into the charge
                 // channel exactly as `I <+ ddt(q) + …;` would.
                 let shape_expr = match module.expr(term.expr) {
-                    Expr::Var(id) => ddt_vars.get(&id.0).copied().unwrap_or(term.expr),
+                    Expr::Var(id) => match ddt_vars.get(&id.0) {
+                        Some(&shape) => shape,
+                        // The variable held a `ddt` shape assigned inside a branch, and that
+                        // binding was discarded when the branch closed (`DdtVars` is forward and
+                        // single-pass by design). Lowering this as an ordinary resistive read
+                        // would compile cleanly and silently omit the charge term entirely —
+                        // `hicumL0_v2p1p0.va` loses its whole self-heating capacitance that way.
+                        // Refuse instead: a missing reactive term is not something to guess at.
+                        None if dropped_ddt.contains(&id.0) => {
+                            return Err(unsupported(
+                                "a ddt assigned to a variable inside an if/case/loop arm and contributed after that arm is not supported: the charge term would be silently dropped. Move the ddt into the contribution itself, or assign it outside the branch",
+                            ))
+                        }
+                        None => term.expr,
+                    },
                     _ => term.expr,
                 };
                 // Noise first: a `white_noise`/`flicker_noise` call is never also a charge shape,
@@ -1264,6 +1296,10 @@ fn lower_stmt(
                 }
                 None => {
                     ddt_vars.remove(&lhs.0);
+                    // A real value assigned here supersedes any `ddt` shape this variable held
+                    // in an earlier branch, so a later `<+` read of it is an ordinary resistive
+                    // read again, not a dropped charge term.
+                    dropped_ddt.remove(&lhs.0);
                     out.push(LoweredStmt::Assign {
                         lhs: *lhs,
                         rhs: *rhs,
@@ -1278,7 +1314,15 @@ fn lower_stmt(
         }
         Stmt::Block(body) => {
             for s in body {
-                lower_stmt(module, s, slot_of_branch, param_only, ddt_vars, out)?;
+                lower_stmt(
+                    module,
+                    s,
+                    slot_of_branch,
+                    param_only,
+                    ddt_vars,
+                    dropped_ddt,
+                    out,
+                )?;
             }
             Ok(())
         }
@@ -1292,6 +1336,7 @@ fn lower_stmt(
                     slot_of_branch,
                     param_only,
                     &mut then_ddt_vars,
+                    dropped_ddt,
                     &mut then_lowered,
                 )?;
             }
@@ -1304,6 +1349,7 @@ fn lower_stmt(
                     slot_of_branch,
                     param_only,
                     &mut else_ddt_vars,
+                    dropped_ddt,
                     &mut else_lowered,
                 )?;
             }
@@ -1311,8 +1357,8 @@ fn lower_stmt(
             // brand-new one local to just one arm) are known to hold after the `if` — which arm
             // ran isn't known here — so forget any variable either arm assigned at all, in the
             // *outer* map that carries forward past this construct (see `DdtVars`'s doc comment).
-            invalidate_ddt_vars(ddt_vars, then_);
-            invalidate_ddt_vars(ddt_vars, else_);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, then_);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, else_);
             out.push(LoweredStmt::If {
                 cond: *cond,
                 then_: then_lowered,
@@ -1330,10 +1376,11 @@ fn lower_stmt(
                     slot_of_branch,
                     param_only,
                     &mut body_ddt_vars,
+                    dropped_ddt,
                     &mut body_lowered,
                 )?;
             }
-            invalidate_ddt_vars(ddt_vars, body);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, body);
             out.push(LoweredStmt::While {
                 cond: *cond,
                 body: body_lowered,
@@ -1354,6 +1401,7 @@ fn lower_stmt(
                 slot_of_branch,
                 param_only,
                 &mut loop_ddt_vars,
+                dropped_ddt,
                 &mut init_lowered,
             )?;
             let mut step_lowered = Vec::new();
@@ -1363,6 +1411,7 @@ fn lower_stmt(
                 slot_of_branch,
                 param_only,
                 &mut loop_ddt_vars,
+                dropped_ddt,
                 &mut step_lowered,
             )?;
             let mut body_lowered = Vec::new();
@@ -1373,12 +1422,25 @@ fn lower_stmt(
                     slot_of_branch,
                     param_only,
                     &mut loop_ddt_vars,
+                    dropped_ddt,
                     &mut body_lowered,
                 )?;
             }
-            invalidate_ddt_vars(ddt_vars, std::slice::from_ref(&**init));
-            invalidate_ddt_vars(ddt_vars, std::slice::from_ref(&**step));
-            invalidate_ddt_vars(ddt_vars, body);
+            invalidate_ddt_vars(
+                module,
+                param_only,
+                ddt_vars,
+                dropped_ddt,
+                std::slice::from_ref(&**init),
+            );
+            invalidate_ddt_vars(
+                module,
+                param_only,
+                ddt_vars,
+                dropped_ddt,
+                std::slice::from_ref(&**step),
+            );
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, body);
             out.push(LoweredStmt::For {
                 init: init_lowered,
                 cond: *cond,
@@ -1397,10 +1459,11 @@ fn lower_stmt(
                     slot_of_branch,
                     param_only,
                     &mut body_ddt_vars,
+                    dropped_ddt,
                     &mut body_lowered,
                 )?;
             }
-            invalidate_ddt_vars(ddt_vars, body);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, body);
             out.push(LoweredStmt::Repeat {
                 count: *count,
                 body: body_lowered,
@@ -1427,6 +1490,7 @@ fn lower_stmt(
                         slot_of_branch,
                         param_only,
                         &mut arm_ddt_vars,
+                        dropped_ddt,
                         &mut body_lowered,
                     )?;
                 }
@@ -1444,13 +1508,14 @@ fn lower_stmt(
                     slot_of_branch,
                     param_only,
                     &mut default_ddt_vars,
+                    dropped_ddt,
                     &mut default_lowered,
                 )?;
             }
             for arm in arms {
-                invalidate_ddt_vars(ddt_vars, &arm.body);
+                invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, &arm.body);
             }
-            invalidate_ddt_vars(ddt_vars, default);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, default);
             out.push(LoweredStmt::Case {
                 selector: *selector,
                 arms: lowered_arms,
@@ -1778,11 +1843,25 @@ fn collect_assigns(stmts: &[Stmt], out: &mut Vec<(u32, ExprId)>) {
 /// body finishes lowering, so a `ddt`-shape substitution recorded (or overwritten) only inside
 /// that body never carries forward past it (see [`DdtVars`]'s doc comment for why this can't
 /// simply merge the body's own final state back instead).
-fn invalidate_ddt_vars(ddt_vars: &mut DdtVars, stmts: &[Stmt]) {
+fn invalidate_ddt_vars(
+    module: &Module,
+    param_only: &HashSet<u32>,
+    ddt_vars: &mut DdtVars,
+    dropped: &mut HashSet<u32>,
+    stmts: &[Stmt],
+) {
     let mut assigns = Vec::new();
     collect_assigns(stmts, &mut assigns);
-    for (var, _) in assigns {
+    for (var, rhs) in assigns {
         ddt_vars.remove(&var);
+        // A `ddt` shape assigned *inside* the branch had its binding recorded only in the
+        // branch's clone of the map, which is discarded here. If the variable is later read at
+        // a `<+`, the charge term it stood for would vanish with no diagnostic — record it so
+        // the contribution site can refuse instead. A plain reassignment afterwards clears the
+        // mark (see `Stmt::Assign`), because that supersedes the `ddt` with a real value.
+        if matches!(charge_term_shape(module, rhs, param_only), Ok(Some(_))) {
+            dropped.insert(var);
+        }
     }
 }
 
