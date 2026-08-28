@@ -33,7 +33,8 @@ shared, demoable milestone that several theses light up at once.
 > (**11/11 circuits pass vs committed QSPICE golden, convergence 11/11 = 100%** at the time of
 > the refresh; **12/12** after T5.6 added `resistor_noise_table` later the same day, **13/13**
 > after T5.7 added `resistor_noise_table_log`), `va-cli check external` (**114/150**
-> files pass the frontend — unmoved by either, no corpus file calls a table function), and a one-off
+> files pass the frontend — a figure since retired as unsound, see the metric-honesty entry
+> below; the same run reports **82/108 self-contained module-declaring files** today — unmoved by either, no corpus file calls a table function), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **105/150**
 > since 2026-08-29 — see this file's `ddt`-distribution entry, and note that the figure is now
 > re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
@@ -52,7 +53,7 @@ shared, demoable milestone that several theses light up at once.
 | 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | ✅ |
 | T1.1 — lexing | `logos` lexer; 20 tests. **Gate green as originally scoped** (a fixed subset); `CLAUDE.md` §1 has since widened T1's target to the *full* Verilog-A token set, tracked live in `token-reference.md` + the corpus scan, not by this row | 🟢 |
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
-| T1.3 — elaboration | AST → `va_ir::Module`; **114/150** real corpus files pass the full frontend (2026-08-04). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
+| T1.3 — elaboration | AST → `va_ir::Module`; **82/108 self-contained, module-declaring corpus files pass the full frontend** (2026-08-29; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
 | T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **105/150 real corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-29; was 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). The 9-file gap between frontend and codegen is two categories only: `ddt` nested inside an expression (7) and a local variable read before assignment (2) | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
@@ -133,6 +134,11 @@ are excluded from the gap accounting below for the same reason as the fragments.
 > **114/150 pass the frontend**, **104/150 also build into a `ModelInstance`**. Every one of
 > the 36 frontend failures now falls into the two artifact categories above — there are **no
 > remaining uncategorized frontend failures in the tracked corpus**:
+>
+> ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
+> "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
+> `114`/`104` totals are not. Current figures: **82/108** (frontend) and **73/108** (frontend +
+> codegen) on files that both declare a module and are self-contained.
 >
 > - **19 — undefined macro** (`` `MAXA ``, `` `GMIN ``, `` `ONE3RD ``, `` `OPPATTR ``, …): an
 >   include fragment scanned standalone, whose macros are defined by the parent that includes
@@ -2380,6 +2386,76 @@ filter pays O(points).
 
 With this, all three tiers of `analysis-context.md` are closed. `$limit` and `absdelay` remain
 the two named non-goals across the whole programme, each with its own recorded reason.
+
+---
+
+## Corpus metric honesty (2026-08-29)
+
+**`114/150 files passed the frontend` was not measuring frontend capability.** The denominator
+was already known to be soft (this file's language-coverage section has classified the 36
+failures as corpus artifacts since 2026-08-04). What had not been noticed is that the
+**numerator was inflated from two directions at once**, and by more than the denominator was.
+
+**Inflation 1 — 14 files passed while declaring no module.** `check_group` iterated each file's
+range of parsed modules and asked "did every one elaborate?". For a macro header
+(`constants.vams`, `simulatorFlags.va`, `ekv3_definitions.va`, …) that range is empty, the loop
+body never runs, `all_ok` stays `true`, and the file is scored as a pass. Confirmed by counting:
+the run printed **100 `[ok ]` module lines but claimed 114 passes**.
+
+**Inflation 2 — 16 model files passed with their entire body deleted.** `preprocess`'s
+unresolved-`` `include ``-is-skipped rule is deliberate and load-bearing (the standard headers
+are built into the frontend, so requiring them on disk would reject nearly every real model).
+But several vendor compact models are a licence block, a `module` line, one
+`` `include "..._module.include" `` holding the whole body, and `endmodule`. With the body file
+absent, an *empty module* reaches the parser — and elaborates perfectly. These reported `[ok ]`
+with **0 params, 0 funcs**: `bjt504/505[t]`, `bjtd504/505[t]`, `bsimcmg`, `bsimimg`,
+`hisimhv[_n4,_n5]`, `hisimsoi[_n4,_n5]`. A BSIM-CMG with zero parameters is self-evidently not a
+pass.
+
+**The two halves are the same defect wearing opposite verdicts.** Those 16 files differ from the
+ten that *fail* with "port `D` has no discipline declaration" (`psp103/104*`, `L_UTSOI_102*`,
+`r2_cmc*`) only in whether their ports happen to be declared inline *before* the vanished
+include. One missing file, one pass and one failure — and a metric that measured neither. The
+`psp102/` family is the control that proves it: `psp102.va` is structurally identical to
+`psp103.va` and differs only in that its `PSP102_module.include` actually ships. It passes with
+317 parameters.
+
+**What shipped.** `preprocess_reporting` returns every `` `include `` name it dropped
+(`preprocess` stays as a thin wrapper, so no caller broke), and `va-cli check` uses it:
+
+- Every status line — `[ok ]`, `[elab ]`, `[cgen ]`, `[parse]`, `[lex ]` — carries an
+  `[after skipping unresolved `include: …]` clause when one was dropped. The ten "port has no
+  discipline declaration" failures now name `PSP103_module.include` in the same breath, so the
+  message is attributable instead of misleading.
+- A file declaring no module is reported `[none ]` and counted separately, not as a pass.
+- The summary reports four numbers instead of one, ending with the defensible one:
+
+```text
+100/136 files declaring a module passed the frontend (lex → parse → elaborate)
+  14 further file(s) declare no module at all (macro/nature headers, statement fragments)
+  of the 100 passes, 18 are on an incomplete module (an unresolved `include was dropped); 82 are self-contained
+  10 of the 36 failures also dropped an unresolved `include (truncated distributions, not gaps)
+  => self-contained files declaring a module: 82/108
+  150 file(s) scanned in total
+```
+
+**The honest headline is 82/108 (frontend) and 73/108 (frontend + codegen)**, not 114/150 and
+105/150. It is a *lower* number than the one it replaces and that is the point — the previous
+figure counted 32 files as coverage that demonstrate nothing.
+
+**What this does not claim.** The 18 incomplete passes are not re-classified as failures: an
+empty module genuinely does elaborate, and the frontend is not at fault. They are counted
+separately because a pass on source the file itself says is incomplete cannot support a claim
+about language coverage. Nor is the missing-include situation itself fixed — the vendor
+`.include` files are absent from the corpus snapshot and no amount of frontend work conjures
+them.
+
+**Evidence:** 551 tests pass (was 550), fmt/clippy clean, all 15 golden gates reproduce their
+recorded numbers to the last digit (nothing in the simulation path changed). A `va-cli` test,
+`a_dropped_include_and_a_module_less_file_are_not_counted_as_clean_passes`, builds all three
+shapes from scratch — a whole model, a `hollow.va` whose body is an absent include (it
+reproduces the exact `0 params, 0 funcs` signature), and a module-less header — and pins each to
+its own bucket, so the accounting cannot quietly collapse back into one number.
 
 ---
 

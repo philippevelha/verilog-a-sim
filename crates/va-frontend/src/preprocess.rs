@@ -10,7 +10,10 @@
 //! - **Unresolved `` `include `` is skipped** (not an error): the standard disciplines are
 //!   built into the frontend, so a model still compiles with no include path. When the header
 //!   *is* on the include path it expands for real (its `discipline`/`nature` blocks are then
-//!   skipped by the parser).
+//!   skipped by the parser). Skipping is *not* silent — every name skipped is recorded and
+//!   returned by [`preprocess_reporting`], because a vendor model whose whole body lives in an
+//!   absent `` `include `` otherwise preprocesses to a shell that elaborates cleanly and looks
+//!   like a pass. See that function's doc comment for how badly this distorted a corpus metric.
 //! - **Undefined macro usage is an error.**
 //! - Comments and string literals are honoured: directives/macros inside them are ignored.
 //! - No `` `__FILE__ ``/`` `__LINE__ ``, token-pasting (`##`), or stringization (`#`); unknown
@@ -20,25 +23,63 @@ use crate::FrontendError;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Preprocess `source`, resolving `` `include `` against `include_dirs` (searched in order).
+/// Preprocess `source`, resolving `` `include `` against `include_dirs` (searched in order),
+/// discarding the record of which includes could not be resolved.
+///
+/// Prefer [`preprocess_reporting`] anywhere the answer is used to judge whether a *file* is
+/// well-formed — this wrapper cannot distinguish a model that compiled from one whose body was
+/// silently deleted.
 ///
 /// # Errors
 ///
 /// Returns [`FrontendError::Preprocess`] on an undefined macro, malformed directive,
 /// unbalanced conditional, or include cycle.
 pub fn preprocess(source: &str, include_dirs: &[PathBuf]) -> Result<String, FrontendError> {
+    preprocess_reporting(source, include_dirs).map(|(out, _)| out)
+}
+
+/// Preprocess `source` as [`preprocess`] does, additionally returning **every `` `include ``
+/// name that could not be resolved** and was therefore dropped, in the order encountered
+/// (de-duplicated).
+///
+/// # Why this is worth returning
+///
+/// Skipping an unresolved include is deliberate and load-bearing — the standard headers
+/// (`disciplines.vams`, `constants.vams`) are built into the frontend, so requiring them on disk
+/// would reject almost every real model. But the same rule quietly turns a *truncated
+/// distribution* into an apparent success. Several vendor compact models are a licence header, a
+/// `module` line, one `` `include "..._module.include" `` holding the entire body, and
+/// `endmodule`. With the body file absent, what reaches the parser is an empty module — which
+/// elaborates perfectly.
+///
+/// Measured on this project's own 150-file corpus (2026-08-29): 16 model files passed
+/// `va-cli check` reporting **0 parameters and 0 functions**, among them `bsimcmg.va` — a
+/// BSIM-CMG with no parameters is self-evidently not a real pass. Those files differ from the
+/// ten that *fail* with "port has no discipline declaration" only in whether their ports happen
+/// to be declared inline before the vanished include. One defect, two opposite verdicts, and a
+/// corpus coverage number that measured neither. Returning the skipped names is what lets a
+/// caller tell the three cases apart.
+///
+/// # Errors
+///
+/// Identical to [`preprocess`].
+pub fn preprocess_reporting(
+    source: &str,
+    include_dirs: &[PathBuf],
+) -> Result<(String, Vec<String>), FrontendError> {
     let mut pp = Preprocessor {
         include_dirs: include_dirs.to_vec(),
         macros: HashMap::new(),
         cond: Vec::new(),
         include_stack: Vec::new(),
         out: String::new(),
+        skipped_includes: Vec::new(),
     };
     pp.process_str(source)?;
     if !pp.cond.is_empty() {
         return Err(pp_err("unterminated `ifdef/`ifndef (missing `endif)"));
     }
-    Ok(pp.out)
+    Ok((pp.out, pp.skipped_includes))
 }
 
 /// A stored macro definition. `params` is `Some` for a function-like macro.
@@ -63,6 +104,9 @@ struct Preprocessor {
     cond: Vec<CondFrame>,
     include_stack: Vec<PathBuf>,
     out: String,
+    /// Every `` `include `` name that no `include_dirs` entry could resolve, in encounter order
+    /// and de-duplicated. See [`preprocess_reporting`].
+    skipped_includes: Vec<String>,
 }
 
 impl Preprocessor {
@@ -203,7 +247,11 @@ impl Preprocessor {
         let file =
             parse_quoted(after).ok_or_else(|| pp_err("`include expects a quoted file name"))?;
         let Some(path) = self.resolve_include(&file) else {
-            // Unresolved include: skipped (standard headers are built in).
+            // Unresolved include: skipped (standard headers are built in), but recorded — see
+            // `preprocess_reporting` for why a silent skip is not good enough.
+            if !self.skipped_includes.contains(&file) {
+                self.skipped_includes.push(file);
+            }
             return Ok(());
         };
         if self.include_stack.contains(&path) {

@@ -196,19 +196,82 @@ pub fn check_models(paths: &[String], codegen: bool) -> Result<()> {
         groups.entry(parent).or_default().push((file, root));
     }
 
-    let mut passed = 0usize;
+    let mut tally = CheckTally::default();
     let mut total = 0usize;
     for group in groups.into_values() {
         total += group.len();
-        passed += check_group(&group, codegen);
+        tally += check_group(&group, codegen);
     }
     let stages = if codegen {
         "the frontend + codegen (lex → parse → elaborate → build_instance)"
     } else {
         "the frontend (lex → parse → elaborate)"
     };
-    println!("\n{passed}/{total} files passed {stages}");
+    let with_module = tally.passed + tally.failed;
+    println!(
+        "\n{}/{with_module} files declaring a module passed {stages}",
+        tally.passed
+    );
+    println!(
+        "  {} further file(s) declare no module at all (macro/nature headers, statement \
+         fragments) — not checkable models, and no longer counted as passes",
+        tally.no_module
+    );
+    println!(
+        "  of the {} passes, {} are on an incomplete module (an unresolved `include was \
+         dropped); {} are self-contained",
+        tally.passed,
+        tally.passed_incomplete,
+        tally.passed - tally.passed_incomplete
+    );
+    let whole_passed = tally.passed - tally.passed_incomplete;
+    let whole_total = whole_passed + (tally.failed - tally.failed_incomplete);
+    println!(
+        "  {} of the {} failures also dropped an unresolved `include (truncated distributions, not gaps)",
+        tally.failed_incomplete, tally.failed
+    );
+    println!("  => self-contained files declaring a module: {whole_passed}/{whole_total}");
+    println!("  {total} file(s) scanned in total");
     Ok(())
+}
+
+/// What one `check` run found, split so the headline number cannot silently absorb the three
+/// things that are not "a model this frontend can handle".
+///
+/// This split exists because the single number it replaces was measuring something else. On the
+/// 150-file corpus, `114/150 passed the frontend` counted **14 files that declare no module**
+/// (they passed because the "did every module elaborate?" loop had nothing to iterate) and
+/// **16 more whose entire module body had been deleted** by an unresolved `` `include ``,
+/// including a `bsimcmg.va` reporting zero parameters. Those 16 differ from the ten files that
+/// *fail* with "port has no discipline declaration" only in whether their ports happen to be
+/// declared before the vanished include — one defect, two opposite verdicts. See
+/// [`va_frontend::preprocess::preprocess_reporting`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CheckTally {
+    /// Files declaring at least one module, every one of which elaborated (and, under
+    /// `--codegen`, built).
+    passed: usize,
+    /// The subset of `passed` whose source was incomplete: at least one `` `include `` could
+    /// not be resolved, so what elaborated is less than the file describes.
+    passed_incomplete: usize,
+    /// Files declaring at least one module where some module failed.
+    failed: usize,
+    /// The subset of `failed` that also dropped an unresolved `` `include ``. These are not
+    /// frontend gaps — the ten "port `X` has no discipline declaration" corpus failures are
+    /// exactly this: the declarations were in a body file the distribution never shipped.
+    failed_incomplete: usize,
+    /// Files that parsed but declare no module — headers and statement-body fragments.
+    no_module: usize,
+}
+
+impl std::ops::AddAssign for CheckTally {
+    fn add_assign(&mut self, rhs: Self) {
+        self.passed += rhs.passed;
+        self.passed_incomplete += rhs.passed_incomplete;
+        self.failed += rhs.failed;
+        self.failed_incomplete += rhs.failed_incomplete;
+        self.no_module += rhs.no_module;
+    }
 }
 
 /// Collect `.va`/`.vams` files under `dir`, recursing into subdirectories so model libraries
@@ -233,13 +296,37 @@ fn collect_va_files(
     Ok(())
 }
 
+/// What [`parse_file`] recovered from one source file.
+struct ParsedFile {
+    /// Every module the file's own text defines — possibly empty, which is itself a verdict
+    /// (a macro/nature header or a statement-body fragment declares none).
+    asts: Vec<va_frontend::ast::ModuleAst>,
+    /// Every `` `include `` the preprocessor could not resolve and therefore dropped. A
+    /// non-empty list means what parsed is **less than the file says it is**; see
+    /// [`va_frontend::preprocess::preprocess_reporting`].
+    skipped_includes: Vec<String>,
+}
+
+/// Render a skipped-include list as a trailing clause for a status line, or `""` if none were
+/// skipped. Attached to *failures* as well as passes: the ten corpus files that fail with
+/// "port `D` has no discipline declaration" fail only because their whole module body lived in
+/// an absent `` `include ``, and without this clause the message points at the wrong thing.
+fn skipped_clause(skipped: &[String]) -> String {
+    if skipped.is_empty() {
+        return String::new();
+    }
+    format!(
+        " [after skipping unresolved `include: {}]",
+        skipped.join(", ")
+    )
+}
+
 /// Run one source file through preprocess → lex → parse, printing a tagged status line on
-/// failure. Returns `None` (already reported) if any stage fails, `Some(asts)` (every module
-/// the file's own text defines) otherwise. `scan_root` is the top-level directory the file was
-/// discovered under (empty if the file was passed directly rather than found via directory
-/// scan) — used only to widen `` `include `` resolution, unrelated to [`check_group`]'s
-/// cross-file *instantiation* library.
-fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<Vec<va_frontend::ast::ModuleAst>> {
+/// failure. Returns `None` (already reported) if any stage fails, `Some(ParsedFile)` otherwise.
+/// `scan_root` is the top-level directory the file was discovered under (empty if the file was
+/// passed directly rather than found via directory scan) — used only to widen `` `include ``
+/// resolution, unrelated to [`check_group`]'s cross-file *instantiation* library.
+fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<ParsedFile> {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -255,24 +342,28 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<Vec<va_frontend
     if !scan_root.as_os_str().is_empty() && Some(scan_root) != own_dir {
         include_dirs.push(scan_root.to_path_buf());
     }
-    let src = match va_frontend::preprocess::preprocess(&src, &include_dirs) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("  [pp   ] {path}: {e}");
-            return None;
-        }
-    };
+    let (src, skipped_includes) =
+        match va_frontend::preprocess::preprocess_reporting(&src, &include_dirs) {
+            Ok(pair) => pair,
+            Err(e) => {
+                println!("  [pp   ] {path}: {e}");
+                return None;
+            }
+        };
     let tokens = match va_frontend::lexer::lex(&src) {
         Ok(t) => t,
         Err(e) => {
-            println!("  [lex  ] {path}: {e}");
+            println!("  [lex  ] {path}: {e}{}", skipped_clause(&skipped_includes));
             return None;
         }
     };
     match va_frontend::parser::parse(&tokens) {
-        Ok(a) => Some(a),
+        Ok(asts) => Some(ParsedFile {
+            asts,
+            skipped_includes,
+        }),
         Err(e) => {
-            println!("  [parse] {path}: {e}");
+            println!("  [parse] {path}: {e}{}", skipped_clause(&skipped_includes));
             None
         }
     }
@@ -284,23 +375,40 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<Vec<va_frontend
 /// successfully-parsed file against the *combined* list of all their modules, so an
 /// `Item::Instance` naming a module declared in a sibling file resolves
 /// (`elaborate_with_library`'s `library` argument doesn't care which file an entry came from).
-/// Returns how many files had every one of their own modules elaborate cleanly — or, with
-/// `codegen` set, elaborate *and* build into a [`va_abi::ModelInstance`].
-fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> usize {
+/// Returns this group's [`CheckTally`]: how many files had every one of their own modules
+/// elaborate cleanly (or, with `codegen` set, elaborate *and* build into a
+/// [`va_abi::ModelInstance`]), split from the files that declare no module at all and the
+/// passes whose module is incomplete because an `` `include `` went unresolved.
+fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTally {
+    let mut tally = CheckTally::default();
     let mut library: Vec<va_frontend::ast::ModuleAst> = Vec::new();
     // Each successfully-parsed file's own modules, as a `library` index range — avoids cloning
     // every `ModuleAst` a second time just to report per-file status.
-    let mut file_ranges: Vec<(&str, std::ops::Range<usize>)> = Vec::new();
+    let mut file_ranges: Vec<(&str, std::ops::Range<usize>, Vec<String>)> = Vec::new();
     for (file, root) in group {
-        if let Some(asts) = parse_file(file, root) {
+        if let Some(parsed) = parse_file(file, root) {
             let start = library.len();
-            library.extend(asts);
-            file_ranges.push((file.as_str(), start..library.len()));
+            library.extend(parsed.asts);
+            file_ranges.push((file.as_str(), start..library.len(), parsed.skipped_includes));
+        } else {
+            // `parse_file` already printed the reason.
+            tally.failed += 1;
         }
     }
 
-    let mut passed = 0usize;
-    for (file, range) in file_ranges {
+    for (file, range, skipped) in file_ranges {
+        // A file that declares no module is not a checkable model — a macro/nature header or a
+        // statement-body fragment meant to be `` `include ``d by something else. It used to be
+        // counted as a pass simply because the "did every module elaborate?" loop had nothing
+        // to iterate; see `CheckTally`.
+        if range.is_empty() {
+            println!(
+                "  [none ] {file}: declares no module{}",
+                skipped_clause(&skipped)
+            );
+            tally.no_module += 1;
+            continue;
+        }
         let mut all_ok = true;
         for ast in &library[range] {
             match va_frontend::elaborate::elaborate_with_library(ast, &library) {
@@ -314,30 +422,53 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> usize {
                         if let Err(e) =
                             va_codegen::build_instance(&m, &terminals, &mut next_unknown)
                         {
-                            println!("  [cgen ] {file}: module `{}`: {e}", m.name);
+                            println!(
+                                "  [cgen ] {file}: module `{}`: {e}{}",
+                                m.name,
+                                skipped_clause(&skipped)
+                            );
                             all_ok = false;
                             continue;
                         }
                     }
                     println!(
-                        "  [ok   ] {file}: module `{}` ({} nodes, {} params, {} funcs)",
+                        "  [ok   ] {file}: module `{}` ({} nodes, {} params, {} funcs){}",
                         m.name,
                         m.nodes.len(),
                         m.params.len(),
-                        m.functions.len()
+                        m.functions.len(),
+                        skipped_clause(&skipped)
                     );
                 }
                 Err(e) => {
-                    println!("  [elab ] {file}: module `{}`: {e}", ast.name);
+                    // The skipped-include clause is what makes this attributable: ten corpus
+                    // files report "port `D` has no discipline declaration" purely because the
+                    // declarations were in a `` `include `` that never shipped.
+                    println!(
+                        "  [elab ] {file}: module `{}`: {e}{}",
+                        ast.name,
+                        skipped_clause(&skipped)
+                    );
                     all_ok = false;
                 }
             }
         }
-        if all_ok {
-            passed += 1;
+        if !all_ok {
+            tally.failed += 1;
+            if !skipped.is_empty() {
+                tally.failed_incomplete += 1;
+            }
+            continue;
+        }
+        tally.passed += 1;
+        // A pass whose preprocessing dropped an `` `include `` is a pass on *less source than
+        // the file names*. Counting it beside a self-contained model is what let 16 corpus
+        // files report "0 params, 0 funcs" and still be scored as coverage.
+        if !skipped.is_empty() {
+            tally.passed_incomplete += 1;
         }
     }
-    passed
+    tally
 }
 
 /// Reject mismatches between what the deck's own dot-card requests and what the caller asked to
@@ -1269,7 +1400,7 @@ mod tests {
             (leg_path.to_string_lossy().into_owned(), dir.clone()),
             (top_path.to_string_lossy().into_owned(), dir.clone()),
         ];
-        let passed = check_group(&group, false);
+        let passed = check_group(&group, false).passed;
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(
@@ -1296,7 +1427,7 @@ mod tests {
         .unwrap();
 
         let group = vec![(top_path.to_string_lossy().into_owned(), dir.clone())];
-        let passed = check_group(&group, false);
+        let passed = check_group(&group, false).passed;
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(
@@ -1326,12 +1457,64 @@ mod tests {
         .unwrap();
 
         let group = vec![(path.to_string_lossy().into_owned(), dir.clone())];
-        let frontend_only = check_group(&group, false);
-        let with_codegen = check_group(&group, true);
+        let frontend_only = check_group(&group, false).passed;
+        let with_codegen = check_group(&group, true).passed;
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(frontend_only, 1, "the module elaborates");
         assert_eq!(with_codegen, 0, "but va-codegen rejects the nested `ddt`");
+    }
+
+    #[test]
+    fn a_dropped_include_and_a_module_less_file_are_not_counted_as_clean_passes() {
+        // The corpus defect this accounting exists for: a vendor model whose entire body lives
+        // in a `` `include `` that was never shipped preprocesses to an empty module, which
+        // elaborates perfectly and used to be scored as coverage — `bsimcmg.va` passed
+        // `va-cli check` reporting 0 parameters. A file declaring no module at all passed for a
+        // different reason: the "did every module elaborate?" loop had nothing to iterate.
+        let dir = std::env::temp_dir().join("va_cli_check_tally_honesty_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. A whole, self-contained model.
+        std::fs::write(
+            dir.join("whole.va"),
+            "module whole(p, n); electrical p, n; parameter real r = 1000;              analog I(p, n) <+ V(p, n) / r; endmodule",
+        )
+        .unwrap();
+        // 2. The truncated-vendor-distribution shape: ports declared inline, body `include`d,
+        //    include absent. This elaborates cleanly — and says nothing true about coverage.
+        std::fs::write(
+            dir.join("hollow.va"),
+            "module hollow(p, n);
+             electrical p, n;
+             `include \"body_that_was_never_shipped.include\"
+             endmodule
+",
+        )
+        .unwrap();
+        // 3. A header that declares no module (the `disciplines.vams`/fragment shape).
+        std::fs::write(
+            dir.join("header.va"),
+            "`define SOME_MACRO 1
+",
+        )
+        .unwrap();
+
+        let group: Vec<(String, std::path::PathBuf)> = ["whole.va", "hollow.va", "header.va"]
+            .iter()
+            .map(|f| (dir.join(f).to_string_lossy().into_owned(), dir.clone()))
+            .collect();
+        let tally = check_group(&group, false);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(tally.failed, 0, "none of the three fails outright");
+        assert_eq!(tally.no_module, 1, "header.va declares no module");
+        assert_eq!(tally.passed, 2, "whole.va and hollow.va both elaborate");
+        assert_eq!(
+            tally.passed_incomplete, 1,
+            "but only hollow.va's pass is on source its own `include left incomplete"
+        );
     }
 
     /// End-to-end DC: parse the divider deck, build reference instances, solve.
