@@ -2552,6 +2552,95 @@ impl Elaborator<'_> {
     /// need either a per-arm equality guard (`case`) or genuine loop-carried accumulation
     /// (`for`/`while`/`repeat`), neither of which this fold attempts; no corpus need for either
     /// has surfaced yet (§ port-current probe).
+    /// Rebuild `expr` from only those top-level additive terms that contain no `ddt`, or
+    /// `None` if every term contained one.
+    ///
+    /// # Why `I(<port>)` drops charge terms
+    ///
+    /// A port-current probe folds to the sum of the flow contributions already made to branches
+    /// touching the port's node. Some of those contributions are charge terms — `HICUM`'s base
+    /// node carries `I(br_bci) <+ ddt(qjcx);` alongside its conduction currents. Inlining a
+    /// contribution's raw right-hand side therefore *manufactured* a `ddt` nested inside an
+    /// ordinary assignment (`IB = I(<b>);`), a shape no model wrote and `va-codegen` rightly
+    /// refuses, since `ddt`'s value depends on the whole history of its argument rather than on
+    /// the current unknowns. Six real corpus files failed for this reason with a message
+    /// blaming a nested `ddt` that does not appear anywhere in their source.
+    ///
+    /// **This is an approximation, and a documented one**: the probe reports **conduction
+    /// current only**, omitting displacement current. It is *exact at a DC operating point*
+    /// (where every `ddt` is zero by definition) and an approximation in transient. That is the
+    /// same rule [`va_codegen`'s flow-current accumulator] already applies to a branch
+    /// self-probe `I(branch)`, so `I(<port>)` is now consistent with it rather than being the
+    /// one construct that fails outright. The alternative — evaluating `dQ/dt` — needs the
+    /// integrator's per-term time-stepping coefficient exposed through Interface β, which is a
+    /// coordinated change, not a fold-local one.
+    ///
+    /// The real corpus reads are all operating-point outputs inside `` `ifdef CALC_OP `` blocks
+    /// (`IB = I(<b>);`), where the conduction current is what is wanted anyway.
+    fn resistive_terms_only(&mut self, expr: ExprId) -> Option<ExprId> {
+        let mut terms = Vec::new();
+        self.collect_signed_terms(expr, 1.0, &mut terms);
+        let kept: Vec<(f64, ExprId)> = terms
+            .into_iter()
+            .filter(|&(_, e)| !self.contains_ddt(e))
+            .collect();
+        let mut sum = None;
+        for (sign, e) in kept {
+            let signed = if sign < 0.0 {
+                self.out.push_expr(Expr::Unary(va_ir::UnOp::Neg, e))
+            } else {
+                e
+            };
+            sum = Some(match sum {
+                None => signed,
+                Some(acc) => self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Add, acc, signed)),
+            });
+        }
+        sum
+    }
+
+    /// Flatten `expr` into signed additive terms, pushing `-` through subtraction and unary
+    /// negation — the same flattening `va_codegen::lower::collect_terms` does, repeated here
+    /// because this crate cannot depend on that one (§3's dependency table).
+    fn collect_signed_terms(&self, expr: ExprId, sign: f64, out: &mut Vec<(f64, ExprId)>) {
+        match self.out.expr(expr) {
+            Expr::Binary(va_ir::BinOp::Add, l, r) => {
+                let (l, r) = (*l, *r);
+                self.collect_signed_terms(l, sign, out);
+                self.collect_signed_terms(r, sign, out);
+            }
+            Expr::Binary(va_ir::BinOp::Sub, l, r) => {
+                let (l, r) = (*l, *r);
+                self.collect_signed_terms(l, sign, out);
+                self.collect_signed_terms(r, -sign, out);
+            }
+            Expr::Unary(va_ir::UnOp::Neg, e) => {
+                let e = *e;
+                self.collect_signed_terms(e, -sign, out);
+            }
+            _ => out.push((sign, expr)),
+        }
+    }
+
+    /// Whether `expr` contains a `ddt` call anywhere in its tree. `idt` is deliberately *not*
+    /// matched: its value is an ordinary read of its accumulator unknown, evaluable anywhere.
+    fn contains_ddt(&self, expr: ExprId) -> bool {
+        match self.out.expr(expr) {
+            Expr::Call(va_ir::Builtin::Ddt, _) => true,
+            Expr::Call(_, args) | Expr::CallUser(_, args) => {
+                args.iter().any(|&a| self.contains_ddt(a))
+            }
+            Expr::Unary(_, e) | Expr::Ddx(e, _) => self.contains_ddt(*e),
+            Expr::Binary(_, l, r) => self.contains_ddt(*l) || self.contains_ddt(*r),
+            Expr::Select(c, t, f) => {
+                self.contains_ddt(*c) || self.contains_ddt(*t) || self.contains_ddt(*f)
+            }
+            Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => false,
+        }
+    }
+
     fn collect_port_flow_contributions(
         &mut self,
         node: NodeId,
@@ -2570,7 +2659,16 @@ impl Elaborator<'_> {
                     } else {
                         continue;
                     };
-                    let mut v = *value;
+                    // Keep only the contribution's *resistive* terms. A `ddt(...)` term is a
+                    // charge, and its time derivative is not a value this pipeline can
+                    // evaluate — inlining it here manufactured a `ddt` nested inside an
+                    // ordinary assignment that no model actually wrote (see
+                    // `Self::resistive_terms_only`).
+                    let Some(mut v) = self.resistive_terms_only(*value) else {
+                        // Every term was a charge term: the branch contributes no conduction
+                        // current at all, so it adds nothing to the probe under this rule.
+                        continue;
+                    };
                     for &g in guards.iter().rev() {
                         let zero = self.out.push_expr(Expr::Const(0.0));
                         v = self.out.push_expr(Expr::Select(g, v, zero));
@@ -5356,6 +5454,70 @@ mod tests {
             m.expr(value),
             va_ir::Expr::Binary(va_ir::BinOp::Add, _, _)
         ));
+    }
+
+    #[test]
+    fn port_probe_excludes_charge_terms_and_keeps_the_resistive_half_of_the_same_branch() {
+        // `hicumL0_v2p0p0.va`'s real shape: the probed node carries both conduction current and
+        // charge on the same branch. Inlining the raw RHS used to manufacture a `ddt` nested in
+        // an ordinary assignment (`IB = I(<b>);`) — a shape none of those models actually wrote
+        // — and `va-codegen` refused it, blaming a nested `ddt` that appears nowhere in their
+        // source. The probe now reports conduction current only (§ `resistive_terms_only`).
+        let m = elaborate_src(
+            "module dev(a, c); inout a, c; electrical a, c;              parameter real is = 1e-14;              parameter real cj = 1e-12;              analog begin                I(a, c) <+ is * V(a, c) + ddt(cj * V(a, c));                I(a) <+ I(<a>);              end endmodule",
+        );
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(
+            !expr_contains_ddt(&m, value),
+            "the probe must carry no `ddt`; got {:?}",
+            m.expr(value)
+        );
+        // The resistive half must survive: a probe that folded to a bare `0.0` would satisfy
+        // the assertion above for entirely the wrong reason.
+        assert!(
+            matches!(m.expr(value), va_ir::Expr::Binary(va_ir::BinOp::Mul, _, _)),
+            "expected the surviving `is * V(a,c)` term, got {:?}",
+            m.expr(value)
+        );
+    }
+
+    #[test]
+    fn port_probe_of_a_purely_capacitive_branch_folds_to_zero() {
+        // The boundary of the rule above: if *every* term of every touching contribution is a
+        // charge term, the port carries no conduction current and the probe is zero — not an
+        // error, and not a stray `ddt`.
+        let m = elaborate_src(
+            "module cap(a, c); inout a, c; electrical a, c;              parameter real cj = 1e-12;              analog begin                I(a, c) <+ ddt(cj * V(a, c));                I(a) <+ I(<a>);              end endmodule",
+        );
+        let value = match &m.analog[1] {
+            va_ir::Stmt::Contribute { value, .. } => *value,
+            other => panic!("expected a contribution, got {other:?}"),
+        };
+        assert!(
+            matches!(m.expr(value), va_ir::Expr::Const(c) if *c == 0.0),
+            "expected a folded 0.0, got {:?}",
+            m.expr(value)
+        );
+    }
+
+    /// Whether `expr`'s tree contains a `ddt` call — the test-side mirror of
+    /// [`Elaborator::contains_ddt`], which works on the elaborator's in-progress module.
+    fn expr_contains_ddt(m: &Module, expr: va_ir::ExprId) -> bool {
+        match m.expr(expr) {
+            va_ir::Expr::Call(va_ir::Builtin::Ddt, _) => true,
+            va_ir::Expr::Call(_, args) | va_ir::Expr::CallUser(_, args) => {
+                args.iter().any(|&a| expr_contains_ddt(m, a))
+            }
+            va_ir::Expr::Unary(_, e) | va_ir::Expr::Ddx(e, _) => expr_contains_ddt(m, *e),
+            va_ir::Expr::Binary(_, l, r) => expr_contains_ddt(m, *l) || expr_contains_ddt(m, *r),
+            va_ir::Expr::Select(c, t, f) => {
+                expr_contains_ddt(m, *c) || expr_contains_ddt(m, *t) || expr_contains_ddt(m, *f)
+            }
+            _ => false,
+        }
     }
 
     #[test]

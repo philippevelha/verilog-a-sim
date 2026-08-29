@@ -35,7 +35,7 @@ shared, demoable milestone that several theses light up at once.
 > after T5.7 added `resistor_noise_table_log`), `va-cli check external` (**114/150**
 > files pass the frontend — a figure since retired as unsound, see the metric-honesty entry
 > below; the same run reports **82/108 self-contained module-declaring files** today — unmoved by either, no corpus file calls a table function), and a one-off
-> frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **105/150**
+> frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **107/150**
 > since 2026-08-29 — see this file's `ddt`-distribution entry, and note that the figure is now
 > re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
@@ -55,7 +55,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; **82/108 self-contained, module-declaring corpus files pass the full frontend** (2026-08-29; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **105/150 real corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-29; was 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). The 9-file gap between frontend and codegen is two categories only: `ddt` nested inside an expression (7) and a local variable read before assignment (2) | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **75/108 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-29; the raw form of that figure is 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -137,7 +137,7 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >
 > ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
 > "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
-> `114`/`104` totals are not. Current figures: **82/108** (frontend) and **73/108** (frontend +
+> `114`/`104` totals are not. Current figures: **82/108** (frontend) and **75/108** (frontend +
 > codegen) on files that both declare a module and are self-contained.
 >
 > - **19 — undefined macro** (`` `MAXA ``, `` `GMIN ``, `` `ONE3RD ``, `` `OPPATTR ``, …): an
@@ -1083,7 +1083,9 @@ matches the code verbatim.
 > it and failed with it — so the two numbers cannot silently become one measurement under two
 > names.
 >
-> **Re-measured with it, 2026-08-29: 105/150.** The 9-file gap is exactly two categories:
+> **Re-measured with it, 2026-08-29: 105/150** (**107/150** later the same day, after the
+> `I(<port>)` fold stopped manufacturing nested `ddt`s — see that entry for the final
+> per-file accounting). At the time of this measurement the 9-file gap was two categories:
 > **`ddt` nested inside an expression** rather than as a top-level contribution term (7:
 > `HICUML0-2`, `hicumL0_v2p0p0`, `hicumL0_v2p1p0`, `hicumL2V2p4p0`, `hicumL2V3p0p0`,
 > `hicumL2_v310`, `mvsg_cmc_3.2.0` — § this phase's "recognized only as a top-level additive
@@ -2439,8 +2441,8 @@ include. One missing file, one pass and one failure — and a metric that measur
   150 file(s) scanned in total
 ```
 
-**The honest headline is 82/108 (frontend) and 73/108 (frontend + codegen)**, not 114/150 and
-105/150. It is a *lower* number than the one it replaces and that is the point — the previous
+**The honest headline is 82/108 (frontend) and 75/108 (frontend + codegen)**, not 114/150 and
+107/150. It is a *lower* number than the one it replaces and that is the point — the previous
 figure counted 32 files as coverage that demonstrate nothing.
 
 **What this does not claim.** The 18 incomplete passes are not re-classified as failures: an
@@ -2574,6 +2576,61 @@ of those files contains a nested `ddt` in its own source text — the nesting is
 the fold. The fix is to give the fold the same carve-out `FlowCurrentAccumulator` already
 documents (sum only the *resistive* contributions); it is a `va-frontend` change and has not
 been attempted here.
+
+---
+
+## `I(<port>)` no longer manufactures a nested `ddt` (2026-08-29)
+
+The last of the day's findings, and the one that had been misattributed the longest. Six corpus
+files failed codegen with "ddt must appear as a top-level contribution term, not inside an
+expression" — and **none of them contains a nested `ddt` anywhere in its source**. The nesting
+was manufactured by the frontend.
+
+**The cause.** `lower_port_probe` folds `I(<port>)` into the signed sum of every flow
+contribution already made to a branch touching that port's node, by inlining each contribution's
+*raw* right-hand side. On a compact model's base node those contributions include charge terms —
+HICUM writes `I(br_bci) <+ ddt(qjcx);` beside its conduction currents — so `IB = I(<b>);` became
+an ordinary `Stmt::Assign` whose RHS contained `ddt(...)`. `va-codegen` refused it, correctly:
+`ddt`'s value depends on the whole history of its argument, not on the current unknowns. The
+error named the right construct and the wrong culprit.
+
+**What shipped.** `resistive_terms_only` splits each contribution into signed additive terms and
+keeps only those containing no `ddt`. If every term is a charge term, the branch adds nothing to
+the probe (a purely capacitive branch carries no conduction current). `idt` is deliberately not
+filtered — its value is an ordinary read of its accumulator unknown, evaluable anywhere.
+
+**This is an approximation, stated rather than hidden.** `I(<port>)` now reports **conduction
+current only**, omitting displacement current. It is **exact at a DC operating point**, where
+every `ddt` is zero by definition, and an approximation in transient. Two things make it the
+right call rather than a convenient one:
+
+- It is the rule `va-codegen`'s flow-current accumulator **already applies** to a branch
+  self-probe `I(branch)` (`lower.rs`'s `FlowCurrentAccumulator`). `I(<port>)` was the one
+  construct that failed outright instead of following it; the two are now consistent.
+- Every real corpus read is an operating-point output inside a `` `ifdef CALC_OP `` block
+  (`IB = I(<b>);`), where conduction current is what is being asked for.
+
+The alternative — actually evaluating `dQ/dt` — needs the integrator's per-term time-stepping
+coefficient exposed through Interface β. That is a §6 coordinated change, not a fold-local one.
+
+**Evidence:** corpus **73/108 → 75/108** with `--codegen`. `HICUML0-2.va` and
+`hicumL0_v2p0p0.va` are unblocked outright — the fold was their only blocker. 557 tests pass
+(was 555), fmt/clippy clean, all 15 golden gates bit-identical. Two tests, both confirmed to fail
+without the change: one pins that the probe carries no `ddt` **while the resistive half of the
+same contribution survives** (a probe folding to a bare `0.0` would pass a "no ddt" assertion for
+entirely the wrong reason), and one pins the purely-capacitive boundary at exactly `0.0`.
+
+**The six remaining codegen failures are now all genuine, and each has its own reason:**
+
+| File(s) | Blocker | Reachable? |
+|---|---|---|
+| `hicumL2V2p4p0`, `hicumL2V3p0p0`, `hicumL2_v310` | `n_2/n_w*ddt(n_w*V(b_n1))` where `n_2` derives from `Tf`/`betadc` — genuinely bias-dependent | No — the product-rule case, needs Interface β |
+| `mvsg_cmc_3.2.0` | `csh*ddt(V(gi2,gi2p))` with `csh` reading `V(gi2,gi2p)`; also `tdut` via `Temp(dt)` | No — same |
+| `hicumL0_v2p1p0` | a `ddt` bound in one `if` arm, contributed later | No — needs the charge channel evaluated inside control flow |
+| `verilogaLib-master/amp_dynamic` | declares `parameter real gain` **and** `real gain` in the same scope | No — a bug in the corpus file |
+
+None is a recognizer gap that more pattern-matching would close. That is a meaningfully different
+statement from where this section started the day.
 
 ---
 
