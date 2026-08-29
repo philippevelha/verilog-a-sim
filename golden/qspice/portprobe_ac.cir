@@ -1,0 +1,7 @@
+* QSPICE reference for circuits/portprobe_ac.net
+V1 a 0 AC 1
+R1 a 0 1000
+C1 a 0 1u
+B1 out 0 V=-I(V1)
+.ac dec 5 10 10meg
+.end

@@ -1,0 +1,10 @@
+* A ddt scaled by a bias-dependent coefficient -- the product-rule case.
+* models/nlcap.va contributes (c0 + c1*V)*ddt(V); with c0 = c1 = 1 uF on this ramp the terminal
+* current runs 1.0 -> 2.0 A. Folding the coefficient into the charge *primal* (a natural but
+* wrong implementation) would give 1.0 -> 3.0 A, so this deck discriminates that specific error.
+* QSPICE reference states the charge directly: C1 a 0 Q=c0*V + 0.5*c1*V^2.
+V1 s   gnd SIN(0 1 1meg)
+Rs s   a   50
+M1 a   gnd out nlcap
+.tran 2n 2u
+.end

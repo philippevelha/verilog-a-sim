@@ -1,0 +1,44 @@
+// A `ddt` scaled by a **bias-dependent** coefficient — the product-rule case, and the sharpest
+// of this set, because the obvious implementation is wrong in a way a weaker gate would miss.
+//
+// The device contributes `(c0 + c1*V) * ddt(V)`, the current of a voltage-dependent capacitance.
+// It is the shape `va_codegen::lower::charge_term_shape` refuses today (its coefficient must be
+// *parameter-only*), and the one blocking `hicumL2V2p4p0`, `hicumL2V3p0p0`, `hicumL2_v310` and
+// `mvsg_cmc_3.2.0`.
+//
+// # The trap this deck exists to catch
+//
+// It is tempting to fold the coefficient into the charge: hand the integrator
+// `Q = (c0 + c1*V)*V`. That is **wrong**. The physical current is
+//
+//     (c0 + c1*V) * dV/dt  =  d/dt[ c0*V + c1*V^2/2 ]
+//
+// so the true charge is `c0*V + c1*V^2/2`, and the folded form `c0*V + c1*V^2` differs by a
+// factor of two on the quadratic term. A coefficient may be folded into the charge *gradient*
+// (it is constant within the linearization) but never into the charge *primal*, which the
+// integrator differentiates. A bias-dependent coefficient must therefore collapse to the
+// numeric-rate form — `AnalysisCtx::ddt_coeff` — and contribute nothing to the charge channel.
+//
+// With `c0 = c1 = 1 uF` on the 1 V-in-1 us ramp, the current runs 1.0 A → 2.0 A across the
+// sweep; the folded-charge error would run 1.0 A → 3.0 A. A 50 % divergence at the endpoint, far
+// outside any tolerance, so the two implementations cannot be confused.
+//
+// The QSPICE reference states the charge directly (`C1 a 0 Q=c0*V + 0.5*c1*V^2`), which is an
+// independent description of the same physics rather than a restatement of our own lowering.
+`include "disciplines.vams"
+
+module nlcap(a, c, out);
+    inout a, c, out;
+    electrical a, c, out;
+
+    parameter real r  = 1000  from (0:inf);
+    parameter real c0 = 1e-9  from [0:inf);  // zero-bias capacitance
+    parameter real c1 = 1e-9;                // linear capacitance-vs-voltage slope, F/V
+
+    analog begin
+        I(a, c) <+ V(a, c) / r;
+        // The quantity under test: a ddt whose coefficient depends on the solution.
+        I(a, c) <+ (c0 + c1 * V(a, c)) * ddt(V(a, c));
+        V(out, c) <+ I(<a>);
+    end
+endmodule

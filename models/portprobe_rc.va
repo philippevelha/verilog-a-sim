@@ -1,0 +1,32 @@
+// Port-current probe over a branch that carries both conduction and displacement current —
+// the gate for `I(<port>)`'s charge handling.
+//
+// The device is a parallel R‖C between terminals `a` and `c`. Terminal `a`'s *total* current is
+// read back with the LRM §5.4.3 port probe `I(<a>)` and reported on `out` as a voltage, one volt
+// per ampere, so an ordinary node-voltage comparison against a reference simulator scores it.
+//
+// Why this discriminates: with `cj = 1 uF` driven by `circuits/portprobe_ramp.net`'s 1 V-in-1 us
+// ramp, dV/dt = 1e6 V/s and the displacement current is 1.0 A, against a conduction current of
+// at most 1 V / 1 kOhm = 1 mA. A probe that reports conduction current only is therefore wrong
+// by a factor of ~1000, not by a tolerance-sized margin.
+//
+// Limitations: `out` is a pure output — nothing in the device depends on it — so the probe's
+// value never feeds back into the network. That is deliberate for a first gate: it isolates
+// "is the probe's value right" from "does a wrong probe value perturb the solution".
+`include "disciplines.vams"
+
+module portprobe_rc(a, c, out);
+    inout a, c, out;
+    electrical a, c, out;
+
+    parameter real r  = 1000  from (0:inf);  // conduction path, ohms
+    parameter real cj = 1e-9  from [0:inf);  // displacement path, farads
+
+    analog begin
+        I(a, c) <+ V(a, c) / r;
+        I(a, c) <+ ddt(cj * V(a, c));
+        // The quantity under test: the total current entering terminal `a`, which must include
+        // the ddt term above.
+        V(out, c) <+ I(<a>);
+    end
+endmodule

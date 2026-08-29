@@ -1,0 +1,7 @@
+* QSPICE reference for circuits/portprobe_sq.net
+V1 a 0 PWL(0 0 1u 1)
+R1 a 0 1000
+C1 a 0 1u
+B1 out 0 V=1e-3*I(V1)*I(V1)
+.tran 1n 1u
+.end

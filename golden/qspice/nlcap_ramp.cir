@@ -1,0 +1,8 @@
+* QSPICE reference for circuits/nlcap_ramp.net
+* Q = c0*V + c1*V^2/2  =>  I = dQ/dt = (c0 + c1*V)*dV/dt, c0 = c1 = 1u
+V1 a 0 PWL(0 0 1u 1)
+R1 a 0 1000
+C1 a 0 Q=1u*V(a,0)+0.5u*V(a,0)*V(a,0)
+B1 out 0 V=-I(V1)
+.tran 1n 1u
+.end

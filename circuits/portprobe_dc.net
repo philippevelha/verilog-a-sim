@@ -1,0 +1,9 @@
+* The negative control for the whole displacement-current set: at a DC operating point every
+* charge rate is zero by definition, so the probe must report conduction current *only*.
+* V(a) = 1 V across r = 1 kOhm gives V(out) = 1 mA exactly, with the 1 uF path contributing
+* nothing. This is what stops the fix from over-correcting -- a charge term leaking into the DC
+* residual would show up here and nowhere else in the set.
+V1 a   gnd DC 1
+M1 a   gnd out portprobe_rc
+.op
+.end

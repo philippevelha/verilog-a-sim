@@ -1,0 +1,29 @@
+// A charge-carrying probe value pushed through a **nonlinearity** — the case that motivated
+// giving `ad::Dual` a second gradient channel at all.
+//
+// `models/portprobe_rc.va` uses `I(<a>)` linearly, so its charge part could in principle be
+// routed by statement-level pattern matching. Squaring it cannot: the chain rule has to carry
+// the charge sensitivity through `f'(u0)`, which is precisely what `Dual::chain` scaling *both*
+// channels by the same derivative provides. If only the linear path were implemented, this gate
+// would fail while `portprobe_ramp` passed.
+//
+// Scaling: the probe reaches ~1 A on the ramp, so `k * I^2` with `k = 1e-3` lands near 1e-3 V,
+// comfortably inside a node-voltage comparison. Conduction-only would give
+// `1e-3 * (1e-3)^2 = 1e-9` — six orders of magnitude off, so the gate cannot pass by accident.
+`include "disciplines.vams"
+
+module portprobe_sq(a, c, out);
+    inout a, c, out;
+    electrical a, c, out;
+
+    parameter real r  = 1000  from (0:inf);
+    parameter real cj = 1e-9  from [0:inf);  // displacement path, farads
+    parameter real k  = 1e-3;                // V per A^2
+
+    analog begin
+        I(a, c) <+ V(a, c) / r;
+        I(a, c) <+ ddt(cj * V(a, c));
+        // The quantity under test: a *nonlinear* function of a value that carries charge.
+        V(out, c) <+ k * I(<a>) * I(<a>);
+    end
+endmodule

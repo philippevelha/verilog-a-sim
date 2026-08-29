@@ -1,0 +1,7 @@
+* QSPICE reference for circuits/portprobe_ramp.net (and selfprobe_ramp.net)
+V1 a 0 PWL(0 0 1u 1)
+R1 a 0 1000
+C1 a 0 1u
+B1 out 0 V=-I(V1)
+.tran 1n 1u
+.end

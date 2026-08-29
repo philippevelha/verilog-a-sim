@@ -1,0 +1,10 @@
+* Branch self-probe over the same R||C -- the companion gate to portprobe_ramp.net.
+* models/selfprobe_rc.va recovers the identical current with I(br) on its own named branch
+* instead of I(<a>), so this deck must produce the same waveform and shares one QSPICE
+* reference. FlowCurrentAccumulator's "resistive contributions only" limitation is what this
+* exercises; if only the port probe is fixed, only that gate goes green.
+V1 s   gnd SIN(0 1 1meg)
+Rs s   a   50
+M1 a   gnd out selfprobe_rc
+.tran 2n 2u
+.end

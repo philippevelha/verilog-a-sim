@@ -1,0 +1,9 @@
+* A charge-carrying probe value pushed through a nonlinearity (squared).
+* Exercises the chain rule carrying charge sensitivity through f'(u0) -- the case that a purely
+* statement-level resistive/charge split cannot reach. V(out) = 1e-3 * I(<a>)^2 runs to ~1e-3 V;
+* conduction-only would give ~1e-9 V.
+V1 s   gnd SIN(0 1 1meg)
+Rs s   a   50
+M1 a   gnd out portprobe_sq
+.tran 2n 2u
+.end

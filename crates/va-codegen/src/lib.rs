@@ -454,7 +454,9 @@ impl GeneratedModel {
                         eval(ctx, term.expr)?;
                         if lower::contains_ddt_call(ctx.module, term.expr) {
                             return Err(CodegenError::Unsupported(
-                                "a ddt nested inside a contribution's resistive term is                                  evaluated but not yet stamped: its charge sensitivity has no                                  channel on this path. Write it as a top-level additive term                                  of the contribution instead"
+                                "a ddt nested inside a contribution's resistive term is evaluated but not yet 
+                                 stamped: its charge sensitivity has no channel on this path. 
+                                 Write it as a top-level additive term of the contribution"
                                     .to_string(),
                             ));
                         }
@@ -465,7 +467,8 @@ impl GeneratedModel {
                         eval(ctx, term.expr)?;
                         if lower::contains_ddt_call(ctx.module, term.expr) {
                             return Err(CodegenError::Unsupported(
-                                "ddt of a ddt is a second time derivative, which this                                  project's single charge channel cannot express"
+                                "ddt of a ddt is a second time derivative, which this project's single 
+                                 charge channel cannot express"
                                     .to_string(),
                             ));
                         }

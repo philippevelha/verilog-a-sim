@@ -1,0 +1,29 @@
+// Branch self-probe over a branch carrying both conduction and displacement current — the
+// companion gate to `models/portprobe_rc.va`, for the *other* construct with the same defect.
+//
+// `va_codegen::lower::FlowCurrentAccumulator`'s defining equation sums only a branch's
+// **resistive** contributions, so `I(br)` read back from a branch that also carries `ddt(...)`
+// misses the charge current. That limitation is documented at the construct and is exactly what
+// this model exercises: identical network and drive to `portprobe_rc.va`, but the total current
+// is recovered with `I(br)` on the device's own named branch instead of `I(<a>)`.
+//
+// Both models must therefore produce the *same* waveform, and share one QSPICE reference deck —
+// if only one of the two constructs is fixed, only one of the two gates goes green.
+`include "disciplines.vams"
+
+module selfprobe_rc(a, c, out);
+    inout a, c, out;
+    electrical a, c, out;
+
+    parameter real r  = 1000  from (0:inf);
+    parameter real cj = 1e-9  from [0:inf);  // displacement path, farads
+
+    branch (a, c) br;
+
+    analog begin
+        I(br) <+ V(br) / r;
+        I(br) <+ ddt(cj * V(br));
+        // The quantity under test: a self-probe of the branch these two contributions target.
+        V(out, c) <+ I(br);
+    end
+endmodule

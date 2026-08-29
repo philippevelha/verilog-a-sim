@@ -1,0 +1,12 @@
+* Port-current probe over a parallel R||C -- the displacement-current gate for I(<port>).
+* V1 ramps 0 -> 1 V in 1 us, so dV/dt = 1e6 V/s across models/portprobe_rc.va's 1 uF path:
+*   displacement = cj*dV/dt = 1.0 A,  conduction = V/r <= 1 mA.
+* V(out) reports the probe's value at 1 V per A, so it should run 1.000 -> 1.001 V.
+* A probe reporting conduction current only would give 0.000 -> 0.001 V -- ~1000x low, which is
+* the point: this gate cannot pass by accident.
+* QSPICE reference: V1/R1/C1 with B1 out 0 V=-I(V1) (see xtask's translation table).
+V1 s   gnd SIN(0 1 1meg)
+Rs s   a   50
+M1 a   gnd out portprobe_rc
+.tran 2n 2u
+.end
