@@ -106,6 +106,13 @@ pub struct Waveform {
 struct Companion {
     coeff: f64,
     offset: Vec<f64>,
+    /// The weight this method puts on a charge site's *previous* rate when a model evaluates
+    /// `ddt(q)` as a number: `dq/dt = coeff*(q - q_prev) - prev_rate_weight*dq/dt|_prev`.
+    /// Backward Euler needs no history term (`0.0`); trapezoidal needs the full previous rate
+    /// (`1.0`). Handed to a model through `va_abi::AnalysisCtx::ddt_prev_rate_weight`; the
+    /// per-row `offset` above is the *stamping* half of the same discretization and is not
+    /// usable per `ddt` site, since it is aggregated over every charge term touching the row.
+    prev_rate_weight: f64,
 }
 
 impl Companion {
@@ -114,6 +121,7 @@ impl Companion {
         Companion {
             coeff: 1.0 / h,
             offset: q_prev.iter().map(|q| -q / h).collect(),
+            prev_rate_weight: 0.0,
         }
     }
 
@@ -141,7 +149,11 @@ impl Companion {
             .zip(is_dynamic)
             .map(|((q, r), &dynamic)| if dynamic { r - coeff * q } else { 0.0 })
             .collect();
-        Companion { coeff, offset }
+        Companion {
+            coeff,
+            offset,
+            prev_rate_weight: 1.0,
+        }
     }
 
     /// Build the companion term for `method` at step size `h` from history (`q_prev` always;
@@ -213,6 +225,7 @@ const SHRINK_FACTOR: f64 = 0.5;
 /// rebuild a time-varying source from scratch at every step.
 /// `state` carries Interface β's per-instance state channel (§6 change, 2026-08-06). See
 /// [`StateBuffers`] for the commit/rollback discipline this function is one half of.
+#[allow(clippy::too_many_arguments)]
 fn assemble(
     instances: &[&dyn ModelInstance],
     x: &[f64],
@@ -220,8 +233,11 @@ fn assemble(
     is_initial_step: bool,
     dim: usize,
     state: &mut StateBuffers,
+    ddt: (f64, f64),
 ) -> DenseStamp {
-    let ctx = AnalysisCtx::transient(t).with_initial_step(is_initial_step);
+    let ctx = AnalysisCtx::transient(t)
+        .with_initial_step(is_initial_step)
+        .with_ddt(ddt.0, ddt.1);
     // Every evaluation starts from the last *committed* state, so an unwritten slot means
     // "unchanged" rather than inheriting whatever a rejected candidate proposed.
     state.reset_scratch();
@@ -326,7 +342,15 @@ fn newton_step(
     for _ in 0..MAX_ITERS {
         // Every iteration re-evaluates at the same candidate landing time `t`: the context is a
         // property of the timepoint being solved for, not of how many iterations it takes.
-        let sink = assemble(instances, &x, t, is_initial_step, dim, state);
+        let sink = assemble(
+            instances,
+            &x,
+            t,
+            is_initial_step,
+            dim,
+            state,
+            (companion.coeff, companion.prev_rate_weight),
+        );
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
         for i in 0..dim {
@@ -421,7 +445,9 @@ pub fn run_with_events(
     let mut state = StateBuffers::new(instances);
     // The one evaluation of the run that is genuinely the analysis's first: a stateful model
     // seeds itself from its input here rather than from a zero-filled `prev`.
-    let initial = assemble(instances, &x, cfg.tstart, true, dim, &mut state);
+    // No step has been taken, so there is no rate to report: `is_initial_step` already
+    // makes every `ddt` site read zero and seed its own history here.
+    let initial = assemble(instances, &x, cfg.tstart, true, dim, &mut state, (0.0, 0.0));
     state.commit();
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
     let mut q_prev = initial.charge;
@@ -478,7 +504,17 @@ pub fn run_with_events(
 
                 // The commit point: a full, fresh evaluation at the accepted `x` and `t`,
                 // whose proposal is the one that actually becomes history.
-                let sink = assemble(instances, &x, t_next, false, dim, &mut state);
+                // The accepted step's own discretization, so each `ddt` site commits the rate that
+                // actually holds over the step being recorded.
+                let sink = assemble(
+                    instances,
+                    &x,
+                    t_next,
+                    false,
+                    dim,
+                    &mut state,
+                    (primary.coeff, primary.prev_rate_weight),
+                );
                 state.commit();
                 q_prev = sink.charge;
                 r_prev = sink.residual;

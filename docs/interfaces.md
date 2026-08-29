@@ -512,3 +512,35 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 >   `docs/token-reference.md`, not implied.
 > - **Laplace-shaped noise** (`laplace_np(white_noise(...), …)`, one real corpus use) — the
 >   filter would have to multiply a PSD, which is the noise channel's business.
+
+> **Revision (§6 change, 2026-08-29):** added `AnalysisCtx::ddt_coeff` and
+> `AnalysisCtx::ddt_prev_rate_weight`, plus the `with_ddt` builder. Purely **additive** — both
+> default to `0.0` in every existing constructor, so no caller breaks and every existing
+> evaluation is bit-identical.
+>
+> Together they let a model evaluate `ddt(q)` as a **number** consistent with the discretization
+> actually being solved:
+>
+> ```text
+> dq/dt  =  ddt_coeff * (q - q_prev)  -  ddt_prev_rate_weight * dq/dt|_prev
+> ```
+>
+> Backward Euler supplies `(1/h, 0.0)`, trapezoidal `(2/h, 1.0)`. Both are `0.0` in DC, AC and
+> noise — not a placeholder, but the correct operating-point charge rate for a static or
+> small-signal solve.
+>
+> **Why the model cannot derive this.** `h` is not `time` minus anything a model knows; the
+> adaptive controller changes it per step; and the LTE estimator solves *the same step twice with
+> two different methods*, so the coefficient is a property of the solve in progress, not of the
+> run. `va_transient::integrator::Companion` gained a `prev_rate_weight` field and passes both
+> through `assemble`.
+>
+> **What this is not for.** Stamping an ordinary `ddt(q)` still goes through the charge channel,
+> where the consumer supplies `d/dt` and the result stays method-independent and exact. This
+> exists only for what that channel cannot express: a `ddt` read as a number, or one scaled by a
+> bias-dependent coefficient, where the product rule needs the operating-point charge *rate*.
+>
+> Per-site history (`q_prev`, `rate_prev`) rides on the **existing** state channel — `va-codegen`
+> allocates two slots per `ddt` call site via `StatefulKind::Ddt` — so read-old/write-new,
+> commit-on-accept and rollback-on-reject all apply unchanged, and `load` stays a pure function
+> of `(x, ctx, committed-state)`.

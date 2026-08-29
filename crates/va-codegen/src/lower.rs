@@ -683,6 +683,15 @@ pub enum StatefulKind {
     /// `transition(value, delay, rise, fall)` — 5 slots:
     /// `(t_prev, y_prev, target, rate, t_start)`.
     Transition,
+    /// `ddt(q)` — 2 slots: `(q_prev, rate_prev)`, the charge and its rate as of the last
+    /// accepted timepoint.
+    ///
+    /// Allocated for **every** `ddt` site, including those whose contribution is stamped through
+    /// the charge channel and therefore never needs a numeric rate. The slots are cheap (two
+    /// `f64`), and making the allocation unconditional keeps it independent of whether
+    /// `charge_term_shape` happened to recognise a given site — a coupling that would otherwise
+    /// silently change a model's `state_len` when an unrelated recognizer widened.
+    Ddt,
 }
 
 impl StatefulKind {
@@ -691,6 +700,7 @@ impl StatefulKind {
         match self {
             StatefulKind::Slew => 2,
             StatefulKind::Transition => 5,
+            StatefulKind::Ddt => 2,
         }
     }
 }
@@ -753,6 +763,7 @@ fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
         let kind = match expr {
             Expr::Call(Builtin::Slew, _) => StatefulKind::Slew,
             Expr::Call(Builtin::Transition, _) => StatefulKind::Transition,
+            Expr::Call(Builtin::Ddt, _) => StatefulKind::Ddt,
             _ => continue,
         };
         calls.push(StatefulCall {
@@ -1745,6 +1756,30 @@ pub(crate) fn contains_ac_stim_call(module: &Module, expr: ExprId) -> bool {
         Expr::Unary(_, e) => contains_ac_stim_call(module, *e),
         Expr::Binary(_, l, r) => {
             contains_ac_stim_call(module, *l) || contains_ac_stim_call(module, *r)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `expr` contains a `ddt` call anywhere in its tree.
+///
+/// Structural, not numeric: `Dual::carries_charge` answers the same question by inspecting a
+/// gradient at one evaluation point, and a coefficient that happens to be zero there hides a
+/// `ddt` that is very much present (`c(x)*ddt(q)` at `x = 0`). The eager validation in
+/// `crate::GeneratedModel::validate` must not depend on the probe point, so it asks this
+/// instead — the same shape as [`contains_noise_call`] and [`contains_ac_stim_call`].
+pub(crate) fn contains_ddt_call(module: &Module, expr: ExprId) -> bool {
+    match module.expr(expr) {
+        Expr::Call(Builtin::Ddt, _) => true,
+        Expr::Call(_, args) | Expr::CallUser(_, args) => {
+            args.iter().any(|&a| contains_ddt_call(module, a))
+        }
+        Expr::Unary(_, e) | Expr::Ddx(e, _) => contains_ddt_call(module, *e),
+        Expr::Binary(_, l, r) => contains_ddt_call(module, *l) || contains_ddt_call(module, *r),
+        Expr::Select(c, t, f) => {
+            contains_ddt_call(module, *c)
+                || contains_ddt_call(module, *t)
+                || contains_ddt_call(module, *f)
         }
         _ => false,
     }

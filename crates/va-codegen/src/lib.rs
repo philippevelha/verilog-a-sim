@@ -444,7 +444,31 @@ impl GeneratedModel {
                                     .to_string(),
                             ));
                         }
+                        // A resistive term whose value depends on a *time derivative* carries
+                        // charge that only `dcharge` could express, and the resistive stamping
+                        // path writes `residual`/`jacobian` only. Evaluating it anyway would
+                        // keep the numeric rate (`AnalysisCtx::ddt_coeff`) in the residual but
+                        // silently drop the exact charge sensitivity from the Jacobian, which
+                        // degrades Newton without failing. Reject until the stamping path
+                        // consumes `Dual::grad_ddt` (tracked in `docs/roadmap.md`).
                         eval(ctx, term.expr)?;
+                        if lower::contains_ddt_call(ctx.module, term.expr) {
+                            return Err(CodegenError::Unsupported(
+                                "a ddt nested inside a contribution's resistive term is                                  evaluated but not yet stamped: its charge sensitivity has no                                  channel on this path. Write it as a top-level additive term                                  of the contribution instead"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    for term in &c.charge {
+                        // The charge channel is single: a `ddt` whose argument itself depends on
+                        // a time derivative is a second derivative and has nowhere to go.
+                        eval(ctx, term.expr)?;
+                        if lower::contains_ddt_call(ctx.module, term.expr) {
+                            return Err(CodegenError::Unsupported(
+                                "ddt of a ddt is a second time derivative, which this                                  project's single charge channel cannot express"
+                                    .to_string(),
+                            ));
+                        }
                     }
                     for term in &c.ac_stim {
                         eval(ctx, term.mag)?;
@@ -620,6 +644,14 @@ impl GeneratedModel {
                     let Ok(q) = Self::sum_charge_terms(ctx, &c.charge) else {
                         return;
                     };
+                    // A charge argument that itself carries charge is a second time derivative,
+                    // which this sink's single charge channel cannot express. `Dual::into_ddt`
+                    // catches the nested-expression spelling; this catches the one that reaches
+                    // here through `lower`'s statement-level extraction of the *outer* `ddt`.
+                    debug_assert!(
+                        !q.carries_charge(),
+                        "ddt of a ddt reached the charge channel; validate() should have                          rejected this module"
+                    );
                     sink.charge(gp, q.value);
                     sink.charge(gn, -q.value);
                     for (slot, &dg) in q.grad.iter().enumerate() {

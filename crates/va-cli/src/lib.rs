@@ -1446,13 +1446,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nested_ddt.va");
-        // `ddt` inside a function argument is a documented codegen limitation (`lower`'s module
-        // docs: `ddt` must be a top-level additive term of a contribution), but the frontend
-        // elaborates it fine — exactly the frontend/codegen gap this flag exists to measure.
+        // A *second* time derivative: `va_abi::StampSink` has exactly one charge channel, so
+        // `ddt(ddt(x))` cannot be expressed and codegen refuses it (`ad::Dual::into_ddt`),
+        // while the frontend elaborates it fine — exactly the frontend/codegen gap this flag
+        // exists to measure. (A plain nested `ddt` no longer works as the fixture here: it has
+        // been supported since `Dual` gained its charge channel.)
         std::fs::write(
             &path,
             "module m(p, n); electrical p, n; parameter real c = 1e-12; \
-             analog I(p, n) <+ exp(ddt(c * V(p, n))); endmodule",
+             analog I(p, n) <+ ddt(ddt(c * V(p, n))); endmodule",
         )
         .unwrap();
 
@@ -1462,7 +1464,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(frontend_only, 1, "the module elaborates");
-        assert_eq!(with_codegen, 0, "but va-codegen rejects the nested `ddt`");
+        assert_eq!(
+            with_codegen, 0,
+            "but va-codegen rejects the second time derivative"
+        );
     }
 
     /// `hicumL0_v2p1p0.va`'s self-heating idiom: a `ddt` assigned to a local variable inside

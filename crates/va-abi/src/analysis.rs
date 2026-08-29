@@ -113,6 +113,37 @@ pub struct AnalysisCtx {
     /// immediately to its input in a static solve — the LRM-correct steady-state answer, and
     /// the same one this project produced when those constructs were const-folded.
     pub is_initial_step: bool,
+    /// The integrator's companion coefficient for the charge channel this evaluation, and the
+    /// weight it puts on each `ddt` site's *previous* rate -- together enough for a model to
+    /// evaluate `ddt(q)` as a **number** consistent with the discretization actually being
+    /// solved:
+    ///
+    /// ```text
+    /// dq/dt  =  ddt_coeff * (q - q_prev)  -  ddt_prev_rate_weight * dq/dt|_prev
+    /// ```
+    ///
+    /// Backward Euler is `(1/h, 0.0)`; trapezoidal is `(2/h, 1.0)`. Both are **`0.0` in DC, AC
+    /// and noise**, which is not a placeholder but the right answer: a static solve and a
+    /// small-signal analysis are both taken about an operating point, where every charge rate is
+    /// zero by definition.
+    ///
+    /// # Why this is exposed rather than inferred
+    ///
+    /// A model cannot derive it. `h` is not `time` minus anything the model knows, the adaptive
+    /// controller changes it per step, and the LTE estimator solves **the same step twice with
+    /// two different methods** -- so the coefficient a model must use is a property of the solve
+    /// in progress, not of the run.
+    ///
+    /// # What needs it, and what does not
+    ///
+    /// Nothing needs it to *stamp* an ordinary `ddt(q)`: that goes through the charge channel,
+    /// where the consumer supplies `d/dt` and the answer stays method-independent and exact.
+    /// This is for the cases the charge channel cannot express -- a `ddt` whose value is read as
+    /// a number (`I(<port>)`), or one multiplied by a bias-dependent coefficient, where the
+    /// product rule needs the operating-point charge *rate*.
+    pub ddt_coeff: f64,
+    /// The weight on a `ddt` site's previous rate -- see [`AnalysisCtx::ddt_coeff`].
+    pub ddt_prev_rate_weight: f64,
     /// Small-signal frequency in **hertz** — the `ω/2π` a frequency-dependent model needs to
     /// evaluate its own transfer function.
     ///
@@ -138,6 +169,8 @@ impl AnalysisCtx {
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
             freq: 0.0,
+            ddt_coeff: 0.0,
+            ddt_prev_rate_weight: 0.0,
         }
     }
 
@@ -152,6 +185,8 @@ impl AnalysisCtx {
             // model then reads committed state instead of re-initialising mid-run.
             is_initial_step: false,
             freq: 0.0,
+            ddt_coeff: 0.0,
+            ddt_prev_rate_weight: 0.0,
         }
     }
 
@@ -165,6 +200,8 @@ impl AnalysisCtx {
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
             freq: 0.0,
+            ddt_coeff: 0.0,
+            ddt_prev_rate_weight: 0.0,
         }
     }
 
@@ -176,6 +213,8 @@ impl AnalysisCtx {
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
             freq: 0.0,
+            ddt_coeff: 0.0,
+            ddt_prev_rate_weight: 0.0,
         }
     }
 
@@ -190,6 +229,16 @@ impl AnalysisCtx {
     /// which is what a caller with no frequency-dependent instance still passes.
     pub const fn ac_at(freq: f64) -> Self {
         AnalysisCtx { freq, ..Self::ac() }
+    }
+
+    /// This context carrying the integrator's charge-channel coefficient and previous-rate
+    /// weight -- see [`AnalysisCtx::ddt_coeff`]. Only a transient driver calls this.
+    pub const fn with_ddt(self, ddt_coeff: f64, ddt_prev_rate_weight: f64) -> Self {
+        AnalysisCtx {
+            ddt_coeff,
+            ddt_prev_rate_weight,
+            ..self
+        }
     }
 
     /// This context marked as (or as not) the analysis's first evaluation.

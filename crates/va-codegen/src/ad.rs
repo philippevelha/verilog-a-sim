@@ -18,13 +18,38 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use va_ir::{BinOp, Builtin, Expr, ExprId, Function, Module, Stmt, UnOp, VarId};
 
-/// A value carried with its gradient w.r.t. the active unknowns (a dual number).
+/// A value carried with its gradient w.r.t. the active unknowns (a dual number), **split into
+/// an instantaneous and a time-derivative channel**.
+///
+/// A `Dual` represents the local affine model
+///
+/// ```text
+/// u  =  value  +  Σ grad[k]·δx[k]  +  Σ grad_ddt[k]·(d/dt)δx[k]
+/// ```
+///
+/// [`Dual::grad`] is the ordinary conductance-like sensitivity that stamps into
+/// `va_abi::StampSink::jacobian`; [`Dual::grad_ddt`] is the capacitance-like sensitivity that
+/// stamps into `va_abi::StampSink::dcharge`, where the consumer supplies the `d/dt` — the
+/// transient integrator's companion coefficient, or `jω` in AC.
+///
+/// # Why two real channels rather than complex numbers
+///
+/// Small-signal AC needs `ddt(u) → jωu`, which looks like it demands complex arithmetic. It
+/// does not: AC *is* a linearization, so a nonlinearity `f` around the operating point
+/// contributes `f'(u₀)·δu` with `f'(u₀)` an ordinary real number. The `jω` never enters the
+/// chain rule — it reappears only when the assembler forms `G + jωC`. So both channels stay
+/// **real**, and every rule below is the same rule applied twice, because differentiation is
+/// linear.
 #[derive(Clone, Debug)]
 pub struct Dual {
     /// The primal value.
     pub value: f64,
-    /// Partial derivatives, one per local unknown (node slot order).
+    /// Partial derivatives w.r.t. each local unknown (node slot order) — the **instantaneous**
+    /// channel, stamped as Jacobian entries.
     pub grad: Vec<f64>,
+    /// Partial derivatives w.r.t. each local unknown's **time derivative** — the charge channel,
+    /// stamped as `dcharge` entries. Non-zero only downstream of a `ddt`.
+    pub grad_ddt: Vec<f64>,
 }
 
 impl Dual {
@@ -33,6 +58,7 @@ impl Dual {
         Self {
             value,
             grad: vec![0.0; n],
+            grad_ddt: vec![0.0; n],
         }
     }
 
@@ -40,7 +66,25 @@ impl Dual {
     pub fn variable(value: f64, i: usize, n: usize) -> Self {
         let mut grad = vec![0.0; n];
         grad[i] = 1.0;
-        Self { value, grad }
+        Self {
+            value,
+            grad,
+            grad_ddt: vec![0.0; n],
+        }
+    }
+
+    /// Assemble from both channels explicitly — used where a rule builds its gradients by hand.
+    fn from_parts(value: f64, grad: Vec<f64>, grad_ddt: Vec<f64>) -> Dual {
+        debug_assert_eq!(
+            grad.len(),
+            grad_ddt.len(),
+            "both channels span the same unknowns"
+        );
+        Dual {
+            value,
+            grad,
+            grad_ddt,
+        }
     }
 
     /// Number of unknowns this dual carries a gradient over.
@@ -48,48 +92,84 @@ impl Dual {
         self.grad.len()
     }
 
+    /// Whether this value depends on any unknown's *time derivative* — i.e. whether it carries
+    /// charge.
+    pub fn carries_charge(&self) -> bool {
+        self.grad_ddt.iter().any(|&c| c != 0.0)
+    }
+
+    /// Move the instantaneous channel into the time-derivative channel — the effect of `ddt(·)`
+    /// on the *gradients*. `value` is supplied by the caller, since `d/dt` of the primal is an
+    /// integrator question, not an algebraic one (see `eval`'s `Builtin::Ddt` arm).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodegenError::Unsupported`] if `self` already carries charge: that would be a
+    /// second time derivative, and `va_abi::StampSink` has exactly one charge channel.
+    pub fn into_ddt(self, value: f64) -> Result<Dual, CodegenError> {
+        if self.carries_charge() {
+            return Err(unsupported(
+                "ddt of a value that already depends on a time derivative is a second time \
+                 derivative, which this project's single charge channel cannot express",
+            ));
+        }
+        let n = self.n();
+        Ok(Dual::from_parts(value, vec![0.0; n], self.grad))
+    }
+
     /// Scale value and gradient by a constant `s`.
     pub fn scale(&self, s: f64) -> Dual {
-        Dual {
-            value: self.value * s,
-            grad: self.grad.iter().map(|g| g * s).collect(),
-        }
+        Dual::from_parts(
+            self.value * s,
+            self.grad.iter().map(|g| g * s).collect(),
+            self.grad_ddt.iter().map(|g| g * s).collect(),
+        )
     }
 
     /// Sum: `(a + b)' = a' + b'`.
     pub fn add(&self, o: &Dual) -> Dual {
-        Dual {
-            value: self.value + o.value,
-            grad: zip_with(&self.grad, &o.grad, |a, b| a + b),
-        }
+        Dual::from_parts(
+            self.value + o.value,
+            zip_with(&self.grad, &o.grad, |a, b| a + b),
+            zip_with(&self.grad_ddt, &o.grad_ddt, |a, b| a + b),
+        )
     }
 
     /// Difference: `(a - b)' = a' - b'`.
     pub fn sub(&self, o: &Dual) -> Dual {
-        Dual {
-            value: self.value - o.value,
-            grad: zip_with(&self.grad, &o.grad, |a, b| a - b),
-        }
+        Dual::from_parts(
+            self.value - o.value,
+            zip_with(&self.grad, &o.grad, |a, b| a - b),
+            zip_with(&self.grad_ddt, &o.grad_ddt, |a, b| a - b),
+        )
     }
 
-    /// Product: `(a*b)' = a'b + ab'`.
+    /// Product: `(a*b)' = a'b + ab'` — applied to both channels, which is exactly the
+    /// linearization `δ(uv) = v₀·δu + u₀·δv` split by which channel each `δ` came from.
+    ///
+    /// This is where a bias-dependent charge coefficient becomes representable: `c(x)·ddt(q)`
+    /// yields `grad_ddt = c₀·∂q/∂x` **and** `grad = (dq/dt)·∂c/∂x` — the two halves of the
+    /// product rule — provided the `ddt` carries a real primal value (see [`Dual::into_ddt`]).
     pub fn mul(&self, o: &Dual) -> Dual {
-        Dual {
-            value: self.value * o.value,
-            grad: zip_with(&self.grad, &o.grad, |a, b| a * o.value + b * self.value),
-        }
+        Dual::from_parts(
+            self.value * o.value,
+            zip_with(&self.grad, &o.grad, |a, b| a * o.value + b * self.value),
+            zip_with(&self.grad_ddt, &o.grad_ddt, |a, b| {
+                a * o.value + b * self.value
+            }),
+        )
     }
 
     /// Quotient: `(a/b)' = (a'b - ab') / b²`.
     pub fn div(&self, o: &Dual) -> Dual {
         let inv = 1.0 / o.value;
         let inv2 = inv * inv;
-        Dual {
-            value: self.value * inv,
-            grad: zip_with(&self.grad, &o.grad, |a, b| {
-                (a * o.value - self.value * b) * inv2
-            }),
-        }
+        let rule = |a: f64, b: f64| (a * o.value - self.value * b) * inv2;
+        Dual::from_parts(
+            self.value * inv,
+            zip_with(&self.grad, &o.grad, rule),
+            zip_with(&self.grad_ddt, &o.grad_ddt, rule),
+        )
     }
 
     /// Negation.
@@ -98,11 +178,17 @@ impl Dual {
     }
 
     /// Apply a differentiable unary function given its value and derivative at `self.value`.
+    ///
+    /// The chain rule scales **both** channels by the same `dvalue`: around the operating point
+    /// `f(u₀ + δu) ≈ f(u₀) + f'(u₀)·δu`, and it does not matter whether a given part of `δu`
+    /// came from `δx` or from `dδx/dt`. This one line is why no nonlinear operator needed
+    /// changing.
     fn chain(&self, value: f64, dvalue: f64) -> Dual {
-        Dual {
+        Dual::from_parts(
             value,
-            grad: self.grad.iter().map(|g| g * dvalue).collect(),
-        }
+            self.grad.iter().map(|g| g * dvalue).collect(),
+            self.grad_ddt.iter().map(|g| g * dvalue).collect(),
+        )
     }
 
     /// `exp`.
@@ -140,10 +226,17 @@ impl Dual {
     pub fn powf(&self, exp: &Dual) -> Dual {
         let value = self.value.powf(exp.value);
         let lnu = self.value.ln();
-        let grad = (0..self.n())
-            .map(|i| value * (exp.grad[i] * lnu + exp.value * self.grad[i] / self.value))
-            .collect();
-        Dual { value, grad }
+        // Linear in both operands' derivatives, so the same coefficients apply to each channel.
+        let rule = |sg: f64, eg: f64| value * (eg * lnu + exp.value * sg / self.value);
+        Dual::from_parts(
+            value,
+            (0..self.n())
+                .map(|i| rule(self.grad[i], exp.grad[i]))
+                .collect(),
+            (0..self.n())
+                .map(|i| rule(self.grad_ddt[i], exp.grad_ddt[i]))
+                .collect(),
+        )
     }
 
     /// Sine. `sin' = cos`.
@@ -224,23 +317,30 @@ impl Dual {
     /// `d atan2 = (x·dy - y·dx) / (x²+y²)`.
     pub fn atan2(&self, x: &Dual) -> Dual {
         let (y, denom) = (self, self.value * self.value + x.value * x.value);
-        let grad = (0..self.n())
-            .map(|i| (x.value * y.grad[i] - y.value * x.grad[i]) / denom)
-            .collect();
-        Dual {
-            value: y.value.atan2(x.value),
-            grad,
-        }
+        let rule = |yg: f64, xg: f64| (x.value * yg - y.value * xg) / denom;
+        Dual::from_parts(
+            y.value.atan2(x.value),
+            (0..self.n()).map(|i| rule(y.grad[i], x.grad[i])).collect(),
+            (0..self.n())
+                .map(|i| rule(y.grad_ddt[i], x.grad_ddt[i]))
+                .collect(),
+        )
     }
 
     /// Euclidean norm `hypot(self, o) = √(self²+o²)`:
     /// `d hypot = (self·dself + o·do) / hypot`.
     pub fn hypot(&self, o: &Dual) -> Dual {
         let value = self.value.hypot(o.value);
-        let grad = (0..self.n())
-            .map(|i| (self.value * self.grad[i] + o.value * o.grad[i]) / value)
-            .collect();
-        Dual { value, grad }
+        let rule = |sg: f64, og: f64| (self.value * sg + o.value * og) / value;
+        Dual::from_parts(
+            value,
+            (0..self.n())
+                .map(|i| rule(self.grad[i], o.grad[i]))
+                .collect(),
+            (0..self.n())
+                .map(|i| rule(self.grad_ddt[i], o.grad_ddt[i]))
+                .collect(),
+        )
     }
 
     /// Minimum. The derivative follows the selected argument (subgradient at a tie).
@@ -572,7 +672,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 if n < count {
                     grad[n] -= 1.0;
                 }
-                Ok(Dual { value, grad })
+                Ok(Dual::from_parts(value, grad, vec![0.0; count]))
             }
             va_ir::AccessKind::Flow => {
                 let slot = *ctx
@@ -591,7 +691,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 if slot < count {
                     grad[slot] = 1.0;
                 }
-                Ok(Dual { value, grad })
+                Ok(Dual::from_parts(value, grad, vec![0.0; count]))
             }
         },
         Expr::Unary(op, e) => {
@@ -660,7 +760,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             if slot < count {
                 grad[slot] = 1.0;
             }
-            Ok(Dual { value, grad })
+            Ok(Dual::from_parts(value, grad, vec![0.0; count]))
         }
         Expr::Call(builtin, args) => eval_call(ctx, expr, *builtin, args),
         Expr::CallUser(fid, args) => {
@@ -906,11 +1006,54 @@ fn eval_call(
             // changes again, at which point the *next* evaluation re-latches.
             Dual::constant(y, count)
         }
+        // `ddt` evaluated as an ordinary sub-expression, rather than pulled out as a top-level
+        // contribution term by `crate::lower`.
+        //
+        // The gradients are exact and method-independent: `into_ddt` moves the argument's
+        // instantaneous sensitivity into the charge channel, where the consumer supplies the
+        // `d/dt` (the integrator's companion coefficient, or `jω` in AC).
+        //
+        // The **primal** is the part that cannot be exact, because `dq/dt` is not an algebraic
+        // function of the current unknowns. It is reconstructed from the last accepted
+        // timepoint's committed state and the discretization the solver is actually running
+        // (`AnalysisCtx::ddt_coeff`/`ddt_prev_rate_weight`):
+        //
+        // ```text
+        // dq/dt = coeff*(q - q_prev) - prev_rate_weight * dq/dt|_prev
+        // ```
+        //
+        // In DC, AC and noise both coefficients are `0.0`, so this is exactly `0.0` — the
+        // correct operating-point charge rate, not a fallback. On a transient run's first
+        // timepoint `is_initial_step` makes it `0.0` too, and the site seeds its own history.
+        //
+        // The history is read from the *committed* buffer, so the value is the same for every
+        // Newton iteration at this timepoint and identical across a rejected step's retries —
+        // which is what keeps `load` a pure function of `(x, ctx, committed-state)`.
+        Builtin::Ddt => {
+            let q = arg(0)?;
+            let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
+                return Err(unsupported(
+                    "ddt call site has no state slots allocated (internal codegen error)",
+                ));
+            };
+            let rate = if ctx.analysis.is_initial_step {
+                0.0
+            } else {
+                let q_prev = ctx.state_get(base, 0);
+                let rate_prev = ctx.state_get(base, 1);
+                ctx.analysis.ddt_coeff * (q.value - q_prev)
+                    - ctx.analysis.ddt_prev_rate_weight * rate_prev
+            };
+            ctx.state_set(base, 0, q.value);
+            ctx.state_set(base, 1, rate);
+            q.into_ddt(rate)?
+        }
         // `idt` never reaches here — `eval`'s own `Expr::Call` match intercepts it before this
         // function is even called (see `eval`'s `Builtin::Idt` arm).
-        Builtin::Ddt | Builtin::Idt => {
+        Builtin::Idt => {
             return Err(unsupported(
-                "ddt must appear as a top-level contribution term, not inside an expression",
+                "idt must be lowered to its own accumulator unknown, not evaluated here \
+                 (internal codegen error)",
             ))
         }
         // LRM §4.5.13: a noise function's *value* is zero in every analysis except noise. This
