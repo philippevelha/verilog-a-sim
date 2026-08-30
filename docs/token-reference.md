@@ -610,13 +610,18 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   matching Verilog's real-to-integer *assignment* conversion rule — not `int()`'s
   truncate-toward-zero.
 - **Structural and Analog Usage**: Module-level (`real x;`, `real out_val[0:15];`) and
-  analog-block-local (`real x;` inside `begin...end`) *scalar* declarations are both legal and
-  treated identically by elaboration (registering the same kind of `VarId`, via
-  `Elaborator::declare_local_var`). An *array* declaration is module-scope only — a block-local
-  one is rejected with a specific error, since by the time the analog-block pass runs there's
-  nowhere sound left to register an array's worth of nodes into (§2.2b). An explicit declaration
-  always introduces a *new* identifier, shadowing a same-named module parameter for the rest of
-  its block (ordinary nested-scope rules — `declare_local_var` never checks `params`, unlike
+  analog-block-local (`real x;` inside `begin...end`) *scalar* declarations are both legal.
+  **Since 2026-08-30 block scoping is real**: each `begin ... end` gets its own
+  `name -> VarId` scope (`Elaborator::block_scopes`), so a block-local declaration shadows an
+  outer variable or a module parameter for **exactly its own block** and not one statement
+  further, and two sibling blocks declaring the same name get two distinct variables. Before
+  that, elaboration had one flat module-wide map with no push/pop at a block, which leaked a
+  block-local binding over the whole analog block — statements *before* the block included — and
+  was a silent wrong answer until it was made a hard error on 2026-08-29. An *array* declaration
+  is module-scope only — a block-local one is rejected with a specific error, since by the time
+  the analog-block pass runs there's nowhere sound left to register an array's worth of nodes
+  into (§2.2b). An explicit declaration always introduces a *new* identifier, shadowing a
+  same-named module parameter within its block (ordinary nested-scope rules — `declare_local_var` never checks `params`, unlike
   `register_var`'s auto-registration for a bare, declaration-less assignment target, which treats
   a same-named parameter as already resolvable and registers nothing new); `Ident` resolution
   checks `vars` before `params` so a read inside the shadowing scope sees the local variable, not
@@ -1808,9 +1813,10 @@ dimensions, indexed as `tile[i][j]` / `V(grid[i][j])`. Not general N-D — cappe
 ## 2.8 Module-level / block-local variable declaration
 
 - Covered fully in Part 1 §1.4 (`Real`/`Integer`). Two grammar sites: `Item::Var` (module
-  scope, `real x, y;`) and `Stmt::VarDecl` (block scope, same syntax inside `begin...end`) —
-  elaboration treats both identically, registering a `VarId` the first time a name is seen,
-  whichever comes first.
+  scope, `real x, y;`) and `Stmt::VarDecl` (block scope, same syntax inside `begin...end`).
+  Since 2026-08-30 these are **not** treated identically: a `Stmt::VarDecl` allocates a fresh
+  `VarId` bound in the innermost block scope, so it shadows rather than aliases. A bare
+  assignment to an undeclared name still auto-registers one module-scope variable, as before.
 
 ## 2.9 Analog function definition
 

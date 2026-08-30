@@ -34,10 +34,10 @@ shared, demoable milestone that several theses light up at once.
 > the refresh; **12/12** after T5.6 added `resistor_noise_table` later the same day, **13/13**
 > after T5.7 added `resistor_noise_table_log`; **15/15** as of 2026-08-30), `va-cli check
 > external` (**114/150** files pass the frontend — a figure since retired as unsound, see the
-> metric-honesty entry below; **85/88 self-contained module-declaring files** as of
+> metric-honesty entry below; **86/88 self-contained module-declaring files** as of
 > 2026-08-30, on a corpus grown to 158 files — see the port-qualifier entry), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **107/150**
-> since 2026-08-29 — both superseded by **79/88** as of 2026-08-30, and note that the figure is
+> since 2026-08-29 — both superseded by **80/88** as of 2026-08-30, and note that the figure is
 > now re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
@@ -54,9 +54,9 @@ shared, demoable milestone that several theses light up at once.
 | 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | ✅ |
 | T1.1 — lexing | `logos` lexer; 20 tests. **Gate green as originally scoped** (a fixed subset); `CLAUDE.md` §1 has since widened T1's target to the *full* Verilog-A token set, tracked live in `token-reference.md` + the corpus scan, not by this row | 🟢 |
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
-| T1.3 — elaboration | AST → `va_ir::Module`; **85/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). The phase's literal gate — the three zoo models elaborating to committed golden IR — closed 2026-08-30 (`crates/va-frontend/tests/golden_ir.rs`) | ✅ |
+| T1.3 — elaboration | AST → `va_ir::Module`; **86/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). The phase's literal gate — the three zoo models elaborating to committed golden IR — closed 2026-08-30 (`crates/va-frontend/tests/golden_ir.rs`) | ✅ |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **79/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **80/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -93,7 +93,7 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
 2. ~~**T1.3's literal gate is unmet.**~~ **Closed 2026-08-30** — `crates/va-frontend/tests/
    golden_ir.rs` commits a full `{:#?}` snapshot of the elaborated `va_ir::Module` for
    `resistor.va`/`capacitor.va`/`diode.va` and fails on any difference. T1.3 is ✅.
-3. **T2.2/T2.3 are not corpus-complete.** 79 of the 88 self-contained, module-declaring corpus
+3. **T2.2/T2.3 are not corpus-complete.** 80 of the 88 self-contained, module-declaring corpus
    files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **6 files**, all
    individually accounted for and none a recognizer gap: a bias-dependent `ddt` coefficient
    needing the product-rule change to Interface β (`hicumL2V2p4p0`, `hicumL2V3p0p0`,
@@ -143,7 +143,7 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >
 > ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
 > "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
-> `114`/`104` totals are not. Current figures: **85/88** (frontend) and **79/88** (frontend +
+> `114`/`104` totals are not. Current figures: **86/88** (frontend) and **80/88** (frontend +
 > codegen) on files that both declare a module and are self-contained (2026-08-30, corpus grown
 > to 158 files — see the port-qualifier entry; the 2026-08-29 revision of this line said
 > 82/108 and 75/108, of which the frontend half was itself off by one, see below).
@@ -160,7 +160,8 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >   one stage earlier — the absent include also held the macro definitions the surviving text
 >   uses (`diode_cmc`, `juncap200`, `psphv`, `psphvrr`, `r3_cmc`).
 >
-> **Only 3 failures are real**, and two of them are bugs in the corpus file rather than here:
+> **Only 2 failures are real, and both are bugs in the corpus file rather than here** (the third,
+> `bsimsoi.va`, was closed on 2026-08-30 by real block scoping — see that entry):
 >
 > - `verilogaLib-master/ctle.va` — `unknown identifier `gain``: the file uses `gain` without
 >   declaring it. (It separately needs array-variable arguments to the Laplace filters; see the
@@ -168,9 +169,6 @@ are excluded from the gap accounting below for the same reason as the fragments.
 > - `verilogAlib/example_mzi_modulator.vams` — passes a *parameter* in a port-connection list
 >   (`.therm_en(1)`; a numeric literal is not a legal analog port connection) and instantiates
 >   modules from `photonic_primitives.vams` without `` `include ``ing it.
-> - `bsimsoi.va` — **the one genuine elaborator limitation left in the frontend column**: a
->   declaration inside a nested block shadowing a module parameter. Rejected rather than
->   silently mis-bound since 2026-08-29; real block scoping is still open.
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
 itself flagged): `genvar`/`generate` loops and vector nets (elaboration-time unrolling); the
@@ -2839,6 +2837,61 @@ failures, **15 are truncated distributions** and only **3 are real** — two bug
 (`ctle.va` uses an undeclared `gain`; `example_mzi_modulator.vams` passes a parameter in a port
 list) and one genuine elaborator limitation (`bsimsoi.va`'s block-scoped shadowing, rejected
 rather than silently mis-bound since 2026-08-29).
+
+---
+
+## Real block scoping (2026-08-30)
+
+The last genuine elaborator limitation in the frontend column. **86/88 frontend, 80/88
+frontend+codegen** — `external/bsimsoi.va` now passes both (14 nodes, 996 params, 2 funcs), and
+it is the **only** file whose verdict changed: a per-file diff of the whole corpus before and
+after shows exactly one line moving, `[elab] -> [ok]`. 573 tests, `fmt`/`clippy -D warnings`
+clean, `xtask validate` 15/15 unchanged.
+
+**What was wrong.** Verilog-A says a declaration inside `begin ... end` shadows an outer name
+*only within that block*. Elaboration had one flat, module-wide `name -> VarId` map with no
+push/pop at a `Stmt::Block`, so a block-local declaration leaked over the **entire** analog
+block — statements *before* the block included, which no scoping rule could justify. On
+2026-08-29 that was made a hard error (the conservative half: a diagnostic can only replace a
+wrong answer, never the reverse) and real scoping was deferred. This is the other half.
+
+**What shipped.** `Elaborator::block_scopes` is a stack of `name -> VarId` maps, pushed and
+popped at every `Stmt::Block` during lowering (popped on the error path too). `lookup_var`
+searches it innermost-outward and falls back to the module/function scope — the single place
+shadowing is now decided, replacing three separate `self.vars.get(...)` sites. A `Stmt::VarDecl`
+allocates a **fresh** `VarId` into the innermost scope, fresh even when an outer variable or a
+parameter of that name exists, which is what shadowing means. Function bodies swap the stack out
+and back, so their blocks neither see nor outlive the analog block's.
+
+**The two passes stay decoupled, which is the design's load-bearing part.** The variable-
+collecting pre-pass and lowering both walk the same AST, and an obvious implementation has them
+agree on a `VarId` allocation order — a coupling that breaks silently the moment their traversal
+orders diverge. Instead only *lowering* allocates. The pre-pass carries `decl_scopes`, a mirror
+stack of **names only**, whose sole job is to stop `register_var` auto-registering a module-scope
+variable for an assignment whose target is really a block-local declaration. Neither pass needs
+to know what the other numbered anything.
+
+**Also retired:** the weaker sibling limitation that sat beside the parameter case — a
+block-local declaration colliding with an outer *variable* silently **aliased** the two rather
+than shadowing. Both are ordinary shadowing now, so `declare_local_var` no longer rejects
+anything and `block_depth` (the nesting-depth heuristic that decided which shadows "actually
+leaked") is gone.
+
+**Tested on resolution, not on success.** The bug's signature was *succeeding with the wrong
+answer*, so a test that only asserts "it elaborates" cannot see it. The tests assert which
+`VarId`/`ParamId` a read actually landed on, via an expression walker whose `match` is
+exhaustive on purpose — a new `Expr` variant must break the helper loudly rather than let a
+resolution test quietly stop looking inside it. Both directions are pinned: after the block,
+`g = 1.0 / k` must read the **parameter** (mis-resolving it silently made a 1 kΩ device 1 Ω);
+inside the block, `k` must read the **block-local variable**. Without that second test the first
+would pass for the wrong reason — resolving every `k` to the parameter is not scoping either.
+A third test pins that two sibling blocks declaring the same name get two distinct variables,
+the property a flat map cannot express at all.
+
+**The golden-IR snapshots did not move**, which is the regression signal worth having: the zoo
+models declare nothing block-locally (`diode.va`'s `real Id;` is module scope), so a change that
+reallocated their `VarId`s would have shown up immediately in the gate committed hours earlier.
+The six `[cgen]` failures are also unchanged, so the reallocation did not disturb codegen.
 
 ---
 

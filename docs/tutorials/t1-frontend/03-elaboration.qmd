@@ -4,12 +4,12 @@ subtitle: "T1 · Phase T1.3 · `va-frontend::elaborate`"
 ---
 
 ::: {.callout-note}
-**Status: complete.** 237 `va-frontend` tests, all green — including this phase's own
+**Status: complete.** 239 `va-frontend` tests, all green — including this phase's own
 validation gate, met literally since 2026-08-30: the three zoo models elaborate to **committed
 golden IR** (`crates/va-frontend/tests/golden_ir.rs`), a full snapshot of each elaborated
 `va_ir::Module` rather than the structural assertions that stood in for it before. Against the
 tracked corpus under `external/` (**158 files** once every sibling `` `include ``-only
-header/body fragment is counted), **85/88 self-contained, module-declaring files pass the full
+header/body fragment is counted), **86/88 self-contained, module-declaring files pass the full
 frontend** (`cargo run -p va-cli -- check external/`, re-derived 2026-08-30, not assumed from a
 stale count).
 
@@ -97,17 +97,17 @@ resolvable metadata still gets `abstol: None`, exactly prior behavior.
 
 ```console
 $ cargo test -p va-frontend
-running 235 tests
+running 237 tests
 test elaborate::tests::zi_zp_real_roots_use_one_minus_root_not_one_minus_s_over_root ... ok
 ...
-test result: ok. 235 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 237 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
 $ cargo run -q -p va-cli -- check external/
-103/121 files declaring a module passed the frontend (lex → parse → elaborate)
+104/121 files declaring a module passed the frontend (lex → parse → elaborate)
   37 further file(s) declare no module at all (macro/nature headers, statement fragments)
-  of the 103 passes, 18 are on an incomplete module (an unresolved `include was dropped)
-  15 of the 18 failures also dropped an unresolved `include (truncated, not gaps)
-  => self-contained files declaring a module: 85/88
+  of the 104 passes, 18 are on an incomplete module (an unresolved `include was dropped)
+  15 of the 17 failures also dropped an unresolved `include (truncated, not gaps)
+  => self-contained files declaring a module: 86/88
   158 file(s) scanned in total
 ```
 
@@ -124,6 +124,14 @@ unblocked and how, not a vague "improved coverage."
 ## Limitations
 
 The real, currently-open backlog (`docs/roadmap.md`'s own prioritized list):
+
+**Closed 2026-08-30 — real block scoping.** Each `begin ... end` now gets its own
+`name -> VarId` scope, so a block-local declaration shadows an outer variable or a module
+parameter for exactly its own block and no further, and sibling blocks declaring the same name
+get distinct variables. Elaboration previously had one flat module-wide map, which leaked a
+block-local binding over the whole analog block (statements *before* it included) — a silent
+wrong answer, made a hard error on 2026-08-29 and properly fixed here. `external/bsimsoi.va` was
+the corpus instance and now passes.
 
 1. **Array-variable arguments to the Laplace/Z-domain filters.** Every filter builtin above only
    accepts a literal `{...}` array; `external/verilogaLib-master/ctle.va` instead assigns a
