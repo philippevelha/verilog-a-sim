@@ -117,10 +117,57 @@ fn loop_iteration_cap_exceeded() -> CodegenError {
 /// Returns [`CodegenError`] if `terminals` is the wrong length or the analog block contains
 /// a construct outside the v0 subset (validated eagerly so [`ModelInstance::load`] cannot
 /// fail).
+/// Which time discretization a generated model is compiled to be exact under.
+///
+/// This only affects one construct: a `ddt` **nested inside a contribution's resistive term**,
+/// i.e. a charge rate scaled by a bias-dependent coefficient, `c(x)·ddt(q(x))`. Everything else
+/// a model can contain is method-independent, so for the overwhelming majority of models the
+/// choice changes nothing at all.
+///
+/// # Why the method has to be a compile-time choice
+///
+/// Such a term is not a charge — it is a *rate* — so it lands in the residual, and its exact
+/// Jacobian needs the product rule split across two channels:
+/// `∂/∂x[c·dq/dt] = (dq/dt)·∂c/∂x + c·coeff·∂q/∂x`, stamped as `jacobian += grad` and
+/// `dcharge += grad_ddt`. Whether that reconstructs the true derivative depends on the
+/// discretization the integrator is running:
+///
+/// - [`Self::BackwardEuler`] — **exact**. `offset = −q_prev/h` and the term stamps no `charge`,
+///   so it never enters the offset; the assembled `jacobian + coeff·dcharge` is precisely the
+///   product rule above.
+/// - [`Self::Trapezoidal`] — **not derived**, so refused. Trapezoidal's offset
+///   (`r_prev − (2/h)·q_prev` on dynamic rows) rests on the identity `dQ/dt = −residual` holding
+///   for those rows; a term that is itself a rate breaks that identity and the offset
+///   double-counts. Refusing is a build error, which is strictly better than a silently wrong
+///   waveform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Integration {
+    /// `dQ/dt ≈ (Q − Q_prev)/h`. The default, and the only method the product-rule case above
+    /// is proven exact under.
+    #[default]
+    BackwardEuler,
+    /// `Q − Q_prev = h/2·(dQ/dt + dQ/dt|_prev)`. A bias-dependent `ddt` coefficient is refused
+    /// under this method — see [`Integration`].
+    Trapezoidal,
+}
+
+/// Build a model instance, compiled to be exact under [`Integration::default`]
+/// (backward Euler). See [`build_instance_with`] to choose.
 pub fn build_instance(
     module: &Module,
     terminals: &[usize],
     next_unknown: &mut usize,
+) -> Result<Box<dyn ModelInstance>, CodegenError> {
+    build_instance_with(module, terminals, next_unknown, Integration::default())
+}
+
+/// Build a model instance compiled to be exact under `integration`. See [`Integration`] for the
+/// single construct the choice affects, and why it must be made here rather than at solve time.
+pub fn build_instance_with(
+    module: &Module,
+    terminals: &[usize],
+    next_unknown: &mut usize,
+    integration: Integration,
 ) -> Result<Box<dyn ModelInstance>, CodegenError> {
     if terminals.len() != module.nodes.len() {
         return Err(CodegenError::TerminalCount {
@@ -147,6 +194,7 @@ pub fn build_instance(
         lowered,
         vt: VT,
         temp: TEMP,
+        integration,
     };
 
     // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -165,6 +213,8 @@ struct GeneratedModel {
     lowered: Lowered,
     vt: f64,
     temp: f64,
+    /// The discretization this model was compiled to be exact under — see [`Integration`].
+    integration: Integration,
 }
 
 impl GeneratedModel {
@@ -386,7 +436,7 @@ impl GeneratedModel {
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
         let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], true);
-        Self::validate_stmts(&ctx, &self.lowered.stmts)?;
+        Self::validate_stmts(&ctx, self.integration, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
         // statement walk above (the call site that *reads* the accumulator's value never
@@ -398,7 +448,11 @@ impl GeneratedModel {
         Ok(())
     }
 
-    fn validate_stmts(ctx: &Ctx, stmts: &[LoweredStmt]) -> Result<(), CodegenError> {
+    fn validate_stmts(
+        ctx: &Ctx,
+        integration: Integration,
+        stmts: &[LoweredStmt],
+    ) -> Result<(), CodegenError> {
         for stmt in stmts {
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => {
@@ -444,19 +498,19 @@ impl GeneratedModel {
                                     .to_string(),
                             ));
                         }
-                        // A resistive term whose value depends on a *time derivative* carries
-                        // charge that only `dcharge` could express, and the resistive stamping
-                        // path writes `residual`/`jacobian` only. Evaluating it anyway would
-                        // keep the numeric rate (`AnalysisCtx::ddt_coeff`) in the residual but
-                        // silently drop the exact charge sensitivity from the Jacobian, which
-                        // degrades Newton without failing. Reject until the stamping path
-                        // consumes `Dual::grad_ddt` (tracked in `docs/roadmap.md`).
+                        // A resistive term whose value depends on a *time derivative* — a
+                        // charge rate scaled by a bias-dependent coefficient, `c(x)·ddt(q(x))` —
+                        // is a rate, not a charge, so its value belongs in the residual and its
+                        // exact Jacobian needs the product rule split across two channels:
+                        // `jacobian += grad` and `dcharge += grad_ddt`. The stamping path does
+                        // consume `Dual::grad_ddt` since 2026-08-30, but only backward Euler
+                        // makes that reconstruction exact — see `Integration`.
                         eval(ctx, term.expr)?;
-                        if lower::contains_ddt_call(ctx.module, term.expr) {
+                        if integration == Integration::Trapezoidal
+                            && lower::contains_ddt_call(ctx.module, term.expr)
+                        {
                             return Err(CodegenError::Unsupported(
-                                "a ddt nested inside a contribution's resistive term is evaluated but not yet 
-                                 stamped: its charge sensitivity has no channel on this path. 
-                                 Write it as a top-level additive term of the contribution"
+                                "a ddt nested inside a contribution's resistive term (a                                  bias-dependent charge coefficient) is only exact under backward                                  Euler, and this model was compiled for trapezoidal:                                  trapezoidal's offset assumes every dynamic row satisfies                                  dQ/dt = -residual, which a term that is itself a rate breaks.                                  Compile for backward Euler, or write the ddt as a top-level                                  additive term of the contribution"
                                     .to_string(),
                             ));
                         }
@@ -522,8 +576,8 @@ impl GeneratedModel {
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, then_)?;
-                    Self::validate_stmts(ctx, else_)?;
+                    Self::validate_stmts(ctx, integration, then_)?;
+                    Self::validate_stmts(ctx, integration, else_)?;
                 }
                 LoweredStmt::Case {
                     selector,
@@ -535,9 +589,9 @@ impl GeneratedModel {
                         for &label in &arm.labels {
                             eval(ctx, label)?;
                         }
-                        Self::validate_stmts(ctx, &arm.body)?;
+                        Self::validate_stmts(ctx, integration, &arm.body)?;
                     }
-                    Self::validate_stmts(ctx, default)?;
+                    Self::validate_stmts(ctx, integration, default)?;
                 }
                 // Loops never actually iterate here (see `lower`'s module doc comment): running
                 // the body once already covers every statement a real iteration could execute,
@@ -545,7 +599,7 @@ impl GeneratedModel {
                 // `while` condition during eager validation.
                 LoweredStmt::While { cond, body } => {
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, body)?;
+                    Self::validate_stmts(ctx, integration, body)?;
                 }
                 LoweredStmt::For {
                     init,
@@ -553,14 +607,14 @@ impl GeneratedModel {
                     step,
                     body,
                 } => {
-                    Self::validate_stmts(ctx, init)?;
+                    Self::validate_stmts(ctx, integration, init)?;
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, body)?;
-                    Self::validate_stmts(ctx, step)?;
+                    Self::validate_stmts(ctx, integration, body)?;
+                    Self::validate_stmts(ctx, integration, step)?;
                 }
                 LoweredStmt::Repeat { count, body } => {
                     eval(ctx, *count)?;
-                    Self::validate_stmts(ctx, body)?;
+                    Self::validate_stmts(ctx, integration, body)?;
                 }
             }
         }
@@ -641,6 +695,22 @@ impl GeneratedModel {
                             sink.jacobian(gn, gk, -dg);
                         }
                     }
+                    // The other half of the product rule for a bias-dependent charge
+                    // coefficient, `c(x)·ddt(q(x))` (§ `Integration`). The term's *value* is
+                    // already in the residual above — reconstructed from committed history by
+                    // `Builtin::Ddt` — so it stamps **no** `charge`, which is what keeps it out
+                    // of the companion offset. What is missing from the Jacobian is
+                    // `c·∂q/∂x`, carried in `grad_ddt`; the integrator supplies the `coeff` that
+                    // multiplies it, giving exactly `(dq/dt)·∂c/∂x + c·coeff·∂q/∂x`. Non-zero
+                    // only downstream of a nested `ddt`, so this loop is a no-op for every
+                    // ordinary resistive term.
+                    for (slot, &dg) in i.grad_ddt.iter().enumerate() {
+                        if dg != 0.0 {
+                            let gk = self.terminals[slot];
+                            sink.dcharge(gp, gk, dg);
+                            sink.dcharge(gn, gk, -dg);
+                        }
+                    }
                 }
 
                 if !c.charge.is_empty() {
@@ -698,6 +768,13 @@ impl GeneratedModel {
                         if dg != 0.0 {
                             let gk = self.terminals[slot];
                             sink.jacobian(gb, gk, -dg);
+                        }
+                    }
+                    // Product-rule charge sensitivity, same as the two-terminal path above.
+                    for (slot, &dg) in i.grad_ddt.iter().enumerate() {
+                        if dg != 0.0 {
+                            let gk = self.terminals[slot];
+                            sink.dcharge(gb, gk, -dg);
                         }
                     }
                 }
@@ -3947,10 +4024,141 @@ mod tests {
             value,
         }];
 
-        assert!(matches!(
-            build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
-        ));
+        assert_product_rule_is_backward_euler_only(&m, &[0, 1]);
+    }
+
+    /// **The §5 gate for the product-rule path**: with a bias-dependent charge coefficient, the
+    /// *assembled* Jacobian the integrator forms — `jacobian + coeff·dcharge`, exactly the
+    /// combination `va_transient::newton_step` builds — must match a central finite difference
+    /// of the assembled residual.
+    ///
+    /// This is the test that decides whether the split across two channels is right. Checking
+    /// `jacobian` alone would pass while the whole feature was wrong: the missing `c·∂q/∂x` term
+    /// lives entirely in `dcharge`, which is precisely what used to be dropped (and why the
+    /// construct was refused). The model is
+    ///
+    /// ```verilog
+    /// I(p,n) <+ V(p,n) * ddt(c0 * V(p,n));
+    /// ```
+    ///
+    /// whose coefficient `V(p,n)` is genuinely bias-dependent, so `is_param_only` refuses to
+    /// fold it into the plain charge channel and it must take the product-rule path.
+    #[test]
+    fn the_product_rule_jacobian_matches_a_central_finite_difference() {
+        let mut m = Module::new("bias_dependent_ddt");
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "c0".into(),
+            default: 2e-9,
+            min: None,
+            max: None,
+        }];
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let v2 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0, v));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v2, ddt_q));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+
+        let inst = build_instance_with(&m, &[0, 1], &mut 2, Integration::BackwardEuler)
+            .expect("exact under backward Euler");
+
+        // A backward-Euler step: coeff = 1/h, no previous-rate weight. The committed history is
+        // a nonzero previous charge, so `dq/dt` is not trivially proportional to `q` — a test
+        // with `q_prev = 0` would pass even if the history term were mishandled.
+        let h = 1e-6_f64;
+        let coeff = 1.0 / h;
+        let ctx = va_abi::AnalysisCtx::transient(1e-3)
+            .with_ddt(coeff, 0.0)
+            .with_initial_step(false);
+        let committed = vec![7e-10_f64; inst.state_len()];
+
+        // The assembled residual at row 0, as `va_transient` forms it: residual + coeff*charge.
+        // (`offset` is a per-row constant, independent of `x`, so it cancels in the difference.)
+        let assembled = |x0: f64| -> f64 {
+            let mut next = vec![0.0; committed.len()];
+            let mut st = va_abi::ModelState::new(&committed, &mut next);
+            let mut sink = DenseStamp::new(1);
+            inst.load(&[x0], &ctx, &mut st, &mut sink);
+            sink.residual[0] + coeff * sink.charge[0]
+        };
+
+        let x0 = 0.35_f64;
+        let mut next = vec![0.0; committed.len()];
+        let mut st = va_abi::ModelState::new(&committed, &mut next);
+        let mut sink = DenseStamp::new(1);
+        inst.load(&[x0], &ctx, &mut st, &mut sink);
+        let analytic = sink.jacobian[0] + coeff * sink.dcharge[0];
+
+        let d = 1e-6_f64;
+        let fd = (assembled(x0 + d) - assembled(x0 - d)) / (2.0 * d);
+
+        let scale = analytic.abs().max(fd.abs()).max(1.0);
+        assert!(
+            (analytic - fd).abs() / scale < 1e-6,
+            "assembled Jacobian {analytic} disagrees with central difference {fd}"
+        );
+
+        // And the half that would be silently missing without the `dcharge` stamp is not
+        // negligible — otherwise the test above could pass with `grad_ddt` dropped entirely.
+        assert!(
+            (coeff * sink.dcharge[0]).abs() > 0.1 * analytic.abs(),
+            "the charge-channel half must be a real part of the answer, not rounding"
+        );
+    }
+
+    /// A bias-dependent charge coefficient (`c(x)·ddt(q)`, a `ddt` nested inside a resistive
+    /// term) is **exact under backward Euler and refused under trapezoidal** — see
+    /// [`Integration`]. Both halves are asserted together so neither can silently drift: if the
+    /// product-rule stamping regressed, the first line fails; if the trapezoidal guard were
+    /// dropped, the second does.
+    ///
+    /// These shapes used to be rejected outright, and the tests that pin them were the negative
+    /// controls proving `lower::is_param_only`'s safety check bit. That check still bites — it is
+    /// what keeps such a term *out* of the plain charge channel, where folding it in would be
+    /// wrong — but the term is no longer refused: it takes the product-rule path instead.
+    fn assert_product_rule_is_backward_euler_only(m: &Module, terminals: &[usize]) {
+        let mut next = terminals.len();
+        build_instance_with(m, terminals, &mut next, Integration::BackwardEuler)
+            .expect("a bias-dependent ddt coefficient is exact under backward Euler");
+        let mut next = terminals.len();
+        let err = match build_instance_with(m, terminals, &mut next, Integration::Trapezoidal) {
+            Err(e) => e,
+            Ok(_) => panic!("a bias-dependent ddt coefficient must be refused under trapezoidal"),
+        };
+        assert!(
+            matches!(&err, CodegenError::Unsupported(msg) if msg.contains("backward Euler")),
+            "the diagnostic must name the method that would work, got: {err:?}"
+        );
     }
 
     /// `I(p,n) <+ ddt(c0*V(p,n))*coeff1*coeff2;` -- `ekv26.va`'s real `ddt(qjd)*TYPE*M` shape,
@@ -4182,10 +4390,7 @@ mod tests {
             value,
         }];
 
-        assert!(matches!(
-            build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
-        ));
+        assert_product_rule_is_backward_euler_only(&m, &[0, 1]);
     }
 
     /// `real t0; t0 = ddt(c0*V(p,n)); if (cond>0.0) begin I(p,n)<+V(p,n)*g+t0; end else
@@ -4727,10 +4932,7 @@ mod tests {
 
         m.analog = vec![if_stmt, contribute];
 
-        assert!(matches!(
-            build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
-        ));
+        assert_product_rule_is_backward_euler_only(&m, &[0, 1]);
     }
 
     /// Build a two-node module whose single flow contribution is `V(p,n)/R + <noise>`, where

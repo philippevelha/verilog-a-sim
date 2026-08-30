@@ -37,7 +37,7 @@ shared, demoable milestone that several theses light up at once.
 > metric-honesty entry below; **86/88 self-contained module-declaring files** as of
 > 2026-08-30, on a corpus grown to 158 files — see the port-qualifier entry), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **107/150**
-> since 2026-08-29 — both superseded by **80/88** as of 2026-08-30, and note that the figure is
+> since 2026-08-29 — both superseded by **84/88** as of 2026-08-30, and note that the figure is
 > now re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
@@ -56,7 +56,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; **86/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). The phase's literal gate — the three zoo models elaborating to committed golden IR — closed 2026-08-30 (`crates/va-frontend/tests/golden_ir.rs`) | ✅ |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **80/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **84/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). Both remaining codegen failures are genuine and individually accounted for — one needs the charge channel evaluated inside control flow (`hicumL0_v2p1p0`), one is a bug in the corpus file (`amp_dynamic.va`) — not recognizer gaps; the four product-rule files closed 2026-08-30 | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -93,14 +93,12 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
 2. ~~**T1.3's literal gate is unmet.**~~ **Closed 2026-08-30** — `crates/va-frontend/tests/
    golden_ir.rs` commits a full `{:#?}` snapshot of the elaborated `va_ir::Module` for
    `resistor.va`/`capacitor.va`/`diode.va` and fails on any difference. T1.3 is ✅.
-3. **T2.2/T2.3 are not corpus-complete.** 80 of the 88 self-contained, module-declaring corpus
-   files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **6 files**, all
-   individually accounted for and none a recognizer gap: a bias-dependent `ddt` coefficient
-   needing the product-rule change to Interface β (`hicumL2V2p4p0`, `hicumL2V3p0p0`,
-   `hicumL2_v310`, `mvsg_cmc_3.2.0`), the charge channel evaluated inside control flow
-   (`hicumL0_v2p1p0`), and one bug in a corpus file (`amp_dynamic.va` declares `parameter real
-   gain` and `real gain` in the same scope). T2.2's own generated-diode check is an operating
-   point + FD rather than a full committed sweep.
+3. **T2.2/T2.3 are not corpus-complete.** 84 of the 88 self-contained, module-declaring corpus
+   files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **2 files**, both
+   individually accounted for and neither a recognizer gap: the charge channel evaluated inside
+   control flow (`hicumL0_v2p1p0`), and one bug in a corpus file (`amp_dynamic.va` declares
+   `parameter real gain` and `real gain` in the same scope). T2.2's own generated-diode check is
+   an operating point + FD rather than a full committed sweep.
 
 No longer true and removed from this list: "T2/T3 run over hand-built IR / reference instances —
 the frontend→codegen→core path is not yet wired by a netlist driver." `va-cli sim --model` has
@@ -143,7 +141,7 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >
 > ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
 > "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
-> `114`/`104` totals are not. Current figures: **86/88** (frontend) and **80/88** (frontend +
+> `114`/`104` totals are not. Current figures: **86/88** (frontend) and **84/88** (frontend +
 > codegen) on files that both declare a module and are self-contained (2026-08-30, corpus grown
 > to 158 files — see the port-qualifier entry; the 2026-08-29 revision of this line said
 > 82/108 and 75/108, of which the frontend half was itself off by one, see below).
@@ -2892,6 +2890,72 @@ the property a flat map cannot express at all.
 models declare nothing block-locally (`diode.va`'s `real Id;` is module scope), so a change that
 reallocated their `VarId`s would have shown up immediately in the gate committed hours earlier.
 The six `[cgen]` failures are also unchanged, so the reallocation did not disturb codegen.
+
+---
+
+## The product rule: a bias-dependent `ddt` coefficient (2026-08-30)
+
+`c(x)·ddt(q(x))` — a charge rate scaled by a coefficient that itself depends on the unknowns.
+**84/88 frontend+codegen**, up from 80/88: all four files this had been blocking now build
+(`hicumL2V2p4p0`, `hicumL2V3p0p0`, `hicumL2_v310`, `mvsg_cmc_3.2.0`), and only **two** codegen
+failures remain in the whole corpus. 574 tests, `xtask validate` 15/15 unchanged.
+
+**No Interface β change was needed after all.** This file had recorded the case as needing "the
+whole companion-model discretization … to also carry a per-term, model-supplied coefficient — a
+`va_abi`/`va_transient` interface change". That assessment predated the Route B groundwork
+(`3fd301a`): `ad::Dual` already carries `grad_ddt`, the sensitivity to each unknown's *time
+derivative*, and `StampSink::dcharge` is already the channel for it. The work was to make the
+**resistive** stamping path consume `grad_ddt`, which is six lines, plus knowing when it is
+valid — which was the actual content.
+
+**The algebra.** Such a term is a *rate*, not a charge, so its value belongs in the residual
+(reconstructed from committed history by `Builtin::Ddt`) and it stamps **no** `charge`, which is
+what keeps it out of the companion offset. Its exact derivative is the product rule, split
+across two channels:
+
+```text
+∂/∂x [ c(x) · dq/dt ]  =  (dq/dt)·∂c/∂x  +  c·coeff·∂q/∂x
+                          └── jacobian ──┘   └─ coeff · dcharge ─┘
+```
+
+and `va_transient::newton_step` assembles exactly `jacobian + coeff·dcharge`. Under **backward
+Euler** (`offset = −q_prev/h`, `prev_rate_weight = 0`) that is exact.
+
+**Under trapezoidal it is refused, and that is the whole reason the method is a compile-time
+choice.** Trapezoidal's offset (`r_prev − (2/h)·q_prev` on dynamic rows) rests on the identity
+`dQ/dt = −residual` holding for those rows; a term that is *itself* a rate breaks that identity
+and the offset double-counts. That failure mode is a wrong waveform, not an error — so the
+build refuses instead, with a diagnostic naming the method that would work.
+
+**`va_codegen::Integration`** carries the choice: `build_instance` defaults to `BackwardEuler`
+(so `va-cli check --codegen` measures the corpus against the exact path), and
+`build_instance_with` takes it explicitly. `va-cli sim` gained **`--integration be|trap`**, which
+sets the integrator's method *and* the discretization models are compiled for **together**, so
+the two can never disagree — a model compiled for backward Euler but stepped with trapezoidal
+would stamp a Jacobian the offset does not match.
+
+**`sim` still defaults to trapezoidal, deliberately**, because every committed transient golden
+was validated against it; changing that default would move five validated waveforms for reasons
+unrelated to this feature. The consequence is worth stating plainly: **a model with a
+bias-dependent `ddt` coefficient is refused by `va-cli sim` unless you pass `--integration be`.**
+That is a build error, never a silent approximation.
+
+**The gate is a finite difference on the *assembled* Jacobian**, not on `jacobian` alone — which
+is the only version of this test that could fail correctly. The missing `c·∂q/∂x` lives entirely
+in `dcharge`, so checking `jacobian` by itself would pass while the feature was wholly wrong.
+The model is `I(p,n) <+ V(p,n)*ddt(c0*V(p,n))`, whose coefficient is genuinely bias-dependent, on
+a step with **nonzero committed history** (a `q_prev = 0` test passes even if the history term is
+mishandled). Verified to bite: deleting the `dcharge` stamp gives an assembled Jacobian of `0`
+against a true `7e-4`, and the test fails — which is precisely the "degrades Newton without
+failing" mode the old refusal comment predicted. A second assertion pins that the charge-channel
+half is a *substantial* fraction of the answer, so the FD check cannot pass with `grad_ddt`
+dropped and the term merely small.
+
+**`lower::is_param_only` still bites** — it is what keeps such a term *out* of the plain charge
+channel, where folding it in would be wrong. What changed is only what happens next: instead of
+being refused, the term now takes the product-rule path. The three negative controls that pinned
+those rejections became method-aware, asserting both halves together (exact under BE, refused
+under trapezoidal) so neither can silently drift.
 
 ---
 

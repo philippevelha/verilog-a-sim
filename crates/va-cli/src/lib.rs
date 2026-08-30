@@ -109,6 +109,7 @@ pub fn run_sim(
     model: Option<&str>,
     analysis: Analysis,
     plot: Option<&str>,
+    integration: Integration,
 ) -> Result<()> {
     let (net, compiled) = load(netlist, model)?;
 
@@ -118,7 +119,7 @@ pub fn run_sim(
     }
 
     if analysis == Analysis::Transient {
-        let wf = solve_transient(&net, &compiled)?;
+        let wf = solve_transient(&net, &compiled, integration)?;
         report_transient(&net, &wf);
         if let Some(path) = plot {
             plot::plot_transient(path, &net, &wf).with_context(|| format!("plotting to {path}"))?;
@@ -585,7 +586,15 @@ type BuiltInstances = (Vec<Box<dyn ModelInstance>>, usize, Vec<(String, usize)>)
 /// instantiation); a device is matched against whichever one shares its model name. Shared by
 /// both DC and transient solving — building the instance set doesn't depend on which analysis
 /// will run on it.
-fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances> {
+/// `integration` selects the time discretization the generated models are compiled to be exact
+/// under (see [`va_codegen::Integration`]). It matters for exactly one construct — a `ddt`
+/// nested inside a resistive term, i.e. a bias-dependent charge coefficient — and is irrelevant
+/// to DC/AC/noise, where the charge rate is zero by definition; those pass the default.
+fn build_instances(
+    net: &Netlist,
+    compiled: &[Module],
+    integration: va_codegen::Integration,
+) -> Result<BuiltInstances> {
     let n_nodes = net.node_order.len();
 
     // Voltage sources take branch-current unknowns after the node unknowns; a flattened
@@ -597,7 +606,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     let mut instances: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
     let mut currents = Vec::new();
     for dev in &net.devices {
-        let (inst, branch) = build_instance(dev, compiled, &mut next_unknown)?;
+        let (inst, branch) = build_instance(dev, compiled, &mut next_unknown, integration)?;
         if let Some(branch) = branch {
             currents.push((dev.name.clone(), branch));
         }
@@ -617,7 +626,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
 /// trivially matches golden regardless of whether the diode model itself is right; the source's
 /// own current is the quantity that actually depends on it).
 pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String, usize)>> {
-    let (_, _, currents) = build_instances(net, compiled)?;
+    let (_, _, currents) = build_instances(net, compiled, va_codegen::Integration::default())?;
     Ok(currents)
 }
 
@@ -625,7 +634,8 @@ pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
-    let (instances, dim, _currents) = build_instances(net, compiled)?;
+    let (instances, dim, _currents) =
+        build_instances(net, compiled, va_codegen::Integration::default())?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
 }
@@ -747,21 +757,71 @@ fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
 /// time from the analysis context like any other analysis-dependent model. `pub` so
 /// `va-harness` can get the numeric [`Waveform`] back directly (§ golden comparison), the same
 /// reason `solve_dc`/`solve_dc_sweep` are — rather than parsing [`run_sim`]'s printed stdout.
-pub fn solve_transient(net: &Netlist, compiled: &[Module]) -> Result<Waveform> {
+/// The time discretization for a transient run, chosen with `va-cli sim --integration <be|trap>`.
+///
+/// It selects the integrator's method **and** the discretization the Verilog-A models are
+/// compiled to be exact under, together, so the two can never disagree (see
+/// [`va_codegen::Integration`] for the one construct that depends on the choice: a `ddt` nested
+/// inside a resistive term — a bias-dependent charge coefficient).
+///
+/// [`Self::Trapezoidal`] is the default because every committed transient golden was validated
+/// against it; `--integration be` is what unlocks a bias-dependent `ddt` coefficient, which is
+/// only exact under backward Euler.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Integration {
+    /// Second-order trapezoidal. The default.
+    #[default]
+    Trapezoidal,
+    /// Backward Euler — required for a bias-dependent `ddt` coefficient.
+    BackwardEuler,
+}
+
+impl Integration {
+    /// Parse the `--integration` argument. Accepts `be`/`backward-euler` and `trap`/
+    /// `trapezoidal`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "be" | "backward-euler" | "backward_euler" => Some(Self::BackwardEuler),
+            "trap" | "trapezoidal" => Some(Self::Trapezoidal),
+            _ => None,
+        }
+    }
+}
+
+/// Run a transient analysis. `integration` selects the time discretization for **both** the
+/// generated models and the integrator — see [`Integration`].
+pub fn solve_transient(
+    net: &Netlist,
+    compiled: &[Module],
+    integration: Integration,
+) -> Result<Waveform> {
     let (tstep, tstop) = net
         .tran
         .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
+    // One choice drives **both** halves, so the models and the integrator can never disagree
+    // about the discretization: a model compiled for backward Euler that were then stepped with
+    // trapezoidal would stamp a product-rule Jacobian the offset does not match, which is a
+    // wrong waveform rather than an error. `Trapezoidal` stays the default here — it is what
+    // every committed transient golden was validated against — and selecting backward Euler is
+    // what unlocks a bias-dependent `ddt` coefficient (see `va_codegen::Integration`).
+    let (method, integration) = match integration {
+        Integration::BackwardEuler => (
+            Method::BackwardEuler,
+            va_codegen::Integration::BackwardEuler,
+        ),
+        Integration::Trapezoidal => (Method::Trapezoidal, va_codegen::Integration::Trapezoidal),
+    };
     let cfg = TranConfig {
         tstart: 0.0,
         tstop,
         tstep,
         tstep_min: tstep * 1e-6,
-        method: Method::Trapezoidal,
+        method,
         lte_reltol: 1e-3,
         lte_abstol: 1e-6,
     };
 
-    let (instances, dim, _currents) = build_instances(net, compiled)?;
+    let (instances, dim, _currents) = build_instances(net, compiled, integration)?;
     let x0 = vec![0.0; dim];
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
@@ -829,7 +889,8 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
         .ac
         .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
 
-    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let (instances, dim, currents) =
+        build_instances(net, compiled, va_codegen::Integration::default())?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, NewtonConfig::default())
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
@@ -873,7 +934,8 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         )
     })?;
 
-    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let (instances, dim, currents) =
+        build_instances(net, compiled, va_codegen::Integration::default())?;
     // The `.noise` card's input source, resolved to its own branch-current row — the row an AC
     // stimulus would excite, and therefore (§ `va_acnoise::noise`) the row of the adjoint vector
     // that already holds the forward gain. Only a `vsource` has such a row, so naming anything
@@ -969,6 +1031,7 @@ fn build_instance(
     dev: &Device,
     compiled: &[Module],
     next_unknown: &mut usize,
+    integration: va_codegen::Integration,
 ) -> Result<(Box<dyn ModelInstance>, Option<usize>)> {
     let p = dev.terminals[0];
     let n = dev.terminals[1];
@@ -992,7 +1055,7 @@ fn build_instance(
     // Use the compiled Verilog-A model when its name matches the device's model.
     if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
         return Ok((
-            build_from_model(module, dev.value, &dev.terminals, next_unknown)?,
+            build_from_model(module, dev.value, &dev.terminals, next_unknown, integration)?,
             None,
         ));
     }
@@ -1010,6 +1073,7 @@ fn build_from_model(
     value: Option<f64>,
     terminals: &[usize],
     next_unknown: &mut usize,
+    integration: va_codegen::Integration,
 ) -> Result<Box<dyn ModelInstance>> {
     let mut m = module.clone();
     if let (Some(v), Some(param)) = (value, m.params.first_mut()) {
@@ -1040,7 +1104,7 @@ fn build_from_model(
         })
         .collect();
 
-    va_codegen::build_instance(&m, &full, next_unknown)
+    va_codegen::build_instance_with(&m, &full, next_unknown, integration)
         .with_context(|| format!("generating instance for model `{}`", module.name))
 }
 
@@ -2151,7 +2215,7 @@ mod tests {
         assert_eq!(net.analysis, AnalysisCard::Tran);
         gate_analysis(&net, Analysis::Transient).expect("transient analysis is accepted");
 
-        let wf = solve_transient(&net, &[]).expect("integrates");
+        let wf = solve_transient(&net, &[], Integration::default()).expect("integrates");
         let out_idx = net
             .node_order
             .iter()
@@ -2201,7 +2265,7 @@ mod tests {
             Some(va_netlist::Waveform::Sin { .. })
         ));
 
-        let wf = solve_transient(&net, &[]).expect("integrates");
+        let wf = solve_transient(&net, &[], Integration::default()).expect("integrates");
         let in_idx = net.node_order.iter().position(|n| n == "in").unwrap();
         let out_idx = net.node_order.iter().position(|n| n == "out").unwrap();
 
@@ -2255,7 +2319,7 @@ mod tests {
         assert_eq!(net.analysis, AnalysisCard::Tran);
         gate_analysis(&net, Analysis::Transient).expect("transient analysis is accepted");
 
-        let wf = solve_transient(&net, &[]).expect("integrates");
+        let wf = solve_transient(&net, &[], Integration::default()).expect("integrates");
         let collector_idxs: Vec<usize> = ["c1", "c2", "c3"]
             .iter()
             .map(|name| net.node_order.iter().position(|n| n == name).unwrap())

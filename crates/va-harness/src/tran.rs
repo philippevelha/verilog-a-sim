@@ -18,7 +18,7 @@ use crate::{metrics, tol, HarnessError, Verdict};
 pub fn run_tran(circuit: &str, model: Option<&str>) -> Result<GoldenTran, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    let wf = va_cli::solve_transient(&net, &compiled)
+    let wf = va_cli::solve_transient(&net, &compiled, va_cli::Integration::default())
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let branch_currents = va_cli::branch_currents(&net, &compiled)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;

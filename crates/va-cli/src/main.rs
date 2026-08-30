@@ -37,7 +37,9 @@ fn print_usage() {
          va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
-         --plot <out.svg>   Write an SVG plot of the transient waveform (--tran only)"
+         --plot <out.svg>        Write an SVG plot of the transient waveform (--tran only)
+    \n         --integration be|trap   Transient discretization, and the one models are compiled for.
+                                 Default trapezoidal; `be` unlocks a bias-dependent ddt coefficient"
     );
 }
 
@@ -78,7 +80,21 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         "[va-cli] sim netlist={netlist} model={} analysis={analysis:?}",
         model.as_deref().unwrap_or("<none>")
     );
-    run_sim(netlist, model.as_deref(), analysis, plot.as_deref())
+    // `--integration` selects the transient discretization *and* the one the Verilog-A models
+    // are compiled to be exact under, together -- see `va_cli::Integration`.
+    let integration = match parse_flag(args, "--integration") {
+        None => va_cli::Integration::default(),
+        Some(v) => va_cli::Integration::parse(&v)
+            .with_context(|| format!("unknown --integration `{v}` (expected `be` or `trap`)"))?,
+    };
+
+    run_sim(
+        netlist,
+        model.as_deref(),
+        analysis,
+        plot.as_deref(),
+        integration,
+    )
 }
 
 /// Pull the value following `flag` out of `args`.
