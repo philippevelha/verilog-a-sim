@@ -2922,10 +2922,9 @@ and `va_transient::newton_step` assembles exactly `jacobian + coeff·dcharge`. U
 Euler** (`offset = −q_prev/h`, `prev_rate_weight = 0`) that is exact.
 
 **Under trapezoidal it is refused, and that is the whole reason the method is a compile-time
-choice.** Trapezoidal's offset (`r_prev − (2/h)·q_prev` on dynamic rows) rests on the identity
-`dQ/dt = −residual` holding for those rows; a term that is *itself* a rate breaks that identity
-and the offset double-counts. That failure mode is a wrong waveform, not an error — so the
-build refuses instead, with a diagnostic naming the method that would work.
+choice.** ⚠️ **The justification first published here was wrong** — corrected below the same day;
+the *refusal* is right, the reason is not what it said. See "Why trapezoidal is refused, correctly
+this time".
 
 **`va_codegen::Integration`** carries the choice: `build_instance` defaults to `BackwardEuler`
 (so `va-cli check --codegen` measures the corpus against the exact path), and
@@ -2956,6 +2955,82 @@ channel, where folding it in would be wrong. What changed is only what happens n
 being refused, the term now takes the product-rule path. The three negative controls that pinned
 those rejections became method-aware, asserting both halves together (exact under BE, refused
 under trapezoidal) so neither can silently drift.
+
+---
+
+## Why trapezoidal is refused — correcting the same day's claim (2026-08-30)
+
+The product-rule entry above originally justified refusing `c(x)·ddt(q)` under trapezoidal by
+saying the companion offset *double-counts*, because a term that is itself a rate violates the
+`dQ/dt = −residual` identity the offset rests on. **That is wrong.** Recording it rather than
+quietly editing it, because the wrong reason is the more plausible one and would be re-derived
+by the next person.
+
+**There is no double count.** With `charge ≡ 0` and the term's value in the residual, and with
+`r_prev` taking the whole stamped residual, the assembled row is
+
+```text
+f = (2/h)(Q_n − Q_{n−1}) + (A_n + B_n) + (A_{n−1} + B_{n−1}) = 0
+```
+
+— verbatim the trapezoid rule applied to `A + B + Q̇ = 0` (exact integration of `Q̇`, trapezoid
+quadrature of the rest). `B` is the rate of `q`, not of `Q`, so it sits on the `r` side of the
+identity, where it belongs. And `J = ∂f/∂x` **exactly, under both methods**, because the model is
+handed the integrator's own `coeff`.
+
+**Which means the finite-difference gate cannot see this.** The §5 check compares `J` against a
+central difference of `f`; it passes under trapezoidal too. It is a consistency check between the
+Jacobian and the residual, not a check that the residual is the right *discrete equation*. Worth
+internalising: an FD gate on the assembled Jacobian is necessary and was the right thing to
+build, but it is not sufficient, and it was never going to catch this.
+
+**The real defect is the rate reconstruction's initial condition.** `Builtin::Ddt` seeds
+`ρ₀ = 0` on the first step, while the true `q̇(0)` is nonzero for any start that is not a steady
+state. The trapezoidal recursion's multiplier is exactly `−1` — *undamped* — so that `O(1)` seed
+error never decays; it alternates. On a **uniform** step it cancels to `O(h²)` and the scheme
+looks second order. Once the step varies — which the adaptive controller does on essentially
+every step — the cancellation breaks:
+
+| step pattern | charge channel (trap) | this path (trap) | this path (BE) |
+|---|---|---|---|
+| uniform, N=800 | 6.4e-10 (order 2.00) | 4.2e-9 (order 2.00) | 1.1e-5 (order 1.00) |
+| alternating `[1,2]`, N=800 | 8.6e-10 (order 2.00) | **2.2e-5 (order 1.00)** | 1.2e-5 (order 1.00) |
+| cycle `[1,2,1,4]`, N=3200 | 9.3e-11 (order 2.00) | **9.3e-6 (order 1.00)** | 3.8e-6 (order 1.00) |
+
+So under the real controller the trapezoidal path is **first order with a worse error constant
+than backward Euler** — while a fixed-step test would have shown clean second order and "proved"
+the refusal unnecessary.
+
+**It is fixable, cheaply, and with no interface change.** Take the **first** step with the
+backward-Euler companion even when the method is trapezoidal, so `ρ₁` is seeded `O(h)` instead of
+`O(1)`; then continue trapezoidal. Nothing about what a model stamps changes, and
+`AnalysisCtx::with_ddt` already carries the per-step companion numbers down. Measured: 3.76e-10
+vs 5.54e-6 on the alternating pattern at N=3200, and clean second order under arbitrary step
+variation. Once that lands, the refusal can be lifted entirely and `va_codegen::Integration`
+becomes unnecessary. A recursion-free BDF2 alternative was tried and does **not** work — it
+composes badly with the outer trapezoid offset and stays first order.
+
+**Standing limitation to keep in view even after the fix:** the recursion is undamped, so an
+`O(h)` alternating error in `ρ` persists for a whole run. It does not cost order, but it is
+genuine trapezoidal ringing; SPICE damps the equivalent with periodic backward-Euler steps.
+
+### A second finding: the LTE probe bypasses the refusal at run time
+
+`reference_method(BackwardEuler) = Trapezoidal`, and `run_with_events` solves **every** candidate
+step a second time with the reference companion to form the embedded-pair LTE estimate. So a
+model `va-codegen` refused to compile for trapezoidal is nevertheless evaluated under trapezoidal
+companion coefficients at every timepoint of an `--integration be` run — behind the very coupling
+`va-cli` introduced to make the two choices agree.
+
+The reported waveform is still backward-Euler-exact: state is committed only from the post-accept
+assemble, and the reference solve writes to scratch. But the accept/reject decision and therefore
+the **entire step schedule** come from `|x_BE − x_trap|`, where `x_trap` carries the first-order
+startup ringing above — so the estimator measures that, not local truncation error, and forces
+needlessly small steps. `nlcap_ramp.net` visibly rejects four times before its first accepted
+step. Worse, if that reference solve fails to converge the `?` aborts the whole run, for a model
+the build deliberately refused to compile for trapezoidal — an error with no honest explanation to
+offer. Fixing the first-step seeding closes this too, since the reference solve then becomes
+legitimate.
 
 ---
 

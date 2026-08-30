@@ -135,11 +135,28 @@ fn loop_iteration_cap_exceeded() -> CodegenError {
 /// - [`Self::BackwardEuler`] — **exact**. `offset = −q_prev/h` and the term stamps no `charge`,
 ///   so it never enters the offset; the assembled `jacobian + coeff·dcharge` is precisely the
 ///   product rule above.
-/// - [`Self::Trapezoidal`] — **not derived**, so refused. Trapezoidal's offset
-///   (`r_prev − (2/h)·q_prev` on dynamic rows) rests on the identity `dQ/dt = −residual` holding
-///   for those rows; a term that is itself a rate breaks that identity and the offset
-///   double-counts. Refusing is a build error, which is strictly better than a silently wrong
-///   waveform.
+/// - [`Self::Trapezoidal`] — **first order under a varying step**, so refused.
+///
+/// The trapezoidal reason is worth stating precisely, because the obvious explanation is wrong.
+/// The assembled equation is *not* double-counted: with `charge ≡ 0` and the term's value in the
+/// residual, `f = (2/h)(Q_n − Q_{n−1}) + (A_n + B_n) + (A_{n−1} + B_{n−1})` is verbatim the
+/// trapezoid rule applied to `A + B + Q̇ = 0`, and `J = ∂f/∂x` exactly. A finite-difference check
+/// of the assembled Jacobian therefore **passes under trapezoidal too** — it is a consistency
+/// check between `J` and `f`, and cannot see this defect.
+///
+/// What breaks is the rate reconstruction's *initial condition*. `Builtin::Ddt` seeds `ρ₀ = 0`
+/// on the first step, but the true `q̇(0)` is nonzero for any start that is not a steady state,
+/// and the trapezoidal recursion's multiplier is exactly `−1` — undamped. That `O(1)` seed error
+/// never decays; it alternates. On a **uniform** step it cancels to `O(h²)` and the scheme looks
+/// second order. The moment the step varies — which the adaptive controller does on essentially
+/// every step — the cancellation breaks and the method drops to **first order with a worse error
+/// constant than backward Euler**. A fixed-step test would "prove" the refusal unnecessary.
+///
+/// This is fixable without any interface change, and without changing what a model stamps: take
+/// the **first** step with the backward-Euler companion even when the method is trapezoidal, so
+/// `ρ₁` is seeded `O(h)` instead of `O(1)`. That restores clean second order under arbitrary
+/// step variation. Until that lands in `va-transient`, refusing is a build error, which is
+/// strictly better than a silently first-order waveform. Tracked in `docs/roadmap.md`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Integration {
     /// `dQ/dt ≈ (Q − Q_prev)/h`. The default, and the only method the product-rule case above
@@ -510,7 +527,7 @@ impl GeneratedModel {
                             && lower::contains_ddt_call(ctx.module, term.expr)
                         {
                             return Err(CodegenError::Unsupported(
-                                "a ddt nested inside a contribution's resistive term (a                                  bias-dependent charge coefficient) is only exact under backward                                  Euler, and this model was compiled for trapezoidal:                                  trapezoidal's offset assumes every dynamic row satisfies                                  dQ/dt = -residual, which a term that is itself a rate breaks.                                  Compile for backward Euler, or write the ddt as a top-level                                  additive term of the contribution"
+                                "a ddt nested inside a contribution's resistive term (a                                  bias-dependent charge coefficient) is only exact under backward                                  Euler, and this model was compiled for trapezoidal: the rate                                  reconstruction seeds its first step at zero, and trapezoidal's                                  undamped recursion turns that into a first-order error once the                                  timestep varies. Compile for backward Euler, or write the ddt as                                  a top-level additive term of the contribution"
                                     .to_string(),
                             ));
                         }
