@@ -4,11 +4,18 @@ subtitle: "T1 · Phase T1.3 · `va-frontend::elaborate`"
 ---
 
 ::: {.callout-note}
-**Status: code complete, real corpus coverage.** 120 tests, all green. Against the tracked
-118-real-model + auxiliary-fragment corpus under `external/` (150 files total once every
-sibling `` `include ``-only header/body fragment is counted), **114/150 pass the full
-frontend** (`cargo run -p va-cli -- check external/`, confirmed just now, not assumed from a
+**Status: code complete, real corpus coverage.** 233 `va-frontend` tests, all green. Against the
+tracked corpus under `external/` (**158 files** once every sibling `` `include ``-only
+header/body fragment is counted), **85/110 self-contained, module-declaring files pass the full
+frontend** (`cargo run -p va-cli -- check external/`, re-derived 2026-08-30, not assumed from a
 stale count).
+
+The denominator matters as much as the numerator here. This page previously reported
+**114/150**, a figure since retired as unsound: it counted files declaring no module at all
+(nothing for the "did every module elaborate?" loop to iterate) and files whose entire body an
+unresolved `` `include `` had deleted. `va-cli check` now prints all four splits, and
+`docs/roadmap.md`'s "Corpus metric honesty" entry records what went wrong. A residual distortion
+of 17 files is still known and quantified there — it understates coverage.
 :::
 
 ## Goal
@@ -86,19 +93,24 @@ $ cargo test -p va-frontend elaborate
 running 120 tests
 test elaborate::tests::zi_zp_real_roots_use_one_minus_root_not_one_minus_s_over_root ... ok
 ...
-test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out; finished in 0.01s
+test result: ok. 233 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
 $ cargo run -q -p va-cli -- check external/
-114/150 files passed the frontend (lex → parse → elaborate)
+103/138 files declaring a module passed the frontend (lex → parse → elaborate)
+  20 further file(s) declare no module at all (macro/nature headers, statement fragments)
+  of the 103 passes, 18 are on an incomplete module (an unresolved `include was dropped)
+  => self-contained files declaring a module: 85/110
+  158 file(s) scanned in total
 ```
 
-Every one of the 36 remaining failures is categorized, not a mystery: ~20 are auxiliary
+Every one of the remaining failures is categorized, not a mystery: 20 are auxiliary
 `` `include ``-only fragments never meant to compile standalone (`constants.vams`,
-`disciplines.vams`, macro-definition headers); 8 more are top-level files whose entire module
-body lives in a sibling `.include` file this corpus snapshot doesn't ship; the rest are the real,
-tracked backlog below. `docs/roadmap.md`'s "Language coverage" section is the append-only,
-dated changelog of every gap closed to get from the first corpus pass to 114/150 — each entry
-names the specific file it unblocked and how, not a vague "improved coverage."
+`disciplines.vams`, macro-definition headers) and are now excluded from the denominator rather
+than scored as failures; 18 more are top-level files whose entire module body lives in a sibling
+`.include` file this corpus snapshot doesn't ship, reported separately as "incomplete"; the rest
+are the real, tracked backlog below. `docs/roadmap.md`'s "Language coverage" section is the
+append-only, dated changelog of every gap closed — each entry names the specific file it
+unblocked and how, not a vague "improved coverage."
 
 ## Limitations
 

@@ -32,12 +32,13 @@ shared, demoable milestone that several theses light up at once.
 > clippy --workspace --all-targets -- -D warnings` (both clean), `cargo xtask validate`
 > (**11/11 circuits pass vs committed QSPICE golden, convergence 11/11 = 100%** at the time of
 > the refresh; **12/12** after T5.6 added `resistor_noise_table` later the same day, **13/13**
-> after T5.7 added `resistor_noise_table_log`), `va-cli check external` (**114/150**
-> files pass the frontend — a figure since retired as unsound, see the metric-honesty entry
-> below; the same run reports **82/108 self-contained module-declaring files** today — unmoved by either, no corpus file calls a table function), and a one-off
+> after T5.7 added `resistor_noise_table_log`; **15/15** as of 2026-08-30), `va-cli check
+> external` (**114/150** files pass the frontend — a figure since retired as unsound, see the
+> metric-honesty entry below; **85/110 self-contained module-declaring files** as of
+> 2026-08-30, on a corpus grown to 158 files — see the port-qualifier entry), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **107/150**
-> since 2026-08-29 — see this file's `ddt`-distribution entry, and note that the figure is now
-> re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
+> since 2026-08-29 — both superseded by **79/110** as of 2026-08-30, and note that the figure is
+> now re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
 > "no harness-vs-golden validation yet" and "no Quarto tutorials written yet" caveats had both
@@ -53,9 +54,9 @@ shared, demoable milestone that several theses light up at once.
 | 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | ✅ |
 | T1.1 — lexing | `logos` lexer; 20 tests. **Gate green as originally scoped** (a fixed subset); `CLAUDE.md` §1 has since widened T1's target to the *full* Verilog-A token set, tracked live in `token-reference.md` + the corpus scan, not by this row | 🟢 |
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
-| T1.3 — elaboration | AST → `va_ir::Module`; **82/108 self-contained, module-declaring corpus files pass the full frontend** (2026-08-29; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
+| T1.3 — elaboration | AST → `va_ir::Module`; **85/110 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **75/108 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-29; the raw form of that figure is 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **79/110 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -91,10 +92,14 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
    `docs/token-reference.md` and the corpus scan, which are explicitly still growing.
 2. **T1.3's literal gate is unmet.** It names committed golden-IR snapshots for the three zoo
    models; the tests assert IR *structure* instead. Cheap to close, not yet closed.
-3. **T2.2/T2.3 are not corpus-complete.** 105 of 150 corpus files build into a `ModelInstance`;
-   the 9-file frontend→codegen gap is `ddt` nested inside an expression (7 files) and a local
-   variable read before assignment (2). T2.2's own generated-diode check is an operating point
-   + FD rather than a full committed sweep.
+3. **T2.2/T2.3 are not corpus-complete.** 79 of the 110 self-contained, module-declaring corpus
+   files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **6 files**, all
+   individually accounted for and none a recognizer gap: a bias-dependent `ddt` coefficient
+   needing the product-rule change to Interface β (`hicumL2V2p4p0`, `hicumL2V3p0p0`,
+   `hicumL2_v310`, `mvsg_cmc_3.2.0`), the charge channel evaluated inside control flow
+   (`hicumL0_v2p1p0`), and one bug in a corpus file (`amp_dynamic.va` declares `parameter real
+   gain` and `real gain` in the same scope). T2.2's own generated-diode check is an operating
+   point + FD rather than a full committed sweep.
 
 No longer true and removed from this list: "T2/T3 run over hand-built IR / reference instances —
 the frontend→codegen→core path is not yet wired by a netlist driver." `va-cli sim --model` has
@@ -137,8 +142,10 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >
 > ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
 > "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
-> `114`/`104` totals are not. Current figures: **82/108** (frontend) and **75/108** (frontend +
-> codegen) on files that both declare a module and are self-contained.
+> `114`/`104` totals are not. Current figures: **85/110** (frontend) and **79/110** (frontend +
+> codegen) on files that both declare a module and are self-contained (2026-08-30, corpus grown
+> to 158 files — see the port-qualifier entry; the 2026-08-29 revision of this line said
+> 82/108 and 75/108, of which the frontend half was itself off by one, see below).
 >
 > - **19 — undefined macro** (`` `MAXA ``, `` `GMIN ``, `` `ONE3RD ``, `` `OPPATTR ``, …): an
 >   include fragment scanned standalone, whose macros are defined by the parent that includes
@@ -2631,6 +2638,110 @@ entirely the wrong reason), and one pins the purely-capacitive boundary at exact
 
 None is a recognizer gap that more pattern-matching would close. That is a meaningfully different
 statement from where this section started the day.
+
+---
+
+## Combined port declarations, and a module-less file is not an error (2026-08-30)
+
+Two `va-frontend` parser defects, found by triaging the six new parse failures that appeared when
+the corpus grew from 150 to **158 files** (a photonic model library: `Attenuator_compliant.va`
+into `external/photonic/`, and `external/verilogAlib/` — five model/header files plus that
+vendor's own `constants.vams`/`disciplines.vams`, co-located because all three `disciplines.vams`
+variants now in the corpus differ, and without them these files would silently bind to a
+*different* library's header).
+
+**Headline: 81/108 → 85/110 frontend, 75/108 → 79/110 frontend+codegen.** Full gate green —
+`fmt`, `clippy -D warnings`, **564 tests** (was 557; +7 here), and `xtask validate` **15/15
+golden reproducing their recorded numbers to the last digit**. Nothing in the simulation path
+changed.
+
+**The 2026-08-29 frontend figure was itself off by one.** Re-measuring the *pre-expansion* corpus
+gives **81/108**, not the 82/108 recorded then: commit `82045f0` (a nested-block declaration
+shadowing a parameter is now rejected) turned `bsimsoi.va` from a frontend pass into an `[elab]`
+failure, and the figure was taken before the last commit of that session landed and never
+re-derived. The codegen half (75/108) was correct. This is the third time a corpus figure has
+survived a revision without being re-measured — see the entry below, and §"How to keep this
+document honest".
+
+### 1. The `discipline_identifier` slot of a port declaration was missing
+
+LRM §6.5.2.2 (from A.2.1.2) defines
+`inout [ discipline_identifier ] [ net_type | wreal ] [ signed ] [ range ] names ;`. Only the
+bare `inout p, n;` form was implemented, so the combined `inout electrical p, n;` failed with
+`expected Semicolon, found Ident("p")` — because `expect_ident` accepts `electrical` as an
+ident-like keyword, the declaration parsed as *one port named `"electrical"`* and then demanded
+its semicolon. A misleading error for a squarely legal construct, and `token-reference.md`
+documented the grammar as though the slot did not exist.
+
+`parse_item`'s direction arm now accepts the qualifier — a built-in `electrical`/`thermal` or any
+name a `discipline` block registered — **and with it the range that follows**
+(`inout electrical [0:3] bus;`), by handing off to the same `parse_net_item` a standalone
+`electrical [0:3] bus;` already takes. The combined form is split back into the two-statement
+form (an `Item::Direction` plus an `Item::Net`, queued through `Parser::pending_items`), so
+nothing downstream of the parser can tell the two spellings apart — the test asserts that
+equivalence directly rather than asserting a shape.
+
+**Guarded, with a negative control.** Recognizing the qualifier requires a name or `[` to follow
+it, so `inout electrical;` still declares a port *named* `electrical` — a spelling
+`ident_like_keyword` deliberately permits. That case is a test.
+
+**`net_type` stays rejected — and that is the language's boundary, not ours.** `wire`, `wand`,
+`wor`, `tri`, `triand`, `trior`, `supply0`, `supply1` name discrete-domain nets, which Annex C
+excludes from Verilog-A (CLAUDE.md §1), and `token-reference.md` already recorded each as
+"reserved, no grammar production". Zero corpus files use the slot. What changed is only the
+*diagnostic*: instead of surfacing as `expected an identifier, but 'wire' is a reserved word`, it
+now names the construct and says why it cannot appear. `signed` is likewise not accepted — it has
+no meaning for a continuous net.
+
+Fixes `mrr_weight.va`, `photonic_primitives.vams` (all **7** modules) and
+`photonic_waveguide.vams` outright.
+
+### 2. A file of nothing but `nature`/`discipline` blocks was a parse error
+
+`parse`'s own contract says a stream defining no module "is not an error — it's a valid, if
+degenerate, compilation unit". That held only for files that lex to **zero** tokens (a pure
+`` `define `` header). The top-level loop checked for end-of-stream and *then* called
+`parse_module`, which consumes the `nature`/`discipline` preamble before demanding `module` — so
+a file whose entire content is that preamble was swallowed and then failed
+`expected Module, found None` at EOF. **A standard `disciplines.vams` is exactly that shape**, so
+the bucket was structurally unreachable for the most common header in the corpus.
+
+The preamble is now consumed at the top level, before the end-of-stream check. Five files move
+from `[parse]` to `[none ] declares no module` — `external/disciplines.vams`,
+`external/ekv3_natures.va`, `external/photonic/disciplines.vams`, and the two newly added
+`external/verilogAlib/{disciplines,photonic_discipline}.vams`. A negative control asserts that
+skipping the preamble does not skip a module that follows it.
+
+This was **a misclassification, not a coverage gain**: those files were never models. It moves
+them out of the denominator, where they had been counted as failing models.
+
+### The denominator is still not fully honest — 17 files, quantified
+
+The 2026-08-29 cleanup fixed the metric's *numerator* (it had counted module-less and
+include-gutted files as passes). The symmetric hole on the failure side is only half closed. A
+file that dies at `[pp]` or `[parse]` is counted as a failing model without anyone asking whether
+it declares a module — because at that point the tool genuinely cannot know. Defect 2 above
+removed the five cases where the answer was structural. **17 remain**: 4 `ekv3_*` statement
+fragments whose token stream starts with `begin` (`[parse]`), and 13 `ekv3_*`/`sp_functions`-class
+include fragments that fail preprocessing (`[pp]`); none contains the word `module` anywhere.
+Excluding them would give roughly **85/93 and 79/93**.
+
+That change is **deliberately not made here.** Classifying a file that failed *preprocessing* as
+"declares no module" means reading its raw text and guessing — and a module can be produced by a
+macro. Under this project's "reject, don't guess" rule the honest move is to state the residual
+distortion with its exact size rather than to paper over it with a heuristic that could itself go
+wrong in the other direction. A second, latent hole from the same family (`crates/va-cli/src/lib.rs`
+discards a failing file's skipped-include list, so a `[pp]` failure can never be tagged
+`failed_incomplete` the way an `[elab]` one is) is currently benign — no corpus file hits both
+conditions — and is recorded here so it is not rediscovered as a surprise.
+
+### Remaining parse failures: 13 → 5
+
+Four are the `ekv3_*` fragments above. The fifth, `example_mzi_modulator.vams`, advances past the
+port fix to two **source** bugs in the corpus file, not frontend gaps: it passes a *parameter*
+in a port-connection list (`.therm_en(1)` — a numeric literal is not a legal analog port
+connection), and it instantiates modules from `photonic_primitives.vams` without `` `include ``ing
+it.
 
 ---
 

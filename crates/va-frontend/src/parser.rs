@@ -110,10 +110,19 @@ pub fn parse_with_disciplines(tokens: &[Token]) -> Result<ParsedUnit, FrontendEr
         natures: HashMap::new(),
         disciplines: HashMap::new(),
         known_access,
+        pending_items: Vec::new(),
     };
     let mut modules = Vec::new();
     loop {
         p.skip_directives();
+        // Consume any `nature`/`discipline` preamble *here*, before the end-of-stream check.
+        // `parse_module` parses the same preamble and then demands `module`, so leaving it to
+        // that call made a file consisting only of nature/discipline blocks — which is exactly
+        // the shape of a standard `disciplines.vams` — fail with `expected Module, found None`
+        // at EOF, contradicting this function's own contract that a module-less stream is a
+        // valid degenerate compilation unit. The preamble tables are cumulative, so consuming
+        // it in either place registers the same natures/disciplines.
+        p.parse_preamble()?;
         if p.peek().is_none() {
             break;
         }
@@ -160,6 +169,15 @@ struct Parser<'a> {
     /// time, since it decides which `Stmt`/`ExprAst` variant to build in the first place, not
     /// just how a name later resolves at elaboration.
     known_access: HashMap<String, AccessKind>,
+    /// Items produced by a declaration that expands into more than one [`Item`], queued for
+    /// the next [`Parser::parse_item`] call to return before it reads any further tokens.
+    ///
+    /// Only the LRM's combined port declaration (`inout electrical p, n;` — direction *and*
+    /// discipline in one statement, § port declarations) uses this: it is split back into the
+    /// equivalent two-statement form, an [`Item::Direction`] followed by an [`Item::Net`], so
+    /// that elaboration keeps seeing exactly the shape it already handles. A queue rather than
+    /// a `parse_item -> Vec<Item>` signature change because this is the only such production.
+    pending_items: Vec<Item>,
 }
 
 impl Parser<'_> {
@@ -400,6 +418,64 @@ impl Parser<'_> {
     /// Shared by every discipline spelling so `electrical`/`thermal` (dedicated tokens) and a
     /// user-declared discipline name (a plain `Ident` looked up in `self.disciplines`) parse
     /// identically past the keyword.
+    /// The `discipline_identifier` slot of a port declaration, if one is present at the cursor:
+    /// a built-in `electrical`/`thermal`, or any name a `discipline ... enddiscipline` block
+    /// earlier in the file registered (the same lookup `parse_item`'s bare-identifier arm uses
+    /// to tell a net declaration from a module instantiation).
+    ///
+    /// Requires a name or a `[` to follow, so that `inout electrical;` — a port literally
+    /// *named* `electrical`, which `ident_like_keyword` deliberately permits — keeps parsing as
+    /// a port name rather than becoming a discipline with an empty name list. Returns the
+    /// discipline without consuming it; the caller advances past it.
+    fn peek_port_discipline(&self) -> Option<Discipline> {
+        let qualified = matches!(self.nth(1), Some(Token::Ident(_)) | Some(Token::LBracket));
+        if !qualified {
+            return None;
+        }
+        match self.peek() {
+            Some(Token::Electrical) => Some(Discipline::Electrical),
+            Some(Token::Thermal) => Some(Discipline::Thermal),
+            Some(Token::Ident(name)) if self.disciplines.contains_key(name) => {
+                Some(Discipline::Custom(name.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Reject the `net_type` slot of a port declaration (`inout wire p, n;`) with a diagnostic
+    /// that says *why*, rather than letting the name list report `wire` as an unexpected
+    /// reserved word.
+    ///
+    /// These name discrete-domain nets. LRM Annex C ("Analog language subset") excludes them
+    /// from Verilog-A, so this is a scope boundary of the *language*, not a gap in this
+    /// implementation — see `docs/token-reference.md`, where each of these words is recorded as
+    /// "reserved, no grammar production". A continuous net's type comes from its discipline.
+    fn reject_net_type_in_port_declaration(&self, dir: Direction) -> Result<(), FrontendError> {
+        const NET_TYPES: [&str; 8] = [
+            "wire", "wand", "wor", "tri", "triand", "trior", "supply0", "supply1",
+        ];
+        let Some(Token::Keyword(kw)) = self.peek() else {
+            return Ok(());
+        };
+        if !NET_TYPES.contains(&kw.as_str()) {
+            return Ok(());
+        }
+        let dir = match dir {
+            Direction::Input => "input",
+            Direction::Output => "output",
+            Direction::Inout => "inout",
+        };
+        // Built directly rather than through `Parser::err`, whose trailing ", found {token}" is
+        // pure noise here: the offending token is already named in the message.
+        Err(FrontendError::Parse(format!(
+            "at token {}: `{kw}` is a discrete-domain net type, which LRM Annex C excludes from \
+             Verilog-A, so it may not qualify the port declaration `{dir} {kw} ...`. A continuous \
+             net takes its type from a discipline instead: write `{dir} <discipline> ...`, or \
+             declare the direction and the discipline in two statements.",
+            self.pos
+        )))
+    }
+
     fn parse_net_item(&mut self, discipline: Discipline) -> Result<Item, FrontendError> {
         // Dimension range(s) before the name list are a *default*; each name may also carry its
         // own suffix range(s) (`bus[3:0]`), overriding the default for that name only — both
@@ -704,6 +780,11 @@ impl Parser<'_> {
     }
 
     fn parse_item(&mut self) -> Result<Item, FrontendError> {
+        // A previous declaration may have expanded into more than one item (see
+        // `Parser::pending_items`); drain that before reading any further tokens.
+        if !self.pending_items.is_empty() {
+            return Ok(self.pending_items.remove(0));
+        }
         match self.peek() {
             Some(Token::Input) | Some(Token::Output) | Some(Token::Inout) => {
                 let dir = match self.bump() {
@@ -711,6 +792,29 @@ impl Parser<'_> {
                     Some(Token::Output) => Direction::Output,
                     _ => Direction::Inout,
                 };
+                // The LRM's port declaration (§6.5.2.2, from A.2.1.2) is
+                // `inout [ discipline_identifier ] [ net_type ] [ signed ] [ range ] names ;` —
+                // every qualifier optional. Two of those slots are deliberately not accepted:
+                // `net_type` (`wire`/`wand`/… name discrete-domain nets, which Annex C excludes
+                // from Verilog-A — `net_type_in_port_declaration` below reports that rather than
+                // letting it surface as a bare "reserved word" error) and `signed`, which has no
+                // meaning for a continuous net. The discipline slot *is* accepted, and with it
+                // the range that follows: `inout electrical [0:3] bus;`.
+                if let Some(discipline) = self.peek_port_discipline() {
+                    self.pos += 1;
+                    // `parse_net_item` consumes the post-discipline range(s), the name list
+                    // (including per-name `bus[3:0]` suffixes) and the `;` — the same code path
+                    // a standalone `electrical [0:3] bus;` takes, so the combined form cannot
+                    // drift from the split one.
+                    let net = self.parse_net_item(discipline)?;
+                    let Item::Net { nets, .. } = &net else {
+                        unreachable!("parse_net_item always yields Item::Net")
+                    };
+                    let names = nets.iter().map(|n| n.name.clone()).collect();
+                    self.pending_items.push(net);
+                    return Ok(Item::Direction { dir, nets: names });
+                }
+                self.reject_net_type_in_port_declaration(dir)?;
                 // A vector port repeats its `[msb:lsb]` width here too (e.g. the LRM's own DAC
                 // example: `input [0:width-1] in;` alongside `electrical [0:width-1] in;`) — the
                 // real vector range comes from the paired discipline declaration (§2.2), so this
@@ -2026,6 +2130,131 @@ mod tests {
             .any(|it| matches!(it, Item::Direction { nets, .. } if nets == &["in".to_string()])));
     }
 
+    // --- combined port declarations (LRM §6.5.2.2 `[ discipline_identifier ] [ range ]`) ---
+
+    /// `inout electrical p, n;` declares direction *and* discipline in one statement. It must
+    /// produce exactly what the two-statement form produces, since everything downstream of the
+    /// parser only ever sees that shape.
+    #[test]
+    fn port_declaration_carries_its_discipline() {
+        let combined =
+            parse_src("module m(p, n); inout electrical p, n; analog V(p,n) <+ 0.0; endmodule");
+        let split = parse_src(
+            "module m(p, n); inout p, n; electrical p, n; analog V(p,n) <+ 0.0; endmodule",
+        );
+
+        let names = |m: &ModuleAst| -> Vec<String> {
+            m.items
+                .iter()
+                .find_map(|it| match it {
+                    Item::Net { nets, .. } => Some(nets.iter().map(|n| n.name.clone()).collect()),
+                    _ => None,
+                })
+                .expect("a net item")
+        };
+        assert!(combined
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Direction { dir, nets }
+                if *dir == Direction::Inout && nets == &["p".to_string(), "n".to_string()])));
+        assert_eq!(names(&combined), names(&split));
+        assert_eq!(combined.items.len(), split.items.len());
+    }
+
+    /// The range slot follows the discipline: `inout electrical [0:3] b;`. Before the qualifier
+    /// region was implemented this could not be expressed at the direction site at all.
+    #[test]
+    fn port_declaration_discipline_takes_a_range() {
+        let m =
+            parse_src("module m(b); inout electrical [0:3] b; analog V(b[0]) <+ 0.0; endmodule");
+        let ranges = m
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Net { nets, .. } => Some(nets[0].ranges.len()),
+                _ => None,
+            })
+            .expect("a net item");
+        assert_eq!(
+            ranges, 1,
+            "the post-discipline range must reach the net decl"
+        );
+    }
+
+    /// A discipline the file itself declared works exactly like a built-in one — the same
+    /// lookup that tells a net declaration from a module instantiation.
+    #[test]
+    fn port_declaration_accepts_a_custom_discipline() {
+        let m = parse_src(
+            "nature Opt units = \"W\"; access = P; abstol = 1e-12; endnature \
+             discipline optical potential Opt; enddiscipline \
+             module m(p, n); inout optical p, n; analog P(p,n) <+ 0.0; endmodule",
+        );
+        assert!(m.items.iter().any(|it| matches!(it,
+            Item::Net { discipline: Discipline::Custom(d), .. } if d == "optical")));
+    }
+
+    /// Negative control for the two tests above: `electrical` is an ident-like keyword, so a
+    /// port may legitimately be *named* `electrical`. Recognizing the qualifier must not eat
+    /// that name — which is why `peek_port_discipline` requires a name or `[` to follow.
+    #[test]
+    fn a_port_named_electrical_is_still_a_port_name() {
+        let m = parse_src(
+            "module m(electrical); inout electrical; electrical electrical; \
+             analog V(electrical) <+ 0.0; endmodule",
+        );
+        assert!(m
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Direction { nets, .. }
+            if nets == &["electrical".to_string()])));
+    }
+
+    /// A `net_type` qualifier is out of scope by the *language*'s definition, not by omission
+    /// here: Annex C excludes discrete-domain nets from Verilog-A. The diagnostic must say so
+    /// rather than report `wire` as a stray reserved word.
+    #[test]
+    fn net_type_in_a_port_declaration_is_rejected_by_name() {
+        let toks =
+            lex("module m(p, n); inout wire p, n; analog V(p,n) <+ 0.0; endmodule").expect("lex");
+        let err = parse(&toks).expect_err("a net_type qualifier must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("discrete-domain net type"), "{msg}");
+        assert!(msg.contains("Annex C"), "{msg}");
+    }
+
+    // --- a module-less compilation unit (§ `parse`'s degenerate-stream contract) ---
+
+    /// A file of nothing but `nature`/`discipline` blocks — the shape of every standard
+    /// `disciplines.vams` — is a valid degenerate compilation unit, not a parse error. The
+    /// preamble used to be consumed inside `parse_module`, which then demanded `module` and
+    /// failed at EOF.
+    #[test]
+    fn a_file_of_only_disciplines_is_not_an_error() {
+        let toks = lex(
+            "nature Opt units = \"W\"; access = P; abstol = 1e-12; endnature \
+                        discipline optical potential Opt; enddiscipline",
+        )
+        .expect("lex");
+        let modules = parse(&toks).expect("a module-less preamble must parse");
+        assert!(modules.is_empty());
+    }
+
+    /// Negative control for the test above: skipping the preamble at top level must not skip
+    /// the module that follows it.
+    #[test]
+    fn a_preamble_followed_by_a_module_still_yields_the_module() {
+        let toks = lex(
+            "nature Opt units = \"W\"; access = P; abstol = 1e-12; endnature \
+                        discipline optical potential Opt; enddiscipline \
+                        module m(p); inout optical p; analog P(p) <+ 0.0; endmodule",
+        )
+        .expect("lex");
+        let modules = parse(&toks).expect("parse");
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "m");
+    }
+
     #[test]
     fn indexed_access_parses() {
         let m = parse_src(
@@ -2720,6 +2949,7 @@ mod tests {
             natures: HashMap::new(),
             disciplines: HashMap::new(),
             known_access,
+            pending_items: Vec::new(),
         }
     }
 

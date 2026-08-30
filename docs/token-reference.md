@@ -42,7 +42,7 @@ from `RESERVED_WORDS` itself, so the `keywords.rs`-level completeness test
 previously unreserved — inconsistent with every other math builtin here, e.g. `exp`/`sqrt`/`ddt`,
 which *is* reserved). All eleven were added, then two of them — `vt`/`temperature` — were
 **removed again**: unlike every other word in that batch, neither has a grammar production for
-its bare (non-`$`) form at all, and a broad corpus scan (`external/`, ~118 files including
+its bare (non-`$`) form at all, and a broad corpus scan (`external/`, 158 files including
 BSIM/HiSIM/HICUM/EKV/VBIC/PSP-family industry compact models, not just the small hand-picked
 set used earlier) turned up real models declaring a plain `vt` variable, which the reservation
 broke for no benefit (see §1.5's `Vt`/`Temperature` entry). Net effect: 169 + 11 − 2 = 178.
@@ -682,10 +682,27 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 
 - **Purpose and Static Nature**: Structural — declares a port's direction; carries no runtime
   value of its own (the *node* the port names does).
-- **Declaration and Assignment**: `input name, ...;` / `output name, ...;` / `inout name, ...;`
-  (LRM §6, port declarations). A port additionally needs a discipline declaration
-  (`electrical`/`thermal`) naming the same net to become a resolvable node —
-  `resolve_ports` rejects a port with direction but no discipline.
+- **Declaration and Assignment**: the LRM's production (§6.5.2.2, from A.2.1.2) is
+  `inout [ discipline_identifier ] [ net_type | wreal ] [ signed ] [ range ] names ;`, every
+  qualifier optional. Two spellings are supported, and they are exactly equivalent — the
+  combined form is split into the split form at parse time, so nothing downstream can tell
+  them apart:
+  - **split** — `inout p, n;` plus a separate `electrical p, n;`. A port declared this way
+    needs the discipline declaration to become a resolvable node; `resolve_ports` rejects a
+    port with direction but no discipline.
+  - **combined** — `inout electrical p, n;`, carrying the `discipline_identifier` slot, and
+    with it the `range` that follows it: `inout electrical [0:3] bus;`. The discipline may be
+    a built-in (`electrical`/`thermal`) or any name a `discipline ... enddiscipline` block
+    earlier in the file declared. Recognizing the qualifier is guarded on a name or `[`
+    following it, so `inout electrical;` still declares a port *named* `electrical` (that
+    spelling is an ident-like keyword — see `Electrical` / `Thermal` below).
+  - The `net_type` slot (`wire`, `wand`, `wor`, `tri`, `triand`, `trior`, `supply0`,
+    `supply1`) is **rejected by name, with a diagnostic that says why**: these name
+    discrete-domain nets, which Annex C excludes from Verilog-A, so this is a boundary of the
+    *language*, not a gap here. Each of those words is recorded as "reserved, no grammar
+    production" in §1.6 below. A continuous net's type comes from its discipline. `signed` is
+    likewise not accepted — it has no meaning for a continuous net. Zero corpus files use
+    either slot.
 - **Expressions and Evaluation**: N/A — pure declaration.
 - **Structural and Analog Usage**: Module-level only.
 - **Comparison with Traditional Constructs**: Analogous to a C function's parameter direction
@@ -1504,10 +1521,10 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `wor` | Reserved, no grammar production (wired-OR net type) | N/A | N/A | Digital structural only | No C analogue |
 | `xnor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a ^ b)`, minus gate timing |
 | `xor` | Reserved, no grammar production (digital gate primitive — distinct from any bitwise operator, which this subset doesn't implement at all) | N/A | N/A | Digital gate level only | Loosely C's `^`, but as a timed gate instance |
-| `zi_nd` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 150 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Parses as a call (`zi_nd(in, num, den[, ...])`); elaboration has no builtin → `unknown function` | Z-domain (discrete) IIR filter, numerator/denominator form | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only, signal-flow filter | Closest: a digital IIR filter's difference equation, expressed declaratively |
-| `zi_np` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 150 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family, pole/zero form | Z-domain IIR filter, pole/zero form | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only | Same as `zi_nd` |
-| `zi_zd` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 150 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family as `laplace_zd`/`zi_nd`, Z-domain-input numerator/denominator form | Z-domain IIR filter variant | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only | Same as `zi_nd` |
-| `zi_zp` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 150 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family, Z-domain-input pole/zero form | Z-domain IIR filter variant | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only | Same as `zi_nd` |
+| `zi_nd` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Parses as a call (`zi_nd(in, num, den[, ...])`); elaboration has no builtin → `unknown function` | Z-domain (discrete) IIR filter, numerator/denominator form | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only, signal-flow filter | Closest: a digital IIR filter's difference equation, expressed declaratively |
+| `zi_np` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family, pole/zero form | Z-domain IIR filter, pole/zero form | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only | Same as `zi_nd` |
+| `zi_zd` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family as `laplace_zd`/`zi_nd`, Z-domain-input numerator/denominator form | Z-domain IIR filter variant | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only | Same as `zi_nd` |
+| `zi_zp` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family, Z-domain-input pole/zero form | Z-domain IIR filter variant | `H(jω)` per frequency point in AC; DC gain in DC/transient | Analog-block only | Same as `zi_nd` |
 
 ## 1.7 `floor`/`ceil`/`round`/`int`/`limexp` — formerly non-reserved (fixed)
 
