@@ -2840,7 +2840,7 @@ rather than silently mis-bound since 2026-08-29).
 
 ## Real block scoping (2026-08-30)
 
-The last genuine elaborator limitation in the frontend column. **86/88 frontend, 80/88
+Closes `bsimsoi.va`. (The commit called this "the last genuine elaborator limitation in the frontend column"; an audit on 2026-08-31 showed that is too strong — see that entry.) **86/88 frontend, 80/88
 frontend+codegen** — `external/bsimsoi.va` now passes both (14 nodes, 996 params, 2 funcs), and
 it is the **only** file whose verdict changed: a per-file diff of the whole corpus before and
 after shows exactly one line moving, `[elab] -> [ok]`. 573 tests, `fmt`/`clippy -D warnings`
@@ -3031,6 +3031,75 @@ step. Worse, if that reference solve fails to converge the `?` aborts the whole 
 the build deliberately refused to compile for trapezoidal — an error with no honest explanation to
 offer. Fixing the first-step seeding closes this too, since the reference solve then becomes
 legitimate.
+
+---
+
+## Two paths the product rule missed, and a block-scoping gap (2026-08-31)
+
+An independent audit of the day's changes found a **regression introduced by the product-rule
+commit** and a **live silent wrong answer** the block-scoping commit's claim did not cover.
+Both are recorded here in full, including the part where the claim was too strong.
+
+### Fixed: two stamping paths dropped `grad_ddt`
+
+Lifting the blanket refusal on a nested `ddt` in a resistive term (`40baec7`) let such models
+build — and two *other* `Dual`-consuming paths still stamped `grad` only, so the term's `c·∂q/∂x`
+went nowhere:
+
+- `stamp_flow_current_accumulators` — a contribution re-read through a bare `I(branch)` probe.
+- `stamp_idt_accumulators` — the same coefficient inside an `idt` integrand.
+
+Both produced an accumulator-row Jacobian of **zero where the truth is −7.0e-4**. Before the
+lift these models were refused outright, so this is squarely a regression the lift created: the
+silent-Newton-degradation the refusal had been preventing, moved one path over. Each fix is one
+loop mirroring the resistive path. Both now carry an assembled-Jacobian finite-difference gate,
+and both gates were verified to bite by deleting the stamps again (analytic −3.0e-4 vs a true
+−1.0e-3).
+
+**The lesson is about the shape of the change, not the arithmetic.** "Make path X consume a new
+channel" is only safe once you have enumerated *every* path that can receive that channel. The
+audit did that enumeration as a table; it should have been part of the original commit.
+
+### Still open, from the same enumeration
+
+- **`stamp_laplace` drops it too** (`laplace_nd(V(p,n)*ddt(c0*V(p,n)), …)`, 7.0e-4 missing) —
+  **pre-existing**, not caused by the lift: nothing checks a `laplace_*` input for a `ddt` under
+  either method.
+- **The charge channel's `debug_assert!` premise is false.** Its comment says `validate()` should
+  have rejected a charge argument that itself carries charge; `lower::contains_ddt_call` is
+  *syntactic* and cannot see through `Expr::Var`, so `x = V*ddt(q); I <+ ddt(c0*x);` reaches it
+  — panicking in debug, silently dropping the second-derivative sensitivity in release.
+- **The trapezoidal guard is bypassable for the same syntactic reason**: `x = V*ddt(q); I <+ x;`
+  builds under `Integration::Trapezoidal` while the direct spelling is correctly refused. Harm is
+  bounded by whatever the first-step seeding fix addresses (see the correction entry above), but
+  the guard should be closed or documented.
+
+### Block scoping covers less than claimed
+
+`69abf1f` called `bsimsoi.va` "the last genuine elaborator limitation in the frontend column."
+**That is too strong.** `parse_block_or_single` returns a flat `Vec<Stmt>` and **drops the
+`begin…end` boundary**, so only a *standalone* block becomes a `Stmt::Block`. When `begin…end` is
+the body of an `if`/`else`/`for`/`while`/`repeat`/`case` arm — the shape real compact models
+actually use — no scope is pushed by either pass, and a `Stmt::VarDecl` writes its fresh `VarId`
+straight into the module-wide map, shadowing the parameter for the rest of the analog block.
+
+Same circuit, same declaration, only the enclosing construct differing:
+
+```text
+if-arm  begin…end:  V(mid) = 0.001996 V   ← a 0.5 Ω device
+standalone begin…end: V(mid) = 0.500000 V   ← the correct 1 kΩ
+```
+
+This is **not a regression** — identical before block scoping landed, and `82045f0`'s hard-error
+guard never covered this shape either — but it is a live instance of the very 1 kΩ→1 Ω bug the
+commit describes. The fix is to preserve the block boundary in the parser so an arm body is a
+`Stmt::Block` like any other; the scoping machinery then applies unchanged.
+
+**Also from the audit, in the safe direction:** a function body's `collect_assign_targets` is
+scope-blind (no `decl_scopes` analogue), so a block-local declaration inside a function now
+allocates a second `VarId` and leaves the hoisted one dead. Codegen catches it as
+`variable #N read before assignment` — an error rather than the silently wrong value it gave
+before — but the diagnostic names neither the position nor the cause.
 
 ---
 

@@ -1049,6 +1049,16 @@ impl GeneratedModel {
                     sink.jacobian(g, gk, -dg);
                 }
             }
+            // `idt`'s integrand may itself carry a bias-dependent charge coefficient
+            // (`idt(c(x)*ddt(q))`), whose `c·∂q/∂x` lives only in `grad_ddt` — see the
+            // accumulator path above and § `Integration`. Stamped alongside this row's own
+            // `dcharge(g, g, 1.0)`, which is the accumulator's *own* state, not the integrand's.
+            for (slot, &dg) in d.grad_ddt.iter().enumerate() {
+                if dg != 0.0 {
+                    let gk = self.terminals[slot];
+                    sink.dcharge(g, gk, -dg);
+                }
+            }
             sink.charge(g, ctx.x.get(g).copied().unwrap_or(0.0));
             sink.dcharge(g, g, 1.0);
         }
@@ -1080,6 +1090,18 @@ impl GeneratedModel {
                 if dg != 0.0 {
                     let gk = self.terminals[slot];
                     sink.jacobian(g, gk, -dg);
+                }
+            }
+            // The product-rule half, exactly as the ordinary resistive path stamps it
+            // (§ `Integration`): a contribution folded into this accumulator can carry a
+            // bias-dependent charge coefficient, and its `c·∂q/∂x` lives only in `grad_ddt`.
+            // Dropping it here would leave this row's Jacobian zero where the truth is not —
+            // the same silent-Newton-degradation this crate refuses elsewhere. Non-zero only
+            // downstream of a nested `ddt`, so a no-op for every ordinary accumulator.
+            for (slot, &dg) in total.grad_ddt.iter().enumerate() {
+                if dg != 0.0 {
+                    let gk = self.terminals[slot];
+                    sink.dcharge(g, gk, -dg);
                 }
             }
         }
@@ -4151,6 +4173,182 @@ mod tests {
             (coeff * sink.dcharge[0]).abs() > 0.1 * analytic.abs(),
             "the charge-channel half must be a real part of the answer, not rounding"
         );
+    }
+
+    /// Assembled-Jacobian finite-difference check over a whole `dim`-unknown system: compares
+    /// `jacobian + coeff·dcharge` against a central difference of `residual + coeff·charge`,
+    /// which is exactly the combination `va_transient::newton_step` forms. Any stamping path
+    /// that receives a `grad_ddt`-carrying `Dual` and ignores it shows up here as an entry that
+    /// is zero where the difference is not.
+    fn assert_assembled_jacobian_matches_fd(
+        inst: &dyn va_abi::ModelInstance,
+        dim: usize,
+        x0: &[f64],
+        coeff: f64,
+    ) {
+        let ctx = va_abi::AnalysisCtx::transient(1e-3)
+            .with_ddt(coeff, 0.0)
+            .with_initial_step(false);
+        let committed = vec![4e-10_f64; inst.state_len()];
+
+        let assembled = |x: &[f64]| -> Vec<f64> {
+            let mut next = vec![0.0; committed.len()];
+            let mut st = va_abi::ModelState::new(&committed, &mut next);
+            let mut sink = DenseStamp::new(dim);
+            inst.load(x, &ctx, &mut st, &mut sink);
+            (0..dim)
+                .map(|r| sink.residual[r] + coeff * sink.charge[r])
+                .collect()
+        };
+
+        let mut next = vec![0.0; committed.len()];
+        let mut st = va_abi::ModelState::new(&committed, &mut next);
+        let mut sink = DenseStamp::new(dim);
+        inst.load(x0, &ctx, &mut st, &mut sink);
+
+        let d = 1e-6_f64;
+        for col in 0..dim {
+            let (mut xp, mut xm) = (x0.to_vec(), x0.to_vec());
+            xp[col] += d;
+            xm[col] -= d;
+            let (fp, fm) = (assembled(&xp), assembled(&xm));
+            for row in 0..dim {
+                let fd = (fp[row] - fm[row]) / (2.0 * d);
+                let analytic =
+                    sink.jacobian[row * dim + col] + coeff * sink.dcharge[row * dim + col];
+                let scale = analytic.abs().max(fd.abs()).max(1.0);
+                assert!(
+                    (analytic - fd).abs() / scale < 1e-6,
+                    "row {row} col {col}: analytic {analytic} vs central difference {fd}"
+                );
+            }
+        }
+    }
+
+    /// Two nodes plus a bias-dependent charge coefficient on branch 0, as
+    /// `the_product_rule_jacobian_matches_a_central_finite_difference` builds it — factored out
+    /// so the accumulator shapes below can reuse it.
+    fn bias_dependent_ddt_module(name: &str) -> (Module, ExprId) {
+        let mut m = Module::new(name);
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        m.params = vec![Param {
+            name: "c0".into(),
+            default: 2e-9,
+            min: None,
+            max: None,
+        }];
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let v2 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let c0 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, c0, v));
+        let ddt_q = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+        let value = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v2, ddt_q));
+        (m, value)
+    }
+
+    /// A contribution carrying a bias-dependent charge coefficient, re-read through a bare
+    /// `I(branch)` probe so it is routed through `stamp_flow_current_accumulators`.
+    ///
+    /// That path stamped `total.grad` only. Lifting the blanket refusal on a nested `ddt` in a
+    /// resistive term (2026-08-30) newly exposed it: the model now *builds*, and its accumulator
+    /// row's Jacobian was zero where the truth is not — the same silent-Newton-degradation the
+    /// refusal had been preventing, moved one path over.
+    #[test]
+    fn the_flow_current_accumulator_carries_the_product_rule_term() {
+        let (mut m, value) = bias_dependent_ddt_module("acc_product_rule");
+        m.nodes.push(NodeDecl {
+            name: "o".into(),
+            discipline: Discipline::Electrical,
+            abstol: None,
+        });
+        m.ports.push(vec![NodeId(2)]);
+        m.branches.push(Branch {
+            p: NodeId(2),
+            n: NodeId(1),
+        });
+        // `I(o,n) <+ I(p,n);` — the bare flow probe that creates the accumulator.
+        let probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Flow,
+            branch: BranchId(0),
+        }));
+        m.analog = vec![
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(1),
+                },
+                value: probe,
+            },
+        ];
+
+        let mut next_unknown = 3;
+        let inst = build_instance_with(
+            &m,
+            &[0, 1, 2],
+            &mut next_unknown,
+            Integration::BackwardEuler,
+        )
+        .expect("builds under backward Euler");
+        // The accumulator claims its own unknown during the build, so the solution vector is
+        // only the right length once `next_unknown` has settled.
+        let mut x0 = vec![0.0; next_unknown];
+        x0[0] = 0.35;
+        x0[2] = 0.1;
+        assert_assembled_jacobian_matches_fd(inst.as_ref(), next_unknown, &x0, 1e6);
+    }
+
+    /// The same coefficient inside an `idt` integrand — `stamp_idt_accumulators` stamped
+    /// `d.grad` only, and was exposed by the same change for the same reason.
+    #[test]
+    fn the_idt_accumulator_carries_the_product_rule_term() {
+        let (mut m, value) = bias_dependent_ddt_module("idt_product_rule");
+        let idt = m.push_expr(Expr::Call(Builtin::Idt, vec![value]));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: idt,
+        }];
+
+        let mut next_unknown = 2;
+        let inst = build_instance_with(&m, &[0, 1], &mut next_unknown, Integration::BackwardEuler)
+            .expect("builds under backward Euler");
+        let mut x0 = vec![0.0; next_unknown];
+        x0[0] = 0.35;
+        if next_unknown > 2 {
+            x0[2] = 0.05;
+        }
+        assert_assembled_jacobian_matches_fd(inst.as_ref(), next_unknown, &x0, 1e6);
     }
 
     /// A bias-dependent charge coefficient (`c(x)·ddt(q)`, a `ddt` nested inside a resistive
