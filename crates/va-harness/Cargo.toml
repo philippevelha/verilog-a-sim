@@ -8,3 +8,4 @@ description = "T6: golden-reference validation harness and accuracy metrics vs Q
 [dependencies]
 va-cli = { workspace = true }
 thiserror = { workspace = true }
+plotters = { workspace = true }

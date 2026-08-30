@@ -11,6 +11,7 @@ pub mod dc;
 pub mod golden;
 pub mod metrics;
 pub mod noise;
+pub mod plot;
 pub mod tran;
 
 use thiserror::Error;

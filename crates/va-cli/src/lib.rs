@@ -27,7 +27,7 @@
 
 #![forbid(unsafe_code)]
 
-mod plot;
+pub mod plot;
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
@@ -114,8 +114,16 @@ pub fn run_sim(
     let (net, compiled) = load(netlist, model)?;
 
     gate_analysis(&net, analysis)?;
-    if plot.is_some() && analysis != Analysis::Transient {
-        bail!("--plot only supports transient analysis in v0 (pass --tran)");
+    // Plottable analyses are the ones that produce a *curve*: a transient waveform, or a `.dc`
+    // sweep. A bare DC operating point is a single point — plotting one would be an empty
+    // image, so asking is still a clear error rather than a misleading file.
+    if plot.is_some()
+        && analysis != Analysis::Transient
+        && !(analysis == Analysis::Dc && net.dc.is_some())
+    {
+        bail!(
+            "--plot supports a transient run (--tran) or a `.dc` sweep; a DC operating point is              a single point, not a curve"
+        );
     }
 
     if analysis == Analysis::Transient {
@@ -135,6 +143,11 @@ pub fn run_sim(
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
         report_sweep(&net, sweep, &points);
+        if let Some(path) = plot {
+            plot::plot_sweep(path, &net, sweep, &points)
+                .with_context(|| format!("plotting to {path}"))?;
+            eprintln!("[va-cli] wrote sweep plot to {path}");
+        }
     } else {
         let op = solve_dc(&net, &compiled)?;
         report(&net, &op.x);

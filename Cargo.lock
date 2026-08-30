@@ -1366,6 +1366,7 @@ dependencies = [
 name = "va-harness"
 version = "0.0.0"
 dependencies = [
+ "plotters",
  "thiserror 2.0.18",
  "va-cli",
 ]

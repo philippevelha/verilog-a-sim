@@ -2,8 +2,10 @@
 //! native-link deps — the bitmap backend pulls in font-rasterization deps for no benefit
 //! here). Decision recorded in `docs/roadmap.md`'s Quarto-tutorials conventions.
 //!
-//! Transient only in v0: a DC operating point is a single point, not a waveform, and plotting
-//! one isn't useful — [`plot_transient`] is the only entry point.
+//! Two entry points: [`plot_transient`] for a waveform against time, and [`plot_sweep`] for a
+//! `.dc` sweep against the swept source's value. A DC *operating point* remains unplottable —
+//! it is a single point, not a curve — so asking for one is still a clear error rather than an
+//! empty image.
 
 use anyhow::{Context, Result};
 use plotters::prelude::*;
@@ -65,6 +67,95 @@ pub fn plot_transient(path: &str, net: &Netlist, wf: &Waveform) -> Result<()> {
         chart
             .draw_series(LineSeries::new(
                 wf.t.iter().zip(&wf.x).map(|(&t, x)| (t, x[i])),
+                &color,
+            ))
+            .with_context(|| format!("drawing V({name})"))?
+            .label(format!("V({name})"))
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+    }
+
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()
+        .context("drawing the legend")?;
+
+    root.present()
+        .with_context(|| format!("writing SVG to {path}"))?;
+    Ok(())
+}
+
+/// Render every node's voltage across a `.dc` sweep as an SVG line chart at `path`.
+///
+/// `points` is [`crate::solve_dc_sweep`]'s output: the swept source value paired with the
+/// operating point solved there. The x-axis is that value, so the familiar diode I–V or MOS
+/// transfer curve comes out the right way round.
+///
+/// Only **node voltages** are drawn — `net.node_order.len()` entries — deliberately. An
+/// operating point's vector continues past them into branch-current unknowns, and a diode
+/// sweep puts volts (0…0.6) beside amps (~1e-13) on one linear axis, where the smaller series
+/// is invisible. Currents need a second axis to be worth drawing; until there is one, leaving
+/// them out is honest and an empty-looking chart is not.
+///
+/// # Errors
+///
+/// Returns an error if `points` is empty, or if drawing/writing the SVG fails.
+pub fn plot_sweep(
+    path: &str,
+    net: &Netlist,
+    sweep: &va_netlist::DcSweep,
+    points: &[(f64, va_core::dc::OperatingPoint)],
+) -> Result<()> {
+    let x_min = points.first().context("sweep has no points to plot")?.0;
+    let x_max = points.last().context("sweep has no points to plot")?.0;
+    // A one-point sweep, or `start == stop`, would collapse the x-axis.
+    let (x_min, x_max) = if x_max > x_min {
+        (x_min, x_max)
+    } else {
+        (x_min - 1.0, x_max + 1.0)
+    };
+
+    let n_nodes = net.node_order.len();
+    let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (_, op) in points {
+        for &v in op.x.iter().take(n_nodes) {
+            y_min = y_min.min(v);
+            y_max = y_max.max(v);
+        }
+    }
+    if y_max <= y_min {
+        y_min -= 1.0;
+        y_max += 1.0;
+    }
+    let pad = 0.05 * (y_max - y_min);
+    y_min -= pad;
+    y_max += pad;
+
+    let root = SVGBackend::new(path, (960, 540)).into_drawing_area();
+    root.fill(&WHITE)
+        .with_context(|| format!("initializing SVG canvas at {path}"))?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("DC sweep", ("sans-serif", 24))
+        .margin(15)
+        .x_label_area_size(35)
+        .y_label_area_size(55)
+        .build_cartesian_2d(x_min..x_max, y_min..y_max)
+        .context("building the chart coordinate system")?;
+
+    chart
+        .configure_mesh()
+        .x_desc(format!("{} (V)", sweep.source))
+        .y_desc("Voltage (V)")
+        .draw()
+        .context("drawing the chart mesh")?;
+
+    for (i, name) in net.node_order.iter().enumerate() {
+        let color = PALETTE[i % PALETTE.len()];
+        chart
+            .draw_series(LineSeries::new(
+                points.iter().map(|(v, op)| (*v, op.x[i])),
                 &color,
             ))
             .with_context(|| format!("drawing V({name})"))?

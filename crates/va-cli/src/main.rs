@@ -37,7 +37,7 @@ fn print_usage() {
          va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
-         --plot <out.svg>        Write an SVG plot of the transient waveform (--tran only)
+         --plot <out.svg>        Write an SVG plot of the transient waveform or .dc sweep
     \n         --integration be|trap   Transient discretization, and the one models are compiled for.
                                  Default trapezoidal; `be` unlocks a bias-dependent ddt coefficient"
     );
