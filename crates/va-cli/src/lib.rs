@@ -369,6 +369,34 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<ParsedFile> {
     }
 }
 
+/// Whether `path`'s source can be **proved** to declare no module, without preprocessing or
+/// parsing it.
+///
+/// The proof has two halves, and needs both:
+///
+/// 1. The byte sequence `module` occurs nowhere in the raw source. Verilog-A's preprocessor has
+///    no token-pasting operator (see `va_frontend::preprocess`'s limitations list), so the
+///    keyword cannot be assembled from fragments — if those six bytes are absent from the file,
+///    no amount of macro expansion can produce them.
+/// 2. The file contains no `` `include ``. An included header *could* carry a `module`, and when
+///    a file fails at the preprocess stage we cannot know what its includes would have expanded
+///    to, so any file with one is left alone.
+///
+/// Together those make this a proof for the files it accepts rather than a guess, which is why
+/// it is allowed to move a file out of the failure count. It is **deliberately one-directional
+/// and deliberately crude**: any occurrence of `module` at all counts, including inside a
+/// comment, a string, or the word `endmodule`. A wrong "declares no module" would hide a real
+/// frontend gap; a wrong "might declare a module" only understates coverage. The asymmetry is
+/// the point — when in doubt this returns `false` and the file stays a failing model.
+///
+/// An unreadable file returns `false` so that `parse_file` reports the read error itself.
+fn cannot_declare_a_module(path: &str) -> bool {
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    !src.contains("module") && !src.contains("`include")
+}
+
 /// Check every file in one directory-grouped library together (§ module instantiation across
 /// files, [`check_models`]): parse each file individually — still reporting its own
 /// read/preprocess/lex/parse failure on its own line — then elaborate every module from every
@@ -386,6 +414,16 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
     // every `ModuleAst` a second time just to report per-file status.
     let mut file_ranges: Vec<(&str, std::ops::Range<usize>, Vec<String>)> = Vec::new();
     for (file, root) in group {
+        // Settle "is this a checkable model at all?" *before* preprocessing or parsing it.
+        // Whether an include fragment's body happens to preprocess says nothing about this
+        // frontend's coverage, and counting it as a failing model understates coverage exactly
+        // as counting it as a pass used to overstate it (see `CheckTally`). This decides only
+        // the cases it can *prove*; everything else still goes through the full pipeline.
+        if cannot_declare_a_module(file) {
+            println!("  [none ] {file}: declares no module (no `module` keyword in the source, and no `` `include `` to introduce one)");
+            tally.no_module += 1;
+            continue;
+        }
         if let Some(parsed) = parse_file(file, root) {
             let start = library.len();
             library.extend(parsed.asts);
@@ -1596,6 +1634,82 @@ mod tests {
         assert_eq!(
             tally.passed_incomplete, 1,
             "but only hollow.va's pass is on source its own `include left incomplete"
+        );
+    }
+
+    /// A statement-body fragment that fails to preprocess or parse is not a failing *model* —
+    /// counting it as one understates coverage exactly as counting it as a pass used to
+    /// overstate it. `cannot_declare_a_module` moves it out of the denominator, but only where
+    /// it can prove the file has no module: no `module` bytes anywhere, and no `` `include ``
+    /// that could bring one in.
+    #[test]
+    fn a_provably_module_less_fragment_is_not_a_failing_model() {
+        let dir = std::env::temp_dir().join("va_cli_module_less_fragment_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The `ekv3_*` shape: an include fragment whose token stream opens mid-statement. It
+        // cannot parse standalone, and that says nothing about frontend coverage.
+        std::fs::write(
+            dir.join("fragment.va"),
+            "begin\n  real x;\n  x = 1.0;\nend\n",
+        )
+        .unwrap();
+        // Negative control 1: same un-parseable shape, but it *does* contain the keyword, so
+        // the proof fails and it stays a failing model.
+        std::fs::write(
+            dir.join("has_keyword.va"),
+            "begin\n  // this fragment belongs to a module\n  real x;\nend\n",
+        )
+        .unwrap();
+        // Negative control 2: no keyword, but an `` `include `` could carry one in — and when a
+        // file dies at the preprocess stage we cannot know what it would have expanded to.
+        std::fs::write(
+            dir.join("has_include.va"),
+            "`include \"never_shipped.include\"\nbegin\n  real x;\nend\n",
+        )
+        .unwrap();
+
+        let group: Vec<(String, std::path::PathBuf)> =
+            ["fragment.va", "has_keyword.va", "has_include.va"]
+                .iter()
+                .map(|f| (dir.join(f).to_string_lossy().into_owned(), dir.clone()))
+                .collect();
+        let tally = check_group(&group, false);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(tally.passed, 0, "none of the three is a working model");
+        assert_eq!(
+            tally.no_module, 1,
+            "only fragment.va can be proved to declare no module"
+        );
+        assert_eq!(
+            tally.failed, 2,
+            "the two controls stay in the failure count — the proof is one-directional"
+        );
+    }
+
+    /// The proof is deliberately crude in the safe direction: `endmodule` contains `module`, so
+    /// a file carrying only that still counts as possibly-a-model. A wrong "declares no module"
+    /// would hide a real gap; a wrong "might" only understates coverage.
+    #[test]
+    fn the_module_less_proof_is_one_directional() {
+        let dir = std::env::temp_dir().join("va_cli_module_less_proof_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bare.va"), "real x;\n").unwrap();
+        std::fs::write(dir.join("endmodule_only.va"), "real x;\nendmodule\n").unwrap();
+        let bare = dir.join("bare.va").to_string_lossy().into_owned();
+        let endm = dir.join("endmodule_only.va").to_string_lossy().into_owned();
+        let (a, b) = (
+            cannot_declare_a_module(&bare),
+            cannot_declare_a_module(&endm),
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(a, "no `module` bytes and no `include: provably module-less");
+        assert!(
+            !b,
+            "`endmodule` contains `module` — not proved, so not moved"
         );
     }
 
