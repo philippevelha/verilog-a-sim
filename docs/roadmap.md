@@ -34,10 +34,10 @@ shared, demoable milestone that several theses light up at once.
 > the refresh; **12/12** after T5.6 added `resistor_noise_table` later the same day, **13/13**
 > after T5.7 added `resistor_noise_table_log`; **15/15** as of 2026-08-30), `va-cli check
 > external` (**114/150** files pass the frontend — a figure since retired as unsound, see the
-> metric-honesty entry below; **85/93 self-contained module-declaring files** as of
+> metric-honesty entry below; **85/88 self-contained module-declaring files** as of
 > 2026-08-30, on a corpus grown to 158 files — see the port-qualifier entry), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **107/150**
-> since 2026-08-29 — both superseded by **79/93** as of 2026-08-30, and note that the figure is
+> since 2026-08-29 — both superseded by **79/88** as of 2026-08-30, and note that the figure is
 > now re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
@@ -54,9 +54,9 @@ shared, demoable milestone that several theses light up at once.
 | 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | ✅ |
 | T1.1 — lexing | `logos` lexer; 20 tests. **Gate green as originally scoped** (a fixed subset); `CLAUDE.md` §1 has since widened T1's target to the *full* Verilog-A token set, tracked live in `token-reference.md` + the corpus scan, not by this row | 🟢 |
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
-| T1.3 — elaboration | AST → `va_ir::Module`; **85/93 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
+| T1.3 — elaboration | AST → `va_ir::Module`; **85/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **79/93 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **79/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -92,7 +92,7 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
    `docs/token-reference.md` and the corpus scan, which are explicitly still growing.
 2. **T1.3's literal gate is unmet.** It names committed golden-IR snapshots for the three zoo
    models; the tests assert IR *structure* instead. Cheap to close, not yet closed.
-3. **T2.2/T2.3 are not corpus-complete.** 79 of the 93 self-contained, module-declaring corpus
+3. **T2.2/T2.3 are not corpus-complete.** 79 of the 88 self-contained, module-declaring corpus
    files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **6 files**, all
    individually accounted for and none a recognizer gap: a bias-dependent `ddt` coefficient
    needing the product-rule change to Interface β (`hicumL2V2p4p0`, `hicumL2V3p0p0`,
@@ -142,7 +142,7 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >
 > ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
 > "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
-> `114`/`104` totals are not. Current figures: **85/93** (frontend) and **79/93** (frontend +
+> `114`/`104` totals are not. Current figures: **85/88** (frontend) and **79/88** (frontend +
 > codegen) on files that both declare a module and are self-contained (2026-08-30, corpus grown
 > to 158 files — see the port-qualifier entry; the 2026-08-29 revision of this line said
 > 82/108 and 75/108, of which the frontend half was itself off by one, see below).
@@ -2650,8 +2650,8 @@ vendor's own `constants.vams`/`disciplines.vams`, co-located because all three `
 variants now in the corpus differ, and without them these files would silently bind to a
 *different* library's header).
 
-**Headline: 81/108 → 85/93 frontend, 75/108 → 79/93 frontend+codegen.** Full gate green —
-`fmt`, `clippy -D warnings`, **566 tests** (was 557; +9 here), and `xtask validate` **15/15
+**Headline: 81/108 → 85/88 frontend, 75/108 → 79/88 frontend+codegen.** Full gate green —
+`fmt`, `clippy -D warnings`, **569 tests** (was 557; +12 here), and `xtask validate` **15/15
 golden reproducing their recorded numbers to the last digit**. Nothing in the simulation path
 changed.
 
@@ -2743,18 +2743,45 @@ hide a real frontend gap; a wrong "might declare a module" only understates cove
 negative controls pin the asymmetry: the same un-parseable fragment *with* the keyword in a
 comment, and one with no keyword but an `` `include ``, both stay in the failure count.
 
-**Effect: 85/110 → 85/93 frontend, 79/110 → 79/93 frontend+codegen.** The numerators do not move
+**Effect: 85/110 → 85/93 frontend, 79/110 → 79/93 frontend+codegen** — and on to 85/88 and 79/88 once the `[pp]` half below landed. The numerators do not move
 — nothing new compiles. This is a measurement correction, and it is worth being explicit that it
 flatters the figure: the honest reading is "of the corpus files that are actually models and are
 self-contained, 85 of 93 pass the frontend", not "coverage improved".
 
-**One residual hole from the same family, still open.** `parse_file` discards a failing file's
-skipped-include list, so a `[pp]` failure can never be tagged `failed_incomplete` the way an
-`[elab]` one is. All 5 remaining `[pp]` failures are truncated vendor distributions — the exact
-artifact `failed_incomplete` exists to quarantine — with 1 to 5 missing `.include` files each
-(`diode_cmc`, `juncap200`, `psphv`, `psphvrr`, `r3_cmc`). Tagging them would give **85/88 and
-79/88**. Not done here: it needs `preprocess_reporting` to report skipped includes alongside its
-error, which is a change to a shared frontend entry point rather than to the reporting layer.
+### The last hole in the same family, closed — 5 files
+
+`parse_file` discarded a failing file's skipped-include list, so `failed_incomplete` was
+**unreachable for a `[pp]` failure**. That left the 2026-08-29 "one defect, two opposite
+verdicts" shape intact in miniature: a truncated distribution whose vanished `` `include ``
+merely broke *elaboration* was quarantined, while one whose vanished include broke
+*preprocessing* was scored as a frontend gap.
+
+`preprocess_reporting` now returns `(Result<String, _>, Vec<String>)` — the skipped list comes
+back on **both** arms. It has to: the absent body file usually also held the macro definitions
+the surviving text goes on to use, so a truncated file characteristically drops an include *and
+then* fails on `` `GMIN ``/`` `IPRoz ``/`` `MAXA ``. Returning the list only on success made those
+two facts unreportable together. `parse_file` correspondingly returns
+`Result<ParsedFile, Vec<String>>`, carrying what was skipped before the failure.
+
+All 5 remaining `[pp]` failures are truncated vendor distributions (`diode_cmc`, `juncap200`,
+`psphv`, `psphvrr`, `r3_cmc`), 1–5 missing `.include` files each. **85/93 → 85/88 frontend,
+79/93 → 79/88 frontend+codegen**, numerators again unmoved.
+
+**The diagnostics improved more than the metric did.** The `[pp]` lines now explain themselves:
+
+```
+[pp] external\psphv.va: preprocess error: undefined macro `GMIN
+     [after skipping unresolved `include: PSP103_macrodefs.include]
+```
+
+The bare form named a symbol and implied a frontend gap; the clause shows the macro lived in the
+file that never shipped.
+
+This is a two-crate change (`va-frontend`'s preprocess entry point and `va-cli`'s reporting), but
+not a §6 event — `preprocess_reporting` is T1's own API, not one of the two frozen interfaces.
+Negative controls both sides: a preprocess failure with nothing skipped reports an empty list,
+and a file that fails on a genuinely undefined macro with no `` `include `` to blame stays in the
+self-contained denominator.
 
 ### Remaining parse failures: 13 → 5
 

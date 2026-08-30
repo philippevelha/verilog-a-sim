@@ -35,7 +35,7 @@ use std::path::PathBuf;
 /// Returns [`FrontendError::Preprocess`] on an undefined macro, malformed directive,
 /// unbalanced conditional, or include cycle.
 pub fn preprocess(source: &str, include_dirs: &[PathBuf]) -> Result<String, FrontendError> {
-    preprocess_reporting(source, include_dirs).map(|(out, _)| out)
+    preprocess_reporting(source, include_dirs).0
 }
 
 /// Preprocess `source` as [`preprocess`] does, additionally returning **every `` `include ``
@@ -60,13 +60,24 @@ pub fn preprocess(source: &str, include_dirs: &[PathBuf]) -> Result<String, Fron
 /// corpus coverage number that measured neither. Returning the skipped names is what lets a
 /// caller tell the three cases apart.
 ///
+/// # Why the skipped list is returned *beside* the result, not inside the `Ok`
+///
+/// A file can both drop an include **and** then fail to preprocess — indeed that is the normal
+/// shape of a truncated vendor distribution, where the absent body file also held the macro
+/// definitions the surviving text goes on to use (`` `IPRoz ``, `` `MAXA ``, …). Returning the
+/// list only on success made those two facts unreportable together: the caller saw an error and
+/// had no way to learn the error was *caused* by a truncation rather than by a frontend gap. So
+/// the list comes back either way, and `Err` means only "this did not preprocess", never "there
+/// is nothing more to say about why".
+///
 /// # Errors
 ///
-/// Identical to [`preprocess`].
+/// The `Result` half is [`FrontendError::Preprocess`] on an undefined macro, malformed
+/// directive, unbalanced conditional, or include cycle — identical to [`preprocess`].
 pub fn preprocess_reporting(
     source: &str,
     include_dirs: &[PathBuf],
-) -> Result<(String, Vec<String>), FrontendError> {
+) -> (Result<String, FrontendError>, Vec<String>) {
     let mut pp = Preprocessor {
         include_dirs: include_dirs.to_vec(),
         macros: HashMap::new(),
@@ -75,11 +86,13 @@ pub fn preprocess_reporting(
         out: String::new(),
         skipped_includes: Vec::new(),
     };
-    pp.process_str(source)?;
-    if !pp.cond.is_empty() {
-        return Err(pp_err("unterminated `ifdef/`ifndef (missing `endif)"));
+    let mut result = pp.process_str(source);
+    if result.is_ok() && !pp.cond.is_empty() {
+        result = Err(pp_err("unterminated `ifdef/`ifndef (missing `endif)"));
     }
-    Ok((pp.out, pp.skipped_includes))
+    // Whatever was skipped before the failure is still the truth about this file.
+    let skipped = std::mem::take(&mut pp.skipped_includes);
+    (result.map(|()| pp.out), skipped)
 }
 
 /// A stored macro definition. `params` is `Some` for a function-like macro.
@@ -616,6 +629,40 @@ mod tests {
         // No include path → the include is dropped, the rest survives.
         let out = pp("`include \"nope.vams\"\nmodule m; endmodule\n");
         assert!(out.contains("module m"));
+    }
+
+    /// The truncated-vendor-distribution shape: the absent `` `include `` held the macro
+    /// definitions the surviving text goes on to use, so the file drops an include **and then**
+    /// fails to preprocess. Both facts have to come back, or a caller sees only the error and
+    /// reads a truncation as a frontend gap — the exact misattribution the skipped list exists
+    /// to prevent.
+    #[test]
+    fn a_failing_preprocess_still_reports_what_it_skipped() {
+        let (result, skipped) = preprocess_reporting(
+            "`include \"macrodefs_that_never_shipped.include\"
+x = `GMIN;
+",
+            &[],
+        );
+        let err = result.expect_err("`GMIN is undefined once the include is dropped");
+        assert!(err.to_string().contains("GMIN"), "{err}");
+        assert_eq!(
+            skipped,
+            vec!["macrodefs_that_never_shipped.include".to_string()]
+        );
+    }
+
+    /// Negative control: a failure with nothing skipped reports an empty list, so a caller
+    /// cannot mistake "we know of no truncation" for "we did not look".
+    #[test]
+    fn a_failing_preprocess_with_no_include_reports_nothing_skipped() {
+        let (result, skipped) = preprocess_reporting(
+            "x = `NOPE;
+",
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(skipped.is_empty());
     }
 
     #[test]

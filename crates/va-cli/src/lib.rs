@@ -254,11 +254,20 @@ struct CheckTally {
     /// The subset of `passed` whose source was incomplete: at least one `` `include `` could
     /// not be resolved, so what elaborated is less than the file describes.
     passed_incomplete: usize,
-    /// Files declaring at least one module where some module failed.
+    /// Files that declare (or may declare) at least one module, where something failed —
+    /// whether at read/preprocess/lex/parse, or on a module that would not elaborate/build.
     failed: usize,
     /// The subset of `failed` that also dropped an unresolved `` `include ``. These are not
     /// frontend gaps — the ten "port `X` has no discipline declaration" corpus failures are
     /// exactly this: the declarations were in a body file the distribution never shipped.
+    ///
+    /// Counted on **both** failure paths. It used to be reachable only after a successful
+    /// parse, because a file that died earlier had its skipped-include list discarded — which
+    /// split one defect into two verdicts all over again: a truncated distribution whose absent
+    /// `` `include `` broke elaboration was quarantined here, while one whose absent include
+    /// broke *preprocessing* (the same file, one macro earlier) was scored as a frontend gap.
+    /// `va_frontend::preprocess::preprocess_reporting` now reports skipped includes beside its
+    /// error as well as inside its `Ok`, which is what makes this reachable for a `[pp]` line.
     failed_incomplete: usize,
     /// Files that parsed but declare no module — headers and statement-body fragments.
     no_module: usize,
@@ -322,16 +331,23 @@ fn skipped_clause(skipped: &[String]) -> String {
 }
 
 /// Run one source file through preprocess → lex → parse, printing a tagged status line on
-/// failure. Returns `None` (already reported) if any stage fails, `Some(ParsedFile)` otherwise.
-/// `scan_root` is the top-level directory the file was discovered under (empty if the file was
-/// passed directly rather than found via directory scan) — used only to widen `` `include ``
-/// resolution, unrelated to [`check_group`]'s cross-file *instantiation* library.
-fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<ParsedFile> {
+/// failure. `scan_root` is the top-level directory the file was discovered under (empty if the
+/// file was passed directly rather than found via directory scan) — used only to widen
+/// `` `include `` resolution, unrelated to [`check_group`]'s cross-file *instantiation* library.
+///
+/// # Errors
+///
+/// `Err` means the file did not reach an AST — already reported on its own status line — and
+/// carries **the unresolved `` `include ``s found before the failure**. That list is what lets
+/// [`check_group`] tell a truncated distribution from a real frontend gap on the failure path,
+/// exactly as `skipped_includes` does on the success path. It is empty when the file could not
+/// be read at all, or when nothing had been skipped yet.
+fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec<String>> {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             println!("  [read ] {path}: {e}");
-            return None;
+            return Err(Vec::new());
         }
     };
     // Resolve `include against the file's own directory first, then fall back to the
@@ -342,29 +358,33 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Option<ParsedFile> {
     if !scan_root.as_os_str().is_empty() && Some(scan_root) != own_dir {
         include_dirs.push(scan_root.to_path_buf());
     }
-    let (src, skipped_includes) =
-        match va_frontend::preprocess::preprocess_reporting(&src, &include_dirs) {
-            Ok(pair) => pair,
-            Err(e) => {
-                println!("  [pp   ] {path}: {e}");
-                return None;
-            }
-        };
+    let (result, skipped_includes) =
+        va_frontend::preprocess::preprocess_reporting(&src, &include_dirs);
+    let src = match result {
+        Ok(src) => src,
+        Err(e) => {
+            // The clause matters most here: a vendor distribution whose body `` `include ``
+            // never shipped usually fails on a macro that same file defined, so the bare error
+            // names a symbol and implies a gap that does not exist.
+            println!("  [pp   ] {path}: {e}{}", skipped_clause(&skipped_includes));
+            return Err(skipped_includes);
+        }
+    };
     let tokens = match va_frontend::lexer::lex(&src) {
         Ok(t) => t,
         Err(e) => {
             println!("  [lex  ] {path}: {e}{}", skipped_clause(&skipped_includes));
-            return None;
+            return Err(skipped_includes);
         }
     };
     match va_frontend::parser::parse(&tokens) {
-        Ok(asts) => Some(ParsedFile {
+        Ok(asts) => Ok(ParsedFile {
             asts,
             skipped_includes,
         }),
         Err(e) => {
             println!("  [parse] {path}: {e}{}", skipped_clause(&skipped_includes));
-            None
+            Err(skipped_includes)
         }
     }
 }
@@ -424,13 +444,22 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
             tally.no_module += 1;
             continue;
         }
-        if let Some(parsed) = parse_file(file, root) {
-            let start = library.len();
-            library.extend(parsed.asts);
-            file_ranges.push((file.as_str(), start..library.len(), parsed.skipped_includes));
-        } else {
-            // `parse_file` already printed the reason.
-            tally.failed += 1;
+        match parse_file(file, root) {
+            Ok(parsed) => {
+                let start = library.len();
+                library.extend(parsed.asts);
+                file_ranges.push((file.as_str(), start..library.len(), parsed.skipped_includes));
+            }
+            // `parse_file` already printed the reason. A failure that also dropped an
+            // unresolved `` `include `` is a *truncated* file, not a gap — the same distinction
+            // the post-elaboration path below draws, which until now could not be drawn here at
+            // all because the skipped list was discarded on the error path.
+            Err(skipped) => {
+                tally.failed += 1;
+                if !skipped.is_empty() {
+                    tally.failed_incomplete += 1;
+                }
+            }
         }
     }
 
@@ -1634,6 +1663,56 @@ mod tests {
         assert_eq!(
             tally.passed_incomplete, 1,
             "but only hollow.va's pass is on source its own `include left incomplete"
+        );
+    }
+
+    /// A file that fails to *preprocess* because the `` `include `` holding its macro
+    /// definitions never shipped is a truncated distribution, not a frontend gap. Until
+    /// `preprocess_reporting` reported skipped includes on its error path, `failed_incomplete`
+    /// was unreachable for a `[pp]` failure, so these could never be separated out the way an
+    /// `[elab]` failure on the same defect already was — one defect, two verdicts again.
+    #[test]
+    fn a_preprocess_failure_on_a_dropped_include_is_counted_as_incomplete() {
+        let dir = std::env::temp_dir().join("va_cli_pp_failure_incomplete_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The vendor shape: the absent include held `GMIN, which the surviving text then uses.
+        std::fs::write(
+            dir.join("truncated.va"),
+            "`include \"macrodefs_that_never_shipped.include\"
+             module truncated(p, n);
+             electrical p, n;
+             analog I(p, n) <+ `GMIN * V(p, n);
+             endmodule
+",
+        )
+        .unwrap();
+        // Negative control: the same preprocess failure with no include to blame it on. This is
+        // a real defect in the file and must stay in the self-contained denominator.
+        std::fs::write(
+            dir.join("genuinely_broken.va"),
+            "module genuinely_broken(p, n);
+             electrical p, n;
+             analog I(p, n) <+ `NEVER_DEFINED * V(p, n);
+             endmodule
+",
+        )
+        .unwrap();
+
+        let group: Vec<(String, std::path::PathBuf)> = ["truncated.va", "genuinely_broken.va"]
+            .iter()
+            .map(|f| (dir.join(f).to_string_lossy().into_owned(), dir.clone()))
+            .collect();
+        let tally = check_group(&group, false);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(tally.passed, 0);
+        assert_eq!(tally.no_module, 0, "both files do declare a module");
+        assert_eq!(tally.failed, 2, "both fail to preprocess");
+        assert_eq!(
+            tally.failed_incomplete, 1,
+            "only the one whose `include vanished is a truncation rather than a gap"
         );
     }
 
