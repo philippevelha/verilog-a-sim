@@ -1,0 +1,98 @@
+Module {
+    name: "capacitor",
+    ports: [
+        [
+            NodeId(
+                0,
+            ),
+        ],
+        [
+            NodeId(
+                1,
+            ),
+        ],
+    ],
+    nodes: [
+        NodeDecl {
+            name: "p",
+            discipline: Electrical,
+            abstol: Some(
+                1e-6,
+            ),
+        },
+        NodeDecl {
+            name: "n",
+            discipline: Electrical,
+            abstol: Some(
+                1e-6,
+            ),
+        },
+    ],
+    branches: [
+        Branch {
+            p: NodeId(
+                0,
+            ),
+            n: NodeId(
+                1,
+            ),
+        },
+    ],
+    params: [
+        Param {
+            name: "C",
+            default: 1e-12,
+            min: Some(
+                0.0,
+            ),
+            max: None,
+        },
+    ],
+    exprs: [
+        Param(
+            ParamId(
+                0,
+            ),
+        ),
+        Probe(
+            Access {
+                kind: Potential,
+                branch: BranchId(
+                    0,
+                ),
+            },
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                0,
+            ),
+            ExprId(
+                1,
+            ),
+        ),
+        Call(
+            Ddt,
+            [
+                ExprId(
+                    2,
+                ),
+            ],
+        ),
+    ],
+    vars: [],
+    functions: [],
+    analog: [
+        Contribute {
+            target: Access {
+                kind: Flow,
+                branch: BranchId(
+                    0,
+                ),
+            },
+            value: ExprId(
+                3,
+            ),
+        },
+    ],
+}

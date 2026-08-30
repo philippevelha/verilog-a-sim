@@ -1,0 +1,218 @@
+Module {
+    name: "diode",
+    ports: [
+        [
+            NodeId(
+                0,
+            ),
+        ],
+        [
+            NodeId(
+                1,
+            ),
+        ],
+    ],
+    nodes: [
+        NodeDecl {
+            name: "anode",
+            discipline: Electrical,
+            abstol: Some(
+                1e-6,
+            ),
+        },
+        NodeDecl {
+            name: "cathode",
+            discipline: Electrical,
+            abstol: Some(
+                1e-6,
+            ),
+        },
+    ],
+    branches: [
+        Branch {
+            p: NodeId(
+                0,
+            ),
+            n: NodeId(
+                1,
+            ),
+        },
+    ],
+    params: [
+        Param {
+            name: "Is",
+            default: 1e-14,
+            min: Some(
+                0.0,
+            ),
+            max: None,
+        },
+        Param {
+            name: "N",
+            default: 1.0,
+            min: Some(
+                0.0,
+            ),
+            max: None,
+        },
+    ],
+    exprs: [
+        Param(
+            ParamId(
+                0,
+            ),
+        ),
+        Probe(
+            Access {
+                kind: Potential,
+                branch: BranchId(
+                    0,
+                ),
+            },
+        ),
+        Param(
+            ParamId(
+                1,
+            ),
+        ),
+        Call(
+            Vt,
+            [],
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                2,
+            ),
+            ExprId(
+                3,
+            ),
+        ),
+        Binary(
+            Div,
+            ExprId(
+                1,
+            ),
+            ExprId(
+                4,
+            ),
+        ),
+        Call(
+            Exp,
+            [
+                ExprId(
+                    5,
+                ),
+            ],
+        ),
+        Const(
+            1.0,
+        ),
+        Binary(
+            Sub,
+            ExprId(
+                6,
+            ),
+            ExprId(
+                7,
+            ),
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                0,
+            ),
+            ExprId(
+                8,
+            ),
+        ),
+        Var(
+            VarId(
+                0,
+            ),
+        ),
+        Const(
+            2.0,
+        ),
+        Const(
+            1.602176634e-19,
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                11,
+            ),
+            ExprId(
+                12,
+            ),
+        ),
+        Var(
+            VarId(
+                0,
+            ),
+        ),
+        Call(
+            Abs,
+            [
+                ExprId(
+                    14,
+                ),
+            ],
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                13,
+            ),
+            ExprId(
+                15,
+            ),
+        ),
+        Call(
+            WhiteNoise,
+            [
+                ExprId(
+                    16,
+                ),
+            ],
+        ),
+    ],
+    vars: [
+        VarDecl {
+            name: "Id",
+        },
+    ],
+    functions: [],
+    analog: [
+        Assign {
+            lhs: VarId(
+                0,
+            ),
+            rhs: ExprId(
+                9,
+            ),
+        },
+        Contribute {
+            target: Access {
+                kind: Flow,
+                branch: BranchId(
+                    0,
+                ),
+            },
+            value: ExprId(
+                10,
+            ),
+        },
+        Contribute {
+            target: Access {
+                kind: Flow,
+                branch: BranchId(
+                    0,
+                ),
+            },
+            value: ExprId(
+                17,
+            ),
+        },
+    ],
+}

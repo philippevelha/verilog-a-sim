@@ -4,7 +4,10 @@ subtitle: "T1 · Phase T1.3 · `va-frontend::elaborate`"
 ---
 
 ::: {.callout-note}
-**Status: code complete, real corpus coverage.** 235 `va-frontend` tests, all green. Against the
+**Status: complete.** 237 `va-frontend` tests, all green — including this phase's own
+validation gate, met literally since 2026-08-30: the three zoo models elaborate to **committed
+golden IR** (`crates/va-frontend/tests/golden_ir.rs`), a full snapshot of each elaborated
+`va_ir::Module` rather than the structural assertions that stood in for it before. Against the
 tracked corpus under `external/` (**158 files** once every sibling `` `include ``-only
 header/body fragment is counted), **85/88 self-contained, module-declaring files pass the full
 frontend** (`cargo run -p va-cli -- check external/`, re-derived 2026-08-30, not assumed from a

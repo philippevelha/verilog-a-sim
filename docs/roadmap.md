@@ -54,7 +54,7 @@ shared, demoable milestone that several theses light up at once.
 | 0 — shared contracts | `va-ir`/`va-abi` frozen; resistor/capacitor/diode reference models pass stamp tests; bridge specs in `docs/bridges/` | ✅ |
 | T1.1 — lexing | `logos` lexer; 20 tests. **Gate green as originally scoped** (a fixed subset); `CLAUDE.md` §1 has since widened T1's target to the *full* Verilog-A token set, tracked live in `token-reference.md` + the corpus scan, not by this row | 🟢 |
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
-| T1.3 — elaboration | AST → `va_ir::Module`; **85/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). *Outstanding:* the phase's literal gate names committed golden-IR snapshots; the tests use structural assertions instead | 🟢 |
+| T1.3 — elaboration | AST → `va_ir::Module`; **85/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). The phase's literal gate — the three zoo models elaborating to committed golden IR — closed 2026-08-30 (`crates/va-frontend/tests/golden_ir.rs`) | ✅ |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
 | T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **79/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). All six remaining codegen failures are genuine and individually accounted for — four need the product-rule change to Interface β, one needs the charge channel evaluated inside control flow, one is a bug in the corpus file — not recognizer gaps | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
@@ -90,8 +90,9 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
    Verilog-A *subset*; `CLAUDE.md` §1 now targets the full language. Their implementations are
    green against the original wording, but "done" for T1 is now measured by
    `docs/token-reference.md` and the corpus scan, which are explicitly still growing.
-2. **T1.3's literal gate is unmet.** It names committed golden-IR snapshots for the three zoo
-   models; the tests assert IR *structure* instead. Cheap to close, not yet closed.
+2. ~~**T1.3's literal gate is unmet.**~~ **Closed 2026-08-30** — `crates/va-frontend/tests/
+   golden_ir.rs` commits a full `{:#?}` snapshot of the elaborated `va_ir::Module` for
+   `resistor.va`/`capacitor.va`/`diode.va` and fails on any difference. T1.3 is ✅.
 3. **T2.2/T2.3 are not corpus-complete.** 79 of the 88 self-contained, module-declaring corpus
    files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **6 files**, all
    individually accounted for and none a recognizer gap: a bias-dependent `ddt` coefficient
@@ -147,28 +148,29 @@ are excluded from the gap accounting below for the same reason as the fragments.
 > to 158 files — see the port-qualifier entry; the 2026-08-29 revision of this line said
 > 82/108 and 75/108, of which the frontend half was itself off by one, see below).
 >
-> - **19 — undefined macro** (`` `MAXA ``, `` `GMIN ``, `` `ONE3RD ``, `` `OPPATTR ``, …): an
->   include fragment scanned standalone, whose macros are defined by the parent that includes
->   it (`diode_cmc`, `juncap200`, `junction_v1_0_2`, `jfetidgIds`, `psphv`/`psphvrr`, `r3_cmc`,
->   `sp_functions`, most of the `ekv3_*` family, and `verilogaLib-master/ctle.va`).
-> - **7 — "expected Module, found None/Some(Begin)"**: nature/discipline definition files and
->   bare-statement fragments with no module of their own (both `disciplines.vams` copies,
->   `ekv3_natures`, `ekv3_{extract_debug,extrinsic_diodes,gate_current,gidl}`).
-> - **10 — "port has no discipline declaration"**: the split-body PSP/UTSOI/`r2_cmc` family.
+> **Re-derived 2026-08-30** (`va-cli check external`, 158 files). Of the **18** frontend
+> failures, **15 are truncated distributions**, now reported as such on both the pass and the
+> failure side (see the metric-honesty entries below) — not language gaps:
 >
-> `ctle.va` is the one entry worth a second look rather than a shrug: its `` `M_TWO_PI `` comes
-> from `constants.vams`, which does exist in the tree but not in `ctle.va`'s own folder, so it
-> is arguably an include-path question rather than a pure artifact — and the file separately has
-> a real pre-existing bug of its own (`gain` used but never declared, § the `laplace_zp` entry
-> below).
+> - **10 — "port `X` has no discipline declaration"**: the split-body family whose module body
+>   lives in a sibling `` `include `` the snapshot never shipped (PSP103/104 and their `_nqs`
+>   variants, `L_UTSOI_102[_nqs]`, `r2_cmc`/`r2_et_cmc`). The message names a port, but the
+>   cause is an empty module body.
+> - **5 — undefined macro** (`` `GMIN ``, `` `IPRoz ``, `` `MPInb ``, `` `P ``): the same defect
+>   one stage earlier — the absent include also held the macro definitions the surviving text
+>   uses (`diode_cmc`, `juncap200`, `psphv`, `psphvrr`, `r3_cmc`).
 >
-> The **frontend→codegen gap** is likewise only two categories, both genuine and both
-> already named in T2.2's section: `ddt` appearing nested inside an expression rather than as a
-> top-level contribution term, and a local variable read before assignment (2 — `bsimsoi`,
-> `verilogaLib-master/amp_dynamic`). It was 10 files on 2026-08-04 and is **9 as of
-> 2026-08-29**: `ekv3` left the first category when `charge_term_shape` learned to distribute a
-> coefficient over a parenthesised sum of `ddt`s, leaving 7 (`HICUML0-2`, `hicumL0_v2p*`,
-> `hicumL2*`, `mvsg_cmc_3.2.0`).
+> **Only 3 failures are real**, and two of them are bugs in the corpus file rather than here:
+>
+> - `verilogaLib-master/ctle.va` — `unknown identifier `gain``: the file uses `gain` without
+>   declaring it. (It separately needs array-variable arguments to the Laplace filters; see the
+>   backlog.)
+> - `verilogAlib/example_mzi_modulator.vams` — passes a *parameter* in a port-connection list
+>   (`.therm_en(1)`; a numeric literal is not a legal analog port connection) and instantiates
+>   modules from `photonic_primitives.vams` without `` `include ``ing it.
+> - `bsimsoi.va` — **the one genuine elaborator limitation left in the frontend column**: a
+>   declaration inside a nested block shadowing a module parameter. Rejected rather than
+>   silently mis-bound since 2026-08-29; real block scoping is still open.
 
 **Progress so far** (each closes a specific corpus failure or a gap `token-reference.md`
 itself flagged): `genvar`/`generate` loops and vector nets (elaboration-time unrolling); the
@@ -671,10 +673,11 @@ matches the code verbatim.
 - **Tutorial:** `t1-frontend/02-parsing.qmd` — AST shape, parsing strategy, error reporting.
 
 ### Phase T1.3 — Elaboration → `va-ir`
-> **Status: 🟢 code complete** — `va-frontend/src/elaborate.rs` lowers AST → `va_ir::Module`:
-> nets→`NodeId`, const-eval'd params + ranges, branch accesses→`BranchId`, builtins→`Builtin`.
-> All three zoo models elaborate end-to-end (the `compile()` milestone test is green). 6 tests.
-> *Outstanding:* committed golden-IR snapshots (currently structural assertions).
+> **Status: ✅ complete** (2026-08-30) — `va-frontend/src/elaborate.rs` lowers AST →
+> `va_ir::Module`: nets→`NodeId`, const-eval'd params + ranges, branch accesses→`BranchId`,
+> builtins→`Builtin`. All three zoo models elaborate end-to-end, and **the validation gate is
+> now met literally**: `crates/va-frontend/tests/golden_ir.rs` compares each against a
+> committed snapshot of the whole elaborated module.
 > `t1-frontend/03-elaboration.qmd` written 2026-07-18 (120 tests by then, up from 6; 114/150
 > real corpus files pass the full frontend).
 
@@ -2790,6 +2793,52 @@ port fix to two **source** bugs in the corpus file, not frontend gaps: it passes
 in a port-connection list (`.therm_en(1)` — a numeric literal is not a legal analog port
 connection), and it instantiates modules from `photonic_primitives.vams` without `` `include ``ing
 it.
+
+---
+
+## T1.3's validation gate, met literally — golden IR (2026-08-30)
+
+The last thing keeping T1.3 at 🟢 was its own gate: *"the three zoo models elaborate to IR that
+matches committed golden IR."* The tests asserted IR **structure** instead — a node count here,
+a parameter name there. This roadmap had called that "cheap to close" since 2026-08-04 without
+closing it. **T1.3 is now ✅.**
+
+`crates/va-frontend/tests/golden_ir.rs` elaborates `resistor.va`, `capacitor.va` and `diode.va`
+through the real include path and compares each against a committed snapshot of the whole
+`va_ir::Module` (98, 151 and 218 lines).
+
+**The snapshot is `{:#?}`, deliberately, and not a hand-written pretty-printer.** A bespoke
+printer reads better and is exactly the wrong tool: it can only print the fields its author
+remembered, so a field added to Interface α tomorrow would be invisible to it and the gate would
+silently stop covering it. `Debug` is **exhaustive by construction** — every field of every
+nested type, or it does not compile. Total coverage beats readability for a gate whose whole job
+is to notice the change nobody predicted. That is the same reasoning that made structural
+assertions insufficient in the first place, applied one level up.
+
+**Generated, never hand-written**, via `UPDATE_GOLDEN_IR=1 cargo test -p va-frontend --test
+golden_ir` — which then *fails on purpose*, so a regeneration run can never be mistaken for a
+passing verification. A snapshot records what the code did, so a diff is a question ("did I mean
+to change Interface α?"), never a licence to edit the file until it matches.
+
+**Not in `golden/`, and that is not an oversight.** `golden/` holds **QSPICE** reference output
+for numerical results, under the standing rule that QSPICE is the sole oracle and nothing
+hand-computed goes in there. IR is not a physical quantity and QSPICE cannot produce it, so these
+snapshots are a different kind of artifact and live beside the test that owns them.
+
+**Two ways of knowing the gate bites**, because a snapshot test that cannot fail is worse than no
+test: a committed negative control asserts two different models do not produce identical dumps,
+and the gate was verified empirically by adding a `parameter real BOGUS` to `models/resistor.va`
+— it failed with `first difference at line 50`, naming the file and both sides, then passed again
+on restore. The failure message points at the regeneration command rather than leaving a 300-line
+`assert_eq!` to be read by eye.
+
+**Also refreshed here:** this file's frontend failure-category list, which still described
+categories that no longer exist (the "7 — expected Module, found None/Some(Begin)" bucket was
+retired when a module-less file stopped being a parse error). Re-derived: of 18 frontend
+failures, **15 are truncated distributions** and only **3 are real** — two bugs in corpus files
+(`ctle.va` uses an undeclared `gain`; `example_mzi_modulator.vams` passes a parameter in a port
+list) and one genuine elaborator limitation (`bsimsoi.va`'s block-scoped shadowing, rejected
+rather than silently mis-bound since 2026-08-29).
 
 ---
 

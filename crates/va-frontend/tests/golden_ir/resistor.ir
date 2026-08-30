@@ -1,0 +1,151 @@
+Module {
+    name: "resistor",
+    ports: [
+        [
+            NodeId(
+                0,
+            ),
+        ],
+        [
+            NodeId(
+                1,
+            ),
+        ],
+    ],
+    nodes: [
+        NodeDecl {
+            name: "p",
+            discipline: Electrical,
+            abstol: Some(
+                1e-6,
+            ),
+        },
+        NodeDecl {
+            name: "n",
+            discipline: Electrical,
+            abstol: Some(
+                1e-6,
+            ),
+        },
+    ],
+    branches: [
+        Branch {
+            p: NodeId(
+                0,
+            ),
+            n: NodeId(
+                1,
+            ),
+        },
+    ],
+    params: [
+        Param {
+            name: "R",
+            default: 1000.0,
+            min: Some(
+                0.0,
+            ),
+            max: None,
+        },
+    ],
+    exprs: [
+        Probe(
+            Access {
+                kind: Potential,
+                branch: BranchId(
+                    0,
+                ),
+            },
+        ),
+        Param(
+            ParamId(
+                0,
+            ),
+        ),
+        Binary(
+            Div,
+            ExprId(
+                0,
+            ),
+            ExprId(
+                1,
+            ),
+        ),
+        Const(
+            4.0,
+        ),
+        Const(
+            1.380649e-23,
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                3,
+            ),
+            ExprId(
+                4,
+            ),
+        ),
+        Call(
+            Temperature,
+            [],
+        ),
+        Binary(
+            Mul,
+            ExprId(
+                5,
+            ),
+            ExprId(
+                6,
+            ),
+        ),
+        Param(
+            ParamId(
+                0,
+            ),
+        ),
+        Binary(
+            Div,
+            ExprId(
+                7,
+            ),
+            ExprId(
+                8,
+            ),
+        ),
+        Call(
+            WhiteNoise,
+            [
+                ExprId(
+                    9,
+                ),
+            ],
+        ),
+    ],
+    vars: [],
+    functions: [],
+    analog: [
+        Contribute {
+            target: Access {
+                kind: Flow,
+                branch: BranchId(
+                    0,
+                ),
+            },
+            value: ExprId(
+                2,
+            ),
+        },
+        Contribute {
+            target: Access {
+                kind: Flow,
+                branch: BranchId(
+                    0,
+                ),
+            },
+            value: ExprId(
+                10,
+            ),
+        },
+    ],
+}
