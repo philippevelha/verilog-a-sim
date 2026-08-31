@@ -1,14 +1,18 @@
 //! `xtask` — project dev automation, invoked as `cargo xtask <subcommand>`.
 //!
 //! Subcommands:
-//! - `validate`   — run `va-harness` over the model zoo and compare to `golden/`.
-//! - `gen-golden` — (re)generate golden outputs from QSPICE, if installed.
-//! - `tutorials`  — render the Quarto developer-tutorial book (`--preview` to live-edit).
+//! - `validate`       — run `va-harness` over the model zoo and compare to `golden/`.
+//! - `gen-golden`     — (re)generate golden outputs from QSPICE, if installed.
+//! - `tutorials`      — render the Quarto developer-tutorial book (`--preview` to live-edit).
+//! - `bench-linsolve` — dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use va_abi::reference::{Resistor, VSource, GROUND};
+use va_abi::ModelInstance;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -18,6 +22,7 @@ fn main() -> Result<()> {
         Some("validate") => validate(),
         Some("gen-golden") => gen_golden(),
         Some("tutorials") => tutorials(&rest),
+        Some("bench-linsolve") => bench_linsolve(),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -35,7 +40,8 @@ fn print_usage() {
          SUBCOMMANDS:\n    \
          validate            Run va-harness over the model zoo vs golden/\n    \
          gen-golden          (Re)generate golden outputs from QSPICE, if installed\n    \
-         tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)"
+         tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)\n    \
+         bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)"
     );
 }
 
@@ -1742,9 +1748,244 @@ fn tutorials_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Node counts `bench_linsolve` sweeps over. Roughly geometric spacing so both ends of the
+/// curve are represented — the low end, where dense is obviously fine, and the high end, where
+/// `O(n³)` time / `O(n²)` space asymptotics start to bite — without spending the whole run on
+/// closely-spaced redundant points. `dim = n_nodes + 1` ([`build_ladder`]'s `+1` is the driving
+/// source's own branch-current unknown). Capped at `10_000` (`dim = 10_001`, ~763 MB of dense
+/// `f64` storage — the point where dense genuinely starts to hurt on ordinary dev hardware) —
+/// the *sparse* solver stays fast enough at every measured size that the whole sweep still
+/// finishes in well under a minute on release hardware; dense's own `O(n³)` cost is what sets
+/// the practical ceiling. See this module's own doc comment on [`bench_linsolve`] for measured
+/// wall time.
+const BENCH_NODE_COUNTS: &[usize] = &[
+    10, 20, 50, 100, 200, 500, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 10_000,
+];
+
+/// Build a leaky resistor-ladder MNA system with `n_nodes` nodes, through real
+/// `va_abi::reference` instances — not a hand-fabricated matrix.
+///
+/// Topology: node `0` is driven by an ideal 5 V source (contributing its own branch-current
+/// unknown, `dim = n_nodes + 1`); every node `i` also carries its own 1 kΩ shunt resistor to
+/// ground (so the system is well-conditioned regardless of size, and no node is left floating);
+/// each adjacent pair `(i, i+1)` is joined by a 100 Ω series resistor. That is a leaky
+/// RC-chain/transmission-line shape, deliberately *not* a dense mesh: every real analog netlist
+/// this project's own `circuits/` zoo contains (a resistor ladder, an RC chain, a bus of similar
+/// cells) has each node touching only a handful of physical neighbors, which is exactly what
+/// makes a dense `n × n` Jacobian mostly zeros as `n` grows — the phenomenon this benchmark
+/// exists to quantify. Every stamp goes through the real `Resistor`/`VSource`
+/// [`ModelInstance::load`], via [`va_core::mna::assemble`] — the same assembly path
+/// `newton`/`dc` use, not a synthetic matrix built by hand.
+fn build_ladder(n_nodes: usize) -> (VSource, Vec<Resistor>) {
+    let branch = n_nodes;
+    let vs = VSource::new(0, GROUND, branch, 5.0);
+    let mut resistors = Vec::with_capacity(2 * n_nodes);
+    for i in 0..n_nodes {
+        resistors.push(Resistor::new(i, GROUND, 1_000.0)); // shunt to ground
+    }
+    for i in 0..n_nodes.saturating_sub(1) {
+        resistors.push(Resistor::new(i, i + 1, 100.0)); // series chain
+    }
+    (vs, resistors)
+}
+
+/// One measured row of `bench_linsolve`'s table.
+struct BenchRow {
+    n_nodes: usize,
+    dim: usize,
+    nnz: usize,
+    dense_bytes: usize,
+    dense_time: Duration,
+    /// `None` if `solve_sparse` itself failed (see [`va_core::linsolve::solve_sparse`]'s own
+    /// `# Errors`) — kept distinct from a slow-but-successful solve.
+    sparse_time: Option<Duration>,
+    /// `Some(false)` if the sparse and dense solutions disagree beyond a loose sanity tolerance
+    /// — would indicate a real correctness bug, not an expected benchmark outcome. `None` when
+    /// there is no sparse solution to compare (`sparse_time` was `None`).
+    sparse_matches_dense: Option<bool>,
+}
+
+/// Build the ladder at `n_nodes`, assemble its MNA system, and time one dense and one sparse
+/// solve of the resulting Newton-step system `J·x = -f` (using the assembled residual as `-b`,
+/// exactly what `newton::solve` itself would hand a linear solver at this operating point).
+fn run_bench_row(n_nodes: usize) -> Result<BenchRow> {
+    let (vs, resistors) = build_ladder(n_nodes);
+    let dim = n_nodes + 1;
+    let mut insts: Vec<&dyn ModelInstance> = Vec::with_capacity(resistors.len() + 1);
+    insts.push(&vs);
+    for r in &resistors {
+        insts.push(r);
+    }
+
+    let x = vec![0.0; dim];
+    let sys = va_core::mna::assemble(&insts, &x, &va_abi::ANALYSIS_DC, dim);
+    let nnz = va_core::linsolve::nnz(&sys.jacobian, dim);
+    let dense_bytes = dim * dim * std::mem::size_of::<f64>();
+    let b: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
+
+    let t0 = Instant::now();
+    let dense_x = va_core::linsolve::solve_dense(&sys.jacobian, &b, dim)
+        .with_context(|| format!("dense solve failed at n_nodes={n_nodes} (dim={dim})"))?;
+    let dense_time = t0.elapsed();
+
+    let t1 = Instant::now();
+    let (sparse_time, sparse_matches_dense) =
+        match va_core::linsolve::solve_sparse(&sys.jacobian, &b, dim) {
+            Ok(sparse_x) => {
+                let elapsed = t1.elapsed();
+                let max_diff = dense_x
+                    .iter()
+                    .zip(sparse_x.iter())
+                    .fold(0.0_f64, |m, (a, s)| m.max((a - s).abs()));
+                (Some(elapsed), Some(max_diff < 1e-6))
+            }
+            Err(e) => {
+                eprintln!(
+                    "[xtask]   bench-linsolve: sparse solve failed at n_nodes={n_nodes}: {e}"
+                );
+                (None, None)
+            }
+        };
+
+    Ok(BenchRow {
+        n_nodes,
+        dim,
+        nnz,
+        dense_bytes,
+        dense_time,
+        sparse_time,
+        sparse_matches_dense,
+    })
+}
+
+/// Sparse-solve benchmark answering the `docs/roadmap.md` T3 backlog question: scale a real
+/// leaky resistor-ladder MNA system ([`build_ladder`], assembled through
+/// [`va_core::mna::assemble`] over real `va_abi::reference::{Resistor, VSource}` instances)
+/// across [`BENCH_NODE_COUNTS`], and report — per size — the assembled Jacobian's actual fill
+/// fraction, the dense `n×n` buffer's `O(n²)` memory footprint, dense solve wall time, and
+/// (where `faer`'s sparse LU is applicable — see [`va_core::linsolve::solve_sparse`]) sparse
+/// solve wall time and the resulting speedup.
+///
+/// Deterministic and re-runnable: fixed node counts, fixed resistances, no randomness — the
+/// same run twice gives the same table modulo wall-clock noise. Does not run under `cargo test
+/// --workspace` (it is a `main`-only binary path, not a `#[test]`), so it never affects normal
+/// CI/test wall time.
+///
+/// **Re-run with:** `cargo xtask bench-linsolve` (release build recommended for the upper end
+/// of [`BENCH_NODE_COUNTS`]: `cargo build --release -p xtask` first, or accept slower debug
+/// timings). See `docs/roadmap.md`'s T3 section for the last captured run's numbers, the
+/// crossover (or its absence), and the resulting recommendation.
+///
+/// # Errors
+///
+/// If a dense solve fails at some `n_nodes` — this ladder is well-conditioned by construction
+/// (every node has its own shunt to ground), so that would indicate a real bug, not an expected
+/// benchmark outcome.
+fn bench_linsolve() -> Result<()> {
+    eprintln!(
+        "[xtask] bench-linsolve: dense vs. sparse MNA solve over a leaky resistor ladder \
+         (va_abi::reference::{{Resistor, VSource}} via va_core::mna::assemble) …"
+    );
+
+    // Warm up both solvers once (rayon thread-pool spin-up, allocator first-touch, icache) on a
+    // throwaway system before timing anything — without this the very first measured row pays a
+    // one-time cost unrelated to `n`, which would read as (and briefly did read as, in an
+    // untrimmed run) a spuriously *slower* small-n dense time than a larger one right after it.
+    let _ = run_bench_row(5);
+
+    eprintln!(
+        "[xtask]   {:>7} {:>6} {:>8} {:>8} {:>10} {:>11} {:>11} {:>9}",
+        "n_nodes", "dim", "nnz", "fill", "dense_MB", "dense_ms", "sparse_ms", "speedup"
+    );
+
+    let mut measured = 0usize;
+    for &n_nodes in BENCH_NODE_COUNTS {
+        let row = run_bench_row(n_nodes)?;
+        let fill = row.nnz as f64 / (row.dim * row.dim) as f64;
+        let dense_mb = row.dense_bytes as f64 / (1024.0 * 1024.0);
+        let sparse_ms_str = row
+            .sparse_time
+            .map(|d| format!("{:.3}", d.as_secs_f64() * 1e3))
+            .unwrap_or_else(|| "FAILED".to_string());
+        let speedup_str = row
+            .sparse_time
+            .map(|d| {
+                format!(
+                    "{:.2}x",
+                    row.dense_time.as_secs_f64() / d.as_secs_f64().max(f64::EPSILON)
+                )
+            })
+            .unwrap_or_else(|| "n/a".to_string());
+        eprintln!(
+            "[xtask]   {:>7} {:>6} {:>8} {:>8.4} {:>10.3} {:>11.3} {:>11} {:>9}",
+            row.n_nodes,
+            row.dim,
+            row.nnz,
+            fill,
+            dense_mb,
+            row.dense_time.as_secs_f64() * 1e3,
+            sparse_ms_str,
+            speedup_str,
+        );
+        if row.sparse_matches_dense == Some(false) {
+            eprintln!(
+                "[xtask]   WARNING: dense/sparse solutions disagree beyond tolerance at \
+                 n_nodes={}",
+                row.n_nodes
+            );
+        }
+        measured += 1;
+    }
+
+    eprintln!(
+        "[xtask] bench-linsolve: {measured} size(s) measured; see docs/roadmap.md's T3 section \
+         for the write-up (crossover, recommendation)"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fast structural sanity check on the ladder builder — the full `bench_linsolve` sweep is
+    /// deliberately *not* exercised here (§ its own doc comment: minutes-scale by design, and
+    /// `cargo test --workspace` must not slow down for it). This just confirms the topology is
+    /// what the doc comment claims, at a size cheap enough to assert on by hand.
+    #[test]
+    fn build_ladder_has_the_claimed_topology() {
+        let (vs, resistors) = build_ladder(3);
+        // 3 nodes -> 3 shunt resistors + 2 series resistors = 5.
+        assert_eq!(resistors.len(), 5);
+        let dim = 3 + 1; // + branch current
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs];
+        for r in &resistors {
+            insts.push(r);
+        }
+        let x = vec![0.0; dim];
+        let sys = va_core::mna::assemble(&insts, &x, &va_abi::ANALYSIS_DC, dim);
+        // Solves without error, and node 0 (directly driven) sits at the source voltage.
+        let b: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
+        let x = va_core::linsolve::solve_dense(&sys.jacobian, &b, dim).expect("well-conditioned");
+        assert!((x[0] - 5.0).abs() < 1e-9, "V(0) = {}", x[0]);
+        // Every downstream node sees a nonzero fraction of the drive (leaky divider chain).
+        for &v in &x[1..3] {
+            assert!(v > 0.0 && v < 5.0, "v = {v}");
+        }
+    }
+
+    /// `run_bench_row` at a small size: dense and sparse must agree, and the reported fill
+    /// fraction must reflect the tridiagonal-plus-branch-row shape (sparse, not dense).
+    #[test]
+    fn run_bench_row_agrees_dense_vs_sparse_at_a_small_size() {
+        let row = run_bench_row(8).expect("well-conditioned ladder solves");
+        assert_eq!(row.dim, 9);
+        assert_eq!(row.sparse_matches_dense, Some(true));
+        // Well under half-full: each node row touches only its neighbors + the shunt + (for
+        // node 0) the source branch — nowhere near a dense n*n fill.
+        let fill = row.nnz as f64 / (row.dim * row.dim) as f64;
+        assert!(fill < 0.5, "fill = {fill}");
+    }
 
     #[test]
     fn workspace_root_resolves_to_the_real_workspace() {

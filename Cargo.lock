@@ -1570,7 +1570,9 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "va-abi",
  "va-cli",
+ "va-core",
  "va-harness",
  "va-netlist",
 ]

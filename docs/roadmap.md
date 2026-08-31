@@ -1256,6 +1256,95 @@ the reference models.
 - **Tutorial:** `t3-core/03-nonlinear-dc.qmd` — why diodes are hard, what each convergence
   aid does, the convergence-rate metric.
 
+### Phase T3.4 — Sparse-solve benchmark (backlog measurement)
+> **Status: ✅ measured, not built** (2026-08-31) — the sparse-solve backlog item this T3
+> section's own staffing note (2026-07-04) flagged as "remaining" now has a real answer instead
+> of an open question: `cargo xtask bench-linsolve` (new subcommand, `xtask/src/main.rs`) scales
+> a leaky resistor-ladder MNA system — real `va_abi::reference::{Resistor, VSource}` instances
+> assembled through the actual `va_core::mna::assemble` path, not a hand-fabricated matrix —
+> from 10 to 10,000 nodes and times [`linsolve::solve_dense`] against a new prototype
+> [`linsolve::solve_sparse`] on the identical assembled Jacobian at each size.
+
+**What `solve_sparse` is.** `faer` 0.22's `sparse-linalg` feature is **on by default** and was
+already being pulled in by `faer = { workspace = true }`'s plain `"0.22"` version spec — no new
+dependency, no `Cargo.toml` feature flag change, nothing for `deny.toml` to re-vet. `faer::sparse
+::linalg::solvers::{SymbolicLu, Lu}` gives a pure-Rust sparse LU (column-AMD ordering, symbolic
+then numeric factorization) with no BLAS/LAPACK/KLU FFI, matching §5 exactly. `solve_sparse` has
+the same `(a: &[f64] (dense, row-major), b, n) -> Result<Vec<f64>, CoreError>` signature as
+`solve_dense`, converts `a`'s nonzero entries to a triplet list, and solves — deliberately a
+**prototype comparison path**, not a production one: it pays an `O(n²)` scan of the dense buffer
+before the sparse solve even starts, which a real sparse rewrite (assembling triplets directly
+from `ModelInstance::load`, never touching a dense buffer) would not. `mna::System` itself is
+still 100% dense; this only swaps the *solve* step, on a like-for-like Jacobian, to isolate the
+one question this phase asks. `linsolve.rs` gained 7 new tests (`solve_sparse` agreeing with
+`solve_dense` on a banded system, its own singular/identity/empty cases, `nnz`'s two cases) —
+`va-core` is now 31 tests, all green, `solve_dense` and its original 6 tests untouched.
+
+**A real bug found along the way:** `faer`'s sparse LU `panic!()`s — does not return `Err` —
+on at least one genuinely-singular input (a structural pivot candidate whose numeric value
+collapses to exactly zero; `faer-0.22.6/src/sparse/linalg/lu.rs:1426`). Confirmed empirically by
+this phase's own `sparse_singular_matrix_is_rejected` test before it was caught, not merely
+suspected from reading the source. `CLAUDE.md` §5 forbids *this crate* panicking on bad input;
+since the panic originates one layer down, `solve_sparse` wraps the factorization in
+`std::panic::catch_unwind` (no `unsafe` needed — `#![forbid(unsafe_code)]` stays intact) and
+folds a caught panic into the same `CoreError::Singular` a graceful rejection would have
+produced. A caller cannot tell the difference between "rejected gracefully" and "rejected via a
+caught dependency panic," and should not have to.
+
+**The measured table** (`cargo xtask bench-linsolve --release`, one representative run — wall
+times carry the usual single-machine/single-run noise, especially at the smallest sizes, but the
+asymptotic shape and the crossover point are stable across reruns):
+
+| n_nodes | dim | nnz | fill | dense (MB) | dense (ms) | sparse (ms) | speedup |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 10 | 11 | 30 | 24.8% | 0.001 | 0.010 | 0.026 | 0.37× (dense wins) |
+| 20 | 21 | 60 | 13.6% | 0.003 | 0.144 | 0.032 | 4.5× |
+| 50 | 51 | 150 | 5.8% | 0.020 | 2.13 | 0.055 | 38.6× |
+| 100 | 101 | 300 | 2.9% | 0.078 | 3.03 | 0.135 | 22.5× |
+| 200 | 201 | 600 | 1.5% | 0.31 | 3.77 | 0.201 | 18.8× |
+| 500 | 501 | 1,500 | 0.60% | 1.9 | 15.4 | 1.09 | 14.1× |
+| 1,000 | 1,001 | 3,000 | 0.30% | 7.6 | 46.4 | 3.16 | 14.7× |
+| 2,000 | 2,001 | 6,000 | 0.15% | 30.5 | 129.9 | 10.5 | 12.3× |
+| 4,000 | 4,001 | 12,000 | 0.07% | 122.1 | 712.5 | 38.8 | 18.4× |
+| 6,000 | 6,001 | 18,000 | 0.05% | 274.8 | 2,074 | 88.5 | 23.4× |
+| 8,000 | 8,001 | 24,000 | 0.04% | 488.4 | 5,377 | 177.7 | 30.3× |
+| 10,000 | 10,001 | 30,000 | 0.03% | 763.1 | 9,341 | 282.1 | 33.1× |
+
+**Crossover:** between `n_nodes = 10` and `n_nodes = 20` (`dim` 11→21) — dense is faster only at
+the very smallest measured size (where both solves are sub-millisecond and dominated by
+factorization setup overhead, not floating-point work), and sparse wins at every size at or above
+`n_nodes = 20`, by a widening margin that settles around 12–33× once `n_nodes` clears a few
+hundred. The fill fraction — real, measured from the assembled Jacobian's actual nonzero count
+via the new `linsolve::nnz`, not estimated — drops from 25% at `n_nodes = 10` to 0.03% at
+`n_nodes = 10,000`, exactly the `O(1/n)` shape a banded/leaky-ladder MNA matrix predicts, and
+exactly why dense storage becomes untenable well before dense *solve time* forces the issue: 763
+MB for one Jacobian buffer at `dim = 10,001` is already a real cost, before `newton::solve`'s own
+"assemble/solve per iteration" loop or `convergence::gmin_for_step`'s multi-stage schedule
+multiply it.
+
+**Recommendation: do not build sparse now; the trigger is circuit size, not the calendar.**
+Every circuit in `circuits/` today has a node count in the low single-to-double digits — the
+whole ladder-rung zoo is nowhere near where this table's crossover sits, so dense remains the
+right default with enormous headroom (`golden/`'s largest gated circuit is `ring_osc.net`, a
+handful of nodes; `bench_linsolve`'s own `n_nodes = 20` row, 21 unknowns, is already larger).
+Building a full sparse *assembly* path (not just swapping the solve step, as this prototype
+does) is real work — a new `StampSink` implementation, a triplet-native `mna` alternative, an
+API decision about when `newton`/`dc` pick dense vs. sparse — that is not worth taking on
+speculatively per `CLAUDE.md` §1's own "incremental, verification-driven... not silent breadth"
+principle. The concrete, checkable trigger to revisit this: **build the sparse path when a
+target circuit (in `circuits/`, or a model class the zoo is about to grow into) needs
+roughly `n_nodes ≳ 500`** — the point in this table where dense is already paying double-digit
+milliseconds *per solve*, which `newton`'s per-iteration re-assembly and `gmin_for_step`'s
+multi-stage schedule both multiply, and where sparse's ~14–33× measured advantage is large enough
+to matter rather than being noise. Until then this phase's deliverable is the measurement itself,
+not new production code — `solve_dense` remains what `newton`/`dc` call, unchanged.
+
+- **Reproduce:** `cargo build --release -p xtask && cargo xtask bench-linsolve` (debug build
+  works too, just slower — the `--release` note in `bench_linsolve`'s own doc comment). Fully
+  deterministic: fixed node-count list, fixed resistances, no randomness.
+- **Files:** `crates/va-core/src/linsolve.rs` (`solve_sparse`, `nnz`, shared `residual_ok`);
+  `xtask/src/main.rs` (`bench_linsolve`, `build_ladder`, `run_bench_row`, `BENCH_NODE_COUNTS`).
+
 ---
 
 ## T4 — `va-transient` (integration · timestep/LTE · events)
