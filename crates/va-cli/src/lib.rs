@@ -2138,6 +2138,67 @@ mod tests {
         }
     }
 
+    /// End-to-end DC sweep of `circuits/diode_clamp.net`: the nonlinear half of ladder rung 2.
+    /// Where `diode_iv.net` forces its only node directly (so every node voltage there is a
+    /// straight line and only `I(V1)` sees the diode), the series resistor here puts the
+    /// exponential *into* a node voltage. Checks the closed form KCL at `mid` holds at every
+    /// swept point, and that `V(mid)` genuinely bends: tracking `Vin` below the knee, clamping
+    /// well below it once the diode conducts.
+    #[test]
+    fn diode_clamp_sweep_is_nonlinear_in_a_node_voltage() {
+        let src = include_str!("../../../models/diode.va");
+        let design = compile_model(src, "diode.va");
+
+        let deck = include_str!("../../../circuits/diode_clamp.net");
+        let net = va_netlist::parser::parse(deck).expect("parse diode_clamp");
+        let sweep = net.dc.clone().expect("`.dc` sweep card");
+        let points = solve_dc_sweep(&net, &design.modules, &sweep).expect("solve clamp sweep");
+        assert_eq!(points.len(), 41); // 0.00, 0.05, ..., 2.00
+
+        let mid_idx = net
+            .node_order
+            .iter()
+            .position(|n| n == "mid")
+            .expect("`mid` node");
+
+        let is = 1e-14_f64;
+        let vt = va_codegen::VT;
+        let r = 1000.0_f64;
+        for (v, op) in &points {
+            let vmid = op.x[mid_idx];
+            // KCL at `mid`: the resistor current in equals the diode current out.
+            let i_r = (v - vmid) / r;
+            let i_d = is * ((vmid / vt).exp() - 1.0);
+            let tol = 1e-12_f64.max(i_d.abs() * 1e-6);
+            assert!(
+                (i_r - i_d).abs() < tol,
+                "KCL at mid violated at V1={v}: I(R1)={i_r}, I(D1)={i_d}"
+            );
+        }
+
+        // Below the knee the diode is off, so R1 drops ~nothing and V(mid) follows V1 ...
+        let (v_low, op_low) = &points[4]; // V1 = 0.20
+        assert!(
+            (op_low.x[mid_idx] - v_low).abs() < 1e-6,
+            "V(mid)={} should track V1={v_low} below the knee",
+            op_low.x[mid_idx]
+        );
+        // ... and past it the curve clamps: 2 V in, but nothing like 2 V at `mid`.
+        let (v_high, op_high) = points.last().expect("a last point");
+        let vmid_high = op_high.x[mid_idx];
+        assert!(
+            (0.6..0.75).contains(&vmid_high),
+            "V(mid)={vmid_high} at V1={v_high} should sit at the diode's knee"
+        );
+        // The defining property of this circuit, stated as an assertion: the sweep is *not*
+        // a straight line. A chord from the first point to the last would predict far more.
+        assert!(
+            v_high - vmid_high > 1.0,
+            "R1 should absorb over a volt at V1={v_high}, got {}",
+            v_high - vmid_high
+        );
+    }
+
     /// End-to-end DC (ladder rung 5): compile `models/mosfet.va` and solve `circuits/mos_dc.net`
     /// — an NMOS common-source bias point through the real frontend → codegen → core pipeline.
     #[test]

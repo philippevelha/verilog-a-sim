@@ -59,11 +59,22 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all thirteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
-`{divider, mos_dc, diode_iv, rc_step, rectifier, ring_osc, rc_ac, diode_ac, diode_noise,
-resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+`golden/*.golden` — all sixteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rectifier, ring_osc, abstime_ramp, rc_ac,
+diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table,
+resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
+
+**Added 2026-08-31: `circuits/diode_clamp.net`, the nonlinear `.dc` sweep.** `diode_iv.net`'s
+`V1` forces the swept node directly, so its node voltage is `V(in) = V1` by construction and
+only its `I(V1)` column (added 2026-07-18, above) exercises the diode at all. `diode_clamp.net`
+puts a 1 k resistor in series (`Vin --[R1]-- mid --[D1]-- gnd`), which moves the exponential
+into a *node voltage*: `V(mid)` tracks `Vin` below the knee, then clamps near 0.66 V as the
+diode turns on. It passes at `error=6.421e-5` (tol `1e-4`) against real QSPICE golden — the
+same order as `diode_iv.net`'s own `6.656e-5`, and traceable to the same diode nonlinearity.
+It is also the circuit `t3-core/03-nonlinear-dc.qmd` plots, since a straight line makes a poor
+figure for a chapter about curvature.
 
 ### The AC gate (added 2026-08-01)
 

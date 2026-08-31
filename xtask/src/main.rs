@@ -54,8 +54,10 @@ const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
 ];
 
 /// The `.dc`-sweep circuits `validate`/`gen-golden` know how to drive (§ ladder rung 2).
-const SWEEP_CIRCUITS: &[(&str, Option<&str>)] =
-    &[("circuits/diode_iv.net", Some("models/diode.va"))];
+const SWEEP_CIRCUITS: &[(&str, Option<&str>)] = &[
+    ("circuits/diode_iv.net", Some("models/diode.va")),
+    ("circuits/diode_clamp.net", Some("models/diode.va")),
+];
 
 /// The `.tran` transient circuits `validate`/`gen-golden` know how to drive (§ ladder rungs
 /// 3/4/6). `ring_osc.net`'s `bjt` device has no `.va` model — it resolves to the hand-written
@@ -521,8 +523,10 @@ const QSPICE_MODEL_TRANSLATIONS: &[(&str, &str)] = &[(
 ///
 /// `models/diode.va`'s `I = Is*(exp(V/(N*$vt)) - 1)` is exactly SPICE's own diode `D` model with
 /// no series resistance/junction capacitance/breakdown — `IS`/`N` carry over one-to-one.
-const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] =
-    &[("circuits/diode_iv.net", ".model diode D(IS=1e-14 N=1)")];
+const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] = &[
+    ("circuits/diode_iv.net", ".model diode D(IS=1e-14 N=1)"),
+    ("circuits/diode_clamp.net", ".model diode D(IS=1e-14 N=1)"),
+];
 
 /// Like [`QSPICE_NATIVE_CIRCUITS`], for the `.tran` transient circuits (§ ladder rung 3):
 /// `circuits/rc_step.net` is a pure `R`/`C`/`V` deck, needing zero translation, just multi-point

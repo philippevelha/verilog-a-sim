@@ -1,0 +1,11 @@
+* Series R + diode clamp — a genuinely nonlinear .dc sweep.
+* Vin --[R1]-- mid --[D1]-- gnd, sweeping the source across the diode's knee.
+* Unlike diode_iv.net (where V1 forces the swept node directly, so V(in) = V1 is a
+* straight line), the divider between R1 and the diode's exponential I-V makes V(mid)
+* itself the nonlinear quantity: it tracks Vin while the diode is off, then clamps near
+* the knee as the diode turns on and R1 takes the rest of the drop.
+V1 in  gnd  DC 0.0
+R1 in  mid  1000
+D1 mid gnd  diode
+.dc V1 0.0 2.0 0.05
+.end

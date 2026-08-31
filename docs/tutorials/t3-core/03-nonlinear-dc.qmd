@@ -95,25 +95,37 @@ The diode I–V sweep, driven through the real netlist pipeline (`t6-integration
 
 ```console
 $ cargo run -q -p xtask -- validate
-[xtask]   PASS circuits/diode_iv.net: error=1.850e-16 (tol 1e-4)
+[xtask]   PASS circuits/diode_iv.net: error=6.656e-5 (tol 1e-4)
+[xtask]   PASS circuits/diode_clamp.net: error=6.421e-5 (tol 1e-4)
 ```
 
-(`t6-integration/03-validation.qmd` has an honest caveat on exactly what this comparison does
-and doesn't exercise — the golden format records node voltage, not the diode's own current.)
+Both golden files carry `I(V1)` alongside the node voltages (since 2026-07-18), so these
+comparisons check the diode's own current against QSPICE's Shockley law, not just an echoed
+source voltage — the former "voltage-only, exercises nothing" caveat is closed
+(`t6-integration/03-validation.qmd`). `diode_clamp.net` adds the other half: a node voltage
+that is itself nonlinear.
 
-`va-cli`'s `--plot` flag draws this sweep directly from the solved `OperatingPoint`s
-(`va_cli::plot::plot_sweep`, `t6-integration/02-cli.qmd`):
+`va-cli`'s `--plot` flag draws a sweep directly from the solved `OperatingPoint`s
+(`va_cli::plot::plot_sweep`, `t6-integration/02-cli.qmd`). The circuit plotted here is
+`diode_clamp.net`, not `diode_iv.net`: `plot_sweep` deliberately draws node voltages only,
+never a branch current (its own doc comment: volts and femtoamps don't share a linear axis
+usefully), and `diode_iv.net`'s `V1` forces the swept node *directly* — so its only node
+voltage is `V(in) = V1`, a straight line, which would show the plotting path working and
+nothing about the diode. Putting a resistor in series moves the nonlinearity into a node
+voltage, where the plot can reach it:
 
 ```console
-$ cargo run -q -p va-cli -- sim circuits/diode_iv.net --model models/diode.va \
-    --plot docs/tutorials/t3-core/figures/diode-iv-sweep.svg
+$ cargo run -q -p va-cli -- sim circuits/diode_clamp.net --model models/diode.va \
+    --plot docs/tutorials/t3-core/figures/diode-clamp-sweep.svg
 ```
 
-![`V(in)` across the swept `V1` — a straight `V(in) = V1` line, because `V1` forces this node
-directly (`circuits/diode_iv.net`'s own comment). `plot_sweep` deliberately draws only node
-voltages, never a branch current (its own doc comment: volts and femtoamps don't share a linear
-axis usefully), so this figure demonstrates the DC-sweep plotting path itself — not the diode's
-*I–V* law, which lives in `I(V1)` above the plot, not in it.](figures/diode-iv-sweep.svg)
+![`V(mid)` across the swept `V1` for `circuits/diode_clamp.net` (`Vin --[R1 1k]-- mid --[D1]--
+gnd`). Below the knee the diode is off, so almost no current flows, `R1` drops almost nothing,
+and `V(mid)` tracks `Vin` along the diagonal. Past ~0.45 V the exponential turns on and the
+curve bends hard: `V(mid)` clamps near 0.66 V while `R1` absorbs the remaining 1.3 V at 2 V in.
+This is the Shockley exponential of *The idea* above made visible — the same nonlinearity
+Newton has to chase, and the reason an unlimited step overshoots into `exp()` overflow without
+the junction limiting described here.](figures/diode-clamp-sweep.svg)
 
 ## Limitations
 

@@ -60,7 +60,7 @@ shared, demoable milestone that several theses light up at once.
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
-| T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `mos_dc` 1.5e-6) | ✅ |
+| T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `diode_clamp` 6.4e-5, `mos_dc` 1.5e-6) | ✅ |
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 4.5e-6 since the 2026-08-31 first-step fix; 1.8e-4 before it) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
@@ -1248,6 +1248,20 @@ the reference models.
 > stage finishes it off in a handful of iterations. Rung 2's golden gate has since formally
 > passed for real, against QSPICE (2026-07-17, T6.3). `t3-core/03-nonlinear-dc.qmd` written
 > 2026-07-18.
+> **2026-08-31: the rung-2 gate gains a nonlinear `.dc` circuit, `circuits/diode_clamp.net`.**
+> Rung 2's existing `diode_iv.net` sweeps a source that forces the swept node directly, so
+> `V(in) = V1` identically and only the `I(V1)` column added in T6.3 exercises the diode at
+> all — every *node voltage* in that gate is a straight line by construction. The new deck
+> puts a 1 k resistor in series (`Vin --[R1]-- mid --[D1]-- gnd`), moving the exponential into
+> `V(mid)`: it tracks `Vin` below the knee, then clamps near 0.66 V while `R1` takes the rest.
+> Real QSPICE golden via the same one-to-one `.model diode D(IS=1e-14 N=1)` translation;
+> passes at `error=6.421e-5` (tol `1e-4`), the same order as `diode_iv`'s `6.656e-5` and from
+> the same source — the diode's own nonlinearity, not plumbing. `validate` is now 16/16.
+> Motivated by `t3-core/03-nonlinear-dc.qmd`'s figure: the chapter about curvature had a
+> straight line for a plot, because `plot_sweep` draws node voltages and rung 2 had no
+> nonlinear one to draw. Regenerating every golden in the same run reproduced all fifteen
+> existing files byte-for-byte, which is its own small evidence that the oracle path is
+> stable.
 
 - Diode I–V; DC operating point + parameter sweep (`dc.rs`); convergence aids (`gmin`
   stepping, source stepping, damping) in `convergence.rs`.
