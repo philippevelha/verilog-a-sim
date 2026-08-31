@@ -3327,12 +3327,19 @@ body, so a function that computes a `ddt` internally and returns it still defeat
 corpus file does this — 0 of 158 contain a `ddt` inside a function body — so it is documented at
 `Taint`'s definition instead of speculatively implemented.
 
+**The `va-frontend` twin is now fixed too** (same day): `Elaborator::contains_ddt` had the
+identical blindness, which let `I(<port>)` carry displacement current when the `ddt` arrived
+through a variable — so the direct spelling `I(a,c) <+ is*V(a,c) + ddt(cj*V(a,c));` and the
+through-a-variable spelling of the *same physics* disagreed about what the probe reports,
+contradicting the documented "conduction current only" invariant. `Elaborator::ddt_tainted_vars`
+mirrors `lower::Taint`'s fixed point inside the frontend; `resistive_terms_only` consults it.
+Five tests, including one that pins the probe to be *exactly* the surviving untainted read rather
+than merely "something survived" — so an over-broad taint that dropped every variable term would
+fail it.
+
 **Still open from the same audit:** the potential-contribution charge path (`lib.rs`'s
 `c.charge` block for `V(p,n) <+ …`) drops `q.grad_ddt` with **no** assert in any build profile,
-where the flow path at least has one; and `Elaborator::contains_ddt` in `va-frontend` has the
-identical blindness, which lets `I(<port>)` carry displacement current when the `ddt` arrives
-through a variable — contradicting the "conduction current only" invariant the direct spelling
-honours.
+where the flow path at least has one.
 
 ## How to keep this document honest
 
