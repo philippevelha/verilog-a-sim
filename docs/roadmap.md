@@ -3337,9 +3337,25 @@ Five tests, including one that pins the probe to be *exactly* the surviving unta
 than merely "something survived" — so an over-broad taint that dropped every variable term would
 fail it.
 
-**Still open from the same audit:** the potential-contribution charge path (`lib.rs`'s
-`c.charge` block for `V(p,n) <+ …`) drops `q.grad_ddt` with **no** assert in any build profile,
-where the flow path at least has one.
+**The last item from that audit is closed too.** The potential-contribution charge path
+(`lib.rs`'s `c.charge` block for `V(p,n) <+ …`) had **no** assert in any build profile, so a
+second time derivative reaching it dropped its sensitivity in silence, while the flow path at
+least failed loudly in debug — the same defect differing only in which contribution kind it was
+written under. It now carries the same backstop.
+
+And the flow path's assert finally has a **true** premise. Its message had always claimed
+"validate() should have rejected this module" while `contains_ddt_call` was purely syntactic, so
+`x = V*ddt(q); I <+ ddt(c*x);` built cleanly and then tripped it mid-solve. With the taint fixed
+point in place, `validate` really does reject that, and both asserts are what they say they are:
+backstops, not the primary defence.
+
+**Three diagnostics were printing their own source indentation.** A `\`-continued string literal
+in this codebase does not survive `cargo fmt` intact — the continuation is flattened into a
+literal run of spaces, so the message reaches the user with a 25-space gap in the middle of a
+sentence. Affected: the `laplace_*` top-level-term refusal, and both charge-channel asserts.
+Rewritten as single-line literals, which cannot be mangled. Two more in `va-frontend`
+(`laplace_*`'s "needs at least one numerator/zero…" and the zero/pole parity message) had the
+same defect and are fixed the same way. Worth knowing before writing the next long diagnostic.
 
 ## How to keep this document honest
 

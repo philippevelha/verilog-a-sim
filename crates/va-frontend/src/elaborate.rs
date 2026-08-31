@@ -1846,7 +1846,7 @@ impl Elaborator<'_> {
                 let den_ids = self.array_lit_exprs(den, "denominator/pole")?;
                 if num_ids.is_empty() || den_ids.is_empty() {
                     return Err(elab(format!(
-                        "`{name}` needs at least one numerator/zero and one denominator/pole                          entry"
+                        "`{name}` needs at least one numerator/zero and one denominator/pole entry"
                     )));
                 }
                 // A zero/pole array is flattened `(re, im)` pairs, so an odd count is
@@ -1859,7 +1859,7 @@ impl Elaborator<'_> {
                     || (denom_is_poles && den_ids.len() % 2 != 0)
                 {
                     return Err(elab(format!(
-                        "`{name}`'s zero/pole array must hold an even number of values — they                          are flattened `(real, imaginary)` root pairs"
+                        "`{name}`'s zero/pole array must hold an even number of values — they are flattened `(real, imaginary)` root pairs"
                     )));
                 }
                 let value_id = self.lower_expr(value)?;

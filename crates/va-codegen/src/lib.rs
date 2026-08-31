@@ -443,7 +443,7 @@ impl GeneratedModel {
                         // would be a hard error mid-solve rather than a build diagnostic.
                         if lower::contains_laplace_call(ctx.module, term.expr) {
                             return Err(CodegenError::Unsupported(
-                                "a laplace_* filter must be a top-level additive term of a                                  contribution (its gain is complex, so there is nowhere in an                                  ordinary expression to put it)"
+                                "a laplace_* filter must be a top-level additive term of a contribution (its gain is complex, so there is nowhere in an ordinary expression to put it)"
                                     .to_string(),
                             ));
                         }
@@ -670,9 +670,15 @@ impl GeneratedModel {
                     // which this sink's single charge channel cannot express. `Dual::into_ddt`
                     // catches the nested-expression spelling; this catches the one that reaches
                     // here through `lower`'s statement-level extraction of the *outer* `ddt`.
+                    //
+                    // A backstop, and — since the taint fixed point landed (§ `lower::Taint`) —
+                    // one whose premise is finally true: `validate` really does reject the
+                    // through-a-variable spelling now. It used to claim that while
+                    // `contains_ddt_call` was purely syntactic, so `x = V*ddt(q); I <+ ddt(c*x);`
+                    // built cleanly and then tripped this assert mid-solve.
                     debug_assert!(
                         !q.carries_charge(),
-                        "ddt of a ddt reached the charge channel; validate() should have                          rejected this module"
+                        "ddt of a ddt reached the charge channel; validate() should have rejected this module"
                     );
                     sink.charge(gp, q.value);
                     sink.charge(gn, -q.value);
@@ -732,6 +738,15 @@ impl GeneratedModel {
                     let Ok(q) = Self::sum_charge_terms(ctx, &c.charge) else {
                         return;
                     };
+                    // The same backstop the flow path above carries. This block had none in any
+                    // build profile, so a second time derivative reaching a *potential*
+                    // contribution's charge channel dropped its sensitivity in silence rather
+                    // than failing loudly in debug — the two spellings of one defect differing
+                    // only in which contribution kind they were written under.
+                    debug_assert!(
+                        !q.carries_charge(),
+                        "ddt of a ddt reached a potential contribution's charge channel; validate() should have rejected this module"
+                    );
                     sink.charge(gb, -q.value);
                     for (slot, &dg) in q.grad.iter().enumerate() {
                         if dg != 0.0 {
