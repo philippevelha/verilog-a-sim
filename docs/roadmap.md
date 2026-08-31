@@ -600,6 +600,17 @@ docs/tutorials/
   switch — is the tightest of the six — the rung most worth
   seeing, not just reading as a number). Each embed states its exact regeneration command per
   this section's own "executable, not just prose" rule.
+  **2026-08-31: and noise, which completes the set.** Every analysis this simulator performs
+  can now be drawn: transient waveform, `.dc` sweep, AC Bode pair, and a log-log noise
+  spectrum (`va_cli::plot::plot_noise`, output- and input-referred on one pair of axes).
+  Log-log is the substance rather than the styling: flicker noise is a straight line of slope
+  -1 per decade and thermal noise is flat, so the knee between them is the entire content of
+  the figure, and linear axes collapse both into a spike at the left edge. `V^2/Hz` is plotted
+  rather than `V/sqrt(Hz)` so the picture carries the same quantity the golden files and
+  QSPICE's `onoise_spectrum` do. Points a log axis cannot show are skipped — a zero PSD, or
+  the infinity `input_psd` reports where the input cannot reach the output — and a spectrum
+  with nothing left is an error, not a blank canvas. Embedded in `t5-acnoise/02-noise.qmd`.
+
   **2026-08-31 (later still): `--plot` learned AC.** An AC sweep now draws as a Bode pair
   (`va_cli::plot::plot_ac`): magnitude in dB above phase in degrees, sharing a logarithmic
   frequency axis. Two panels rather than one for the same reason branch currents were kept off

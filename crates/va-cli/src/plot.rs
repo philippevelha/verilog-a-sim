@@ -306,6 +306,137 @@ pub fn plot_ac(path: &str, net: &Netlist, resp: &va_acnoise::ac::AcResponse) -> 
     Ok(())
 }
 
+/// Write a noise-spectrum plot to `path` as SVG: output-referred PSD against frequency, on a
+/// log-log pair of axes, with the input-referred spectrum alongside it when one was computed.
+///
+/// Log-log because that is the shape noise actually has: thermal noise is flat, flicker noise
+/// is a straight line of slope -1 per decade, and a linear axis renders both as a spike at the
+/// left edge. Plotting `V^2/Hz` directly rather than converting to `V/sqrt(Hz)` keeps it the
+/// same quantity the golden files and QSPICE's `onoise_spectrum` carry, so the picture and the
+/// gate are reading the same numbers.
+///
+/// # Limitations
+///
+/// Non-positive or non-finite points cannot appear on a logarithmic axis and are skipped — a
+/// zero PSD, or the infinity `input_psd` reports where the input has no path to the output.
+/// A spectrum with no usable point left is an error rather than an empty canvas. Per-device
+/// contributions (`per_instance`) are not drawn: the totals are what the gate scores, and one
+/// curve per device would need a legend keyed by an index this layer would have to map back.
+///
+/// # Errors
+///
+/// Returns an error if nothing is plottable, or if drawing/writing the SVG fails.
+pub fn plot_noise(path: &str, spectrum: &va_acnoise::noise::NoiseSpectrum) -> Result<()> {
+    let usable: Vec<usize> = (0..spectrum.f.len())
+        .filter(|&i| {
+            spectrum.f[i] > 0.0
+                && spectrum
+                    .psd
+                    .get(i)
+                    .is_some_and(|p| *p > 0.0 && p.is_finite())
+        })
+        .collect();
+    if usable.is_empty() {
+        anyhow::bail!("noise spectrum has no positive, finite point to plot");
+    }
+
+    let has_input = !spectrum.input_psd.is_empty();
+    let input_usable: Vec<usize> = if has_input {
+        usable
+            .iter()
+            .copied()
+            .filter(|&i| {
+                spectrum
+                    .input_psd
+                    .get(i)
+                    .is_some_and(|p| *p > 0.0 && p.is_finite())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let f_min = spectrum.f[usable[0]];
+    let f_max = spectrum.f[*usable.last().expect("non-empty")];
+    let (f_min, f_max) = if f_max > f_min {
+        (f_min, f_max)
+    } else {
+        (f_min * 0.9, f_max * 1.1)
+    };
+
+    let (mut p_min, mut p_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &i in usable.iter().chain(input_usable.iter()) {
+        p_min = p_min.min(spectrum.psd[i]);
+        p_max = p_max.max(spectrum.psd[i]);
+        if let Some(v) = spectrum.input_psd.get(i) {
+            if *v > 0.0 && v.is_finite() {
+                p_min = p_min.min(*v);
+                p_max = p_max.max(*v);
+            }
+        }
+    }
+    // A flat spectrum (a plain resistor) would collapse the y-axis; widen it by a decade
+    // either side so the flatness is visible as flatness rather than as a divide-by-zero.
+    if p_max <= p_min {
+        p_min *= 0.1;
+        p_max *= 10.0;
+    }
+
+    let root = SVGBackend::new(path, (960, 540)).into_drawing_area();
+    root.fill(&WHITE)
+        .with_context(|| format!("initializing SVG canvas at {path}"))?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Noise spectrum", ("sans-serif", 24))
+        .margin(15)
+        .x_label_area_size(35)
+        .y_label_area_size(75)
+        .build_cartesian_2d((f_min..f_max).log_scale(), (p_min..p_max).log_scale())
+        .context("building the chart coordinate system")?;
+
+    chart
+        .configure_mesh()
+        .x_desc("Frequency (Hz)")
+        .y_desc("PSD (V^2/Hz)")
+        .draw()
+        .context("drawing the chart mesh")?;
+
+    let out_color = PALETTE[0];
+    chart
+        .draw_series(LineSeries::new(
+            usable.iter().map(|&i| (spectrum.f[i], spectrum.psd[i])),
+            &out_color,
+        ))
+        .context("drawing the output-noise series")?
+        .label("output-referred")
+        .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], out_color));
+
+    if !input_usable.is_empty() {
+        let in_color = PALETTE[1 % PALETTE.len()];
+        chart
+            .draw_series(LineSeries::new(
+                input_usable
+                    .iter()
+                    .map(|&i| (spectrum.f[i], spectrum.input_psd[i])),
+                &in_color,
+            ))
+            .context("drawing the input-referred series")?
+            .label("input-referred")
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], in_color));
+    }
+
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()
+        .context("drawing the legend")?;
+
+    root.present()
+        .with_context(|| format!("writing the SVG to {path}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +542,72 @@ mod tests {
             "frequency axis unlabelled"
         );
         assert!(contents.contains("V(out)"), "node series unlabelled");
+    }
+
+    /// The noise plot draws both referred spectra and labels the log-log axes. Uses a real
+    /// solved spectrum so the curve is the one the analysis produced.
+    #[test]
+    fn noise_plot_draws_both_referred_spectra() {
+        // `diode_noise.net` resolves its diode to the hand-written `va-abi` reference, so no
+        // compiled Verilog-A model is needed to get a real spectrum here.
+        let net = parse(include_str!("../../../circuits/diode_noise.net")).expect("parse");
+        let spectrum = crate::solve_noise(&net, &[]).expect("solves");
+        let path = std::env::temp_dir()
+            .join("va-cli-plot-test-noise.svg")
+            .to_str()
+            .expect("utf8 path")
+            .to_string();
+        plot_noise(&path, &spectrum).expect("renders");
+        let contents = std::fs::read_to_string(&path).expect("reads back");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(contents.contains("<svg"), "not an SVG");
+        assert!(contents.contains("PSD (V^2/Hz)"), "y-axis unlabelled");
+        assert!(contents.contains("Frequency (Hz)"), "x-axis unlabelled");
+        assert!(
+            contents.contains("output-referred"),
+            "output series unlabelled"
+        );
+        assert!(
+            contents.contains("input-referred"),
+            "input series unlabelled"
+        );
+    }
+
+    /// Points a logarithmic axis cannot show are skipped rather than drawn, and a spectrum
+    /// with none left is an error rather than a blank canvas — including the infinity
+    /// `input_psd` reports where the input has no path to the output.
+    #[test]
+    fn a_noise_plot_skips_what_a_log_axis_cannot_show() {
+        let path = std::env::temp_dir()
+            .join("va-cli-plot-test-noise-degenerate.svg")
+            .to_str()
+            .expect("utf8 path")
+            .to_string();
+
+        let empty = va_acnoise::noise::NoiseSpectrum::default();
+        assert!(plot_noise(&path, &empty).is_err(), "an empty spectrum");
+
+        let all_zero = va_acnoise::noise::NoiseSpectrum {
+            f: vec![1.0, 10.0],
+            psd: vec![0.0, 0.0],
+            ..Default::default()
+        };
+        assert!(
+            plot_noise(&path, &all_zero).is_err(),
+            "a zero PSD has no place on a log axis"
+        );
+
+        // A usable output spectrum with an unusable input one still plots: the input series is
+        // dropped, not the whole figure.
+        let mixed = va_acnoise::noise::NoiseSpectrum {
+            f: vec![1.0, 10.0, 100.0],
+            psd: vec![1e-18, 1e-18, 1e-18],
+            input_psd: vec![f64::INFINITY, 1e-16, f64::INFINITY],
+            ..Default::default()
+        };
+        plot_noise(&path, &mixed).expect("renders with a partial input series");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A response with nothing plottable is an error, not a blank canvas: a logarithmic

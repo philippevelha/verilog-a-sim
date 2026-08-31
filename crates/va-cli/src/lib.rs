@@ -120,10 +120,12 @@ pub fn run_sim(
     if plot.is_some()
         && analysis != Analysis::Transient
         && analysis != Analysis::Ac
+        && analysis != Analysis::Noise
         && !(analysis == Analysis::Dc && net.dc.is_some())
     {
         bail!(
-            "--plot supports a transient run (--tran), an AC sweep (--ac), or a `.dc` sweep; \
+            "--plot supports a transient run (--tran), an AC sweep (--ac), a noise sweep \
+             (--noise), or a `.dc` sweep; \
              a DC operating point is a single point, not a curve"
         );
     }
@@ -146,6 +148,10 @@ pub fn run_sim(
     } else if analysis == Analysis::Noise {
         let spectrum = solve_noise(&net, &compiled)?;
         report_noise(&net, &spectrum);
+        if let Some(path) = plot {
+            plot::plot_noise(path, &spectrum).with_context(|| format!("plotting to {path}"))?;
+            eprintln!("[va-cli] wrote noise plot to {path}");
+        }
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
         report_sweep(&net, sweep, &points);

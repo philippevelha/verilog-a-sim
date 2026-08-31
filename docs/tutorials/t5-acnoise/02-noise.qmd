@@ -379,6 +379,26 @@ The lesson generalizes well past noise: **a tolerance constant carries an implic
 about scale**, and reusing one across quantities that differ by ten orders of magnitude turns a
 gate into decoration.
 
+**And visibly.** `--plot` draws a noise sweep as a log-log spectrum (2026-08-31):
+
+```console
+$ cargo run -q -p va-cli -- sim circuits/diode_flicker.net --noise \
+    --model models/diode_flicker.va \
+    --plot docs/tutorials/t5-acnoise/figures/diode-flicker-noise.svg
+```
+
+![`diode_flicker.net`'s output- and input-referred spectra. Log-log is not a stylistic choice
+here: flicker noise is a straight line of slope -1 per decade and thermal noise is flat, so the
+knee where one hands over to the other is the whole content of the figure — and on linear axes
+both would collapse into a spike against the left edge. The two curves are the same shape
+because referring to the input divides by `|H|^2`, which is frequency-independent for this
+network. `V^2/Hz` is plotted rather than `V/sqrt(Hz)` so the picture carries the same quantity
+the golden files and QSPICE's `onoise_spectrum` do.](figures/diode-flicker-noise.svg)
+
+Points a logarithmic axis cannot show are skipped rather than drawn: a zero PSD, or the
+infinity `input_psd` reports at a frequency where the input has no path to the output (§ above).
+A spectrum with nothing left is an error rather than a blank canvas.
+
 ## Limitations
 
 *(Updated 2026-08-01b: two of the four below are now closed — see "What's next".)*
