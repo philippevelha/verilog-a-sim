@@ -605,6 +605,175 @@ mod tests {
         )
     }
 
+    // --- order-of-convergence study for a bias-dependent `ddt` coefficient ----------------
+    //
+    // The defect the 2026-08-31 first-step fix addresses is invisible on a *uniform* step: the
+    // undamped rate recursion's `O(1)` startup seed alternates and cancels to `O(h²)`. Only a
+    // **varying** step exposes it. So this device deliberately drives the controller into an
+    // alternating `h, 2h, h, 2h, …` schedule and measures the observed order against a closed
+    // form.
+
+    /// One node carrying `c(v)·dv/dt + v/R = 0` with `c(v) = 1 + a·v` — a genuinely
+    /// bias-dependent charge coefficient, stamped exactly the way `va-codegen` stamps one:
+    /// the reconstructed rate's value into `residual`, its instantaneous sensitivity into
+    /// `jacobian`, and `c·∂q/∂v` into `dcharge`, with **no** `charge` (the term is a rate, not a
+    /// charge, so it must not enter the companion offset).
+    ///
+    /// The rate is reconstructed from committed history with the integrator's own companion
+    /// numbers, `dq/dt = ddt_coeff·(q − q_prev) − ddt_prev_rate_weight·dq/dt|_prev`, which is
+    /// exactly what `va_codegen`'s `Builtin::Ddt` does for a bare `ddt` sub-expression.
+    struct BiasDependentRate {
+        unknowns: [usize; 1],
+        r: f64,
+        a: f64,
+        /// Forces the alternating step schedule, as a pure function of time — see the module
+        /// note above. `None` leaves the controller alone.
+        step_pattern: Option<f64>,
+    }
+
+    impl ModelInstance for BiasDependentRate {
+        fn unknowns(&self) -> &[usize] {
+            &self.unknowns
+        }
+        fn state_len(&self) -> usize {
+            2 // committed q, committed rate
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &va_abi::AnalysisCtx,
+            state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::stamps::StampSink,
+        ) {
+            let row = self.unknowns[0];
+            let v = x.get(row).copied().unwrap_or(0.0);
+            let q = v; // the `ddt` argument; ∂q/∂v = 1
+            let c = 1.0 + self.a * v;
+
+            let rate = if ctx.is_initial_step {
+                0.0
+            } else {
+                ctx.ddt_coeff * (q - state.committed()[0])
+                    - ctx.ddt_prev_rate_weight * state.committed()[1]
+            };
+            state.set(0, q);
+            state.set(1, rate);
+
+            sink.residual(row, v / self.r + c * rate);
+            // ∂/∂v of the instantaneous part, with the rate's own v-dependence held in dcharge.
+            sink.jacobian(row, row, 1.0 / self.r + self.a * rate);
+            // The product-rule half: c·∂q/∂v. No `charge` — see this struct's doc comment.
+            sink.dcharge(row, row, c);
+
+            if let Some(h) = self.step_pattern {
+                // Alternate the landing cap h, 2h, h, 2h, … purely from `t`: accepted times run
+                // 0, h, 3h, 4h, 6h, … so `round(t/h) % 3 == 0` selects the short step.
+                let k = (ctx.time / h).round() as i64;
+                sink.bound_step(if k % 3 == 0 { h } else { 2.0 * h });
+            }
+        }
+    }
+
+    /// `c(v)·dv/dt + v/R = 0` with `c(v) = 1 + a·v` separates to `ln v + a·v = const − t/R`.
+    /// Solved for `v(t)` by Newton — the closed form this study measures against.
+    fn bias_dependent_exact(v0: f64, a: f64, r: f64, t: f64) -> f64 {
+        let k = v0.ln() + a * v0 - t / r;
+        let mut v = v0;
+        for _ in 0..200 {
+            let f = v.ln() + a * v - k;
+            let df = 1.0 / v + a;
+            let step = f / df;
+            v -= step;
+            if v <= 0.0 {
+                v = 1e-300;
+            }
+            if step.abs() < 1e-16 * v.max(1.0) {
+                break;
+            }
+        }
+        v
+    }
+
+    /// Max |simulated − exact| over the accepted points, for one method at one base step.
+    fn bias_dependent_error(method: Method, tstep: f64) -> f64 {
+        let (v0, a, r, tstop) = (1.0_f64, 3.0_f64, 1.0_f64, 0.5_f64);
+        let dev = BiasDependentRate {
+            unknowns: [0],
+            r,
+            a,
+            step_pattern: Some(tstep),
+        };
+        let instances: Vec<&dyn ModelInstance> = vec![&dev];
+        // `bound_step` can only *shrink* a landing, and the controller caps `h` at `cfg.tstep`,
+        // so the **long** step of the pattern has to be the configured one — otherwise both caps
+        // are non-binding and every step comes out uniform, which is precisely the case this
+        // study must avoid.
+        let mut cfg = default_cfg(tstop, 2.0 * tstep, method);
+        // The LTE controller must not second-guess the schedule this study is imposing: the
+        // point is to measure order at a *known* step pattern, not to test the controller.
+        cfg.lte_reltol = 1.0;
+        cfg.lte_abstol = 1.0;
+        let wf = run(&instances, 1, vec![v0], cfg).expect("integrates");
+        // `DUMP_SCHEDULE=1` prints the realized step pattern. Kept because getting this study
+        // wrong is easy and silent: the first attempt produced a *uniform* schedule (both caps
+        // were non-binding) and then passed with or without the fix, proving nothing.
+        if std::env::var_os("DUMP_SCHEDULE").is_some() {
+            let deltas: Vec<String> =
+                wf.t.windows(2)
+                    .take(8)
+                    .map(|w| format!("{:.4}", (w[1] - w[0]) / tstep))
+                    .collect();
+            eprintln!("SCHEDULE {method:?} tstep={tstep:e} first deltas (in units of tstep): {deltas:?} npts={}", wf.t.len());
+        }
+        wf.t.iter()
+            .zip(&wf.x)
+            .map(|(&t, x)| (x[0] - bias_dependent_exact(v0, a, r, t)).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// **The gate that would justify lifting `va_codegen::Integration`'s trapezoidal refusal.**
+    ///
+    /// With the first step taken by backward Euler, trapezoidal must be genuinely second order
+    /// for a bias-dependent `ddt` coefficient *on a varying step schedule* — the case where the
+    /// undamped rate recursion's startup seed used to drop the whole run to first order while a
+    /// fixed-step test still showed a clean order 2.
+    ///
+    /// Asserted as an observed convergence order, not an absolute error, because an absolute
+    /// bound would silently pass a first-order run at a small enough step. Backward Euler is
+    /// measured alongside as the control: it must come out ~1, which is what proves the
+    /// harness can tell the two apart at all.
+    #[test]
+    fn a_bias_dependent_rate_is_second_order_under_trapezoidal_on_varying_steps() {
+        let order = |method: Method| -> f64 {
+            let coarse = bias_dependent_error(method, 1e-2);
+            let fine = bias_dependent_error(method, 5e-3);
+            assert!(
+                coarse.is_finite() && fine.is_finite() && fine > 0.0,
+                "{method:?}: non-finite or zero error (coarse {coarse:e}, fine {fine:e})"
+            );
+            (coarse / fine).log2()
+        };
+
+        let be = order(Method::BackwardEuler);
+        let trap = order(Method::Trapezoidal);
+        // Printed so a failure shows both numbers, and so `--nocapture` can be used to watch
+        // the orders while changing the integrator. Measured on 2026-08-31: backward Euler
+        // 0.982, trapezoidal 1.999 with the first-step fix; trapezoidal falls to **0.954**
+        // without it, which is what makes this a discriminating gate rather than a ritual.
+        eprintln!("observed order: backward-euler={be:.3}  trapezoidal={trap:.3}");
+
+        // The control: backward Euler is first order, so the harness demonstrably discriminates.
+        assert!(
+            (0.7..1.4).contains(&be),
+            "backward Euler should be ~1st order, observed {be:.3}"
+        );
+        // The claim: trapezoidal is second order even though the step alternates.
+        assert!(
+            trap > 1.7,
+            "trapezoidal should be ~2nd order on a varying step, observed {trap:.3}              (a first-order result here is the undamped startup-seed defect the 2026-08-31              first-step fix was meant to remove)"
+        );
+    }
+
     fn default_cfg(tstop: f64, tstep: f64, method: Method) -> TranConfig {
         TranConfig {
             tstart: 0.0,

@@ -3164,6 +3164,39 @@ closed-form solution, asserting second order. A fixed-step version would pass ei
 nothing, which is precisely how this defect stayed invisible. Until that exists, the refusal is
 **conservative rather than necessary**, and this entry is the record of which it is.
 
+**That test now exists** (see the entry below); the bar is met, and the refusal is confirmed
+unnecessary rather than merely suspected so.
+
+## An order-of-convergence gate for the rate reconstruction (2026-08-31)
+
+The evidence the entry above named as the bar for lifting `va_codegen::Integration`'s trapezoidal
+refusal, now in the repo and reproducible.
+
+`va-transient`'s tests gained a device carrying `c(v)·dv/dt + v/R = 0` with `c(v) = 1 + a·v` — a
+genuinely bias-dependent charge coefficient — stamped exactly the way `va-codegen` stamps one
+(reconstructed rate into `residual`, its instantaneous sensitivity into `jacobian`, `c·∂q/∂v` into
+`dcharge`, and **no** `charge`). That ODE separates to `ln v + a·v = const − t/R`, so there is a
+closed form to measure against. The observed convergence order is asserted, not an absolute error:
+an absolute bound would silently pass a first-order run at a small enough step.
+
+**It discriminates**, which is the only property that matters here:
+
+| | backward Euler (control) | trapezoidal |
+|---|---|---|
+| with the first-step fix | 0.982 | **1.999** |
+| with it disabled | 0.982 | **0.954** |
+
+Backward Euler is measured alongside as a control precisely so a passing trapezoidal number cannot
+be mistaken for a harness that reports 2 no matter what.
+
+**The part worth remembering is how nearly it proved nothing.** The first version of this study
+came out order 2.0 with the fix *and* order 2.0 without it. The schedule was uniform: `bound_step`
+can only *shrink* a landing and the controller already caps `h` at `cfg.tstep`, so requesting `h`
+or `2h` when `h` was already the cap left every step identical. The long step of the pattern has to
+*be* `cfg.tstep` for the short one to bind. A `DUMP_SCHEDULE=1` hook now prints the realized
+pattern, kept deliberately: a convergence study that silently degenerates to fixed-step is a test
+that passes for the wrong reason, and this one did, once.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.
