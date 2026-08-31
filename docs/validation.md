@@ -59,10 +59,10 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all twenty — are real, QSPICE-generated data (`cargo xtask gen-golden`):
-`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rl_decay, rlc_ring, rectifier,
-ring_osc, abstime_ramp, rc_ac, rc_ac_lin, diode_ac, laplace_ac, diode_noise, resistor_noise_va,
-diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+`golden/*.golden` — all twenty-one — are real, QSPICE-generated data (`cargo xtask
+gen-golden`): `{divider, mos_dc, diode_iv, diode_iv_params, diode_clamp, rc_step, rc_discharge,
+rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin, diode_ac, laplace_ac,
+diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -103,6 +103,20 @@ quantity is the one compared. Like `rc_discharge.net` it has no source, so ignor
 condition leaves the whole run flat at zero rather than slightly wrong. Passes at
 `error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
 single-pole linear decay with no nonlinearity for either engine to disagree about.
+
+**Added 2026-08-31: `circuits/diode_iv_params.net`, per-instance parameter overrides.** A
+device line can now set the referenced model's parameters by name (`D1 in gnd diode Is=1e-12
+N=1.3`), where before a device could override only the model's *first* parameter, positionally,
+through the SPICE scalar value. This circuit is the same sweep as `diode_iv.net` with `Is` and
+`N` moved off their `.va` defaults, gated against a QSPICE `.model diode D(IS=1e-12 N=1.3)`
+carrying the matching values. It is discriminating: a dropped override would silently be
+`diode_iv.net`'s curve again, which differs from this golden by orders of magnitude rather than
+marginally. Passes at `error=6.826e-5` (tol `1e-4`).
+
+The deck translator strips those overrides on the way to QSPICE, because SPICE expresses the
+same values on the `.model` card instead — and strips them *only* from `D`/`M`/`Q` lines: a
+`C`/`L` line's `IC=` is a genuine SPICE element parameter QSPICE reads as written, and removing
+it would silently change the initial conditions the golden run starts from.
 
 **Added 2026-08-31: `circuits/rc_ac_lin.net`, the linear AC sweep.** `.ac` accepts all three
 SPICE sweep types now (`dec`, `oct`, `lin`), and `lin` is the one whose semantics differ: its

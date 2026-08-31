@@ -1566,6 +1566,27 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: a device line can set a model's parameters by name.** Before this, a netlist
+> device could override exactly one of its model's parameters — the *first* one, positionally,
+> through the SPICE scalar value. For a Verilog-A simulator that is a real limitation (models
+> routinely declare a dozen parameters) and a quietly fragile one: reordering `parameter`
+> declarations in a `.va` file would change what every existing deck means, with nothing to
+> catch it. `D1 in gnd diode Is=1e-12 N=1.3` now works, on `D`/`M`/`Q` lines, in SPICE's own
+> spelling.
+>
+> An override naming a parameter the model does not declare is an **error** that names both the
+> offending name and the ones the model does declare, rather than a no-op: silently dropping it
+> would leave a deck looking like it set something it did not, which is the exact failure the
+> feature exists to prevent. A trailing token that is not a `name=value` pair is refused too.
+>
+> `circuits/diode_iv_params.net` gates it against a QSPICE `.model diode D(IS=1e-12 N=1.3)`
+> carrying the matching values, at `error=6.826e-5`; `validate` is **21/21**. It discriminates:
+> a dropped override would silently be `diode_iv.net`'s curve, which differs by orders of
+> magnitude rather than marginally. The deck translator strips instance parameters on the way
+> to QSPICE (SPICE puts them on the `.model` card) but **only** from `D`/`M`/`Q` lines — a
+> `C`/`L` line's `IC=` is a real SPICE element parameter, and stripping it would silently
+> change the initial conditions the golden run starts from.
+>
 > **2026-08-31: `.ac` gained `oct` and `lin`.** The card had been `dec`-only, and the stated
 > reason was sound — `AcSweep::frequencies` produced a per-decade grid, so parsing a type the
 > analysis could not deliver would have been a promise the engine could not keep. The fix was

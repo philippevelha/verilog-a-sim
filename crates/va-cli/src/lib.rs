@@ -1171,7 +1171,7 @@ fn build_instance(
     // Use the compiled Verilog-A model when its name matches the device's model.
     if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
         return Ok((
-            build_from_model(module, dev.value, &dev.terminals, next_unknown)?,
+            build_from_model(module, dev.value, &dev.params, &dev.terminals, next_unknown)?,
             None,
         ));
     }
@@ -1179,20 +1179,45 @@ fn build_instance(
     Ok((reference_instance(dev)?, None))
 }
 
-/// Build a device instance from a compiled IR module, overriding the model's first parameter
-/// with the device's scalar value (the SPICE convention: an `R`/`C` line's value sets the
-/// model's primary parameter). Each of `module`'s port nodes is assigned the netlist terminal
+/// Build a device instance from a compiled IR module, applying the device's parameter
+/// overrides: the positional scalar `value` sets the model's *first* parameter (the SPICE
+/// convention, where an `R`/`C` line's value is its primary parameter), then each `name=value`
+/// in `overrides` sets the parameter it names. An override naming a parameter the model does
+/// not declare is an error rather than a no-op — see the loop's own comment. Each of `module`'s port nodes is assigned the netlist terminal
 /// it connects to; any other node (e.g. an internal node a flattened submodule instance
 /// introduced, § module instantiation) claims a fresh global unknown from `next_unknown`.
 fn build_from_model(
     module: &Module,
     value: Option<f64>,
+    overrides: &[(String, f64)],
     terminals: &[usize],
     next_unknown: &mut usize,
 ) -> Result<Box<dyn ModelInstance>> {
     let mut m = module.clone();
     if let (Some(v), Some(param)) = (value, m.params.first_mut()) {
         param.default = v;
+    }
+    // Named overrides are applied after the positional value, so a line that somehow states
+    // both has the explicit name win over the implicit position. An unknown name is an error:
+    // dropping it silently would leave a deck looking like it set something it did not, and
+    // the whole reason to write `Is=1e-12` rather than rely on parameter order is to be sure.
+    for (name, v) in overrides {
+        match m.params.iter_mut().find(|p| p.name == *name) {
+            Some(param) => param.default = *v,
+            None => {
+                let mut known: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
+                known.sort_unstable();
+                bail!(
+                    "model `{}` has no parameter `{name}` (it declares: {})",
+                    m.name,
+                    if known.is_empty() {
+                        "none".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                );
+            }
+        }
     }
 
     let port_nodes: Vec<NodeId> = m.ports.iter().flatten().copied().collect();
@@ -2261,6 +2286,70 @@ mod tests {
                 -expected_id
             );
         }
+    }
+
+    /// Per-instance parameter overrides reach the compiled model, and are checked against a
+    /// second solve rather than an absolute number: the same deck at the model's own defaults
+    /// must give a *different* answer, which is what proves the override was applied at all.
+    #[test]
+    fn parameter_overrides_reach_the_compiled_model() {
+        let src = include_str!("../../../models/diode.va");
+        let design = compile_model(src, "diode.va");
+
+        let overridden =
+            va_netlist::parser::parse(include_str!("../../../circuits/diode_iv_params.net"))
+                .expect("parse diode_iv_params");
+        let sweep = overridden.dc.clone().expect("`.dc` card");
+        let with = solve_dc_sweep(&overridden, &design.modules, &sweep).expect("solves");
+
+        // The same circuit with the overrides removed, i.e. at the .va file's own defaults.
+        let plain_deck = include_str!("../../../circuits/diode_iv_params.net")
+            .replace("diode Is=1e-12 N=1.3", "diode");
+        let plain = va_netlist::parser::parse(&plain_deck).expect("parse without overrides");
+        assert!(
+            plain.devices.iter().all(|d| d.params.is_empty()),
+            "the comparison deck must genuinely carry no overrides"
+        );
+        let without = solve_dc_sweep(&plain, &design.modules, &sweep).expect("solves");
+
+        // At the top of the sweep the two are not subtly different. The overridden diode
+        // conducts *less*, which is worth stating because it is the opposite of what "a
+        // hundredfold larger Is" suggests on its own: N=1.3 shrinks the exponent by more than
+        // the larger Is scales the prefactor, and the exponent wins. The assertion is on the
+        // size of the gap, not its direction, so it tests that the overrides landed rather
+        // than re-deriving the diode equation.
+        let branch = overridden.node_order.len(); // I(V1) follows the node unknowns
+        let i_with = with.last().expect("points").1.x[branch].abs();
+        let i_without = without.last().expect("points").1.x[branch].abs();
+        let ratio = (i_with / i_without).max(i_without / i_with);
+        assert!(
+            ratio > 10.0,
+            "overrides should change the answer by orders of magnitude: {i_with} vs {i_without}"
+        );
+    }
+
+    /// An override naming a parameter the model does not declare is an error that names both
+    /// the offending parameter and what the model does declare -- silently ignoring it would
+    /// leave a deck looking like it set something it did not.
+    #[test]
+    fn an_unknown_parameter_override_is_rejected_by_name() {
+        let src = include_str!("../../../models/diode.va");
+        let design = compile_model(src, "diode.va");
+        let deck =
+            include_str!("../../../circuits/diode_iv_params.net").replace("Is=1e-12", "Isat=1e-12");
+        let net = va_netlist::parser::parse(&deck).expect("parses -- the name is only checked                                                            against the model, not the grammar");
+        let sweep = net.dc.clone().expect("`.dc` card");
+        let err = solve_dc_sweep(&net, &design.modules, &sweep)
+            .expect_err("`Isat` is not a parameter of models/diode.va");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Isat"),
+            "the error should name the bad parameter: {msg}"
+        );
+        assert!(
+            msg.contains("Is"),
+            "and list what the model does declare: {msg}"
+        );
     }
 
     /// `PULSE`'s shape, pinned point by point against its own definition: `v1` before the

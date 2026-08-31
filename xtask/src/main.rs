@@ -57,6 +57,7 @@ const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
 const SWEEP_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/diode_iv.net", Some("models/diode.va")),
     ("circuits/diode_clamp.net", Some("models/diode.va")),
+    ("circuits/diode_iv_params.net", Some("models/diode.va")),
 ];
 
 /// The `.tran` transient circuits `validate`/`gen-golden` know how to drive (§ ladder rungs
@@ -529,6 +530,10 @@ const QSPICE_MODEL_TRANSLATIONS: &[(&str, &str)] = &[(
 /// no series resistance/junction capacitance/breakdown — `IS`/`N` carry over one-to-one.
 const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] = &[
     ("circuits/diode_iv.net", ".model diode D(IS=1e-14 N=1)"),
+    (
+        "circuits/diode_iv_params.net",
+        ".model diode D(IS=1e-12 N=1.3)",
+    ),
     ("circuits/diode_clamp.net", ".model diode D(IS=1e-14 N=1)"),
 ];
 
@@ -753,6 +758,7 @@ fn translate_for_qspice(deck: &str, model_card: &str) -> String {
     out.push_str(model_card);
     out.push('\n');
     for line in lines {
+        let line = &strip_instance_params(line);
         let toks: Vec<&str> = line.split_whitespace().collect();
         let is_m_device = matches!(toks.first(), Some(t) if t.starts_with(['M', 'm']))
             && !line.trim_start().starts_with('*');
@@ -768,6 +774,35 @@ fn translate_for_qspice(deck: &str, model_card: &str) -> String {
         }
     }
     out
+}
+
+/// Drop a model-referencing device line's `name=value` parameter overrides.
+///
+/// This project writes a model's parameters on the *device* line (`D1 in gnd diode Is=1e-12`,
+/// § `va_netlist::Device::params`); SPICE and QSPICE express the same thing on the `.model`
+/// card instead, which the per-circuit translation table already supplies with matching values.
+/// Leaving the overrides on the line would hand QSPICE tokens it does not accept there, so the
+/// faithful translation is to remove them — the values are not lost, they move to the card.
+///
+/// Only `D`/`M`/`Q` lines are touched. A `C`/`L` line's `IC=` is a genuine SPICE element
+/// parameter that QSPICE reads exactly as written, and stripping it would silently change the
+/// initial conditions the golden run starts from.
+fn strip_instance_params(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('*') {
+        return line.to_string();
+    }
+    let is_model_device = trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, 'D' | 'd' | 'M' | 'm' | 'Q' | 'q'));
+    if !is_model_device {
+        return line.to_string();
+    }
+    line.split_whitespace()
+        .filter(|t| !t.contains('='))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Force a `.tran` deck to cold-start from the zero vector, matching this project's own
@@ -2400,6 +2435,37 @@ mod tests {
         };
         let node_order = vec!["out".to_string(), "missing".to_string()];
         assert!(golden_ac_from_qraw(&raw, &node_order).is_err());
+    }
+
+    /// A device line's `name=value` overrides are this project's spelling; SPICE puts the
+    /// same values on the `.model` card, which the translation table supplies. So they are
+    /// stripped from the line -- but a `C`/`L` line's `IC=` is a real SPICE element parameter
+    /// QSPICE reads as written, and stripping *that* would silently change the initial
+    /// conditions the golden run starts from.
+    #[test]
+    fn instance_params_are_stripped_only_from_model_devices() {
+        assert_eq!(
+            strip_instance_params("D1 in gnd diode Is=1e-12 N=1.3"),
+            "D1 in gnd diode"
+        );
+        assert_eq!(
+            strip_instance_params("M1 d g s nmos W=10u L=2u"),
+            "M1 d g s nmos"
+        );
+        // Untouched: a reactive element's initial condition, a plain device, a comment.
+        assert_eq!(
+            strip_instance_params("C1 out gnd 1e-6 IC=5"),
+            "C1 out gnd 1e-6 IC=5"
+        );
+        assert_eq!(
+            strip_instance_params("L1 out gnd 1e-3 IC=1e-3"),
+            "L1 out gnd 1e-3 IC=1e-3"
+        );
+        assert_eq!(strip_instance_params("R1 a b 1000"), "R1 a b 1000");
+        assert_eq!(
+            strip_instance_params("* D1 a b diode Is=1"),
+            "* D1 a b diode Is=1"
+        );
     }
 
     #[test]

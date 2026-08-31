@@ -1,0 +1,9 @@
+* Diode I-V with per-instance parameter overrides — the same sweep as diode_iv.net, but
+* with the model's Is and N set on the device line rather than left at the .va defaults
+* (Is=1e-14, N=1.0). A hundredfold larger Is and a 1.3 ideality factor move the knee
+* visibly, so this gate fails loudly if an override were dropped: it would simply be
+* diode_iv.net's curve again.
+V1 in gnd DC 0.0
+D1 in gnd diode Is=1e-12 N=1.3
+.dc V1 0.0 0.8 0.05
+.end

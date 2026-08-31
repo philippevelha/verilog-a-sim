@@ -89,6 +89,45 @@ pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
     Ok(net)
 }
 
+/// Parse trailing `name=value` parameter overrides on a model-referencing device line.
+///
+/// SPICE's own spelling (`M1 d g s nmos W=10u L=2u`). Every trailing token must be one: a bare
+/// token there is a typo or an unsupported field, and silently ignoring it would leave a deck
+/// looking like it set something it did not. Names are kept as written and matched against the
+/// model's own parameter names by `va-cli`, which is the layer that knows what the model
+/// declares.
+fn parse_param_overrides(
+    rest: &[&str],
+    line_no: usize,
+) -> Result<Vec<(String, f64)>, NetlistError> {
+    let mut out = Vec::new();
+    for tok in rest {
+        let Some((name, value)) = tok.split_once('=') else {
+            return Err(NetlistError::Parse {
+                line: line_no,
+                message: format!(
+                    "unexpected token `{tok}`: a model-referencing device takes only \
+                     `name=value` parameter overrides after its model name"
+                ),
+            });
+        };
+        let Some(v) = parse_value(value) else {
+            return Err(NetlistError::Parse {
+                line: line_no,
+                message: format!("bad value `{value}` for parameter `{name}`"),
+            });
+        };
+        if name.is_empty() {
+            return Err(NetlistError::Parse {
+                line: line_no,
+                message: format!("parameter override `{tok}` has no name"),
+            });
+        }
+        out.push((name.to_string(), v));
+    }
+    Ok(out)
+}
+
 /// The raw `PULSE(...)` numbers on a source line, or `None` for any other line.
 fn pulse_numbers(line: &str) -> Option<Vec<f64>> {
     let toks: Vec<&str> = line.split_whitespace().collect();
@@ -307,13 +346,15 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform: None,
                 ac: None,
                 ic,
+                params: Vec::new(),
             })
         }
         'D' => {
             need(4)?;
             let p = intern(net, toks[1]);
             let n = intern(net, toks[2]);
-            // The fourth token names the model (e.g. `diode`).
+            // The fourth token names the model (e.g. `diode`); anything after it is a
+            // `name=value` parameter override.
             Ok(Device {
                 name,
                 model: toks[3].to_string(),
@@ -322,6 +363,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform: None,
                 ac: None,
                 ic: None,
+                params: parse_param_overrides(&toks[4..], line_no)?,
             })
         }
         // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
@@ -342,6 +384,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform: None,
                 ac: None,
                 ic: None,
+                params: parse_param_overrides(&toks[5..], line_no)?,
             })
         }
         'V' => {
@@ -359,6 +402,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform,
                 ac,
                 ic: None,
+                params: Vec::new(),
             })
         }
         // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
@@ -379,6 +423,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform: None,
                 ac: None,
                 ic: None,
+                params: parse_param_overrides(&toks[5..], line_no)?,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -726,6 +771,42 @@ C1 out gnd 1e-6 IC=5
 
     /// `IC=` on a resistor, and a malformed value, are refused with a message — not silently
     /// dropped, which would leave a deck's author believing an initial condition was applied.
+    #[test]
+    fn a_model_device_carries_named_parameter_overrides() {
+        let net = parse("D1 a gnd diode Is=1e-12 N=1.3\n.end\n").expect("parses");
+        assert_eq!(
+            net.devices[0].params,
+            vec![("Is".to_string(), 1e-12), ("N".to_string(), 1.3)]
+        );
+        // Order is preserved as written, and SPICE suffixes work in a value position.
+        // Compared with a tolerance rather than bit-exactly: `10u` is `10.0 * 1e-6`, one ULP
+        // off the `1e-5` literal, which is arithmetic rather than a parse error.
+        let net = parse("M1 d g s nmos W=10u L=2u\n.end\n").expect("parses");
+        let got = &net.devices[0].params;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "W");
+        assert!((got[0].1 - 10e-6).abs() < 1e-18, "W = {}", got[0].1);
+        assert_eq!(got[1].0, "L");
+        assert!((got[1].1 - 2e-6).abs() < 1e-18, "L = {}", got[1].1);
+
+        // A device with no overrides carries an empty list, not a phantom entry.
+        let net = parse("D1 a gnd diode\n.end\n").expect("parses");
+        assert!(net.devices[0].params.is_empty());
+    }
+
+    /// A trailing token that is not a `name=value` pair is refused rather than ignored: it is
+    /// a typo or an unsupported field, and dropping it would leave the deck looking like it
+    /// set something it did not.
+    #[test]
+    fn a_malformed_parameter_override_is_rejected() {
+        assert!(parse("D1 a gnd diode Is\n.end\n").is_err(), "bare token");
+        assert!(
+            parse("D1 a gnd diode Is=banana\n.end\n").is_err(),
+            "bad value"
+        );
+        assert!(parse("D1 a gnd diode =5\n.end\n").is_err(), "no name");
+    }
+
     #[test]
     fn a_bad_initial_condition_is_rejected() {
         assert!(

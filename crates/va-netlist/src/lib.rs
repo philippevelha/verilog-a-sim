@@ -199,6 +199,16 @@ pub struct Device {
     /// **Transient only, and only an initial *seed*.** It is not a DC constraint: a `.op` or
     /// `.dc` solve ignores it entirely, exactly as SPICE's own `UIC` semantics do.
     pub ic: Option<f64>,
+    /// Per-instance parameter overrides, `name=value`, in the order written.
+    ///
+    /// SPICE's own convention for a model-referencing device (`M1 d g s nmos W=10u L=2u`).
+    /// Each name must match a parameter the referenced model declares; `va-cli` rejects an
+    /// unknown one rather than ignoring it, since a silently-dropped override reads as a
+    /// working deck that is quietly using the wrong value.
+    ///
+    /// Empty for a device with no overrides, and for the primitives (`R`/`C`/`L`/`V`) whose
+    /// single positional value already says everything the line can say.
+    pub params: Vec<(String, f64)>,
 }
 
 /// A time-domain source waveform beyond a bare DC value.
