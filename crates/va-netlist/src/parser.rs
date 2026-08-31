@@ -51,6 +51,12 @@ use va_abi::reference::GROUND;
 /// tokens, or an unparseable value).
 pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
     let mut net = Netlist::default();
+    // `PULSE`'s optional trailing parameters default to values SPICE derives from the `.tran`
+    // card (one timestep for an omitted rise/fall, the run length for an omitted width or
+    // period), and that card may appear *after* the source line. So the raw numbers are held
+    // here and resolved once the whole deck has been read, rather than defaulted against
+    // timing that may not have been parsed yet.
+    let mut pending_pulses: Vec<(usize, Vec<f64>)> = Vec::new();
 
     for (idx, raw) in deck.lines().enumerate() {
         let line = raw.trim();
@@ -70,10 +76,53 @@ pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
             continue;
         }
         let device = parse_device(&mut net, line, line_no)?;
+        if let Some(nums) = pulse_numbers(line) {
+            pending_pulses.push((net.devices.len(), nums));
+        }
         net.devices.push(device);
     }
 
+    resolve_pulse_defaults(&mut net, &pending_pulses);
     Ok(net)
+}
+
+/// The raw `PULSE(...)` numbers on a source line, or `None` for any other line.
+fn pulse_numbers(line: &str) -> Option<Vec<f64>> {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    let first = toks.first()?;
+    if !first.starts_with(['V', 'v']) {
+        return None;
+    }
+    let upper = line.to_ascii_uppercase();
+    let at = upper.find("PULSE")?;
+    let inner = line[at..].split(['(', ')']).nth(1)?;
+    let nums: Vec<f64> = inner.split_whitespace().filter_map(parse_value).collect();
+    (nums.len() >= 2).then_some(nums)
+}
+
+/// Fill in each `PULSE`'s omitted trailing parameters, now that the deck's `.tran` timing (if
+/// any) has been parsed. SPICE's defaults: `td = 0`, `tr = tf = <one timestep>`, and `pw` and
+/// `per` running to the end of the analysis. With no `.tran` card at all there is no timing to
+/// derive from, so an omitted rise/fall becomes an ideal (zero-time) edge and the pulse does
+/// not repeat — a `PULSE` source in a `.op`/`.dc`/`.ac`-only deck contributes its `v1` value
+/// regardless, so none of those defaults are observable there.
+fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>)]) {
+    let (tstep, tstop) = net.tran.unwrap_or((0.0, 0.0));
+    for (idx, nums) in pending {
+        let Some(dev) = net.devices.get_mut(*idx) else {
+            continue;
+        };
+        let get = |i: usize, default: f64| nums.get(i).copied().unwrap_or(default);
+        dev.waveform = Some(Waveform::Pulse {
+            v1: nums[0],
+            v2: nums[1],
+            td: get(2, 0.0),
+            tr: get(3, tstep),
+            tf: get(4, tstep),
+            pw: get(5, tstop),
+            per: get(6, tstop),
+        });
+    }
 }
 
 /// Parse a dot-card, recording the analysis it requests. Unrecognized cards are ignored.
@@ -349,8 +398,13 @@ fn parse_source_value(rest: &[&str]) -> f64 {
         Some(t) if t.eq_ignore_ascii_case("dc") => {
             rest.get(1).and_then(|v| parse_value(v)).unwrap_or(0.0)
         }
-        Some(t) if t.to_ascii_uppercase().starts_with("SIN") => {
-            // The offset is the first number inside the parentheses.
+        Some(t)
+            if t.to_ascii_uppercase().starts_with("SIN")
+                || t.to_ascii_uppercase().starts_with("PULSE") =>
+        {
+            // The first number inside the parentheses: a `SIN`'s offset, a `PULSE`'s `v1`.
+            // Both are the waveform's value at `t = 0`, which is what a DC operating point and
+            // an AC linearization see (§ `Waveform`).
             let joined = rest.join(" ");
             let inner = joined
                 .split(['(', ')'])
@@ -369,21 +423,41 @@ fn parse_source_value(rest: &[&str]) -> f64 {
 /// (`DC <value>`, a bare number, or a malformed `SIN(...)` missing one of the first three
 /// values — the DC-only fallback in [`parse_source_value`] already covers that case).
 fn parse_source_waveform(rest: &[&str]) -> Option<Waveform> {
-    let first = rest.first()?;
-    if !first.to_ascii_uppercase().starts_with("SIN") {
-        return None;
-    }
+    let first = rest.first()?.to_ascii_uppercase();
     let joined = rest.join(" ");
     let inner = joined.split(['(', ')']).nth(1)?;
     let nums: Vec<f64> = inner.split_whitespace().filter_map(parse_value).collect();
-    match nums.as_slice() {
-        [offset, amplitude, freq, ..] => Some(Waveform::Sin {
-            offset: *offset,
-            amplitude: *amplitude,
-            freq: *freq,
-        }),
-        _ => None,
+
+    if first.starts_with("SIN") {
+        return match nums.as_slice() {
+            [offset, amplitude, freq, ..] => Some(Waveform::Sin {
+                offset: *offset,
+                amplitude: *amplitude,
+                freq: *freq,
+            }),
+            _ => None,
+        };
     }
+
+    if first.starts_with("PULSE") {
+        // A placeholder: `resolve_pulse_defaults` overwrites this once the deck's `.tran`
+        // timing is known. Recorded here anyway so the device is marked time-varying from the
+        // start, and so a `PULSE` in a deck with no `.tran` card still parses.
+        let [v1, v2, ..] = nums.as_slice() else {
+            return None;
+        };
+        return Some(Waveform::Pulse {
+            v1: *v1,
+            v2: *v2,
+            td: 0.0,
+            tr: 0.0,
+            tf: 0.0,
+            pw: 0.0,
+            per: 0.0,
+        });
+    }
+
+    None
 }
 
 /// Parse a `V` line's `AC <magnitude> [phase]` tokens, or `None` for a source with no `AC` token.

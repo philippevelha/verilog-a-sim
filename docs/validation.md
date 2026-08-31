@@ -104,6 +104,47 @@ condition leaves the whole run flat at zero rather than slightly wrong. Passes a
 `error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
 single-pole linear decay with no nonlinearity for either engine to disagree about.
 
+### A circuit deliberately *not* gated: `circuits/rc_pulse.net` (2026-08-31)
+
+`PULSE(v1 v2 td tr tf pw per)` sources are implemented and tested, but the RC circuit driven by
+one is **not** compared against QSPICE golden, and the reason is worth recording because it is
+the first case where this project and the oracle genuinely disagree about a *definition*.
+
+**QSPICE starts a `PULSE` ramp slightly before `td`.** Measured by probing QSPICE directly with
+single-source decks and extrapolating each ramp linearly back to `v1` (the ramp's own slope is
+exact, so the intercept is exact too):
+
+| deck `.tran` step | `td` | measured ramp start | offset |
+|---|---|---|---|
+| 2 us | 100 us | 99.9 us | -0.1 us |
+| 2 us | 125 us | 124.9 us | -0.1 us |
+| 2 us | 200 us | 199.9 us | -0.1 us |
+| 0.5 us | 200 us | 199.95 us | -0.05 us |
+| 0.2 us | 200 us | 199.961 us | -0.039 us |
+
+The slope always matches `(v2-v1)/tr` exactly, so `tr` is honoured; only the *placement* moves.
+The offset is independent of `td` (three values, same offset) and independent of `tr` (1 us and
+10 us edges gave the same 0.1 us), and it is not a dyadic-grid snap — `td = 125 us` is exactly
+`tstop/16` and still lands 0.1 us early. It varies with the run's timing setup in a way that is
+not proportional to the timestep (a 10x smaller step moved it only 2.6x), which points at a
+QSPICE-internal minimum edge or startup grid rather than anything derivable from the deck.
+
+**Why that sinks an RMS gate.** A fixed time shift on a fast edge is a large amplitude error:
+0.1 us on a 20 us / 5 V edge is 25 mV, and the RC integrates it into a persisting offset on the
+output node. Measured: `error=5.779e-2` with 1 us edges, `5.254e-3` with 20 us edges,
+`1.698e-3` with 100 us edges — all against a `1e-3` tolerance, and all traceable to that one
+shift. Slowing the edges further until the number dips under the bar would be tuning the
+circuit to the tolerance rather than testing anything, so it was not done.
+
+**What is validated instead.** `PULSE`'s shape is pinned against its own definition, segment by
+segment and from both sides of every boundary (`va-cli`'s
+`a_pulse_waveform_follows_its_definition_segment_by_segment`), including the single-shot
+(`per <= 0`) and ideal-edge (`tr = 0`) cases that must not divide by zero. The RC's response is
+checked against the analytic charging law parameter-free: the ratio of successive gaps to the
+source level decays as `exp(-dt/RC)` on the plateau and between pulses, which needs no absolute
+reference at all. This engine starts the ramp at `td`, the textbook SPICE definition, and that
+is what is tested.
+
 ### The AC gate (added 2026-08-01)
 
 Two circuits, chosen so the pair separates "the complex solve works" from "the model's own

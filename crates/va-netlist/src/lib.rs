@@ -197,6 +197,33 @@ pub enum Waveform {
         /// Frequency (Hz).
         freq: f64,
     },
+    /// `PULSE(v1 v2 td tr tf pw per)`: SPICE's trapezoidal pulse train. Starts at `v1`, holds
+    /// until `td`, ramps linearly to `v2` over `tr`, holds `v2` for `pw`, ramps back over `tf`,
+    /// and repeats with period `per`.
+    ///
+    /// Every parameter after `v2` is optional in SPICE and defaults here the way SPICE
+    /// defaults them for a `.tran` run: `td = 0`, `tr = tf = <one timestep>` (supplied by the
+    /// caller, since the deck's `.tran` step is what SPICE uses), `pw` and `per` = the whole
+    /// run. A `per` of zero or less means "no repeat" and is treated as a single pulse.
+    ///
+    /// The value at `t = 0` is `v1`, which is what this device contributes to a DC operating
+    /// point and an AC linearization — the same rule [`Self::Sin`]'s offset follows.
+    Pulse {
+        /// Initial (and inter-pulse) value (V).
+        v1: f64,
+        /// Pulsed value (V).
+        v2: f64,
+        /// Delay before the first rising edge (s).
+        td: f64,
+        /// Rise time, `v1` to `v2` (s). Zero is allowed and gives an ideal step.
+        tr: f64,
+        /// Fall time, `v2` back to `v1` (s). Zero is allowed.
+        tf: f64,
+        /// Width of the `v2` plateau, measured from the end of the rise (s).
+        pw: f64,
+        /// Repeat period (s). Non-positive means a single, non-repeating pulse.
+        per: f64,
+    },
 }
 
 #[cfg(test)]

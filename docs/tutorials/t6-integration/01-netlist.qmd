@@ -102,6 +102,13 @@ by an in-deck SPICE `.model` card. A `.dc` sweep only steps one source linearly;
 multi-source sweeps, no bare `.dc` (source-list) form some SPICE dialects accept. A `V` source's
 optional trailing `SIN` parameters (delay, damping, phase) aren't parsed.
 
+`PULSE(v1 v2 td tr tf pw per)` (added 2026-08-31) is the other supported waveform. Its optional
+trailing parameters default the way SPICE defaults them — an omitted rise/fall is one timestep,
+an omitted width or period runs to the end of the analysis — which means they depend on the
+`.tran` card, and that card may appear *after* the source line. So they are filled in by a
+post-pass once the whole deck has been read (`resolve_pulse_defaults`), not defaulted inline
+against timing that has not been parsed yet.
+
 `L` (inductor, added 2026-08-31) parses like `R`/`C` but behaves like a voltage source
 structurally: it claims its own branch-current unknown, because its row is the constitutive law
 `-(V(p)-V(n)) + d(L*i)/dt = 0` rather than a KCL sum. Writing it that way puts the flux `L*i` on

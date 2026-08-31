@@ -1,0 +1,18 @@
+* RC driven by a real PULSE source — the honest version of rc_step.net.
+* rc_step.net fakes a step by cold-starting a constant source; this one asks for the
+* waveform explicitly: PULSE(v1 v2 td tr tf pw per) = 0 V until 100us, a 20us rise to 5 V,
+* 400us high, a 20us fall, repeating every 1ms. RC = 1k * 100n = 100us, so the capacitor
+* charges nearly fully during the plateau and discharges between pulses.
+*
+* NOT gated against QSPICE golden, deliberately — see docs/validation.md. QSPICE starts a
+* PULSE ramp a sub-timestep amount *before* td (measured 0.039-0.1us, varying with the run's
+* internal timing and independent of td, while honouring tr's slope exactly); this engine
+* starts at td, the textbook definition. On crisp edges that difference dominates an RMS
+* comparison outright, and the alternative — slowing the edges until it stops dominating —
+* is tuning the circuit to the bar rather than testing anything. It is validated against the
+* closed-form waveform definition instead (va-cli's own tests).
+V1 in  gnd  PULSE(0 5 100u 20u 20u 400u 1m)
+R1 in  out  1000
+C1 out gnd  100n
+.tran 2e-6 2e-3
+.end

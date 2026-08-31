@@ -755,6 +755,33 @@ fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
             amplitude,
             freq,
         } => offset + amplitude * (2.0 * PI * freq * t).sin(),
+        va_netlist::Waveform::Pulse {
+            v1,
+            v2,
+            td,
+            tr,
+            tf,
+            pw,
+            per,
+        } => {
+            // Before the first edge the source sits at `v1`; a non-positive period means the
+            // pulse never repeats, so time past the first cycle stays on the falling tail.
+            if t < td {
+                return v1;
+            }
+            let since = if per > 0.0 { (t - td) % per } else { t - td };
+            if since < tr {
+                // Rising edge. A zero rise time is an ideal step, and is never divided by:
+                // `since < 0.0` is impossible, so `since < tr` is false when `tr == 0.0`.
+                v1 + (v2 - v1) * (since / tr)
+            } else if since < tr + pw {
+                v2
+            } else if since < tr + pw + tf {
+                v2 + (v1 - v2) * ((since - tr - pw) / tf)
+            } else {
+                v1
+            }
+        }
     }
 }
 
@@ -2214,6 +2241,139 @@ mod tests {
                 -expected_id
             );
         }
+    }
+
+    /// `PULSE`'s shape, pinned point by point against its own definition: `v1` before the
+    /// delay, a linear ramp over `tr`, the `v2` plateau, a linear fall over `tf`, `v1` again,
+    /// and the whole thing repeating on `per`. Every boundary is checked from both sides,
+    /// since off-by-one-segment errors are the failure mode a mid-segment check would miss.
+    #[test]
+    fn a_pulse_waveform_follows_its_definition_segment_by_segment() {
+        let w = va_netlist::Waveform::Pulse {
+            v1: 1.0,
+            v2: 5.0,
+            td: 10.0,
+            tr: 2.0,
+            tf: 4.0,
+            pw: 8.0,
+            per: 100.0,
+        };
+        let at = |t: f64| waveform_value(w, t);
+
+        assert_eq!(at(0.0), 1.0, "before the delay");
+        assert_eq!(at(9.999), 1.0, "still v1 right up to td");
+        assert_eq!(
+            at(10.0),
+            1.0,
+            "the ramp starts at td, so it is still v1 there"
+        );
+        assert!((at(11.0) - 3.0).abs() < 1e-12, "halfway up the rise");
+        assert!((at(12.0) - 5.0).abs() < 1e-12, "top of the rise");
+        assert!((at(15.0) - 5.0).abs() < 1e-12, "on the plateau");
+        assert!((at(20.0) - 5.0).abs() < 1e-12, "plateau ends at td+tr+pw");
+        assert!((at(22.0) - 3.0).abs() < 1e-12, "halfway down the fall");
+        assert!(
+            (at(24.0) - 1.0).abs() < 1e-12,
+            "back to v1 at the end of the fall"
+        );
+        assert_eq!(at(50.0), 1.0, "idle until the period repeats");
+        // Second cycle: the same shape, shifted by `per`.
+        assert!(
+            (at(111.0) - 3.0).abs() < 1e-12,
+            "halfway up the second rise"
+        );
+        assert!(
+            (at(122.0) - 3.0).abs() < 1e-12,
+            "halfway down the second fall"
+        );
+    }
+
+    /// A non-positive period means a single pulse: SPICE decks write `per` as 0 (or omit it)
+    /// for a one-shot, and treating that as "repeat every 0 seconds" would divide by zero or
+    /// spin. Also covers the ideal-edge case `tr = 0`, which must not divide by zero either.
+    #[test]
+    fn a_pulse_can_be_a_single_shot_with_ideal_edges() {
+        let one_shot = va_netlist::Waveform::Pulse {
+            v1: 0.0,
+            v2: 2.0,
+            td: 5.0,
+            tr: 0.0,
+            tf: 0.0,
+            pw: 5.0,
+            per: 0.0,
+        };
+        let at = |t: f64| waveform_value(one_shot, t);
+        assert_eq!(at(4.9), 0.0);
+        assert_eq!(at(5.0), 2.0, "a zero rise time is an ideal step at td");
+        assert_eq!(at(9.9), 2.0);
+        assert_eq!(at(10.0), 0.0, "a zero fall time drops instantly");
+        assert_eq!(at(1e6), 0.0, "and never repeats");
+        assert!(at(1e6).is_finite(), "no division by a zero period");
+    }
+
+    /// End to end: the RC's response to a real `PULSE` source, checked against the analytic
+    /// charging law rather than against a golden file (`circuits/rc_pulse.net` is deliberately
+    /// not gated against QSPICE -- see its own header comment). During the plateau the
+    /// capacitor charges toward 5 V with tau = RC, so the *ratio* of successive gaps to 5 V
+    /// must decay as exp(-dt/RC) -- a parameter-free check that needs no absolute reference.
+    #[test]
+    fn a_pulse_driven_rc_charges_with_its_own_time_constant() {
+        let deck = include_str!("../../../circuits/rc_pulse.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rc_pulse");
+        let wf = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("`out` node");
+        let rc = 1000.0 * 100e-9;
+
+        // Two points well inside the plateau (which runs 120us..520us), far enough from the
+        // rising edge that the source really is holding 5 V.
+        let sample = |t_query: f64| {
+            let i =
+                wf.t.iter()
+                    .position(|&t| t >= t_query)
+                    .expect("a sample at or past the query time");
+            (wf.t[i], wf.x[i][out])
+        };
+        let (t1, v1) = sample(200e-6);
+        let (t2, v2) = sample(300e-6);
+        let ratio = (5.0 - v2) / (5.0 - v1);
+        let expected = (-(t2 - t1) / rc).exp();
+        let rel = (ratio - expected).abs() / expected;
+        assert!(
+            rel < 1e-2,
+            "plateau charging ratio {ratio:e} vs exp(-dt/RC) {expected:e} (rel {rel:e})"
+        );
+
+        // Before the delay nothing has happened, and by the end of the plateau the capacitor
+        // is within a millivolt of the source: 400us of plateau is four time constants.
+        assert!(sample(50e-6).1.abs() < 1e-9, "idle before td");
+        assert!(
+            (sample(515e-6).1 - 5.0).abs() < 0.1,
+            "should be near 5 V by the end of the plateau, got {}",
+            sample(515e-6).1
+        );
+        // And between pulses it discharges with the same time constant, toward zero. Checked
+        // the same parameter-free way: the ratio of two late samples is exp(-dt/RC), whatever
+        // the level happens to be. (At 950us the fall ended 410us ago, so ~4.1 time constants
+        // of decay leaves tens of millivolts -- "near zero" would be the wrong assertion.)
+        let (t3, v3) = sample(700e-6);
+        let (t4, v4) = sample(800e-6);
+        let decay = v4 / v3;
+        let expected_decay = (-(t4 - t3) / rc).exp();
+        let rel = (decay - expected_decay).abs() / expected_decay;
+        assert!(
+            rel < 1e-2,
+            "inter-pulse decay {decay:e} vs exp(-dt/RC) {expected_decay:e} (rel {rel:e})"
+        );
+        let plateau = sample(515e-6).1;
+        assert!(
+            v4 < 0.2 * plateau,
+            "should have discharged well below the plateau it reached: {v4} vs {plateau}"
+        );
     }
 
     /// An inductor's initial condition is a *current*, seeded on its own branch row rather

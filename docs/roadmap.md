@@ -1522,6 +1522,31 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: `PULSE` sources, and the first real disagreement with the oracle.**
+> `V1 in gnd PULSE(v1 v2 td tr tf pw per)` parses and drives a transient run. SPICE's optional
+> trailing parameters default from the `.tran` card (one timestep for an omitted rise/fall, the
+> run length for an omitted width/period), and since that card may appear *after* the source
+> line, they are resolved in an explicit post-pass over the parsed deck rather than defaulted
+> against timing that has not been read yet. A `PULSE`'s `v1` is its DC/AC value, the same rule
+> `SIN`'s offset already followed.
+>
+> **`circuits/rc_pulse.net` exists but is deliberately not gated against QSPICE.** QSPICE starts
+> a `PULSE` ramp a sub-timestep amount *before* `td` — measured at 0.039-0.1 us across five
+> probe decks, independent of `td` and of `tr`, not a dyadic-grid snap, and not proportional to
+> the timestep — while honouring `tr`'s slope exactly. This engine starts at `td`, the textbook
+> definition. On a fast edge that fixed shift is a large amplitude error the RC then integrates
+> into a persistent offset: `5.779e-2` with 1 us edges, `5.254e-3` with 20 us, `1.698e-3` with
+> 100 us, against a `1e-3` tolerance. Slowing the edges until the number cleared the bar would
+> be tuning the circuit to the tolerance rather than testing anything, so the circuit keeps
+> physically sensible 20 us edges and is validated against the waveform's own definition
+> instead — segment by segment, from both sides of every boundary, plus a parameter-free
+> `exp(-dt/RC)` ratio check on the RC's charging and discharging. `validate` stays **19/19**;
+> the full measurement table is in `docs/validation.md`.
+>
+> Open question for the supervisor: is QSPICE's early edge a deliberate convention worth
+> matching, or an artifact to leave alone? Matching it is not obviously possible anyway, since
+> the offset is not derivable from the deck.
+>
 > **2026-08-31: `IC=` completed for the other reactive element.** An inductor's initial
 > condition is **amps through it**, not volts across it, so it seeds its own branch-current row
 > rather than a node voltage — the units follow the state the element carries. The row index is
