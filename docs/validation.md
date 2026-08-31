@@ -59,10 +59,10 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all eighteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
-`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rlc_ring, rectifier, ring_osc,
-abstime_ramp, rc_ac, diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker,
-resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+`golden/*.golden` — all nineteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rl_decay, rlc_ring, rectifier,
+ring_osc, abstime_ramp, rc_ac, diode_ac, laplace_ac, diode_noise, resistor_noise_va,
+diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -94,6 +94,15 @@ first-order stamp, a missing flux term, or a sign error on the inductor's consti
 cannot produce this waveform at all, where a resistive error would merely shift a level. The
 golden file carries `I(L1)` alongside `I(V1)`, so **the inductor's own current is scored against
 QSPICE's**, not just the node voltages it influences. Passes at `error=6.480e-5` (tol `1e-3`).
+
+**Added 2026-08-31: `circuits/rl_decay.net`, the inductor's own initial condition.** `IC=` on an
+`L` is **amps through it**, not volts across it, so it seeds the element's branch-current row
+rather than a node voltage. A source-free `R`/`L` loop starting at 1 mA gates that: `i(t) =
+1mA*exp(-t/tau)` with `tau = L/R = 100us`, and the golden scores `I(L1)` itself, so the seeded
+quantity is the one compared. Like `rc_discharge.net` it has no source, so ignoring the
+condition leaves the whole run flat at zero rather than slightly wrong. Passes at
+`error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
+single-pole linear decay with no nonlinearity for either engine to disagree about.
 
 ### The AC gate (added 2026-08-01)
 

@@ -830,15 +830,21 @@ pub fn solve_transient(
         lte_estimator: LteEstimator::DividedDifference,
     };
 
-    let (instances, dim, _currents) = build_instances(net, compiled)?;
-    let x0 = initial_solution(net, dim);
+    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let x0 = initial_solution(net, dim, &currents);
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
     va_transient::integrator::run(&refs, dim, x0, cfg).context("transient integration failed")
 }
 
-/// The transient run's initial solution vector: zero everywhere, then each capacitor's
-/// `IC=<volts>` applied as `V(p) = V(n) + ic` (`va_netlist::Device::ic`).
+/// The transient run's initial solution vector: zero everywhere, then each reactive element's
+/// `IC=` applied (`va_netlist::Device::ic`) — a capacitor's volts as `V(p) = V(n) + ic`, an
+/// inductor's amps straight onto its own branch-current row, whose index `currents` carries.
+///
+/// Only the seeded entry is set. An inductor's initial current does not back-solve the node
+/// voltages that current implies, so the `t = tstart` sample can be inconsistent until the
+/// first real solve corrects it — the same unsolved-seed sample `va-harness` already excludes
+/// from a golden comparison.
 ///
 /// This is SPICE's `UIC` semantics and nothing more: **no DC operating point is solved first**.
 /// A capacitor with no `IC=` starts at 0 V, which is what this engine has always done and what
@@ -854,10 +860,21 @@ pub fn solve_transient(
 /// case SPICE decks overwhelmingly write, and the only one in this project's zoo — is exact.
 /// Nothing here reconciles two conditions that contradict each other; the last one written
 /// wins, rather than the conflict being reported.
-fn initial_solution(net: &Netlist, dim: usize) -> Vec<f64> {
+fn initial_solution(net: &Netlist, dim: usize, currents: &[(String, usize)]) -> Vec<f64> {
     let mut x0 = vec![0.0; dim];
     for dev in &net.devices {
         let Some(ic) = dev.ic else { continue };
+        // An inductor's state is its *current*, which lives on its own branch row rather than
+        // across its terminals, so it seeds a different entry entirely (see `Device::ic`'s
+        // units). The branch index is the one `build_instances` already handed back.
+        if dev.model == "inductor" {
+            if let Some(&(_, branch)) = currents.iter().find(|(name, _)| *name == dev.name) {
+                if branch < dim {
+                    x0[branch] = ic;
+                }
+            }
+            continue;
+        }
         let (Some(&p), Some(&n)) = (dev.terminals.first(), dev.terminals.get(1)) else {
             continue;
         };
@@ -2197,6 +2214,52 @@ mod tests {
                 -expected_id
             );
         }
+    }
+
+    /// An inductor's initial condition is a *current*, seeded on its own branch row rather
+    /// than across its terminals. `rl_decay.net` has no source, so as with `rc_discharge.net`
+    /// the whole waveform is driven by that seed -- and dropping it would leave the branch
+    /// current at zero and every node voltage flat for the entire run.
+    #[test]
+    fn an_inductor_initial_current_drives_a_source_free_decay() {
+        let deck = include_str!("../../../circuits/rl_decay.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rl_decay");
+        let wf = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("`out` node");
+        let (r, l, i0) = (10.0_f64, 1e-3_f64, 1e-3_f64);
+        let tau = l / r;
+
+        // V(out) = -i(t)*R with i(t) = i0*exp(-t/tau), checked at one and two time constants.
+        // The t=0 sample is the caller's own unsolved seed, whose node voltage has not yet
+        // been reconciled with the seeded branch current (the sample `va-harness` also
+        // excludes from a golden comparison), so it is deliberately not asserted on.
+        for &n_tau in &[1.0_f64, 2.0] {
+            let i =
+                wf.t.iter()
+                    .position(|&t| t >= n_tau * tau)
+                    .expect("a sample at or past the query time");
+            let expected = -i0 * r * (-wf.t[i] / tau).exp();
+            let rel = (wf.x[i][out] - expected).abs() / expected.abs();
+            assert!(
+                rel < 5e-3,
+                "at t={} ({n_tau} tau): {} vs analytic {expected} (rel {rel:e})",
+                wf.t[i],
+                wf.x[i][out]
+            );
+        }
+
+        // The first *solved* point already reflects the seeded current; a run that ignored
+        // IC= would sit at exactly zero for the whole waveform.
+        assert!(
+            (wf.x[1][out] + i0 * r).abs() < 1e-4,
+            "first solved sample should reflect the seeded current, got {}",
+            wf.x[1][out]
+        );
     }
 
     /// An inductor is a second-order element, so the strongest cheap check is the closed-form

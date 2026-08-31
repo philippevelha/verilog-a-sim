@@ -66,6 +66,7 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_step.net", None),
     ("circuits/rc_discharge.net", None),
     ("circuits/rlc_ring.net", None),
+    ("circuits/rl_decay.net", None),
     ("circuits/rectifier.net", Some("models/diode.va")),
     ("circuits/ring_osc.net", None),
     ("circuits/abstime_ramp.net", Some("models/abstime_ramp.va")),
@@ -537,6 +538,7 @@ const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &[
     "circuits/rc_step.net",
     "circuits/rc_discharge.net",
     "circuits/rlc_ring.net",
+    "circuits/rl_decay.net",
 ];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.tran` transient circuits (§ ladder rungs

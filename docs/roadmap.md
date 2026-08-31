@@ -1522,6 +1522,24 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: `IC=` completed for the other reactive element.** An inductor's initial
+> condition is **amps through it**, not volts across it, so it seeds its own branch-current row
+> rather than a node voltage — the units follow the state the element carries. The row index is
+> the one `build_instances` already returns for branch currents, so `initial_solution` needed
+> only that mapping, not new plumbing. `IC=` on a resistor stays an error: no state to seed.
+>
+> `circuits/rl_decay.net` gates it: a source-free `R`/`L` loop starting at 1 mA, decaying as
+> `exp(-t/tau)` with `tau = L/R = 100us`. Its golden scores `I(L1)` itself, so the seeded
+> quantity is the compared one, and like `rc_discharge.net` it has no source, so ignoring the
+> condition leaves the run flat at zero rather than slightly wrong. Passes at `error=2.172e-8`;
+> `validate` is **19/19**.
+>
+> Honest wrinkle, documented on `initial_solution` rather than hidden: seeding a branch current
+> does **not** back-solve the node voltages that current implies, so the `t = tstart` sample can
+> be inconsistent until the first real solve corrects it. That is the same unsolved-seed sample
+> `va-harness` already excludes from every transient golden comparison, which is why the gate is
+> unaffected and the end-to-end test asserts from the first *solved* point onward.
+>
 > **2026-08-31: inductors, with no interface change needed.** `va_abi::reference::Inductor`
 > and the netlist's `L` element. An inductor claims its own branch-current unknown like a
 > voltage source, because its row is the constitutive law rather than a KCL sum; written as

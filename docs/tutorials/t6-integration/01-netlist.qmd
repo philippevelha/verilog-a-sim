@@ -108,10 +108,11 @@ structurally: it claims its own branch-current unknown, because its row is the c
 the existing charge channel, so **no Interface beta change was needed** — and the same
 formulation gives the correct DC answer for free, since with no charge channel in a DC solve the
 row collapses to `V(p) = V(n)`, an inductor's short circuit. Mutual inductance (`K`) is not
-parsed, and `IC=` is refused on an `L` (an inductor's initial condition is a *current*, seeded on
-its branch row, which `va_cli::initial_solution` does not do yet) rather than silently ignored.
+parsed. `IC=` on an `L` is **amps through it** (an inductor's state), seeded onto its branch
+row rather than across its terminals — the units differ from a capacitor's `IC=` because the
+state does.
 
-A capacitor's `IC=<volts>` (added 2026-08-31) seeds a **transient** run only, as SPICE's `UIC`
+A reactive element's `IC=` (added 2026-08-31) seeds a **transient** run only, as SPICE's `UIC`
 semantics do — no DC operating point is solved first, and a `.op`/`.dc`/`.ac` run ignores it.
 Conditions are applied in device order, each reading whatever its negative terminal holds at that
 point, so a grounded capacitor (the case SPICE decks overwhelmingly write, and the only kind in

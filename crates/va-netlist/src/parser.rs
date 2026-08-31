@@ -10,8 +10,9 @@
 //! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
 //! is the reference node; every other net gets a dense unknown index in first-seen order.
 //!
-//! A `C` line may carry SPICE's per-element initial condition, `` C<name> p n <value> IC=<volts> ``
-//! ([`va_netlist::Device::ic`]): the voltage across the capacitor at `tstart`, seeding a
+//! A `C` or `L` line may carry SPICE's per-element initial condition, `` IC=<value> ``
+//! ([`va_netlist::Device::ic`]): volts across a capacitor, amps through an inductor — the state
+//! each element actually carries — at `tstart`, seeding a
 //! **transient** run's initial solution and ignored by every other analysis — SPICE's own `UIC`
 //! semantics, in which no DC operating point is solved first. A capacitor with no `IC=` starts
 //! at 0 V, which is what this engine did unconditionally before the token was recognized.
@@ -219,9 +220,9 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 'C' => "capacitor",
                 _ => "inductor",
             };
-            // `IC=<volts>`, SPICE's per-element initial condition. Accepted on a capacitor
-            // only: it is the voltage across the element at `tstart`, and a resistor has no
-            // state to initialize. Spelled as one token (`IC=5`), the form QSPICE and every
+            // `IC=<value>`, SPICE's per-element initial condition, in the units of the state
+            // the element carries: volts across a capacitor, amps through an inductor. A
+            // resistor has no state to initialize, so `IC=` there is an error. Spelled as one token (`IC=5`), the form QSPICE and every
             // SPICE dialect write, and the form `xtask`'s golden-deck translator already
             // leaves untouched when it injects `IC=0` into the decks that lack one.
             let mut ic = None;
@@ -229,12 +230,9 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 let Some(rest) = tok.strip_prefix("IC=").or_else(|| tok.strip_prefix("ic=")) else {
                     return Err(err(format!("unexpected token `{tok}` after the value")));
                 };
-                if kind != 'C' {
-                    // An inductor's initial condition is a *current*, seeded on its own branch
-                    // row rather than across its terminals, which `va_cli::initial_solution`
-                    // does not do yet. Refused rather than silently accepted and dropped.
+                if kind == 'R' {
                     return Err(err(format!(
-                        "`IC=` is only supported on a capacitor, not on `{name}`"
+                        "`IC=` is only meaningful on a reactive element, not on `{name}`"
                     )));
                 }
                 ic = Some(
@@ -653,5 +651,11 @@ C1 out gnd 1e-6 IC=5
             .is_err(),
             "stray trailing token"
         );
+
+        // An inductor does carry state, in amps, so `IC=` is accepted there too.
+        let net = parse("L1 a gnd 1e-3 IC=2e-3\n.tran 1e-6 1e-3\n.end\n")
+            .expect("IC= on an inductor parses");
+        assert_eq!(net.devices[0].ic, Some(2e-3));
+        assert_eq!(net.devices[0].model, "inductor");
     }
 }

@@ -1,0 +1,9 @@
+* Source-free RL loop decaying from an initial inductor current.
+* L1 and R1 in a loop; the inductor starts carrying 1 mA and there is no source, so
+* i(t) = 1mA * exp(-t/tau) with tau = L/R = 1mH/10 = 100us, and V(out) = -i*R.
+* The counterpart to rc_discharge.net for the *other* reactive element: IC= on an L is
+* amps through it, seeded on its own branch-current row rather than across its terminals.
+R1 out gnd 10
+L1 out gnd 1e-3 IC=1e-3
+.tran 1e-6 5e-4
+.end
