@@ -59,10 +59,11 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all twenty-one — are real, QSPICE-generated data (`cargo xtask
+`golden/*.golden` — all twenty-two — are real, QSPICE-generated data (`cargo xtask
 gen-golden`): `{divider, mos_dc, diode_iv, diode_iv_params, diode_clamp, rc_step, rc_discharge,
-rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin, diode_ac, laplace_ac,
-diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin, rc_ac_oct, diode_ac,
+laplace_ac, diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table,
+resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -103,6 +104,14 @@ quantity is the one compared. Like `rc_discharge.net` it has no source, so ignor
 condition leaves the whole run flat at zero rather than slightly wrong. Passes at
 `error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
 single-pole linear decay with no nonlinearity for either engine to disagree about.
+
+**Added 2026-08-31: `circuits/rc_ac_oct.net`, the octave sweep.** `oct`'s count is a density
+like `dec`'s but per factor of 2, so a wrong base silently produces a different grid rather
+than erroring — which makes it worth an oracle check rather than only a unit test. 10 Hz to
+320 Hz is exactly five octaves, so the expected count is checkable by hand (5*2 + 1 = 11), and
+QSPICE returns those same 11 points. Passes at `|mag| 1.942e-15`. Added while reviewing this
+session's own work: `lin` had been gated and `oct` had not, which left the newer of the two
+grid rules resting on unit tests alone.
 
 **Added 2026-08-31: `circuits/diode_iv_params.net`, per-instance parameter overrides.** A
 device line can now set the referenced model's parameters by name (`D1 in gnd diode Is=1e-12

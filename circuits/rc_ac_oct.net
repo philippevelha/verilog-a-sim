@@ -1,0 +1,11 @@
+* The same RC low-pass again, swept per octave.
+* Gates SPICE's `.ac oct <points-per-octave> <fstart> <fstop>` (added 2026-08-31). Unlike
+* `lin`, the count is a density like `dec`'s -- but per factor of 2 rather than 10, so a
+* wrong base silently changes the grid rather than erroring. 10 Hz to 320 Hz is exactly five
+* octaves, which makes the expected point count checkable by hand: 5*2 + 1 = 11.
+* The band straddles the -3 dB corner at 159.15 Hz for the same reason rc_ac_lin.net's does.
+V1 in  gnd  DC 0 AC 1
+R1 in  out  1000
+C1 out gnd  1e-6
+.ac oct 2 10 320
+.end
