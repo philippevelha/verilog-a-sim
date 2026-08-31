@@ -113,10 +113,16 @@
 //! around this project's still-`if`/`case`-restricted `ddt` placement in some real models, e.g.
 //! `angelov_gan.va`'s `T0 = ddt(Ldc * I(rf,si)); // Avoid analog operator in if/else block`) is
 //! tracked back to its defining assignment via [`DdtVars`]: a `Stmt::Assign` whose RHS is itself
-//! a recognized `ddt` shape never becomes an ordinary [`LoweredStmt::Assign`] (there would be no
-//! sound value to assign — evaluating a bare `ddt(...)` outside the charge channel is exactly
-//! what this project cannot do) and instead records `lhs -> rhs` for the `Stmt::Contribute` arm
-//! to substitute when it later encounters a bare read of that variable as an additive term. This
+//! a recognized `ddt` shape records `lhs -> rhs` rather than emitting an ordinary
+//! [`LoweredStmt::Assign`], for the `Stmt::Contribute` arm
+//! to substitute when it later encounters a bare read of that variable as an additive term.
+//!
+//! **That used to be unconditional**, justified by "there would be no sound value to assign —
+//! evaluating a bare `ddt(...)` outside the charge channel is exactly what this project cannot
+//! do". That justification expired when Route B gave a bare `ddt` sub-expression a real primal
+//! (reconstructed from committed history) plus a `grad_ddt` every stamping path now consumes. So
+//! the assignment *is* emitted, additionally to the binding, for the variables in [`Escaping`] —
+//! see there. This
 //! is forward, single-pass, and intentionally *not* a full reaching-definitions analysis: entering
 //! any branch/loop body clones the map, and the clone's mutations are discarded on exit rather
 //! than merged back, so a variable reassigned inside only one arm of an `if`/`case` (a common
@@ -909,15 +915,45 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         next_slot += 1;
     }
 
+    // Pass 1 discovers which `ddt`-holding variables escape their branch under time-invariant
+    // guards; pass 2 reruns with that knowledge and emits the assignments pass 1 elided. See
+    // `Escaping`. Pass 1's statement output is discarded — only the set survives — and pass 2's
+    // discovery is provably identical, since `escaping` controls emission alone and emission
+    // does not feed back into the drop analysis.
+    let mut escaping: Escaping = {
+        let mut probe_stmts = Vec::new();
+        let mut probe_ddt_vars = HashMap::new();
+        let mut probe_dropped: HashMap<u32, bool> = HashMap::new();
+        let mut discover: Escaping = HashSet::new();
+        for stmt in &module.analog {
+            lower_stmt(
+                module,
+                true,
+                &mut discover,
+                stmt,
+                &slot_of_branch,
+                &param_only,
+                &mut probe_ddt_vars,
+                &mut probe_dropped,
+                &mut probe_stmts,
+            )?;
+        }
+        discover
+    };
+
     let mut stmts = Vec::new();
     let mut ddt_vars = HashMap::new();
     // Variables whose `ddt` binding was discarded at the close of a branch/loop, and that no
-    // ordinary assignment has superseded since. Unlike `ddt_vars` this is never cloned per
-    // branch — a drop that happened inside one arm must stay visible to everything after it.
-    let mut dropped_ddt = HashSet::new();
+    // ordinary assignment has superseded since, mapped to **whether every drop site sat under
+    // time-invariant guards**. Unlike `ddt_vars` this is never cloned per branch — a drop that
+    // happened inside one arm must stay visible to everything after it — and one bad site
+    // poisons the variable for all of them.
+    let mut dropped_ddt: HashMap<u32, bool> = HashMap::new();
     for stmt in &module.analog {
         lower_stmt(
             module,
+            true,
+            &mut escaping,
             stmt,
             &slot_of_branch,
             &param_only,
@@ -1197,13 +1233,21 @@ fn collect_branch_kinds_one(stmt: &Stmt, flow: &mut BTreeSet<u32>, potential: &m
 /// contribution sites that run after its most recent assignment was a `ddt` shape.
 type DdtVars = HashMap<u32, ExprId>;
 
+// Nine arguments, and bundling them would cost more than it buys: `guards_invariant` is
+// narrowed per arm, `ddt_vars` is *cloned* per arm while `dropped_ddt`/`escaping` deliberately
+// are not, and `out` is a fresh buffer per arm. A context struct would have to be rebuilt at
+// every recursion with a different mix of shared and per-arm fields, which is exactly the
+// distinction this signature makes visible. Same call as `va_transient::newton_step`.
+#[allow(clippy::too_many_arguments)]
 fn lower_stmt(
     module: &Module,
+    guards_invariant: bool,
+    escaping: &mut Escaping,
     stmt: &Stmt,
     slot_of_branch: &HashMap<u32, usize>,
     param_only: &HashSet<u32>,
     ddt_vars: &mut DdtVars,
-    dropped_ddt: &mut HashSet<u32>,
+    dropped_ddt: &mut HashMap<u32, bool>,
     out: &mut Vec<LoweredStmt>,
 ) -> Result<(), CodegenError> {
     match stmt {
@@ -1227,13 +1271,31 @@ fn lower_stmt(
                         Some(&shape) => shape,
                         // The variable held a `ddt` shape assigned inside a branch, and that
                         // binding was discarded when the branch closed (`DdtVars` is forward and
-                        // single-pass by design). Lowering this as an ordinary resistive read
-                        // would compile cleanly and silently omit the charge term entirely —
-                        // `hicumL0_v2p1p0.va` loses its whole self-heating capacitance that way.
-                        // Refuse instead: a missing reactive term is not something to guess at.
-                        None if dropped_ddt.contains(&id.0) => {
+                        // single-pass by design), so the term cannot be routed to the charge
+                        // channel from here.
+                        //
+                        // Whether that is recoverable turns on the guards it sat under. Under
+                        // **time-invariant** guards the arm choice cannot change mid-run, so the
+                        // `ddt` site is evaluated at every accepted timepoint and its committed
+                        // history really is the previous step's — the rate is then contributable
+                        // as an ordinary term, taking the product-rule path (value in the
+                        // residual, `grad_ddt` into `dcharge`). Marking it here is what makes
+                        // pass 2 emit the assignment pass 1 elided; see `Escaping`.
+                        None if dropped_ddt.get(&id.0) == Some(&true) => {
+                            escaping.insert(id.0);
+                            term.expr
+                        }
+                        // Under a solution-dependent guard, or inside a loop, it is not
+                        // recoverable and refusing is the only honest answer. `ModelState`
+                        // pre-seeds scratch from committed, so on a step where the arm is *not*
+                        // taken the site's `q_prev`/rate survive stale; the next time it is
+                        // taken, `coeff` belongs to the current step while `q_prev` is several
+                        // steps old — an O(1) wrong rate with no diagnostic. Under trapezoidal
+                        // `classify_dynamic_rows`' one-shot verdict would additionally zero that
+                        // row's history offset. This is also exactly what LRM §4.5.15 forbids.
+                        None if dropped_ddt.contains_key(&id.0) => {
                             return Err(unsupported(
-                                "a ddt assigned to a variable inside an if/case/loop arm and contributed after that arm is not supported: the charge term would be silently dropped. Move the ddt into the contribution itself, or assign it outside the branch",
+                                "a ddt assigned to a variable inside an if/case/loop arm and contributed after that arm needs a controlling condition that is constant for the whole run (LRM 4.5.15); this one depends on the solution, or the arm is a loop body, so the operator's history would not advance on the steps the arm is not taken. Move the ddt into the contribution itself, or make the condition parameter-only",
                             ))
                         }
                         None => term.expr,
@@ -1298,16 +1360,29 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::Assign { lhs, rhs } => {
-            // A `ddt`-shape RHS never becomes a `LoweredStmt::Assign`: this project has no way
-            // to evaluate a bare `ddt(...)` as an ordinary value (that's exactly why it normally
-            // must be a top-level contribution term — see this module's doc comment), so the
-            // assignment is tracked symbolically in `ddt_vars` instead and resolved at whatever
-            // later contribution reads it (see the `Stmt::Contribute` arm above). Any other RHS
+            // A `ddt`-shape RHS is tracked symbolically in `ddt_vars` and resolved at whatever
+            // later contribution reads it (see the `Stmt::Contribute` arm above), so it can be
+            // routed to the charge channel — the better discretization where it applies. It is
+            // *additionally* emitted as a `LoweredStmt::Assign` when the variable escapes its
+            // branch under time-invariant guards (see `Escaping`). Any other RHS
             // invalidates a stale entry, so a variable reused for an ordinary value afterward is
             // read normally, not substituted.
             match charge_term_shape(module, *rhs, param_only)? {
                 Some(_) => {
                     ddt_vars.insert(lhs.0, *rhs);
+                    // Keeping the binding *and* emitting is deliberate: a variable that is both
+                    // folded at an in-arm `<+` and read after the arm keeps the charge channel
+                    // at the in-arm site (the better discretization) while the later read gets a
+                    // defined value. Emission is conditional so the blast radius stays bounded
+                    // to files that error today — an unconditional emit would start evaluating
+                    // every `ddt`-shape assignment in `validate`, including dead ones, and
+                    // `Dual::into_ddt` errors on an argument that already carries charge.
+                    if escaping.contains(&lhs.0) {
+                        out.push(LoweredStmt::Assign {
+                            lhs: *lhs,
+                            rhs: *rhs,
+                        });
+                    }
                 }
                 None => {
                     ddt_vars.remove(&lhs.0);
@@ -1331,6 +1406,8 @@ fn lower_stmt(
             for s in body {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1342,11 +1419,18 @@ fn lower_stmt(
             Ok(())
         }
         Stmt::If { cond, then_, else_ } => {
+            // LRM §4.5.15: an analog operator inside `if`/`case` is legal only when the
+            // controlling condition is a *constant* expression. That is exactly the boundary
+            // between "an escaping rate is exact" and "it is silently wrong" (see the
+            // `Stmt::Contribute` read site), so it is the boundary this lowering enforces.
+            let guards_invariant = guards_invariant && is_time_invariant(module, *cond);
             let mut then_lowered = Vec::new();
             let mut then_ddt_vars = ddt_vars.clone();
             for s in then_ {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1360,6 +1444,8 @@ fn lower_stmt(
             for s in else_ {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1372,8 +1458,22 @@ fn lower_stmt(
             // brand-new one local to just one arm) are known to hold after the `if` — which arm
             // ran isn't known here — so forget any variable either arm assigned at all, in the
             // *outer* map that carries forward past this construct (see `DdtVars`'s doc comment).
-            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, then_);
-            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, else_);
+            invalidate_ddt_vars(
+                module,
+                param_only,
+                ddt_vars,
+                dropped_ddt,
+                guards_invariant,
+                then_,
+            );
+            invalidate_ddt_vars(
+                module,
+                param_only,
+                ddt_vars,
+                dropped_ddt,
+                guards_invariant,
+                else_,
+            );
             out.push(LoweredStmt::If {
                 cond: *cond,
                 then_: then_lowered,
@@ -1387,6 +1487,8 @@ fn lower_stmt(
             for s in body {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1395,7 +1497,7 @@ fn lower_stmt(
                     &mut body_lowered,
                 )?;
             }
-            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, body);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, false, body);
             out.push(LoweredStmt::While {
                 cond: *cond,
                 body: body_lowered,
@@ -1412,6 +1514,8 @@ fn lower_stmt(
             let mut init_lowered = Vec::new();
             lower_stmt(
                 module,
+                guards_invariant,
+                escaping,
                 init,
                 slot_of_branch,
                 param_only,
@@ -1422,6 +1526,8 @@ fn lower_stmt(
             let mut step_lowered = Vec::new();
             lower_stmt(
                 module,
+                guards_invariant,
+                escaping,
                 step,
                 slot_of_branch,
                 param_only,
@@ -1433,6 +1539,8 @@ fn lower_stmt(
             for s in body {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1446,6 +1554,7 @@ fn lower_stmt(
                 param_only,
                 ddt_vars,
                 dropped_ddt,
+                false,
                 std::slice::from_ref(&**init),
             );
             invalidate_ddt_vars(
@@ -1453,9 +1562,10 @@ fn lower_stmt(
                 param_only,
                 ddt_vars,
                 dropped_ddt,
+                false,
                 std::slice::from_ref(&**step),
             );
-            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, body);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, false, body);
             out.push(LoweredStmt::For {
                 init: init_lowered,
                 cond: *cond,
@@ -1470,6 +1580,8 @@ fn lower_stmt(
             for s in body {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1478,7 +1590,7 @@ fn lower_stmt(
                     &mut body_lowered,
                 )?;
             }
-            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, body);
+            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, false, body);
             out.push(LoweredStmt::Repeat {
                 count: *count,
                 body: body_lowered,
@@ -1490,6 +1602,9 @@ fn lower_stmt(
             arms,
             default,
         } => {
+            // The same LRM §4.5.15 rule as `if`, keyed on the selector.
+            let case_invariant = guards_invariant && is_time_invariant(module, *selector);
+            let guards_invariant = case_invariant;
             // Every arm (and `default`) is a mutually exclusive alternative to every other, so
             // each must be lowered from the *same* pre-`case` snapshot — not one another's
             // possibly-already-invalidated state — hence cloning from `ddt_vars` up front for
@@ -1501,6 +1616,8 @@ fn lower_stmt(
                 for s in &arm.body {
                     lower_stmt(
                         module,
+                        guards_invariant,
+                        escaping,
                         s,
                         slot_of_branch,
                         param_only,
@@ -1519,6 +1636,8 @@ fn lower_stmt(
             for s in default {
                 lower_stmt(
                     module,
+                    guards_invariant,
+                    escaping,
                     s,
                     slot_of_branch,
                     param_only,
@@ -1528,9 +1647,23 @@ fn lower_stmt(
                 )?;
             }
             for arm in arms {
-                invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, &arm.body);
+                invalidate_ddt_vars(
+                    module,
+                    param_only,
+                    ddt_vars,
+                    dropped_ddt,
+                    case_invariant,
+                    &arm.body,
+                );
             }
-            invalidate_ddt_vars(module, param_only, ddt_vars, dropped_ddt, default);
+            invalidate_ddt_vars(
+                module,
+                param_only,
+                ddt_vars,
+                dropped_ddt,
+                case_invariant,
+                default,
+            );
             out.push(LoweredStmt::Case {
                 selector: *selector,
                 arms: lowered_arms,
@@ -1925,6 +2058,42 @@ fn ddt_arg(module: &Module, expr: ExprId) -> Result<Option<ExprId>, CodegenError
     }
 }
 
+/// Variables whose `ddt` binding is discarded before the `<+` that reads them, but whose every
+/// drop site sat under **time-invariant** guards — so the rate they hold may legitimately be
+/// contributed as an ordinary term taking the product-rule path.
+///
+/// This is the whole reason [`lower`] runs two passes. The mark cannot be made at the
+/// assignment: it is created by [`invalidate_ddt_vars`] when the *enclosing* construct closes,
+/// which is strictly after the assignment was already lowered (or, as it used to be, elided). A
+/// forward single pass cannot know. So pass 1 discovers this set and throws its output away;
+/// pass 2 reruns with it and emits the assignment that pass 1 dropped.
+type Escaping = HashSet<u32>;
+
+/// Whether `expr` is **constant for the whole run** — not merely parameter-*valued*.
+///
+/// `Const`, `Param`, and pure arithmetic over them. Everything else is refused, including
+/// `Expr::Var` and every `Expr::Call`.
+///
+/// # Why not [`is_param_only`]
+///
+/// That predicate answers a different question and would be actively wrong here. It accepts an
+/// `Expr::Var` for any variable in `param_only`, and [`param_only_vars`] is deliberately
+/// *non-path-sensitive*: `asmhemt.va`'s `if (V(g) > voff) ct = ctrap3; else ct = 1.0e-9;` makes
+/// `ct` "parameter-only" even though its value genuinely changes as the bias moves. Guarding on
+/// that would admit precisely the case this restriction exists to refuse — an analog operator
+/// under a condition that flips mid-run.
+///
+/// Refusing `Expr::Call` outright is the same conservatism: real compact-model guards are
+/// comparisons of parameters, and enumerating which builtins are time-invariant buys nothing.
+fn is_time_invariant(module: &Module, expr: ExprId) -> bool {
+    match module.expr(expr) {
+        Expr::Const(_) | Expr::Param(_) => true,
+        Expr::Unary(_, e) => is_time_invariant(module, *e),
+        Expr::Binary(_, l, r) => is_time_invariant(module, *l) && is_time_invariant(module, *r),
+        _ => false,
+    }
+}
+
 /// Whether `expr` is provably independent of every unknown (node voltage, branch current, and
 /// local variable) — built from nothing but `Const`/`Param`, pure arithmetic/builtin
 /// combinations of those, and a local variable (by `VarId.0`) present in `param_only` (see
@@ -1993,7 +2162,8 @@ fn invalidate_ddt_vars(
     module: &Module,
     param_only: &HashSet<u32>,
     ddt_vars: &mut DdtVars,
-    dropped: &mut HashSet<u32>,
+    dropped: &mut HashMap<u32, bool>,
+    guards_invariant: bool,
     stmts: &[Stmt],
 ) {
     let mut assigns = Vec::new();
@@ -2006,7 +2176,12 @@ fn invalidate_ddt_vars(
         // the contribution site can refuse instead. A plain reassignment afterwards clears the
         // mark (see `Stmt::Assign`), because that supersedes the `ddt` with a real value.
         if matches!(charge_term_shape(module, rhs, param_only), Ok(Some(_))) {
-            dropped.insert(var);
+            // One drop site under a solution-dependent guard poisons the variable for every
+            // other, however many well-guarded sites it also has.
+            dropped
+                .entry(var)
+                .and_modify(|f| *f &= guards_invariant)
+                .or_insert(guards_invariant);
         }
     }
 }

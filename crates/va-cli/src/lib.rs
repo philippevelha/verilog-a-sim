@@ -1720,14 +1720,25 @@ mod tests {
     /// `hicumL0_v2p1p0.va`'s self-heating idiom: a `ddt` assigned to a local variable inside
     /// one arm of an `if`, then contributed by a **later, separate** statement.
     ///
-    /// `DdtVars` is forward and single-pass — entering a branch clones the map and discards the
-    /// clone on exit, so the `i_cth -> ddt(...)` binding is gone by the time `I(p,n) <+ i_cth;`
-    /// is reached. This used to lower as an ordinary resistive read and *compile*, because the
-    /// other arm's `i_cth = 0.0` did emit an assignment — silently stamping **no charge at
-    /// all**, so the device's entire thermal capacitance vanished with no diagnostic. It is now
-    /// refused instead, with a message naming the actual restriction.
+    /// `DdtVars` is forward and single-pass, so the `i_cth -> ddt(...)` binding is gone by the
+    /// time `I(p,n) <+ i_cth;` is reached. This used to lower as an ordinary resistive read and
+    /// *compile*, silently stamping no charge at all — the device's whole thermal capacitance
+    /// vanishing with no diagnostic. It was then refused outright. Since the guards here are
+    /// **parameter-only**, it is now lowered instead: the assignment is emitted, the variable
+    /// carries the rate, and the contribution takes the product-rule path.
+    ///
+    /// Asserts the four things that distinguish that path from every neighbouring one — a test
+    /// that only checked "it builds" would pass on the very bug this replaced:
+    ///   * `dcharge == cth`   — the charge sensitivity is present, and is the right size;
+    ///   * `charge == 0`      — it took the product-rule path, **not** the charge channel;
+    ///   * `jacobian == 0`    — the coefficient here is constant, so there is no `(dq/dt)·∂c/∂x`;
+    ///   * `residual` matches the reconstructed rate from real committed history.
+    ///
+    /// Run under a **transient** context with non-zero `ddt_coeff` and non-zero committed
+    /// history on purpose: under DC `ddt_coeff` is zero, so the residual would be legitimately
+    /// zero and a broken primal reconstruction would sail through.
     #[test]
-    fn a_ddt_assigned_in_an_if_arm_and_contributed_later_is_refused_not_dropped() {
+    fn a_ddt_assigned_in_an_if_arm_under_parameter_guards_is_contributed_as_a_rate() {
         let src = "module thermal(p, n);
                    electrical p, n;
                    parameter real cth = 1e-9;
@@ -1745,14 +1756,98 @@ mod tests {
 ";
         let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
         let mut next = 2usize;
+        let inst = va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next)
+            .expect("a parameter-guarded escaping rate is supported");
+
+        let (h, cth, v) = (1e-6_f64, 1e-9_f64, 0.4_f64);
+        let coeff = 1.0 / h;
+        let ctx = va_abi::AnalysisCtx::transient(1e-3)
+            .with_ddt(coeff, 0.0)
+            .with_initial_step(false);
+        let q_prev = 3e-10_f64;
+        let committed = vec![q_prev; inst.state_len()];
+        let mut nxt = vec![0.0; committed.len()];
+        let mut st = va_abi::ModelState::new(&committed, &mut nxt);
+        let mut sink = va_abi::stamps::DenseStamp::new(1);
+        inst.load(&[v], &ctx, &mut st, &mut sink);
+
+        assert!(
+            (sink.dcharge[0] - cth).abs() < 1e-18,
+            "expected dcharge = cth = {cth:e}, got {:e} — the thermal capacitance is the whole              point of this shape",
+            sink.dcharge[0]
+        );
+        assert_eq!(
+            sink.charge[0], 0.0,
+            "an escaping rate must NOT enter the charge channel: its value is already in the              residual, so a non-zero charge here would double-count it through the offset"
+        );
+        assert!(
+            sink.jacobian[0].abs() < 1e-18,
+            "the coefficient is a parameter, so there is no (dq/dt)*dc/dx half; got {:e}",
+            sink.jacobian[0]
+        );
+        let expected = coeff * (cth * v - q_prev);
+        assert!(
+            (sink.residual[0] - expected).abs() < 1e-12 * expected.abs().max(1.0),
+            "residual {:e} is not the reconstructed rate {expected:e} from committed history",
+            sink.residual[0]
+        );
+    }
+
+    /// The narrowed refusal must still bite: the same shape with a guard that **depends on the
+    /// solution**. There the arm choice can flip between timepoints, so the `ddt` site is not
+    /// evaluated every step and its committed history goes stale — an O(1) wrong rate with no
+    /// diagnostic. LRM §4.5.15 forbids exactly this.
+    #[test]
+    fn an_escaping_ddt_under_a_solution_dependent_guard_is_still_refused() {
+        let src = "module bad(p, n);
+                   electrical p, n;
+                   parameter real c0 = 1e-9;
+                   real i_c;
+                   analog begin
+                     if (V(p, n) > 0.5) begin
+                       i_c = ddt(c0 * V(p, n));
+                     end else begin
+                       i_c = 0.0;
+                     end
+                     I(p, n) <+ i_c;
+                   end
+                   endmodule
+";
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        let mut next = 2usize;
         let msg = match va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next) {
             Err(e) => e.to_string(),
-            Ok(_) => panic!("must not build: the charge term would be silently dropped"),
+            Ok(_) => panic!("a solution-dependent guard must still be refused"),
         };
-        assert!(
-            msg.contains("silently dropped"),
-            "the diagnostic must say what would be lost, got: {msg}"
-        );
+        assert!(msg.contains("constant for the whole run"), "got: {msg}");
+    }
+
+    /// And inside a loop body, which LRM §4.5.15 forbids outright regardless of the condition.
+    #[test]
+    fn an_escaping_ddt_inside_a_loop_body_is_still_refused() {
+        let src = "module loopy(p, n);
+                   electrical p, n;
+                   parameter real c0 = 1e-9;
+                   integer k;
+                   real i_c;
+                   analog begin
+                     i_c = 0.0;
+                     k = 0;
+                     while (k < 1) begin
+                       i_c = ddt(c0 * V(p, n));
+                       k = k + 1;
+                     end
+                     I(p, n) <+ i_c;
+                   end
+                   endmodule
+";
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        let mut next = 2usize;
+        let msg = match va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a loop body must still be refused"),
+        };
+        assert!(msg.contains("constant for the whole run"), "got: {msg}");
     }
 
     /// The control: the *same* variable-indirection shape with the `ddt` assigned **outside**

@@ -37,7 +37,7 @@ shared, demoable milestone that several theses light up at once.
 > metric-honesty entry below; **86/88 self-contained module-declaring files** as of
 > 2026-08-30, on a corpus grown to 158 files — see the port-qualifier entry), and a one-off
 > frontend+codegen scan of the same corpus (**104/150** build into a `ModelInstance`; **107/150**
-> since 2026-08-29 — both superseded by **84/88** as of 2026-08-30, and note that the figure is
+> since 2026-08-29 — both superseded by **85/88** as of 2026-08-31, and note that the figure is
 > now re-derivable with `va-cli check external --codegen` rather than a hand-written scan). The
 > previous revision of this table dated from 2026-07-18 and had gone stale in three ways, all
 > corrected here: T2.2's corpus figure predated the corpus growing from 115 to 150 files; the
@@ -56,7 +56,7 @@ shared, demoable milestone that several theses light up at once.
 | T1.2 — parsing | recursive-descent parser + arena AST; precedence/associativity. Same "gate green as scoped, target since widened" caveat as T1.1 | 🟢 |
 | T1.3 — elaboration | AST → `va_ir::Module`; **86/88 self-contained, module-declaring corpus files pass the full frontend** (2026-08-30, corpus 158 files; the old headline "114/150" counted 14 files declaring no module and 18 whose body an unresolved `` `include `` had deleted — see the metric-honesty entry). The phase's literal gate — the three zoo models elaborating to committed golden IR — closed 2026-08-30 (`crates/va-frontend/tests/golden_ir.rs`) | ✅ |
 | T2.1 — AD core | forward-mode dual numbers over the IR arena; every differentiated operator FD-checked (§5) | ✅ |
-| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **84/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). Both remaining codegen failures are genuine and individually accounted for — one needs the charge channel evaluated inside control flow (`hicumL0_v2p1p0`), one is a bug in the corpus file (`amp_dynamic.va`) — not recognizer gaps; the four product-rule files closed 2026-08-30 | 🟢 |
+| T2.2 — lowering | IR → `ModelInstance` incl. local-variable assignments, `if`/`else`, potential contributions (incl. mixed flow/potential), loops, `case`, user-defined analog functions, and parameter-scaled `ddt` (incl. through local-variable coefficients, and — since 2026-08-29 — a coefficient distributed over a parenthesised *sum* of `ddt`s); **85/88 self-contained, module-declaring corpus files pass frontend+codegen** (`va-cli check external --codegen`, 2026-08-30 on a 158-file corpus; was 75/108 on 2026-08-29, whose raw form was 107/150, up from 104/150 on 2026-08-04, which itself superseded the old 50/115 measured before the corpus grew to 150 files). The **one** remaining codegen failure is a bug in the corpus file itself (`amp_dynamic.va` declares `parameter real gain` and `real gain` in the same scope) — not a recognizer gap; the four product-rule files closed 2026-08-30 and `hicumL0_v2p1p0` on 2026-08-31 | 🟢 |
 | T2.3 — charge channel | `ddt` terms routed to the charge channel (capacitor); broad coverage ongoing | 🟢 |
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
@@ -93,12 +93,11 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
 2. ~~**T1.3's literal gate is unmet.**~~ **Closed 2026-08-30** — `crates/va-frontend/tests/
    golden_ir.rs` commits a full `{:#?}` snapshot of the elaborated `va_ir::Module` for
    `resistor.va`/`capacitor.va`/`diode.va` and fails on any difference. T1.3 is ✅.
-3. **T2.2/T2.3 are not corpus-complete.** 84 of the 88 self-contained, module-declaring corpus
-   files build into a `ModelInstance` (2026-08-30). The frontend→codegen gap is **2 files**, both
-   individually accounted for and neither a recognizer gap: the charge channel evaluated inside
-   control flow (`hicumL0_v2p1p0`), and one bug in a corpus file (`amp_dynamic.va` declares
-   `parameter real gain` and `real gain` in the same scope). T2.2's own generated-diode check is
-   an operating point + FD rather than a full committed sweep.
+3. **T2.2/T2.3 are not corpus-complete.** 85 of the 88 self-contained, module-declaring corpus
+   files build into a `ModelInstance` (2026-08-31). The frontend→codegen gap is **1 file**, and it is
+   a bug in a corpus file rather than a recognizer gap (`amp_dynamic.va` declares `parameter real
+   gain` and `real gain` in the same scope). T2.2's own generated-diode check is an operating
+   point + FD rather than a full committed sweep.
 
 No longer true and removed from this list: "T2/T3 run over hand-built IR / reference instances —
 the frontend→codegen→core path is not yet wired by a netlist driver." `va-cli sim --model` has
@@ -141,7 +140,7 @@ are excluded from the gap accounting below for the same reason as the fragments.
 >
 > ⚠️ **Both numerators above are now known to be inflated and are kept only as history** — see
 > "Corpus metric honesty (2026-08-29)" below. The categories in this list are correct; the
-> `114`/`104` totals are not. Current figures: **86/88** (frontend) and **84/88** (frontend +
+> `114`/`104` totals are not. Current figures: **86/88** (frontend) and **85/88** (frontend +
 > codegen) on files that both declare a module and are self-contained (2026-08-30, corpus grown
 > to 158 files — see the port-qualifier entry; the 2026-08-29 revision of this line said
 > 82/108 and 75/108, of which the frontend half was itself off by one, see below).
@@ -3356,6 +3355,64 @@ sentence. Affected: the `laplace_*` top-level-term refusal, and both charge-chan
 Rewritten as single-line literals, which cannot be mangled. Two more in `va-frontend`
 (`laplace_*`'s "needs at least one numerator/zero…" and the zero/pole parity message) had the
 same defect and are fixed the same way. Worth knowing before writing the next long diagnostic.
+
+## An escaping rate: `hicumL0`'s self-heating idiom (2026-08-31)
+
+The last codegen gap. **84/88 → 85/88**, and the single remaining failure corpus-wide is a bug in
+the corpus file itself. `hicumL0_v2p1p0.va` builds (11 nodes, 112 params).
+
+The shape: `if (flsh == 0) i_cth = 0.0; else i_cth = ddt(cth*V(br_sht));` followed by a *later,
+separate* `I(br_sht) <+ i_cth;`. `DdtVars` is forward and single-pass, so the binding is gone by
+the time the contribution is reached.
+
+**The naive lift is wrong, and I tried it first.** Simply letting the read fall through to an
+ordinary resistive term makes the term contribute **nothing** — residual, jacobian, charge and
+dcharge all zero — because a `ddt`-shape assignment was never *emitted* as a statement, so the
+variable keeps its earlier value. That is worse than the refusal it removes. The fix has to change
+the **write** site, not the read site.
+
+**The discriminator is the LRM, not an implementation limit.** §4.5.15: an analog operator inside
+`if`/`case` is legal only when the controlling condition is a *constant* expression, and is
+illegal inside a loop at all. That is exactly the boundary between "exact" and "silently wrong"
+here — under a time-invariant guard the arm choice cannot flip mid-run, so the `ddt` site is
+evaluated at every accepted timepoint and its committed history really is the previous step's.
+Under a solution-dependent guard it is not: `ModelState` pre-seeds scratch from committed, so on a
+step where the arm is skipped the site's `q_prev` survives stale, and the next time it is taken
+`coeff` belongs to the current step while `q_prev` is several steps old — an O(1) wrong rate with
+no diagnostic. So the refusal survives, **narrowed, with the language as its justification**.
+`hicumL0`'s guards are `flsh` and `cth`, both parameters, so it falls on the legal side.
+
+**Two passes, because the mark cannot be made at the assignment.** It is created when the
+*enclosing* construct closes, strictly after the assignment was lowered — a forward single pass
+cannot know. Pass 1 discovers the escaping set and throws its statements away; pass 2 reruns and
+emits what pass 1 elided. Emission is *conditional* on that set, which bounds the blast radius to
+files that error today: an unconditional emit would start evaluating every `ddt`-shape assignment
+in `validate`, dead ones included, where `Dual::into_ddt` errors on an argument already carrying
+charge.
+
+**The trap worth recording:** `is_param_only` is sitting in the same file and looks like the
+obvious guard predicate. It would be **wrong** — it accepts any variable in `param_only`, and
+`param_only_vars` is deliberately non-path-sensitive, so `asmhemt.va`'s
+`if (V(g) > voff) ct = ctrap3; else ct = 1.0e-9;` makes `ct` "parameter-only" while its value
+genuinely changes with bias. Guarding on it would admit precisely the case this refuses. The new
+`is_time_invariant` accepts `Const`/`Param` and arithmetic over them only — no `Expr::Var`, no
+`Expr::Call`.
+
+**Tested on stamps, never on `Result::is_ok()`** — the naive fix built fine and stamped nothing.
+The positive test asserts four things that separate this path from every neighbour:
+`dcharge == cth` (the capacitance is there, and the right size), `charge == 0` (it took the
+product-rule path, *not* the charge channel — a non-zero charge would double-count through the
+offset), `jacobian == 0` (a constant coefficient has no `(dq/dt)·∂c/∂x` half), and a residual
+matching the rate reconstructed from **non-zero committed history** — run under a transient
+context, because under DC `ddt_coeff` is zero and a broken primal would sail through. Verified to
+bite: deleting the emit gives `dcharge = 0`. Two negatives pin the narrowed refusal
+(solution-dependent guard, loop body), and the pre-existing straight-line control still asserts
+`charge != 0`, so the fix cannot have over-reached into the fold.
+
+**Also corrected here:** this module's doc comment and `token-reference.md` both stated the old
+unconditional rule — "a `ddt`-shape assign never becomes a `LoweredStmt::Assign`", and that
+§4.5.15 is entirely unenforced. The first is no longer true; the second is now true only of
+`va-frontend`, since `va-codegen` enforces one slice of it.
 
 ## How to keep this document honest
 

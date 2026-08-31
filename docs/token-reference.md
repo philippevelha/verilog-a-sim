@@ -799,8 +799,13 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 - **Purpose and Static Nature**: Simulation-time in the analog block (the branch taken can
   depend on a signal value, re-evaluated every Newton iteration); note the LRM restriction
   (§4.5.15) that an analog operator (`ddt`, `idt`, …) is only legal inside an `if`/`case`/`?:`
-  when the controlling condition is itself a compile-time constant — `va-frontend` does not
-  currently enforce this restriction (a gap, not claimed as implemented).
+  when the controlling condition is itself a compile-time constant. `va-frontend` does not
+  enforce this (still a gap, not claimed as implemented), but **`va-codegen` enforces one slice
+  of it since 2026-08-31**: a `ddt` assigned to a variable inside an arm and contributed *after*
+  that arm is accepted only when every enclosing guard is time-invariant, and refused with a
+  §4.5.15 citation otherwise. That slice is exactly where the restriction is load-bearing for
+  this implementation — the operator's history only advances on steps its arm is taken. A `ddt`
+  used *within* the arm that assigns it is unaffected.
 - **Declaration and Assignment**: `if ( cond ) then_stmt [else else_stmt]`, both arms accepting
   either a single statement or a `begin...end` block, normalized to `Stmt::If { cond, then_,
   else_ }` (an absent `else` becomes an empty `else_` list).
