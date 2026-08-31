@@ -15,7 +15,7 @@ pub mod vsource;
 
 pub use bjt::Bjt;
 pub use capacitor::Capacitor;
-pub use controlled::{Vccs, Vcvs};
+pub use controlled::{Cccs, Ccvs, Vccs, Vcvs};
 pub use diode::Diode;
 pub use inductor::Inductor;
 pub use resistor::Resistor;

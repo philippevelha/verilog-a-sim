@@ -1,0 +1,7 @@
+in 1
+mid 0
+fout -0.6
+hout 2
+I(V1) -0.001
+I(Vsense) 0.001
+I(H1) -0.0002

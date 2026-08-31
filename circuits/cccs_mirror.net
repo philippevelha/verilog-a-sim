@@ -1,0 +1,17 @@
+* Current-controlled sources: F (current-controlled current source) and H (current-controlled
+* voltage source), both sensing the same element's branch current.
+* V1 drives 1 mA through R1 (V1/R1 = 1V/1k). Vsense is a 0 V source in series -- the SPICE
+* idiom for sensing a current, since only an element with a branch row has one to sense.
+* F1 mirrors that current times 3 into R2, so V(fout) = -3mA * 200 = -0.6 V.
+* H1 converts it to a voltage at 2000 ohms transresistance: V(hout) = 2000 * I(Vsense).
+* The two share one controlling element deliberately: if the branch row were resolved wrongly
+* for either, the two outputs would disagree about a current they must agree on.
+V1     in    gnd   DC 1
+R1     in    mid   1000
+Vsense mid   gnd   DC 0
+F1     fout  gnd   Vsense  3
+R2     fout  gnd   200
+H1     hout  gnd   Vsense  2000
+R3     hout  gnd   10000
+.op
+.end

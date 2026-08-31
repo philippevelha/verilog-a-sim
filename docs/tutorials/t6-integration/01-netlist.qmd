@@ -96,12 +96,14 @@ would be caught here before it ever reached `va-cli`.
 ## Limitations
 
 Stated in the parser module's own doc comment: subcircuits (`X`), mutual inductance (`K`),
-current-controlled sources (`F`/`H`), and `.model` cards are not parsed — a device's *model* is
+and `.model` cards are not parsed — a device's *model* is
 always resolved by `va-cli` matching a name against either a compiled `.va` file or a
 hand-written `va-abi` reference primitive, never by an in-deck SPICE `.model` card.
-(Inductors and the voltage-controlled sources `E`/`G` were on this list until 2026-08-31; they
-are parsed now. `F`/`H` stay off it because their controlling quantity is another element's
-branch current, which needs that element resolved rather than a node pair read.) A `.dc` sweep only steps one source linearly; no nested/
+(Inductors and all four controlled sources were on this list until 2026-08-31; they are
+parsed now. `F`/`H` were the last to land because their controlling quantity is another
+element's branch current, so that element has to be resolved to a row before the source can be
+built — and it may be written later in the deck, which is why instances are built in two
+phases.) A `.dc` sweep only steps one source linearly; no nested/
 multi-source sweeps, no bare `.dc` (source-list) form some SPICE dialects accept. A `V` source's
 optional trailing `SIN` parameters (delay, damping, phase) aren't parsed.
 
@@ -111,6 +113,12 @@ nodes — the driven pair, then the controlling pair — and a gain or transcond
 `2e-3*V(ctl)` amps through whatever `out` is connected to. The `G` claims no branch unknown at
 all; the `E` claims one, exactly as an independent source does, because it states a constraint
 rather than contributing a current.
+
+`F` and `H` are their current-controlled counterparts: two nodes, then the *name* of an
+element whose branch current controls them, then a gain (`F`) or a transresistance in ohms
+(`H`). That element must own a branch row — a `V` source, an `L`, an `E` or an `H` — which is
+the same restriction SPICE has, and the reason its decks conventionally insert a 0 V source
+purely to sense a current. Naming something without one (a resistor) is an error that says so.
 
 A model-referencing device (`D`/`M`/`Q`) may set the model's parameters by name,
 `D1 in gnd diode Is=1e-12 N=1.3` (added 2026-08-31). Before that a device could override only

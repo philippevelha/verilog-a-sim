@@ -8,6 +8,11 @@
 //! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
 //! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
 //! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
+//! `F` (current-controlled current source) and `H` (current-controlled voltage source) take
+//! two nodes, the *name* of an element whose branch current controls them, and a gain or
+//! transresistance. That element must be one that owns a branch row (a `V` source, an `L`, an
+//! `E` or an `H`) — the same restriction SPICE has, and the reason its decks conventionally
+//! insert a 0 V source purely to sense a current.
 //! `E` (voltage-controlled voltage source) and `G` (voltage-controlled current source) take
 //! four nodes — the driven pair then the controlling pair — and a gain/transconductance.
 //! is the reference node; every other net gets a dense unknown index in first-seen order.
@@ -359,6 +364,30 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic,
                 params: Vec::new(),
+                control: None,
+            })
+        }
+        // `F<name> p n <controlling element> <gain>` / `H<name> p n <controlling element>
+        // <transresistance>` — the current-controlled pair. The third token names another
+        // element whose branch current is the controlling quantity; it is resolved to a row by
+        // `va-cli`, which is the layer that assigns those rows.
+        'F' | 'H' => {
+            need(5)?;
+            let p = intern(net, toks[1]);
+            let n = intern(net, toks[2]);
+            let value =
+                parse_value(toks[4]).ok_or_else(|| err(format!("bad value `{}`", toks[4])))?;
+            let model = if kind == 'F' { "cccs" } else { "ccvs" };
+            Ok(Device {
+                name,
+                model: model.to_string(),
+                terminals: vec![p, n],
+                value: Some(value),
+                waveform: None,
+                ac: None,
+                ic: None,
+                params: Vec::new(),
+                control: Some(toks[3].to_string()),
             })
         }
         // `E<name> p n cp cn <gain>` / `G<name> p n cp cn <gm>` — linear
@@ -384,6 +413,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: Vec::new(),
+                control: None,
             })
         }
         'D' => {
@@ -401,6 +431,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: parse_param_overrides(&toks[4..], line_no)?,
+                control: None,
             })
         }
         // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
@@ -422,6 +453,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: parse_param_overrides(&toks[5..], line_no)?,
+                control: None,
             })
         }
         'V' => {
@@ -440,6 +472,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac,
                 ic: None,
                 params: Vec::new(),
+                control: None,
             })
         }
         // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
@@ -461,6 +494,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: parse_param_overrides(&toks[5..], line_no)?,
+                control: None,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -828,6 +862,21 @@ C1 out gnd 1e-6 IC=5
             net.devices[0].waveform,
             Some(Waveform::Pulse { .. })
         ));
+    }
+
+    /// `F`/`H` take two nodes, the *name* of the element they sense, and a gain.
+    #[test]
+    fn current_controlled_sources_name_their_controller() {
+        let net = parse("F1 o gnd Vs 3\nH1 q gnd Vs 2000\n.op\n.end\n").expect("parses");
+        assert_eq!(net.devices[0].model, "cccs");
+        assert_eq!(net.devices[0].control.as_deref(), Some("Vs"));
+        assert_eq!(net.devices[0].value, Some(3.0));
+        assert_eq!(net.devices[1].model, "ccvs");
+        assert_eq!(net.devices[1].control.as_deref(), Some("Vs"));
+        assert_eq!(net.devices[1].value, Some(2000.0));
+        // Every other device kind leaves `control` empty.
+        let net = parse("R1 a gnd 1000\n.end\n").expect("parses");
+        assert!(net.devices[0].control.is_none());
     }
 
     /// `E`/`G` take four nodes -- the driven pair then the controlling pair -- and a gain.

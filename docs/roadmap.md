@@ -1566,6 +1566,24 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: the current-controlled sources (`F`, `H`) complete the set.** They sense
+> another element's branch current rather than a node pair, which is why they had been left out
+> earlier the same day: the controlling element must be *resolved to a row* before the instance
+> can be built, and that element may be written after them in the deck. `build_instances` now
+> runs in two phases — everything else first, then the current-controlled sources against the
+> `(name, index)` map the first phase produced.
+>
+> **That deferral is only safe because of a bug fixed hours earlier.** While branch identity
+> was inferred from device order, appending instances in a different order than they were
+> written would have mislabelled currents. Since identity now travels by name, order is free.
+> Naming a controlling element that owns no branch row (a resistor) is a clear error naming it,
+> not a silent zero — which is exactly why SPICE decks insert a 0 V source to do the sensing.
+>
+> `circuits/cccs_mirror.net` gates both at `error=0.000e0`, exact agreement with QSPICE on all
+> seven columns including both sign conventions; `validate` is **24/24**. Both sources sense the
+> *same* element on purpose: if either resolved the controlling row wrongly, the two outputs
+> would disagree about a current they must agree on, which a single-source deck could not show.
+>
 > **2026-08-31: say out loud when a transient run is approximating an operator.** Some
 > analog operators fold to something simpler here, and the fold is *correct* for DC and AC —
 > `absdelay` and the `laplace_*` family both settle to their steady-state value at a fixed

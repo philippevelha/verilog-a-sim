@@ -32,7 +32,7 @@ pub mod plot;
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
 use va_abi::reference::{
-    diode::VT_NOMINAL, Bjt, Capacitor, Diode, Inductor, Resistor, VSource, Vccs, Vcvs,
+    diode::VT_NOMINAL, Bjt, Capacitor, Cccs, Ccvs, Diode, Inductor, Resistor, VSource, Vccs, Vcvs,
 };
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
@@ -707,12 +707,50 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     let mut next_unknown = n_nodes;
     let mut instances: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
     let mut currents = Vec::new();
+    // Phase 1: everything whose construction depends on nothing else. A current-controlled
+    // source (`F`/`H`) is deferred, because it needs the *branch row* of the element it senses
+    // and that element may be written after it in the deck. Deferring is only safe because
+    // branch identity is carried by the `currents` map rather than inferred from device order
+    // (§ `report`'s own doc comment, and the bug that established it).
     for dev in &net.devices {
+        if matches!(dev.model.as_str(), "cccs" | "ccvs") {
+            continue;
+        }
         let (inst, branch) = build_instance(dev, compiled, &mut next_unknown)?;
         if let Some(branch) = branch {
             currents.push((dev.name.clone(), branch));
         }
         instances.push(inst);
+    }
+    // Phase 2: the current-controlled sources, now that every branch row above has an index.
+    for dev in &net.devices {
+        if !matches!(dev.model.as_str(), "cccs" | "ccvs") {
+            continue;
+        }
+        let ctl_name = dev
+            .control
+            .as_deref()
+            .with_context(|| format!("`{}` names no controlling element", dev.name))?;
+        let ctl = currents
+            .iter()
+            .find(|(name, _)| name == ctl_name)
+            .map(|(_, idx)| *idx)
+            .with_context(|| {
+                format!(
+                    "`{}` is controlled by `{ctl_name}`, which has no branch current to sense                      (only a voltage source, an inductor, or an `E`/`H` carries one)",
+                    dev.name
+                )
+            })?;
+        let (p, n) = (dev.terminals[0], dev.terminals[1]);
+        let gain = dev.value.unwrap_or(0.0);
+        if dev.model == "cccs" {
+            instances.push(Box::new(Cccs::new(p, n, ctl, gain)));
+        } else {
+            let branch = next_unknown;
+            next_unknown += 1;
+            currents.push((dev.name.clone(), branch));
+            instances.push(Box::new(Ccvs::new(p, n, ctl, branch, gain)));
+        }
     }
     Ok((instances, next_unknown, currents))
 }
@@ -2442,6 +2480,53 @@ mod tests {
         assert!((at("mid") - 1.0).abs() < 1e-9, "V(mid) = {}", at("mid"));
         assert!((at("eout") - 4.0).abs() < 1e-9, "V(eout) = {}", at("eout"));
         assert!((at("gout") + 1.0).abs() < 1e-9, "V(gout) = {}", at("gout"));
+    }
+
+    /// Current-controlled sources, against hand-computed values. Both sense the *same*
+    /// element deliberately: if either resolved the controlling branch row wrongly, the two
+    /// outputs would disagree about a current they must agree on.
+    #[test]
+    fn current_controlled_sources_sense_a_named_branch() {
+        let deck = include_str!("../../../circuits/cccs_mirror.net");
+        let net = va_netlist::parser::parse(deck).expect("parse cccs_mirror");
+        let op = solve_dc(&net, &[]).expect("solves");
+        let at = |name: &str| {
+            let i = net
+                .node_order
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("node `{name}`"));
+            op.x[i]
+        };
+        // 1 mA through the sensed source: F mirrors it x3 into 200 ohms, H converts it at
+        // 2000 ohms transresistance.
+        assert!((at("fout") + 0.6).abs() < 1e-9, "V(fout) = {}", at("fout"));
+        assert!((at("hout") - 2.0).abs() < 1e-9, "V(hout) = {}", at("hout"));
+    }
+
+    /// Naming a controlling element that owns no branch row is a clear error rather than a
+    /// silent zero -- a resistor has no branch current to sense, which is exactly why SPICE
+    /// decks insert a 0 V source to do the sensing.
+    #[test]
+    fn a_controller_without_a_branch_row_is_rejected() {
+        let deck = "V1 in gnd DC 1
+R1 in gnd 1000
+F1 o gnd R1 2
+R2 o gnd 100
+.op
+.end
+";
+        let net = va_netlist::parser::parse(deck).expect("parses");
+        let err = solve_dc(&net, &[]).expect_err("R1 has no branch current");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("R1"),
+            "should name the controlling element: {msg}"
+        );
+        assert!(
+            msg.contains("branch current"),
+            "and say what is missing: {msg}"
+        );
     }
 
     /// Branch-current identity must come from `branch_currents`, not from assuming which

@@ -51,6 +51,7 @@ fn print_usage() {
 const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/divider.net", None),
     ("circuits/vcvs_amp.net", None),
+    ("circuits/cccs_mirror.net", None),
     ("circuits/mos_dc.net", Some("models/mosfet.va")),
 ];
 
@@ -511,7 +512,11 @@ fn validate() -> Result<()> {
 /// `.temp` to exactly 300 K made it *worse*, not better, since SPICE rescales `IS` relative to
 /// `TNOM` whenever `.temp` differs from it) is now closed: `va_codegen::TEMP`/`VT` (and every
 /// reference-model copy) were moved to the 300.15 K/QSPICE-matching convention.
-const QSPICE_NATIVE_CIRCUITS: &[&str] = &["circuits/divider.net", "circuits/vcvs_amp.net"];
+const QSPICE_NATIVE_CIRCUITS: &[&str] = &[
+    "circuits/divider.net",
+    "circuits/vcvs_amp.net",
+    "circuits/cccs_mirror.net",
+];
 
 /// QSPICE-native `.model` card translations for the single-`.op`-point circuits (§ ladder rung 5)
 /// that reference a custom `.va` model QSPICE has no idea how to load. Hand-translated from the

@@ -59,9 +59,9 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all twenty-three — are real, QSPICE-generated data (`cargo xtask
-gen-golden`): `{divider, vcvs_amp, mos_dc, diode_iv, diode_iv_params, diode_clamp, rc_step,
-rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin,
+`golden/*.golden` — all twenty-four — are real, QSPICE-generated data (`cargo xtask
+gen-golden`): `{divider, vcvs_amp, cccs_mirror, mos_dc, diode_iv, diode_iv_params, diode_clamp,
+rc_step, rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin,
 rc_ac_oct, diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker,
 resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
@@ -104,6 +104,15 @@ quantity is the one compared. Like `rc_discharge.net` it has no source, so ignor
 condition leaves the whole run flat at zero rather than slightly wrong. Passes at
 `error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
 single-pole linear decay with no nonlinearity for either engine to disagree about.
+
+**Added 2026-08-31: `circuits/cccs_mirror.net`, the current-controlled pair.** `F` and `H`
+sense another element's branch current rather than a node pair, so they need that element
+resolved to its row before they can be built at all. Both sources in this deck sense the *same*
+0 V sensing source deliberately: if either resolved the controlling row wrongly, the two
+outputs would disagree about a current they must agree on, which a single-source deck could
+not reveal. `F1` mirrors 1 mA times 3 into 200 ohms (`V(fout) = -0.6 V`) and `H1` converts the
+same 1 mA at 2000 ohms (`V(hout) = 2 V`). QSPICE agrees on all seven columns exactly:
+`error=0.000e0`.
 
 **Added 2026-08-31: `circuits/vcvs_amp.net`, the controlled sources.** SPICE's `E`
 (voltage-controlled voltage source) and `G` (voltage-controlled current source) both appear in
