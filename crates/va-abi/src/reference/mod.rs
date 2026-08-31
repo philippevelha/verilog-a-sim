@@ -8,12 +8,14 @@
 pub mod bjt;
 pub mod capacitor;
 pub mod diode;
+pub mod inductor;
 pub mod resistor;
 pub mod vsource;
 
 pub use bjt::Bjt;
 pub use capacitor::Capacitor;
 pub use diode::Diode;
+pub use inductor::Inductor;
 pub use resistor::Resistor;
 pub use vsource::VSource;
 

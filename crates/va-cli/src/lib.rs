@@ -31,7 +31,7 @@ pub mod plot;
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
-use va_abi::reference::{diode::VT_NOMINAL, Bjt, Capacitor, Diode, Resistor, VSource};
+use va_abi::reference::{diode::VT_NOMINAL, Bjt, Capacitor, Diode, Inductor, Resistor, VSource};
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
@@ -1088,6 +1088,19 @@ fn build_instance(
             }),
             None => Box::new(VSource::new(p, n, branch, dev.value.unwrap_or(0.0))),
         };
+        return Ok((inst, Some(branch)));
+    }
+
+    if dev.model == "inductor" {
+        // Like a voltage source, an inductor carries its own branch-current unknown: its row
+        // is the constitutive law `-(V(p)-V(n)) + d(L*i)/dt = 0`, not a KCL sum. Claiming the
+        // index here (rather than in `va-abi`) keeps `dim` assignment in one place, and
+        // returning it as a named current means `I(L1)` reaches golden files exactly as a
+        // source's own current does.
+        let branch = *next_unknown;
+        *next_unknown += 1;
+        let inst: Box<dyn ModelInstance> =
+            Box::new(Inductor::new(p, n, branch, dev.value.unwrap_or(0.0)));
         return Ok((inst, Some(branch)));
     }
 
@@ -2184,6 +2197,73 @@ mod tests {
                 -expected_id
             );
         }
+    }
+
+    /// An inductor is a second-order element, so the strongest cheap check is the closed-form
+    /// step response of the series RLC it forms: peak overshoot and ringing frequency both
+    /// follow from `zeta` and `w0` alone. A first-order stamp, a missing flux term, or a sign
+    /// error on the constitutive row cannot reproduce either.
+    #[test]
+    fn an_inductor_gives_a_series_rlc_its_textbook_ringing() {
+        let deck = include_str!("../../../circuits/rlc_ring.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rlc_ring");
+        let wf = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("`out` node");
+
+        let (r, l, c) = (10.0_f64, 1e-3_f64, 1e-6_f64);
+        let w0 = 1.0 / (l * c).sqrt();
+        let zeta = 0.5 * r * (c / l).sqrt();
+
+        // Peak overshoot of an underdamped second-order step: 1 + exp(-pi*zeta/sqrt(1-zeta^2)).
+        let expected_peak =
+            5.0 * (1.0 + (-std::f64::consts::PI * zeta / (1.0 - zeta * zeta).sqrt()).exp());
+        let peak =
+            wf.x.iter()
+                .map(|row| row[out])
+                .fold(f64::NEG_INFINITY, f64::max);
+        let rel = (peak - expected_peak).abs() / expected_peak;
+        assert!(
+            rel < 5e-3,
+            "overshoot {peak} vs closed form {expected_peak} (rel {rel:e})"
+        );
+
+        // Damped ringing period: 2*pi/(w0*sqrt(1-zeta^2)). Measured between the first two
+        // upward crossings of the 5 V final value, which is where the waveform is steepest and
+        // the crossing time least sensitive to sampling.
+        let t_cross: Vec<f64> =
+            wf.t.windows(2)
+                .zip(wf.x.windows(2))
+                .filter(|(_, xs)| xs[0][out] < 5.0 && xs[1][out] >= 5.0)
+                .map(|(ts, xs)| {
+                    let frac = (5.0 - xs[0][out]) / (xs[1][out] - xs[0][out]);
+                    ts[0] + frac * (ts[1] - ts[0])
+                })
+                .collect();
+        assert!(
+            t_cross.len() >= 2,
+            "expected at least two rising crossings of the final value, got {}",
+            t_cross.len()
+        );
+        let measured_period = t_cross[1] - t_cross[0];
+        let expected_period = 2.0 * std::f64::consts::PI / (w0 * (1.0 - zeta * zeta).sqrt());
+        let rel = (measured_period - expected_period).abs() / expected_period;
+        assert!(
+            rel < 5e-3,
+            "ringing period {measured_period:e} vs closed form {expected_period:e} (rel {rel:e})"
+        );
+
+        // At DC an inductor is a short and a capacitor an open, so the run must settle at the
+        // full source voltage rather than at a divider fraction of it.
+        let settled = wf.x.last().expect("a last point")[out];
+        assert!(
+            (settled - 5.0).abs() < 0.15,
+            "should ring down toward the 5 V source, ended at {settled}"
+        );
     }
 
     /// The initial condition must actually *drive* the run, not merely parse. `rc_discharge.net`

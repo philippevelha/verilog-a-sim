@@ -59,8 +59,8 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all seventeen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
-`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rectifier, ring_osc,
+`golden/*.golden` — all eighteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rlc_ring, rectifier, ring_osc,
 abstime_ramp, rc_ac, diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker,
 resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
@@ -85,6 +85,15 @@ the circuit sitting at 0 V for the whole run. That makes it the one gate here th
 loudly rather than subtly. It passes at `error=7.692e-6` (tol `1e-3`) against real QSPICE golden,
 generated through the same `UIC` cold-start translation the other transient decks use — which
 already left an explicit `IC=` alone, so no change to `xtask` was needed to support it.
+
+**Added 2026-08-31: `circuits/rlc_ring.net`, the inductor gate.** A series RLC step response
+(`R=10`, `L=1mH`, `C=1uF`, so `zeta=0.158`), cold-started so the constant source acts as a step.
+It is the first gated circuit with an `L`, and the first *second-order* one: `V(out)` overshoots
+to 8.02 V and rings down with a 199 us period. That is what makes it discriminating — a
+first-order stamp, a missing flux term, or a sign error on the inductor's constitutive row
+cannot produce this waveform at all, where a resistive error would merely shift a level. The
+golden file carries `I(L1)` alongside `I(V1)`, so **the inductor's own current is scored against
+QSPICE's**, not just the node voltages it influences. Passes at `error=6.480e-5` (tol `1e-3`).
 
 ### The AC gate (added 2026-08-01)
 

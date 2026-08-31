@@ -2,7 +2,8 @@
 //!
 //! Reads a SPICE-flavored deck: one element or dot-card per line, whitespace-separated
 //! tokens, `*` full-line comments. The supported element letters are `R` (resistor), `C`
-//! (capacitor), `D` (a two-terminal model-referencing device, e.g. a diode), `M` (a
+//! (capacitor), `L` (inductor — which, like a voltage source, claims its own branch-current
+//! unknown), `D` (a two-terminal model-referencing device, e.g. a diode), `M` (a
 //! three-terminal model-referencing device, e.g. a MOSFET — `` M<name> d g s model ``, no
 //! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
 //! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
@@ -17,7 +18,8 @@
 //!
 //! # Limitations
 //!
-//! - Inductors, controlled sources, subcircuits (`X`), and `.model` cards are not parsed.
+//! - Controlled sources, subcircuits (`X`), mutual inductance (`K`), and `.model` cards are
+//!   not parsed.
 //! - A `V` source accepts `DC <value>` or `SIN(off amp freq …)`. The latter's offset becomes
 //!   the DC value (what a DC operating point needs) *and* its full `(offset, amplitude, freq)`
 //!   is retained as [`crate::Device::waveform`] for a transient run to reproduce the actual
@@ -206,13 +208,17 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
     };
 
     match kind {
-        'R' | 'C' => {
+        'R' | 'C' | 'L' => {
             need(4)?;
             let p = intern(net, toks[1]);
             let n = intern(net, toks[2]);
             let value =
                 parse_value(toks[3]).ok_or_else(|| err(format!("bad value `{}`", toks[3])))?;
-            let model = if kind == 'R' { "resistor" } else { "capacitor" };
+            let model = match kind {
+                'R' => "resistor",
+                'C' => "capacitor",
+                _ => "inductor",
+            };
             // `IC=<volts>`, SPICE's per-element initial condition. Accepted on a capacitor
             // only: it is the voltage across the element at `tstart`, and a resistor has no
             // state to initialize. Spelled as one token (`IC=5`), the form QSPICE and every
@@ -224,8 +230,11 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                     return Err(err(format!("unexpected token `{tok}` after the value")));
                 };
                 if kind != 'C' {
+                    // An inductor's initial condition is a *current*, seeded on its own branch
+                    // row rather than across its terminals, which `va_cli::initial_solution`
+                    // does not do yet. Refused rather than silently accepted and dropped.
                     return Err(err(format!(
-                        "`IC=` is only meaningful on a capacitor, not on `{name}`"
+                        "`IC=` is only supported on a capacitor, not on `{name}`"
                     )));
                 }
                 ic = Some(

@@ -102,6 +102,15 @@ by an in-deck SPICE `.model` card. A `.dc` sweep only steps one source linearly;
 multi-source sweeps, no bare `.dc` (source-list) form some SPICE dialects accept. A `V` source's
 optional trailing `SIN` parameters (delay, damping, phase) aren't parsed.
 
+`L` (inductor, added 2026-08-31) parses like `R`/`C` but behaves like a voltage source
+structurally: it claims its own branch-current unknown, because its row is the constitutive law
+`-(V(p)-V(n)) + d(L*i)/dt = 0` rather than a KCL sum. Writing it that way puts the flux `L*i` on
+the existing charge channel, so **no Interface beta change was needed** — and the same
+formulation gives the correct DC answer for free, since with no charge channel in a DC solve the
+row collapses to `V(p) = V(n)`, an inductor's short circuit. Mutual inductance (`K`) is not
+parsed, and `IC=` is refused on an `L` (an inductor's initial condition is a *current*, seeded on
+its branch row, which `va_cli::initial_solution` does not do yet) rather than silently ignored.
+
 A capacitor's `IC=<volts>` (added 2026-08-31) seeds a **transient** run only, as SPICE's `UIC`
 semantics do — no DC operating point is solved first, and a `.op`/`.dc`/`.ac` run ignores it.
 Conditions are applied in device order, each reading whatever its negative terminal holds at that

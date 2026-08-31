@@ -1,0 +1,14 @@
+* Series RLC step response — an underdamped second-order transient.
+* V1 --[R1 10]-- a --[L1 1mH]-- out --[C1 1uF]-- gnd, cold-started at x=0, so the
+* constant 5 V source is a step (the same trick rc_step.net uses).
+* w0 = 1/sqrt(LC) = 31623 rad/s (f0 ~ 5.03 kHz, period ~199us); damping ratio
+* zeta = (R/2)*sqrt(C/L) = 0.158, so V(out) overshoots and rings down with an
+* envelope time constant 2L/R = 200us. Exercises the inductor's branch-current row
+* and its flux on the charge channel; a first-order or wrongly-signed stamp cannot
+* produce this waveform at all.
+V1 in  gnd  DC 5
+R1 in  a    10
+L1 a   out  1e-3
+C1 out gnd  1e-6
+.tran 1e-6 1e-3
+.end
