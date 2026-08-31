@@ -80,10 +80,12 @@ model, reproduces the analytic RC charging curve.
 
 ## Limitations
 
-**No `.ic`/`UIC` initial-condition support** — shared honestly with every other reactive state in
-this codegen and with `va-cli`'s own transient driver (`t4-transient/01-integration.qmd`,
-`t6-integration/03-validation.qmd`'s SPICE-gotcha section has the concrete consequence this had
-for QSPICE golden comparison).
+**No `.ic`/`UIC` initial condition for a *generated model's own* internal state.** The netlist
+layer gained `IC=` on 2026-08-31, so a deck can seed a capacitor's voltage or an inductor's
+current (`t6-integration/01-netlist.qmd`), but that seeds an *unknown* in the solution vector.
+A compiled model's internal reactive state — an `idt` accumulator, a `ddt` site's history — has
+no way to be initialized from a deck, and still starts at zero. `t6-integration/03-validation
+.qmd`'s SPICE-gotcha section has the consequence this had for QSPICE golden comparison.
 
 **A dedicated "operator coverage matrix" for T2 specifically never got built as its own
 artifact.** The roadmap originally scoped this phase to include one; what actually happened

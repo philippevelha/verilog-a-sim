@@ -48,10 +48,11 @@ Backward Euler needed no such gate: its own `offset` is naturally `0` for an alg
 `run`/`run_with_events` take `x0: Vec<f64>` as a plain argument; nothing in this module forces
 it to be zero. `rc_transient_matches_analytic` deliberately starts the capacitor at `0` V (not
 already at steady state) to exercise a real charging transient, while a *different* test's
-`x0` sets the source node directly to its own DC value. `va-cli::solve_transient` — one layer up
-— is the one that always chooses `x0 = vec![0.0; dim]` (its own stated limitation, no `.ic`/`UIC`
-support, `t6-integration/02-cli.qmd`); that's a choice at the integration layer, not a
-restriction of this engine.
+`x0` sets the source node directly to its own DC value. `va-cli::solve_transient` — one layer
+up — chooses that vector, and since 2026-08-31 it seeds it from any `IC=` the deck states
+(volts across a capacitor, amps through an inductor) rather than always handing over zeros.
+Either way it is a choice at the integration layer, not a restriction of this engine: the
+integrator has always accepted whatever `x0` it is given.
 
 ## The code
 

@@ -101,15 +101,23 @@ follows.
 
 ## Limitations
 
-Same cold-start limitation `t3-core/02-newton.qmd`/`t4-transient/01-integration.qmd` note: no
-`.ic`/`UIC` support, so `solve_transient` can't reproduce a circuit whose demo genuinely depends
-on starting from a specific non-zero operating point (the ring oscillator's hand-built fixture
-does; the same topology run through this crate's own cold start turned out to reproduce the
-oscillation anyway, but only confirmed empirically, not guaranteed by design —
-`t4-transient/03-events.qmd`). `--plot` supports a transient run (`--tran`) or a `.dc` sweep
-(`va_cli::plot::plot_transient`/`plot_sweep`) — a bare DC operating point remains unplottable, a
-single point rather than a curve, and asking for one is still a clear error rather than an empty
-image (`t3-core/03-nonlinear-dc.qmd` has the sweep figure).
+**The cold start is no longer unconditional** (2026-08-31): a reactive element may carry
+SPICE's `IC=`, and `solve_transient` seeds the initial solution vector from it — volts across a
+capacitor, amps through an inductor. These are `UIC` semantics and nothing more: no DC
+operating point is solved first, and an element without `IC=` still starts at zero, which is
+what this crate always did. What remains true is the *ring oscillator* caveat: its hand-built
+fixture starts from a specific non-zero point, and the same topology through a plain cold start
+reproduces the oscillation only as an empirical fact, not by design (`t4-transient/03-events.qmd`).
+
+`--plot` covers every analysis that produces a curve: a transient waveform, a `.dc` sweep, an AC
+Bode pair, and a noise spectrum (`va_cli::plot::{plot_transient, plot_sweep, plot_ac,
+plot_noise}`). A bare DC operating point remains unplottable — a single point rather than a
+curve — and asking for one is still a clear error rather than an empty image.
+
+A transient run on a model using an operator this engine only *approximates* in the time domain
+(`absdelay`, the `laplace_*` family) prints a warning naming the operator and what it did
+instead, before the waveform. The fold is correct for DC and AC, which is why it is a warning
+and not a refusal.
 
 ## What's next
 
