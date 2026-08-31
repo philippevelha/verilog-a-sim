@@ -117,74 +117,18 @@ fn loop_iteration_cap_exceeded() -> CodegenError {
 /// Returns [`CodegenError`] if `terminals` is the wrong length or the analog block contains
 /// a construct outside the v0 subset (validated eagerly so [`ModelInstance::load`] cannot
 /// fail).
-/// Which time discretization a generated model is compiled to be exact under.
+/// Build a model instance from an elaborated IR module.
 ///
-/// This only affects one construct: a `ddt` **nested inside a contribution's resistive term**,
-/// i.e. a charge rate scaled by a bias-dependent coefficient, `c(x)·ddt(q(x))`. Everything else
-/// a model can contain is method-independent, so for the overwhelming majority of models the
-/// choice changes nothing at all.
-///
-/// # Why the method has to be a compile-time choice
-///
-/// Such a term is not a charge — it is a *rate* — so it lands in the residual, and its exact
-/// Jacobian needs the product rule split across two channels:
-/// `∂/∂x[c·dq/dt] = (dq/dt)·∂c/∂x + c·coeff·∂q/∂x`, stamped as `jacobian += grad` and
-/// `dcharge += grad_ddt`. Whether that reconstructs the true derivative depends on the
-/// discretization the integrator is running:
-///
-/// - [`Self::BackwardEuler`] — **exact**. `offset = −q_prev/h` and the term stamps no `charge`,
-///   so it never enters the offset; the assembled `jacobian + coeff·dcharge` is precisely the
-///   product rule above.
-/// - [`Self::Trapezoidal`] — **first order under a varying step**, so refused.
-///
-/// The trapezoidal reason is worth stating precisely, because the obvious explanation is wrong.
-/// The assembled equation is *not* double-counted: with `charge ≡ 0` and the term's value in the
-/// residual, `f = (2/h)(Q_n − Q_{n−1}) + (A_n + B_n) + (A_{n−1} + B_{n−1})` is verbatim the
-/// trapezoid rule applied to `A + B + Q̇ = 0`, and `J = ∂f/∂x` exactly. A finite-difference check
-/// of the assembled Jacobian therefore **passes under trapezoidal too** — it is a consistency
-/// check between `J` and `f`, and cannot see this defect.
-///
-/// What breaks is the rate reconstruction's *initial condition*. `Builtin::Ddt` seeds `ρ₀ = 0`
-/// on the first step, but the true `q̇(0)` is nonzero for any start that is not a steady state,
-/// and the trapezoidal recursion's multiplier is exactly `−1` — undamped. That `O(1)` seed error
-/// never decays; it alternates. On a **uniform** step it cancels to `O(h²)` and the scheme looks
-/// second order. The moment the step varies — which the adaptive controller does on essentially
-/// every step — the cancellation breaks and the method drops to **first order with a worse error
-/// constant than backward Euler**. A fixed-step test would "prove" the refusal unnecessary.
-///
-/// This is fixable without any interface change, and without changing what a model stamps: take
-/// the **first** step with the backward-Euler companion even when the method is trapezoidal, so
-/// `ρ₁` is seeded `O(h)` instead of `O(1)`. That restores clean second order under arbitrary
-/// step variation. Until that lands in `va-transient`, refusing is a build error, which is
-/// strictly better than a silently first-order waveform. Tracked in `docs/roadmap.md`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Integration {
-    /// `dQ/dt ≈ (Q − Q_prev)/h`. The default, and the only method the product-rule case above
-    /// is proven exact under.
-    #[default]
-    BackwardEuler,
-    /// `Q − Q_prev = h/2·(dQ/dt + dQ/dt|_prev)`. A bias-dependent `ddt` coefficient is refused
-    /// under this method — see [`Integration`].
-    Trapezoidal,
-}
-
-/// Build a model instance, compiled to be exact under [`Integration::default`]
-/// (backward Euler). See [`build_instance_with`] to choose.
+/// The generated model is **independent of the integration method**. It was briefly not: a
+/// bias-dependent `ddt` coefficient (`c(x)·ddt(q)`) was accepted only under backward Euler,
+/// because trapezoidal's rate reconstruction was first order once the timestep varied. That was
+/// an integrator defect, fixed in `va-transient` by taking the first step with backward Euler,
+/// and gated there by an order-of-convergence study — so there is nothing left for a model to be
+/// compiled "for".
 pub fn build_instance(
     module: &Module,
     terminals: &[usize],
     next_unknown: &mut usize,
-) -> Result<Box<dyn ModelInstance>, CodegenError> {
-    build_instance_with(module, terminals, next_unknown, Integration::default())
-}
-
-/// Build a model instance compiled to be exact under `integration`. See [`Integration`] for the
-/// single construct the choice affects, and why it must be made here rather than at solve time.
-pub fn build_instance_with(
-    module: &Module,
-    terminals: &[usize],
-    next_unknown: &mut usize,
-    integration: Integration,
 ) -> Result<Box<dyn ModelInstance>, CodegenError> {
     if terminals.len() != module.nodes.len() {
         return Err(CodegenError::TerminalCount {
@@ -211,7 +155,6 @@ pub fn build_instance_with(
         lowered,
         vt: VT,
         temp: TEMP,
-        integration,
     };
 
     // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -230,8 +173,6 @@ struct GeneratedModel {
     lowered: Lowered,
     vt: f64,
     temp: f64,
-    /// The discretization this model was compiled to be exact under — see [`Integration`].
-    integration: Integration,
 }
 
 impl GeneratedModel {
@@ -453,7 +394,7 @@ impl GeneratedModel {
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
         let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], true);
-        Self::validate_stmts(&ctx, self.integration, &self.lowered.stmts)?;
+        Self::validate_stmts(&ctx, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
         // statement walk above (the call site that *reads* the accumulator's value never
@@ -465,11 +406,7 @@ impl GeneratedModel {
         Ok(())
     }
 
-    fn validate_stmts(
-        ctx: &Ctx,
-        integration: Integration,
-        stmts: &[LoweredStmt],
-    ) -> Result<(), CodegenError> {
+    fn validate_stmts(ctx: &Ctx, stmts: &[LoweredStmt]) -> Result<(), CodegenError> {
         for stmt in stmts {
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => {
@@ -519,18 +456,9 @@ impl GeneratedModel {
                         // charge rate scaled by a bias-dependent coefficient, `c(x)·ddt(q(x))` —
                         // is a rate, not a charge, so its value belongs in the residual and its
                         // exact Jacobian needs the product rule split across two channels:
-                        // `jacobian += grad` and `dcharge += grad_ddt`. The stamping path does
-                        // consume `Dual::grad_ddt` since 2026-08-30, but only backward Euler
-                        // makes that reconstruction exact — see `Integration`.
+                        // `jacobian += grad` and `dcharge += grad_ddt`. Both are stamped, on
+                        // every path that can carry one, so nothing needs refusing here.
                         eval(ctx, term.expr)?;
-                        if integration == Integration::Trapezoidal
-                            && lower::contains_ddt_call(ctx.module, term.expr)
-                        {
-                            return Err(CodegenError::Unsupported(
-                                "a ddt nested inside a contribution's resistive term (a                                  bias-dependent charge coefficient) is only exact under backward                                  Euler, and this model was compiled for trapezoidal: the rate                                  reconstruction seeds its first step at zero, and trapezoidal's                                  undamped recursion turns that into a first-order error once the                                  timestep varies. Compile for backward Euler, or write the ddt as                                  a top-level additive term of the contribution"
-                                    .to_string(),
-                            ));
-                        }
                     }
                     for term in &c.charge {
                         // The charge channel is single: a `ddt` whose argument itself depends on
@@ -593,8 +521,8 @@ impl GeneratedModel {
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, integration, then_)?;
-                    Self::validate_stmts(ctx, integration, else_)?;
+                    Self::validate_stmts(ctx, then_)?;
+                    Self::validate_stmts(ctx, else_)?;
                 }
                 LoweredStmt::Case {
                     selector,
@@ -606,9 +534,9 @@ impl GeneratedModel {
                         for &label in &arm.labels {
                             eval(ctx, label)?;
                         }
-                        Self::validate_stmts(ctx, integration, &arm.body)?;
+                        Self::validate_stmts(ctx, &arm.body)?;
                     }
-                    Self::validate_stmts(ctx, integration, default)?;
+                    Self::validate_stmts(ctx, default)?;
                 }
                 // Loops never actually iterate here (see `lower`'s module doc comment): running
                 // the body once already covers every statement a real iteration could execute,
@@ -616,7 +544,7 @@ impl GeneratedModel {
                 // `while` condition during eager validation.
                 LoweredStmt::While { cond, body } => {
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, integration, body)?;
+                    Self::validate_stmts(ctx, body)?;
                 }
                 LoweredStmt::For {
                     init,
@@ -624,14 +552,14 @@ impl GeneratedModel {
                     step,
                     body,
                 } => {
-                    Self::validate_stmts(ctx, integration, init)?;
+                    Self::validate_stmts(ctx, init)?;
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, integration, body)?;
-                    Self::validate_stmts(ctx, integration, step)?;
+                    Self::validate_stmts(ctx, body)?;
+                    Self::validate_stmts(ctx, step)?;
                 }
                 LoweredStmt::Repeat { count, body } => {
                     eval(ctx, *count)?;
-                    Self::validate_stmts(ctx, integration, body)?;
+                    Self::validate_stmts(ctx, body)?;
                 }
             }
         }
@@ -4063,7 +3991,7 @@ mod tests {
             value,
         }];
 
-        assert_product_rule_is_backward_euler_only(&m, &[0, 1]);
+        assert_product_rule_is_carried(&m, &[0, 1]);
     }
 
     /// **The §5 gate for the product-rule path**: with a bias-dependent charge coefficient, the
@@ -4128,8 +4056,7 @@ mod tests {
             value,
         }];
 
-        let inst = build_instance_with(&m, &[0, 1], &mut 2, Integration::BackwardEuler)
-            .expect("exact under backward Euler");
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
 
         // A backward-Euler step: coeff = 1/h, no previous-rate weight. The committed history is
         // a nonzero previous charge, so `dq/dt` is not trivially proportional to `q` — a test
@@ -4311,13 +4238,7 @@ mod tests {
         ];
 
         let mut next_unknown = 3;
-        let inst = build_instance_with(
-            &m,
-            &[0, 1, 2],
-            &mut next_unknown,
-            Integration::BackwardEuler,
-        )
-        .expect("builds under backward Euler");
+        let inst = build_instance(&m, &[0, 1, 2], &mut next_unknown).expect("builds");
         // The accumulator claims its own unknown during the build, so the solution vector is
         // only the right length once `next_unknown` has settled.
         let mut x0 = vec![0.0; next_unknown];
@@ -4341,8 +4262,7 @@ mod tests {
         }];
 
         let mut next_unknown = 2;
-        let inst = build_instance_with(&m, &[0, 1], &mut next_unknown, Integration::BackwardEuler)
-            .expect("builds under backward Euler");
+        let inst = build_instance(&m, &[0, 1], &mut next_unknown).expect("builds");
         let mut x0 = vec![0.0; next_unknown];
         x0[0] = 0.35;
         if next_unknown > 2 {
@@ -4352,27 +4272,34 @@ mod tests {
     }
 
     /// A bias-dependent charge coefficient (`c(x)·ddt(q)`, a `ddt` nested inside a resistive
-    /// term) is **exact under backward Euler and refused under trapezoidal** — see
-    /// [`Integration`]. Both halves are asserted together so neither can silently drift: if the
-    /// product-rule stamping regressed, the first line fails; if the trapezoidal guard were
-    /// dropped, the second does.
+    /// term) builds and takes the product-rule path.
     ///
     /// These shapes used to be rejected outright, and the tests that pin them were the negative
     /// controls proving `lower::is_param_only`'s safety check bit. That check still bites — it is
     /// what keeps such a term *out* of the plain charge channel, where folding it in would be
-    /// wrong — but the term is no longer refused: it takes the product-rule path instead.
-    fn assert_product_rule_is_backward_euler_only(m: &Module, terminals: &[usize]) {
+    /// wrong — but the term is no longer refused: it takes the product-rule path instead, which
+    /// is method-independent (§ `build_instance`).
+    ///
+    /// Asserts the term actually reaches a channel, not merely that the build succeeds: a build
+    /// that quietly dropped the charge would otherwise pass, which is the exact failure mode the
+    /// original refusal existed to prevent.
+    fn assert_product_rule_is_carried(m: &Module, terminals: &[usize]) {
         let mut next = terminals.len();
-        build_instance_with(m, terminals, &mut next, Integration::BackwardEuler)
-            .expect("a bias-dependent ddt coefficient is exact under backward Euler");
-        let mut next = terminals.len();
-        let err = match build_instance_with(m, terminals, &mut next, Integration::Trapezoidal) {
-            Err(e) => e,
-            Ok(_) => panic!("a bias-dependent ddt coefficient must be refused under trapezoidal"),
-        };
+        let inst = build_instance(m, terminals, &mut next).expect("builds");
+
+        let ctx = va_abi::AnalysisCtx::transient(1e-3)
+            .with_ddt(1e6, 0.0)
+            .with_initial_step(false);
+        let committed = vec![4e-10_f64; inst.state_len()];
+        let mut nxt = vec![0.0; committed.len()];
+        let mut st = va_abi::ModelState::new(&committed, &mut nxt);
+        let mut sink = DenseStamp::new(next);
+        let mut x = vec![0.0; next];
+        x[0] = 0.35;
+        inst.load(&x, &ctx, &mut st, &mut sink);
         assert!(
-            matches!(&err, CodegenError::Unsupported(msg) if msg.contains("backward Euler")),
-            "the diagnostic must name the method that would work, got: {err:?}"
+            sink.dcharge.iter().any(|v| *v != 0.0),
+            "the bias-dependent charge coefficient reached no channel — dcharge is all zero"
         );
     }
 
@@ -4605,7 +4532,7 @@ mod tests {
             value,
         }];
 
-        assert_product_rule_is_backward_euler_only(&m, &[0, 1]);
+        assert_product_rule_is_carried(&m, &[0, 1]);
     }
 
     /// `real t0; t0 = ddt(c0*V(p,n)); if (cond>0.0) begin I(p,n)<+V(p,n)*g+t0; end else
@@ -5147,7 +5074,7 @@ mod tests {
 
         m.analog = vec![if_stmt, contribute];
 
-        assert_product_rule_is_backward_euler_only(&m, &[0, 1]);
+        assert_product_rule_is_carried(&m, &[0, 1]);
     }
 
     /// Build a two-node module whose single flow contribution is `V(p,n)/R + <noise>`, where

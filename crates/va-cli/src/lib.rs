@@ -599,15 +599,7 @@ type BuiltInstances = (Vec<Box<dyn ModelInstance>>, usize, Vec<(String, usize)>)
 /// instantiation); a device is matched against whichever one shares its model name. Shared by
 /// both DC and transient solving — building the instance set doesn't depend on which analysis
 /// will run on it.
-/// `integration` selects the time discretization the generated models are compiled to be exact
-/// under (see [`va_codegen::Integration`]). It matters for exactly one construct — a `ddt`
-/// nested inside a resistive term, i.e. a bias-dependent charge coefficient — and is irrelevant
-/// to DC/AC/noise, where the charge rate is zero by definition; those pass the default.
-fn build_instances(
-    net: &Netlist,
-    compiled: &[Module],
-    integration: va_codegen::Integration,
-) -> Result<BuiltInstances> {
+fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances> {
     let n_nodes = net.node_order.len();
 
     // Voltage sources take branch-current unknowns after the node unknowns; a flattened
@@ -619,7 +611,7 @@ fn build_instances(
     let mut instances: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
     let mut currents = Vec::new();
     for dev in &net.devices {
-        let (inst, branch) = build_instance(dev, compiled, &mut next_unknown, integration)?;
+        let (inst, branch) = build_instance(dev, compiled, &mut next_unknown)?;
         if let Some(branch) = branch {
             currents.push((dev.name.clone(), branch));
         }
@@ -639,7 +631,7 @@ fn build_instances(
 /// trivially matches golden regardless of whether the diode model itself is right; the source's
 /// own current is the quantity that actually depends on it).
 pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String, usize)>> {
-    let (_, _, currents) = build_instances(net, compiled, va_codegen::Integration::default())?;
+    let (_, _, currents) = build_instances(net, compiled)?;
     Ok(currents)
 }
 
@@ -647,8 +639,7 @@ pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
-    let (instances, dim, _currents) =
-        build_instances(net, compiled, va_codegen::Integration::default())?;
+    let (instances, dim, _currents) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
 }
@@ -772,14 +763,13 @@ fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
 /// reason `solve_dc`/`solve_dc_sweep` are — rather than parsing [`run_sim`]'s printed stdout.
 /// The time discretization for a transient run, chosen with `va-cli sim --integration <be|trap>`.
 ///
-/// It selects the integrator's method **and** the discretization the Verilog-A models are
-/// compiled to be exact under, together, so the two can never disagree (see
-/// [`va_codegen::Integration`] for the one construct that depends on the choice: a `ddt` nested
-/// inside a resistive term — a bias-dependent charge coefficient).
+/// It selects the integrator's method. Generated models are **method-independent** — a
+/// bias-dependent `ddt` coefficient was briefly compiled per-method, but that was an integrator
+/// defect (fixed by taking the first step with backward Euler) rather than a property of the
+/// model, so there is nothing to keep in step any more.
 ///
-/// [`Self::Trapezoidal`] is the default because every committed transient golden was validated
-/// against it; `--integration be` is what unlocks a bias-dependent `ddt` coefficient, which is
-/// only exact under backward Euler.
+/// [`Self::Trapezoidal`] is the default: it is second order, and it is what every committed
+/// transient golden was validated against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Integration {
     /// Second-order trapezoidal. The default.
@@ -801,8 +791,8 @@ impl Integration {
     }
 }
 
-/// Run a transient analysis. `integration` selects the time discretization for **both** the
-/// generated models and the integrator — see [`Integration`].
+/// Run a transient analysis. `integration` selects the integrator's method — see
+/// [`Integration`].
 pub fn solve_transient(
     net: &Netlist,
     compiled: &[Module],
@@ -811,18 +801,12 @@ pub fn solve_transient(
     let (tstep, tstop) = net
         .tran
         .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
-    // One choice drives **both** halves, so the models and the integrator can never disagree
-    // about the discretization: a model compiled for backward Euler that were then stepped with
-    // trapezoidal would stamp a product-rule Jacobian the offset does not match, which is a
-    // wrong waveform rather than an error. `Trapezoidal` stays the default here — it is what
-    // every committed transient golden was validated against — and selecting backward Euler is
-    // what unlocks a bias-dependent `ddt` coefficient (see `va_codegen::Integration`).
-    let (method, integration) = match integration {
-        Integration::BackwardEuler => (
-            Method::BackwardEuler,
-            va_codegen::Integration::BackwardEuler,
-        ),
-        Integration::Trapezoidal => (Method::Trapezoidal, va_codegen::Integration::Trapezoidal),
+    // Generated models are method-independent (§ `Integration`), so this selects the
+    // integrator's method and nothing else. `Trapezoidal` stays the default: it is second order,
+    // and it is what every committed transient golden was validated against.
+    let method = match integration {
+        Integration::BackwardEuler => Method::BackwardEuler,
+        Integration::Trapezoidal => Method::Trapezoidal,
     };
     let cfg = TranConfig {
         tstart: 0.0,
@@ -834,7 +818,7 @@ pub fn solve_transient(
         lte_abstol: 1e-6,
     };
 
-    let (instances, dim, _currents) = build_instances(net, compiled, integration)?;
+    let (instances, dim, _currents) = build_instances(net, compiled)?;
     let x0 = vec![0.0; dim];
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
@@ -902,8 +886,7 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
         .ac
         .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
 
-    let (instances, dim, currents) =
-        build_instances(net, compiled, va_codegen::Integration::default())?;
+    let (instances, dim, currents) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, NewtonConfig::default())
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
@@ -947,8 +930,7 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         )
     })?;
 
-    let (instances, dim, currents) =
-        build_instances(net, compiled, va_codegen::Integration::default())?;
+    let (instances, dim, currents) = build_instances(net, compiled)?;
     // The `.noise` card's input source, resolved to its own branch-current row — the row an AC
     // stimulus would excite, and therefore (§ `va_acnoise::noise`) the row of the adjoint vector
     // that already holds the forward gain. Only a `vsource` has such a row, so naming anything
@@ -1044,7 +1026,6 @@ fn build_instance(
     dev: &Device,
     compiled: &[Module],
     next_unknown: &mut usize,
-    integration: va_codegen::Integration,
 ) -> Result<(Box<dyn ModelInstance>, Option<usize>)> {
     let p = dev.terminals[0];
     let n = dev.terminals[1];
@@ -1068,7 +1049,7 @@ fn build_instance(
     // Use the compiled Verilog-A model when its name matches the device's model.
     if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
         return Ok((
-            build_from_model(module, dev.value, &dev.terminals, next_unknown, integration)?,
+            build_from_model(module, dev.value, &dev.terminals, next_unknown)?,
             None,
         ));
     }
@@ -1086,7 +1067,6 @@ fn build_from_model(
     value: Option<f64>,
     terminals: &[usize],
     next_unknown: &mut usize,
-    integration: va_codegen::Integration,
 ) -> Result<Box<dyn ModelInstance>> {
     let mut m = module.clone();
     if let (Some(v), Some(param)) = (value, m.params.first_mut()) {
@@ -1117,7 +1097,7 @@ fn build_from_model(
         })
         .collect();
 
-    va_codegen::build_instance_with(&m, &full, next_unknown, integration)
+    va_codegen::build_instance(&m, &full, next_unknown)
         .with_context(|| format!("generating instance for model `{}`", module.name))
 }
 

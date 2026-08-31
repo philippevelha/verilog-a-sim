@@ -2926,12 +2926,12 @@ choice.** ⚠️ **The justification first published here was wrong** — correc
 the *refusal* is right, the reason is not what it said. See "Why trapezoidal is refused, correctly
 this time".
 
-**`va_codegen::Integration`** carries the choice: `build_instance` defaults to `BackwardEuler`
-(so `va-cli check --codegen` measures the corpus against the exact path), and
-`build_instance_with` takes it explicitly. `va-cli sim` gained **`--integration be|trap`**, which
-sets the integrator's method *and* the discretization models are compiled for **together**, so
-the two can never disagree — a model compiled for backward Euler but stepped with trapezoidal
-would stamp a Jacobian the offset does not match.
+**`va_codegen::Integration`** carried the choice: `build_instance` defaulted to `BackwardEuler`,
+`build_instance_with` took it explicitly, and `va-cli sim --integration be|trap` set the
+integrator's method and the models' compiled-for method together so they could not disagree.
+⚠️ **Retired 2026-08-31** — the method-dependence was an integrator defect, not a property of the
+model; see "Retiring `Integration`" below. `--integration` remains, now selecting the integrator's
+method and nothing else.
 
 **`sim` still defaults to trapezoidal, deliberately**, because every committed transient golden
 was validated against it; changing that default would move five validated waveforms for reasons
@@ -3196,6 +3196,40 @@ or `2h` when `h` was already the cap left every step identical. The long step of
 *be* `cfg.tstep` for the short one to bind. A `DUMP_SCHEDULE=1` hook now prints the realized
 pattern, kept deliberately: a convergence study that silently degenerates to fixed-step is a test
 that passes for the wrong reason, and this one did, once.
+
+## Retiring `va_codegen::Integration` (2026-08-31)
+
+With the first step taken by backward Euler and an order-of-convergence gate holding it in place,
+the bias-dependent `ddt` coefficient is second order under trapezoidal too. So the refusal is
+gone, and with it the type that carried the choice.
+
+**A generated model is method-independent again.** `build_instance` is back to its original
+three-argument signature; `build_instance_with`, `va_codegen::Integration`, and the
+`integration` parameter threaded through `validate_stmts`/`lower`/`lower_stmt` and through
+`va-cli`'s `build_instances`/`build_instance`/`build_from_model` are all gone. That is the right
+architecture, and the reason is worth stating: **a compiled model should not know which
+discretization will step it.** The method-dependence was never a property of the model — it was
+the integrator's rate reconstruction seeding its first step wrong, and once that was fixed there
+was nothing left for a model to be compiled *for*.
+
+**`va-cli sim --integration be|trap` stays**, now meaning exactly what its name says: the
+integrator's method. It no longer has to keep two choices in step, because there is only one.
+Default remains trapezoidal — second order, and what every committed transient golden was
+validated against.
+
+**The three negative controls became positive ones.** They had asserted "exact under backward
+Euler, refused under trapezoidal"; they now assert the term *reaches a channel* — that
+`dcharge` is non-zero after a load — rather than merely that the build succeeds. A build that
+quietly dropped the charge would otherwise pass, which is the exact failure mode the original
+refusal existed to prevent, and the reason the assertion is on the stamp rather than on the
+`Result`.
+
+**Unchanged, and checked:** 583 tests, `xtask validate` 15/15, corpus 86/88 frontend and 84/88
+frontend+codegen with all four product-rule files (`hicumL2V2p4p0`, `hicumL2V3p0p0`,
+`hicumL2_v310`, `mvsg_cmc_3.2.0`) still building. `lower::is_param_only` still bites, and the
+separate `dropped_ddt` refusal — a `ddt` assigned inside a branch arm and contributed after it,
+`hicumL0_v2p1p0`'s shape — is untouched and still correct: that one is not about the integration
+method, and lifting it naively makes the term vanish entirely (see this file's own note).
 
 ## How to keep this document honest
 
