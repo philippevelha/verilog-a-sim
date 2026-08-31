@@ -1300,6 +1300,28 @@ the reference models.
 > stage finishes it off in a handful of iterations. Rung 2's golden gate has since formally
 > passed for real, against QSPICE (2026-07-17, T6.3). `t3-core/03-nonlinear-dc.qmd` written
 > 2026-07-18.
+> **2026-08-31: damping, the third convergence aid, is implemented.** T3.3's own step list
+> named three (`gmin` stepping, source stepping, damping) and only two existed.
+> `NewtonConfig::max_damping_halvings` adds a backtracking line search: a step that increases
+> the residual infinity norm is retried at 1/2, 1/4, ... and the first scale that improves on
+> the starting residual is taken. Default `0` (off), so every gated result is unchanged — and
+> `validate` confirms 20/20 with it in the tree.
+>
+> It is genuinely complementary rather than a third way of doing the same thing: junction
+> limiting bounds a step's *size* per unknown without knowing whether that helps, `gmin`
+> stepping changes the *circuit*, and damping is the only one that consults the residual the
+> step actually produced. Demonstrated the way the `gmin` aid was: one test checks the same
+> circuit *fails* undamped and *succeeds* damped — a hard-driven diode with junction limiting
+> deliberately off, where the first cold-start step lands far past the exponential's usable
+> range — and then checks KCL at the junction, so it cannot pass by merely returning.
+>
+> **Source stepping, the third name on that list, is still missing, and is blocked rather than
+> merely undone.** Ramping independent sources means telling each source instance that its
+> excitation is scaled, which `va-core` cannot do through Interface β as it stands: `load` sees
+> an `AnalysisCtx` with no such field. That is the *same* additive-`AnalysisCtx` shape
+> `docs/proposals/bdf2-interface-change.md` proposes for BDF2, so the two should probably be
+> decided together rather than as two separate §6 events.
+>
 > **2026-08-31: the rung-2 gate gains a nonlinear `.dc` circuit, `circuits/diode_clamp.net`.**
 > Rung 2's existing `diode_iv.net` sweeps a source that forces the swept node directly, so
 > `V(in) = V1` identically and only the `I(V1)` column added in T6.3 exercises the diode at

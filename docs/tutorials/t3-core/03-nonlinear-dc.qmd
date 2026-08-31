@@ -127,6 +127,25 @@ This is the Shockley exponential of *The idea* above made visible — the same n
 Newton has to chase, and the reason an unlimited step overshoots into `exp()` overflow without
 the junction limiting described here.](figures/diode-clamp-sweep.svg)
 
+**Damping is the third aid** (`NewtonConfig::max_damping_halvings`, added 2026-08-31), and it
+is the only one that looks at the result of the step it just proposed. Junction limiting bounds
+a step's size per unknown without knowing whether that helps; `gmin` stepping changes the
+circuit rather than the step; damping re-assembles at the proposed point, and if the residual
+got *worse* it halves the step and tries again, up to a configured number of times. That costs
+an extra assemble per halving, which is why it is off by default.
+
+```console
+$ cargo test -p va-core damping
+test newton::tests::damping_converges_a_circuit_undamped_newton_cannot ... ok
+```
+
+That test is built like the `gmin` one: the same circuit — a hard-driven diode with junction
+limiting deliberately switched off — is asserted to *fail* undamped and *succeed* damped, and
+the converged answer is then checked against KCL at the junction so it cannot pass by merely
+returning a number. Turning limiting off is the point: it shows damping fixing the same class
+of overshoot *without* needing to know which unknowns are junction voltages, which is what
+makes the two aids complementary rather than redundant.
+
 ## Limitations
 
 **Junction limiting is blanket** (§ `t3-core/02-newton.qmd`) — the same tradeoff carries through

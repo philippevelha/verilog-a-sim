@@ -47,6 +47,22 @@ pub struct NewtonConfig {
     /// constraint row — see [`crate::mna::System::shunt_gmin`]), so it's safe to enable on any
     /// circuit, including ones with ideal sources.
     pub gmin_steps: usize,
+    /// Maximum number of times a Newton step may be halved when the full step does not reduce
+    /// the residual — a backtracking line search, the third convergence aid alongside junction
+    /// limiting and `gmin` stepping.
+    ///
+    /// `0` (the default) disables damping entirely: every step is taken in full, exactly as
+    /// before this existed. With `n > 0`, a step that would *increase* the residual infinity
+    /// norm is retried at 1/2, 1/4, ... up to `n` times, and the first scale that improves on
+    /// the starting residual is taken; if none does, the smallest tried step is taken anyway so
+    /// the iteration still moves rather than stalling.
+    ///
+    /// This helps where the other two aids do not: junction limiting bounds a step's *size*
+    /// per unknown without knowing whether it helps, and `gmin` stepping changes the circuit
+    /// rather than the step. Damping is the only one that consults the residual the step
+    /// actually produced. It cannot rescue a genuinely singular Jacobian, and it costs one
+    /// extra assemble per halving, which is why it is off unless asked for.
+    pub max_damping_halvings: usize,
 }
 
 impl Default for NewtonConfig {
@@ -55,6 +71,7 @@ impl Default for NewtonConfig {
             max_iters: 100,
             abstol: 1e-12,
             reltol: 1e-9,
+            max_damping_halvings: 0,
             limit_junctions: true,
             gmin_steps: 0,
         }
@@ -131,10 +148,25 @@ fn solve_from(
         let neg_f: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
         let dx = linsolve::solve_dense(&sys.jacobian, &neg_f, dim)?;
 
+        // Apply the step, optionally damped: `scale` is 1.0 unless the full step made the
+        // residual worse, in which case `damped_scale` backtracks (§ `max_damping_halvings`).
+        let scale = damped_scale(
+            instances,
+            &x,
+            &dx,
+            dim,
+            cfg,
+            gmin,
+            kinds,
+            vt,
+            vcrit,
+            residual_norm,
+        );
+
         let mut update_small = true;
         for i in 0..dim {
             let vold = x[i];
-            let vnew_raw = vold + dx[i];
+            let vnew_raw = vold + scale * dx[i];
             let vnew = if cfg.limit_junctions {
                 convergence::limit_junction(vnew_raw, vold, vt, vcrit)
             } else {
@@ -160,6 +192,55 @@ fn solve_from(
     })
 }
 
+/// The fraction of `dx` to actually apply: `1.0` when damping is off or when the full step
+/// already reduces the residual, otherwise the first of `1/2, 1/4, ...` that does.
+///
+/// Each trial costs one extra assemble, which is the whole reason this is opt-in. A trial point
+/// is built exactly the way the real update is, junction limiting included, so the residual
+/// being compared is the one the iteration would actually land on rather than an idealized
+/// version of it. If no scale improves on `residual_norm`, the smallest one tried is returned
+/// rather than `0.0`: a zero step would stall the iteration into `max_iters` having learned
+/// nothing, while a small uphill step still moves and lets the next Jacobian re-aim.
+#[allow(clippy::too_many_arguments)]
+fn damped_scale(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    dx: &[f64],
+    dim: usize,
+    cfg: NewtonConfig,
+    gmin: f64,
+    kinds: &[UnknownKind],
+    vt: f64,
+    vcrit: f64,
+    residual_norm: f64,
+) -> f64 {
+    if cfg.max_damping_halvings == 0 {
+        return 1.0;
+    }
+    let mut scale = 1.0;
+    for _ in 0..=cfg.max_damping_halvings {
+        let candidate: Vec<f64> = (0..dim)
+            .map(|i| {
+                let raw = x[i] + scale * dx[i];
+                if cfg.limit_junctions {
+                    convergence::limit_junction(raw, x[i], vt, vcrit)
+                } else {
+                    raw
+                }
+            })
+            .collect();
+        let mut sys = mna::assemble(instances, &candidate, &va_abi::ANALYSIS_DC, dim);
+        sys.shunt_gmin(&candidate, gmin, kinds);
+        // A non-finite residual (an exponential that overflowed at this trial point) is not an
+        // improvement by any reading, and `<` against a NaN is false, so it backtracks.
+        if inf_norm(&sys.residual) < residual_norm {
+            return scale;
+        }
+        scale *= 0.5;
+    }
+    scale * 2.0
+}
+
 /// Infinity norm (max absolute component) of a vector.
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
@@ -171,6 +252,60 @@ mod tests {
     use crate::testutil::VSource;
     use va_abi::reference::diode::VT_NOMINAL;
     use va_abi::reference::{Diode, Resistor, GROUND};
+
+    /// Damping's own demonstration, in the shape `gmin_stepping_converges_a_circuit_plain_
+    /// newton_cannot` established: the same circuit is checked to *fail* undamped and
+    /// *succeed* damped, in one test, so this cannot pass by being decorative.
+    ///
+    /// The circuit is a diode in series with a small resistance driven hard, with junction
+    /// limiting deliberately **off**. Without limiting, the first Newton step from a cold
+    /// start proposes a junction voltage far past the exponential's usable range and the
+    /// iteration never recovers. Damping needs no per-device knowledge to fix that -- it just
+    /// notices the residual got worse and backs off -- which is exactly the property that
+    /// makes it complementary to limiting rather than redundant with it.
+    #[test]
+    fn damping_converges_a_circuit_undamped_newton_cannot() {
+        let build = || {
+            (
+                VSource::new(0, GROUND, 2, 10.0),
+                Resistor::new(0, 1, 1.0),
+                Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL),
+            )
+        };
+        let (vs, r, d) = build();
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
+
+        let undamped = NewtonConfig {
+            limit_junctions: false,
+            max_damping_halvings: 0,
+            ..NewtonConfig::default()
+        };
+        let failed = solve(&insts, 3, undamped);
+        assert!(
+            failed.is_err(),
+            "undamped Newton was expected to fail here; it returned {failed:?} -- if this              circuit became solvable, the test has stopped demonstrating anything and needs a              harder one, not a relaxed assertion"
+        );
+
+        let damped = NewtonConfig {
+            max_damping_halvings: 20,
+            ..undamped
+        };
+        let x = solve(&insts, 3, damped).expect("damped Newton should converge");
+
+        // And the answer is right, not merely returned: KCL at the junction node says the
+        // diode current equals the resistor current, to the solver's own tolerance.
+        let vd = x[1];
+        let id = 1e-14 * ((vd / VT_NOMINAL).exp() - 1.0);
+        let ir = (x[0] - vd) / 1.0;
+        assert!(
+            (id - ir).abs() < 1e-9 * ir.abs().max(1e-6),
+            "KCL at the junction: diode {id} vs resistor {ir} (V(d) = {vd})"
+        );
+        assert!(
+            (0.4..1.0).contains(&vd),
+            "a forward-biased silicon junction should sit near 0.6-0.8 V, got {vd}"
+        );
+    }
 
     #[test]
     fn solves_resistor_divider() {
