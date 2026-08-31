@@ -223,4 +223,47 @@ mod tests {
             .to_string();
         assert!(plot_transient(&path, &net, &empty).is_err());
     }
+
+    #[test]
+    fn plots_a_dc_sweep_to_a_real_file() {
+        let net = parse(include_str!("../../../circuits/diode_iv.net")).expect("parse diode_iv");
+        let sweep = net.dc.clone().expect("diode_iv.net carries a .dc card");
+        let n = net.node_order.len();
+        let points: Vec<(f64, va_core::dc::OperatingPoint)> = vec![
+            (0.0, va_core::dc::OperatingPoint { x: vec![0.0; n] }),
+            (0.3, va_core::dc::OperatingPoint { x: vec![0.3; n] }),
+            (0.6, va_core::dc::OperatingPoint { x: vec![0.6; n] }),
+        ];
+
+        let dir = std::env::temp_dir().join("va-cli-plot-test");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("diode_iv_sweep.svg");
+        let path_str = path.to_str().expect("utf8 path");
+
+        plot_sweep(path_str, &net, &sweep, &points).expect("plots without error");
+
+        let contents = std::fs::read_to_string(&path).expect("reads back the SVG");
+        assert!(contents.starts_with("<?xml") || contents.contains("<svg"));
+        assert!(contents.contains("V(in)"), "node series unlabelled");
+        assert!(
+            contents.contains(&sweep.source),
+            "swept source name missing from the x-axis label"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty sweep is refused rather than producing a blank/zero-width canvas — the same
+    /// contract [`plot_transient`] enforces for an empty waveform.
+    #[test]
+    fn empty_sweep_is_an_error_not_a_panic() {
+        let net = parse(include_str!("../../../circuits/diode_iv.net")).expect("parse diode_iv");
+        let sweep = net.dc.clone().expect("diode_iv.net carries a .dc card");
+        let path = std::env::temp_dir()
+            .join("va-cli-plot-test-empty-sweep.svg")
+            .to_str()
+            .expect("utf8 path")
+            .to_string();
+        assert!(plot_sweep(&path, &net, &sweep, &[]).is_err());
+    }
 }

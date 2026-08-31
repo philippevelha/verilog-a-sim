@@ -106,8 +106,10 @@ Same cold-start limitation `t3-core/02-newton.qmd`/`t4-transient/01-integration.
 on starting from a specific non-zero operating point (the ring oscillator's hand-built fixture
 does; the same topology run through this crate's own cold start turned out to reproduce the
 oscillation anyway, but only confirmed empirically, not guaranteed by design —
-`t4-transient/03-events.qmd`). `--plot` only supports transient runs (a DC operating point is a
-single point, not a waveform).
+`t4-transient/03-events.qmd`). `--plot` supports a transient run (`--tran`) or a `.dc` sweep
+(`va_cli::plot::plot_transient`/`plot_sweep`) — a bare DC operating point remains unplottable, a
+single point rather than a curve, and asking for one is still a clear error rather than an empty
+image (`t3-core/03-nonlinear-dc.qmd` has the sweep figure).
 
 ## What's next
 

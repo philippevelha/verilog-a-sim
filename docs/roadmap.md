@@ -566,13 +566,26 @@ docs/tutorials/
   dependencies pulled in) draws every node's voltage over time as an SVG line chart; a
   `--plot <out.svg>` flag on `sim` wires it in, gated to transient runs only (a DC operating
   point is a single point, not a waveform — plotting one isn't implemented, and asking for it
-  is a clear error rather than an empty/misleading image). `.qmd` tutorials embed the emitted
-  SVG as a plain markdown image, unchanged from the original plan. Verified against the
+  is a clear error rather than an empty/misleading image). Verified against the
   rectifier: `cargo run -p va-cli -- sim circuits/rectifier.net --tran --plot rectifier.svg`.
-  *Outstanding (re-checked 2026-08-04, both still open — but the stated blockers are gone):* a
-  `va-harness` golden-comparison overlay plot and a DC sweep plot. `va-harness` is no longer
-  `todo!()` (T6.3 closed 2026-07-18) and `sim` does sweep now (`.dc` cards, T6.2), so both are
-  plain unwritten plotting code today, not blocked on anything.
+  **2026-08-31: both outstanding figure types closed, and embedded.** `plot_sweep` (`va-cli`)
+  draws a `.dc` sweep's node voltages against the swept source's own value — `run_sim` now
+  accepts `--plot` for `Analysis::Dc` when the netlist carries a `.dc` card, alongside the
+  existing transient path; a bare operating point (no `.dc` card) is still refused with a clear
+  error, not an empty image. `va_harness::plot::{overlay_sweep, overlay_tran}` draw a freshly
+  solved sim trace over its committed `golden/` reference on one shared axis (golden as grey
+  dots underneath, sim as a solid line on top; a transient overlay resamples golden onto the
+  simulated timebase first, via the same `resample_linear` `compare_tran` scores against, so the
+  picture and the pass/fail number describe the same comparison) — new module, unit-tested
+  (`cargo test -p va-harness --lib`), not yet wired into `xtask validate` itself (regenerating a
+  tutorial's figure is a separate, explicit step from checking a golden gate; see
+  `crates/va-harness/examples/gen_figures.rs`). Both are now embedded as plain markdown images:
+  the diode I–V sweep in `t3-core/03-nonlinear-dc.qmd` (honestly captioned — `plot_sweep` draws
+  only node voltages, so this particular circuit's figure is a straight `V(in)=V1` line, not the
+  diode's *I–V* law) and the rectifier sim-vs-golden overlay in `t6-integration/03-validation.qmd`
+  (chosen because rung 4's `6.766e-4` margin is the tightest of the six — the rung most worth
+  seeing, not just reading as a number). Each embed states its exact regeneration command per
+  this section's own "executable, not just prose" rule.
 - **Standard skeleton** for each tutorial: *Goal* (one sentence) → *Where it fits* (the §2
   pipeline diagram, the relevant box highlighted) → *The idea* (theory, the equations, the
   design choice) → *The code* (the public API the student built, with the doc-comment

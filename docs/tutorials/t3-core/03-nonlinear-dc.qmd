@@ -101,6 +101,20 @@ $ cargo run -q -p xtask -- validate
 (`t6-integration/03-validation.qmd` has an honest caveat on exactly what this comparison does
 and doesn't exercise — the golden format records node voltage, not the diode's own current.)
 
+`va-cli`'s `--plot` flag draws this sweep directly from the solved `OperatingPoint`s
+(`va_cli::plot::plot_sweep`, `t6-integration/02-cli.qmd`):
+
+```console
+$ cargo run -q -p va-cli -- sim circuits/diode_iv.net --model models/diode.va \
+    --plot docs/tutorials/t3-core/figures/diode-iv-sweep.svg
+```
+
+![`V(in)` across the swept `V1` — a straight `V(in) = V1` line, because `V1` forces this node
+directly (`circuits/diode_iv.net`'s own comment). `plot_sweep` deliberately draws only node
+voltages, never a branch current (its own doc comment: volts and femtoamps don't share a linear
+axis usefully), so this figure demonstrates the DC-sweep plotting path itself — not the diode's
+*I–V* law, which lives in `I(V1)` above the plot, not in it.](figures/diode-iv-sweep.svg)
+
 ## Limitations
 
 **Junction limiting is blanket** (§ `t3-core/02-newton.qmd`) — the same tradeoff carries through

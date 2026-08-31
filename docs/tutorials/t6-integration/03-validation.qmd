@@ -263,6 +263,21 @@ still comfortably under `TRAN_RMS`'s `1e-3` without any tolerance loosening. A d
 golden value reports `FAIL` and a non-zero exit instead, confirmed the same way (plant a wrong
 value, re-run, restore it) for every golden shape.
 
+A number alone doesn't show *where* `6.766e-4` of disagreement lives, only that it's small
+enough to pass. `va_harness::plot::overlay_tran` draws the simulated curve on top of the golden
+points on one shared axis, so the tightest-margin rung is the one with a picture:
+
+```console
+$ cargo run -q -p va-harness --example gen_figures
+[gen_figures] wrote .../docs/tutorials/t6-integration/figures/rectifier-overlay.svg
+```
+
+![`rectifier.net`'s transient run (solid lines) over its QSPICE golden reference (grey dots),
+resampled onto the simulated timebase exactly as `compare_tran` scores it (§ above). `V(out)`'s
+smoothed, rectified ripple tracks the golden dots closely enough that the two are visually
+indistinguishable at this scale — consistent with the `6.766e-4` RMS margin, not just asserted by
+it.](figures/rectifier-overlay.svg)
+
 ## Branch currents are golden data too
 
 Node voltages alone can hide a wrong model behind a directly-forced source: `circuits/
