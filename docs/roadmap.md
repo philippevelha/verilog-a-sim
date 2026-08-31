@@ -3062,9 +3062,7 @@ audit did that enumeration as a table; it should have been part of the original 
 
 ### Still open, from the same enumeration
 
-- **`stamp_laplace` drops it too** (`laplace_nd(V(p,n)*ddt(c0*V(p,n)), …)`, 7.0e-4 missing) —
-  **pre-existing**, not caused by the lift: nothing checks a `laplace_*` input for a `ddt` under
-  either method.
+- ~~**`stamp_laplace` drops it too**~~ — **fixed 2026-08-31**, see below.
 - **The charge channel's `debug_assert!` premise is false.** Its comment says `validate()` should
   have rejected a charge argument that itself carries charge; `lower::contains_ddt_call` is
   *syntactic* and cannot see through `Expr::Var`, so `x = V*ddt(q); I <+ ddt(c0*x);` reaches it
@@ -3230,6 +3228,43 @@ frontend+codegen with all four product-rule files (`hicumL2V2p4p0`, `hicumL2V3p0
 separate `dropped_ddt` refusal — a `ddt` assigned inside a branch arm and contributed after it,
 `hicumL0_v2p1p0`'s shape — is untouched and still correct: that one is not about the integration
 method, and lifting it naively makes the term vanish entirely (see this file's own note).
+
+## A `laplace_*` input carrying a time derivative (2026-08-31)
+
+The last of the paths the `grad_ddt` enumeration turned up, and the only one that was
+**pre-existing** rather than exposed by lifting the nested-`ddt` refusal: nothing ever checked a
+filter's input for a `ddt`, so `laplace_nd(c(x)·ddt(q(x)), num, den)` stamped `u.grad` only and
+dropped the input's `c·∂q/∂x` entirely — Newton degrading without failing.
+
+**Stamped rather than refused**, unlike the two sibling refusals it sits next to (`laplace` nested
+in a resistive term, `ac_stim` nested). The reason is not taste: **carrying it is unconditional,
+whereas detecting it is not.** `lower::contains_ddt_call` is syntactic and cannot see through an
+`Expr::Var` holding a `ddt`-derived value, so a refusal would be bypassable in exactly the shape
+that matters, while the stamp is correct however the term was spelled.
+
+Linearizing `y = H·u` with `δu = (grad + jω·grad_ddt)·δx`:
+
+```text
+δy = (re + j·im)(grad + jω·grad_ddt)·δx
+   → jacobian:  re·grad − ω·im·grad_ddt
+   → dcharge :  im·grad/ω + re·grad_ddt        (the assembler forms G + jωC)
+```
+
+The `grad` halves are what the code already had. In DC and transient `ω` is zero and a
+real-coefficient filter has `im = 0` there, so only `re·grad_ddt` survives — `re` being the DC
+gain the filter already folds to.
+
+**Gated, and the gate bites:** a central difference of the assembled residual against
+`jacobian + coeff·dcharge`, plus an explicit "`dcharge` is not all zero" assertion. With the new
+stamp deleted the test fails on that assertion, which is the point — an FD check alone would pass
+a model whose contribution had silently become zero.
+
+**Stated limitation:** the transient half is finite-difference gated; the AC cross-term
+`−ω·im·grad_ddt` is derived but has **no golden circuit behind it**, because no corpus model
+exercises the shape. Of the six files using `laplace_*`/`zi_*`, every input is a plain probe, a
+`white_noise` call, or an algebraic expression of probes — none contains a `ddt`. The stamp is
+there so the physics cannot be silently lost if one ever does; the AC half should be read as
+derived, not validated.
 
 ## How to keep this document honest
 

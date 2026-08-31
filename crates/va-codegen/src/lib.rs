@@ -829,6 +829,52 @@ impl GeneratedModel {
                     }
                 }
             }
+            // A filtered input that itself carries a time derivative — `laplace_nd(c(x)*ddt(q),
+            // …)`. `u.grad_ddt` is the input's sensitivity to `ẋ`, and dropping it here left the
+            // whole `c·∂q/∂x` term out of the Jacobian while the residual kept the rate: Newton
+            // degraded without ever failing, the same silent defect the ordinary resistive path
+            // was fixed for on 2026-08-30. Nothing in the corpus writes this shape; it is
+            // stamped rather than refused because carrying it is unconditional, whereas
+            // detecting it is not — `lower::contains_ddt_call` is syntactic and cannot see
+            // through an `Expr::Var` holding a `ddt`-derived value.
+            //
+            // Linearizing `y = H·u` with `δu = (grad + jω·grad_ddt)·δx`:
+            //
+            // ```text
+            // δy = (re + j·im)(grad + jω·grad_ddt)·δx
+            //    → jacobian:  re·grad − ω·im·grad_ddt
+            //    → dcharge :  im·grad/ω + re·grad_ddt      (the assembler forms G + jωC)
+            // ```
+            //
+            // The `grad` halves are the loop above. In DC and transient `ω` is zero and a
+            // real-coefficient filter has `im = 0` there, so only `re·grad_ddt` survives — `re`
+            // being the DC gain the filter already folds to (§ this crate's `laplace_at`).
+            //
+            // **Stated limitation:** the transient half is finite-difference gated; the AC
+            // cross-term `−ω·im·grad_ddt` is derived here but has no golden circuit behind it,
+            // because no corpus model exercises it.
+            for (slot, &dg) in u.grad_ddt.iter().enumerate() {
+                if dg == 0.0 {
+                    continue;
+                }
+                let gk = self.terminals[slot];
+                match gb {
+                    None => {
+                        sink.dcharge(gp, gk, re * dg);
+                        sink.dcharge(gn, gk, -re * dg);
+                        if ac {
+                            sink.jacobian(gp, gk, -omega * im * dg);
+                            sink.jacobian(gn, gk, omega * im * dg);
+                        }
+                    }
+                    Some(gb) => {
+                        sink.dcharge(gb, gk, -re * dg);
+                        if ac {
+                            sink.jacobian(gb, gk, omega * im * dg);
+                        }
+                    }
+                }
+            }
             // The residual only matters where a *value* does: AC keeps derivatives alone.
             if !ac {
                 match gb {
@@ -4269,6 +4315,59 @@ mod tests {
             x0[2] = 0.05;
         }
         assert_assembled_jacobian_matches_fd(inst.as_ref(), next_unknown, &x0, 1e6);
+    }
+
+    /// A `laplace_*` filter whose **input** carries a time derivative:
+    /// `I(p,n) <+ laplace_nd(V(p,n)*ddt(c0*V(p,n)), {1}, {1, tau});`.
+    ///
+    /// `stamp_laplace` stamped `u.grad` only, so the input's `c·∂q/∂x` was dropped and the
+    /// row's Jacobian was zero where the truth is not — Newton degrading without failing. Unlike
+    /// the two accumulator paths, this one was **pre-existing** rather than exposed by lifting
+    /// the nested-`ddt` refusal: nothing ever checked a filter's input for a `ddt`.
+    ///
+    /// In DC and transient the filter folds to its DC gain, so the correct contribution is
+    /// `re·grad_ddt` into `dcharge` — which this checks against a central difference of the
+    /// assembled residual, the combination `va_transient::newton_step` actually forms.
+    #[test]
+    fn a_laplace_input_carrying_a_ddt_keeps_its_charge_sensitivity() {
+        let (mut m, value) = bias_dependent_ddt_module("laplace_over_rate");
+        // `laplace_nd(value, {1}, {1, tau})` — a one-pole low-pass with unity DC gain.
+        let one = m.push_expr(Expr::Const(1.0));
+        let num_len = m.push_expr(Expr::Const(1.0));
+        let tau = m.push_expr(Expr::Const(1e-4));
+        let lap = m.push_expr(Expr::Call(
+            Builtin::LaplaceNd,
+            vec![value, num_len, one, one, tau],
+        ));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: lap,
+        }];
+
+        let mut next_unknown = 2;
+        let inst = build_instance(&m, &[0, 1], &mut next_unknown).expect("builds");
+
+        // The charge sensitivity must reach a channel at all …
+        let ctx = va_abi::AnalysisCtx::transient(1e-3)
+            .with_ddt(1e6, 0.0)
+            .with_initial_step(false);
+        let committed = vec![4e-10_f64; inst.state_len()];
+        let mut nxt = vec![0.0; committed.len()];
+        let mut st = va_abi::ModelState::new(&committed, &mut nxt);
+        let mut sink = DenseStamp::new(next_unknown);
+        let mut x = vec![0.0; next_unknown];
+        x[0] = 0.35;
+        inst.load(&x, &ctx, &mut st, &mut sink);
+        assert!(
+            sink.dcharge.iter().any(|v| *v != 0.0),
+            "the filtered input's charge sensitivity was dropped — dcharge is all zero"
+        );
+
+        // … and be the right size.
+        assert_assembled_jacobian_matches_fd(inst.as_ref(), next_unknown, &x, 1e6);
     }
 
     /// A bias-dependent charge coefficient (`c(x)·ddt(q)`, a `ddt` nested inside a resistive
