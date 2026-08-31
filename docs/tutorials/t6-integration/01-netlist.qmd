@@ -95,12 +95,22 @@ would be caught here before it ever reached `va-cli`.
 
 ## Limitations
 
-Stated in the parser module's own doc comment: inductors, controlled sources, subcircuits (`X`),
-and `.model` cards are not parsed — a device's *model* is always resolved by `va-cli` matching a
-name against either a compiled `.va` file or a hand-written `va-abi` reference primitive, never
-by an in-deck SPICE `.model` card. A `.dc` sweep only steps one source linearly; no nested/
+Stated in the parser module's own doc comment: subcircuits (`X`), mutual inductance (`K`),
+current-controlled sources (`F`/`H`), and `.model` cards are not parsed — a device's *model* is
+always resolved by `va-cli` matching a name against either a compiled `.va` file or a
+hand-written `va-abi` reference primitive, never by an in-deck SPICE `.model` card.
+(Inductors and the voltage-controlled sources `E`/`G` were on this list until 2026-08-31; they
+are parsed now. `F`/`H` stay off it because their controlling quantity is another element's
+branch current, which needs that element resolved rather than a node pair read.) A `.dc` sweep only steps one source linearly; no nested/
 multi-source sweeps, no bare `.dc` (source-list) form some SPICE dialects accept. A `V` source's
 optional trailing `SIN` parameters (delay, damping, phase) aren't parsed.
+
+`E` and `G` are the linear voltage-controlled sources (added 2026-08-31), each taking four
+nodes — the driven pair, then the controlling pair — and a gain or transconductance:
+`E1 out gnd ctl gnd 4` holds `V(out) = 4*V(ctl)`, while `G1 out gnd ctl gnd 2e-3` pushes
+`2e-3*V(ctl)` amps through whatever `out` is connected to. The `G` claims no branch unknown at
+all; the `E` claims one, exactly as an independent source does, because it states a constraint
+rather than contributing a current.
 
 A model-referencing device (`D`/`M`/`Q`) may set the model's parameters by name,
 `D1 in gnd diode Is=1e-12 N=1.3` (added 2026-08-31). Before that a device could override only
