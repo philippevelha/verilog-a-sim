@@ -150,6 +150,7 @@ pub enum Token {
     /// parser routes to call expressions — plus gate primitives and constructs outside the
     /// v0 subset. The `kw` callback maps the matched lexeme back to its [`Keyword`].
     #[token("abs", kw)]
+    #[token("absdelay", kw)]
     #[token("abstol", kw)]
     #[token("access", kw)]
     #[token("acos", kw)]

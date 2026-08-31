@@ -25,8 +25,9 @@ Each entry follows the same five-part structure:
 The Verilog-AMS LRM's own Annex B ("List of keywords") lists a larger reserved-word set (around
 257 words, including SystemVerilog-configuration keywords like `config`/`liblist`/`connectmodule`
 that Annex C.16 explicitly excludes from the Verilog-A subset) than this project's
-`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (182 words, as of the discipline/nature
-parsing pass adding `discrete`/`domain`/`continuous` — previously 179). That's expected and correct —
+`crates/va-frontend/src/keywords.rs::RESERVED_WORDS` (184 words, as of the `absdelay`
+pass — 182 after the discipline/nature parsing pass added `discrete`/`domain`/`continuous`,
+previously 179 before that). That's expected and correct —
 `va-frontend` targets "single-module compact models" (`CLAUDE.md` §1), so words meaningful only
 to full Verilog-AMS hierarchy, configuration, and digital timing checks are outside the declared
 subset by design, not by oversight. The LRM's own Annex B (VAMS-LRM-2.4, p.380–382, Table B.1)
@@ -393,6 +394,39 @@ class of lexemes.
   analogue of a C array subscript, but with a crucial restriction the LRM states explicitly
   (§5.5.2): the index "must be a constant expression, though it may include genvar variables" —
   unlike C, where `a[i]` allows `i` to be any runtime value.
+
+### `LBrace` (`{`), `RBrace` (`}`) — undocumented until this audit pass
+
+- **Purpose and Static Nature**: Structural — delimits an array-literal expression,
+  `{expr, expr, ...}`, whose elements are read only where the LRM's Laplace/Z-domain filter
+  builtins (§4.5.11/§4.5.12) expect a coefficient or root list (`laplace_nd`/`laplace_np`/
+  `laplace_zd`/`laplace_zp`/`zi_nd`/`zi_np`/`zi_zd`/`zi_zp`, §1.5/§1.6) and `noise_table`/
+  `noise_table_log`'s table argument (§1.5), both of which const-fold or lower each element the
+  same way.
+- **Declaration and Assignment**: Not a declaration; parsed generically in expression position
+  (`Parser::parse_primary`'s `Token::LBrace` arm) into `ExprAst::ArrayLit(Vec<ExprRef>)` — a
+  comma-separated list of ordinary expressions between `{`/`}`, no special-casing at parse time
+  for which builtin will eventually consume it.
+- **Expressions and Evaluation**: Reaching `lower_expr`/`const_eval` as a bare value (i.e.,
+  anywhere other than one of the argument positions above) is a hard elaboration error — "an
+  array-literal expression (`{...}`) is only valid as a Laplace/Z-domain filter's
+  numerator/zero/denominator/pole argument..., not as a general-purpose value"
+  (`Elaborator::lower_expr`'s `ExprAst::ArrayLit` arm) / "...not constant in a parameter
+  context" (`Elaborator::const_eval`'s). Where it *is* legal, two different helpers consume it
+  depending on whether the caller needs a compile-time-constant sum (`array_lit_values`, used
+  for a Laplace filter's DC/transient gain) or a set of lowered, still-dynamic `ExprId`s
+  (`array_lit_exprs`, used for the AC per-frequency evaluation — so a coefficient written as a
+  parameter expression, e.g. `` {1, `M_TWO_PI*Fgr} ``, tracks a netlist override rather than
+  freezing at its default); `noise_table`/`noise_table_log` instead read it via
+  `array_lit_values` through `noise_table_points`, always as constants (LRM: the table is data,
+  not a per-bias expression).
+- **Structural and Analog Usage**: Analog-block only, and only as one specific builtin's
+  argument — there is no general array/aggregate type anywhere else in this subset.
+- **Comparison with Traditional Constructs**: Superficially resembles a C aggregate initializer
+  (`int a[] = {1, 2, 3};`), but it is not a value or storage of its own — it exists purely as a
+  fixed-arity argument-list shape for a handful of signal-processing builtins, closer to a
+  variadic function's bracketed argument-pack syntax in a language that has one than to any
+  first-class C array literal.
 
 ### `At` (`@`)
 
@@ -845,7 +879,7 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 Every other reserved word lexes as `Token::Keyword(Keyword)`, a payload the parser inspects by
 string (`at_keyword`/`eat_keyword`, or the `Some(&Token::Keyword(kw)) => match kw.as_str()
 {...}` dispatch in `parse_stmt`). The words below are the ones with real, working
-grammar/elaboration behavior; §1.6 gives the master table covering every one of the 182 words,
+grammar/elaboration behavior; §1.6 gives the master table covering every one of the 184 words,
 including the ones with no implemented behavior at all.
 
 ### `Branch`
@@ -1347,16 +1381,18 @@ See `docs/proposals/model-state.md` §1.1.
 
 ## 1.6 Master table — every reserved word
 
-Every one of the 182 words in `RESERVED_WORDS`, alphabetically, each addressed against all five
-questions. Words with a full write-up above are cross-referenced rather than repeated; the
-remaining ~110 words — almost entirely digital-Verilog gate primitives, net-strength/charge
+Every one of the 184 words in `RESERVED_WORDS`, alphabetically, each addressed against all five
+questions. `absdelay`'s row predates its reservation: the 2026-08-31 audit found the word had a
+row here and real elaboration behavior but was absent from the table itself, and reserving it the
+same day made this section's count and its rows agree again (see that row's note). Words with a full write-up above are cross-referenced rather than repeated;
+the remaining ~110 words — almost entirely digital-Verilog gate primitives, net-strength/charge
 keywords, specify-block/task/event keywords, and signal-processing transform names — get their
 first (and, for the ~90 with zero implemented behavior, only) treatment here.
 
 | Token | Purpose & Static Nature | Declaration & Assignment | Expressions & Evaluation | Structural & Analog Usage | Comparison with Traditional Constructs |
 |---|---|---|---|---|---|
 | `abs` | Dynamic/static dual, see §1.5 Math builtins | `abs(x)` call | Absolute value, both paths | Analog expr / const context | C `fabs()`/`abs()` |
-| `absdelay` | **Still wrong in transient** — needs an interpolated *history buffer*, not a fixed-size state vector (Tier B §1.3); folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
+| `absdelay` | **Still wrong in transient** — needs an interpolated *history buffer*, not a fixed-size state vector (Tier B §1.3); folds to its `value` argument (fixed — see §1.5 `Absdelay`); settles to input at DC. **Was missing from `RESERVED_WORDS`** despite appearing in this table — found by the 2026-08-31 audit pass and **fixed the same day**: unlike its siblings `transition`/`slew`, which were reserved, `absdelay` was recognized purely by matching the call name `ExprAst::Call { name, .. }` in `elaborate.rs`, so it lexed as a plain `Ident` and a user could shadow it (`real absdelay;`) — the same class of gap the `floor`/`ceil`/`round`/`int`/`limexp` fix (§1.7) closed for the math builtins. Closing it took a `#[token("absdelay", kw)]` in the lexer *as well as* the table entry (the table alone does not tokenize anything), and is safe for the call syntax because the parser turns a reserved word in expression position back into a call name (`Token::Keyword` arm of `parse_primary`), so the `name == "absdelay"` elaboration arm still fires. Corpus coverage was unchanged by it (86/88, 85/88), i.e. no corpus file was using the word as an identifier | `absdelay(value, delay[, max_delay])` call | Identity on `value`; `delay`/`max_delay` parsed, never evaluated | Analog-block only | No C analogue |
 | `abstol` | Parsed into `NatureDecl::abstol` (§1.5 `Discipline`/`Nature`); round-trips into `va_ir::NodeDecl::abstol` and `va-core`'s per-unknown Newton convergence check (§ nature-metadata wiring) | Nature attribute `abstol = expr;` | Read only when `expr` is a plain (optionally negated) numeric literal; a more complex expression still parses (tokens consumed) but the value is dropped | N/A (module preamble) | A nature's absolute-tolerance attribute; no C analogue |
 | `access` | Parsed into `NatureDecl::access` (§1.5), widens the recognized access-function set once bound by a `discipline` | Nature attribute `access = fn_name;` | Read as a plain identifier; has a real effect (§2.17) once a `discipline` binds this nature as `potential`/`flow` | N/A (module preamble) | Names the `V`/`I`-style access function for a custom nature; no C analogue |
 | `acos` | Dynamic/static dual, §1.5 | `acos(x)` call | Inverse cosine | Analog expr / const context | C `acos()` |
