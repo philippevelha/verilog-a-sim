@@ -3259,12 +3259,30 @@ gain the filter already folds to.
 stamp deleted the test fails on that assertion, which is the point — an FD check alone would pass
 a model whose contribution had silently become zero.
 
-**Stated limitation:** the transient half is finite-difference gated; the AC cross-term
-`−ω·im·grad_ddt` is derived but has **no golden circuit behind it**, because no corpus model
-exercises the shape. Of the six files using `laplace_*`/`zi_*`, every input is a plain probe, a
-`white_noise` call, or an algebraic expression of probes — none contains a `ddt`. The stamp is
-there so the physics cannot be silently lost if one ever does; the AC half should be read as
-derived, not validated.
+**Both halves are now gated**, the AC one by a trick worth reusing: spell **one** transfer
+function two ways. `laplace_nd(V, {0,c}, {1,τ})` goes entirely through `grad`;
+`laplace_nd(ddt(c*V), {1}, {1,τ})` goes entirely through `grad_ddt` — `grad` vanishes because `c`
+is a parameter, and in AC the primal is zero. With `D = 1 + ω²τ²`:
+
+```text
+A:  re = ω²cτ/D, im = ωc/D   →  G = re·grad        = ω²cτ/D,  C = im/ω·grad   = c/D
+B:  re = 1/D,    im = −ωτ/D  →  G = −ω·im·grad_ddt = ω²τc/D,  C = re·grad_ddt = c/D
+```
+
+Identical in both channels at every ω, and both equal the closed form for a series R–C branch
+with `R = τ/c`, `C = c` — the very network the committed `laplace_ac` golden already uses. So it
+is an equivalence *and* an absolute check, needing **no new golden data**. Mutation-tested:
+flipping the cross-term's sign turns `G` into a negative conductance and deleting it makes the
+input admittance identically zero; both are caught.
+
+An independent check also confirmed the algebra, the `Some(gb)` branch-constraint signs, and that
+`im` is **exactly** zero at ω=0 for all four spellings including complex root forms — the LRM's
+`∏(1 − s/ζ)` normalization makes `H(0)` identically 1 regardless of the roots. So the `if ac`
+guard on the cross-term is defensive, not load-bearing.
+
+**Stated limitation, pre-existing:** under `AnalysisKind::Noise` the `ac` flag is always false, so
+every `laplace_*` collapses to `H(0)` and this term degenerates to a plain capacitor. The `grad`
+half already behaved that way; this term inherits it rather than introducing it.
 
 ## How to keep this document honest
 

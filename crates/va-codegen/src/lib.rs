@@ -850,9 +850,16 @@ impl GeneratedModel {
             // real-coefficient filter has `im = 0` there, so only `re·grad_ddt` survives — `re`
             // being the DC gain the filter already folds to (§ this crate's `laplace_at`).
             //
-            // **Stated limitation:** the transient half is finite-difference gated; the AC
-            // cross-term `−ω·im·grad_ddt` is derived here but has no golden circuit behind it,
-            // because no corpus model exercises it.
+            // Both halves are gated: the transient one by a finite difference of the assembled
+            // residual, the AC cross-term by spelling one transfer function two ways —
+            // `laplace_nd(V, {0,c}, {1,τ})` goes entirely through `grad`, `laplace_nd(ddt(c*V),
+            // {1}, {1,τ})` entirely through `grad_ddt`, and they must agree channel-for-channel
+            // at every ω (and with the closed form for a series R–C branch, `R = τ/c`, `C = c`).
+            //
+            // **Stated limitation:** under `AnalysisKind::Noise` the `ac` flag is always false,
+            // so every `laplace_*` collapses to `H(0)` and this term degenerates to a plain
+            // capacitor. That is pre-existing — the `grad` half above behaves the same way — not
+            // something this term introduced.
             for (slot, &dg) in u.grad_ddt.iter().enumerate() {
                 if dg == 0.0 {
                     continue;
@@ -4368,6 +4375,131 @@ mod tests {
 
         // … and be the right size.
         assert_assembled_jacobian_matches_fd(inst.as_ref(), next_unknown, &x, 1e6);
+    }
+
+    /// The **AC** half of the laplace `grad_ddt` stamp: `jacobian += −ω·im·grad_ddt`.
+    ///
+    /// The transient gate above cannot reach it — under a transient context `ω = 0` and a
+    /// real-coefficient filter has `im` exactly `0` at `s = 0`, so only the `dcharge` half is
+    /// exercised. This reaches it by spelling **one** transfer function two ways:
+    ///
+    /// ```verilog
+    /// I(p,n) <+ laplace_nd(V(p,n),      {0, c}, {1, tau});   // Y(s) = s·c/(1 + s·τ)
+    /// I(p,n) <+ laplace_nd(ddt(c*V(p,n)), {1},  {1, tau});   // the same Y(s)
+    /// ```
+    ///
+    /// The first goes **entirely** through `grad` (`grad_ddt` is zero); the second **entirely**
+    /// through `grad_ddt` — `grad` vanishes because `c` is a parameter, so the product rule's
+    /// `(dq/dt)·∂c/∂x` half is zero, and in AC `ddt_coeff` is zero so the primal is too. Working
+    /// both out with `D = 1 + ω²τ²`:
+    ///
+    /// ```text
+    /// A:  re = ω²cτ/D, im = ωc/D  →  G = re·grad        = ω²cτ/D,  C = im/ω·grad   = c/D
+    /// B:  re = 1/D,    im = −ωτ/D →  G = −ω·im·grad_ddt = ω²τc/D,  C = re·grad_ddt = c/D
+    /// ```
+    ///
+    /// Identical in both channels at every ω — and both equal the closed form for a series R–C
+    /// branch with `R = τ/c`, `C = c`, which is the network the committed `laplace_ac` golden
+    /// already uses. So this is an equivalence *and* an absolute check, with no new golden data.
+    ///
+    /// It discriminates: flipping the cross-term's sign makes `G` a negative conductance,
+    /// dropping the `ω` factor is off by ω, and dropping the term makes the input admittance
+    /// identically zero.
+    #[test]
+    fn the_ac_half_of_a_laplace_ddt_input_matches_the_same_filter_spelled_directly() {
+        let (c, tau) = (1e-6_f64, 1e-3_f64);
+
+        // `laplace_nd(<input>, num, den)` flattens to `[input, Const(num_len), num…, den…]`.
+        let build = |through_ddt: bool| -> Box<dyn va_abi::ModelInstance> {
+            let mut m = Module::new("lap");
+            m.nodes = vec![
+                NodeDecl {
+                    name: "p".into(),
+                    discipline: Discipline::Electrical,
+                    abstol: None,
+                },
+                NodeDecl {
+                    name: "n".into(),
+                    discipline: Discipline::Electrical,
+                    abstol: None,
+                },
+            ];
+            m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+            m.branches = vec![Branch {
+                p: NodeId(0),
+                n: NodeId(1),
+            }];
+            let v = m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }));
+            let den0 = m.push_expr(Expr::Const(1.0));
+            let den1 = m.push_expr(Expr::Const(tau));
+            let args = if through_ddt {
+                let cc = m.push_expr(Expr::Const(c));
+                let q = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, cc, v));
+                let d = m.push_expr(Expr::Call(Builtin::Ddt, vec![q]));
+                let n_len = m.push_expr(Expr::Const(1.0));
+                let num0 = m.push_expr(Expr::Const(1.0));
+                vec![d, n_len, num0, den0, den1]
+            } else {
+                let n_len = m.push_expr(Expr::Const(2.0));
+                let num0 = m.push_expr(Expr::Const(0.0));
+                let num1 = m.push_expr(Expr::Const(c));
+                vec![v, n_len, num0, num1, den0, den1]
+            };
+            let lap = m.push_expr(Expr::Call(Builtin::LaplaceNd, args));
+            m.analog = vec![Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: lap,
+            }];
+            build_instance(&m, &[0, 1], &mut 2).expect("builds")
+        };
+
+        let direct = build(false);
+        let via_ddt = build(true);
+
+        for f in [1.0_f64, 159.154_943, 1e4, 1e6] {
+            let ctx = va_abi::AnalysisCtx::ac_at(f);
+            let stamp = |inst: &dyn va_abi::ModelInstance| -> (f64, f64) {
+                let mut st = va_abi::ModelState::stateless();
+                let mut sink = DenseStamp::new(1);
+                inst.load(&[1.0], &ctx, &mut st, &mut sink);
+                (sink.jacobian[0], sink.dcharge[0])
+            };
+            let (g_a, c_a) = stamp(direct.as_ref());
+            let (g_b, c_b) = stamp(via_ddt.as_ref());
+
+            let w = 2.0 * std::f64::consts::PI * f;
+            let d = 1.0 + w * w * tau * tau;
+            let (g_exact, c_exact) = (w * w * c * tau / d, c / d);
+
+            let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1e-30);
+            assert!(
+                close(g_a, g_b),
+                "f={f}: G differs between spellings, direct {g_a:e} vs via-ddt {g_b:e}"
+            );
+            assert!(
+                close(c_a, c_b),
+                "f={f}: C differs between spellings, direct {c_a:e} vs via-ddt {c_b:e}"
+            );
+            assert!(
+                close(g_b, g_exact),
+                "f={f}: G {g_b:e} disagrees with the closed form {g_exact:e}"
+            );
+            assert!(
+                close(c_b, c_exact),
+                "f={f}: C {c_b:e} disagrees with the closed form {c_exact:e}"
+            );
+            // The whole point of the cross-term: without it `G` would be zero here.
+            assert!(
+                g_b.abs() > 0.0,
+                "f={f}: the AC cross-term contributed nothing"
+            );
+        }
     }
 
     /// A bias-dependent charge coefficient (`c(x)·ddt(q)`, a `ddt` nested inside a resistive
