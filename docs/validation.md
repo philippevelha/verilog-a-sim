@@ -155,6 +155,29 @@ grid samples the response's interesting part. Passes at `|mag| 1.304e-15`, `phas
 `.noise` deliberately stays `dec`-only: its integrated-total maths assumes logarithmic spacing,
 so a linear grid there would change what the reported total means.
 
+### A second ungated circuit: `circuits/transformer.net` (2026-08-31)
+
+Mutual inductance (`K`) works, and the two engines agree on the whole waveform — peak
+`V(s) = 1.681 V` at 3.9 us, to four digits. They disagree in the **first microsecond**, where
+QSPICE swings the secondary to `-0.43 V` and this engine holds it at 0.
+
+**Here we can show which is right, rather than only that they differ.** KCL at the secondary
+node says `i_L2 + V(s)/R2 = 0`, and an inductor's current cannot jump, so `V(s)(0+)` is exactly
+zero. QSPICE's early excursion violates that continuity; ours does not. The likely cause is on
+the translation side: `gen-golden` injects `IC=0` into every reactive element plus `UIC` to
+match this engine's cold start, and forcing an initial current on *coupled* inductors appears
+to leave QSPICE's first timepoint inconsistent.
+
+An RMS gate over the full window scores that disagreement (measured `1.749e-2` against a
+`1e-3` tolerance, and still `1.7e-2` after dropping everything before 100 ns). The only thing
+that would hide it is a per-circuit "ignore the early window" knob — a gate-weakening
+mechanism, and one that should be a deliberate decision rather than a side effect of wanting a
+green line. (The existing `RING_OSC_GOLDEN_TSTOP` is the *opposite*: it compares only an early
+window and discards a late one that is chaotic-sensitive.) So the circuit stays out of the gate
+and is validated on the two facts that need no oracle: `V(s)(0+) = 0` exactly, and removing the
+`K` card leaves the secondary at exactly zero for the whole run — which is what makes the
+first assertion a statement about coupling rather than about wiring.
+
 ### A circuit deliberately *not* gated: `circuits/rc_pulse.net` (2026-08-31)
 
 `PULSE(v1 v2 td tr tf pw per)` sources are implemented and tested, but the RC circuit driven by

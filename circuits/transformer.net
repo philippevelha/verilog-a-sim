@@ -1,0 +1,24 @@
+* A transformer: two coupled inductors, driven on the primary, loaded on the secondary.
+* L1 = 1 mH primary, L2 = 4 mH secondary, coupling k = 0.9, so M = 0.9*sqrt(1m*4m) = 1.8 mH.
+* The turns ratio is sqrt(L2/L1) = 2, so a step on the primary appears roughly doubled (and
+* k-scaled) across the secondary before the L/R time constants take over.
+* Cold-started, so the constant source is a step, as in rc_step.net.
+*
+* Removing K makes this fail loudly rather than subtly: the secondary becomes an isolated
+* L-R loop with no source and V(s) stays at exactly 0.000000 for the whole run.
+*
+* NOT gated against QSPICE golden, deliberately -- see docs/validation.md. The two engines
+* agree on the whole waveform (peak V(s) = 1.681 V at 3.9 us, to four digits) but disagree in
+* the first microsecond, where QSPICE swings to -0.43 V and this engine holds 0. Ours is
+* provably the right one: KCL at s says i_L2 + V(s)/R2 = 0, and an inductor's current cannot
+* jump, so V(s)(0+) is exactly 0. Gating this on an RMS over the full window would score that
+* disagreement, and the only mechanism that would hide it -- ignoring an early window -- is a
+* gate-weakening knob that should be a deliberate decision rather than a side effect.
+V1  in   gnd  DC 1
+R1  in   p    10
+L1  p    gnd  1e-3
+L2  s    gnd  4e-3
+R2  s    gnd  1000
+K1  L1   L2   0.9
+.tran 1e-7 2e-4
+.end

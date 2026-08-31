@@ -95,8 +95,8 @@ would be caught here before it ever reached `va-cli`.
 
 ## Limitations
 
-Stated in the parser module's own doc comment: subcircuits (`X`), mutual inductance (`K`),
-and `.model` cards are not parsed — a device's *model* is
+Stated in the parser module's own doc comment: subcircuits (`X`) and `.model` cards are not
+parsed — a device's *model* is
 always resolved by `va-cli` matching a name against either a compiled `.va` file or a
 hand-written `va-abi` reference primitive, never by an in-deck SPICE `.model` card.
 (Inductors and all four controlled sources were on this list until 2026-08-31; they are
@@ -113,6 +113,11 @@ nodes — the driven pair, then the controlling pair — and a gain or transcond
 `2e-3*V(ctl)` amps through whatever `out` is connected to. The `G` claims no branch unknown at
 all; the `E` claims one, exactly as an independent source does, because it states a constraint
 rather than contributing a current.
+
+`K` couples two inductors' flux, `K1 L1 L2 0.9`. It connects to no nodes at all — it names
+the two elements — and contributes only the off-diagonal flux terms, since each inductor
+already carries its own. Its coupling must lie in `[-1, 1]`; beyond that would link more flux
+than either winding produces, and is refused rather than clamped silently at the deck level.
 
 `F` and `H` are their current-controlled counterparts: two nodes, then the *name* of an
 element whose branch current controls them, then a gain (`F`) or a transresistance in ohms

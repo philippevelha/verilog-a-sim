@@ -199,12 +199,14 @@ pub struct Device {
     /// **Transient only, and only an initial *seed*.** It is not a DC constraint: a `.op` or
     /// `.dc` solve ignores it entirely, exactly as SPICE's own `UIC` semantics do.
     pub ic: Option<f64>,
-    /// The element whose branch current controls this one, for SPICE's current-controlled
-    /// sources (`F`/`H`). `None` for every other device.
+    /// Other elements this device refers to **by name**: the sensed element of a
+    /// current-controlled source (`F`/`H`, one name), or the two coupled inductors of a
+    /// mutual-inductance card (`K`, two names). Empty for every other device.
     ///
-    /// Held as a *name* rather than an index because the netlist layer does not assign branch
-    /// rows — `va-cli` does, and resolves this against the map it builds.
-    pub control: Option<String>,
+    /// Names rather than indices because the netlist layer does not assign branch rows —
+    /// `va-cli` does, and resolves these against the map it builds, in a second pass once
+    /// every row has an index.
+    pub controls: Vec<String>,
     /// Per-instance parameter overrides, `name=value`, in the order written.
     ///
     /// SPICE's own convention for a model-referencing device (`M1 d g s nmos W=10u L=2u`).

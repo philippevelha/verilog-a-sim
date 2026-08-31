@@ -8,6 +8,9 @@
 //! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
 //! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
 //! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
+//! `K` couples two inductors' flux, `` K<name> <inductor> <inductor> <coupling> `` — it
+//! connects to no nodes, naming the two elements instead, and its coupling must lie in
+//! `[-1, 1]`.
 //! `F` (current-controlled current source) and `H` (current-controlled voltage source) take
 //! two nodes, the *name* of an element whose branch current controls them, and a gain or
 //! transresistance. That element must be one that owns a branch row (a `V` source, an `L`, an
@@ -364,7 +367,32 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic,
                 params: Vec::new(),
-                control: None,
+                controls: Vec::new(),
+            })
+        }
+        // `K<name> <inductor> <inductor> <coupling>` — mutual inductance. It connects to no
+        // nodes at all: it names two inductors and couples their flux, so its "terminals" are
+        // empty and both references are resolved by `va-cli` like an `F`/`H` controller.
+        'K' => {
+            need(4)?;
+            let k =
+                parse_value(toks[3]).ok_or_else(|| err(format!("bad coupling `{}`", toks[3])))?;
+            if !(-1.0..=1.0).contains(&k) {
+                return Err(err(format!(
+                    "coupling `{k}` is outside [-1, 1]: a coefficient beyond perfect coupling \
+                     would link more flux than either winding produces"
+                )));
+            }
+            Ok(Device {
+                name,
+                model: "mutual".to_string(),
+                terminals: Vec::new(),
+                value: Some(k),
+                waveform: None,
+                ac: None,
+                ic: None,
+                params: Vec::new(),
+                controls: vec![toks[1].to_string(), toks[2].to_string()],
             })
         }
         // `F<name> p n <controlling element> <gain>` / `H<name> p n <controlling element>
@@ -387,7 +415,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: Vec::new(),
-                control: Some(toks[3].to_string()),
+                controls: vec![toks[3].to_string()],
             })
         }
         // `E<name> p n cp cn <gain>` / `G<name> p n cp cn <gm>` — linear
@@ -413,7 +441,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: Vec::new(),
-                control: None,
+                controls: Vec::new(),
             })
         }
         'D' => {
@@ -431,7 +459,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: parse_param_overrides(&toks[4..], line_no)?,
-                control: None,
+                controls: Vec::new(),
             })
         }
         // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
@@ -453,7 +481,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: parse_param_overrides(&toks[5..], line_no)?,
-                control: None,
+                controls: Vec::new(),
             })
         }
         'V' => {
@@ -472,7 +500,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac,
                 ic: None,
                 params: Vec::new(),
-                control: None,
+                controls: Vec::new(),
             })
         }
         // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
@@ -494,7 +522,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic: None,
                 params: parse_param_overrides(&toks[5..], line_no)?,
-                control: None,
+                controls: Vec::new(),
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -869,14 +897,14 @@ C1 out gnd 1e-6 IC=5
     fn current_controlled_sources_name_their_controller() {
         let net = parse("F1 o gnd Vs 3\nH1 q gnd Vs 2000\n.op\n.end\n").expect("parses");
         assert_eq!(net.devices[0].model, "cccs");
-        assert_eq!(net.devices[0].control.as_deref(), Some("Vs"));
+        assert_eq!(net.devices[0].controls, vec!["Vs".to_string()]);
         assert_eq!(net.devices[0].value, Some(3.0));
         assert_eq!(net.devices[1].model, "ccvs");
-        assert_eq!(net.devices[1].control.as_deref(), Some("Vs"));
+        assert_eq!(net.devices[1].controls, vec!["Vs".to_string()]);
         assert_eq!(net.devices[1].value, Some(2000.0));
         // Every other device kind leaves `control` empty.
         let net = parse("R1 a gnd 1000\n.end\n").expect("parses");
-        assert!(net.devices[0].control.is_none());
+        assert!(net.devices[0].controls.is_empty());
     }
 
     /// `E`/`G` take four nodes -- the driven pair then the controlling pair -- and a gain.

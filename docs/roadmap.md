@@ -1566,6 +1566,30 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: mutual inductance (`K`), and a disagreement where we can prove we are
+> right.** `va_abi::reference::Mutual` contributes *only* the off-diagonal flux terms —
+> `M*i2` on the first inductor's row, `M*i1` on the second — because each inductor already
+> puts its own `L*i` on its own row. So a `K` needs no unknown and no new Interface β
+> machinery, and removing the coupling leaves two ordinary inductors with nothing to unwind.
+> Being purely reactive, it also vanishes at DC, which is the physically right answer rather
+> than an omission. The netlist's `control` field became `controls` to carry two names.
+>
+> **`circuits/transformer.net` is the second deliberately ungated circuit.** The engines agree
+> on the whole waveform (peak `V(s) = 1.681 V` at 3.9 us, four digits) but disagree in the
+> first microsecond: QSPICE swings the secondary to `-0.43 V` where this engine holds 0.
+> Unlike the `PULSE` edge case, **this one is decidable**: KCL at the secondary node says
+> `i_L2 + V(s)/R2 = 0`, an inductor's current cannot jump, so `V(s)(0+)` is exactly zero. Ours
+> satisfies that; QSPICE's does not. The suspected cause is the translation injecting `IC=0`
+> plus `UIC` on *coupled* inductors, leaving its first timepoint inconsistent.
+>
+> Gating it would score that disagreement (`1.749e-2`, still `1.7e-2` past 100 ns), and the
+> only thing that would hide it is a per-circuit "ignore the early window" knob — a
+> gate-weakening mechanism that deserves a decision rather than arriving as a side effect of
+> wanting a green line. (`RING_OSC_GOLDEN_TSTOP` is the opposite: it keeps an early window and
+> discards a chaotic late one.) Validated instead on the two facts needing no oracle:
+> `V(s)(0+) = 0`, and removing the `K` card leaves the secondary at exactly zero all run —
+> which is what makes the first a statement about coupling rather than about wiring.
+>
 > **2026-08-31: the current-controlled sources (`F`, `H`) complete the set.** They sense
 > another element's branch current rather than a node pair, which is why they had been left out
 > earlier the same day: the controlling element must be *resolved to a row* before the instance

@@ -32,7 +32,8 @@ pub mod plot;
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
 use va_abi::reference::{
-    diode::VT_NOMINAL, Bjt, Capacitor, Cccs, Ccvs, Diode, Inductor, Resistor, VSource, Vccs, Vcvs,
+    diode::VT_NOMINAL, Bjt, Capacitor, Cccs, Ccvs, Diode, Inductor, Mutual, Resistor, VSource,
+    Vccs, Vcvs,
 };
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
@@ -713,7 +714,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     // branch identity is carried by the `currents` map rather than inferred from device order
     // (§ `report`'s own doc comment, and the bug that established it).
     for dev in &net.devices {
-        if matches!(dev.model.as_str(), "cccs" | "ccvs") {
+        if matches!(dev.model.as_str(), "cccs" | "ccvs" | "mutual") {
             continue;
         }
         let (inst, branch) = build_instance(dev, compiled, &mut next_unknown)?;
@@ -724,12 +725,49 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     }
     // Phase 2: the current-controlled sources, now that every branch row above has an index.
     for dev in &net.devices {
+        if dev.model == "mutual" {
+            // A `K` names two inductors and couples their flux. Both the branch rows and the
+            // inductances come from those elements, so it can only be built once they exist.
+            let (a, b) = match dev.controls.as_slice() {
+                [a, b] => (a.as_str(), b.as_str()),
+                _ => bail!("`{}` must name exactly two inductors", dev.name),
+            };
+            let find = |want: &str| -> Result<(usize, f64)> {
+                let d = net
+                    .devices
+                    .iter()
+                    .find(|d| d.name == want && d.model == "inductor")
+                    .with_context(|| {
+                        format!("`{}` couples `{want}`, which is not an inductor", dev.name)
+                    })?;
+                let branch = currents
+                    .iter()
+                    .find(|(name, _)| name == want)
+                    .map(|(_, i)| *i)
+                    .with_context(|| format!("`{want}` has no branch row"))?;
+                Ok((branch, d.value.unwrap_or(0.0)))
+            };
+            let (b1, l1) = find(a)?;
+            let (b2, l2) = find(b)?;
+            if b1 == b2 {
+                bail!("`{}` couples `{a}` to itself", dev.name);
+            }
+            instances.push(Box::new(Mutual::from_coupling(
+                b1,
+                b2,
+                l1,
+                l2,
+                dev.value.unwrap_or(0.0),
+            )));
+            continue;
+        }
         if !matches!(dev.model.as_str(), "cccs" | "ccvs") {
             continue;
         }
         let ctl_name = dev
-            .control
-            .as_deref()
+            .controls
+            .first()
+            .map(String::as_str)
             .with_context(|| format!("`{}` names no controlling element", dev.name))?;
         let ctl = currents
             .iter()
@@ -2480,6 +2518,54 @@ mod tests {
         assert!((at("mid") - 1.0).abs() < 1e-9, "V(mid) = {}", at("mid"));
         assert!((at("eout") - 4.0).abs() < 1e-9, "V(eout) = {}", at("eout"));
         assert!((at("gout") + 1.0).abs() < 1e-9, "V(gout) = {}", at("gout"));
+    }
+
+    /// Mutual inductance, against the two facts that can be established without an oracle:
+    /// the secondary voltage is exactly zero at t=0+ (KCL at that node says
+    /// `i_L2 + V(s)/R2 = 0`, and an inductor's current cannot jump), and removing the coupling
+    /// leaves the secondary dead for the whole run. `circuits/transformer.net` is deliberately
+    /// not gated against QSPICE -- see its own header comment.
+    #[test]
+    fn coupling_drives_a_secondary_that_is_otherwise_dead() {
+        let deck = include_str!("../../../circuits/transformer.net");
+        let net = va_netlist::parser::parse(deck).expect("parse transformer");
+        let wf = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+        let s_idx = net
+            .node_order
+            .iter()
+            .position(|n| n == "s")
+            .expect("`s` node");
+
+        assert_eq!(
+            wf.x[0][s_idx], 0.0,
+            "an inductor's current cannot jump, so V(s)(0+) = 0"
+        );
+        let peak =
+            wf.x.iter()
+                .map(|r| r[s_idx])
+                .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (1.5..1.9).contains(&peak),
+            "a k=0.9 transformer with a turns ratio of 2 should push the secondary well past              the 1 V primary step, got {peak}"
+        );
+
+        // The same deck without its K card: the secondary is an isolated L-R loop with no
+        // source, so it must stay at exactly zero -- which is what makes the assertion above
+        // a statement about coupling rather than about wiring.
+        let uncoupled: String = deck
+            .lines()
+            .filter(|l| !l.starts_with("K1"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        let net = va_netlist::parser::parse(&uncoupled).expect("parses without K");
+        let wf = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+        assert!(
+            wf.x.iter().all(|r| r[s_idx] == 0.0),
+            "without coupling the secondary must be dead for the entire run"
+        );
     }
 
     /// Current-controlled sources, against hand-computed values. Both sense the *same*

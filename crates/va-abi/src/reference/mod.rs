@@ -10,6 +10,7 @@ pub mod capacitor;
 pub mod controlled;
 pub mod diode;
 pub mod inductor;
+pub mod mutual;
 pub mod resistor;
 pub mod vsource;
 
@@ -18,6 +19,7 @@ pub use capacitor::Capacitor;
 pub use controlled::{Cccs, Ccvs, Vccs, Vcvs};
 pub use diode::Diode;
 pub use inductor::Inductor;
+pub use mutual::Mutual;
 pub use resistor::Resistor;
 pub use vsource::VSource;
 
