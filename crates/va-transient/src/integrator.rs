@@ -6,7 +6,7 @@
 //! step-size control; [`Method::Gear`] is not (returns [`TransientError::UnsupportedMethod`],
 //! never silently falls back to another method).
 //!
-//! **Two LTE estimators exist; the embedded pair is the default** ([`LteEstimator`]).
+//! **Two LTE estimators exist; divided differences are the default** ([`LteEstimator`]).
 //!
 //! [`LteEstimator::EmbeddedPair`] computes *both* methods' result from the same starting point
 //! and step size — one as the reported solution, the other purely to estimate error — and
@@ -30,11 +30,13 @@
 //! accuracy at double the cost. A caller who wants the pair's accuracy from divided
 //! differences tightens `lte_reltol` instead of paying for it on every step.
 //!
-//! The pair remains the default for one reason, recorded rather than dressed up as a technical
-//! preference: every committed transient golden was validated under it, and switching moves
-//! those numbers (`rectifier` 6.766e-4 -> 8.226e-4 against a 1e-3 tolerance, `rc_step` 1.839e-5
-//! -> 2.193e-5, `ring_osc` unchanged at 4.464e-6 — all still passing). Changing the default is
-//! a decision to re-validate the transient gates under, not a drive-by.
+//! **The transient gates were re-run under divided differences on 2026-08-31 and are 16/16
+//! green** with `rectifier` at 6.766e-4 -> 8.226e-4 (tolerance 1e-3), `rc_step` 1.839e-5 ->
+//! 2.193e-5, and `ring_osc` unchanged at 4.464e-6. No golden file moved, and none could: a
+//! golden is QSPICE's answer to the circuit and owes nothing to this integrator — the estimator
+//! moves *our* number, which is the side of the comparison the gate is meant to test. Callers
+//! wanting the old, more conservative stepping select [`LteEstimator::EmbeddedPair`]
+//! explicitly, or tighten `lte_reltol`, which is the honest way to buy accuracy.
 //!
 //! [`run_with_events`] wires `crate::events::EventQueue` in: breakpoints clamp the adaptive
 //! step so it never overshoots a forced timepoint, and crossing watches are checked against

@@ -4,10 +4,11 @@ subtitle: "T4 · Phase T4.2 · `va-transient::integrator`"
 ---
 
 ::: {.callout-note}
-**Status: code complete — ladder rung 4, formally passed.** Embedded-pair local-truncation-error
+**Status: code complete — ladder rung 4, formally passed.** Divided-difference local-truncation-error
 control drives accept/reject and step growth/shrink. The diode rectifier formally passes against
-real QSPICE golden (2026-07-18, `error=7.925e-4` against a `1e-3` tolerance — the tightest
-margin of any passed rung, and a real, unpadded one).
+real QSPICE golden (`error=8.226e-4` against a `1e-3` tolerance under the current estimator —
+`7.925e-4` when first gated on 2026-07-18, `6.766e-4` under the embedded pair it replaced on
+2026-08-31 — the tightest margin of any passed rung, and a real, unpadded one).
 :::
 
 ## Goal
@@ -36,9 +37,8 @@ fixed-step solve (two full Newton solves, not one). The honest tradeoff, stated 
 own doc comment: a real divided-difference LTE estimate from several *past* accepted points
 needs no second solve per step, but needs a history buffer.
 
-**That estimate now exists** (2026-08-31, `LteEstimator::DividedDifference`) — and the
-embedded pair is still the default, which is worth explaining because the reason is not
-technical. Divided differences estimate the first unused Taylor term from past accepted points
+**That estimate now exists, and is the default** (2026-08-31,
+`LteEstimator::DividedDifference`). Divided differences estimate the first unused Taylor term from past accepted points
 (`LTE ~ h^2*DD2` for backward Euler, `LTE ~ (h^3/2)*DD3` for trapezoidal), falling back to the
 pair until enough history exists. Measured on the RC charge at `lte_reltol` 1e-3: **686 model
 evaluations for the pair vs 279 for divided differences**, with relative error 4.6e-5 vs 2.1e-4.
@@ -47,10 +47,16 @@ The cheaper estimator being less accurate *at the same nominal tolerance* is the
 part, and it is not a defect: the pair's `|x_BE - x_Trap|` is dominated by backward Euler's own
 first-order error, so it over-estimates a trapezoidal step's true LTE, takes smaller steps than
 were asked for, and charges a second Newton solve per attempt for accuracy nobody requested.
-Divided differences deliver what `lte_reltol` actually asks for. The pair stays default only
-because every committed transient golden was validated under it, and switching moves those
-numbers (`rectifier` 6.766e-4 -> 8.226e-4 against a 1e-3 tolerance) — a re-validation decision,
-not a drive-by one.
+Divided differences deliver what `lte_reltol` actually asks for; the embedded pair stays
+selectable for a caller who wants the old, more conservative stepping.
+
+The transient gates were re-run under the new default and are **16/16 green**, with `rectifier`
+moving 6.766e-4 -> 8.226e-4 against its 1e-3 tolerance, `rc_step` 1.839e-5 -> 2.193e-5, and
+`ring_osc` unchanged. **No golden file changed** — a golden is QSPICE's answer to the circuit and
+owes nothing to our integrator, so an estimator switch moves *our* number, never the reference.
+(Confirmed rather than assumed: regenerating every golden from QSPICE first reproduced all three
+byte-for-byte.) That distinction is the whole point of a golden gate: re-baselining it to
+whatever the code now prints would make it unfalsifiable.
 
 **The error ratio is scaled per-unknown, the same `reltol·|x| + abstol` shape Newton's own
 convergence check uses** (`t3-core/02-newton.qmd`) — consistent tolerance semantics across the
@@ -119,21 +125,26 @@ and compared against genuine QSPICE output, is ladder rung 4:
 
 ```console
 $ cargo run -q -p xtask -- validate
-[xtask]   PASS circuits/rectifier.net: error=7.925e-4 (tol 1e-3)
+[xtask]   PASS circuits/rectifier.net: error=8.226e-4 (tol 1e-3)
 ```
 
-That `7.925e-4` margin is real and unpadded — the tightest of any rung passed so far, closed
+That margin is real and unpadded — the tightest of any rung passed so far, closed
 only after `t6-integration/03-validation.qmd`'s two SPICE-comparison fixes (a `UIC` cold-start
 translation, and excluding both the caller's own unsolved seed sample *and* any golden sample
-earlier than this engine's own first real solved time from the comparison).
+earlier than this engine's own first real solved time from the comparison). It has moved twice
+against the *same* golden file, and each move was this engine's own number changing, never the
+reference: `7.925e-4` when first gated, `6.766e-4` after the 2026-08-31 backward-Euler first-step
+fix, `8.226e-4` under the divided-difference estimator that replaced the embedded pair the same
+day.
 
 ## Limitations
 
 `GROWTH_FACTOR`/`GROWTH_ERR_THRESHOLD`/`SHRINK_FACTOR` are fixed constants, not exposed as
 `TranConfig` knobs — a circuit that would benefit from a different growth/shrink aggressiveness
 has no way to ask for one today. The ~2× per-step cost of the embedded-pair approach (§ above)
-is a real, accepted tradeoff, not hidden — and since 2026-08-31 it is one a caller can opt out
-of with `LteEstimator::DividedDifference`, at the cost of re-validating against golden.
+was a real, accepted tradeoff, and since 2026-08-31 it is no longer paid by default —
+`LteEstimator::DividedDifference` is, with the embedded pair still selectable and still used for
+the opening steps of every run.
 
 ## What's next
 

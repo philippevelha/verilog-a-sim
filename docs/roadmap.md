@@ -62,7 +62,7 @@ shared, demoable milestone that several theses light up at once.
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `diode_clamp` 6.4e-5, `mos_dc` 1.5e-6) | ✅ |
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
-| T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
+| T4.2 — adaptive timestep & LTE | divided-difference LTE estimate drives accept/reject + grow/shrink (the embedded pair remains available, and covers the opening steps); a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 8.2e-4, re-validated 2026-08-31 under divided differences; 6.8e-4 under the embedded pair) | ✅ |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 4.5e-6 since the 2026-08-31 first-step fix; 1.8e-4 before it) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
 | T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
 | T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 13 golden gates runs through this path | ✅ |
@@ -596,7 +596,8 @@ docs/tutorials/
   the diode I–V sweep in `t3-core/03-nonlinear-dc.qmd` (honestly captioned — `plot_sweep` draws
   only node voltages, so this particular circuit's figure is a straight `V(in)=V1` line, not the
   diode's *I–V* law) and the rectifier sim-vs-golden overlay in `t6-integration/03-validation.qmd`
-  (chosen because rung 4's `6.766e-4` margin is the tightest of the six — the rung most worth
+  (chosen because rung 4's margin — `6.766e-4` then, `8.226e-4` since the 2026-08-31 estimator
+  switch — is the tightest of the six — the rung most worth
   seeing, not just reading as a number). Each embed states its exact regeneration command per
   this section's own "executable, not just prose" rule.
 - **Standard skeleton** for each tutorial: *Goal* (one sentence) → *Where it fits* (the §2
@@ -1431,7 +1432,8 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
   first transient waveform vs ngspice.
 
 ### Phase T4.2 — Adaptive timestep & LTE control
-> **Status: ✅ complete** (2026-08-04: gate closed — rung 4, `rectifier` at 6.8e-4 vs QSPICE
+> **Status: ✅ complete** (2026-08-04: gate closed — rung 4, `rectifier` at 8.2e-4 under the
+> current divided-difference estimator, 6.8e-4 as originally gated under the embedded pair, vs QSPICE
 > golden) — `run()` adapts `h` within
 > `[cfg.tstep_min, cfg.tstep]` via an **embedded-pair LTE estimate**, not a rigorous
 > divided-difference truncation-error calculation: every accepted step computes *both*
@@ -1492,13 +1494,21 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > the privilege. Divided differences deliver what `lte_reltol` actually requests; a caller who
 > wants the pair's accuracy tightens the tolerance rather than buying it by accident.
 >
-> **Why the default did not change.** Flipping `va-cli`'s production config to divided
-> differences keeps all 16 gates green, but moves committed transient numbers: `rectifier`
-> 6.766e-4 -> 8.226e-4 (against a 1e-3 tolerance, so headroom falls from 1.5x to 1.2x),
-> `rc_step` 1.839e-5 -> 2.193e-5, `ring_osc` unchanged at 4.464e-6. Every committed transient
-> golden was validated under the embedded pair; moving the estimator is a decision to
-> re-validate those gates under, not a drive-by, so it is recorded here as the supervisor's
-> call rather than taken silently. Reverting the flip reproduced all three numbers exactly.
+> **The default changed on the same day, on the supervisor's instruction.** Divided differences
+> are now `va-cli`'s production estimator and **the transient gates were re-run under them:
+> 16/16 green**, `rectifier` 6.766e-4 -> 8.226e-4 (tolerance 1e-3, so headroom falls from 1.5x
+> to 1.2x), `rc_step` 1.839e-5 -> 2.193e-5, `ring_osc` unchanged at 4.464e-6. The three va-cli
+> pipeline tests that build their own `TranConfig` were flipped with it, so they exercise the
+> path production takes (41 tests green).
+>
+> **Nothing in `golden/` changed, and nothing could have.** A golden file is QSPICE's answer to
+> the circuit; this project's integrator plays no part in producing it, so an estimator switch
+> cannot move it — what moves is *our* number, which is exactly what the gate compares. Checked
+> rather than assumed: a full `cargo xtask gen-golden` before the switch reproduced
+> `rc_step`/`rectifier`/`ring_osc` byte-for-byte (md5 identical, clean `git status golden/`).
+> The re-validation is therefore a re-run of the comparison, not a re-baselining of it — the
+> distinction matters, because re-baselining a gate to whatever the code now prints would make
+> it unfalsifiable.
 >
 > Verified against the *closed form*, not against the other estimator (which would only prove
 > the two agree): `divided_difference_matches_the_analytic_truncation_error` checks the
@@ -2352,8 +2362,8 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 |------|--------------------|-----------|--------------------------|-------------------------------|--------|
 | 1    | resistor divider   | DC        | T3 (+ T6 via CLI)        | T3.2, T6.2, shared            | ✅ **formally passed** — `cargo xtask validate` is green against `golden/divider.golden`, real QSPICE output, now also checking `I(V1)` (error=0.000e0, tol 1e-4) |
 | 2    | diode I–V          | DC sweep  | T1, T2, T3               | T1.3, T2.2, T3.3              | ✅ **formally passed** — green against `golden/diode_iv.golden`, real QSPICE output via a native `.model diode D(...)` translation (error=6.656e-5, tol 1e-4); now also checks `I(V1)` (the diode's own current) against QSPICE's Shockley law for real — the former "voltage-only, doesn't exercise the diode" caveat is closed (§ T6.3's 2026-07-18 branch-current entry) |
-| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start, now also checking `I(V1)` (error=1.845e-5, tol 1e-3) |
-| 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start, now also checking `I(V1)` (error=6.766e-4, tol 1e-3) |
+| 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start, now also checking `I(V1)` (error=2.193e-5 under divided differences since 2026-08-31; 1.845e-5 as first gated, tol 1e-3) |
+| 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start, now also checking `I(V1)` (error=8.226e-4 under divided differences since 2026-08-31; 6.766e-4 as first gated, tol 1e-3) |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ✅ **formally passed** — green against `golden/mos_dc.golden`, real QSPICE output via a native `.model mosfet NMOS(...)` translation (error=1.490e-6, tol 1e-4); now also checks `I(VDD)`/`I(VG)` |
 | 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ✅ **formally passed** — green against `golden/ring_osc.golden` (1041 pts, an honestly-scoped 0.1s window — § T4.3's 2026-07-18 entry), real QSPICE output via a native `.model bjt NPN(...)` translation + a `gnd`-to-`0` ground-aliasing fix, now also checking `I(VCC)` (error=**4.464e-6** since the 2026-08-31 first-step fix; 1.799e-4 before it, tol 1e-3); `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` (full 0.2s) and `cargo test -p va-transient ring_oscillator_sustains_oscillation` (hand-built instances) both still demonstrate the full growing oscillation |
 
