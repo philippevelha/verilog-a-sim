@@ -3735,6 +3735,83 @@ mod tests {
         );
     }
 
+    /// The same shadowing rule when the `begin ... end` is an **`if`-arm body** rather than a
+    /// standalone block — the shape real compact models actually use.
+    ///
+    /// This did not work when block scoping first landed: `parse_block_or_single` returned a flat
+    /// `Vec<Stmt>` and dropped the `begin ... end` boundary, so only a standalone block ever
+    /// became a `Stmt::Block`. An arm body therefore had no block node, neither pass pushed a
+    /// scope, and the declaration leaked module-wide — the same 1 kΩ-becomes-0.5 Ω silent wrong
+    /// answer, one construct over. The parser now preserves the boundary.
+    #[test]
+    fn a_declaration_in_an_if_arm_body_does_not_leak_past_the_arm() {
+        let m = elaborate_src(
+            "module armshadow(p, n);
+             electrical p, n;
+             parameter real k = 1000.0;
+             real g;
+             analog begin
+               if (V(p, n) > 0.0) begin
+                 real k;
+                 k = 1.0;
+               end
+               g = 1.0 / k;
+               I(p, n) <+ g * V(p, n);
+             end
+             endmodule
+",
+        );
+        // `g = 1.0 / k` sits after the `if`, so its `k` must be the parameter (1000.0).
+        let g = var_id(&m, "g");
+        let rhs = assign_rhs(&m, g).expect("`g` is assigned after the arm");
+        let k_param = m
+            .params
+            .iter()
+            .position(|p| p.name == "k")
+            .expect("parameter `k`") as u32;
+        assert!(
+            reads_param(&m, rhs, ParamId(k_param)),
+            "the read of `k` after the if-arm must resolve to the parameter, not the arm-local              variable — mis-resolving it silently made this a 0.5 ohm device"
+        );
+        assert!(
+            !reads_any_var_named(&m, rhs, "k"),
+            "and must not read any variable named `k`"
+        );
+    }
+
+    /// The same for a loop body, so the fix is not special-cased to `if`.
+    #[test]
+    fn a_declaration_in_a_loop_body_does_not_leak_past_the_loop() {
+        let m = elaborate_src(
+            "module loopshadow(p, n);
+             electrical p, n;
+             parameter real k = 1000.0;
+             real g;
+             integer c;
+             analog begin
+               c = 0;
+               while (c < 1) begin
+                 real k;
+                 k = 1.0;
+                 c = c + 1;
+               end
+               g = 1.0 / k;
+               I(p, n) <+ g * V(p, n);
+             end
+             endmodule
+",
+        );
+        let g = var_id(&m, "g");
+        let rhs = assign_rhs(&m, g).expect("`g` is assigned after the loop");
+        let k_param = m
+            .params
+            .iter()
+            .position(|p| p.name == "k")
+            .expect("parameter `k`") as u32;
+        assert!(reads_param(&m, rhs, ParamId(k_param)));
+        assert!(!reads_any_var_named(&m, rhs, "k"));
+    }
+
     /// The mirror of the test above: *inside* the block, the same name must resolve to the
     /// block-local variable rather than the parameter. Without this, resolving every `k` to the
     /// parameter would pass the test above for the wrong reason — there would be no shadowing
@@ -3848,6 +3925,23 @@ mod tests {
             }
         }
         found
+    }
+
+    /// Flatten nested [`va_ir::Stmt::Block`]s into the statements they contain, for tests that
+    /// care *what* a generate loop unrolled to rather than how it is nested.
+    ///
+    /// Since block boundaries are preserved (§ block scoping), each unrolled iteration of a
+    /// `for ... begin ... end` is its own `Stmt::Block` — which is correct, an iteration is a
+    /// scope — so an assertion on the unrolled statements has to look through that nesting.
+    fn flatten_blocks(stmts: &[va_ir::Stmt]) -> Vec<&va_ir::Stmt> {
+        let mut out = Vec::new();
+        for st in stmts {
+            match st {
+                va_ir::Stmt::Block(inner) => out.extend(flatten_blocks(inner)),
+                other => out.push(other),
+            }
+        }
+        out
     }
 
     fn elaborate_src(src: &str) -> Module {
@@ -5349,8 +5443,9 @@ mod tests {
         // `va_ir::Stmt::For` — only the flat block of unrolled contributions does.
         match &m.analog[0] {
             va_ir::Stmt::Block(stmts) => {
-                assert_eq!(stmts.len(), 3);
-                assert!(stmts
+                let flat = flatten_blocks(stmts);
+                assert_eq!(flat.len(), 3);
+                assert!(flat
                     .iter()
                     .all(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
             }
@@ -5373,8 +5468,9 @@ mod tests {
         let m = elaborate_src(src);
         match &m.analog[0] {
             va_ir::Stmt::Block(stmts) => {
-                assert_eq!(stmts.len(), 2);
-                assert!(stmts
+                let flat = flatten_blocks(stmts);
+                assert_eq!(flat.len(), 2);
+                assert!(flat
                     .iter()
                     .all(|s| matches!(s, va_ir::Stmt::Contribute { .. })));
             }
@@ -5517,10 +5613,9 @@ mod tests {
         assert_eq!(m.analog.len(), 2);
         match &m.analog[0] {
             va_ir::Stmt::Block(stmts) => {
-                assert_eq!(stmts.len(), 3);
-                assert!(stmts
-                    .iter()
-                    .all(|s| matches!(s, va_ir::Stmt::Assign { .. })));
+                let flat = flatten_blocks(stmts);
+                assert_eq!(flat.len(), 3);
+                assert!(flat.iter().all(|s| matches!(s, va_ir::Stmt::Assign { .. })));
             }
             other => panic!("expected the unrolled block, got {other:?}"),
         }
@@ -6045,22 +6140,18 @@ mod tests {
                I(a) <+ tile[0][0] + tile[0][1] + tile[1][0] + tile[1][1]; \
              end endmodule",
         );
-        // Both generate loops are fully unrolled: the outer Block holds one inner Block per
-        // `i`, each inner Block holding one Assign per `j`.
+        // Both generate loops are fully unrolled: one nest per `i`, each holding one Assign per
+        // `j`. Since 2026-08-31 each `begin ... end` is preserved as its own scope, so an
+        // iteration's statements sit one `Stmt::Block` deeper than the unrolling itself puts
+        // them — `flatten_blocks` looks through that, which is why this asserts on *counts of
+        // assignments* rather than on the exact nesting.
         match &m.analog[0] {
             va_ir::Stmt::Block(outer) => {
-                assert_eq!(outer.len(), 2);
-                for inner in outer {
-                    match inner {
-                        va_ir::Stmt::Block(inner) => {
-                            assert_eq!(inner.len(), 2);
-                            assert!(inner
-                                .iter()
-                                .all(|s| matches!(s, va_ir::Stmt::Assign { .. })));
-                        }
-                        other => panic!("expected an inner unrolled block, got {other:?}"),
-                    }
-                }
+                let per_i = flatten_blocks(outer);
+                assert_eq!(per_i.len(), 4, "2 values of i x 2 of j");
+                assert!(per_i
+                    .iter()
+                    .all(|s| matches!(s, va_ir::Stmt::Assign { .. })));
             }
             other => panic!("expected the outer unrolled block, got {other:?}"),
         }

@@ -863,8 +863,14 @@ impl Parser<'_> {
             }
             Some(Token::Analog) => {
                 self.pos += 1;
-                let body = self.parse_block_or_single()?;
-                Ok(Item::Analog(Stmt::Block(body)))
+                // `analog begin ... end` already yields a `Stmt::Block`; wrapping it again would
+                // nest a second, identical scope and change the IR shape for no reason. A bare
+                // `analog <one statement>;` still gets the block the rest of the pipeline expects.
+                let body = match self.parse_stmt_body()? {
+                    block @ Stmt::Block(_) => block,
+                    single => Stmt::Block(vec![single]),
+                };
+                Ok(Item::Analog(body))
             }
             // A bare leading identifier is either a net declaration under a user-defined
             // discipline (`discipline optical; ... enddiscipline` earlier in the file, then
@@ -1160,7 +1166,18 @@ impl Parser<'_> {
 
     /// Parse either a `begin … end` block (returning its statements) or a single statement
     /// (returning a one-element list). Normalises both `if` arms and the analog block.
-    fn parse_block_or_single(&mut self) -> Result<Vec<Stmt>, FrontendError> {
+    /// The body of a control-flow arm, an `analog` item, or a function: either a
+    /// `begin ... end` block or a single statement.
+    ///
+    /// A `begin ... end` becomes a [`Stmt::Block`] — **the block boundary is preserved**, which
+    /// is what makes it a scope. It used to be flattened away into the surrounding statement
+    /// list, so only a *standalone* block (via [`Self::parse_stmt`]) ever produced a
+    /// `Stmt::Block` node. When `begin ... end` was the body of an `if`/`else`/`for`/`while`/
+    /// `repeat`/`case` arm — the shape real compact models actually use — no block node existed,
+    /// so elaboration had no place to push a scope and a block-local declaration leaked over the
+    /// whole analog block. That was a silent wrong answer with the same signature as the one
+    /// block scoping was introduced to fix: a 1 kΩ device silently becoming 0.5 Ω.
+    fn parse_stmt_body(&mut self) -> Result<Stmt, FrontendError> {
         if self.at(&Token::Begin) {
             self.pos += 1;
             // An optional `: label` names the block (Verilog-A); the name is discarded.
@@ -1176,10 +1193,16 @@ impl Parser<'_> {
                 stmts.push(self.parse_stmt()?);
             }
             self.eat(&Token::End)?;
-            Ok(stmts)
+            Ok(Stmt::Block(stmts))
         } else {
-            Ok(vec![self.parse_stmt()?])
+            self.parse_stmt()
         }
+    }
+
+    /// [`Self::parse_stmt_body`] as the one-element statement list the arm-bearing AST nodes
+    /// (`Stmt::If`'s `then_`/`else_`, loop bodies, `case` arms) store.
+    fn parse_block_or_single(&mut self) -> Result<Vec<Stmt>, FrontendError> {
+        Ok(vec![self.parse_stmt_body()?])
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
@@ -1193,7 +1216,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(Stmt::Block(Vec::new()))
             }
-            Some(Token::Begin) => Ok(Stmt::Block(self.parse_block_or_single()?)),
+            Some(Token::Begin) => self.parse_stmt_body(),
             // Event control `@(event) statement`.
             //
             // `@(initial_step)` is **desugared here into an ordinary `if`** whose condition is a

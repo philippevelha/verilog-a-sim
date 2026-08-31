@@ -3092,8 +3092,23 @@ standalone begin…end: V(mid) = 0.500000 V   ← the correct 1 kΩ
 
 This is **not a regression** — identical before block scoping landed, and `82045f0`'s hard-error
 guard never covered this shape either — but it is a live instance of the very 1 kΩ→1 Ω bug the
-commit describes. The fix is to preserve the block boundary in the parser so an arm body is a
-`Stmt::Block` like any other; the scoping machinery then applies unchanged.
+commit describes.
+
+**Fixed the same day.** `parse_stmt_body` now returns a `Stmt::Block` for a `begin ... end`
+wherever one can appear, so an arm body is a block like any other and the scoping machinery
+applies unchanged — no elaboration change at all. `parse_block_or_single` becomes a thin wrapper
+returning that as the one-element list the arm-bearing AST nodes store, and the two sites that
+already wrapped (a standalone block in `parse_stmt`, and the `analog` item) no longer double-wrap,
+which is what keeps the IR shape — and the committed golden IR — unmoved.
+
+The audit's reproducer now reads `V(mid) = 0.500000 V`, the correct 1 kΩ, where it read
+`0.001996 V` before. Tests pin both an `if`-arm body and a `while` body, so the fix is not
+special-cased to one construct.
+
+**One deliberate shape change:** each iteration of an unrolled `for ... begin ... end` generate
+loop is now its own `Stmt::Block`. That is correct — an iteration *is* a scope — and the four
+generate tests that asserted a flat unrolled list now flatten before asserting, via a
+`flatten_blocks` helper that says why in its doc comment.
 
 **Also from the audit, in the safe direction:** a function body's `collect_assign_targets` is
 scope-blind (no `decl_scopes` analogue), so a block-local declaration inside a function now
