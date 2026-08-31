@@ -34,9 +34,23 @@ reference is backward Euler, and vice versa — and their disagreement at the sa
 stands in for the local truncation error. Every accepted step therefore costs roughly 2× a
 fixed-step solve (two full Newton solves, not one). The honest tradeoff, stated in this module's
 own doc comment: a real divided-difference LTE estimate from several *past* accepted points
-would need no second solve per step, but needs a longer history buffer this module doesn't keep
-yet — this is the simpler design that's easy to verify directly against an analytic solution,
-not the more rigorous one.
+needs no second solve per step, but needs a history buffer.
+
+**That estimate now exists** (2026-08-31, `LteEstimator::DividedDifference`) — and the
+embedded pair is still the default, which is worth explaining because the reason is not
+technical. Divided differences estimate the first unused Taylor term from past accepted points
+(`LTE ~ h^2*DD2` for backward Euler, `LTE ~ (h^3/2)*DD3` for trapezoidal), falling back to the
+pair until enough history exists. Measured on the RC charge at `lte_reltol` 1e-3: **686 model
+evaluations for the pair vs 279 for divided differences**, with relative error 4.6e-5 vs 2.1e-4.
+
+The cheaper estimator being less accurate *at the same nominal tolerance* is the interesting
+part, and it is not a defect: the pair's `|x_BE - x_Trap|` is dominated by backward Euler's own
+first-order error, so it over-estimates a trapezoidal step's true LTE, takes smaller steps than
+were asked for, and charges a second Newton solve per attempt for accuracy nobody requested.
+Divided differences deliver what `lte_reltol` actually asks for. The pair stays default only
+because every committed transient golden was validated under it, and switching moves those
+numbers (`rectifier` 6.766e-4 -> 8.226e-4 against a 1e-3 tolerance) — a re-validation decision,
+not a drive-by one.
 
 **The error ratio is scaled per-unknown, the same `reltol·|x| + abstol` shape Newton's own
 convergence check uses** (`t3-core/02-newton.qmd`) — consistent tolerance semantics across the
@@ -118,7 +132,8 @@ earlier than this engine's own first real solved time from the comparison).
 `GROWTH_FACTOR`/`GROWTH_ERR_THRESHOLD`/`SHRINK_FACTOR` are fixed constants, not exposed as
 `TranConfig` knobs — a circuit that would benefit from a different growth/shrink aggressiveness
 has no way to ask for one today. The ~2× per-step cost of the embedded-pair approach (§ above)
-is a real, accepted tradeoff, not hidden.
+is a real, accepted tradeoff, not hidden — and since 2026-08-31 it is one a caller can opt out
+of with `LteEstimator::DividedDifference`, at the cost of re-validating against golden.
 
 ## What's next
 

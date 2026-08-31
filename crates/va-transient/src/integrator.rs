@@ -6,17 +6,35 @@
 //! step-size control; [`Method::Gear`] is not (returns [`TransientError::UnsupportedMethod`],
 //! never silently falls back to another method).
 //!
-//! **The LTE estimate is an embedded pair, not a rigorous divided-difference truncation-error
-//! calculation.** Each accepted step computes *both* methods' result from the same starting
-//! point and step size — one as the reported solution, the other purely to estimate error —
-//! and uses their difference as an error proxy, the same spirit as an embedded Runge-Kutta
-//! pair (e.g. RK45's 4th/5th-order combination). A textbook SPICE-style implementation would
-//! instead estimate the next unused Taylor term from a divided difference of several *past*
-//! accepted points, needing no second solve per step; that's the more rigorous approach and
-//! remains future work, but it needs a longer history buffer this module doesn't keep yet.
-//! The honest cost of the current approach: every step is ~2x a fixed-step solve. Its honest
-//! benefit: it needed no new history-tracking infrastructure and is simple enough to verify by
-//! direct comparison against the analytic RC solution (`tests::rc_transient_matches_analytic`).
+//! **Two LTE estimators exist; the embedded pair is the default** ([`LteEstimator`]).
+//!
+//! [`LteEstimator::EmbeddedPair`] computes *both* methods' result from the same starting point
+//! and step size — one as the reported solution, the other purely to estimate error — and
+//! uses their difference as an error proxy, in the spirit of an embedded Runge-Kutta pair. It
+//! needs no history and works from the first step, and costs a second Newton solve on every
+//! step attempt.
+//!
+//! [`LteEstimator::DividedDifference`] (added 2026-08-31) is the textbook SPICE approach: it
+//! estimates the first unused Taylor term from a divided difference of past accepted points,
+//! so it needs **no second solve**. It falls back to the embedded pair until it has enough
+//! accepted history (2 past points for backward Euler, 3 for trapezoidal), which covers the
+//! opening steps of a run.
+//!
+//! **Measured trade-off** (RC charge, trapezoidal, `lte_reltol` 1e-3, `tests::divided_
+//! differences_cost_fewer_evaluations_than_the_embedded_pair`): 686 model evaluations for the
+//! pair vs 279 for divided differences, a 2.5x reduction; relative error at one time constant
+//! 4.6e-5 vs 2.1e-4. The divided-difference run is *less accurate at the same nominal
+//! tolerance, and that is the estimator being faithful rather than worse*: the pair's
+//! `|x_BE - x_Trap|` is dominated by backward Euler's own first-order error, so it
+//! systematically over-estimates a trapezoidal step's true LTE and silently over-delivers
+//! accuracy at double the cost. A caller who wants the pair's accuracy from divided
+//! differences tightens `lte_reltol` instead of paying for it on every step.
+//!
+//! The pair remains the default for one reason, recorded rather than dressed up as a technical
+//! preference: every committed transient golden was validated under it, and switching moves
+//! those numbers (`rectifier` 6.766e-4 -> 8.226e-4 against a 1e-3 tolerance, `rc_step` 1.839e-5
+//! -> 2.193e-5, `ring_osc` unchanged at 4.464e-6 — all still passing). Changing the default is
+//! a decision to re-validate the transient gates under, not a drive-by.
 //!
 //! [`run_with_events`] wires `crate::events::EventQueue` in: breakpoints clamp the adaptive
 //! step so it never overshoots a forced timepoint, and crossing watches are checked against
@@ -83,6 +101,8 @@ pub struct TranConfig {
     /// branch current). Must be strictly positive: it is the error scale's floor when `x` is
     /// near zero, so a zero value would make the error-vs-tolerance ratio divide by zero.
     pub lte_abstol: f64,
+    /// Which LTE estimator drives step accept/reject. See [`LteEstimator`].
+    pub lte_estimator: LteEstimator,
 }
 
 /// A sampled transient waveform: aligned time and solution-vector columns.
@@ -195,6 +215,115 @@ fn reference_method(method: Method) -> Method {
         Method::Trapezoidal => Method::BackwardEuler,
         Method::Gear => unreachable!("rejected in run() before any step is attempted"),
     }
+}
+
+/// Which local-truncation-error estimator the step controller runs on.
+///
+/// The two differ in cost and in rigour, not in what they are estimating. See the module doc
+/// comment for the full account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LteEstimator {
+    /// Solve the step with both implemented methods and use their disagreement as the error
+    /// proxy. Costs a **second Newton solve on every step attempt**, needs no history, and
+    /// works from the very first step.
+    EmbeddedPair,
+    /// Estimate the first unused Taylor term from a divided difference of past accepted
+    /// points (the textbook SPICE approach). **No second solve.** Needs `order + 1` accepted
+    /// points before it can say anything, and falls back to [`Self::EmbeddedPair`] until it
+    /// has them — so the opening steps of a run are unchanged.
+    DividedDifference,
+}
+
+/// The top-order Newton divided difference of `values` sampled at `times`, i.e.
+/// `f[t_0, t_1, ..., t_k]` for `k + 1` points. Approximates the `k`-th derivative over `k!`.
+///
+/// Returns `0.0` for fewer than two points, and for repeated times (a zero denominator — a
+/// step the controller should never have produced, but `0.0` is the conservative answer: it
+/// reports "no evidence of curvature", which can only make the controller accept a step it
+/// would otherwise have shrunk, never mask a divergence, since the Newton solve itself still
+/// has to converge for the step to be offered at all).
+fn divided_difference(times: &[f64], values: &[f64]) -> f64 {
+    debug_assert_eq!(times.len(), values.len());
+    if times.len() < 2 {
+        return 0.0;
+    }
+    let mut dd = values.to_vec();
+    for order in 1..times.len() {
+        for i in 0..times.len() - order {
+            let dt = times[i] - times[i + order];
+            if dt == 0.0 {
+                return 0.0;
+            }
+            dd[i] = (dd[i] - dd[i + 1]) / dt;
+        }
+    }
+    dd[0]
+}
+
+/// The number of *past* accepted points [`LteEstimator::DividedDifference`] needs for `method`,
+/// on top of the candidate point itself.
+///
+/// A method of order `p` has a local error whose leading term is the `(p+1)`-th derivative, and
+/// a `(p+1)`-th divided difference needs `p + 2` points in total.
+fn divided_difference_history(method: Method) -> usize {
+    match method {
+        Method::BackwardEuler => 2, // order 1: second derivative from 3 points
+        Method::Trapezoidal => 3,   // order 2: third derivative from 4 points
+        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+    }
+}
+
+/// Per-unknown local truncation error from divided differences, as a multiple of the allowed
+/// budget (the same `reltol*|x| + abstol` scale [`lte_error_ratio`] uses). `<= 1.0` means accept.
+///
+/// `history` holds the most recent accepted points, newest first, as `(t, x)`; the candidate
+/// point is prepended to it before differencing.
+///
+/// The two leading-term constants are the textbook ones, rewritten in terms of the divided
+/// difference actually available:
+///
+/// - backward Euler: `LTE = (h^2/2)*x''`, and `f[t0,t1,t2]` approximates `x''/2`, so
+///   `LTE ~ h^2 * DD2`;
+/// - trapezoidal: `LTE = (h^3/12)*x'''`, and `f[t0..t3]` approximates `x'''/6`, so
+///   `LTE ~ (h^3/2) * DD3`.
+///
+/// Returns `None` when `history` is too short for `method` — the caller's signal to fall back
+/// to the embedded pair rather than to guess.
+#[allow(clippy::too_many_arguments)]
+fn divided_difference_error_ratio(
+    method: Method,
+    t_next: f64,
+    x_candidate: &[f64],
+    history: &[(f64, Vec<f64>)],
+    h: f64,
+    reltol: f64,
+    abstol: f64,
+) -> Option<f64> {
+    let needed = divided_difference_history(method);
+    if history.len() < needed {
+        return None;
+    }
+    let mut times = Vec::with_capacity(needed + 1);
+    times.push(t_next);
+    times.extend(history[..needed].iter().map(|(t, _)| *t));
+
+    let leading = match method {
+        Method::BackwardEuler => h * h,
+        Method::Trapezoidal => h * h * h / 2.0,
+        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+    };
+
+    let mut values = Vec::with_capacity(needed + 1);
+    let mut worst = 0.0_f64;
+    for (i, xi) in x_candidate.iter().enumerate() {
+        values.clear();
+        values.push(*xi);
+        values.extend(history[..needed].iter().map(|(_, x)| x[i]));
+        let lte = leading * divided_difference(&times, &values);
+        let scale = reltol * xi.abs() + abstol;
+        worst = worst.max(lte.abs() / scale);
+    }
+    Some(worst)
 }
 
 /// How far outside tolerance the embedded pair's disagreement is, as a multiple of the allowed
@@ -481,6 +610,10 @@ pub fn run_with_events(
     // channel, which is every model in the zoo — are unaffected in the residual: they read
     // neither `coeff` nor `prev_rate_weight` from `AnalysisCtx`.
     let mut first_step = true;
+    // Accepted points, newest first, for `LteEstimator::DividedDifference`. Capped at the
+    // longest history any implemented method asks for, so the buffer cannot grow with `tstop`.
+    let mut history: Vec<(f64, Vec<f64>)> = Vec::new();
+    let history_cap = divided_difference_history(Method::Trapezoidal);
 
     while t < cfg.tstop {
         loop {
@@ -509,25 +642,46 @@ pub fn run_with_events(
             let primary = Companion::for_method(step_method, &q_prev, &r_prev, step_h, &is_dynamic);
             let x_primary = newton_step(instances, dim, &x, t_next, false, &mut state, &primary)?;
 
-            let reference_companion = Companion::for_method(
-                reference_method(step_method),
-                &q_prev,
-                &r_prev,
-                step_h,
-                &is_dynamic,
-            );
-            let x_reference = newton_step(
-                instances,
-                dim,
-                &x,
-                t_next,
-                false,
-                &mut state,
-                &reference_companion,
-            )?;
+            // Divided differences first when configured: they need no second solve, so the
+            // embedded pair below is only ever paid for when the history is too short to say
+            // anything yet (the opening steps of a run, and any step whose method just
+            // changed order — the first step is always backward Euler).
+            let dd_ratio = if cfg.lte_estimator == LteEstimator::DividedDifference {
+                divided_difference_error_ratio(
+                    step_method,
+                    t_next,
+                    &x_primary,
+                    &history,
+                    step_h,
+                    cfg.lte_reltol,
+                    cfg.lte_abstol,
+                )
+            } else {
+                None
+            };
 
-            let err_ratio =
-                lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol);
+            let err_ratio = match dd_ratio {
+                Some(ratio) => ratio,
+                None => {
+                    let reference_companion = Companion::for_method(
+                        reference_method(step_method),
+                        &q_prev,
+                        &r_prev,
+                        step_h,
+                        &is_dynamic,
+                    );
+                    let x_reference = newton_step(
+                        instances,
+                        dim,
+                        &x,
+                        t_next,
+                        false,
+                        &mut state,
+                        &reference_companion,
+                    )?;
+                    lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol)
+                }
+            };
 
             if err_ratio <= 1.0 {
                 let x_before = std::mem::replace(&mut x, x_primary);
@@ -555,6 +709,8 @@ pub fn run_with_events(
                 t = t_next;
                 waveform.t.push(t);
                 waveform.x.push(x.clone());
+                history.insert(0, (t, x.clone()));
+                history.truncate(history_cap);
 
                 for (watch_idx, watch) in events.watches().iter().enumerate() {
                     let before = x_before[watch.unknown] - watch.threshold;
@@ -591,6 +747,174 @@ mod tests {
 
     /// R (1 kΩ) from an ideal `vs_val` V source (node 0) to node 1; C (1 µF) from node 1 to
     /// ground. `RC = 1 ms`.
+    /// A divided difference of order `k` over an exact degree-`k` polynomial is exactly that
+    /// polynomial's leading coefficient, and of order `k` over a lower-degree one is exactly
+    /// zero. Both directions matter: the first says the estimator sees curvature that is
+    /// there, the second says it does not invent curvature that is not.
+    #[test]
+    fn divided_differences_recover_a_polynomial_leading_coefficient() {
+        let times = [4.0, 3.0, 2.0, 1.0];
+
+        let cubic: Vec<f64> = times.iter().map(|t| 2.0 * t * t * t).collect();
+        let dd3 = divided_difference(&times, &cubic);
+        assert!(
+            (dd3 - 2.0).abs() < 1e-9,
+            "DD3 of 2t^3 should be 2, got {dd3}"
+        );
+
+        let quadratic: Vec<f64> = times.iter().map(|t| 5.0 * t * t).collect();
+        let dd3_of_quadratic = divided_difference(&times, &quadratic);
+        assert!(
+            dd3_of_quadratic.abs() < 1e-9,
+            "DD3 of a quadratic should vanish, got {dd3_of_quadratic}"
+        );
+
+        // Three points see the second derivative over 2!.
+        let dd2 = divided_difference(&times[..3], &quadratic[..3]);
+        assert!(
+            (dd2 - 5.0).abs() < 1e-9,
+            "DD2 of 5t^2 should be 5, got {dd2}"
+        );
+
+        // Unequal spacing is the case that actually occurs under an adaptive controller.
+        let uneven = [7.0, 3.0, 2.0, 0.5];
+        let cubic: Vec<f64> = uneven.iter().map(|t| t * t * t - 4.0 * t).collect();
+        let dd3 = divided_difference(&uneven, &cubic);
+        assert!(
+            (dd3 - 1.0).abs() < 1e-9,
+            "DD3 is spacing-independent, got {dd3}"
+        );
+    }
+
+    /// Too little history is reported as `None` — the caller's signal to fall back — rather
+    /// than as a zero ratio, which would accept any step at all.
+    #[test]
+    fn divided_difference_estimator_reports_insufficient_history() {
+        let history = vec![(1.0, vec![1.0]), (0.0, vec![0.0])];
+        // Trapezoidal needs 3 past points; only 2 are on hand.
+        assert!(divided_difference_error_ratio(
+            Method::Trapezoidal,
+            2.0,
+            &[2.0],
+            &history,
+            1.0,
+            1e-3,
+            1e-6
+        )
+        .is_none());
+        // Backward Euler needs 2, which it has.
+        assert!(divided_difference_error_ratio(
+            Method::BackwardEuler,
+            2.0,
+            &[2.0],
+            &history,
+            1.0,
+            1e-3,
+            1e-6
+        )
+        .is_some());
+    }
+
+    /// The estimator has to agree with the *analytic* local truncation error, not merely be
+    /// self-consistent. On `x(t) = e^t` sampled exactly, backward Euler's local error over the
+    /// next step of size `h` is `(h^2/2)*x''` = `(h^2/2)*e^t`; the divided-difference estimate
+    /// is checked against that closed form rather than against the embedded pair (which would
+    /// only prove the two agree with each other, not that either is right).
+    #[test]
+    fn divided_difference_matches_the_analytic_truncation_error() {
+        let h = 1e-3;
+        let t_next = 1.0;
+        let times: Vec<f64> = (0..3).map(|k| t_next - h * k as f64).collect();
+        let values: Vec<f64> = times.iter().map(|t| t.exp()).collect();
+        let history: Vec<(f64, Vec<f64>)> =
+            times[1..].iter().map(|t| (*t, vec![t.exp()])).collect();
+
+        // reltol 0 / abstol 1 makes the returned ratio the raw |LTE| in the unknown's units.
+        let ratio = divided_difference_error_ratio(
+            Method::BackwardEuler,
+            t_next,
+            &values[..1],
+            &history,
+            h,
+            0.0,
+            1.0,
+        )
+        .expect("enough history");
+
+        let analytic = 0.5 * h * h * t_next.exp();
+        let rel = (ratio - analytic).abs() / analytic;
+        assert!(
+            rel < 1e-3,
+            "divided-difference LTE {ratio:e} vs analytic {analytic:e} (rel {rel:e})"
+        );
+    }
+
+    /// A `ModelInstance` that delegates to a real one and counts how many times the integrator
+    /// evaluates it. Not a mock: the physics is the reference capacitor's own, unchanged —
+    /// the counter is the only addition, so the run it takes part in is a real run.
+    struct CountingCapacitor {
+        inner: va_abi::reference::Capacitor,
+        loads: std::cell::Cell<usize>,
+    }
+
+    impl ModelInstance for CountingCapacitor {
+        fn unknowns(&self) -> &[usize] {
+            self.inner.unknowns()
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &va_abi::AnalysisCtx,
+            state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::stamps::StampSink,
+        ) {
+            self.loads.set(self.loads.get() + 1);
+            self.inner.load(x, ctx, state, sink);
+        }
+    }
+
+    /// The whole point of the divided-difference estimator: it drops the second Newton solve
+    /// the embedded pair needs on every step attempt. Counted through a real run of the same
+    /// circuit under both estimators — and the accuracy against the analytic RC curve is
+    /// asserted too, so a cheaper-but-wrong estimator cannot pass this.
+    #[test]
+    fn divided_differences_cost_fewer_evaluations_than_the_embedded_pair() {
+        let rc = 1e-3;
+        let vs_val = 5.0;
+
+        let run_with = |estimator: LteEstimator| -> (usize, f64) {
+            let (vs, r, _) = rc_circuit(vs_val);
+            let cap = CountingCapacitor {
+                inner: va_abi::reference::Capacitor::new(1, va_abi::reference::GROUND, 1e-6),
+                loads: std::cell::Cell::new(0),
+            };
+            let insts: [&dyn ModelInstance; 3] = [&vs, &r, &cap];
+            let mut cfg = default_cfg(5.0 * rc, rc / 10.0, Method::Trapezoidal);
+            cfg.lte_estimator = estimator;
+            let wf = run(&insts, 3, vec![vs_val, 0.0, 0.0], cfg).expect("integrates");
+
+            let analytic = vs_val * (1.0 - (-1.0f64).exp());
+            let err = (interpolate(&wf, rc, 1) - analytic).abs() / analytic;
+            (cap.loads.get(), err)
+        };
+
+        let (pair_loads, pair_err) = run_with(LteEstimator::EmbeddedPair);
+        let (dd_loads, dd_err) = run_with(LteEstimator::DividedDifference);
+
+        assert!(
+            dd_loads < pair_loads,
+            "divided differences should evaluate the model less: {dd_loads} vs {pair_loads}"
+        );
+        assert!(
+            dd_err < 1e-2,
+            "divided-difference run must still track the analytic RC curve: rel err {dd_err}"
+        );
+        assert!(
+            (dd_err - pair_err).abs() < 5e-3,
+            "the two estimators should land on comparable accuracy: {dd_err} vs {pair_err}"
+        );
+    }
+
     fn rc_circuit(
         vs_val: f64,
     ) -> (
@@ -783,6 +1107,7 @@ mod tests {
             method,
             lte_reltol: 1e-3,
             lte_abstol: 1e-6,
+            lte_estimator: LteEstimator::EmbeddedPair,
         }
     }
 
@@ -1353,6 +1678,7 @@ mod tests {
             method: Method::Trapezoidal,
             lte_reltol: 5e-2,
             lte_abstol: 2e-3,
+            lte_estimator: LteEstimator::EmbeddedPair,
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage

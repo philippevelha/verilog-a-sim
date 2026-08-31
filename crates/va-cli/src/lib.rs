@@ -37,7 +37,7 @@ use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
-use va_transient::integrator::{Method, TranConfig, Waveform};
+use va_transient::integrator::{LteEstimator, Method, TranConfig, Waveform};
 
 /// Which analysis to run for a `sim` invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -822,6 +822,12 @@ pub fn solve_transient(
         method,
         lte_reltol: 1e-3,
         lte_abstol: 1e-6,
+        // The embedded pair stays the production default even though `DividedDifference` is
+        // both cheaper and the more rigorous estimator: every committed transient golden was
+        // validated under this one, and switching moves those numbers (rectifier 6.766e-4 ->
+        // 8.226e-4 against a 1e-3 tolerance). See `va_transient::integrator::LteEstimator` and
+        // docs/roadmap.md's T4.2 entry for the measured trade-off.
+        lte_estimator: LteEstimator::EmbeddedPair,
     };
 
     let (instances, dim, _currents) = build_instances(net, compiled)?;
@@ -1373,6 +1379,7 @@ mod tests {
             method: Method::Trapezoidal,
             lte_reltol: 1e-6,
             lte_abstol: 1e-12,
+            lte_estimator: LteEstimator::EmbeddedPair,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -1431,6 +1438,7 @@ mod tests {
             method: Method::Trapezoidal,
             lte_reltol: 1e-6,
             lte_abstol: 1e-9,
+            lte_estimator: LteEstimator::EmbeddedPair,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -1491,6 +1499,7 @@ mod tests {
             method: Method::Trapezoidal,
             lte_reltol: 1e-6,
             lte_abstol: 1e-9,
+            lte_estimator: LteEstimator::EmbeddedPair,
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");

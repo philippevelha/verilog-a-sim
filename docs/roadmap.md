@@ -1469,9 +1469,43 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > `va-cli`'s `build_instances_split` is the one caller that needs this today.
 
 > **Superseded 2026-08-06:** `run_dynamic` and `build_instances_split` are **deleted**. Interface β now carries an `AnalysisCtx` (time + analysis kind), so a `SIN` source is an ordinary stateless `ModelInstance` reading `ctx.time` (`va_cli::WaveformSource`) and every device takes the same path — see this file's "Analysis context — Tier A" section. The reasoning below is kept as history; the mechanism it describes is gone.
-> *Outstanding:* a rigorous divided-difference LTE estimator to replace the embedded-pair
-> heuristic. `t4-transient/02-lte-timestep.qmd` written 2026-07-18 (rung 4's golden gate has
-> since formally passed for real too, against QSPICE, same date).
+> ~~*Outstanding:* a rigorous divided-difference LTE estimator to replace the embedded-pair
+> heuristic.~~ **Built 2026-08-31 as `LteEstimator::DividedDifference`, and deliberately *not*
+> made the default** — see below. `t4-transient/02-lte-timestep.qmd` written 2026-07-18 (rung 4's
+> golden gate has since formally passed for real too, against QSPICE, same date).
+>
+> **2026-08-31: the divided-difference estimator exists, is validated against the closed-form
+> truncation error, and is opt-in.** `integrator::divided_difference` computes a Newton divided
+> difference over the candidate point plus the last accepted ones; the leading-term constants
+> are the textbook ones rewritten in terms of what is actually available (`LTE ~ h^2*DD2` for
+> backward Euler, `LTE ~ (h^3/2)*DD3` for trapezoidal). It needs 2 past accepted points for BE
+> and 3 for trapezoidal, and **falls back to the embedded pair until it has them** rather than
+> guessing, so the opening steps of a run are unchanged.
+>
+> **The measured trade-off, on an RC charge under trapezoidal at `lte_reltol` 1e-3: 686 model
+> evaluations for the embedded pair vs 279 for divided differences (2.5x fewer), with relative
+> error at one time constant of 4.6e-5 vs 2.1e-4.** The cheaper estimator being the less
+> accurate one at the same nominal tolerance is not a defect in it — it is the pair being
+> *accidentally conservative*: `|x_BE - x_Trap|` is dominated by backward Euler's own
+> first-order error, so it systematically over-estimates the trapezoidal step's true LTE, takes
+> smaller steps than the tolerance asked for, and pays a second Newton solve per attempt for
+> the privilege. Divided differences deliver what `lte_reltol` actually requests; a caller who
+> wants the pair's accuracy tightens the tolerance rather than buying it by accident.
+>
+> **Why the default did not change.** Flipping `va-cli`'s production config to divided
+> differences keeps all 16 gates green, but moves committed transient numbers: `rectifier`
+> 6.766e-4 -> 8.226e-4 (against a 1e-3 tolerance, so headroom falls from 1.5x to 1.2x),
+> `rc_step` 1.839e-5 -> 2.193e-5, `ring_osc` unchanged at 4.464e-6. Every committed transient
+> golden was validated under the embedded pair; moving the estimator is a decision to
+> re-validate those gates under, not a drive-by, so it is recorded here as the supervisor's
+> call rather than taken silently. Reverting the flip reproduced all three numbers exactly.
+>
+> Verified against the *closed form*, not against the other estimator (which would only prove
+> the two agree): `divided_difference_matches_the_analytic_truncation_error` checks the
+> estimate on `x(t) = e^t` against `(h^2/2)*x''` to 1e-3 relative, and
+> `divided_differences_recover_a_polynomial_leading_coefficient` pins the differencing itself
+> both ways — exact on a degree-k polynomial, exactly zero on a lower-degree one, and
+> spacing-independent, which is the case an adaptive controller actually produces.
 
 - Local truncation error estimate driving adaptive step size; step accept/reject logic.
 - **Validation gate (ladder rung 4):** diode rectifier transient RMS ≤ 1e-3 vs golden.
