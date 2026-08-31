@@ -275,8 +275,24 @@ $ cargo run -q -p va-harness --example gen_figures
 ![`rectifier.net`'s transient run (solid lines) over its QSPICE golden reference (grey dots),
 resampled onto the simulated timebase exactly as `compare_tran` scores it (§ above). `V(out)`'s
 smoothed, rectified ripple tracks the golden dots closely enough that the two are visually
-indistinguishable at this scale — consistent with the `6.766e-4` RMS margin, not just asserted by
-it.](figures/rectifier-overlay.svg)
+indistinguishable at this scale — consistent with the RMS margin (`8.226e-4` under the current
+divided-difference estimator), not just asserted by it.](figures/rectifier-overlay.svg)
+
+The same command draws rung 2's nonlinear DC sweep, which makes a different claim about the same
+harness: the transient overlay shows a waveform tracked over time, this one shows a *curve*
+checked point for point at 41 swept source values.
+
+![`diode_clamp.net`'s DC sweep (solid lines) over its QSPICE golden (grey dots). `V(in)` is the
+straight diagonal — `V1` forces it — while `V(mid)` bends at the diode's knee and clamps near
+0.66 V; the golden dots sit on both, including through the knee, which is the part a linear
+model would get wrong. This is the same `6.421e-5` the gate scores, drawn.
+](figures/diode-clamp-overlay.svg)
+
+**Both figures plot node voltages only.** A golden file's `node_order` also carries the branch
+currents described in the next section, and those are amps: on a shared linear axis with volts a
+milliamp trace flatlines along the bottom while the legend calls it a voltage. The *gate* still
+scores every column — the picture just declines to pretend amps and volts share a scale, the same
+reasoning `va_cli::plot::plot_sweep` states for its own series choice.
 
 ## Branch currents are golden data too
 

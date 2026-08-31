@@ -462,7 +462,11 @@ class of lexemes.
 - **Declaration and Assignment**: Two grammar productions consume it (§ module instantiation,
   Annex C.8), both inside an `Item::Instance`: a named port connection, `.port(net)`
   (`parse_port_conn`), and a `#(...)` parameter override's `.name(expr)` entries
-  (`parse_param_override`). Outside those two positions `.` still has no grammar rule and
+  (`parse_param_override`). The two are **not** interchangeable, and mixing them is the one
+  mistake the corpus actually makes: a port connects to a *net*, so a value in that position
+  (`.therm_en(1)`, where `therm_en` is a `parameter` of the instantiated module —
+  `external/verilogAlib/example_mzi_modulator.vams`) is rejected with a message naming the
+  `#(...)` list, rather than with `expect_ident`'s generic "expected an identifier". Outside those two positions `.` still has no grammar rule and
   remains a parse error via the default "expected a statement"/"expected an expression"
   fallback — there is no struct/record member access in this subset.
 - **Expressions and Evaluation**: N/A — a delimiter, not an expression.

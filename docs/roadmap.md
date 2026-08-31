@@ -600,6 +600,18 @@ docs/tutorials/
   switch — is the tightest of the six — the rung most worth
   seeing, not just reading as a number). Each embed states its exact regeneration command per
   this section's own "executable, not just prose" rule.
+  **2026-08-31 (later): `overlay_sweep` put to work, and a units bug found by using it.** The
+  DC-sweep overlay had been written and unit-tested but drawn by nothing, because until
+  `circuits/diode_clamp.net` existed no gated `.dc` circuit had a node voltage worth looking at.
+  It now draws that clamp curve against its QSPICE golden in `t6-integration/03-validation.qmd`,
+  from the same `cargo run -p va-harness --example gen_figures` as the rectifier overlay.
+  Generating it exposed a real defect in *both* overlays: they plotted every column of a golden
+  file's `node_order`, which since 2026-07-18 includes branch currents — amps, drawn against an
+  axis labelled "Voltage (V)", where a milliamp trace flatlines along the bottom under a legend
+  calling it a voltage. `render` now draws node-voltage columns only, matching the rule
+  `va_cli::plot::plot_sweep` already stated for itself; the gate still scores every column, so
+  nothing is checked less, only drawn honestly. Pinned by a test whose current column is 1000x
+  the voltages, so a regression that re-includes it would visibly rescale the axis.
 - **Standard skeleton** for each tutorial: *Goal* (one sentence) → *Where it fits* (the §2
   pipeline diagram, the relevant box highlighted) → *The idea* (theory, the equations, the
   design choice) → *The code* (the public API the student built, with the doc-comment

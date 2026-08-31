@@ -54,6 +54,14 @@ struct Overlay<'a> {
 
 /// Draw `ov` to `path`. Shared by both entry points, which differ only in axis labels and in
 /// how they get onto a common x grid.
+/// Whether a `node_order` entry names a branch current rather than a node voltage.
+///
+/// The golden format spells those `I(<device>)` (§ `crate::golden`'s branch-current
+/// convention), which is not a legal node name, so the prefix test is unambiguous.
+fn is_branch_current(name: &str) -> bool {
+    name.starts_with("I(")
+}
+
 fn render(path: &str, ov: &Overlay) -> Result<(), HarnessError> {
     let (first, last) = match (ov.sim.first(), ov.sim.last()) {
         (Some(f), Some(l)) => (f.0, l.0),
@@ -71,13 +79,30 @@ fn render(path: &str, ov: &Overlay) -> Result<(), HarnessError> {
         (first - 1.0, last + 1.0)
     };
 
-    let n = ov.node_order.len();
+    // Only the node-voltage columns are drawn. A golden file's `node_order` also carries the
+    // branch currents `va_cli::branch_currents` resolved (`I(V1)` and friends, § the golden
+    // format's branch-current convention), and those are amps: on a shared linear axis with
+    // volts a milliamp trace flatlines along the bottom while claiming to be a voltage, which
+    // is exactly the reasoning `va_cli::plot::plot_sweep` already states for drawing node
+    // voltages only. The gate still checks every column — the figure just doesn't pretend
+    // amps and volts share a scale.
+    let columns: Vec<usize> = (0..ov.node_order.len())
+        .filter(|&i| !is_branch_current(&ov.node_order[i]))
+        .collect();
+    if columns.is_empty() {
+        return Err(HarnessError::Run(
+            "nothing to plot: every column is a branch current, and this chart's axis is volts"
+                .to_string(),
+        ));
+    }
     let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
     for (_, row) in ov.sim.iter().chain(ov.golden.iter()) {
-        for &v in row.iter().take(n) {
-            if v.is_finite() {
-                y_min = y_min.min(v);
-                y_max = y_max.max(v);
+        for &i in &columns {
+            if let Some(&v) = row.get(i) {
+                if v.is_finite() {
+                    y_min = y_min.min(v);
+                    y_max = y_max.max(v);
+                }
             }
         }
     }
@@ -114,7 +139,7 @@ fn render(path: &str, ov: &Overlay) -> Result<(), HarnessError> {
         .map_err(|e| draw_err("drawing the chart mesh", e))?;
 
     // Golden first, so the simulated curve lands on top of it.
-    for i in 0..n {
+    for &i in &columns {
         chart
             .draw_series(ov.golden.iter().filter_map(|(x, row)| {
                 row.get(i)
@@ -129,7 +154,8 @@ fn render(path: &str, ov: &Overlay) -> Result<(), HarnessError> {
         .label("golden (QSPICE)")
         .legend(|(x, y)| Circle::new((x + 10, y), 2, GOLDEN.filled()));
 
-    for (i, name) in ov.node_order.iter().enumerate() {
+    for &i in &columns {
+        let name = &ov.node_order[i];
         let color = PALETTE[i % PALETTE.len()];
         chart
             .draw_series(LineSeries::new(
@@ -268,6 +294,48 @@ mod tests {
         assert!(svg.contains("<svg"), "not an SVG");
         assert!(svg.contains("golden (QSPICE)"), "golden series unlabelled");
         assert!(svg.contains("V(out)"), "simulated series unlabelled");
+    }
+
+    /// A golden file's `node_order` carries branch currents alongside node voltages, and the
+    /// overlay's y-axis is volts. Those columns are dropped from the *picture* (not from the
+    /// gate, which still scores them): drawing amps against a volt axis puts a milliamp trace
+    /// flat along the bottom while the legend calls it a voltage.
+    #[test]
+    fn an_overlay_leaves_branch_currents_off_a_voltage_axis() {
+        let with_current = |points: Vec<(f64, Vec<f64>)>| GoldenSweep {
+            source: "V1".into(),
+            node_order: vec!["in".into(), "out".into(), "I(V1)".into()],
+            points,
+        };
+        // The current column is ~1000x the voltages: were it drawn, it would set the y-range
+        // and squash both real curves into a line.
+        let sim = with_current(vec![
+            (0.0, vec![0.0, 0.0, 0.0]),
+            (1.0, vec![1.0, 0.5, 1000.0]),
+        ]);
+        let gold = with_current(vec![
+            (0.0, vec![0.0, 0.0, 0.0]),
+            (1.0, vec![1.0, 0.49, 1000.0]),
+        ]);
+        let path = tmp("va_harness_overlay_branch_current.svg");
+        overlay_sweep(&path, &sim, &gold).expect("renders");
+        let svg = std::fs::read_to_string(&path).expect("reads back");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            svg.contains("V(out)"),
+            "voltage series should still be drawn"
+        );
+        assert!(
+            !svg.contains("I(V1)"),
+            "a branch current must not be labelled on a voltage axis"
+        );
+        // The y-axis must still be scaled to the voltages: an axis reaching 1000 would mean
+        // the current column had been plotted after all.
+        assert!(
+            !svg.contains(">1000<") && !svg.contains(">800<"),
+            "y-axis was scaled by the branch current, not the voltages"
+        );
     }
 
     /// A mismatched point count is refused rather than drawn misaligned — the same contract

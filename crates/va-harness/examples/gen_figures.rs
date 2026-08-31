@@ -16,8 +16,9 @@
 //! (from anywhere — paths are resolved from `CARGO_MANIFEST_DIR`, not the caller's `cwd`, the
 //! same robustness trick the crate's own `#[cfg(test)]` modules already use.)
 
-use va_harness::golden::GoldenTran;
-use va_harness::plot::overlay_tran;
+use va_harness::dc::run_dc_sweep;
+use va_harness::golden::{GoldenSweep, GoldenTran};
+use va_harness::plot::{overlay_sweep, overlay_tran};
 use va_harness::tran::run_tran;
 
 /// Absolute path to a workspace file, robust to `cargo run`'s working directory.
@@ -37,6 +38,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let got = run_tran(&circuit, Some(&model))?;
     let golden = GoldenTran::read(std::path::Path::new(&golden_path))?;
     overlay_tran(&out, &got, &golden)?;
+    println!("[gen_figures] wrote {out}");
+
+    // Rung 2's nonlinear half: the series-R diode clamp. The transient overlay above shows a
+    // waveform tracked over time; this one shows a *curve* checked point for point, which is a
+    // different claim about the same harness — and it is the only gated circuit whose node
+    // voltage is itself nonlinear, so it is the one where an overlay can show the model's
+    // physics rather than a straight line (see `t3-core/03-nonlinear-dc.qmd`).
+    let circuit = workspace_path("circuits/diode_clamp.net");
+    let golden_path = workspace_path("golden/diode_clamp.golden");
+    let out = workspace_path("docs/tutorials/t6-integration/figures/diode-clamp-overlay.svg");
+
+    let got = run_dc_sweep(&circuit, Some(&model))?;
+    let golden = GoldenSweep::read(std::path::Path::new(&golden_path))?;
+    overlay_sweep(&out, &got, &golden)?;
     println!("[gen_figures] wrote {out}");
 
     Ok(())
