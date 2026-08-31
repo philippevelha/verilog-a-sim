@@ -59,9 +59,9 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all nineteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`golden/*.golden` — all twenty — are real, QSPICE-generated data (`cargo xtask gen-golden`):
 `{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rl_decay, rlc_ring, rectifier,
-ring_osc, abstime_ramp, rc_ac, diode_ac, laplace_ac, diode_noise, resistor_noise_va,
+ring_osc, abstime_ramp, rc_ac, rc_ac_lin, diode_ac, laplace_ac, diode_noise, resistor_noise_va,
 diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
@@ -103,6 +103,16 @@ quantity is the one compared. Like `rc_discharge.net` it has no source, so ignor
 condition leaves the whole run flat at zero rather than slightly wrong. Passes at
 `error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
 single-pole linear decay with no nonlinearity for either engine to disagree about.
+
+**Added 2026-08-31: `circuits/rc_ac_lin.net`, the linear AC sweep.** `.ac` accepts all three
+SPICE sweep types now (`dec`, `oct`, `lin`), and `lin` is the one whose semantics differ: its
+count is a **total** across the band, not a per-decade density. That is the easiest thing to get
+wrong and the reason this circuit exists — QSPICE returns exactly the 41 points the card asks
+for, so the gate confirms both engines read the count the same way, not merely that the
+magnitudes agree. Same RC network as `rc_ac.net`, over a band straddling the -3 dB corner so the
+grid samples the response's interesting part. Passes at `|mag| 1.304e-15`, `phase 1.554e-14 rad`.
+`.noise` deliberately stays `dec`-only: its integrated-total maths assumes logarithmic spacing,
+so a linear grid there would change what the reported total means.
 
 ### A circuit deliberately *not* gated: `circuits/rc_pulse.net` (2026-08-31)
 

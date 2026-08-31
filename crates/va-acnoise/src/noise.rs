@@ -356,7 +356,8 @@ mod tests {
         AcSweep {
             fstart: 1.0,
             fstop: 1e6,
-            points_per_decade: 10,
+            points: 10,
+            kind: Default::default(),
         }
     }
 
@@ -543,7 +544,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 10.0,
             fstop: 1e4,
-            points_per_decade: 1,
+            points: 1,
+            kind: Default::default(),
         };
         let spectrum =
             run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0, None).expect("noise solves");
@@ -600,7 +602,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 10.0,
             fstop: 1e4,
-            points_per_decade: 1,
+            points: 1,
+            kind: Default::default(),
         };
         let spectrum =
             run_at_nominal_temp(&insts, &[0.0], 1, sweep, 0, None).expect("noise solves");

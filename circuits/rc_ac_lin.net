@@ -1,0 +1,11 @@
+* The same RC low-pass as rc_ac.net, swept linearly instead of per-decade.
+* Gates SPICE's `.ac lin <total-points> <fstart> <fstop>` sweep type (added 2026-08-31),
+* where the count is a TOTAL across the band rather than a per-decade density -- the one
+* semantic that distinguishes `lin` from `dec`/`oct` and the easiest to get wrong.
+* The band deliberately straddles the -3 dB corner at 1/(2*pi*RC) = 159.15 Hz, so the
+* linear grid samples the interesting part of the response rather than its flat tail.
+V1 in  gnd  DC 0 AC 1
+R1 in  out  1000
+C1 out gnd  1e-6
+.ac lin 41 10 410
+.end

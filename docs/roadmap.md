@@ -1522,6 +1522,22 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: `.ac` gained `oct` and `lin`.** The card had been `dec`-only, and the stated
+> reason was sound — `AcSweep::frequencies` produced a per-decade grid, so parsing a type the
+> analysis could not deliver would have been a promise the engine could not keep. The fix was
+> therefore to implement the grids, not to loosen the parser: `AcSweepKind` now selects the
+> spacing, `points` is a density for `dec`/`oct` and a **total** for `lin` (SPICE's own
+> convention), and every grid still ends exactly on `fstop` rather than approaching it through
+> accumulated arithmetic. An unrecognized sweep type is still refused rather than guessed at.
+>
+> `circuits/rc_ac_lin.net` gates the linear grid at `|mag| 1.3e-15` / `phase 1.6e-14 rad`, and
+> gates the *semantics* rather than just the numbers: QSPICE returns exactly the 41 points the
+> card asks for, confirming both engines read `lin`'s count as a total. `validate` is **20/20**.
+>
+> **`.noise` deliberately stays `dec`-only.** Its integrated-total maths assumes logarithmic
+> spacing, so accepting a linear grid there would quietly change what the reported total means
+> rather than merely resampling a spectrum — a different and larger change than this one.
+>
 > **2026-08-31: `PULSE` sources, and the first real disagreement with the oracle.**
 > `V1 in gnd PULSE(v1 v2 td tr tf pw per)` parses and drives a transient run. SPICE's optional
 > trailing parameters default from the `.tran` card (one timestep for an omitted rise/fall, the

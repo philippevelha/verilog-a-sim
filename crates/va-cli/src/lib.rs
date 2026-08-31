@@ -984,7 +984,12 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
     let sweep = va_acnoise::ac::AcSweep {
         fstart: card.fstart,
         fstop: card.fstop,
-        points_per_decade: card.points_per_decade,
+        points: card.points,
+        kind: match card.kind {
+            va_netlist::AcSweepKindCard::Dec => va_acnoise::ac::AcSweepKind::Dec,
+            va_netlist::AcSweepKindCard::Oct => va_acnoise::ac::AcSweepKind::Oct,
+            va_netlist::AcSweepKindCard::Lin => va_acnoise::ac::AcSweepKind::Lin,
+        },
     };
     va_acnoise::ac::run(&refs, &op.x, dim, sweep, &excitation).context("AC sweep failed")
 }
@@ -1060,7 +1065,10 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
     let sweep = va_acnoise::ac::AcSweep {
         fstart: card.fstart,
         fstop: card.fstop,
-        points_per_decade: card.points_per_decade,
+        // `.noise` stays `dec`-only: its integrated-total maths assumes logarithmic
+        // spacing, so accepting `lin` here would quietly change what the total means.
+        points: card.points_per_decade,
+        kind: va_acnoise::ac::AcSweepKind::Dec,
     };
     va_acnoise::noise::run_at_nominal_temp(&refs, &op.x, dim, sweep, output, input)
         .context("noise sweep failed")

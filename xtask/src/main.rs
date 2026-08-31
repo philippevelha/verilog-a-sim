@@ -79,6 +79,7 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
 /// stamps.
 const AC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_ac.net", None),
+    ("circuits/rc_ac_lin.net", None),
     ("circuits/diode_ac.net", Some("models/diode.va")),
     ("circuits/laplace_ac.net", Some("models/laplace_lowpass.va")),
 ];
@@ -602,7 +603,7 @@ const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[(
 /// topology-neutral normalization this project's own net interning already performs, so applying
 /// it costs nothing and sidesteps QSPICE's own `gnd`-aliasing quirk without having to reason
 /// about which element kinds are affected.
-const QSPICE_NATIVE_AC_CIRCUITS: &[&str] = &["circuits/rc_ac.net"];
+const QSPICE_NATIVE_AC_CIRCUITS: &[&str] = &["circuits/rc_ac.net", "circuits/rc_ac_lin.net"];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.ac` circuits (T5) that reference a custom
 /// `.va` model. The same one-to-one `IS`/`N` diode translation applies — an AC analysis

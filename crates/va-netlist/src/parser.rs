@@ -33,13 +33,16 @@
 //!   value, solving a fresh operating point at each step ([`crate::DcSweep`]) — only a linear
 //!   sweep of a single source, no nested/multi-source sweeps and no `.dc` with no arguments
 //!   (a source-list sweep) as some SPICE dialects also accept.
-//! - `.ac dec <points-per-decade> <fstart> <fstop>` (T5) requests a small-signal AC sweep
+//! - `.ac <dec|oct|lin> <points> <fstart> <fstop>` (T5) requests a small-signal AC sweep
 //!   ([`crate::AcSweepCard`]); a `V` line's own `AC <magnitude> [phase]` tokens supply the
-//!   excitation ([`crate::AcSpec`]). Only the `dec` sweep type is parsed (see
-//!   [`crate::AcSweepCard`]'s own limitations), and a source's AC phase defaults to 0°.
+//!   excitation ([`crate::AcSpec`]). All three SPICE sweep types are parsed, with `points`
+//!   meaning a per-decade or per-octave *density* for `dec`/`oct` and a *total* for `lin`
+//!   (SPICE's own convention). An unrecognized sweep type leaves the card unparsed rather
+//!   than being guessed at. A source's AC phase defaults to 0°.
 
 use crate::{
-    AcSpec, AcSweepCard, AnalysisCard, DcSweep, Device, Netlist, NetlistError, NoiseCard, Waveform,
+    AcSpec, AcSweepCard, AcSweepKindCard, AnalysisCard, DcSweep, Device, Netlist, NetlistError,
+    NoiseCard, Waveform,
 };
 use va_abi::reference::GROUND;
 
@@ -175,16 +178,24 @@ fn parse_card(net: &mut Netlist, body: &str) {
     // an `oct`/`lin` card leaves `net.ac` as `None`, so `va-cli` reports "no parseable `.ac`
     // card" rather than silently solving a decade grid the deck never asked for.
     if card == AnalysisCard::Ac {
-        let is_dec = toks.get(1).is_some_and(|t| t.eq_ignore_ascii_case("dec"));
-        if let (true, Some(ppd), Some(fstart), Some(fstop)) = (
-            is_dec,
+        let kind = toks
+            .get(1)
+            .and_then(|t| match t.to_ascii_lowercase().as_str() {
+                "dec" => Some(AcSweepKindCard::Dec),
+                "oct" => Some(AcSweepKindCard::Oct),
+                "lin" => Some(AcSweepKindCard::Lin),
+                _ => None,
+            });
+        if let (Some(kind), Some(points), Some(fstart), Some(fstop)) = (
+            kind,
             toks.get(2).and_then(|v| parse_value(v)),
             toks.get(3).and_then(|v| parse_value(v)),
             toks.get(4).and_then(|v| parse_value(v)),
         ) {
-            if ppd >= 1.0 {
+            if points >= 1.0 {
                 net.ac = Some(AcSweepCard {
-                    points_per_decade: ppd as usize,
+                    points: points as usize,
+                    kind,
                     fstart,
                     fstop,
                 });
@@ -193,7 +204,7 @@ fn parse_card(net: &mut Netlist, body: &str) {
     }
     // `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` (T5.2) — SPICE's
     // standard positional noise card: an output *probe*, an input source, then the same
-    // frequency-grid spec `.ac` takes (and the same `dec`-only limitation).
+    // frequency-grid spec `.ac` takes, except that `.noise` stays `dec`-only (see below).
     if card == AnalysisCard::Noise {
         let is_dec = toks.get(3).is_some_and(|t| t.eq_ignore_ascii_case("dec"));
         if let (Some(output), Some(source), true, Some(ppd), Some(fstart), Some(fstop)) = (
@@ -576,22 +587,41 @@ mod tests {
     }
 
     #[test]
-    fn ac_card_parses_only_a_dec_sweep() {
+    fn ac_card_parses_every_spice_sweep_type() {
         let net = parse("* t\nV1 in 0 AC 1\n.ac dec 10 1 1meg\n.end\n").expect("parse");
         assert_eq!(net.analysis, AnalysisCard::Ac);
         assert_eq!(
             net.ac,
             Some(AcSweepCard {
-                points_per_decade: 10,
+                points: 10,
+                kind: AcSweepKindCard::Dec,
                 fstart: 1.0,
                 fstop: 1e6,
             })
         );
 
-        // `lin`/`oct` are recognized as *AC analysis* but leave no parseable sweep — the
-        // frequency grid `va_acnoise::ac::AcSweep` produces is per-decade only, so promising a
-        // linear grid here would be a lie (§ `crate::AcSweepCard`'s own limitations).
+        // `lin` and `oct` parse too, as of 2026-08-31: `va_acnoise::ac::AcSweep` produces all
+        // three grids, so accepting them here no longer promises a spacing the analysis
+        // cannot deliver. `lin`'s count is a *total*, not a density.
         let net = parse("* t\nV1 in 0 AC 1\n.ac lin 100 1 1meg\n.end\n").expect("parse");
+        assert_eq!(
+            net.ac,
+            Some(AcSweepCard {
+                points: 100,
+                kind: AcSweepKindCard::Lin,
+                fstart: 1.0,
+                fstop: 1e6,
+            })
+        );
+        let net = parse("* t\nV1 in 0 AC 1\n.ac oct 5 10 10k\n.end\n").expect("parse");
+        assert_eq!(
+            net.ac.map(|c| (c.points, c.kind)),
+            Some((5, AcSweepKindCard::Oct))
+        );
+
+        // An unrecognized sweep type is still refused rather than guessed at: the card marks
+        // the run as AC, but leaves no grid behind.
+        let net = parse("* t\nV1 in 0 AC 1\n.ac log 10 1 1meg\n.end\n").expect("parse");
         assert_eq!(net.analysis, AnalysisCard::Ac);
         assert_eq!(net.ac, None);
     }

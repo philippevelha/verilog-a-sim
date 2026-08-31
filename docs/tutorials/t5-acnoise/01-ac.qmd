@@ -72,10 +72,15 @@ pub fn run(instances: &[&dyn ModelInstance], x_dc: &[f64], dim: usize,
            sweep: AcSweep, excitation: &[Complex]) -> Result<AcResponse, AcNoiseError>;
 ```
 
-On the deck side, `va-netlist` learned `.ac dec <ppd> <fstart> <fstop>` and a `V` line's
-`AC <magnitude> [phase]`. Only the `dec` sweep type is accepted — `AcSweep::frequencies` produces
-a per-decade grid, so parsing `lin`/`oct` would promise a grid the analysis cannot produce; those
-leave the card unparsed and `va-cli` says so plainly rather than silently sweeping something else.
+On the deck side, `va-netlist` learned `.ac <dec|oct|lin> <points> <fstart> <fstop>` and a `V`
+line's `AC <magnitude> [phase]`. All three SPICE sweep types are accepted as of 2026-08-31
+(originally `dec` only, because `AcSweep::frequencies` produced a per-decade grid and parsing a
+type the analysis could not deliver would have been a promise the engine could not keep — the
+fix was to implement the grids, not to loosen the parser). `points` is a *density* for `dec` and
+`oct` and a *total* for `lin`, following SPICE; an unrecognized type still leaves the card
+unparsed rather than being guessed at. `circuits/rc_ac_lin.net` gates the linear grid against
+QSPICE — which returns exactly the 41 points the card asks for, confirming the count really is a
+total on both sides.
 
 ## It works
 

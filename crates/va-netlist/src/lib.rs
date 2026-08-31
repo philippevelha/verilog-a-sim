@@ -79,8 +79,10 @@ pub struct Netlist {
 /// A `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (T5.2): sweep the
 /// small-signal output noise PSD at node `output`, linearized about the DC operating point.
 ///
-/// The frequency grid is specified exactly as [`AcSweepCard`]'s is, and carries the same
-/// `dec`-only limitation for the same reason.
+/// The frequency grid is specified as [`AcSweepCard`]'s is, but **`dec` only**: unlike `.ac`,
+/// which gained `oct`/`lin` on 2026-08-31, the noise analysis's integrated-total maths assumes
+/// logarithmic spacing, so accepting a linear grid here would quietly change what the reported
+/// total means rather than merely resampling the spectrum.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoiseCard {
     /// The output node's name, unwrapped from the card's own `V(<name>)` spelling.
@@ -105,17 +107,32 @@ pub struct NoiseCard {
 ///
 /// # Limitations
 ///
-/// Only SPICE's `dec` (per-decade) sweep type is parsed — not `oct` or `lin`. That matches what
-/// `va_acnoise::ac::AcSweep` itself implements, so accepting `lin` here would promise a grid the
-/// analysis can't actually produce.
+/// All three SPICE sweep types are parsed (`dec`, `oct`, `lin`), each backed by the matching
+/// grid in `va_acnoise::ac::AcSweep` — the two are kept in step deliberately, so this type can
+/// never promise a spacing the analysis cannot produce.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AcSweepCard {
-    /// Frequency points per decade.
-    pub points_per_decade: usize,
+    /// Point count, interpreted per [`Self::kind`]: per decade, per octave, or in total.
+    pub points: usize,
+    /// Spacing rule, from the card's own `dec`/`oct`/`lin` token.
+    pub kind: AcSweepKindCard,
     /// Start frequency (Hz).
     pub fstart: f64,
     /// Stop frequency (Hz).
     pub fstop: f64,
+}
+
+/// A `.ac`/`.noise` card's sweep type. Mirrors `va_acnoise::ac::AcSweepKind`; kept as its own
+/// type so `va-netlist` stays a leaf that does not depend on the analysis crates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AcSweepKindCard {
+    /// `dec`: `points` per decade.
+    #[default]
+    Dec,
+    /// `oct`: `points` per octave.
+    Oct,
+    /// `lin`: `points` in total.
+    Lin,
 }
 
 /// A voltage source's small-signal AC excitation (`AC <magnitude> [phase]` on a `V` line).

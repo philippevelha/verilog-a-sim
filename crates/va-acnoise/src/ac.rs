@@ -9,29 +9,81 @@ use va_abi::ModelInstance;
 /// replace this if the workspace adds it.
 pub type Complex = (f64, f64);
 
-/// AC sweep specification (logarithmic decade sweep).
+/// How an [`AcSweep`] spaces its frequency points — SPICE's three sweep types.
+///
+/// The `points` count means something different for each, exactly as it does in a SPICE
+/// `.ac` card: a *density* for the two logarithmic types, a *total* for the linear one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AcSweepKind {
+    /// `dec`: logarithmic, `points` per decade (a factor of 10).
+    #[default]
+    Dec,
+    /// `oct`: logarithmic, `points` per octave (a factor of 2).
+    Oct,
+    /// `lin`: linear, `points` in total across `[fstart, fstop]`.
+    Lin,
+}
+
+/// AC sweep specification.
 #[derive(Clone, Copy, Debug)]
 pub struct AcSweep {
     /// Start frequency (Hz).
     pub fstart: f64,
     /// Stop frequency (Hz).
     pub fstop: f64,
-    /// Points per decade.
-    pub points_per_decade: usize,
+    /// Point count, interpreted per [`Self::kind`]: per decade, per octave, or in total.
+    pub points: usize,
+    /// Spacing rule.
+    pub kind: AcSweepKind,
 }
 
 impl AcSweep {
-    /// The logarithmically-spaced frequency points this sweep visits, from `fstart` up to and
-    /// including `fstop` (SPICE `.ac dec` convention). Empty if `fstart`/`fstop`/
-    /// `points_per_decade` are non-positive or `fstop < fstart`.
+    /// The `dec` sweep this type used to be the only form of — `points` per decade.
+    pub fn dec(fstart: f64, fstop: f64, points_per_decade: usize) -> Self {
+        AcSweep {
+            fstart,
+            fstop,
+            points: points_per_decade,
+            kind: AcSweepKind::Dec,
+        }
+    }
+}
+
+impl AcSweep {
+    /// The frequency points this sweep visits, from `fstart` up to and including `fstop`,
+    /// spaced per [`Self::kind`] (SPICE's `dec`/`oct`/`lin` conventions). `fstop` is always
+    /// the exact last point. Empty if `fstart`/`fstop`/`points` are non-positive or
+    /// `fstop < fstart`.
     pub fn frequencies(&self) -> Vec<f64> {
-        if self.fstart <= 0.0 || self.fstop < self.fstart || self.points_per_decade == 0 {
+        if self.fstart <= 0.0 || self.fstop < self.fstart || self.points == 0 {
             return Vec::new();
         }
         if self.fstop == self.fstart {
             return vec![self.fstart];
         }
-        let ratio = 10f64.powf(1.0 / self.points_per_decade as f64);
+        // `lin` is a *total* count over the closed interval, so it is generated directly
+        // rather than by the ratio walk the logarithmic types share. A single requested point
+        // degenerates to `fstart` alone, matching the `fstop == fstart` case above.
+        if self.kind == AcSweepKind::Lin {
+            if self.points == 1 {
+                return vec![self.fstart];
+            }
+            let step = (self.fstop - self.fstart) / (self.points - 1) as f64;
+            let mut freqs: Vec<f64> = (0..self.points)
+                .map(|i| self.fstart + step * i as f64)
+                .collect();
+            // Same exactness guarantee the logarithmic path gives below: the last point is
+            // `fstop` itself, not `fstart + (n-1)*step` with its accumulated rounding.
+            if let Some(last) = freqs.last_mut() {
+                *last = self.fstop;
+            }
+            return freqs;
+        }
+        let per = match self.kind {
+            AcSweepKind::Oct => 2f64,
+            _ => 10f64,
+        };
+        let ratio = per.powf(1.0 / self.points as f64);
         let mut freqs = Vec::new();
         let mut f = self.fstart;
         // Stop once a step would overshoot `fstop` by more than half a step (in log space) —
@@ -271,6 +323,98 @@ pub fn phase((re, im): Complex) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Each sweep type's *own* contract, checked against values that can be written down by
+    /// hand rather than recomputed from the implementation.
+    #[test]
+    fn each_sweep_type_spaces_its_points_its_own_way() {
+        // `dec`: a density. 1 Hz to 1 kHz at 1 point/decade is 1, 10, 100, 1000.
+        let f = AcSweep::dec(1.0, 1000.0, 1).frequencies();
+        assert_eq!(f.len(), 4);
+        for (got, want) in f.iter().zip([1.0, 10.0, 100.0, 1000.0]) {
+            assert!((got - want).abs() < 1e-9, "dec grid {f:?}");
+        }
+
+        // `oct`: the same shape, but per factor of 2. 1 Hz to 8 Hz at 1/octave is 1, 2, 4, 8.
+        let f = AcSweep {
+            fstart: 1.0,
+            fstop: 8.0,
+            points: 1,
+            kind: AcSweepKind::Oct,
+        }
+        .frequencies();
+        assert_eq!(f.len(), 4);
+        for (got, want) in f.iter().zip([1.0, 2.0, 4.0, 8.0]) {
+            assert!((got - want).abs() < 1e-9, "oct grid {f:?}");
+        }
+
+        // `lin`: a *total*, not a density. 5 points over 0..100 are evenly spaced.
+        let f = AcSweep {
+            fstart: 0.0_f64.max(20.0),
+            fstop: 100.0,
+            points: 5,
+            kind: AcSweepKind::Lin,
+        }
+        .frequencies();
+        assert_eq!(f, vec![20.0, 40.0, 60.0, 80.0, 100.0]);
+    }
+
+    /// `fstop` is the exact last point of every grid, not a value approached by accumulated
+    /// multiplication or addition -- the property a golden comparison against another
+    /// simulator's frequency column depends on.
+    #[test]
+    fn every_sweep_type_ends_exactly_on_fstop() {
+        let cases = [
+            AcSweep::dec(1.0, 1e6, 7),
+            AcSweep {
+                fstart: 3.0,
+                fstop: 9999.0,
+                points: 3,
+                kind: AcSweepKind::Oct,
+            },
+            AcSweep {
+                fstart: 1.0,
+                fstop: 1e5,
+                points: 37,
+                kind: AcSweepKind::Lin,
+            },
+        ];
+        for c in cases {
+            let f = c.frequencies();
+            assert_eq!(
+                *f.last().expect("a non-empty grid"),
+                c.fstop,
+                "{:?} sweep must end exactly on fstop",
+                c.kind
+            );
+            assert_eq!(f[0], c.fstart, "and start exactly on fstart");
+            assert!(
+                f.windows(2).all(|w| w[1] > w[0]),
+                "{:?} grid must be strictly increasing",
+                c.kind
+            );
+        }
+    }
+
+    /// Degenerate requests are answered, not panicked on: a single linear point, and a count
+    /// of zero.
+    #[test]
+    fn degenerate_sweeps_are_handled() {
+        let one = AcSweep {
+            fstart: 50.0,
+            fstop: 500.0,
+            points: 1,
+            kind: AcSweepKind::Lin,
+        };
+        assert_eq!(one.frequencies(), vec![50.0]);
+        let none = AcSweep {
+            fstart: 50.0,
+            fstop: 500.0,
+            points: 0,
+            kind: AcSweepKind::Lin,
+        };
+        assert!(none.frequencies().is_empty());
+    }
     use super::*;
     use std::f64::consts::PI;
     use va_abi::reference::{Capacitor, Resistor, VSource, GROUND};
@@ -280,7 +424,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 1.0,
             fstop: 100.0,
-            points_per_decade: 2,
+            points: 2,
+            kind: Default::default(),
         };
         let f = sweep.frequencies();
         assert!((f[0] - 1.0).abs() < 1e-9, "first point: {}", f[0]);
@@ -298,7 +443,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 1e3,
             fstop: 1e3,
-            points_per_decade: 10,
+            points: 10,
+            kind: Default::default(),
         };
         assert_eq!(sweep.frequencies(), vec![1e3]);
     }
@@ -308,7 +454,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 0.0,
             fstop: 100.0,
-            points_per_decade: 10,
+            points: 10,
+            kind: Default::default(),
         };
         assert!(sweep.frequencies().is_empty());
     }
@@ -362,7 +509,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 1e3,
             fstop: 1e6,
-            points_per_decade: 4,
+            points: 4,
+            kind: Default::default(),
         };
         // No netlist excitation at all: everything driving this circuit comes from the model.
         let resp = run(&insts, &[0.0], 1, sweep, &[(0.0, 0.0)]).expect("sweeps");
@@ -420,7 +568,8 @@ mod tests {
         let sweep = AcSweep {
             fstart: 1.0,
             fstop: 1e6,
-            points_per_decade: 5,
+            points: 5,
+            kind: Default::default(),
         };
         // 1V-AC excitation on the source's own branch row; zero everywhere else.
         let excitation = [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0)];
