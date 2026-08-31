@@ -3284,6 +3284,56 @@ guard on the cross-term is defensive, not load-bearing.
 every `laplace_*` collapses to `H(0)` and this term degenerates to a plain capacitor. The `grad`
 half already behaved that way; this term inherits it rather than introducing it.
 
+## An analog operator reaching a contribution through a variable (2026-08-31)
+
+`lower`'s `contains_noise_call`, `contains_ac_stim_call` and `contains_ddt_call` establish
+**silent-drop** safety properties: a `white_noise` buried where `noise_term_shape` cannot pull it
+out contributes nothing, so it is refused rather than dropped. All three were purely syntactic,
+with **no `Expr::Var` arm** — and one assignment defeated all three.
+
+**The noise case was a live wrong answer, not a diagnostic gap.** `2.0*white_noise(...)` written
+directly is refused. Written through a variable it built clean and the source contributed
+**exactly zero**, silently:
+
+| | S(a) @ 1 kHz | contributors |
+|---|---|---|
+| via a variable | 4.144e-18 V²/Hz | `R1 100.0%` |
+| written directly | 8.284e-18 V²/Hz | `R1 50.0%`, `D1 50.0%` |
+
+`ac_stim` behaved the same way (its value is zero in every analysis; only the split-out excitation
+channel carries it). The `ddt` case was louder but no better: it reached the charge channel as a
+*second* time derivative, tripping a `debug_assert` whose comment claimed `validate()` had already
+rejected it — a false premise — and in release dropping the sensitivity.
+
+**The fix is a taint fixed point, not a numeric check.** `Dual::carries_charge()` answers "does
+this value carry a time derivative" exactly, but only *at a point*, and `validate` runs at the
+all-zero operating point where a coefficient is routinely zero: `x = V(p,n)*ddt(c0*V(p,n))` has
+`grad_ddt = 0` there, so a numeric check **would have passed the very module that then panics**.
+`lower::Taint` instead grows a set of variables that can carry each operator, iterating over every
+assignment to a fixed point — the same shape as `param_only_vars` right beside it, and
+point-independent by construction. Computed once in `lower()` and carried on `Lowered`.
+
+**Over-approximating, deliberately and in the safe direction:** non-path-sensitive, so
+`x = ddt(q); x = 0.0; I <+ ddt(x);` is refused too. Refusing a shape nothing in the corpus writes
+costs nothing; missing one costs physics.
+
+**Zero corpus movement**, as predicted before the change: 86/88 frontend and 84/88
+frontend+codegen, unchanged. A scan of all 158 files found 1136 `ddt` call sites across 53 files
+and **not one** whose argument mentions a variable ever assigned from a `ddt`, nor any noise or
+`ac_stim` call assigned to a variable at all.
+
+**Known limit, recorded rather than fixed:** taint does not flow through an `analog function`'s
+body, so a function that computes a `ddt` internally and returns it still defeats the scans. No
+corpus file does this — 0 of 158 contain a `ddt` inside a function body — so it is documented at
+`Taint`'s definition instead of speculatively implemented.
+
+**Still open from the same audit:** the potential-contribution charge path (`lib.rs`'s
+`c.charge` block for `V(p,n) <+ …`) drops `q.grad_ddt` with **no** assert in any build profile,
+where the flow path at least has one; and `Elaborator::contains_ddt` in `va-frontend` has the
+identical blindness, which lets `I(<port>)` carry displacement current when the `ddt` arrives
+through a variable — contradicting the "conduction current only" invariant the direct spelling
+honours.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

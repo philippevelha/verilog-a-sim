@@ -1594,6 +1594,129 @@ mod tests {
         );
     }
 
+    // --- an analog operator reaching a contribution through a variable ---------------------
+    //
+    // `lower`'s `contains_noise_call`/`contains_ac_stim_call`/`contains_ddt_call` establish
+    // *silent-drop* safety properties. They were purely syntactic, with no `Expr::Var` arm, so
+    // one assignment defeated all three. A taint fixed point over the analog block now closes
+    // that; these pin each family, each with its own control.
+
+    fn build_msg(src: &str) -> Result<(), String> {
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        let mut next = 2usize;
+        match va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// **The most serious of the three, because it was silent.** `2.0*white_noise(...)` written
+    /// directly is refused — the PSD scales as the square of any factor around it, so a scaled
+    /// noise call cannot be pulled out and would contribute nothing. Written through a variable
+    /// it *built*, and the source contributed exactly zero with no diagnostic: measured on a
+    /// divider as 4.14e-18 V²/Hz against a true 8.28e-18, the per-device breakdown reporting one
+    /// contributor where there were two.
+    #[test]
+    fn a_noise_source_reaching_a_contribution_through_a_variable_is_refused() {
+        let msg = build_msg(
+            "module nz(p, n);
+             electrical p, n;
+             parameter real g = 1e-3;
+             real n1;
+             analog begin
+               n1 = white_noise(4.0e-21 * g, \"thermal\");
+               I(p, n) <+ g * V(p, n) + 2.0 * n1;
+             end
+             endmodule
+",
+        )
+        .expect_err("a scaled noise source must be refused, not silently dropped");
+        assert!(msg.contains("top-level additive term"), "got: {msg}");
+    }
+
+    /// The control for it: the same source contributed *directly* as a top-level term still
+    /// builds. Without this, refusing every `white_noise` would pass the test above.
+    #[test]
+    fn a_top_level_noise_source_still_builds() {
+        build_msg(
+            "module nz(p, n);
+             electrical p, n;
+             parameter real g = 1e-3;
+             analog begin
+               I(p, n) <+ g * V(p, n) + white_noise(4.0e-21 * g, \"thermal\");
+             end
+             endmodule
+",
+        )
+        .expect("a top-level noise source is the supported spelling");
+    }
+
+    /// Same hole, `ac_stim` family: its value is zero in every analysis and only the split-out
+    /// excitation channel carries it, so a nested one contributes nothing.
+    #[test]
+    fn an_ac_stim_reaching_a_contribution_through_a_variable_is_refused() {
+        let msg = build_msg(
+            "module stim(p, n);
+             electrical p, n;
+             real s;
+             analog begin
+               s = ac_stim(\"ac\", 1.0, 0.0);
+               I(p, n) <+ 1e-3 * V(p, n) + 2.0 * s;
+             end
+             endmodule
+",
+        )
+        .expect_err("a scaled ac_stim must be refused");
+        assert!(msg.contains("top-level additive term"), "got: {msg}");
+    }
+
+    /// Same hole, `ddt` family: a charge term whose argument itself depends on a time derivative
+    /// is a *second* derivative, which this project's single charge channel cannot express. The
+    /// direct spelling was rejected; through a variable it built and then hit a `debug_assert`
+    /// mid-solve, or in release silently dropped the sensitivity.
+    ///
+    /// The variable must hold a shape `charge_term_shape` *rejects* — here the coefficient is a
+    /// node voltage, so it is not parameter-only — otherwise the assignment is folded into the
+    /// charge channel and never becomes an ordinary read at all.
+    #[test]
+    fn a_second_derivative_reaching_the_charge_channel_through_a_variable_is_refused() {
+        let msg = build_msg(
+            "module sd(p, n);
+             electrical p, n;
+             parameter real c0 = 1e-6;
+             real x;
+             analog begin
+               x = V(p, n) * ddt(c0 * V(p, n));
+               I(p, n) <+ ddt(c0 * x);
+               I(p, n) <+ V(p, n) * 1e-3;
+             end
+             endmodule
+",
+        )
+        .expect_err("a second time derivative must be refused");
+        assert!(msg.contains("second time derivative"), "got: {msg}");
+    }
+
+    /// The control for the taint itself: a variable that never touches an analog operator must
+    /// not be tainted, so ordinary variable-carried arithmetic keeps working. Without this, a
+    /// taint set that marked everything would pass all three tests above.
+    #[test]
+    fn an_ordinary_variable_is_not_tainted() {
+        build_msg(
+            "module plain(p, n);
+             electrical p, n;
+             parameter real g = 1e-3;
+             real y;
+             analog begin
+               y = 2.0 * g;
+               I(p, n) <+ y * V(p, n) + white_noise(4.0e-21 * g, \"thermal\");
+             end
+             endmodule
+",
+        )
+        .expect("an operator-free variable must stay untainted");
+    }
+
     /// `hicumL0_v2p1p0.va`'s self-heating idiom: a `ddt` assigned to a local variable inside
     /// one arm of an `if`, then contributed by a **later, separate** statement.
     ///

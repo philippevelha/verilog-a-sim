@@ -394,7 +394,7 @@ impl GeneratedModel {
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
         let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], true);
-        Self::validate_stmts(&ctx, &self.lowered.stmts)?;
+        Self::validate_stmts(&ctx, &self.lowered.taint, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
         // statement walk above (the call site that *reads* the accumulator's value never
@@ -406,7 +406,11 @@ impl GeneratedModel {
         Ok(())
     }
 
-    fn validate_stmts(ctx: &Ctx, stmts: &[LoweredStmt]) -> Result<(), CodegenError> {
+    fn validate_stmts(
+        ctx: &Ctx,
+        taint: &lower::Taint,
+        stmts: &[LoweredStmt],
+    ) -> Result<(), CodegenError> {
         for stmt in stmts {
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => {
@@ -421,7 +425,7 @@ impl GeneratedModel {
                         // declaring a noise source that silently contributes nothing. Reject it
                         // here instead (§ `lower::noise_term_shape`'s own doc comment on why
                         // scaled/nested shapes aren't guessed at).
-                        if lower::contains_noise_call(ctx.module, term.expr) {
+                        if lower::contains_noise_call(ctx.module, term.expr, &taint.noise) {
                             return Err(CodegenError::Unsupported(
                                 "white_noise/flicker_noise must be a top-level additive term of \
                                  a contribution (a scaled or nested noise call would be silently \
@@ -443,7 +447,7 @@ impl GeneratedModel {
                                     .to_string(),
                             ));
                         }
-                        if lower::contains_ac_stim_call(ctx.module, term.expr) {
+                        if lower::contains_ac_stim_call(ctx.module, term.expr, &taint.ac_stim) {
                             return Err(CodegenError::Unsupported(
                                 "ac_stim must be a top-level additive term of a contribution (a \
                                  scaled or nested ac_stim would be silently dropped, since its \
@@ -464,7 +468,7 @@ impl GeneratedModel {
                         // The charge channel is single: a `ddt` whose argument itself depends on
                         // a time derivative is a second derivative and has nowhere to go.
                         eval(ctx, term.expr)?;
-                        if lower::contains_ddt_call(ctx.module, term.expr) {
+                        if lower::contains_ddt_call(ctx.module, term.expr, &taint.ddt) {
                             return Err(CodegenError::Unsupported(
                                 "ddt of a ddt is a second time derivative, which this project's single 
                                  charge channel cannot express"
@@ -521,8 +525,8 @@ impl GeneratedModel {
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, then_)?;
-                    Self::validate_stmts(ctx, else_)?;
+                    Self::validate_stmts(ctx, taint, then_)?;
+                    Self::validate_stmts(ctx, taint, else_)?;
                 }
                 LoweredStmt::Case {
                     selector,
@@ -534,9 +538,9 @@ impl GeneratedModel {
                         for &label in &arm.labels {
                             eval(ctx, label)?;
                         }
-                        Self::validate_stmts(ctx, &arm.body)?;
+                        Self::validate_stmts(ctx, taint, &arm.body)?;
                     }
-                    Self::validate_stmts(ctx, default)?;
+                    Self::validate_stmts(ctx, taint, default)?;
                 }
                 // Loops never actually iterate here (see `lower`'s module doc comment): running
                 // the body once already covers every statement a real iteration could execute,
@@ -544,7 +548,7 @@ impl GeneratedModel {
                 // `while` condition during eager validation.
                 LoweredStmt::While { cond, body } => {
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, body)?;
+                    Self::validate_stmts(ctx, taint, body)?;
                 }
                 LoweredStmt::For {
                     init,
@@ -552,14 +556,14 @@ impl GeneratedModel {
                     step,
                     body,
                 } => {
-                    Self::validate_stmts(ctx, init)?;
+                    Self::validate_stmts(ctx, taint, init)?;
                     eval(ctx, *cond)?;
-                    Self::validate_stmts(ctx, body)?;
-                    Self::validate_stmts(ctx, step)?;
+                    Self::validate_stmts(ctx, taint, body)?;
+                    Self::validate_stmts(ctx, taint, step)?;
                 }
                 LoweredStmt::Repeat { count, body } => {
                     eval(ctx, *count)?;
-                    Self::validate_stmts(ctx, body)?;
+                    Self::validate_stmts(ctx, taint, body)?;
                 }
             }
         }

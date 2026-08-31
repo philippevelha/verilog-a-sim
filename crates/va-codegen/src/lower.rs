@@ -644,6 +644,9 @@ pub struct Lowered {
     pub n_unknowns: usize,
     /// Statements in source order (assignments and contributions only — see Limitations).
     pub stmts: Vec<LoweredStmt>,
+    /// Which local variables can carry an analog operator's value, so the `contains_*_call`
+    /// scans in `crate::GeneratedModel::validate` can see past an `Expr::Var` — see [`Taint`].
+    pub(crate) taint: Taint,
     /// One entry per branch that receives a potential contribution anywhere in the module, in
     /// ascending [`BranchId`] order (the deterministic order their local terminal slots are
     /// allocated in, past `module.nodes.len()`).
@@ -928,6 +931,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
 
     Ok(Lowered {
         n_unknowns: next_slot,
+        taint: Taint::of(module, &module.analog),
         stmts,
         branch_currents,
         idt_accumulators,
@@ -1746,16 +1750,110 @@ fn ac_stim_term_shape(
     }
 }
 
+/// Which local variables can carry the value of an analog operator, through however many
+/// assignments — the fixed point that makes the `contains_*_call` scans below see past an
+/// `Expr::Var`.
+///
+/// # Why this exists
+///
+/// Those scans establish *silent-drop* safety properties: a `white_noise` buried where
+/// [`noise_term_shape`] cannot pull it out contributes exactly nothing, so it is refused rather
+/// than dropped. Being purely syntactic, they had no `Expr::Var` arm, and so were defeated by
+/// one assignment:
+///
+/// ```verilog
+/// real nz;
+/// nz = white_noise(4.0*`P_K*$temperature*g, "thermal");
+/// I(p,n) <+ g*V(p,n) + 2.0*nz;      // built clean; the source contributed **zero**
+/// ```
+///
+/// `2.0*white_noise(...)` written directly is refused. Written through `nz` it built, and the
+/// noise vanished with no diagnostic — measured on a divider as 4.14e-18 V²/Hz against a true
+/// 8.28e-18, with the per-device breakdown reporting one contributor instead of two.
+///
+/// # Why a fixed point and not an evaluation
+///
+/// [`crate::ad::Dual::carries_charge`] answers "does this value carry a time derivative" exactly,
+/// but only *at a point*, and `validate` runs at the all-zero operating point where a coefficient
+/// — and with it the whole product — is routinely zero: `x = V(p,n)*ddt(c0*V(p,n))` has
+/// `grad_ddt = 0` there, so a numeric check would pass the very module that then panics. This is
+/// structural instead, and therefore point-independent.
+///
+/// Deliberately **over-approximating**, in the safe direction and in the same
+/// non-path-sensitive style as [`param_only_vars`]: a variable is tainted if *any* assignment to
+/// it anywhere carries the operator, so `x = ddt(q); x = 0.0; I <+ ddt(x);` is refused too.
+/// Refusing a shape nothing in the corpus writes costs nothing; missing one costs physics.
+///
+/// **Known limit:** taint does not flow through an `analog function`'s body — a function that
+/// computes a `ddt` internally and returns it still defeats the scans. No corpus file does this
+/// (0 of 158 files contain a `ddt` inside a function body), so it is recorded rather than fixed.
+#[derive(Debug, Default)]
+pub(crate) struct Taint {
+    /// Variables that can hold a `ddt` result.
+    pub ddt: HashSet<u32>,
+    /// Variables that can hold a `white_noise`/`flicker_noise`/`noise_table*` result.
+    pub noise: HashSet<u32>,
+    /// Variables that can hold an `ac_stim` result.
+    pub ac_stim: HashSet<u32>,
+}
+
+impl Taint {
+    /// Compute all three fixed points over `stmts`.
+    fn of(module: &Module, stmts: &[Stmt]) -> Self {
+        let mut assigns = Vec::new();
+        collect_assigns(stmts, &mut assigns);
+        Taint {
+            ddt: taint_fixpoint(module, &assigns, &|m, e, t| contains_ddt_call(m, e, t)),
+            noise: taint_fixpoint(module, &assigns, &|m, e, t| contains_noise_call(m, e, t)),
+            ac_stim: taint_fixpoint(module, &assigns, &|m, e, t| contains_ac_stim_call(m, e, t)),
+        }
+    }
+}
+
+/// One taint fixed point: grow the set until no further assignment's RHS is found to carry the
+/// operator. Mirrors [`param_only_vars`]'s loop, with the membership test inverted (that one
+/// grows a set of *safe* variables, this one a set of *carrying* ones).
+fn taint_fixpoint(
+    module: &Module,
+    assigns: &[(u32, ExprId)],
+    contains: &dyn Fn(&Module, ExprId, &HashSet<u32>) -> bool,
+) -> HashSet<u32> {
+    let mut tainted: HashSet<u32> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for &(var, rhs) in assigns {
+            if tainted.contains(&var) {
+                continue;
+            }
+            if contains(module, rhs, &tainted) {
+                tainted.insert(var);
+                changed = true;
+            }
+        }
+        if !changed {
+            return tainted;
+        }
+    }
+}
+
 /// Whether `expr` contains an `ac_stim` call anywhere in its tree — used to reject a stimulus
 /// buried where [`ac_stim_term_shape`] cannot pull it out, rather than silently contributing
 /// nothing. The exact counterpart of [`contains_noise_call`].
-pub(crate) fn contains_ac_stim_call(module: &Module, expr: ExprId) -> bool {
+pub(crate) fn contains_ac_stim_call(module: &Module, expr: ExprId, tainted: &HashSet<u32>) -> bool {
     match module.expr(expr) {
         Expr::Call(Builtin::AcStim, _) => true,
-        Expr::Call(_, args) => args.iter().any(|&a| contains_ac_stim_call(module, a)),
-        Expr::Unary(_, e) => contains_ac_stim_call(module, *e),
+        Expr::Var(id) => tainted.contains(&id.0),
+        Expr::Call(_, args) | Expr::CallUser(_, args) => args
+            .iter()
+            .any(|&a| contains_ac_stim_call(module, a, tainted)),
+        Expr::Unary(_, e) | Expr::Ddx(e, _) => contains_ac_stim_call(module, *e, tainted),
         Expr::Binary(_, l, r) => {
-            contains_ac_stim_call(module, *l) || contains_ac_stim_call(module, *r)
+            contains_ac_stim_call(module, *l, tainted) || contains_ac_stim_call(module, *r, tainted)
+        }
+        Expr::Select(c, t, f) => {
+            contains_ac_stim_call(module, *c, tainted)
+                || contains_ac_stim_call(module, *t, tainted)
+                || contains_ac_stim_call(module, *f, tainted)
         }
         _ => false,
     }
@@ -1768,18 +1866,21 @@ pub(crate) fn contains_ac_stim_call(module: &Module, expr: ExprId) -> bool {
 /// `ddt` that is very much present (`c(x)*ddt(q)` at `x = 0`). The eager validation in
 /// `crate::GeneratedModel::validate` must not depend on the probe point, so it asks this
 /// instead — the same shape as [`contains_noise_call`] and [`contains_ac_stim_call`].
-pub(crate) fn contains_ddt_call(module: &Module, expr: ExprId) -> bool {
+pub(crate) fn contains_ddt_call(module: &Module, expr: ExprId, tainted: &HashSet<u32>) -> bool {
     match module.expr(expr) {
         Expr::Call(Builtin::Ddt, _) => true,
+        Expr::Var(id) => tainted.contains(&id.0),
         Expr::Call(_, args) | Expr::CallUser(_, args) => {
-            args.iter().any(|&a| contains_ddt_call(module, a))
+            args.iter().any(|&a| contains_ddt_call(module, a, tainted))
         }
-        Expr::Unary(_, e) | Expr::Ddx(e, _) => contains_ddt_call(module, *e),
-        Expr::Binary(_, l, r) => contains_ddt_call(module, *l) || contains_ddt_call(module, *r),
+        Expr::Unary(_, e) | Expr::Ddx(e, _) => contains_ddt_call(module, *e, tainted),
+        Expr::Binary(_, l, r) => {
+            contains_ddt_call(module, *l, tainted) || contains_ddt_call(module, *r, tainted)
+        }
         Expr::Select(c, t, f) => {
-            contains_ddt_call(module, *c)
-                || contains_ddt_call(module, *t)
-                || contains_ddt_call(module, *f)
+            contains_ddt_call(module, *c, tainted)
+                || contains_ddt_call(module, *t, tainted)
+                || contains_ddt_call(module, *f, tainted)
         }
         _ => false,
     }
@@ -1788,7 +1889,7 @@ pub(crate) fn contains_ddt_call(module: &Module, expr: ExprId) -> bool {
 /// Whether `expr` contains a noise call anywhere in its tree — used to reject a noise source
 /// buried where [`noise_term_shape`] cannot pull it out (e.g. `2*white_noise(p)` or
 /// `sin(white_noise(p))`), rather than silently contributing nothing.
-pub(crate) fn contains_noise_call(module: &Module, expr: ExprId) -> bool {
+pub(crate) fn contains_noise_call(module: &Module, expr: ExprId, tainted: &HashSet<u32>) -> bool {
     match module.expr(expr) {
         Expr::Call(
             Builtin::WhiteNoise
@@ -1797,9 +1898,19 @@ pub(crate) fn contains_noise_call(module: &Module, expr: ExprId) -> bool {
             | Builtin::NoiseTableLog,
             _,
         ) => true,
-        Expr::Call(_, args) => args.iter().any(|&a| contains_noise_call(module, a)),
-        Expr::Unary(_, e) => contains_noise_call(module, *e),
-        Expr::Binary(_, l, r) => contains_noise_call(module, *l) || contains_noise_call(module, *r),
+        Expr::Var(id) => tainted.contains(&id.0),
+        Expr::Call(_, args) | Expr::CallUser(_, args) => args
+            .iter()
+            .any(|&a| contains_noise_call(module, a, tainted)),
+        Expr::Unary(_, e) | Expr::Ddx(e, _) => contains_noise_call(module, *e, tainted),
+        Expr::Binary(_, l, r) => {
+            contains_noise_call(module, *l, tainted) || contains_noise_call(module, *r, tainted)
+        }
+        Expr::Select(c, t, f) => {
+            contains_noise_call(module, *c, tainted)
+                || contains_noise_call(module, *t, tainted)
+                || contains_noise_call(module, *f, tainted)
+        }
         _ => false,
     }
 }
