@@ -31,7 +31,9 @@ pub mod plot;
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
-use va_abi::reference::{diode::VT_NOMINAL, Bjt, Capacitor, Diode, Inductor, Resistor, VSource};
+use va_abi::reference::{
+    diode::VT_NOMINAL, Bjt, Capacitor, Diode, Inductor, Resistor, VSource, Vccs, Vcvs,
+};
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
@@ -154,7 +156,8 @@ pub fn run_sim(
         }
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
-        report_sweep(&net, sweep, &points);
+        let currents = branch_currents(&net, &compiled)?;
+        report_sweep(&net, &currents, sweep, &points);
         if let Some(path) = plot {
             plot::plot_sweep(path, &net, sweep, &points)
                 .with_context(|| format!("plotting to {path}"))?;
@@ -162,7 +165,8 @@ pub fn run_sim(
         }
     } else {
         let op = solve_dc(&net, &compiled)?;
-        report(&net, &op.x);
+        let currents = branch_currents(&net, &compiled)?;
+        report(&net, &currents, &op.x);
     }
     Ok(())
 }
@@ -1155,6 +1159,37 @@ fn build_instance(
         return Ok((inst, Some(branch)));
     }
 
+    if dev.model == "vccs" {
+        // No extra unknown: a `G`'s output current is a function of node voltages the solver
+        // already carries, so it stamps like a resistor that happens to read a different node
+        // pair from the one it drives.
+        let (p, n, cp, cn) = (
+            dev.terminals[0],
+            dev.terminals[1],
+            dev.terminals[2],
+            dev.terminals[3],
+        );
+        let inst: Box<dyn ModelInstance> =
+            Box::new(Vccs::new(p, n, cp, cn, dev.value.unwrap_or(0.0)));
+        return Ok((inst, None));
+    }
+
+    if dev.model == "vcvs" {
+        // Like an independent source, an `E` states a constraint rather than contributing a
+        // current, so it claims its own branch row.
+        let (p, n, cp, cn) = (
+            dev.terminals[0],
+            dev.terminals[1],
+            dev.terminals[2],
+            dev.terminals[3],
+        );
+        let branch = *next_unknown;
+        *next_unknown += 1;
+        let inst: Box<dyn ModelInstance> =
+            Box::new(Vcvs::new(p, n, cp, cn, branch, dev.value.unwrap_or(0.0)));
+        return Ok((inst, Some(branch)));
+    }
+
     if dev.model == "inductor" {
         // Like a voltage source, an inductor carries its own branch-current unknown: its row
         // is the constitutive law `-(V(p)-V(n)) + d(L*i)/dt = 0`, not a KCL sum. Claiming the
@@ -1283,17 +1318,22 @@ fn reference_instance(dev: &Device) -> Result<Box<dyn ModelInstance>> {
     Ok(inst)
 }
 
-/// Print the DC operating point: node voltages, then source branch currents.
-fn report(net: &Netlist, x: &[f64]) {
+/// Print the DC operating point: node voltages, then every branch current.
+///
+/// `currents` is [`branch_currents`]' own `(name, global index)` map, the same authority
+/// [`report_ac`] uses. It is passed in rather than re-derived here because re-deriving it means
+/// assuming *which* devices claim branch rows and in what order — an assumption that was true
+/// when only `vsource` did, and became silently wrong once inductors and controlled sources
+/// claimed them too. A deck declaring an inductor before its source then printed the
+/// inductor's current under the source's name.
+fn report(net: &Netlist, currents: &[(String, usize)], x: &[f64]) {
     println!("DC operating point:");
     for (i, name) in net.node_order.iter().enumerate() {
         println!("  V({name}) = {:.6} V", x[i]);
     }
-    let mut branch = net.node_order.len();
-    for dev in &net.devices {
-        if dev.model == "vsource" {
-            println!("  I({}) = {:.6e} A", dev.name, x[branch]);
-            branch += 1;
+    for (name, idx) in currents {
+        if let Some(v) = x.get(*idx) {
+            println!("  I({name}) = {v:.6e} A");
         }
     }
 }
@@ -1302,6 +1342,7 @@ fn report(net: &Netlist, x: &[f64]) {
 /// the same per-point content [`report`] prints for a single operating point, repeated.
 fn report_sweep(
     net: &Netlist,
+    currents: &[(String, usize)],
     sweep: &va_netlist::DcSweep,
     points: &[(f64, va_core::dc::OperatingPoint)],
 ) {
@@ -1318,11 +1359,9 @@ fn report_sweep(
         for (i, name) in net.node_order.iter().enumerate() {
             print!(" V({name})={:.6}V", op.x[i]);
         }
-        let mut branch = net.node_order.len();
-        for dev in &net.devices {
-            if dev.model == "vsource" {
-                print!(" I({})={:.6e}A", dev.name, op.x[branch]);
-                branch += 1;
+        for (name, idx) in currents {
+            if let Some(v) = op.x.get(*idx) {
+                print!(" I({name})={v:.6e}A");
             }
         }
         println!();
@@ -2286,6 +2325,67 @@ mod tests {
                 -expected_id
             );
         }
+    }
+
+    /// Controlled sources, against values computable by hand rather than against golden:
+    /// a 3 V source across a 2k/1k divider gives V(mid) = 1 V, an E with gain 4 holds
+    /// V(eout) = 4 V, and a G pushing 2 mA through 500 ohms gives V(gout) = -1 V.
+    #[test]
+    fn controlled_sources_amplify_by_their_stated_gain() {
+        let deck = include_str!("../../../circuits/vcvs_amp.net");
+        let net = va_netlist::parser::parse(deck).expect("parse vcvs_amp");
+        let op = solve_dc(&net, &[]).expect("solves");
+        let at = |name: &str| {
+            let i = net
+                .node_order
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("node `{name}`"));
+            op.x[i]
+        };
+        assert!((at("mid") - 1.0).abs() < 1e-9, "V(mid) = {}", at("mid"));
+        assert!((at("eout") - 4.0).abs() < 1e-9, "V(eout) = {}", at("eout"));
+        assert!((at("gout") + 1.0).abs() < 1e-9, "V(gout) = {}", at("gout"));
+    }
+
+    /// Branch-current identity must come from `branch_currents`, not from assuming which
+    /// devices claim branch rows and in what order. That assumption held while only `vsource`
+    /// claimed one; inductors and controlled sources claim them too, so a deck declaring an
+    /// inductor *before* its source used to print the inductor's current under the source's
+    /// name -- a confidently mislabelled number rather than a missing one.
+    #[test]
+    fn branch_currents_are_identified_by_name_not_by_device_order() {
+        let deck = "L1 in out 1e-3
+V1 in gnd DC 2
+R1 out gnd 1000
+.op
+.end
+";
+        let net = va_netlist::parser::parse(deck).expect("parses");
+        let currents = branch_currents(&net, &[]).expect("resolves");
+        let op = solve_dc(&net, &[]).expect("solves");
+
+        let idx = |name: &str| {
+            currents
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no branch current for `{name}`"))
+                .1
+        };
+        // The source sees -2 mA by its own sign convention; the inductor carries +2 mA. If the
+        // two were transposed, both assertions would still be about real numbers in the
+        // solution vector -- which is exactly why the bug was invisible without checking signs.
+        assert!(
+            (op.x[idx("V1")] + 2e-3).abs() < 1e-9,
+            "I(V1) = {}",
+            op.x[idx("V1")]
+        );
+        assert!(
+            (op.x[idx("L1")] - 2e-3).abs() < 1e-9,
+            "I(L1) = {}",
+            op.x[idx("L1")]
+        );
+        assert_ne!(idx("V1"), idx("L1"), "each element owns a distinct row");
     }
 
     /// Per-instance parameter overrides reach the compiled model, and are checked against a

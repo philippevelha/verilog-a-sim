@@ -1566,6 +1566,29 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: linear controlled sources (`E`, `G`), and a mislabelled current they
+> exposed.** `va_abi::reference::{Vcvs, Vccs}` plus the netlist's `E`/`G` lines, each taking
+> four nodes — the driven pair then the controlling pair. Both are expressible through
+> Interface β unchanged: a `G` needs no extra unknown at all (its output current is a function
+> of node voltages the solver already carries, so it stamps like a resistor reading a different
+> pair than it drives), and an `E` claims a branch row exactly as an independent source does,
+> differing only in that two entries of its constraint row are Jacobian terms rather than a
+> constant. SPICE's current-controlled `F`/`H` are deliberately absent: their controlling
+> quantity is another element's branch current, which is a resolution problem rather than a
+> stamping one.
+>
+> `circuits/vcvs_amp.net` gates both at `error=8.496e-11`, the tightest in the suite, with every
+> value hand-computable; `validate` is **23/23**.
+>
+> **The real find was a bug they made visible.** `va-cli`'s DC and sweep reports re-derived
+> branch-current identity by assuming only `vsource` devices claim branch rows, and walking
+> them in device order. That was true when it was written. Inductors (added earlier today) and
+> now controlled sources claim branch rows too, so a deck declaring an inductor *before* its
+> source printed the inductor's current under the source's name — a confidently mislabelled
+> number, not a missing one, and invisible unless you checked the sign. Both reports now take
+> `branch_currents`' own `(name, index)` map, which is what `report_ac` already did. The golden
+> files were never affected — they were built from that same map — so no gate moved.
+>
 > **2026-08-31: a device line can set a model's parameters by name.** Before this, a netlist
 > device could override exactly one of its model's parameters — the *first* one, positionally,
 > through the SPICE scalar value. For a Verilog-A simulator that is a real limitation (models

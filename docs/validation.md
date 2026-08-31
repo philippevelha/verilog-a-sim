@@ -59,11 +59,11 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all twenty-two — are real, QSPICE-generated data (`cargo xtask
-gen-golden`): `{divider, mos_dc, diode_iv, diode_iv_params, diode_clamp, rc_step, rc_discharge,
-rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin, rc_ac_oct, diode_ac,
-laplace_ac, diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table,
-resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+`golden/*.golden` — all twenty-three — are real, QSPICE-generated data (`cargo xtask
+gen-golden`): `{divider, vcvs_amp, mos_dc, diode_iv, diode_iv_params, diode_clamp, rc_step,
+rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin,
+rc_ac_oct, diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker,
+resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -104,6 +104,15 @@ quantity is the one compared. Like `rc_discharge.net` it has no source, so ignor
 condition leaves the whole run flat at zero rather than slightly wrong. Passes at
 `error=2.172e-8` (tol `1e-3`), the tightest agreement of any transient gate — unsurprising for a
 single-pole linear decay with no nonlinearity for either engine to disagree about.
+
+**Added 2026-08-31: `circuits/vcvs_amp.net`, the controlled sources.** SPICE's `E`
+(voltage-controlled voltage source) and `G` (voltage-controlled current source) both appear in
+one deck, with every value computable by hand: a 3 V source across a 2k/1k divider gives
+`V(mid) = 1 V`, the `E` at gain 4 holds `V(eout) = 4 V`, and the `G` pushing 2 mA through 500
+ohms gives `V(gout) = -1 V`. QSPICE agrees on all six columns including `I(E1)`, which also
+confirms both engines use the same sign convention for a controlled source's own current.
+Passes at `error=8.496e-11`, the tightest gate in the suite — expected for a purely linear
+circuit where neither engine has anything to be approximate about.
 
 **Added 2026-08-31: `circuits/rc_ac_oct.net`, the octave sweep.** `oct`'s count is a density
 like `dec`'s but per factor of 2, so a wrong base silently produces a different grid rather

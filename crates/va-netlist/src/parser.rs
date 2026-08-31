@@ -8,6 +8,8 @@
 //! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
 //! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
 //! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
+//! `E` (voltage-controlled voltage source) and `G` (voltage-controlled current source) take
+//! four nodes — the driven pair then the controlling pair — and a gain/transconductance.
 //! is the reference node; every other net gets a dense unknown index in first-seen order.
 //!
 //! A `C` or `L` line may carry SPICE's per-element initial condition, `` IC=<value> ``
@@ -356,6 +358,31 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform: None,
                 ac: None,
                 ic,
+                params: Vec::new(),
+            })
+        }
+        // `E<name> p n cp cn <gain>` / `G<name> p n cp cn <gm>` — linear
+        // voltage-controlled sources. Four terminals: the driven pair, then the controlling
+        // pair. SPICE's current-controlled `F`/`H` are not parsed: their controlling quantity
+        // is another element's branch current, which needs that element named and resolved,
+        // a different problem from reading a node pair.
+        'E' | 'G' => {
+            need(6)?;
+            let p = intern(net, toks[1]);
+            let n = intern(net, toks[2]);
+            let cp = intern(net, toks[3]);
+            let cn = intern(net, toks[4]);
+            let value =
+                parse_value(toks[5]).ok_or_else(|| err(format!("bad value `{}`", toks[5])))?;
+            let model = if kind == 'E' { "vcvs" } else { "vccs" };
+            Ok(Device {
+                name,
+                model: model.to_string(),
+                terminals: vec![p, n, cp, cn],
+                value: Some(value),
+                waveform: None,
+                ac: None,
+                ic: None,
                 params: Vec::new(),
             })
         }
@@ -801,6 +828,21 @@ C1 out gnd 1e-6 IC=5
             net.devices[0].waveform,
             Some(Waveform::Pulse { .. })
         ));
+    }
+
+    /// `E`/`G` take four nodes -- the driven pair then the controlling pair -- and a gain.
+    #[test]
+    fn controlled_sources_take_two_node_pairs() {
+        let net = parse("E1 o gnd c gnd 4\nG1 p gnd c gnd 2e-3\n.op\n.end\n").expect("parses");
+        assert_eq!(net.devices[0].model, "vcvs");
+        assert_eq!(net.devices[0].value, Some(4.0));
+        assert_eq!(net.devices[0].terminals.len(), 4);
+        assert_eq!(net.devices[1].model, "vccs");
+        assert_eq!(net.devices[1].value, Some(2e-3));
+        assert_eq!(net.devices[1].terminals.len(), 4);
+
+        // Too few nodes is an error, not a silently three-terminal source.
+        assert!(parse("E1 o gnd c 4\n.end\n").is_err());
     }
 
     #[test]

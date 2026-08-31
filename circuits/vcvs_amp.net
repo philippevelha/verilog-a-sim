@@ -1,0 +1,15 @@
+* Controlled sources: an E (voltage-controlled voltage source) amplifying a divider, and a
+* G (voltage-controlled current source) driving a load from the same controlling pair.
+* V1 --[R1]-- mid --[R2]-- gnd sets V(mid) = 1 V from a 3 V source (R2/(R1+R2) = 1/3).
+* E1 holds V(eout) = 4 * V(mid) = 4 V, loaded by R3 so its branch current is observable.
+* G1 pushes 2e-3 * V(mid) = 2 mA through R4, so V(gout) = -2mA * 500 = -1 V (the current
+* flows out of the first node, i.e. into the resistor from gnd's side).
+V1  in   gnd  DC 3
+R1  in   mid  2000
+R2  mid  gnd  1000
+E1  eout gnd  mid gnd  4
+R3  eout gnd  10000
+G1  gout gnd  mid gnd  2e-3
+R4  gout gnd  500
+.op
+.end
