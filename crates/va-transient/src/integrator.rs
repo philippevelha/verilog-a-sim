@@ -340,13 +340,54 @@ fn lte_error_ratio(x_primary: &[f64], x_reference: &[f64], reltol: f64, abstol: 
         })
 }
 
-/// Shrink the step when a candidate is rejected, floor at `min_h`; grow it after a
-/// comfortably-within-tolerance accept, capped at `max_h`. Not a rigorous order-based
-/// power-law controller (see this module's doc comment) — fixed multiplicative factors, tuned
-/// to be conservative on shrink (halve) and modest on growth (50% per accepted step).
-const GROWTH_FACTOR: f64 = 1.5;
-const GROWTH_ERR_THRESHOLD: f64 = 0.5;
-const SHRINK_FACTOR: f64 = 0.5;
+/// Step-controller bounds. The factor itself comes from [`step_factor`]'s power law; these only
+/// keep it sane when the error estimate is extreme.
+///
+/// `SAFETY` biases every prediction low, so a step aimed exactly at the tolerance does not
+/// land just outside it and get rejected. The growth cap stops one very accurate step from
+/// launching the next one far past the region where the local-error model still holds; the
+/// shrink floor stops one bad estimate from collapsing the step to nothing.
+const SAFETY: f64 = 0.9;
+const MAX_GROWTH: f64 = 2.0;
+const MIN_SHRINK: f64 = 0.1;
+/// A rejected step must actually get smaller, or the controller can retry the same step
+/// forever: a ratio barely above 1.0 predicts a factor barely below it. Capping the retry
+/// factor guarantees progress toward either an accept or [`TransientError::TimestepUnderflow`].
+const MAX_RETRY_FACTOR: f64 = 0.9;
+
+/// The integration order of `method` — the `p` in a local error of `O(h^(p+1))`.
+fn method_order(method: Method) -> f64 {
+    match method {
+        Method::BackwardEuler => 1.0,
+        Method::Trapezoidal => 2.0,
+        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+    }
+}
+
+/// The classic order-based step prediction: with a local error of `O(h^(p+1))` and a measured
+/// `err_ratio` (error as a multiple of the budget), the step that would have landed exactly on
+/// the budget is `h * err_ratio^(-1/(p+1))`, biased by [`SAFETY`].
+///
+/// `accepted` selects which side of 1.0 the result is clamped to. An accepted step never
+/// shrinks the controller's `h` here — the step already met tolerance, and shrinking on success
+/// would fight the growth this function exists to provide; a rejected one always shrinks, by
+/// at least `1 - MAX_RETRY_FACTOR`, so progress is guaranteed.
+///
+/// A zero or non-finite ratio (an exactly-linear stretch, where the estimator honestly reports
+/// no local error at all) yields the maximum growth rather than a division by zero.
+fn step_factor(err_ratio: f64, method: Method, accepted: bool) -> f64 {
+    let exponent = 1.0 / (method_order(method) + 1.0);
+    let raw = if err_ratio <= 0.0 || !err_ratio.is_finite() {
+        MAX_GROWTH
+    } else {
+        SAFETY * err_ratio.powf(-exponent)
+    };
+    if accepted {
+        raw.clamp(1.0, MAX_GROWTH)
+    } else {
+        raw.clamp(MIN_SHRINK, MAX_RETRY_FACTOR)
+    }
+}
 
 /// Assemble every instance's stamps at `x`, at absolute time `t`, into a fresh dense sink.
 ///
@@ -725,13 +766,11 @@ pub fn run_with_events(
                     }
                 }
 
-                if err_ratio < GROWTH_ERR_THRESHOLD {
-                    h = (h * GROWTH_FACTOR).min(cfg.tstep);
-                }
+                h = (h * step_factor(err_ratio, step_method, true)).min(cfg.tstep);
                 break;
             }
 
-            let shrunk = h * SHRINK_FACTOR;
+            let shrunk = h * step_factor(err_ratio, step_method, false);
             if shrunk < cfg.tstep_min {
                 return Err(TransientError::TimestepUnderflow { t });
             }
@@ -749,6 +788,48 @@ mod tests {
 
     /// R (1 kΩ) from an ideal `vs_val` V source (node 0) to node 1; C (1 µF) from node 1 to
     /// ground. `RC = 1 ms`.
+    /// The step prediction is the textbook one, so it is checkable in closed form rather than
+    /// by eyeballing behaviour: a step whose error came in at `2^(p+1)` times the budget must
+    /// be halved (times the safety bias) to land on it.
+    #[test]
+    fn the_step_factor_predicts_the_step_that_lands_on_the_budget() {
+        // Trapezoidal, p+1 = 3: a ratio of 8 wants half the step.
+        let f = step_factor(8.0, Method::Trapezoidal, false);
+        assert!((f - SAFETY * 0.5).abs() < 1e-12, "expected ~0.45, got {f}");
+        // Backward Euler, p+1 = 2: the same ratio of 8 wants a smaller step than trapezoidal
+        // does, because its error falls off more slowly with h.
+        let be = step_factor(8.0, Method::BackwardEuler, false);
+        assert!(be < f, "backward Euler should shrink harder: {be} vs {f}");
+        assert!((be - SAFETY / 8.0_f64.sqrt()).abs() < 1e-12, "got {be}");
+        // An accurate step grows, by the predicted amount up to the cap.
+        let grow = step_factor(1.0 / 8.0, Method::Trapezoidal, true);
+        assert!(
+            (grow - SAFETY * 2.0).abs() < 1e-12,
+            "expected ~1.8, got {grow}"
+        );
+    }
+
+    /// The two clamps that keep the controller from misbehaving on an extreme estimate, and
+    /// the one that guarantees a rejected step actually makes progress.
+    #[test]
+    fn the_step_factor_is_bounded_on_both_sides() {
+        // A rejected step always shrinks — even when the ratio is barely over 1.0, where the
+        // raw power law would predict a factor of ~0.997 and could retry near-forever.
+        let marginal = step_factor(1.0001, Method::Trapezoidal, false);
+        assert!(
+            marginal <= MAX_RETRY_FACTOR,
+            "a rejected step must shrink: {marginal}"
+        );
+        // A catastrophic ratio cannot collapse the step past the floor.
+        assert!(step_factor(1e30, Method::Trapezoidal, false) >= MIN_SHRINK);
+        // An accepted step never shrinks, however marginal.
+        assert!(step_factor(0.999, Method::Trapezoidal, true) >= 1.0);
+        // Nor grows past the cap, however accurate — including the degenerate zero-error case
+        // (an exactly linear stretch), which must not divide by zero.
+        assert!(step_factor(1e-30, Method::Trapezoidal, true) <= MAX_GROWTH);
+        assert_eq!(step_factor(0.0, Method::Trapezoidal, true), MAX_GROWTH);
+    }
+
     /// A divided difference of order `k` over an exact degree-`k` polynomial is exactly that
     /// polynomial's leading coefficient, and of order `k` over a lower-degree one is exactly
     /// zero. Both directions matter: the first says the estimator sees curvature that is

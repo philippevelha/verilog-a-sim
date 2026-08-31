@@ -139,9 +139,12 @@ day.
 
 ## Limitations
 
-`GROWTH_FACTOR`/`GROWTH_ERR_THRESHOLD`/`SHRINK_FACTOR` are fixed constants, not exposed as
-`TranConfig` knobs — a circuit that would benefit from a different growth/shrink aggressiveness
-has no way to ask for one today. The ~2× per-step cost of the embedded-pair approach (§ above)
+The step controller's tuning constants (`SAFETY`, `MAX_GROWTH`, `MIN_SHRINK`,
+`MAX_RETRY_FACTOR`) are fixed, not exposed as `TranConfig` knobs — a circuit that would benefit
+from a different growth/shrink aggressiveness has no way to ask for one today. The *factor*
+itself is no longer fixed, though: since 2026-08-31 it comes from the order-based power law
+`h*err_ratio^(-1/(p+1))` (`step_factor`), so the step is predicted rather than ratcheted, and
+the exponent follows the method's own order. The ~2× per-step cost of the embedded-pair approach (§ above)
 was a real, accepted tradeoff, and since 2026-08-31 it is no longer paid by default —
 `LteEstimator::DividedDifference` is, with the embedded pair still selectable and still used for
 the opening steps of every run.

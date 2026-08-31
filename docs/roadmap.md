@@ -1440,8 +1440,8 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > `BackwardEuler` and `Trapezoidal` from the same `(x_prev, h)` (one reported, one purely an
 > error reference), and their disagreement — weighted by `cfg.lte_reltol`/`cfg.lte_abstol`,
 > the same `reltol·|x|+abstol` combination `va-core`'s Newton `reltol`/`abstol` use — drives
-> accept/reject and grow/shrink (`SHRINK_FACTOR`/`GROWTH_FACTOR`, fixed multiplicative
-> constants, not a power-law order-based controller). Below `cfg.tstep_min` without meeting
+> accept/reject and grow/shrink (since 2026-08-31 a **power-law order-based controller**,
+> `step_factor`; `SHRINK_FACTOR`/`GROWTH_FACTOR`'s fixed multiplicative constants before that). Below `cfg.tstep_min` without meeting
 > tolerance, returns `TransientError::TimestepUnderflow` rather than silently accepting an
 > out-of-tolerance step. **A real bug found and fixed while building this:** the trapezoidal
 > companion's history term (`residual_prev − (2/h)·Q_prev`) is only valid for a row some
@@ -1509,6 +1509,31 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > The re-validation is therefore a re-run of the comparison, not a re-baselining of it — the
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
+>
+> **2026-08-31, same day: the step controller became order-based too.** With a real local-error
+> estimate finally in hand, multiplying by 1.5 on a good step and 0.5 on a bad one was leaving
+> the useful part of the estimate on the floor: a local error of `O(h^(p+1))` and a measured
+> `err_ratio` say exactly which step would have landed on the budget, `h*err_ratio^(-1/(p+1))`.
+> `step_factor` computes that, biased by a `SAFETY` of 0.9 and clamped — growth capped at 2x
+> (one very accurate step must not launch the next one past where the local-error model still
+> holds), shrink floored at 0.1x, and a rejected step forced to at least a 0.9x reduction, since
+> the raw power law predicts ~0.997x for a ratio barely over 1.0 and would retry near-forever.
+> The exponent now differs per method, which the fixed factors could not express: backward Euler
+> shrinks harder than trapezoidal for the same overshoot, because its error falls off more
+> slowly with `h`.
+>
+> **Measured on the RC charge with divided differences: 279 -> 271 model evaluations and
+> 2.1e-4 -> 8.6e-6 relative error** — 25x more accurate for slightly less work, because the
+> steps are now sized to the tolerance instead of ratcheting toward it. The golden gates barely
+> moved (`rectifier` 8.226e-4 -> 8.269e-4, `rc_step` 2.193e-5 -> 2.248e-5, `ring_osc` 4.464e-6
+> -> 4.553e-6, all 16/16 green): those circuits are breakpoint- and source-driven, so their
+> stepping is constrained by more than the error estimate. The gain shows up where the
+> controller is actually free to choose.
+>
+> `step_factor` is verified in closed form rather than by watching behaviour: a ratio of 8 under
+> trapezoidal (`p+1 = 3`) must predict exactly `SAFETY * 1/2`, the same ratio under backward
+> Euler (`p+1 = 2`) exactly `SAFETY / sqrt(8)`, and both clamps plus the zero-error
+> division-by-zero case are pinned by their own test.
 >
 > Verified against the *closed form*, not against the other estimator (which would only prove
 > the two agree): `divided_difference_matches_the_analytic_truncation_error` checks the
