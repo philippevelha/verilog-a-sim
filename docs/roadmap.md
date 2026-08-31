@@ -63,7 +63,7 @@ shared, demoable milestone that several theses light up at once.
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `mos_dc` 1.5e-6) | ✅ |
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
 | T4.2 — adaptive timestep & LTE | embedded-pair LTE estimate drives accept/reject + grow/shrink; a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 6.8e-4) | ✅ |
-| T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 1.8e-4) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
+| T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 4.5e-6 since the 2026-08-31 first-step fix; 1.8e-4 before it) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
 | T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
 | T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 13 golden gates runs through this path | ✅ |
 | T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section. As of 2026-08-04 the zoo has grown to **13 gated circuits, all green** (the six ladder rungs plus `rc_ac`, `diode_ac`, `diode_noise`, `resistor_noise_va`, `diode_flicker`, `resistor_noise_table`, `resistor_noise_table_log`) | ✅ |
@@ -2167,7 +2167,7 @@ Each rung is a shared demo where the responsible theses present their tutorials 
 | 3    | RC                 | transient | T4 (+ T2 charge)         | T2.3, T4.1                    | ✅ **formally passed** — green against `golden/rc_step.golden` (1038 pts), real QSPICE output via `UIC` cold-start, now also checking `I(V1)` (error=1.845e-5, tol 1e-3) |
 | 4    | diode rectifier    | transient | T4                       | T4.2                          | ✅ **formally passed** — green against `golden/rectifier.golden` (1065 pts), real QSPICE output via a native `.model diode D(...)` translation + `UIC` cold-start, now also checking `I(V1)` (error=6.766e-4, tol 1e-3) |
 | 5    | a MOS              | DC        | T1, T2, T3 (model reach) | T1/T2 coverage updates        | ✅ **formally passed** — green against `golden/mos_dc.golden`, real QSPICE output via a native `.model mosfet NMOS(...)` translation (error=1.490e-6, tol 1e-4); now also checks `I(VDD)`/`I(VG)` |
-| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ✅ **formally passed** — green against `golden/ring_osc.golden` (1041 pts, an honestly-scoped 0.1s window — § T4.3's 2026-07-18 entry), real QSPICE output via a native `.model bjt NPN(...)` translation + a `gnd`-to-`0` ground-aliasing fix, now also checking `I(VCC)` (error=1.799e-4, tol 1e-3); `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` (full 0.2s) and `cargo test -p va-transient ring_oscillator_sustains_oscillation` (hand-built instances) both still demonstrate the full growing oscillation |
+| 6    | ring oscillator    | transient | T4 (full stack)          | T4.3                          | ✅ **formally passed** — green against `golden/ring_osc.golden` (1041 pts, an honestly-scoped 0.1s window — § T4.3's 2026-07-18 entry), real QSPICE output via a native `.model bjt NPN(...)` translation + a `gnd`-to-`0` ground-aliasing fix, now also checking `I(VCC)` (error=**4.464e-6** since the 2026-08-31 first-step fix; 1.799e-4 before it, tol 1e-3); `cargo run -p va-cli -- sim circuits/ring_osc.net --tran` (full 0.2s) and `cargo test -p va-transient ring_oscillator_sustains_oscillation` (hand-built instances) both still demonstrate the full growing oscillation |
 
 Stretch rungs for T5 (AC/noise) hang off rung 1–2 circuits (RC/RLC) once a DC operating point
 is available. **These now exist and pass** (2026-08-01, § the T5 sections): six more gated
@@ -3117,6 +3117,52 @@ allocates a second `VarId` and leaves the hoisted one dead. Codegen catches it a
 before — but the diagnostic names neither the position nor the cause.
 
 ---
+
+## The first step is backward Euler (2026-08-31)
+
+The fix the correction entry above specified. `run_with_events` now takes the **first step with
+the backward-Euler companion regardless of `cfg.method`**, then hands over to the configured
+method — standard SPICE practice, and here it removes a specific defect.
+
+**Why.** A `ddt` evaluated as an ordinary sub-expression reconstructs its own primal as
+`dq/dt = coeff·(q − q_prev) − prev_rate_weight·dq/dt|_prev`. At `tstart` there is no previous
+rate, so `is_initial_step` seeds it `0.0`, while the true `q̇(0)` is nonzero for any start that is
+not a steady state. Trapezoidal's `prev_rate_weight` then feeds that `O(1)` seed into a recursion
+whose multiplier is exactly `−1` — **undamped**, so it never decays, only alternates. Backward
+Euler has `prev_rate_weight = 0` and never reads the seed; one BE step is enough, because from
+the second step on `dq/dt|_prev` is a real reconstructed rate accurate to `O(h)`.
+
+**All 15 gates pass, and one improved by 40×:**
+
+| gate | before | after |
+|---|---|---|
+| `ring_osc` | 1.799e-4 | **4.464e-6** |
+| `rc_step` | 1.839e-5 | 1.839e-5 |
+| `rectifier` | 6.766e-4 | 6.766e-4 |
+| `abstime_ramp` | 4.382e-17 | 4.382e-17 |
+
+`ring_osc` is the one gate whose accuracy is dominated by its startup transient, so it is exactly
+where a better-seeded first step should show up — and it is a recorded golden number moving, which
+this file records rather than quietly re-baselining. The other three are unchanged to every digit,
+which is the expected result: they route every `ddt` through the charge channel and so read
+neither `coeff` nor `prev_rate_weight`.
+
+### The trapezoidal refusal stays, deliberately
+
+The analysis says this fix makes the bias-dependent-`ddt` case exact under trapezoidal too, so
+`va_codegen::Integration`'s refusal could now be lifted and the type retired. **Not done here.**
+
+The evidence for lifting is an off-repo numerical study; the evidence *against* being hasty is
+that twice today a plausible-looking lift turned out to drop physics silently — and the §5
+finite-difference gate provably **cannot** see this class of defect, because it checks `J` against
+`f` rather than checking that `f` is the right discrete equation. Lifting a refusal on strength of
+numerics this repo cannot re-run is the same mistake in a new place.
+
+What would justify lifting it: an **in-repo order-of-convergence test** — a model with a genuinely
+bias-dependent `ddt` coefficient, integrated on a deliberately *varying* step pattern, against a
+closed-form solution, asserting second order. A fixed-step version would pass either way and prove
+nothing, which is precisely how this defect stayed invisible. Until that exists, the refusal is
+**conservative rather than necessary**, and this entry is the record of which it is.
 
 ## How to keep this document honest
 

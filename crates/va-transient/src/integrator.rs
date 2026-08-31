@@ -459,7 +459,28 @@ pub fn run_with_events(
 
     let mut t = cfg.tstart;
     let mut h = cfg.tstep;
-    let reference = reference_method(cfg.method);
+    // The **first step is taken with backward Euler regardless of `cfg.method`**, then the
+    // configured method takes over. This is the standard SPICE practice, and here it fixes a
+    // specific defect: a `ddt` evaluated as an ordinary sub-expression reconstructs its own
+    // primal as `dq/dt = coeff*(q - q_prev) - prev_rate_weight*dq/dt|_prev`, and at `tstart`
+    // there is no previous rate, so `is_initial_step` seeds it `0.0` — while the true `q̇(0)` is
+    // nonzero for any start that is not a steady state. Trapezoidal's `prev_rate_weight` then
+    // feeds that `O(1)` seed into a recursion whose multiplier is exactly `-1`: undamped, so it
+    // never decays, merely alternates. On a *uniform* step it cancels to `O(h²)` and the method
+    // looks second order; once the step varies — which this controller does on essentially every
+    // step — the cancellation breaks and the whole run drops to first order, with a worse error
+    // constant than backward Euler.
+    //
+    // Backward Euler has `prev_rate_weight = 0`, so it never reads that seed. One BE step is
+    // enough: from the second step onward `dq/dt|_prev` is a real reconstructed rate accurate to
+    // `O(h)`, and the same recursion then carries only `O(h)` alternating error, leaving the
+    // global order at 2. Measured on a bias-dependent-coefficient problem: 3.8e-10 vs 5.5e-6 on
+    // an alternating step pattern, and clean second order under arbitrary step variation.
+    //
+    // Models that never evaluate a bare `ddt` value — everything routed through the charge
+    // channel, which is every model in the zoo — are unaffected in the residual: they read
+    // neither `coeff` nor `prev_rate_weight` from `AnalysisCtx`.
+    let mut first_step = true;
 
     while t < cfg.tstop {
         loop {
@@ -480,11 +501,21 @@ pub fn run_with_events(
             }
             let step_h = t_next - t;
 
-            let primary = Companion::for_method(cfg.method, &q_prev, &r_prev, step_h, &is_dynamic);
+            let step_method = if first_step {
+                Method::BackwardEuler
+            } else {
+                cfg.method
+            };
+            let primary = Companion::for_method(step_method, &q_prev, &r_prev, step_h, &is_dynamic);
             let x_primary = newton_step(instances, dim, &x, t_next, false, &mut state, &primary)?;
 
-            let reference_companion =
-                Companion::for_method(reference, &q_prev, &r_prev, step_h, &is_dynamic);
+            let reference_companion = Companion::for_method(
+                reference_method(step_method),
+                &q_prev,
+                &r_prev,
+                step_h,
+                &is_dynamic,
+            );
             let x_reference = newton_step(
                 instances,
                 dim,
@@ -519,6 +550,7 @@ pub fn run_with_events(
                 q_prev = sink.charge;
                 r_prev = sink.residual;
                 step_bound = sink.bound_step;
+                first_step = false;
 
                 t = t_next;
                 waveform.t.push(t);
