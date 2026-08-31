@@ -9,6 +9,12 @@
 //! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
 //! is the reference node; every other net gets a dense unknown index in first-seen order.
 //!
+//! A `C` line may carry SPICE's per-element initial condition, `` C<name> p n <value> IC=<volts> ``
+//! ([`va_netlist::Device::ic`]): the voltage across the capacitor at `tstart`, seeding a
+//! **transient** run's initial solution and ignored by every other analysis — SPICE's own `UIC`
+//! semantics, in which no DC operating point is solved first. A capacitor with no `IC=` starts
+//! at 0 V, which is what this engine did unconditionally before the token was recognized.
+//!
 //! # Limitations
 //!
 //! - Inductors, controlled sources, subcircuits (`X`), and `.model` cards are not parsed.
@@ -207,6 +213,25 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
             let value =
                 parse_value(toks[3]).ok_or_else(|| err(format!("bad value `{}`", toks[3])))?;
             let model = if kind == 'R' { "resistor" } else { "capacitor" };
+            // `IC=<volts>`, SPICE's per-element initial condition. Accepted on a capacitor
+            // only: it is the voltage across the element at `tstart`, and a resistor has no
+            // state to initialize. Spelled as one token (`IC=5`), the form QSPICE and every
+            // SPICE dialect write, and the form `xtask`'s golden-deck translator already
+            // leaves untouched when it injects `IC=0` into the decks that lack one.
+            let mut ic = None;
+            for tok in &toks[4..] {
+                let Some(rest) = tok.strip_prefix("IC=").or_else(|| tok.strip_prefix("ic=")) else {
+                    return Err(err(format!("unexpected token `{tok}` after the value")));
+                };
+                if kind != 'C' {
+                    return Err(err(format!(
+                        "`IC=` is only meaningful on a capacitor, not on `{name}`"
+                    )));
+                }
+                ic = Some(
+                    parse_value(rest).ok_or_else(|| err(format!("bad `IC=` value `{rest}`")))?,
+                );
+            }
             Ok(Device {
                 name,
                 model: model.to_string(),
@@ -214,6 +239,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 value: Some(value),
                 waveform: None,
                 ac: None,
+                ic,
             })
         }
         'D' => {
@@ -228,6 +254,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 value: None,
                 waveform: None,
                 ac: None,
+                ic: None,
             })
         }
         // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
@@ -247,6 +274,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 value: None,
                 waveform: None,
                 ac: None,
+                ic: None,
             })
         }
         'V' => {
@@ -263,6 +291,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 value: Some(value),
                 waveform,
                 ac,
+                ic: None,
             })
         }
         // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
@@ -282,6 +311,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 value: None,
                 waveform: None,
                 ac: None,
+                ic: None,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -531,5 +561,88 @@ mod tests {
         assert_eq!(net.ac, None);
         let v = parse("* t\nV1 a 0 DC 5\n.op\n.end\n").expect("parse");
         assert_eq!(v.devices[0].ac, None);
+    }
+    /// `IC=` is parsed off a capacitor line, and only off a capacitor: a resistor has no state
+    /// to initialize, so `IC=` there is a mistake worth naming rather than ignoring.
+    #[test]
+    fn a_capacitor_carries_an_initial_condition() {
+        let net = parse(
+            "R1 out gnd 1000
+C1 out gnd 1e-6 IC=5
+.tran 1e-6 1e-3
+.end
+",
+        )
+        .expect("parses");
+        let cap = net
+            .devices
+            .iter()
+            .find(|d| d.name == "C1")
+            .expect("C1 parsed");
+        assert_eq!(cap.ic, Some(5.0));
+        let res = net
+            .devices
+            .iter()
+            .find(|d| d.name == "R1")
+            .expect("R1 parsed");
+        assert_eq!(res.ic, None, "a resistor has no initial condition");
+
+        // Lower-case spelling, and a suffixed value, both of which real decks use.
+        let net = parse(
+            "C1 a gnd 1e-6 ic=2.5m
+.tran 1e-6 1e-3
+.end
+",
+        )
+        .expect("parses");
+        assert_eq!(net.devices[0].ic, Some(2.5e-3));
+    }
+
+    /// A capacitor with no `IC=` keeps `None` rather than `Some(0.0)`: "not specified" and
+    /// "specified as zero" are the same *answer* here but not the same *statement*, and the
+    /// golden-deck translator keys off which one a line makes.
+    #[test]
+    fn a_capacitor_without_ic_has_none() {
+        let net = parse(
+            "C1 a gnd 1e-6
+.tran 1e-6 1e-3
+.end
+",
+        )
+        .expect("parses");
+        assert_eq!(net.devices[0].ic, None);
+    }
+
+    /// `IC=` on a resistor, and a malformed value, are refused with a message — not silently
+    /// dropped, which would leave a deck's author believing an initial condition was applied.
+    #[test]
+    fn a_bad_initial_condition_is_rejected() {
+        assert!(
+            parse(
+                "R1 a gnd 1000 IC=5
+.end
+"
+            )
+            .is_err(),
+            "IC= on a resistor"
+        );
+        assert!(
+            parse(
+                "C1 a gnd 1e-6 IC=banana
+.end
+"
+            )
+            .is_err(),
+            "unparseable IC="
+        );
+        assert!(
+            parse(
+                "C1 a gnd 1e-6 5
+.end
+"
+            )
+            .is_err(),
+            "stray trailing token"
+        );
     }
 }

@@ -831,10 +831,43 @@ pub fn solve_transient(
     };
 
     let (instances, dim, _currents) = build_instances(net, compiled)?;
-    let x0 = vec![0.0; dim];
+    let x0 = initial_solution(net, dim);
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
     va_transient::integrator::run(&refs, dim, x0, cfg).context("transient integration failed")
+}
+
+/// The transient run's initial solution vector: zero everywhere, then each capacitor's
+/// `IC=<volts>` applied as `V(p) = V(n) + ic` (`va_netlist::Device::ic`).
+///
+/// This is SPICE's `UIC` semantics and nothing more: **no DC operating point is solved first**.
+/// A capacitor with no `IC=` starts at 0 V, which is what this engine has always done and what
+/// `xtask`'s golden-deck translator reproduces on the QSPICE side by injecting `IC=0` into every
+/// reactive element it finds without one.
+///
+/// # Limitations
+///
+/// Conditions are applied in device order, each reading whatever `V(n)` holds *at that point*,
+/// so a chain of capacitors referenced to each other resolves only if it is written in
+/// dependency order; a genuinely floating capacitor between two nodes that no other `IC=`
+/// pins leaves the pair under-determined and lands with `V(n) = 0`. A grounded capacitor — the
+/// case SPICE decks overwhelmingly write, and the only one in this project's zoo — is exact.
+/// Nothing here reconciles two conditions that contradict each other; the last one written
+/// wins, rather than the conflict being reported.
+fn initial_solution(net: &Netlist, dim: usize) -> Vec<f64> {
+    let mut x0 = vec![0.0; dim];
+    for dev in &net.devices {
+        let Some(ic) = dev.ic else { continue };
+        let (Some(&p), Some(&n)) = (dev.terminals.first(), dev.terminals.get(1)) else {
+            continue;
+        };
+        // `GROUND` is not a row in the reduced system; a terminal at ground contributes 0.
+        let vn = if n < dim { x0[n] } else { 0.0 };
+        if p < dim {
+            x0[p] = vn + ic;
+        }
+    }
+    x0
 }
 
 /// Build the complex small-signal excitation vector (`b` in `(G + jω·C)·X = b`) for `net`'s own
@@ -2149,6 +2182,45 @@ mod tests {
                 (i_v1 - (-expected_id)).abs() < tol,
                 "at V1={v}: I(V1)={i_v1}, expected {}",
                 -expected_id
+            );
+        }
+    }
+
+    /// The initial condition must actually *drive* the run, not merely parse. `rc_discharge.net`
+    /// has no source at all, so if `IC=` were ignored the circuit would sit at 0 V forever and
+    /// every sample would be zero -- the strongest available discrimination for this feature.
+    /// Checked against the closed form `V(t) = 5*exp(-t/RC)` at three points, not just at t=0.
+    #[test]
+    fn an_initial_condition_drives_a_source_free_discharge() {
+        let deck = include_str!("../../../circuits/rc_discharge.net");
+        let net = va_netlist::parser::parse(deck).expect("parse rc_discharge");
+        let wf = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("`out` node");
+        let rc = 1000.0 * 1e-6;
+
+        assert!(
+            (wf.x[0][out] - 5.0).abs() < 1e-9,
+            "the run must start at the initial condition, got {}",
+            wf.x[0][out]
+        );
+        for &tau in &[1.0, 2.5, 5.0] {
+            let t_query = tau * rc;
+            let i =
+                wf.t.iter()
+                    .position(|&t| t >= t_query)
+                    .expect("sample at or past the query time");
+            let expected = 5.0 * (-wf.t[i] / rc).exp();
+            let rel = (wf.x[i][out] - expected).abs() / expected;
+            assert!(
+                rel < 1e-3,
+                "at t={} ({tau} tau): {} vs analytic {expected} (rel {rel:e})",
+                wf.t[i],
+                wf.x[i][out]
             );
         }
     }

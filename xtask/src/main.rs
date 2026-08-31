@@ -64,6 +64,7 @@ const SWEEP_CIRCUITS: &[(&str, Option<&str>)] = &[
 /// `va-abi::reference::Bjt` via `va-cli::reference_instance`, so `model` is `None` here too.
 const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_step.net", None),
+    ("circuits/rc_discharge.net", None),
     ("circuits/rectifier.net", Some("models/diode.va")),
     ("circuits/ring_osc.net", None),
     ("circuits/abstime_ramp.net", Some("models/abstime_ramp.va")),
@@ -531,7 +532,7 @@ const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] = &[
 /// Like [`QSPICE_NATIVE_CIRCUITS`], for the `.tran` transient circuits (§ ladder rung 3):
 /// `circuits/rc_step.net` is a pure `R`/`C`/`V` deck, needing zero translation, just multi-point
 /// `.qraw` parsing ([`golden_tran_from_qraw`]) instead of the single-`.op`-point path.
-const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &["circuits/rc_step.net"];
+const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &["circuits/rc_step.net", "circuits/rc_discharge.net"];
 
 /// Like [`QSPICE_SWEEP_MODEL_TRANSLATIONS`], for the `.tran` transient circuits (§ ladder rungs
 /// 4/6) that reference a custom model. `models/bjt` has no `.va` file (it's the hand-written

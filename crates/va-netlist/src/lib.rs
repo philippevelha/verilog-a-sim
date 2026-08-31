@@ -173,6 +173,14 @@ pub struct Device {
     /// an AC analysis (holding its two terminals at a fixed small-signal difference of zero), it
     /// just contributes nothing to the excitation vector.
     pub ac: Option<AcSpec>,
+    /// A capacitor's SPICE-style `IC=<volts>` initial condition: the voltage across it
+    /// (`V(p) − V(n)`) at `tstart`, used to seed a transient run's initial solution vector.
+    /// `None` for a capacitor with no `IC=` token (which starts at 0 V, this engine's
+    /// long-standing cold start) and for every non-capacitor device.
+    ///
+    /// **Transient only, and only an initial *seed*.** It is not a DC constraint: a `.op` or
+    /// `.dc` solve ignores it entirely, exactly as SPICE's own `UIC` semantics do.
+    pub ic: Option<f64>,
 }
 
 /// A time-domain source waveform beyond a bare DC value.

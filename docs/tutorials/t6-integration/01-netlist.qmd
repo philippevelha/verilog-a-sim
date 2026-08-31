@@ -102,6 +102,13 @@ by an in-deck SPICE `.model` card. A `.dc` sweep only steps one source linearly;
 multi-source sweeps, no bare `.dc` (source-list) form some SPICE dialects accept. A `V` source's
 optional trailing `SIN` parameters (delay, damping, phase) aren't parsed.
 
+A capacitor's `IC=<volts>` (added 2026-08-31) seeds a **transient** run only, as SPICE's `UIC`
+semantics do — no DC operating point is solved first, and a `.op`/`.dc`/`.ac` run ignores it.
+Conditions are applied in device order, each reading whatever its negative terminal holds at that
+point, so a grounded capacitor (the case SPICE decks overwhelmingly write, and the only kind in
+this zoo) is exact, while a genuinely floating one that nothing else pins leaves the pair
+under-determined. Two contradictory conditions are not diagnosed: the last one written wins.
+
 ## What's next
 
 `t6-integration/02-cli.qmd` — turning a parsed `Netlist` into real `ModelInstance`s and actually

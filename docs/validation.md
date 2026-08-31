@@ -59,10 +59,10 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all sixteen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
-`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rectifier, ring_osc, abstime_ramp, rc_ac,
-diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table,
-resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+`golden/*.golden` — all seventeen — are real, QSPICE-generated data (`cargo xtask gen-golden`):
+`{divider, mos_dc, diode_iv, diode_clamp, rc_step, rc_discharge, rectifier, ring_osc,
+abstime_ramp, rc_ac, diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker,
+resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -75,6 +75,16 @@ diode turns on. It passes at `error=6.421e-5` (tol `1e-4`) against real QSPICE g
 same order as `diode_iv.net`'s own `6.656e-5`, and traceable to the same diode nonlinearity.
 It is also the circuit `t3-core/03-nonlinear-dc.qmd` plots, since a straight line makes a poor
 figure for a chapter about curvature.
+
+**Added 2026-08-31: `circuits/rc_discharge.net`, the initial-condition gate.** Every other
+transient circuit in the zoo is driven by a source, so all of them would still produce a
+plausible-looking waveform if a capacitor's initial condition were quietly ignored. This one has
+**no source at all** — a capacitor charged to 5 V by `IC=5`, decaying through a 1 k resistor — so
+`V(out) = 5*exp(-t/RC)` is driven entirely by the initial condition, and dropping it would leave
+the circuit sitting at 0 V for the whole run. That makes it the one gate here that can fail
+loudly rather than subtly. It passes at `error=7.692e-6` (tol `1e-3`) against real QSPICE golden,
+generated through the same `UIC` cold-start translation the other transient decks use — which
+already left an explicit `IC=` alone, so no change to `xtask` was needed to support it.
 
 ### The AC gate (added 2026-08-01)
 

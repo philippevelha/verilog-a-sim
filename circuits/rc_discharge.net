@@ -1,0 +1,9 @@
+* RC discharge from an initial condition — the .tran counterpart to rc_step.net.
+* There is no source at all: the capacitor starts charged at 5 V and decays through R1,
+* so the initial condition IS the stimulus. V(out) = 5*exp(-t/RC), RC = 1k * 1u = 1ms.
+* IC= is SPICE's per-element initial condition, honoured only by a transient run (UIC
+* semantics — no DC operating point is solved first), exactly as QSPICE treats it.
+R1 out gnd 1000
+C1 out gnd 1e-6 IC=5
+.tran 5e-6 5e-3
+.end

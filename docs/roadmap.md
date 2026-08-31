@@ -64,7 +64,7 @@ shared, demoable milestone that several theses light up at once.
 | T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
 | T4.2 — adaptive timestep & LTE | divided-difference LTE estimate drives accept/reject + grow/shrink (the embedded pair remains available, and covers the opening steps); a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 8.2e-4, re-validated 2026-08-31 under divided differences; 6.8e-4 under the embedded pair) | ✅ |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 4.5e-6 since the 2026-08-31 first-step fix; 1.8e-4 before it) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
-| T6.1 — netlist parser | R/C/D/M/Q/V elements (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
+| T6.1 — netlist parser | R/C/D/M/Q/V elements (a `C` may carry SPICE's `IC=<volts>` initial condition, 2026-08-31) (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
 | T6.2 — CLI wiring (DC + sweep + transient + AC + noise) | `va-cli sim` drives a DC operating point, a `.dc` sweep, `.tran` (incl. `SIN`-sourced circuits like the rectifier), `--ac` small-signal sweeps, and `--noise` spectra through the real pipeline; every one of the 13 golden gates runs through this path | ✅ |
 | T6.3 — validation harness | `va-harness::metrics`/`golden::{GoldenDc, GoldenSweep, GoldenTran}`/`dc::{run_dc, compare_dc, run_dc_sweep, compare_dc_sweep}`/`tran::{run_tran, compare_tran}`; `xtask validate`/`gen-golden` real and wired; **all six ladder rungs formally passed** against committed, real QSPICE golden (rungs 2/5 via a hand-translated `.model` card; rungs 3/4 via that plus a `UIC` cold-start fix; rung 6 via that plus a `gnd`-aliasing bug fix and an honest early-window comparison) — see this file's T6.3 section. As of 2026-08-04 the zoo has grown to **13 gated circuits, all green** (the six ladder rungs plus `rc_ac`, `diode_ac`, `diode_noise`, `resistor_noise_va`, `diode_flicker`, `resistor_noise_table`, `resistor_noise_table_log`) | ✅ |
 | T6.4 — convergence dashboard | `xtask::Tally` separates `skipped`/`not_converged`/`failed`, and `try_solve` records a non-converging circuit instead of aborting the run — so `CLAUDE.md` §7's fourth metric is computable from a real run for the first time; `validate` prints **convergence 13/13 (100.0%)**; `t6-integration/04-convergence-dashboard.qmd` | ✅ |
@@ -1522,6 +1522,24 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: initial conditions, and the first gate that fails loudly.** `C<name> p n <value>
+> IC=<volts>` now parses (`va_netlist::Device::ic`) and seeds a transient run's initial solution
+> vector (`va_cli::initial_solution`). These are SPICE's `UIC` semantics exactly: transient only,
+> no DC operating point solved first, a capacitor without `IC=` starting at 0 V as this engine
+> always did. Element-level `IC=` was chosen over a `.ic` card specifically because `xtask`'s
+> golden-deck translator already leaves an explicit `IC=` alone while injecting `IC=0` into the
+> reactive elements that lack one — so the QSPICE side needed no change whatsoever to support
+> the new form.
+>
+> `circuits/rc_discharge.net` gates it, and is deliberately shaped to be *falsifiable*: it has
+> **no source at all**, so `V(out) = 5*exp(-t/RC)` is driven entirely by the initial condition
+> and an implementation that quietly ignored `IC=` would sit at 0 V for the whole run rather
+> than producing a slightly-wrong waveform. Every other transient circuit in the zoo is
+> source-driven and would keep looking plausible under that bug. Passes at `error=7.692e-6`
+> (tol 1e-3) against real QSPICE golden; `validate` is now **17/17**. The end-to-end test checks
+> the closed form at 1, 2.5 and 5 time constants, not just at `t=0`, where any implementation
+> that merely copied the seed would also agree.
+
 > **2026-08-31, same day: the step controller became order-based too.** With a real local-error
 > estimate finally in hand, multiplying by 1.5 on a good step and 0.5 on a bad one was leaving
 > the useful part of the estimate on the floor: a local error of `O(h^(p+1))` and a measured
