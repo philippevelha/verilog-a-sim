@@ -100,6 +100,21 @@ One real bug surfaced while writing those: the first `frequencies` implementatio
 point a few ULPs short of it (`100.00000000000003` vs `100.0`). Fixed by snapping within a
 relative tolerance instead of demanding bit-exact equality.
 
+**And visibly.** `--plot` draws an AC sweep as a Bode pair (2026-08-31), magnitude in dB over
+phase in degrees, sharing a logarithmic frequency axis — two panels rather than one because
+decibels and degrees share neither units nor a useful scale:
+
+```console
+$ cargo run -q -p va-cli -- sim circuits/rc_ac.net --ac \
+    --plot docs/tutorials/t5-acnoise/figures/rc-ac-bode.svg
+```
+
+![`rc_ac.net`'s response. `V(in)` is the 1 V source itself: flat at 0 dB and 0°, which is the
+reference the other curve is read against. `V(out)` is flat below the corner, breaks at
+1/(2πRC) = 159.15 Hz, and rolls off at -20 dB/decade while the phase swings from 0° toward
+-90° — the single-pole shape the closed form above predicts, drawn from the same solved
+response the golden gate scores.](figures/rc-ac-bode.svg)
+
 **Then against QSPICE golden**, through two circuits chosen to separate two different claims:
 
 ```console

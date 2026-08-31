@@ -37,7 +37,7 @@ fn print_usage() {
          va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
-         --plot <out.svg>        Write an SVG plot of the transient waveform or .dc sweep
+         --plot <out.svg>        Write an SVG plot: transient waveform, .dc sweep, or AC Bode
     \n         --integration be|trap   Integration method for a transient run.
                                  Default trapezoidal (second order)"
     );

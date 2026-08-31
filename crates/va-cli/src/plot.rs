@@ -175,6 +175,137 @@ pub fn plot_sweep(
     Ok(())
 }
 
+/// Write a Bode plot of an AC sweep to `path` as SVG: magnitude in dB and phase in degrees,
+/// stacked, sharing a logarithmic frequency axis.
+///
+/// Two panels rather than one because the two quantities share no units and no useful scale;
+/// a decibel magnitude and a degree phase forced onto one linear axis is the same mistake
+/// `va_harness::plot` avoids by keeping branch currents off a voltage axis.
+///
+/// # Limitations
+///
+/// Plots node voltages only (the first `net.node_order.len()` unknowns), so a branch-current
+/// unknown is not drawn — same rule [`plot_sweep`] follows. A frequency point at or below zero
+/// cannot appear on a logarithmic axis and is skipped; a sweep with no usable point left is an
+/// error rather than an empty canvas. Magnitude is `20*log10(|H|)`, with an exact zero clamped
+/// to a floor rather than plotted at negative infinity.
+///
+/// # Errors
+///
+/// Returns an error if the response is empty, if every frequency point is non-positive, or if
+/// drawing/writing the SVG fails.
+pub fn plot_ac(path: &str, net: &Netlist, resp: &va_acnoise::ac::AcResponse) -> Result<()> {
+    let n_nodes = net.node_order.len();
+    let usable: Vec<usize> = (0..resp.f.len()).filter(|&i| resp.f[i] > 0.0).collect();
+    if usable.is_empty() || n_nodes == 0 {
+        anyhow::bail!("AC response has no positive frequency point to plot");
+    }
+
+    // -400 dB is far below any physically meaningful response and keeps an exact zero (a node
+    // held at ground, say) on the canvas instead of sending the axis to negative infinity.
+    const DB_FLOOR: f64 = -400.0;
+    let db = |c: va_acnoise::ac::Complex| {
+        let mag = (c.0 * c.0 + c.1 * c.1).sqrt();
+        if mag > 0.0 {
+            (20.0 * mag.log10()).max(DB_FLOOR)
+        } else {
+            DB_FLOOR
+        }
+    };
+    let deg = |c: va_acnoise::ac::Complex| c.1.atan2(c.0).to_degrees();
+
+    let f_min = resp.f[*usable.first().expect("non-empty")];
+    let f_max = resp.f[*usable.last().expect("non-empty")];
+    let (f_min, f_max) = if f_max > f_min {
+        (f_min, f_max)
+    } else {
+        (f_min * 0.9, f_max * 1.1)
+    };
+
+    let (mut db_min, mut db_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ph_min, mut ph_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &i in &usable {
+        for c in resp.x[i].iter().take(n_nodes) {
+            db_min = db_min.min(db(*c));
+            db_max = db_max.max(db(*c));
+            ph_min = ph_min.min(deg(*c));
+            ph_max = ph_max.max(deg(*c));
+        }
+    }
+    let pad = |lo: &mut f64, hi: &mut f64| {
+        if *hi <= *lo {
+            *lo -= 1.0;
+            *hi += 1.0;
+        }
+        let p = 0.05 * (*hi - *lo);
+        *lo -= p;
+        *hi += p;
+    };
+    pad(&mut db_min, &mut db_max);
+    pad(&mut ph_min, &mut ph_max);
+
+    let root = SVGBackend::new(path, (960, 640)).into_drawing_area();
+    root.fill(&WHITE)
+        .with_context(|| format!("initializing SVG canvas at {path}"))?;
+    let (top, bottom) = root.split_vertically(320);
+
+    let mut mag_chart = ChartBuilder::on(&top)
+        .caption("AC response", ("sans-serif", 24))
+        .margin(15)
+        .x_label_area_size(35)
+        .y_label_area_size(60)
+        .build_cartesian_2d((f_min..f_max).log_scale(), db_min..db_max)
+        .context("building the magnitude chart")?;
+    mag_chart
+        .configure_mesh()
+        .x_desc("Frequency (Hz)")
+        .y_desc("Magnitude (dB)")
+        .draw()
+        .context("drawing the magnitude mesh")?;
+
+    let mut ph_chart = ChartBuilder::on(&bottom)
+        .margin(15)
+        .x_label_area_size(35)
+        .y_label_area_size(60)
+        .build_cartesian_2d((f_min..f_max).log_scale(), ph_min..ph_max)
+        .context("building the phase chart")?;
+    ph_chart
+        .configure_mesh()
+        .x_desc("Frequency (Hz)")
+        .y_desc("Phase (deg)")
+        .draw()
+        .context("drawing the phase mesh")?;
+
+    for (i, name) in net.node_order.iter().enumerate() {
+        let color = PALETTE[i % PALETTE.len()];
+        mag_chart
+            .draw_series(LineSeries::new(
+                usable.iter().map(|&k| (resp.f[k], db(resp.x[k][i]))),
+                &color,
+            ))
+            .with_context(|| format!("drawing the magnitude series for {name}"))?
+            .label(format!("V({name})"))
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+        ph_chart
+            .draw_series(LineSeries::new(
+                usable.iter().map(|&k| (resp.f[k], deg(resp.x[k][i]))),
+                &color,
+            ))
+            .with_context(|| format!("drawing the phase series for {name}"))?;
+    }
+
+    mag_chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(BLACK)
+        .draw()
+        .context("drawing the legend")?;
+
+    root.present()
+        .with_context(|| format!("writing the SVG to {path}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +382,60 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The Bode plot draws both panels, labels both axes, and names each node series. Uses a
+    /// real solved RC response rather than fabricated numbers, so the magnitudes on the canvas
+    /// are the ones the analysis actually produced.
+    #[test]
+    fn ac_plot_draws_magnitude_and_phase_panels() {
+        let net = parse(include_str!("../../../circuits/rc_ac.net")).expect("parse rc_ac");
+        let resp = crate::solve_ac(&net, &[]).expect("solves");
+        let path = std::env::temp_dir()
+            .join("va-cli-plot-test-ac.svg")
+            .to_str()
+            .expect("utf8 path")
+            .to_string();
+        plot_ac(&path, &net, &resp).expect("renders");
+        let contents = std::fs::read_to_string(&path).expect("reads back");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(contents.contains("<svg"), "not an SVG");
+        assert!(
+            contents.contains("Magnitude (dB)"),
+            "magnitude panel missing"
+        );
+        assert!(contents.contains("Phase (deg)"), "phase panel missing");
+        assert!(
+            contents.contains("Frequency (Hz)"),
+            "frequency axis unlabelled"
+        );
+        assert!(contents.contains("V(out)"), "node series unlabelled");
+    }
+
+    /// A response with nothing plottable is an error, not a blank canvas: a logarithmic
+    /// frequency axis cannot show a point at or below zero, and a sweep consisting only of
+    /// those has nothing left to draw.
+    #[test]
+    fn an_ac_plot_with_no_positive_frequency_is_an_error() {
+        let net = parse(include_str!("../../../circuits/rc_ac.net")).expect("parse rc_ac");
+        let path = std::env::temp_dir()
+            .join("va-cli-plot-test-ac-empty.svg")
+            .to_str()
+            .expect("utf8 path")
+            .to_string();
+
+        let empty = va_acnoise::ac::AcResponse::default();
+        assert!(plot_ac(&path, &net, &empty).is_err(), "empty response");
+
+        let dc_only = va_acnoise::ac::AcResponse {
+            f: vec![0.0],
+            x: vec![vec![(1.0, 0.0); net.node_order.len()]],
+        };
+        assert!(
+            plot_ac(&path, &net, &dc_only).is_err(),
+            "a zero-frequency-only sweep has nothing a log axis can show"
+        );
     }
 
     /// An empty sweep is refused rather than producing a blank/zero-width canvas — the same

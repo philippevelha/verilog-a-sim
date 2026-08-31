@@ -600,6 +600,17 @@ docs/tutorials/
   switch — is the tightest of the six — the rung most worth
   seeing, not just reading as a number). Each embed states its exact regeneration command per
   this section's own "executable, not just prose" rule.
+  **2026-08-31 (later still): `--plot` learned AC.** An AC sweep now draws as a Bode pair
+  (`va_cli::plot::plot_ac`): magnitude in dB above phase in degrees, sharing a logarithmic
+  frequency axis. Two panels rather than one for the same reason branch currents were kept off
+  a voltage axis earlier the same day — decibels and degrees share neither units nor a useful
+  scale, and forcing them onto one axis makes the flatter of the two unreadable. `t5-acnoise/
+  01-ac.qmd` embeds `rc_ac.net`'s response, where `V(in)` is flat at 0 dB/0° (it is the 1 V
+  source, i.e. the reference the other curve is read against) and `V(out)` shows the
+  -20 dB/decade rolloff and 0° → -90° phase swing of the single pole. A frequency point at or
+  below zero cannot appear on a log axis and is skipped; a sweep with nothing left is an error
+  rather than a blank canvas, which is the same contract the transient and sweep plots keep.
+
   **2026-08-31 (later): `overlay_sweep` put to work, and a units bug found by using it.** The
   DC-sweep overlay had been written and unit-tested but drawn by nothing, because until
   `circuits/diode_clamp.net` existed no gated `.dc` circuit had a node voltage worth looking at.

@@ -101,9 +101,9 @@ pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)
 ///
 /// Returns an error if a file cannot be read, the deck or model cannot be parsed, an
 /// unsupported analysis is requested, a device names an unknown model, or the solve diverges.
-/// If `plot` is given, also returns an error if it names a transient run (a DC operating point
-/// is a single point, not a waveform — plotting one isn't implemented) or if writing the SVG
-/// fails.
+/// If `plot` is given, also returns an error when the requested analysis produces no curve
+/// to draw — a bare DC operating point is a single point, not a waveform — or if writing the
+/// SVG fails.
 pub fn run_sim(
     netlist: &str,
     model: Option<&str>,
@@ -119,10 +119,12 @@ pub fn run_sim(
     // image, so asking is still a clear error rather than a misleading file.
     if plot.is_some()
         && analysis != Analysis::Transient
+        && analysis != Analysis::Ac
         && !(analysis == Analysis::Dc && net.dc.is_some())
     {
         bail!(
-            "--plot supports a transient run (--tran) or a `.dc` sweep; a DC operating point is              a single point, not a curve"
+            "--plot supports a transient run (--tran), an AC sweep (--ac), or a `.dc` sweep; \
+             a DC operating point is a single point, not a curve"
         );
     }
 
@@ -137,6 +139,10 @@ pub fn run_sim(
         let response = solve_ac(&net, &compiled)?;
         let currents = branch_currents(&net, &compiled)?;
         report_ac(&net, &currents, &response);
+        if let Some(path) = plot {
+            plot::plot_ac(path, &net, &response).with_context(|| format!("plotting to {path}"))?;
+            eprintln!("[va-cli] wrote AC plot to {path}");
+        }
     } else if analysis == Analysis::Noise {
         let spectrum = solve_noise(&net, &compiled)?;
         report_noise(&net, &spectrum);
