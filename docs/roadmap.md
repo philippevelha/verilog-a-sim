@@ -93,7 +93,20 @@ tutorials written yet" was true until 2026-07-18 and is now false — all 21 `.q
 2. ~~**T1.3's literal gate is unmet.**~~ **Closed 2026-08-30** — `crates/va-frontend/tests/
    golden_ir.rs` commits a full `{:#?}` snapshot of the elaborated `va_ir::Module` for
    `resistor.va`/`capacitor.va`/`diode.va` and fails on any difference. T1.3 is ✅.
-3. **T2.2/T2.3 are not corpus-complete.** 85 of the 88 self-contained, module-declaring corpus
+3. **Both remaining frontend failures are bugs in the corpus files, not recognizer gaps**
+   (established 2026-08-31 by reading each one, not inferred from the error text). The 86/88
+   headline is therefore 88/88 of the files that are actually valid Verilog-A:
+   `verilogaLib-master/ctle.va` writes `V(out) <+ gain * laplace_zp(...)` but never declares
+   `gain` anywhere — no parameter, no variable — so "unknown identifier `gain`" is the
+   correct answer; and `verilogAlib/example_mzi_modulator.vams` connects `.therm_en(1)` in a
+   port-connection list, but `therm_en` is a `parameter` of `photonic_waveguide` (line 50 of
+   `photonic_waveguide.vams`), so it belongs in the `#(...)` override list — a port takes a
+   net, never a value. This mirrors the single remaining *codegen* failure, `amp_dynamic.va`,
+   which is also a file bug. Both diagnostics were sharpened rather than the parser widened
+   (see the 2026-08-31 located-diagnostics entry below): rejecting these is right, so the work
+   was making the rejection say why.
+
+4. **T2.2/T2.3 are not corpus-complete.** 85 of the 88 self-contained, module-declaring corpus
    files build into a `ModelInstance` (2026-08-31). The frontend→codegen gap is **1 file**, and it is
    a bug in a corpus file rather than a recognizer gap (`amp_dynamic.va` declares `parameter real
    gain` and `real gain` in the same scope). T2.2's own generated-diode check is an operating
@@ -674,6 +687,32 @@ matches the code verbatim.
 > `Ok(vec![])` for one instead of erroring. Re-scanned the full external corpus (115 files):
 > **72/115 pass frontend+codegen, up from 62** (+10, all previously "expected at least one
 > `module`" failures — the entire macro-only-header bucket closed in one shot).
+>
+> **2026-08-31: parse errors carry a line, a column, and the offending line's text.** Every
+> `FrontendError::Parse` used to open `at token 733:` — a token index into a stream the reader
+> cannot see, useless for finding the mistake in a 3000-line vendor model. `lexer::lex_spanned`
+> now returns each token's start offset alongside the token, and
+> `parser::parse_with_disciplines_located` turns the failing index into `at preprocessed line
+> 471, column 19 (`.therm_en(1)`)`. Both additions are strictly additive: `lex`/`parse` keep
+> their old signatures and fall back to the token-index wording, so no existing caller changed
+> behavior — `compile_with_includes` and `va-cli check` opt in.
+>
+> The number is deliberately labelled **preprocessed**, because that is what it counts: the
+> pipeline lexes the expanded text, so a file whose includes resolved (or were silently
+> skipped) is renumbered relative to its own source — `example_mzi_modulator.vams`'s failure
+> is its line 120 but the expansion's line 471. Quoting the offending line's *text* is what
+> makes the diagnostic usable across that drift: the quote is exact and greppable in the
+> original file no matter how far the count has moved. Mapping expanded lines back to original
+> ones needs the preprocessor to keep a line map, which it does not — recorded here as the
+> honest limitation rather than papered over with a number that might be wrong.
+>
+> One diagnostic was also made specific rather than generic: a **value in a port-connection
+> list** (`.therm_en(1)`) now says a port connects to a net and points at the `#(...)`
+> parameter-override list, instead of `expect_ident`'s "expected an identifier". That is the
+> real mistake in the one corpus file it rejects — `therm_en` is a `parameter` of the
+> instantiated module — and the parser is right to refuse it, so the fix was in the wording,
+> not the grammar. Four tests cover the machinery: the located form, the token-index fallback,
+> the port-connection message, and the long-line cap.
 
 - Recursive-descent (or chosen) parser → AST for module headers, ports, params with ranges,
   the analog block, `<+`, `if/else`, analog function calls.

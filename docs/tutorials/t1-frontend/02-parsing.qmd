@@ -114,8 +114,11 @@ empty statement (a bare `;`) parses as a no-op, since `mvsg_cmc_3.2.0.va` uses e
 
 ## Limitations
 
-Stated in the parser module's own doc comment: errors are reported by token index, not source
-byte offset (spans aren't carried past the lexer yet); parameter-range inclusive/exclusive
+Stated in the parser module's own doc comment: a reported line number counts lines of the
+*preprocessed* text, not the original file (2026-08-31 — errors used to carry only a token
+index; they now carry a line, a column, and the offending line's text, but mapping an expanded
+line back to an original one needs a preprocessor line map that doesn't exist yet, so the quoted
+text is the part that stays exact); parameter-range inclusive/exclusive
 delimiters (`[0:inf)`) are recorded but dropped at elaboration; analog-function argument/local
 *types* are parsed and discarded, direction only is kept; `@(event) stmt` parses but the trigger
 is discarded (the controlled statement always runs — sound for a DC operating point, not for

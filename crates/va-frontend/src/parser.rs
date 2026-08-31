@@ -18,8 +18,14 @@
 //!
 //! # Limitations
 //!
-//! - Errors are reported by token index, not source byte offset: the lexer discards spans
-//!   in v0 (see [`crate::lexer`]). Carrying spans is a planned improvement.
+//! - Errors carry a line, a column, and the offending line's text when the caller supplies the
+//!   source ([`parse_with_disciplines_located`], fed by [`crate::lexer::lex_spanned`]), and
+//!   fall back to a bare token index when it does not ([`parse`]). The reported line counts
+//!   lines of the **preprocessed** text, which is what the pipeline actually lexes — for a
+//!   file whose `` `include ``s resolved or were skipped that is not the file's own numbering,
+//!   so the message quotes the line's text too, which stays exact and greppable either way.
+//!   Mapping an expanded line back to an original one would need a preprocessor line map,
+//!   which does not exist yet.
 //! - Parameter ranges accept mixed inclusive/exclusive delimiters — `[`/`]` (inclusive) and
 //!   `(`/`)` (exclusive) in any combination, e.g. `from [0:inf)`. The inclusive/exclusive
 //!   flags are recorded in the AST but dropped by elaboration (see [`crate::elaborate`]).
@@ -94,6 +100,28 @@ pub type ParsedUnit = (
 ///
 /// As [`parse`].
 pub fn parse_with_disciplines(tokens: &[Token]) -> Result<ParsedUnit, FrontendError> {
+    parse_with_disciplines_located(tokens, None)
+}
+
+/// Like [`parse_with_disciplines`], but with the source text and per-token byte offsets from
+/// [`crate::lexer::lex_spanned`], so a parse error names a **line, column, and the offending
+/// source line** rather than a bare token index. Pass `None` to get the token-index form.
+///
+/// The location is only ever as good as the text you hand it. `crate::compile_with_includes`
+/// lexes the *preprocessed* source, so a reported line is a line of the expanded text: for a
+/// file with no macro expansion or `` `include `` it is the file's own line, but for one whose
+/// includes were resolved (or silently skipped) it can be off by however many lines the
+/// preprocessor added or dropped. That is why the message quotes the offending line's *text*
+/// too — the quoted text is exact regardless, and greppable in the original file even when
+/// the number has drifted.
+///
+/// # Errors
+///
+/// As [`parse_with_disciplines`].
+pub fn parse_with_disciplines_located(
+    tokens: &[Token],
+    located: Option<(&str, &[usize])>,
+) -> Result<ParsedUnit, FrontendError> {
     // The always-on access-function baseline (§ module preamble discipline/nature parsing):
     // recognized regardless of whether any `discipline`/`nature` block is ever parsed, so a
     // file with no preamble at all still recognizes the standard electrical/thermal names.
@@ -111,6 +139,8 @@ pub fn parse_with_disciplines(tokens: &[Token]) -> Result<ParsedUnit, FrontendEr
         disciplines: HashMap::new(),
         known_access,
         pending_items: Vec::new(),
+        src: located.map(|(src, _)| src),
+        offsets: located.map(|(_, offsets)| offsets),
     };
     let mut modules = Vec::new();
     loop {
@@ -153,6 +183,12 @@ fn ident_like_keyword(t: &Token) -> Option<&'static str> {
 
 struct Parser<'a> {
     toks: &'a [Token],
+    /// The text `toks` was lexed from, if the caller supplied it
+    /// ([`parse_with_disciplines_located`]) — used only to turn a token index into a
+    /// human line/column for an error message.
+    src: Option<&'a str>,
+    /// Byte offset of each token in `src`, parallel to `toks`. Present exactly when `src` is.
+    offsets: Option<&'a [usize]>,
     pos: usize,
     exprs: Vec<ExprAst>,
     /// Parsed `nature ... endnature` blocks, keyed by name (§ module preamble discipline/nature
@@ -264,11 +300,39 @@ impl Parser<'_> {
 
     fn err<T>(&self, what: String) -> Result<T, FrontendError> {
         Err(FrontendError::Parse(format!(
-            "at token {}: {}, found {:?}",
-            self.pos,
+            "{}: {}, found {:?}",
+            self.location(),
             what,
             self.peek()
         )))
+    }
+
+    /// Where the parser is, phrased for a human if [`parse_with_disciplines_located`] supplied
+    /// the source, and as a bare token index otherwise. The quoted line text is trimmed and
+    /// capped, so one very long expanded macro line cannot flood a diagnostic.
+    fn location(&self) -> String {
+        let (Some(src), Some(offsets)) = (self.src, self.offsets) else {
+            return format!("at token {}", self.pos);
+        };
+        // Past the last token (an unexpected EOF), point at the end of the source.
+        let offset = offsets.get(self.pos).copied().unwrap_or(src.len());
+        let offset = offset.min(src.len());
+        let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let line_no = src[..offset].bytes().filter(|&b| b == b'\n').count() + 1;
+        let col = src[line_start..offset].chars().count() + 1;
+        let line_end = src[offset..].find('\n').map_or(src.len(), |i| offset + i);
+        let text = src[line_start..line_end].trim();
+        const MAX: usize = 100;
+        let quoted: String = if text.chars().count() > MAX {
+            text.chars().take(MAX).collect::<String>() + "…"
+        } else {
+            text.to_string()
+        };
+        // "preprocessed line", not "line": the pipeline lexes the *expanded* text, so this
+        // number counts lines of that, which for a file with resolved (or skipped)
+        // includes is not the file's own numbering. Saying which is cheaper than being
+        // quietly wrong, and the quoted text stays greppable in the original either way.
+        format!("at preprocessed line {line_no}, column {col} (`{quoted}`)")
     }
 
     fn expect_ident(&mut self) -> Result<String, FrontendError> {
@@ -960,6 +1024,18 @@ impl Parser<'_> {
             self.pos += 1;
             let port = self.expect_ident()?;
             self.eat(&Token::LParen)?;
+            // A port connects to a *net*, never to a value. Saying so beats `expect_ident`'s
+            // generic "expected an identifier": the mistake this actually catches in the wild
+            // is a parameter override written into the port list instead of the `#(...)` one
+            // (`external/verilogAlib/example_mzi_modulator.vams` connects `.therm_en(1)`, and
+            // `therm_en` is a `parameter` of the instantiated module, not one of its ports).
+            if matches!(self.peek(), Some(Token::Number(_))) {
+                return self.err(format!(
+                    "`.{port}(...)`: a port connects to a net, not to a value — if \
+                     `{port}` is a parameter of the instantiated module, override it in \
+                     the `#(...)` list before the instance name instead"
+                ));
+            }
             let net = self.parse_net_arg()?;
             self.eat(&Token::RParen)?;
             Ok(PortConn::Named { port, net })
@@ -1741,6 +1817,62 @@ fn binop_binding(t: &Token) -> Option<(BinOp, u8, u8)> {
 mod tests {
     use super::*;
     use crate::lexer::lex;
+
+    /// A located parse error names the line, the column, and the offending line's own text.
+    /// Nothing expands in this source, so the preprocessed line number is the source line
+    /// number and is checkable directly.
+    #[test]
+    fn a_located_parse_error_names_the_line_and_quotes_it() {
+        let src = "module m(a);\n    electrical a;\n    analog begin\n        I(a) <+ ;\n    end\nendmodule\n";
+        let (tokens, offsets) = crate::lexer::lex_spanned(src).expect("lex");
+        let err = parse_with_disciplines_located(&tokens, Some((src, &offsets)))
+            .expect_err("`<+ ;` is not an expression");
+        let msg = err.to_string();
+        assert!(msg.contains("preprocessed line 4"), "{msg}");
+        assert!(msg.contains("I(a) <+ ;"), "{msg}");
+    }
+
+    /// Without the source, the same failure still reports, just by token index — so the
+    /// location is strictly additive and `parse`'s own callers keep working unchanged.
+    #[test]
+    fn an_unlocated_parse_error_falls_back_to_a_token_index() {
+        let src = "module m(a);\n    electrical a;\n    analog begin\n        I(a) <+ ;\n    end\nendmodule\n";
+        let tokens = lex(src).expect("lex");
+        let err = parse(&tokens).expect_err("`<+ ;` is not an expression");
+        let msg = err.to_string();
+        assert!(msg.contains("at token "), "{msg}");
+        assert!(!msg.contains("line"), "{msg}");
+    }
+
+    /// A parameter override written into the port-connection list (the real mistake in
+    /// `external/verilogAlib/example_mzi_modulator.vams`) is rejected by name and pointed at
+    /// the `#(...)` list — not met with `expect_ident`'s generic "expected an identifier".
+    #[test]
+    fn a_value_in_a_port_connection_names_the_parameter_override_fix() {
+        let src =
+            "module top(a);\n    electrical a;\n    child c1 (.opt(a), .therm_en(1));\nendmodule\n";
+        let (tokens, offsets) = crate::lexer::lex_spanned(src).expect("lex");
+        let err = parse_with_disciplines_located(&tokens, Some((src, &offsets)))
+            .expect_err("a port takes a net, not a number");
+        let msg = err.to_string();
+        assert!(msg.contains("`.therm_en(...)`"), "{msg}");
+        assert!(msg.contains("`#(...)`"), "{msg}");
+        assert!(msg.contains("preprocessed line 3"), "{msg}");
+    }
+
+    /// A very long line (an expanded macro, in practice) is capped rather than flooding the
+    /// diagnostic, and the cap is visible as an ellipsis.
+    #[test]
+    fn a_long_offending_line_is_truncated_in_the_diagnostic() {
+        let filler = "a + ".repeat(80);
+        let src =
+            format!("module m(a);\n    electrical a;\n    analog I(a) <+ {filler};\nendmodule\n");
+        let (tokens, offsets) = crate::lexer::lex_spanned(&src).expect("lex");
+        let err = parse_with_disciplines_located(&tokens, Some((&src, &offsets)))
+            .expect_err("a trailing `+` has no operand");
+        let msg = err.to_string();
+        assert!(msg.contains('\u{2026}'), "{msg}");
+    }
 
     /// `models/`, as an include-path root. Every model there `` `include ``s `disciplines.vams`
     /// and `constants.vams` from alongside itself; a test that lexes/parses a model without
@@ -2973,6 +3105,8 @@ mod tests {
             disciplines: HashMap::new(),
             known_access,
             pending_items: Vec::new(),
+            src: None,
+            offsets: None,
         }
     }
 

@@ -384,14 +384,20 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
             return Err(skipped_includes);
         }
     };
-    let tokens = match va_frontend::lexer::lex(&src) {
+    // Lex with spans so a parse failure below reports a line, a column, and the offending
+    // line's text instead of a token index. The line is a line of the *preprocessed* source
+    // (unresolved includes have already been dropped), which is why the quoted text matters
+    // as much as the number here -- see va_frontend::parser::parse_with_disciplines_located.
+    let (tokens, offsets) = match va_frontend::lexer::lex_spanned(&src) {
         Ok(t) => t,
         Err(e) => {
             println!("  [lex  ] {path}: {e}{}", skipped_clause(&skipped_includes));
             return Err(skipped_includes);
         }
     };
-    match va_frontend::parser::parse(&tokens) {
+    match va_frontend::parser::parse_with_disciplines_located(&tokens, Some((&src, &offsets)))
+        .map(|(asts, _, _)| asts)
+    {
         Ok(asts) => Ok(ParsedFile {
             asts,
             skipped_includes,

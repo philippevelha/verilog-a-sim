@@ -520,13 +520,34 @@ fn parse_string(lex: &logos::Lexer<Token>) -> String {
 /// Returns [`FrontendError::Lex`] at the first character the lexer cannot tokenize, with the
 /// byte offset of the offending span.
 pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
+    lex_spanned(source).map(|(tokens, _)| tokens)
+}
+
+/// Like [`lex`], but also returning each token's **start byte offset** in `source`, so a later
+/// parse error can name a line and column instead of a bare token index
+/// (`crate::parser::parse_with_disciplines_located`).
+///
+/// The returned offsets are parallel to the returned tokens: `offsets[i]` is where `tokens[i]`
+/// begins. They index whatever string was passed in — which, in the `crate::compile` pipeline,
+/// is the *preprocessed* text, not the original file. See
+/// [`crate::parser::parse_with_disciplines_located`] for what that means for a reported line
+/// number.
+///
+/// # Errors
+///
+/// As [`lex`].
+pub fn lex_spanned(source: &str) -> Result<(Vec<Token>, Vec<usize>), FrontendError> {
     let mut tokens = Vec::new();
+    let mut offsets = Vec::new();
     let mut lexer = Token::lexer(source);
     while let Some(result) = lexer.next() {
+        let span = lexer.span();
         match result {
-            Ok(token) => tokens.push(token),
+            Ok(token) => {
+                tokens.push(token);
+                offsets.push(span.start);
+            }
             Err(()) => {
-                let span = lexer.span();
                 return Err(FrontendError::Lex {
                     offset: span.start,
                     message: format!("unexpected input {:?}", lexer.slice()),
@@ -534,7 +555,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             }
         }
     }
-    Ok(tokens)
+    Ok((tokens, offsets))
 }
 
 #[cfg(test)]

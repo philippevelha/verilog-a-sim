@@ -61,8 +61,12 @@ pub fn compile_with_includes(
     include_dirs: &[PathBuf],
 ) -> Result<CompiledDesign, FrontendError> {
     let expanded = preprocess::preprocess(source, include_dirs)?;
-    let tokens = lexer::lex(&expanded)?;
-    let (asts, natures, disciplines) = parser::parse_with_disciplines(&tokens)?;
+    // Lex with spans and hand them to the parser, so a parse error reports a line, a column,
+    // and the offending line's text rather than a token index. The line number is a line of
+    // `expanded`, not of `source` ''' + M + ''' see `parser::parse_with_disciplines_located`.
+    let (tokens, offsets) = lexer::lex_spanned(&expanded)?;
+    let (asts, natures, disciplines) =
+        parser::parse_with_disciplines_located(&tokens, Some((&expanded, &offsets)))?;
     let mut modules = Vec::with_capacity(asts.len());
     for ast in &asts {
         modules.push(elaborate::elaborate_with_library_and_disciplines(
