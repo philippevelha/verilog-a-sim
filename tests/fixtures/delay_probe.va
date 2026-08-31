@@ -1,0 +1,15 @@
+// A model exercising `absdelay`, purely to demonstrate the transient-approximation warning.
+// Not part of the validation zoo: this engine folds `absdelay` to its undelayed input in a
+// transient run, so a golden comparison here would be scoring the fold, not a delay.
+`include "disciplines.vams"
+
+module delay_probe(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1000.0 from (0:inf);
+    parameter real td = 1e-5 from [0:inf);
+
+    analog begin
+        I(p, n) <+ absdelay(V(p, n), td) / r;
+    end
+endmodule

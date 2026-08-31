@@ -1566,6 +1566,26 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-08-31: say out loud when a transient run is approximating an operator.** Some
+> analog operators fold to something simpler here, and the fold is *correct* for DC and AC —
+> `absdelay` and the `laplace_*` family both settle to their steady-state value at a fixed
+> operating point. In a **transient** run the same fold is a plausible number that is wrong:
+> `absdelay` returns its undelayed input, and a `laplace_*` filter returns its DC gain.
+> Corpus demand is real, not hypothetical: 5 files call `absdelay` and 5 call a `laplace_*`.
+>
+> `va-cli` now prints a warning naming the operator and what it did instead, *before* the
+> waveform rather than after it. A warning and not an error, deliberately: refusing the model
+> would block DC and AC analyses that are perfectly sound. What is not acceptable is a
+> transient run handing back a confident waveform without mentioning that one of its operators
+> was never really evaluated.
+>
+> Detection lexes rather than string-searches, so the word in a comment or an identifier that
+> merely contains it (`absdelay_count`) does not trigger it. That precision is a direct
+> dividend of reserving `absdelay` earlier the same day: it now arrives as a `Keyword` token
+> rather than a bare identifier. `transition`/`slew` are deliberately **not** on the list —
+> they are genuinely evaluated against Interface β's state channel — and the Z-domain family is
+> not either, since elaboration rejects it outright, which is already loud.
+>
 > **2026-08-31: linear controlled sources (`E`, `G`), and a mislabelled current they
 > exposed.** `va_abi::reference::{Vcvs, Vccs}` plus the netlist's `E`/`G` lines, each taking
 > four nodes — the driven pair then the controlling pair. Both are expressible through

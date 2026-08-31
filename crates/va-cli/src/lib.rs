@@ -55,6 +55,75 @@ pub enum Analysis {
     Noise,
 }
 
+/// Analog operators this engine **approximates in a transient run**, paired with what it
+/// actually computes instead. Reported by [`warn_transient_approximations`].
+///
+/// Deliberately not a list of everything unimplemented: these are the constructs that
+/// produce a *plausible number that is wrong* rather than an error. `transition` and
+/// `slew` are absent because they are genuinely evaluated against Interface beta's state
+/// channel; the Z-domain family is absent because elaboration rejects it outright, which
+/// is already loud.
+const TRANSIENT_APPROXIMATIONS: &[(&str, &str)] = &[
+    (
+        "absdelay",
+        "folds to its undelayed input (a true delay needs an interpolated history buffer)",
+    ),
+    (
+        "laplace_nd",
+        "folds to its DC gain (a time-domain Laplace filter is a convolution)",
+    ),
+    ("laplace_np", "folds to its DC gain"),
+    ("laplace_zd", "folds to its DC gain"),
+    ("laplace_zp", "folds to its DC gain"),
+];
+
+/// Warn, on stderr, when `src` uses an operator this engine approximates in transient.
+///
+/// Lexes rather than string-searches, so a mention inside a comment or inside a longer
+/// identifier does not trigger it — every name here is a reserved word, so it arrives as a
+/// `Keyword` token. (`absdelay` only became reserved on 2026-08-31; before that this check
+/// would have had to match raw identifiers and would have been the weaker for it.)
+///
+/// A warning rather than an error, on purpose: the fold is *correct* for DC and AC, where
+/// these operators settle to their steady-state value, so refusing the model outright
+/// would block analyses that are perfectly sound. What is not acceptable is a transient
+/// run returning a confident waveform without saying that one of its operators was never
+/// really evaluated.
+fn warn_transient_approximations(src: &str, path: &str) {
+    for name in approximations_in(src) {
+        let effect = TRANSIENT_APPROXIMATIONS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, e)| *e)
+            .unwrap_or("is approximated");
+        eprintln!(
+            "[va-cli] warning: {path} uses `{name}`, which this engine {effect} \
+             in a transient run"
+        );
+    }
+}
+
+/// The [`TRANSIENT_APPROXIMATIONS`] operators `src` actually calls, in table order, each named
+/// once. Split out from the warning so the detection is testable without capturing stderr.
+fn approximations_in(src: &str) -> Vec<&'static str> {
+    let Ok(tokens) = va_frontend::lexer::lex(src) else {
+        return Vec::new(); // A model that does not lex will fail louder elsewhere.
+    };
+    let mut seen: Vec<&'static str> = Vec::new();
+    for tok in &tokens {
+        if let va_frontend::lexer::Token::Keyword(kw) = tok {
+            if let Some((name, _)) = TRANSIENT_APPROXIMATIONS
+                .iter()
+                .find(|(n, _)| *n == kw.as_str())
+            {
+                if !seen.contains(name) {
+                    seen.push(name);
+                }
+            }
+        }
+    }
+    seen
+}
 /// Parse `netlist` and, if `model` is given, compile it through the real frontend → codegen
 /// pipeline — the common prelude every driver needs before solving. Split out of [`run_sim`]
 /// (which still calls it, unchanged) so a caller that wants the *values* — `va-harness`
@@ -133,6 +202,12 @@ pub fn run_sim(
     }
 
     if analysis == Analysis::Transient {
+        // Said *before* the numbers, so the caveat is not buried under a waveform.
+        if let Some(path) = model {
+            if let Ok(src) = std::fs::read_to_string(path) {
+                warn_transient_approximations(&src, path);
+            }
+        }
         let wf = solve_transient(&net, &compiled, integration)?;
         report_transient(&net, &wf);
         if let Some(path) = plot {
@@ -2327,6 +2402,27 @@ mod tests {
         }
     }
 
+    /// The transient-approximation warning fires on the operators this engine folds, stays
+    /// quiet on models using none, and is driven by the *lexer* rather than a substring
+    /// search -- so the word in a comment, or an identifier merely containing it, is ignored.
+    /// That precision is only available because `absdelay` became a reserved word on
+    /// 2026-08-31; before that it lexed as a plain identifier.
+    #[test]
+    fn transient_approximations_are_detected_by_token_not_by_substring() {
+        let uses_it = include_str!("../../../tests/fixtures/delay_probe.va");
+        assert_eq!(approximations_in(uses_it), vec!["absdelay"]);
+
+        // The zoo's own diode uses none of them.
+        assert!(approximations_in(include_str!("../../../models/diode.va")).is_empty());
+
+        // A comment mentioning it, and an identifier containing it, are both ignored: the
+        // lexer skips the first and yields an `Ident` (not a `Keyword`) for the second.
+        let decoy = "// absdelay is not used here\nmodule m(a);\nelectrical a;\nreal absdelay_count;\nanalog absdelay_count = 1.0;\nendmodule\n";
+        assert!(
+            approximations_in(decoy).is_empty(),
+            "a comment or a longer identifier must not trigger the warning"
+        );
+    }
     /// Controlled sources, against values computable by hand rather than against golden:
     /// a 3 V source across a 2k/1k divider gives V(mid) = 1 V, an E with gain 4 holds
     /// V(eout) = 4 V, and a G pushing 2 mA through 500 ohms gives V(gout) = -1 V.
