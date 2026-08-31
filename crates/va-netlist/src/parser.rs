@@ -129,15 +129,25 @@ fn parse_param_overrides(
 }
 
 /// The raw `PULSE(...)` numbers on a source line, or `None` for any other line.
+///
+/// `PULSE` is recognized **positionally**, as the token immediately after the source's two
+/// nodes — the same position [`parse_source_waveform`] reads it from. Searching the line for
+/// the word instead would match a *net* called `pulse_out`, and then happily read whatever
+/// parenthesised numbers came next: a `V1 pulse_out gnd SIN(0 1 1k)` source was silently
+/// rewritten into a pulse built from the sine's own arguments, producing a flat zero waveform
+/// where a 1 kHz sine belonged. Caught by review rather than by a gate, because no circuit in
+/// the zoo happens to name a net that way.
 fn pulse_numbers(line: &str) -> Option<Vec<f64>> {
     let toks: Vec<&str> = line.split_whitespace().collect();
-    let first = toks.first()?;
-    if !first.starts_with(['V', 'v']) {
+    if !toks.first()?.starts_with(['V', 'v']) {
         return None;
     }
-    let upper = line.to_ascii_uppercase();
-    let at = upper.find("PULSE")?;
-    let inner = line[at..].split(['(', ')']).nth(1)?;
+    let spec = toks.get(3)?;
+    if !spec.to_ascii_uppercase().starts_with("PULSE") {
+        return None;
+    }
+    let inner = toks[3..].join(" ");
+    let inner = inner.split(['(', ')']).nth(1)?;
     let nums: Vec<f64> = inner.split_whitespace().filter_map(parse_value).collect();
     (nums.len() >= 2).then_some(nums)
 }
@@ -771,6 +781,28 @@ C1 out gnd 1e-6 IC=5
 
     /// `IC=` on a resistor, and a malformed value, are refused with a message — not silently
     /// dropped, which would leave a deck's author believing an initial condition was applied.
+    /// A net whose *name* contains "pulse" must not turn its source into a pulse. The
+    /// first version of `pulse_numbers` searched the whole line for the word, matched the
+    /// node name, and then read the `SIN` call's arguments as pulse parameters -- silently
+    /// replacing a 1 kHz sine with a flat zero waveform.
+    #[test]
+    fn a_net_named_like_a_waveform_does_not_become_one() {
+        let net = parse("V1 pulse_out gnd SIN(0 1 1k)\n.tran 1e-5 1e-3\n.end\n").expect("parses");
+        assert!(
+            matches!(net.devices[0].waveform, Some(Waveform::Sin { .. })),
+            "a SIN source on a net called `pulse_out` stayed a sine: {:?}",
+            net.devices[0].waveform
+        );
+
+        // And the positive case still works, including lower case.
+        let net =
+            parse("V1 a gnd pulse(0 5 1u 1n 1n 5u 10u)\n.tran 1e-7 1e-4\n.end\n").expect("parses");
+        assert!(matches!(
+            net.devices[0].waveform,
+            Some(Waveform::Pulse { .. })
+        ));
+    }
+
     #[test]
     fn a_model_device_carries_named_parameter_overrides() {
         let net = parse("D1 a gnd diode Is=1e-12 N=1.3\n.end\n").expect("parses");
