@@ -108,9 +108,31 @@ account (QSPICE solves the DC operating point before a `.tran` run by default; t
 
 ## Limitations
 
-`Method::Gear` is declared but not implemented (`TransientError::UnsupportedMethod`, never a
-silent fallback to another method). The LTE estimate itself — the mechanism that decides *when*
-a step is accepted — is its own phase, `t4-transient/02-lte-timestep.qmd`.
+`Method::Gear` (variable-step BDF2) was declared but unimplemented until 2026-09-01. It works
+now, behind `--integration gear`, and the interesting part is *why it is not the default*.
+
+Implementing it needed a CLAUDE.md §6 interface change, because BDF2 is a different **shape**
+from the other two, not merely a different set of coefficients. Backward Euler and trapezoidal
+both reconstruct a bare `ddt` as a one-step recursion on the previous *rate* — trapezoidal's
+closed form `Q_n - Q_(n-1) = h/2*(rate_n + rate_prev)` literally is that recursion. BDF2 is a
+three-point difference on the charge, and no algebraic identity recovers `Q_(n-2)`'s weight
+from `rate_(n-1)`, because that rate was itself built under a different step ratio. Hence
+`AnalysisCtx::ddt_prev2_weight`.
+
+The stamped charge channel, by contrast, needed nothing: BDF2's two history charges fold into
+the companion's `offset` exactly as trapezoidal's already do. That asymmetry is the trap —
+shipping the companion alone would give an exact BDF2 stamp beside a stale reconstruction on
+the value path, two orders inside one model, still converging. The order-of-convergence test
+catches precisely that: **1.997 wired, -0.016 with the new weight forced to zero**.
+
+And the measurement, which is the honest conclusion: Gear passes all 24 gates at essentially
+identical step counts and is uniformly *less* accurate — 1.05x worse on `rectifier`, 9.3x on
+`rlc_ring`. L-stability pays when the step is large relative to a stiff mode, and the adaptive
+controller has already shrunk `h` below that. `rlc_ring`'s ringing is physical, so damping it
+harder is just less faithful. Trapezoidal stays the default (`docs/validation.md`).
+
+The LTE estimate itself — the mechanism that decides *when* a step is accepted — is its own
+phase, `t4-transient/02-lte-timestep.qmd`.
 
 ## What's next
 

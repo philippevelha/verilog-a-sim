@@ -1,6 +1,15 @@
 # Proposal: `Method::Gear` (variable-step BDF2) in `va-transient`
 
-**Status:** proposed, not ratified. **Date:** 2026-08-31.
+**Status: RATIFIED and implemented, 2026-09-01.** **Proposed:** 2026-08-31.
+
+> Outcome: stages 1-4 all landed. The measured checkpoint §5 asks for came out **against** Gear
+> on this project's circuits 
+> (`docs/validation.md`): same step count as trapezoidal, uniformly worse accuracy (1.05x on
+> `rectifier`, 9.3x on `rlc_ring`). It ships as opt-in, trapezoidal stays the default. Two
+> details in this document were corrected during implementation: `divided_difference_history`
+> for Gear is 3, the *same* as trapezoidal rather than one more (both are order 2), and Gear can
+> start at step 2 rather than step 3, since one backward-Euler step already supplies the second
+> history charge.
 **Affects:** `va-abi` (Interface β), `va-transient`, `va-codegen`, `va-cli`. `va-ir`
 (Interface α), `va-core`, `va-acnoise` are **not** touched — see §2.
 **CLAUDE.md §6 step 1** — the written description the rule requires before any code.

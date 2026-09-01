@@ -61,7 +61,7 @@ shared, demoable milestone that several theses light up at once.
 | T3.1 — MNA & dense solve (staff-maintained, not a thesis — see T3 section) | `assemble` + `faer` LU solve with singularity detection | ✅ |
 | T3.2 — Newton & divider (staff-maintained, not a thesis) | Newton loop; resistor divider solves to the analytic midpoint; **ladder rung 1 passes vs QSPICE golden** (`divider` 0.0e0) | ✅ |
 | T3.3 — nonlinear DC & sweep (staff-maintained, not a thesis) | diode–resistor clamp converges; DC `sweep`; `convergence` aids wired into `newton::solve`; **rungs 2/5 pass vs golden** (`diode_iv` 6.7e-5, `diode_clamp` 6.4e-5, `mos_dc` 1.5e-6) | ✅ |
-| T4.1 — integration (fixed-step superseded by T4.2) | backward Euler + trapezoidal companion model; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
+| T4.1 — integration (fixed-step superseded by T4.2) | backward Euler, trapezoidal and (2026-09-01) Gear/BDF2 companion models; **rung 3 passes vs golden** (`rc_step` 1.8e-5) | ✅ |
 | T4.2 — adaptive timestep & LTE | divided-difference LTE estimate drives accept/reject + grow/shrink (the embedded pair remains available, and covers the opening steps); a `SIN` source reads `ctx.time` off Interface β's analysis context (was `run_dynamic`, deleted 2026-08-06); **rung 4 passes vs golden** (`rectifier` 8.2e-4, re-validated 2026-08-31 under divided differences; 6.8e-4 under the embedded pair) | ✅ |
 | T4.3 — events & breakpoints | `EventQueue` wired into `run_with_events`: forced exact landings, interpolated crossing detection; **rung 6 passes vs golden** (`ring_osc` 4.5e-6 since the 2026-08-31 first-step fix; 1.8e-4 before it) — the "harness gate blocked" note in T4.3's own section was resolved 2026-07-09 by adding `va-abi::reference::Bjt` | ✅ |
 | T6.1 — netlist parser | R/C/L/D/M/Q/V elements (`L` and a `C`'s SPICE `IC=<volts>` initial condition both 2026-08-31) (`M`/`Q` = 3-terminal model-referencing devices, § rungs 5/6), dot-cards incl. `.tran` timing, `.dc <source> <start> <stop> <step>` sweep, `.ac dec <ppd> <fstart> <fstop>` + a `V` line's `AC <mag> [phase]` (T5), and `.noise V(<out>) <src> dec …` (T5.2); `va_ir::Discipline` unaware, SPICE-flavored `.net` format | ✅ |
@@ -1565,6 +1565,29 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > The re-validation is therefore a re-run of the comparison, not a re-baselining of it — the
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
+>
+> **2026-09-01: `Method::Gear` (variable-step BDF2) implemented, after a §6 interface change
+> the supervisor ratified.** `AnalysisCtx` gained `ddt_prev2_weight`
+> (`docs/interfaces.md`'s 2026-09-01 revision; `docs/proposals/bdf2-interface-change.md` is the
+> §6 step-1 document, now marked ratified). Landed in the proposal's own stages, each green
+> before the next: the interface + codegen plumbing behaviour-preserving (all 24 gates
+> reproduced their numbers *exactly*), then the companion, then the bare-`ddt`-value path, then
+> the CLI.
+>
+> **The half-wired case is the one that mattered, and it is gated.** The stamped charge channel
+> needs no interface change to do BDF2, so shipping the companion alone would have produced an
+> exact BDF2 stamp next to a stale two-point reconstruction on the value path — two orders in
+> one model, still converging. `a_bias_dependent_rate_is_second_order_under_gear_on_varying_
+> steps` measures observed order on a device that reads `ddt` as a value: **1.997** wired,
+> **-0.016** with the new weight forced to zero. Verified by actually forcing it, not asserted.
+>
+> **The empirical checkpoint the proposal demanded came out against Gear.** All 24 gates pass
+> under it, at essentially identical step counts, and it is uniformly *less* accurate: 1.05x
+> worse on `rectifier`, 3x on `rc_step`/`ring_osc`, **9.3x on `rlc_ring`**. L-stability buys
+> nothing when the adaptive controller has already shrunk `h` into the regime where trapezoidal
+> does not ring, and `rlc_ring`'s ringing is physical, so damping it harder is simply less
+> faithful — the proposal predicted that circuit would argue against Gear. **Trapezoidal stays
+> the default; Gear ships as `--integration gear`.** Full table in `docs/validation.md`.
 >
 > **2026-08-31: mutual inductance (`K`), and a disagreement where we can prove we are
 > right.** `va_abi::reference::Mutual` contributes *only* the off-diagonal flux terms —

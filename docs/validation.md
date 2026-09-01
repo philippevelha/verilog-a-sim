@@ -155,6 +155,43 @@ grid samples the response's interesting part. Passes at `|mag| 1.304e-15`, `phas
 `.noise` deliberately stays `dec`-only: its integrated-total maths assumes logarithmic spacing,
 so a linear grid there would change what the reported total means.
 
+### Gear/BDF2 measured against trapezoidal (2026-09-01)
+
+`Method::Gear` is implemented and reachable as `va-cli sim --integration gear`. It is **not the
+default**, and the measurement is why — recorded here rather than in a commit message because
+it is the answer to "is this worth using", not just "does it work".
+
+Every gate passes under Gear (24/24), so this is a comparison of two working methods, not a
+failure. Each circuit's golden error, trapezoidal vs Gear, at the same tolerances:
+
+| circuit | trapezoidal | Gear | Gear / trap |
+|---|--:|--:|--:|
+| `rlc_ring` | 6.480e-5 | 6.042e-4 | 9.3x worse |
+| `rc_step` | 2.248e-5 | 6.865e-5 | 3.1x worse |
+| `ring_osc` | 4.553e-6 | 1.385e-5 | 3.0x worse |
+| `rl_decay` | 2.172e-8 | 5.574e-8 | 2.6x worse |
+| `rc_discharge` | 7.692e-6 | 1.355e-5 | 1.8x worse |
+| `rectifier` | 8.269e-4 | 8.673e-4 | 1.05x worse |
+| `abstime_ramp` | 4.382e-17 | 4.382e-17 | same |
+
+Step counts are essentially identical (`rc_step` 267 vs 267, `rectifier` 718 vs 711, `rlc_ring`
+1013 vs 1013), so this is not a speed-for-accuracy trade — it is the same work for less
+accuracy. Backward Euler, for scale, needs 1980 steps on `rectifier` against trapezoidal's 718.
+
+**Why the textbook argument did not show up.** BDF2's selling point is L-stability: it damps a
+stiff mode to zero in one step where trapezoidal's amplification factor approaches -1 and can
+ring numerically. That advantage appears when the step is *large* relative to the stiff mode.
+Here the adaptive controller already shrinks `h` until the local error meets tolerance, which
+is precisely the regime where trapezoidal does not ring — so Gear pays its extra damping
+without collecting the benefit. `rlc_ring` is the clearest case and the worst result: its
+ringing is **physical** (zeta = 0.158), so a method that damps harder is simply less faithful,
+which is what the 9.3x says. The proposal predicted exactly this circuit would argue against
+Gear rather than for it.
+
+**Conclusion: keep trapezoidal as the default.** Gear earns its place as an opt-in for a future
+genuinely stiff circuit, and the honest summary today is that this zoo has none — a fixed-step
+run, or a deck whose stiffness outruns `tstep_min`, would be where to look next.
+
 ### A second ungated circuit: `circuits/transformer.net` (2026-08-31)
 
 Mutual inductance (`K`) works, and the two engines agree on the whole waveform — peak

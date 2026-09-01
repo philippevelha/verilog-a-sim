@@ -2,9 +2,16 @@
 //!
 //! # Status
 //!
-//! [`Method::BackwardEuler`] and [`Method::Trapezoidal`] are implemented, both with adaptive
-//! step-size control; [`Method::Gear`] is not (returns [`TransientError::UnsupportedMethod`],
-//! never silently falls back to another method).
+//! All three methods are implemented with adaptive step-size control: [`Method::BackwardEuler`],
+//! [`Method::Trapezoidal`] (the default), and [`Method::Gear`] — variable-step BDF2, added
+//! 2026-09-01 with the Interface β change it needed (`va_abi::AnalysisCtx::ddt_prev2_weight`).
+//!
+//! **Gear is not the better choice on this project's circuits, and that is measured rather than
+//! assumed.** It is second order like trapezoidal, so it buys no order; its advantage is
+//! L-stability, which only pays when the step is large relative to a stiff mode. The adaptive
+//! controller already shrinks `h` below that regime, so on every gated circuit Gear costs the
+//! same step count for 1.05x-9.3x more error (`docs/validation.md`). It exists for a genuinely
+//! stiff problem this zoo does not yet contain.
 //!
 //! **Two LTE estimators exist; divided differences are the default** ([`LteEstimator`]).
 //!
@@ -135,6 +142,17 @@ struct Companion {
     /// per-row `offset` above is the *stamping* half of the same discretization and is not
     /// usable per `ddt` site, since it is aggregated over every charge term touching the row.
     prev_rate_weight: f64,
+    /// The weight this method puts on the charge from *two* accepted steps back, for the same
+    /// bare-`ddt`-as-a-value path `prev_rate_weight` serves: `dq/dt = coeff*(q - q_prev) -
+    /// prev_rate_weight*rate_prev + prev2_weight*(q_prev - q_prev2)`. Zero for backward Euler
+    /// and trapezoidal, whose reconstruction is a one-step recursion on the rate; nonzero only
+    /// for Gear/BDF2, whose difference is genuinely three-point. Handed to a model through
+    /// `va_abi::AnalysisCtx::ddt_prev2_weight` (§6 change, 2026-09-01).
+    ///
+    /// Getting this wrong is the specific silent failure the interface change exists to avoid:
+    /// the *stamped* charge channel would be exact BDF2 while a model's bare-`ddt` reads stayed
+    /// on the old two-point reconstruction, mixing orders within one model at one row.
+    prev2_weight: f64,
 }
 
 impl Companion {
@@ -144,6 +162,7 @@ impl Companion {
             coeff: 1.0 / h,
             offset: q_prev.iter().map(|q| -q / h).collect(),
             prev_rate_weight: 0.0,
+            prev2_weight: 0.0,
         }
     }
 
@@ -175,22 +194,83 @@ impl Companion {
             coeff,
             offset,
             prev_rate_weight: 1.0,
+            prev2_weight: 0.0,
         }
+    }
+
+    /// Gear / BDF2, the variable-step second-order backward difference:
+    ///
+    /// ```text
+    ///   dQ/dt = (1/h)*[ (1+2r)/(1+r)*Q_n - (1+r)*Q_(n-1) + r^2/(1+r)*Q_(n-2) ],  r = h/h_prev
+    /// ```
+    ///
+    /// which reduces to the textbook uniform-step `(3/2*Q_n - 2*Q_(n-1) + 1/2*Q_(n-2))/h` at
+    /// `r = 1`. Rearranged into the shared `residual + coeff*charge + offset = 0` shape, the
+    /// two history charges both fold into `offset` exactly as trapezoidal's `q_prev`/`r_prev`
+    /// already do, so this needs no new machinery in the Newton loop.
+    ///
+    /// `prev_rate_weight` is `0.0`: BDF2 reads two previous *charges*, never a previous rate.
+    /// The bare-`ddt`-as-a-value path gets its own third weight instead
+    /// (`va_abi::AnalysisCtx::ddt_prev2_weight`), which is what the 2026-09-01 Interface beta
+    /// change exists for.
+    ///
+    /// Only `is_dynamic` rows carry history, for the reason [`Self::trapezoidal`] states at
+    /// length: an algebraic row must satisfy `residual(x) = 0` at every solved time regardless
+    /// of history, and injecting one there corrupts every step after it.
+    fn gear(q_prev: &[f64], q_prev2: &[f64], h: f64, h_prev: f64, is_dynamic: &[bool]) -> Self {
+        let r = h / h_prev;
+        let coeff = (1.0 + 2.0 * r) / ((1.0 + r) * h);
+        let w_prev = (1.0 + r) / h;
+        let w_prev2 = r * r / ((1.0 + r) * h);
+        let offset = q_prev
+            .iter()
+            .zip(q_prev2)
+            .zip(is_dynamic)
+            .map(|((q1, q2), &dynamic)| {
+                if dynamic {
+                    w_prev2 * q2 - w_prev * q1
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        Companion {
+            coeff,
+            offset,
+            prev_rate_weight: 0.0,
+            prev2_weight: Self::gear_prev2_weight(h, h_prev),
+        }
+    }
+
+    /// The weight `va_abi::AnalysisCtx::ddt_prev2_weight` needs so a model reading `ddt(q)` as
+    /// a bare *value* reconstructs the same BDF2 difference this companion stamps.
+    ///
+    /// Derived, not guessed: the reconstruction
+    /// `dq/dt = coeff*(q - q_prev) + w2*(q_prev - q_prev2)` expands to `coeff*q +
+    /// (w2 - coeff)*q_prev - w2*q_prev2`, and matching both history coefficients against the
+    /// formula above gives `w2 = -r^2/((1+r)h)` from either one -- consistent, which is why a
+    /// single new field suffices and a fourth term is not needed.
+    fn gear_prev2_weight(h: f64, h_prev: f64) -> f64 {
+        let r = h / h_prev;
+        -(r * r) / ((1.0 + r) * h)
     }
 
     /// Build the companion term for `method` at step size `h` from history (`q_prev` always;
     /// `r_prev`/`is_dynamic` only matter to [`Self::trapezoidal`]).
+    #[allow(clippy::too_many_arguments)]
     fn for_method(
         method: Method,
         q_prev: &[f64],
+        q_prev2: &[f64],
         r_prev: &[f64],
         h: f64,
+        h_prev: f64,
         is_dynamic: &[bool],
     ) -> Self {
         match method {
             Method::BackwardEuler => Self::backward_euler(q_prev, h),
             Method::Trapezoidal => Self::trapezoidal(q_prev, r_prev, h, is_dynamic),
-            Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+            Method::Gear => Self::gear(q_prev, q_prev2, h, h_prev, is_dynamic),
         }
     }
 }
@@ -215,7 +295,11 @@ fn reference_method(method: Method) -> Method {
     match method {
         Method::BackwardEuler => Method::Trapezoidal,
         Method::Trapezoidal => Method::BackwardEuler,
-        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+        // Both are second order, so their disagreement estimates the difference of two
+        // leading error terms rather than one method's error outright. That is a legitimate
+        // but looser proxy, and it matters little in practice: the embedded pair is only the
+        // fallback for the opening steps before divided differences have history.
+        Method::Gear => Method::Trapezoidal,
     }
 }
 
@@ -271,7 +355,7 @@ fn divided_difference_history(method: Method) -> usize {
     match method {
         Method::BackwardEuler => 2, // order 1: second derivative from 3 points
         Method::Trapezoidal => 3,   // order 2: third derivative from 4 points
-        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+        Method::Gear => 3,          // also order 2, so the same 4 points
     }
 }
 
@@ -311,8 +395,9 @@ fn divided_difference_error_ratio(
 
     let leading = match method {
         Method::BackwardEuler => h * h,
-        Method::Trapezoidal => h * h * h / 2.0,
-        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+        // Second order either way, so the same leading term: LTE ~ (h^3/12)*x''' and
+        // f[t0..t3] ~ x'''/6.
+        Method::Trapezoidal | Method::Gear => h * h * h / 2.0,
     };
 
     let mut values = Vec::with_capacity(needed + 1);
@@ -360,7 +445,7 @@ fn method_order(method: Method) -> f64 {
     match method {
         Method::BackwardEuler => 1.0,
         Method::Trapezoidal => 2.0,
-        Method::Gear => unreachable!("rejected in run() before any step is attempted"),
+        Method::Gear => 2.0,
     }
 }
 
@@ -405,11 +490,12 @@ fn assemble(
     is_initial_step: bool,
     dim: usize,
     state: &mut StateBuffers,
-    ddt: (f64, f64),
+    ddt: (f64, f64, f64),
 ) -> DenseStamp {
     let ctx = AnalysisCtx::transient(t)
         .with_initial_step(is_initial_step)
-        .with_ddt(ddt.0, ddt.1);
+        .with_ddt(ddt.0, ddt.1)
+        .with_ddt_prev2(ddt.2);
     // Every evaluation starts from the last *committed* state, so an unwritten slot means
     // "unchanged" rather than inheriting whatever a rejected candidate proposed.
     state.reset_scratch();
@@ -521,7 +607,11 @@ fn newton_step(
             is_initial_step,
             dim,
             state,
-            (companion.coeff, companion.prev_rate_weight),
+            (
+                companion.coeff,
+                companion.prev_rate_weight,
+                companion.prev2_weight,
+            ),
         );
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
@@ -600,10 +690,6 @@ pub fn run_with_events(
     cfg: TranConfig,
     events: &EventQueue,
 ) -> Result<Waveform, TransientError> {
-    if cfg.method == Method::Gear {
-        return Err(TransientError::UnsupportedMethod { method: cfg.method });
-    }
-
     let mut waveform = Waveform {
         t: vec![cfg.tstart],
         x: vec![x0.clone()],
@@ -619,11 +705,24 @@ pub fn run_with_events(
     // seeds itself from its input here rather than from a zero-filled `prev`.
     // No step has been taken, so there is no rate to report: `is_initial_step` already
     // makes every `ddt` site read zero and seed its own history here.
-    let initial = assemble(instances, &x, cfg.tstart, true, dim, &mut state, (0.0, 0.0));
+    let initial = assemble(
+        instances,
+        &x,
+        cfg.tstart,
+        true,
+        dim,
+        &mut state,
+        (0.0, 0.0, 0.0),
+    );
     state.commit();
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
     let mut q_prev = initial.charge;
     let mut r_prev = initial.residual;
+    // BDF2 needs the charge from *two* accepted steps back and the previous step size. Seeded
+    // from the initial assembly and the configured step: neither is read until a second
+    // accepted point exists, because the first step is always backward Euler.
+    let mut q_prev2 = q_prev.clone();
+    let mut h_prev = cfg.tstep;
     // A `bound_step` request read at the last accepted point (the initial condition, to start
     // with). Re-read after every accept, never from a rejected candidate — see
     // `va_abi::StampSink::bound_step`.
@@ -677,12 +776,25 @@ pub fn run_with_events(
             }
             let step_h = t_next - t;
 
+            // The first step is backward Euler regardless of `cfg.method` (see the long
+            // comment above). For Gear that rule does double duty: BDF2 needs two accepted
+            // charge vectors and a previous step size before its three-point difference is
+            // defined at all, and one backward-Euler step produces exactly the missing one.
+            // From the second step onward `q_prev`/`q_prev2`/`h_prev` are all real.
             let step_method = if first_step {
                 Method::BackwardEuler
             } else {
                 cfg.method
             };
-            let primary = Companion::for_method(step_method, &q_prev, &r_prev, step_h, &is_dynamic);
+            let primary = Companion::for_method(
+                step_method,
+                &q_prev,
+                &q_prev2,
+                &r_prev,
+                step_h,
+                h_prev,
+                &is_dynamic,
+            );
             let x_primary = newton_step(instances, dim, &x, t_next, false, &mut state, &primary)?;
 
             // Divided differences first when configured: they need no second solve, so the
@@ -709,8 +821,10 @@ pub fn run_with_events(
                     let reference_companion = Companion::for_method(
                         reference_method(step_method),
                         &q_prev,
+                        &q_prev2,
                         &r_prev,
                         step_h,
+                        h_prev,
                         &is_dynamic,
                     );
                     let x_reference = newton_step(
@@ -741,11 +855,18 @@ pub fn run_with_events(
                     false,
                     dim,
                     &mut state,
-                    (primary.coeff, primary.prev_rate_weight),
+                    (
+                        primary.coeff,
+                        primary.prev_rate_weight,
+                        primary.prev2_weight,
+                    ),
                 );
                 state.commit();
-                q_prev = sink.charge;
+                // Shift the charge history before overwriting it: what was `q_prev` becomes
+                // the charge two steps back for the next step's BDF2 difference.
+                q_prev2 = std::mem::replace(&mut q_prev, sink.charge);
                 r_prev = sink.residual;
+                h_prev = step_h;
                 step_bound = sink.bound_step;
                 first_step = false;
 
@@ -1043,7 +1164,7 @@ mod tests {
             &self.unknowns
         }
         fn state_len(&self) -> usize {
-            2 // committed q, committed rate
+            3 // committed q, committed rate, committed q from two steps back
         }
         fn load(
             &self,
@@ -1057,14 +1178,20 @@ mod tests {
             let q = v; // the `ddt` argument; ∂q/∂v = 1
             let c = 1.0 + self.a * v;
 
+            let q_prev = state.committed()[0];
             let rate = if ctx.is_initial_step {
                 0.0
             } else {
-                ctx.ddt_coeff * (q - state.committed()[0])
-                    - ctx.ddt_prev_rate_weight * state.committed()[1]
+                // The same three-term reconstruction `va_codegen`'s `Builtin::Ddt` performs.
+                // The third weight is zero under backward Euler and trapezoidal, so this stays
+                // bit-identical for them; under Gear it is what makes a bare `ddt` read agree
+                // with the BDF2 difference the charge channel is stamping.
+                ctx.ddt_coeff * (q - q_prev) - ctx.ddt_prev_rate_weight * state.committed()[1]
+                    + ctx.ddt_prev2_weight * (q_prev - state.committed()[2])
             };
             state.set(0, q);
             state.set(1, rate);
+            state.set(2, q_prev);
 
             sink.residual(row, v / self.r + c * rate);
             // ∂/∂v of the instantaneous part, with the rate's own v-dependence held in dcharge.
@@ -1194,6 +1321,8 @@ mod tests {
         }
     }
 
+    /// Linear interpolation of `wf.x[.][component]` at `t_query`, for comparing an adaptively
+    /// sampled waveform (which won't land exactly on an arbitrary query time) against an
     /// Linear interpolation of `wf.x[.][component]` at `t_query`, for comparing an adaptively
     /// sampled waveform (which won't land exactly on an arbitrary query time) against an
     /// analytic reference.
@@ -1327,17 +1456,67 @@ mod tests {
         ));
     }
 
+    /// Gear's own order study, the sibling `docs/proposals/bdf2-interface-change.md` §3 says is
+    /// required rather than trusting the trapezoidal one: that test is hard-coded to compare
+    /// backward Euler against trapezoidal, and every Gear path used to be `unreachable!()`.
+    ///
+    /// This is the test that discriminates a **half-wired** BDF2, which is the specific way
+    /// this feature fails silently. `Companion::gear` alone makes the *stamped charge channel*
+    /// exact BDF2; if `AnalysisCtx::ddt_prev2_weight` were never threaded through, a model
+    /// reading `ddt` as a bare value would keep using the old two-point reconstruction, and
+    /// the run would still converge — just at the wrong order, on that term. `BiasDependentRate`
+    /// is exactly such a model (its rate is reconstructed, not stamped), so its observed order
+    /// falls to ~1 in that case rather than the run failing.
+    ///
+    /// Observed order, not absolute error, and on a *varying* step: a uniform schedule hides
+    /// history-recursion defects, and an absolute bound would pass a first-order run at a small
+    /// enough step. Backward Euler is measured alongside as the control that proves the harness
+    /// can tell the orders apart at all.
     #[test]
-    fn gear_is_not_yet_implemented() {
-        let (vs, r, c) = rc_circuit(1.0);
+    fn a_bias_dependent_rate_is_second_order_under_gear_on_varying_steps() {
+        let order = |method: Method| -> f64 {
+            let coarse = bias_dependent_error(method, 1e-2);
+            let fine = bias_dependent_error(method, 5e-3);
+            assert!(
+                coarse.is_finite() && fine.is_finite() && fine > 0.0,
+                "{method:?}: non-finite or zero error (coarse {coarse:e}, fine {fine:e})"
+            );
+            (coarse / fine).log2()
+        };
+
+        let be = order(Method::BackwardEuler);
+        let gear = order(Method::Gear);
+        eprintln!("observed order: backward-euler={be:.3}  gear={gear:.3}");
+
+        assert!(
+            (0.7..1.4).contains(&be),
+            "backward Euler should be ~1st order, observed {be:.3}"
+        );
+        assert!(
+            gear > 1.7,
+            "Gear should be ~2nd order on a varying step, observed {gear:.3}              (a first-order result here is the half-wired case: an exact BDF2 charge stamp              with a stale two-point reconstruction on the bare-`ddt` value path)"
+        );
+    }
+
+    /// Gear integrates now (it returned `UnsupportedMethod` until 2026-09-01), and lands on
+    /// the same answer the other two methods do on a problem with a closed form.
+    #[test]
+    fn gear_integrates_and_matches_the_analytic_rc() {
+        let rc = 1e-3;
+        let vs_val = 5.0;
+        let (vs, r, c) = rc_circuit(vs_val);
         let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
-        let cfg = default_cfg(1e-3, 1e-5, Method::Gear);
-        assert!(matches!(
-            run(&insts, 3, vec![1.0, 0.0, 0.0], cfg),
-            Err(TransientError::UnsupportedMethod {
-                method: Method::Gear
-            })
-        ));
+
+        let cfg = default_cfg(5.0 * rc, rc / 10.0, Method::Gear);
+        let wf = run(&insts, 3, vec![vs_val, 0.0, 0.0], cfg).expect("Gear integrates");
+
+        let analytic = vs_val * (1.0 - (-1.0f64).exp());
+        let got = interpolate(&wf, rc, 1);
+        let rel = (got - analytic).abs() / analytic;
+        assert!(
+            rel < 1e-2,
+            "Gear vs analytic RC charge: {got} vs {analytic} (rel {rel:e})"
+        );
     }
 
     #[test]

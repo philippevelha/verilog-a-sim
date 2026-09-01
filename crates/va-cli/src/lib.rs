@@ -977,6 +977,14 @@ pub enum Integration {
     Trapezoidal,
     /// Backward Euler — required for a bias-dependent `ddt` coefficient.
     BackwardEuler,
+    /// Gear / BDF2, second order and **L-stable** (2026-09-01). Unlike trapezoidal it damps a
+    /// stiff mode to zero in one step rather than approaching an amplification factor of -1,
+    /// so it does not ring numerically on a stiff transient. That is the only reason to pick
+    /// it: it is not more accurate than trapezoidal, being the same order.
+    ///
+    /// Not the default, and no committed golden was validated under it — see
+    /// `docs/validation.md` for the measured comparison on this project's own circuits.
+    Gear,
 }
 
 impl Integration {
@@ -986,6 +994,7 @@ impl Integration {
         match s {
             "be" | "backward-euler" | "backward_euler" => Some(Self::BackwardEuler),
             "trap" | "trapezoidal" => Some(Self::Trapezoidal),
+            "gear" | "bdf2" => Some(Self::Gear),
             _ => None,
         }
     }
@@ -1007,6 +1016,7 @@ pub fn solve_transient(
     let method = match integration {
         Integration::BackwardEuler => Method::BackwardEuler,
         Integration::Trapezoidal => Method::Trapezoidal,
+        Integration::Gear => Method::Gear,
     };
     let cfg = TranConfig {
         tstart: 0.0,

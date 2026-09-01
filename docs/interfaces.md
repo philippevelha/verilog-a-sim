@@ -544,3 +544,43 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > allocates two slots per `ddt` call site via `StatefulKind::Ddt` — so read-old/write-new,
 > commit-on-accept and rollback-on-reject all apply unchanged, and `load` stays a pure function
 > of `(x, ctx, committed-state)`.
+
+> **Revision (§6 change, ratified 2026-09-01):** added `AnalysisCtx::ddt_prev2_weight` and the
+> `with_ddt_prev2` builder, so `Method::Gear` (variable-step BDF2) could be implemented.
+> Proposal and full analysis: `docs/proposals/bdf2-interface-change.md`. Purely **additive**
+> — defaults to `0.0` in every constructor, so no implementor breaks and every existing
+> evaluation is bit-identical (checked: all 24 gates reproduced their previous numbers exactly).
+>
+> The reconstruction becomes:
+>
+> ```text
+> dq/dt  =  ddt_coeff * (q - q_prev)
+>          -  ddt_prev_rate_weight * dq/dt|_prev
+>          +  ddt_prev2_weight     * (q_prev - q_prev2)
+> ```
+>
+> Backward Euler supplies `(1/h, 0, 0)`, trapezoidal `(2/h, 1, 0)`, Gear
+> `((1+2r)/((1+r)h), 0, -r^2/((1+r)h))` with `r = h_n/h_(n-1)`.
+>
+> **Why a third field was genuinely necessary, rather than arithmetic on the existing two.**
+> Backward Euler and trapezoidal share a *shape*: a one-step recursion on the previous **rate**.
+> Trapezoidal's closed form `Q_n - Q_(n-1) = h/2*(rate_n + rate_prev)` *is* that recursion, which
+> is why two fields sufficed for both. BDF2 is a three-point finite difference on `Q`, and it
+> cannot be recovered from one charge plus one derived rate: at the previous step, `rate_(n-1)`
+> was itself built under a *different* step ratio, so no algebraic identity recovers
+> `Q_(n-2)`'s weight from `rate_(n-1)` alone. One new field is also *enough* — matching both
+> history coefficients against BDF2's formula yields the same `w2` from either, so a fourth
+> term is not needed.
+>
+> **The failure this exists to prevent** is silent, not loud. The *stamped* charge channel needs
+> no interface change to do BDF2 (the two history charges fold into the companion's `offset`
+> exactly as trapezoidal's already do). Shipping Gear without this field would therefore give an
+> exact BDF2 charge stamp alongside a stale two-point reconstruction on the bare-`ddt`-value
+> path — two different orders inside one model, at one row, still converging. `va-transient`'s
+> `a_bias_dependent_rate_is_second_order_under_gear_on_varying_steps` is the gate for exactly
+> that: with the weight forced to `0.0` the observed order collapses from **1.997 to -0.016**.
+>
+> `va-codegen`'s `StatefulKind::Ddt` went from 2 state slots to 3 (`q_prev`, `rate_prev`,
+> `q_prev2`), which is that crate's own bookkeeping rather than a channel change: `state_len()`
+> was already instance-declared. The third slot is written under *every* method so a compiled
+> model stays method-agnostic and its history is already correct whenever a run reaches Gear.

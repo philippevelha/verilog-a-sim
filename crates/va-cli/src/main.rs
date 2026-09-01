@@ -38,7 +38,7 @@ fn print_usage() {
          FLAGS:\n    \
          -h, --help    Print this help\n    \
          --plot <out.svg>        Write an SVG plot: transient waveform, .dc sweep, or AC Bode
-    \n         --integration be|trap   Integration method for a transient run.
+    \n         --integration be|trap|gear  Integration method for a transient run.
                                  Default trapezoidal (second order)"
     );
 }
@@ -84,8 +84,9 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // -- see `va_cli::Integration`.
     let integration = match parse_flag(args, "--integration") {
         None => va_cli::Integration::default(),
-        Some(v) => va_cli::Integration::parse(&v)
-            .with_context(|| format!("unknown --integration `{v}` (expected `be` or `trap`)"))?,
+        Some(v) => va_cli::Integration::parse(&v).with_context(|| {
+            format!("unknown --integration `{v}` (expected `be`, `trap`, or `gear`)")
+        })?,
     };
 
     run_sim(
