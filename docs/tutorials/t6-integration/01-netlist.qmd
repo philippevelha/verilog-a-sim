@@ -114,6 +114,20 @@ nodes — the driven pair, then the controlling pair — and a gain or transcond
 all; the `E` claims one, exactly as an independent source does, because it states a constraint
 rather than contributing a current.
 
+`X` is the general way to place a compiled Verilog-A model (added 2026-09-01):
+`X1 n1 n2 ... <model> [param=value]...`, with the model name trailing the node list as a
+subcircuit's does in SPICE. It exists because every other device letter fixes its terminal
+count — 2 for `D`, 3 for `M`/`Q`, 4 for `E`/`G` — which left a model with any other port
+count unplaceable. The motivating case is photonic: an optical waveguide declaring two `[0:3]`
+vector ports needs eight terminals, so before `X` those models could be *compiled* but never
+*simulated*.
+
+Its companion is `--model <directory>`, which compiles every `.va` in a folder as one library
+so a module can instance a sibling file's module. That is how real model libraries are shipped
+(the photonic corpus is one module per file across thirty-odd files), and without it
+`Waveguide.va` alone fails with "instance `Polar2Cartesian1` references unknown module" — it
+was never meant to stand alone.
+
 `K` couples two inductors' flux, `K1 L1 L2 0.9`. It connects to no nodes at all — it names
 the two elements — and contributes only the off-diagonal flux terms, since each inductor
 already carries its own. Its coupling must lie in `[-1, 1]`; beyond that would link more flux

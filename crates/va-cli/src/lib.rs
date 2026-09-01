@@ -140,28 +140,108 @@ pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)
     let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {netlist}"))?;
 
     let compiled = match model {
-        Some(path) => {
-            let src =
-                std::fs::read_to_string(path).with_context(|| format!("reading model {path}"))?;
-            // Resolve `include against the model's own directory.
-            let include_dirs: Vec<std::path::PathBuf> = std::path::Path::new(path)
-                .parent()
-                .map(|p| vec![p.to_path_buf()])
-                .unwrap_or_default();
-            let design = va_frontend::compile_with_includes(&src, &include_dirs)
-                .with_context(|| format!("compiling Verilog-A model {path}"))?;
-            for module in &design.modules {
-                eprintln!(
-                    "[va-cli] compiled Verilog-A module `{}` from {path}",
-                    module.name
-                );
-            }
-            design.modules
-        }
+        Some(path) => compile_model_path(path)?,
         None => Vec::new(),
     };
 
     Ok((net, compiled))
+}
+
+/// Compile `path` into a module library: a single `.va` file, or a **directory** of them.
+///
+/// A directory is compiled as one unit, which is what makes a real model library usable. The
+/// photonic corpus is the motivating case: it is one module per file across 30-odd files, so
+/// `Waveguide.va` alone fails with "instance `Polar2Cartesian1` references unknown module" -- it
+/// is not self-contained and was never meant to be. Every file's modules are parsed first and
+/// then elaborated against the *combined* set, exactly as `check` already does for the corpus
+/// scan, so an instance naming a sibling file's module resolves.
+///
+/// Each file's own `` `include `` resolves against the directory, so a shared
+/// `disciplines.vams` defining a custom discipline (the photonic library's `optical`) is found
+/// without the caller naming it.
+///
+/// # Errors
+///
+/// If a file cannot be read, or any module fails to parse or elaborate. A directory containing
+/// a file that is not a model is an error rather than a skip: `sim` is being told *this is the
+/// library*, unlike `check`, whose whole job is to survey files of unknown quality.
+fn compile_model_path(path: &str) -> Result<Vec<Module>> {
+    let p = std::path::Path::new(path);
+    let files: Vec<std::path::PathBuf> = if p.is_dir() {
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(p)
+            .with_context(|| format!("reading model directory {path}"))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|f| {
+                matches!(
+                    f.extension().and_then(|e| e.to_str()),
+                    Some("va") | Some("vams")
+                )
+            })
+            .collect();
+        // Sorted so a library compiles identically on every platform and every run: the
+        // elaborated module order reaches `build_instance` and, through it, unknown indices.
+        v.sort();
+        v
+    } else {
+        vec![p.to_path_buf()]
+    };
+    if files.is_empty() {
+        bail!("no `.va`/`.vams` model files found in {path}");
+    }
+
+    let include_dirs: Vec<std::path::PathBuf> = if p.is_dir() {
+        vec![p.to_path_buf()]
+    } else {
+        p.parent()
+            .map(|d| vec![d.to_path_buf()])
+            .unwrap_or_default()
+    };
+
+    // Pass 1: parse every file, accumulating modules and the discipline/nature tables their
+    // own includes brought in. Later files do not override earlier definitions -- a library
+    // whose files disagree about a discipline is a problem to report, not to silently resolve.
+    let mut library: Vec<va_frontend::ast::ModuleAst> = Vec::new();
+    let mut disciplines = std::collections::HashMap::new();
+    let mut natures = std::collections::HashMap::new();
+    for f in &files {
+        let name = f.display().to_string();
+        let src = std::fs::read_to_string(f).with_context(|| format!("reading model {name}"))?;
+        let expanded = va_frontend::preprocess::preprocess(&src, &include_dirs)
+            .with_context(|| format!("preprocessing {name}"))?;
+        let (tokens, offsets) =
+            va_frontend::lexer::lex_spanned(&expanded).with_context(|| format!("lexing {name}"))?;
+        let (asts, file_natures, file_disciplines) =
+            va_frontend::parser::parse_with_disciplines_located(
+                &tokens,
+                Some((&expanded, &offsets)),
+            )
+            .with_context(|| format!("parsing {name}"))?;
+        for (k, v) in file_disciplines {
+            disciplines.entry(k).or_insert(v);
+        }
+        for (k, v) in file_natures {
+            natures.entry(k).or_insert(v);
+        }
+        library.extend(asts);
+    }
+
+    // Pass 2: elaborate each module against every module in the library.
+    let mut modules = Vec::with_capacity(library.len());
+    for ast in &library {
+        let m = va_frontend::elaborate::elaborate_with_library_and_disciplines(
+            ast,
+            &library,
+            &disciplines,
+            &natures,
+        )
+        .with_context(|| format!("elaborating module `{}`", ast.name))?;
+        modules.push(m);
+    }
+    eprintln!(
+        "[va-cli] compiled {} Verilog-A module(s) from {path}",
+        modules.len()
+    );
+    Ok(modules)
 }
 
 /// Run the full pipeline for `netlist` + an optional Verilog-A `model` under `analysis`.
@@ -2676,6 +2756,73 @@ mod tests {
         assert!(
             (re - 1.0).abs() < 1e-12 && im.abs() < 1e-12,
             "the arms should cancel at half the FSR, giving unity: ({re}, {im})"
+        );
+    }
+
+    /// A Verilog-A model with an arbitrary port count, instantiated by an `X` line out of a
+    /// model *library* loaded from a directory. Both halves are needed and neither existed
+    /// before: every other device letter fixes its terminal count (2 for `D`, 3 for `M`/`Q`,
+    /// 4 for `E`/`G`), and `--model` took a single file, so a module instancing a sibling
+    /// file's module failed with "references unknown module".
+    ///
+    /// Checked against hand-computed values: each arm is a conductance against a 1 k load.
+    #[test]
+    fn a_model_library_places_an_arbitrary_port_count() {
+        let modules = compile_model_path(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/lib"
+        ))
+        .expect("compiles the library");
+        assert_eq!(modules.len(), 2, "both files' modules are in the library");
+        assert!(
+            modules.iter().any(|m| m.name == "tee") && modules.iter().any(|m| m.name == "scaler"),
+            "the library carries both modules"
+        );
+
+        let net = va_netlist::parser::parse(include_str!("../../../circuits/lib_tee.net"))
+            .expect("parse lib_tee");
+        let dev = net.devices.iter().find(|d| d.name == "X1").expect("X1");
+        assert_eq!(dev.model, "tee", "the model name trails the node list");
+        assert_eq!(
+            dev.terminals.len(),
+            4,
+            "four nodes, which no other letter allows"
+        );
+
+        let op = solve_dc(&net, &modules).expect("solves");
+        let at = |name: &str| {
+            op.x[net
+                .node_order
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("node `{name}`"))]
+        };
+        assert!((at("b") - 1.0).abs() < 1e-9, "V(b) = {}", at("b"));
+        assert!((at("d") - 2.0).abs() < 1e-9, "V(d) = {}", at("d"));
+    }
+
+    /// Connecting the wrong number of nodes is refused by name and count, not silently
+    /// truncated or padded -- the failure mode a positional connection list invites.
+    #[test]
+    fn an_x_line_with_the_wrong_port_count_is_rejected() {
+        let modules = compile_model_path(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/lib"
+        ))
+        .expect("compiles the library");
+        let deck = "V1 a gnd DC 1
+X1 a b c tee
+R1 b gnd 1k
+.op
+.end
+";
+        let net = va_netlist::parser::parse(deck).expect("parses");
+        let err = solve_dc(&net, &modules).expect_err("three nodes into a four-port model");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tee"), "should name the model: {msg}");
+        assert!(
+            msg.contains('4') && msg.contains('3'),
+            "should give both counts: {msg}"
         );
     }
 

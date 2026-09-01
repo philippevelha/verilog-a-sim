@@ -8,6 +8,10 @@
 //! separate body/bulk terminal in v0, § ladder rung 5), `Q` (a three-terminal model-referencing
 //! device, a BJT — `` Q<name> c b e model ``, SPICE's own collector/base/emitter order, no
 //! substrate terminal in v0, § ladder rung 6), and `V` (voltage source). Net `0`/`gnd`
+//! `X` places a compiled Verilog-A model with **any** number of ports,
+//! `` X<name> <node>... <model> [param=value]... `` — the general instantiation form, since every
+//! other device letter fixes its terminal count. The model name trails the node list, as a
+//! subcircuit's does in SPICE.
 //! `K` couples two inductors' flux, `` K<name> <inductor> <inductor> <coupling> `` — it
 //! connects to no nodes, naming the two elements instead, and its coupling must lie in
 //! `[-1, 1]`.
@@ -367,6 +371,42 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ac: None,
                 ic,
                 params: Vec::new(),
+                controls: Vec::new(),
+            })
+        }
+        // `X<name> <node>... <model> [param=value]...` — SPICE's subcircuit line, used
+        // here as the **general** way to place a compiled Verilog-A model. Every other device
+        // letter fixes its terminal count (2 for `D`, 3 for `M`/`Q`, 4 for `E`/`G`), which
+        // leaves a model with any other port count unplaceable — an optical waveguide
+        // declaring two `[0:3]` vector ports needs eight.
+        //
+        // The model name is the **last** token that is not a `name=value` override, following
+        // SPICE, where a subcircuit's name trails its node list. Everything between the
+        // instance name and it is a node.
+        'X' => {
+            need(3)?;
+            let mut end = toks.len();
+            while end > 2 && toks[end - 1].contains('=') {
+                end -= 1;
+            }
+            // `X1 model` with no nodes at all is a mistake, not a zero-terminal instance.
+            if end < 3 {
+                return Err(err(format!(
+                    "`{name}` names a model but connects no nodes (expected `X<name> <node>... \
+                     <model>`)"
+                )));
+            }
+            let model = toks[end - 1].to_string();
+            let terminals: Vec<usize> = toks[1..end - 1].iter().map(|t| intern(net, t)).collect();
+            Ok(Device {
+                name,
+                model,
+                terminals,
+                value: None,
+                waveform: None,
+                ac: None,
+                ic: None,
+                params: parse_param_overrides(&toks[end..], line_no)?,
                 controls: Vec::new(),
             })
         }

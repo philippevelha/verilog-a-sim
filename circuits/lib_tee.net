@@ -1,0 +1,15 @@
+* A four-port Verilog-A model, built from a sibling file's primitive.
+* Two things this deck needs that did not exist before 2026-09-01: `X` places a model with any
+* number of ports (every other device letter fixes its count at 2, 3 or 4), and `--model` takes
+* a *directory*, so `tee`'s instance of `scaler` resolves against the sibling file that declares
+* it. The photonic corpus is the motivating case for both: one module per file, and a waveguide
+* with two [0:3] vector ports needs eight terminals.
+* Expected, by hand: each arm is a conductance against a 1k load, so V(b) = 2*g1/(g1 + 1m) = 1 V
+* and V(d) = 3*g2/(g2 + 1m) = 2 V.
+V1 a gnd DC 2
+V2 c gnd DC 3
+X1 a b c d tee
+R1 b gnd 1000
+R2 d gnd 1000
+.op
+.end

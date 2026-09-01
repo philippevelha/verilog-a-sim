@@ -1,0 +1,11 @@
+// A library primitive, in its own file: a two-port linear conductance.
+// Exists to be instantiated by a sibling file, which is the case `--model <directory>` and the
+// netlist's `X` line together make possible.
+`include "disciplines.vams"
+
+module scaler(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real g = 1e-3 from (0:inf);
+    analog I(p, n) <+ g * V(p, n);
+endmodule

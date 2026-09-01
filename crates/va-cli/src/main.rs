@@ -33,7 +33,7 @@ fn print_usage() {
     eprintln!(
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
-         va-cli sim <netlist.net> [--model <model.va>] [--ac|--tran|--noise] [--plot <out.svg>]\n    \
+         va-cli sim <netlist.net> [--model <model.va|dir>] [--ac|--tran|--noise] [--plot <out.svg>]\n    \
          va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \

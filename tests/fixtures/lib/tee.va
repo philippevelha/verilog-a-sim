@@ -1,0 +1,14 @@
+// A four-port model built from a sibling file's primitive. Two things make this compile:
+// the library is loaded as a directory (so `scaler` resolves), and it has four ports, which
+// only the netlist's `X` line can connect.
+`include "disciplines.vams"
+
+module tee(a, b, c, d);
+    inout a, b, c, d;
+    electrical a, b, c, d;
+    parameter real g1 = 1e-3 from (0:inf);
+    parameter real g2 = 2e-3 from (0:inf);
+
+    scaler #(.g(g1)) s1 (a, b);
+    scaler #(.g(g2)) s2 (c, d);
+endmodule
