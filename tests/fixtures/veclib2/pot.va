@@ -1,0 +1,6 @@
+`include "disciplines.vams"
+module pot(o);
+    output o;
+    electrical o;
+    analog V(o) <+ 3.0;
+endmodule

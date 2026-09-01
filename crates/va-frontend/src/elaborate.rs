@@ -78,10 +78,14 @@
 //!   module is still the only IR shape, matching its own doc comment. Scalar port connections
 //!   only (no vector-port fan-out); no module-item-level `generate` around instances. **A
 //!   submodule's own implicit ground** (interned by `Elaborator::reference_node` for
-//!   single-terminal `V(p)` shorthand) is *not* unified with the parent's or a sibling
-//!   instance's ground, since each submodule elaborates in its own arena — a model that needs
-//!   the true circuit reference node from inside a submodule must declare an explicit port for
-//!   it and have the instantiating parent wire that port to real ground, like any other port.
+//!   single-terminal `V(p)` shorthand) **is** unified with the parent's, as of 2026-09-01.
+//!   Verilog-A's reference node is global (LRM §3.6.3), so `V(x)` inside a submodule means
+//!   `V(x, ground)` against *the* ground. It used not to be, on the reasoning that each
+//!   submodule elaborates in its own arena — which was true of the mechanism but wrong about
+//!   the language, and silent: the inlined copy was a separate floating node, so every
+//!   `V(out) <+ ...` drove something connected to nothing. Found through the photonic corpus,
+//!   whose primitives are written entirely in that style, and none of which could be
+//!   simulated as a result.
 
 use std::collections::{HashMap, HashSet};
 
@@ -3286,8 +3290,49 @@ impl Elaborator<'_> {
             }
         }
 
+        // Verilog-A's reference node is **global** (LRM §3.6.3): a single-terminal access
+        // `V(x)` means `V(x, ground)` against *the* ground, not one private to the module it
+        // was written in. Each submodule elaborates in its own arena and interns its own
+        // implicit `gnd` for that shorthand, so without this the inlined copy would be a
+        // separate floating node — and every contribution written `V(out) <+ ...` would drive
+        // a node connected to nothing. That is silent: the model builds, and the row is
+        // singular or the value simply wrong.
+        //
+        // Found via the photonic corpus, whose primitives are written entirely in that style
+        // (`OptE(cart[0]) <+ ...`), so nothing in that library could be simulated at all.
+        if let Some(sub_ground) = Self::ground_node_of(&sub) {
+            node_map.entry(sub_ground).or_insert_with(|| {
+                // Interning the parent's own reference node, which is idempotent and is the
+                // same node any `V(x)` shorthand in the parent already resolves to.
+                if let Some(id) = self.ground {
+                    id
+                } else {
+                    let id = self.intern_node("gnd", Discipline::Electrical, None);
+                    self.ground = Some(id);
+                    id
+                }
+            });
+        }
+
         self.merge_submodule(inst_name, sub, node_map);
         Ok(())
+    }
+
+    /// The module's own implicit reference node, if it interned one.
+    ///
+    /// Identified by name: [`Elaborator::reference_node`] interns exactly `"gnd"`, and
+    /// [`Elaborator::collect_ground`] aliases every explicit `ground` declaration onto that
+    /// same node, so the name is the marker rather than a convention this function invents.
+    ///
+    /// A node that is also a **port** is excluded: a module declaring a port called `gnd` is
+    /// wiring it from outside like any other terminal, and stealing it for the global reference
+    /// would silently rewire the instance.
+    fn ground_node_of(m: &Module) -> Option<NodeId> {
+        let is_port = |id: NodeId| m.ports.iter().flatten().any(|&p| p == id);
+        m.nodes.iter().enumerate().find_map(|(i, n)| {
+            let id = NodeId(i as u32);
+            (n.name == "gnd" && !is_port(id)).then_some(id)
+        })
     }
 
     /// Inline an already-elaborated submodule's arenas into `self.out`: port nodes alias

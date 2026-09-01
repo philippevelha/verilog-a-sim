@@ -1,0 +1,14 @@
+// The CartesianMultiplier pattern, reduced: a vector-port child driven by single-node
+// potential contributions.
+`include "disciplines.vams"
+
+module vmul(a, b, out);
+    input [0:1] a, b;
+    output [0:1] out;
+    electrical [0:1] a, b, out;
+
+    analog begin
+        V(out[0]) <+ V(a[0]) * V(b[0]);
+        V(out[1]) <+ V(a[1]) * V(b[1]);
+    end
+endmodule

@@ -1412,10 +1412,24 @@ fn build_instance(
     compiled: &[Module],
     next_unknown: &mut usize,
 ) -> Result<(Box<dyn ModelInstance>, Option<usize>)> {
-    let p = dev.terminals[0];
-    let n = dev.terminals[1];
+    // Read lazily rather than up front: every *letter* device has at least two terminals, but
+    // an `X` line places a model with whatever port count that model declares, and a
+    // one-terminal model is legal (the photonic library's `CwLaser(out)` is one). Indexing
+    // both here panicked on exactly that — a panic on valid input, which CLAUDE.md 5 forbids.
+    let two_terminals = || -> Result<(usize, usize)> {
+        match dev.terminals.as_slice() {
+            [p, n, ..] => Ok((*p, *n)),
+            _ => bail!(
+                "`{}` is a {}-terminal device line, but `{}` needs at least two nodes",
+                dev.name,
+                dev.terminals.len(),
+                dev.model
+            ),
+        }
+    };
 
     if dev.model == "vsource" {
+        let (p, n) = two_terminals()?;
         let branch = *next_unknown;
         *next_unknown += 1;
         // A `SIN(...)` source becomes a time-reading instance; every other source is constant.
@@ -1463,6 +1477,7 @@ fn build_instance(
     }
 
     if dev.model == "inductor" {
+        let (p, n) = two_terminals()?;
         // Like a voltage source, an inductor carries its own branch-current unknown: its row
         // is the constitutive law `-(V(p)-V(n)) + d(L*i)/dt = 0`, not a KCL sum. Claiming the
         // index here (rather than in `va-abi`) keeps `dim` assignment in one place, and
@@ -1539,6 +1554,19 @@ fn build_from_model(
     let mut assigned: Vec<Option<usize>> = vec![None; m.nodes.len()];
     for (nid, &g) in port_nodes.iter().zip(terminals) {
         assigned[nid.0 as usize] = Some(g);
+    }
+    // A module's own implicit reference node is the *circuit's* ground, not an internal net.
+    // Verilog-A's reference node is global (LRM §3.6.3), so `V(out) <+ 3.0` inside a model
+    // means 3 V with respect to the same ground the deck uses. Left to the loop below it would
+    // be handed a fresh unknown connected to nothing, and the contribution would drive a
+    // floating node: the model builds and reports 0 V, or a singular row — silently, either
+    // way. Identified by name, which is what `va-frontend` interns for the shorthand and what
+    // it aliases an explicit `ground` declaration onto; a node that is also a *port* is
+    // excluded, since the deck wires that one itself.
+    for (i, node) in m.nodes.iter().enumerate() {
+        if node.name == "gnd" && assigned[i].is_none() {
+            assigned[i] = Some(va_abi::reference::GROUND);
+        }
     }
     let full: Vec<usize> = assigned
         .into_iter()
@@ -2757,6 +2785,68 @@ mod tests {
             (re - 1.0).abs() < 1e-12 && im.abs() < 1e-12,
             "the arms should cancel at half the FSR, giving unity: ({re}, {im})"
         );
+    }
+
+    /// Verilog-A's reference node is **global** (LRM 3.6.3): `V(x)` means `V(x, ground)`
+    /// against *the* ground, not one private to the module the shorthand was written in.
+    ///
+    /// Two places got that wrong, and both were silent rather than loud. A submodule
+    /// elaborates in its own arena and interns its own implicit `gnd`, which inlining copied
+    /// in as a separate floating node; and a top-level model's `gnd` was handed a fresh
+    /// unknown by `build_from_model` instead of the circuit's ground. Either way a
+    /// contribution written `V(out) <+ 3.0` drove a node connected to nothing, and the model
+    /// reported 0 V or a singular row while looking perfectly healthy.
+    ///
+    /// The fixture mirrors the shape the photonic corpus is written in: a parent driving an
+    /// internal net by potential contribution, a child instanced through a *slice* of a wider
+    /// vector net, and the child driving its own output the same way.
+    #[test]
+    fn a_models_implicit_ground_is_the_circuits_ground() {
+        let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/veclib2");
+        let modules = compile_model_path(lib).expect("compiles");
+
+        // Top level: `V(o) <+ 3.0` against the model's implicit ground must be 3 V against the
+        // deck's ground, not 0 V against a floating one.
+        let net = va_netlist::parser::parse(
+            "X1 out pot
+R1 out gnd 1000
+.op
+.end
+",
+        )
+        .expect("parses");
+        let op = solve_dc(&net, &modules).expect("solves");
+        let out = net.node_order.iter().position(|n| n == "out").expect("out");
+        assert!(
+            (op.x[out] - 3.0).abs() < 1e-9,
+            "a single-terminal potential contribution must reference circuit ground, got {}",
+            op.x[out]
+        );
+
+        // And through a submodule instanced across a vector slice.
+        let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/veclib");
+        let modules = compile_model_path(lib).expect("compiles");
+        let deck = "V0 p0 gnd DC 2
+V1 p1 gnd DC 0.5
+V2 p2 gnd DC 0
+V3 p3 gnd DC 0
+                    X1 p0 p1 p2 p3 q0 q1 vtop
+.op
+.end
+";
+        let net = va_netlist::parser::parse(deck).expect("parses");
+        let op = solve_dc(&net, &modules).expect("solves");
+        let at = |name: &str| {
+            op.x[net
+                .node_order
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("node `{name}`"))]
+        };
+        // The child multiplies its two vector inputs elementwise: t = (3, 5) from the parent's
+        // own contributions, p[0:1] = (2, 0.5) from the deck through the slice.
+        assert!((at("q0") - 6.0).abs() < 1e-9, "V(q0) = {}", at("q0"));
+        assert!((at("q1") - 2.5).abs() < 1e-9, "V(q1) = {}", at("q1"));
     }
 
     /// A Verilog-A model with an arbitrary port count, instantiated by an `X` line out of a
