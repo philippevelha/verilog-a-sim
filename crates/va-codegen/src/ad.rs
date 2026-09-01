@@ -1036,16 +1036,27 @@ fn eval_call(
                     "ddt call site has no state slots allocated (internal codegen error)",
                 ));
             };
+            let q_prev = ctx.state_get(base, 0);
             let rate = if ctx.analysis.is_initial_step {
                 0.0
             } else {
-                let q_prev = ctx.state_get(base, 0);
                 let rate_prev = ctx.state_get(base, 1);
+                let q_prev2 = ctx.state_get(base, 2);
+                // The third term is Gear/BDF2's: a weight on the charge two accepted steps
+                // back (§6 change, 2026-09-01). It is `0.0` under every other method, which
+                // reduces this to exactly the two-term recursion that predates it — so a
+                // model compiled today evaluates bit-identically under backward Euler and
+                // trapezoidal to one compiled before the field existed.
                 ctx.analysis.ddt_coeff * (q.value - q_prev)
                     - ctx.analysis.ddt_prev_rate_weight * rate_prev
+                    + ctx.analysis.ddt_prev2_weight * (q_prev - q_prev2)
             };
             ctx.state_set(base, 0, q.value);
             ctx.state_set(base, 1, rate);
+            // Shift the charge history: what was `q_prev` on entry becomes `q_prev2` for the
+            // next accepted step. Written unconditionally so the history is already correct
+            // whenever a run switches to Gear (it starts on backward Euler by design).
+            ctx.state_set(base, 2, q_prev);
             q.into_ddt(rate)?
         }
         // `idt` never reaches here — `eval`'s own `Expr::Call` match intercepts it before this

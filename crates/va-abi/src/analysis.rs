@@ -119,11 +119,14 @@ pub struct AnalysisCtx {
     /// solved:
     ///
     /// ```text
-    /// dq/dt  =  ddt_coeff * (q - q_prev)  -  ddt_prev_rate_weight * dq/dt|_prev
+    /// dq/dt  =  ddt_coeff * (q - q_prev)
+    ///           -  ddt_prev_rate_weight * dq/dt|_prev
+    ///           +  ddt_prev2_weight     * (q_prev - q_prev2)
     /// ```
     ///
-    /// Backward Euler is `(1/h, 0.0)`; trapezoidal is `(2/h, 1.0)`. Both are **`0.0` in DC, AC
-    /// and noise**, which is not a placeholder but the right answer: a static solve and a
+    /// Backward Euler is `(1/h, 0.0, 0.0)`; trapezoidal is `(2/h, 1.0, 0.0)`; Gear/BDF2 is
+    /// `((1+2r)/((1+r)h), 0.0, -r^2/((1+r)h))` with `r = h_n/h_(n-1)` (§6 change, 2026-09-01 —
+    /// see [`AnalysisCtx::ddt_prev2_weight`]). All are **`0.0` in DC, AC and noise**, which is not a placeholder but the right answer: a static solve and a
     /// small-signal analysis are both taken about an operating point, where every charge rate is
     /// zero by definition.
     ///
@@ -144,6 +147,24 @@ pub struct AnalysisCtx {
     pub ddt_coeff: f64,
     /// The weight on a `ddt` site's previous rate -- see [`AnalysisCtx::ddt_coeff`].
     pub ddt_prev_rate_weight: f64,
+    /// The weight on the charge from **two** accepted steps back (§6 change, ratified
+    /// 2026-09-01; `docs/proposals/bdf2-interface-change.md`, `docs/interfaces.md`).
+    ///
+    /// `0.0` for every method that does not need it, which is all of them except Gear/BDF2, and
+    /// `0.0` in DC/AC/noise. A defaulted field rather than a signature change, following
+    /// [`crate::ModelInstance::unknown_kind`]'s precedent: nothing outside `va-abi` constructs
+    /// an `AnalysisCtx` as a bare struct literal, so every existing caller keeps compiling and
+    /// keeps its previous behaviour exactly.
+    ///
+    /// # Why a third term was necessary
+    ///
+    /// Backward Euler and trapezoidal share a *shape*: a one-step recursion on the previous
+    /// **rate**. Trapezoidal's closed form `Q_n - Q_(n-1) = h/2*(rate_n + rate_prev)` is exactly
+    /// that recursion, which is why two fields sufficed. BDF2 is a different shape — a
+    /// three-point finite difference on `Q` — and cannot be recovered from one charge plus one
+    /// derived rate: the previous rate was itself built under a *different* step ratio, so no
+    /// algebraic identity recovers `Q_(n-2)`'s weight from `rate_(n-1)` alone.
+    pub ddt_prev2_weight: f64,
     /// Small-signal frequency in **hertz** — the `ω/2π` a frequency-dependent model needs to
     /// evaluate its own transfer function.
     ///
@@ -171,6 +192,7 @@ impl AnalysisCtx {
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
+            ddt_prev2_weight: 0.0,
         }
     }
 
@@ -187,6 +209,7 @@ impl AnalysisCtx {
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
+            ddt_prev2_weight: 0.0,
         }
     }
 
@@ -202,6 +225,7 @@ impl AnalysisCtx {
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
+            ddt_prev2_weight: 0.0,
         }
     }
 
@@ -215,6 +239,7 @@ impl AnalysisCtx {
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
+            ddt_prev2_weight: 0.0,
         }
     }
 
@@ -237,6 +262,17 @@ impl AnalysisCtx {
         AnalysisCtx {
             ddt_coeff,
             ddt_prev_rate_weight,
+            ..self
+        }
+    }
+
+    /// This context carrying the weight on the charge two accepted steps back -- see
+    /// [`AnalysisCtx::ddt_prev2_weight`]. Only a Gear/BDF2 driver calls this; every other
+    /// caller leaves the field at its constructor default of `0.0`, which reduces the
+    /// reconstruction to exactly the two-term form that predates this field.
+    pub const fn with_ddt_prev2(self, ddt_prev2_weight: f64) -> Self {
+        AnalysisCtx {
+            ddt_prev2_weight,
             ..self
         }
     }

@@ -709,7 +709,14 @@ impl StatefulKind {
         match self {
             StatefulKind::Slew => 2,
             StatefulKind::Transition => 5,
-            StatefulKind::Ddt => 2,
+            // `(q_prev, rate_prev, q_prev2)`. The third slot exists for Gear/BDF2, whose
+            // reconstruction is a three-point difference on the charge rather than a one-step
+            // recursion on the rate (§6 change, 2026-09-01 — `AnalysisCtx::ddt_prev2_weight`).
+            // Every other method leaves its weight at `0.0`, so the slot is written and never
+            // read there; carrying it unconditionally keeps the layout independent of which
+            // method a model is later evaluated under, which is what makes a compiled model
+            // method-agnostic.
+            StatefulKind::Ddt => 3,
         }
     }
 }
