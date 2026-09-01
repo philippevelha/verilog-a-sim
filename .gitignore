@@ -16,9 +16,14 @@ Cargo.lock.orig
 Thumbs.db
 
 # Third-party Verilog-A corpus (untracked scratch space, not part of the model zoo) and
-# working notes.
+# working notes. `syntax_guide.txt`/`tokens.txt` are personal notes compiled from the LRMs in
+# /references/ (themselves ignored, above): useful while writing docs/token-reference.md, but
+# derived from text that is not ours to redistribute, and superseded by that document as the
+# tracked record.
 /external/
 /docs/notes.txt
+/docs/syntax_guide.txt
+/docs/tokens.txt
 
 # Language reference manuals (VAMS-LRM-2-4.pdf, OVI_VerilogA.pdf, veriaref.pdf) — ~6 MB of
 # third-party PDFs, kept locally because docs/token-reference.md and the T5 noise work are
