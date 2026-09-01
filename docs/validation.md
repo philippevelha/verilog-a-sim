@@ -155,6 +155,29 @@ grid samples the response's interesting part. Passes at `|mag| 1.304e-15`, `phas
 `.noise` deliberately stays `dec`-only: its integrated-total maths assumes logarithmic spacing,
 so a linear grid there would change what the reported total means.
 
+### Ungated circuits, and why each one is (2026-09-01)
+
+Nine of the decks in `circuits/` are not registered with `cargo xtask validate`. They are not
+one category, and the distinction matters — a deck that looks like coverage but is exercised by
+nothing is the failure mode this file exists to prevent.
+
+**Parked, to be gated later (6).** `nlcap_ramp`, `portprobe_dc`, `portprobe_ac`,
+`portprobe_ramp`, `portprobe_sq`, `selfprobe_ramp` — the displacement-current set built for the
+`I(<port>)` / `ddt`-coefficient work, with QSPICE-side evidence recorded in
+`golden/qspice/README.md` (including a deliberate negative control, `portprobe_dc`, which must
+show *no* displacement current at DC). Their numbers discriminate — the margins in that README
+run from 50% to 10^6 — but the decks were run by hand rather than through
+`translate_for_qspice`, so nothing re-runs them today. **Deliberately kept for future gating,** 
+not dead weight to delete: gating them is the remaining step, and until then they are honestly
+zero coverage rather than coverage-in-waiting.
+
+**A unit-test fixture (1).** `hier_divider` — driven by a `va-cli` test, never intended for a
+golden comparison.
+
+**Deliberately ungated after trying (2).** `rc_pulse` and `transformer`, each documented above
+with the measurement that led to the decision. Both are exercised by tests against closed-form
+physics rather than against QSPICE.
+
 ### Gear/BDF2 measured against trapezoidal (2026-09-01)
 
 `Method::Gear` is implemented and reachable as `va-cli sim --integration gear`. It is **not the

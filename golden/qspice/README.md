@@ -4,8 +4,13 @@ Hand-written QSPICE decks for the `I(<port>)` / `I(branch)` displacement-current
 describes the *same physics* as a `models/*.va` + `circuits/*.net` pair, built from QSPICE-native
 primitives so the comparison is evidence rather than a restatement of our own lowering.
 
-**Status: verified to run and to discriminate; not yet wired into `xtask gen-golden`.** These are
-the PWL-driven forms, each run against QSPICE on 2026-08-29 with the numbers below. They are kept
+**Status: verified to run and to discriminate; not yet wired into `xtask gen-golden`.
+Parked deliberately (confirmed 2026-09-01), to be gated later — not abandoned.** The six
+`circuits/*.net` decks these mirror are therefore exercised by nothing today: they are
+coverage-in-waiting, and `docs/validation.md`'s ungated-circuit section says so plainly so they
+are neither deleted nor mistaken for a passing gate.
+
+These are the PWL-driven forms, each run against QSPICE on 2026-08-29 with the numbers below. They are kept
 here because the numbers are the load-bearing part — the decks themselves must eventually be
 produced by `translate_for_qspice` rather than run by hand (see "Open" below).
 
