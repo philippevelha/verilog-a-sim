@@ -1,0 +1,16 @@
+* A two-path interferometer swept in frequency — fringes from two transport delays.
+* The device sums two delayed copies of its input (arms at t1 = 0 and t2 = 1us), so its own
+* admittance carries H(jw) = (1 + exp(-jw*t2))/2 / r. Driven through R1 = 500 into a 1k load,
+* KCL gives V(out)/V(in) = 1 / (1 + (R1/r)*(1 + exp(-jw*t2))/2).
+* The response is periodic in frequency with spacing 1/(t2 - t1) = 1 MHz -- the free spectral
+* range. Swept over 2.5 MHz so more than two full fringes appear: a rational filter can imitate
+* one fringe, never a repeating comb.
+*
+* The grid is chosen so its 50 kHz spacing divides the 1 MHz free spectral range exactly -- that
+* is what lets the test compare f against f + FSR as a point-for-point identity rather than by
+* interpolating between samples.
+V1 in  gnd  DC 0 AC 1
+R1 in  out  500
+D1 out gnd  interferometer r=1000 t1=0 t2=1e-6
+.ac lin 51 5e4 2.55e6
+.end

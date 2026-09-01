@@ -1,0 +1,22 @@
+// A pure transport delay driving a load — the simplest model that exercises `absdelay`.
+//
+// `I(p, n) <+ absdelay(V(p, n) / r, td)` is a conductance whose current responds to the input
+// as it was `td` seconds ago. The `1/r` sits *inside* the delay rather than scaling it from
+// outside: a delay is linear, so exp(-jw*td)*(V/r) and (1/r)*exp(-jw*td)*V are the same thing,
+// and this engine requires a frequency-domain term to be a bare top-level additive term of a
+// contribution (its gain is complex, so a scaled one has nowhere to put the imaginary part). In AC that is exactly H(jw) = exp(-jw*td)/r: unit magnitude
+// (scaled by 1/r) and a phase of -w*td, linear in frequency. That linear-in-frequency phase is
+// what distinguishes a true delay from any rational filter approximating one, and it is what
+// the golden comparison checks.
+`include "disciplines.vams"
+
+module delay_line(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r  = 1000.0 from (0:inf);   // load resistance, ohms
+    parameter real td = 1e-6   from [0:inf);   // transport delay, seconds
+
+    analog begin
+        I(p, n) <+ absdelay(V(p, n) / r, td);
+    end
+endmodule

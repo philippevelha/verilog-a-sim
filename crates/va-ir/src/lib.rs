@@ -489,6 +489,21 @@ pub enum Builtin {
     /// with values near `1e71`) and buys nothing. A root at the origin contributes a factor of
     /// `s` rather than `(1 − s/ζ)`, which is what makes the DC gain `0` there.
     LaplaceZp,
+    /// `absdelay(value, delay)` — a pure transport delay, LRM §4.5.9 (§6 change, 2026-09-01;
+    /// `docs/proposals/absdelay.md`). Arguments are normalized to `[value, delay]`; an
+    /// optional `maxdelay` third argument is parsed and dropped, since only a time-domain
+    /// implementation needs it to size a history buffer.
+    ///
+    /// Frequency-domain sibling of the `Laplace*` family rather than a separate kind of thing:
+    /// a pure delay is the transfer function `H(jw) = exp(-jw*tau)`, which `va-codegen` stamps
+    /// through exactly the same `G = Re(H)`, `C = Im(H)/w` path. That is **exact**, not an
+    /// approximation of a delay by a rational filter.
+    ///
+    /// At DC it is the identity (`H(0) = 1`), which is the correct steady-state answer and the
+    /// behaviour this operator already had when it was folded away at elaboration. **In
+    /// transient it still folds to its undelayed input** — a real time-domain delay needs an
+    /// interpolated history buffer, which is stage 2 of the proposal.
+    Absdelay,
     /// `white_noise(pwr)` — a frequency-flat noise source of power spectral density `pwr`,
     /// in the units of the contribution it appears in (A²/Hz in a flow contribution).
     ///

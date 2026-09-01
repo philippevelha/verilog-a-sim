@@ -1794,10 +1794,21 @@ impl Elaborator<'_> {
             // DC steady state (no delay history exists at a fixed operating point), so it folds
             // like `transition`/`slew` above: `delay`/`max_delay` are parsed but never evaluated.
             ExprAst::Call { name, args } if name == "absdelay" => {
+                // Lowered to `Builtin::Absdelay` rather than folded away (§6 change,
+                // 2026-09-01). Folding was correct at DC and silently wrong everywhere else:
+                // an optical waveguide's `absdelay(OptE(fwd), length*n_g/c)` *is* its
+                // propagation delay, and folding made light cross the guide instantly.
                 let value = *args.first().ok_or_else(|| {
                     elab("`absdelay` requires at least a value and a delay argument".to_string())
                 })?;
-                return self.lower_expr(value);
+                let delay = *args
+                    .get(1)
+                    .ok_or_else(|| elab("`absdelay` requires a delay argument".to_string()))?;
+                let value = self.lower_expr(value)?;
+                let delay = self.lower_expr(delay)?;
+                // A third `maxdelay` argument is accepted and dropped: it exists to size a
+                // history buffer, which only a time-domain implementation needs (stage 2).
+                Expr::Call(Builtin::Absdelay, vec![value, delay])
             }
             // `laplace_nd(value, num, den[, tol])` / `laplace_np(value, num, pole[, tol])` /
             // `laplace_zd(value, zero, den[, tol])` / `laplace_zp(value, zero, pole[, tol])`
@@ -5304,20 +5315,38 @@ mod tests {
     }
 
     #[test]
-    fn absdelay_folds_to_its_value_argument() {
-        // `absdelay(V(a,b), td)` settles to its undelayed input in DC steady state, same
-        // treatment as `transition`/`slew` — no `Call` node survives, and `td` is never lowered.
-        let m = elaborate_src(
-            "module t(a, b); electrical a, b; parameter real td = 1n; \
-             analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule",
-        );
-        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
-        assert!(!m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(..))));
+    fn absdelay_lowers_to_its_own_builtin() {
+        // Until 2026-09-01 `absdelay` was folded to its value argument and its delay was never
+        // lowered at all. Right at DC, silently wrong everywhere else — an optical
+        // waveguide's propagation delay simply vanished — so it now survives into the IR as
+        // its own builtin, carrying the delay (§6 change; `docs/proposals/absdelay.md`).
+        let args_of = |src: &str| {
+            elaborate_src(src)
+                .exprs
+                .iter()
+                .find_map(|e| match e {
+                    va_ir::Expr::Call(Builtin::Absdelay, a) => Some(a.clone()),
+                    _ => None,
+                })
+                .expect("an absdelay call survives elaboration")
+        };
 
-        // No value argument at all is an error.
-        let src =
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ absdelay(); end endmodule";
-        let toks = lex(src).expect("lex");
+        let m = elaborate_src("module t(a, b); electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
+        let args = args_of("module t(a, b); electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
+        assert_eq!(args.len(), 2, "absdelay normalizes to (value, delay)");
+        assert!(matches!(m.expr(args[0]), va_ir::Expr::Probe(_)));
+        // The delay is a real lowered expression now, not a discarded token.
+        assert!(matches!(m.expr(args[1]), va_ir::Expr::Param(_)));
+
+        // A third `maxdelay` argument is accepted and dropped: only a time-domain
+        // implementation needs it, to size a history buffer (stage 2 of the proposal).
+        assert_eq!(args_of("module t(a, b); electrical a, b; analog begin I(a, b) <+ absdelay(V(a, b), 1n, 5n); end endmodule").len(), 2, "maxdelay is dropped, not carried");
+
+        // No value argument at all is still an error.
+        let toks = lex(
+            "module t(a, b); electrical a, b; analog begin I(a, b) <+ absdelay(); end endmodule",
+        )
+        .expect("lex");
         let ast = parse(&toks)
             .expect("parse")
             .into_iter()

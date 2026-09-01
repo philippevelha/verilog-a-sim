@@ -1,6 +1,19 @@
 # Proposal: `absdelay` — a real transport delay, across disciplines
 
-**Status:** proposed, not ratified. **Date:** 2026-09-01.
+**Status: stage 1 RATIFIED and implemented, 2026-09-01.** Stages 2-3 remain proposed.
+
+> Stage 1 outcome: `absdelay` is now exact in AC and unchanged (identity) at DC; transient
+> still folds, warned and counted. Validated against the closed form rather than QSPICE —
+> `models/delay_line.va` + `circuits/delay_ac.net` check `1/(1 + (R1/r)e^(-jwt))` point by
+> point *and across a phase wrap*, and `models/interferometer.va` +
+> `circuits/interferometer_ac.net` check a two-arm fringe comb repeating at its free spectral
+> range. QSPICE has no lumped `absdelay` equivalent to translate to, so a golden gate would
+> have compared this engine against a different circuit; the closed form is the stronger oracle
+> here and is exact.
+
+> One design detail settled during implementation: `absdelay` rides `LaplaceTerm` (given an
+> optional delay) rather than a type of its own, because it needs the identical stamping,
+> restriction and frequency-dependence flag.
 **Affects:** `va-ir` (Interface α), `va-frontend`, `va-codegen`. `va-abi` (Interface β),
 `va-core`, `va-transient`, `va-acnoise`, `va-netlist` are **not** touched — see §3.
 **CLAUDE.md §6 step 1** — the written description the rule requires before any code.

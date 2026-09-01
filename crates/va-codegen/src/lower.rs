@@ -301,6 +301,14 @@ pub struct LaplaceTerm {
     pub num: Vec<ExprId>,
     /// Denominator coefficients or flattened `(re, im)` pole pairs.
     pub den: Vec<ExprId>,
+    /// A pure transport delay in seconds, for an `absdelay` term (§6 change, 2026-09-01).
+    ///
+    /// `None` for a `laplace_*` filter. When `Some`, `num`/`den` are empty and the whole
+    /// transfer function is `H(jw) = exp(-jw*tau)` — which is why `absdelay` rides this type
+    /// rather than one of its own: a delay *is* a frequency-domain term, and it needs exactly
+    /// the same `G = Re(H)`, `C = Im(H)/w` stamping, the same top-level-term restriction, and
+    /// the same "this model is frequency-dependent" flag.
+    pub delay: Option<ExprId>,
 }
 
 /// If `expr` is a bare `laplace_*` call, unpack its flattened argument layout
@@ -320,6 +328,24 @@ fn laplace_term_shape(
             b @ (Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp),
             args,
         ) => (*b, args),
+        // `absdelay(value, delay)` is the degenerate frequency-domain term: no rational part
+        // at all, the entire transfer function being `exp(-jw*tau)`.
+        Expr::Call(Builtin::Absdelay, args) => {
+            let (Some(&input), Some(&delay)) = (args.first(), args.get(1)) else {
+                return Err(unsupported(
+                    "absdelay is missing its value or delay argument",
+                ));
+            };
+            return Ok(Some(LaplaceTerm {
+                sign,
+                input,
+                num_is_roots: false,
+                den_is_roots: false,
+                num: Vec::new(),
+                den: Vec::new(),
+                delay: Some(delay),
+            }));
+        }
         _ => return Ok(None),
     };
     let num_is_roots = matches!(builtin, Builtin::LaplaceZd | Builtin::LaplaceZp);
@@ -361,6 +387,7 @@ fn laplace_term_shape(
         den_is_roots,
         num: num.to_vec(),
         den: den.to_vec(),
+        delay: None,
     }))
 }
 
@@ -370,7 +397,12 @@ fn laplace_term_shape(
 pub(crate) fn contains_laplace_call(module: &Module, expr: ExprId) -> bool {
     match module.expr(expr) {
         Expr::Call(
-            Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp,
+            Builtin::LaplaceNd
+            | Builtin::LaplaceNp
+            | Builtin::LaplaceZd
+            | Builtin::LaplaceZp
+            // Same restriction, same reason: a complex gain has nowhere to live in a `Dual`.
+            | Builtin::Absdelay,
             _,
         ) => true,
         Expr::Call(_, args) => args.iter().any(|&a| contains_laplace_call(module, a)),

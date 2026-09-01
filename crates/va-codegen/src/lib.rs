@@ -805,22 +805,41 @@ impl GeneratedModel {
             let Ok(u) = eval(ctx, term.input) else {
                 continue;
             };
-            let Some(num) = Self::eval_coeffs(ctx, &term.num) else {
-                continue;
-            };
-            let Some(den) = Self::eval_coeffs(ctx, &term.den) else {
-                continue;
-            };
-
             let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
             let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
-            let h = ad::laplace_at(
-                if ac { omega } else { 0.0 },
-                &num,
-                term.num_is_roots,
-                &den,
-                term.den_is_roots,
-            );
+
+            let h = if let Some(delay) = term.delay {
+                // A pure transport delay: `H(jw) = exp(-jw*tau)`, which is **exact** rather
+                // than a rational approximation of one. At DC (and in every non-AC analysis)
+                // `H(0) = 1`, the identity — the correct steady-state answer, and the same
+                // thing this operator did when it was folded away at elaboration.
+                let Ok(tau) = eval(ctx, delay) else {
+                    continue;
+                };
+                if !tau.value.is_finite() {
+                    continue;
+                }
+                if ac {
+                    let wt = omega * tau.value;
+                    ad::Cx(wt.cos(), -wt.sin())
+                } else {
+                    ad::Cx(1.0, 0.0)
+                }
+            } else {
+                let Some(num) = Self::eval_coeffs(ctx, &term.num) else {
+                    continue;
+                };
+                let Some(den) = Self::eval_coeffs(ctx, &term.den) else {
+                    continue;
+                };
+                ad::laplace_at(
+                    if ac { omega } else { 0.0 },
+                    &num,
+                    term.num_is_roots,
+                    &den,
+                    term.den_is_roots,
+                )
+            };
             if !h.0.is_finite() || !h.1.is_finite() {
                 continue; // a denominator vanishing at this frequency: skip rather than poison
             }

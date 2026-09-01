@@ -1566,6 +1566,38 @@ not new production code — `solve_dense` remains what `newton`/`dc` call, uncha
 > distinction matters, because re-baselining a gate to whatever the code now prints would make
 > it unfalsifiable.
 >
+> **2026-09-01: `absdelay` is a real delay in AC (stage 1 of `docs/proposals/absdelay.md`,
+> §6 Interface α change ratified).** It had been *folded to its undelayed input at
+> elaboration* — right at DC, silently wrong elsewhere, and invisible to every later pass since
+> nothing survived into the IR. `Builtin::Absdelay` now carries it, and `va-codegen` stamps
+> `H(jw) = exp(-jw*tau)` through the same `G`/`C` route `laplace_*` uses.
+>
+> **Why this operator and not another.** The new soundness split showed 9 of 104 passing corpus
+> files compute something other than what their source says, and 5 are `absdelay` — four of
+> them photonic, where the delay is `length*groupIndex/`P_C`, i.e. `L*n_g/c`, the group delay of
+> a waveguide. Folded, light crossed the guide instantly. `CLAUDE.md` §1 names optical among the
+> target disciplines, so this was not an obscure corner.
+>
+> **Exact, and validated as such.** A pure delay's frequency response repeats every `1/tau`,
+> which no finite-order rational filter reproduces, so the tests check a phase *wrap* rather
+> than a few degrees of phase: `circuits/delay_ac.net` matches `1/(1 + (R1/r)e^(-jw*td))` point
+> by point and reproduces itself one `1/td` later, and `circuits/interferometer_ac.net` shows a
+> two-arm fringe comb repeating at its free spectral range, with the arms cancelling to unity at
+> half an FSR. Against the closed form rather than QSPICE, deliberately: QSPICE has no lumped
+> `absdelay` equivalent, so a golden gate would have compared this engine against a *different
+> circuit*, while the closed form here is exact.
+>
+> The deck that found the first bug in this work is worth recording: at `R1 = r` the delayed
+> feedback exactly cancels the source at `f = 1/(2*td)` and the response has a genuine pole.
+> That is physics, not a numerical artifact — but a singular point is a poor place to check an
+> identity, so the gate deck uses `R1/r = 0.5` and says why.
+>
+> **In transient it still folds**, warned and counted. Stage 2 (an interpolated history buffer,
+> with the photonic sub-timestep case putting the delayed value into the Jacobian) remains
+> proposed. Corpus coverage is unchanged at 86/88 and 85/88 — the restriction that a
+> frequency-domain term be a bare top-level additive term did not cost any corpus file,
+> including `fbh_hbt-2_1.va`'s negated `-absdelay(V(ni),Tf)`.
+>
 > **2026-09-01: `Method::Gear` (variable-step BDF2) implemented, after a §6 interface change
 > the supervisor ratified.** `AnalysisCtx` gained `ddt_prev2_weight`
 > (`docs/interfaces.md`'s 2026-09-01 revision; `docs/proposals/bdf2-interface-change.md` is the

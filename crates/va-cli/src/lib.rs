@@ -2540,6 +2540,145 @@ mod tests {
             "a comment or a longer identifier must not trigger the warning"
         );
     }
+    /// `absdelay` in AC, against the closed form. The deck is a 1 k resistor into a delay
+    /// line whose own conductance is delayed, so KCL gives exactly
+    ///
+    /// ```text
+    ///   V(out)/V(in) = 1 / (1 + (R1/r)*exp(-j*w*td))
+    /// ```
+    ///
+    /// Checked at several frequencies *and across a phase wrap*: at f = 1/td the delay's phase
+    /// has advanced a full turn, so f and f + 1/td must give bit-comparable answers. That wrap
+    /// is the part no rational filter can imitate -- a Pade or single-pole approximation of a
+    /// delay tracks the first few degrees and then diverges -- which is what makes this a test
+    /// of a real delay rather than of "something with phase in it".
+    #[test]
+    fn absdelay_is_an_exact_delay_in_ac() {
+        let src = include_str!("../../../models/delay_line.va");
+        let design = compile_model(src, "delay_line.va");
+        let net = va_netlist::parser::parse(include_str!("../../../circuits/delay_ac.net"))
+            .expect("parse delay_ac");
+        let resp = solve_ac(&net, &design.modules).expect("solves");
+
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("`out` node");
+        let td = 1e-6_f64; // set on the device line, along with r
+        let k = 500.0 / 1000.0; // R1 / r, deliberately not 1 (see the deck's own comment)
+
+        for (i, &f) in resp.f.iter().enumerate() {
+            let (re, im) = resp.x[i][out];
+            // 1 / (1 + e^{-jwt}), by hand: denominator (1 + cos, -sin), then reciprocal.
+            let wt = 2.0 * std::f64::consts::PI * f * td;
+            let (dr, di) = (1.0 + k * wt.cos(), -k * wt.sin());
+            let d2 = dr * dr + di * di;
+            let (want_re, want_im) = (dr / d2, -di / d2);
+            let err = ((re - want_re).powi(2) + (im - want_im).powi(2)).sqrt();
+            assert!(
+                err < 1e-9 * (want_re.hypot(want_im)).max(1.0),
+                "at {f:e} Hz: got ({re:.9}, {im:.9}), closed form ({want_re:.9}, {want_im:.9})"
+            );
+        }
+
+        // The wrap, stated as its own claim: f and f + 1/td are the same point on the delay's
+        // unit circle, so the response must repeat. A rational approximation would not.
+        let at = |target: f64| {
+            let i = resp
+                .f
+                .iter()
+                .position(|&f| (f - target).abs() < 1.0)
+                .unwrap_or_else(|| panic!("no sweep point at {target:e} Hz"));
+            resp.x[i][out]
+        };
+        let (a_re, a_im) = at(1e5);
+        let (b_re, b_im) = at(1e5 + 1.0 / td);
+        assert!(
+            (a_re - b_re).abs() < 1e-9 && (a_im - b_im).abs() < 1e-9,
+            "the response must repeat every 1/td: ({a_re}, {a_im}) vs ({b_re}, {b_im})"
+        );
+    }
+
+    /// A two-path interferometer, which is the reason `absdelay` has to be an exact delay.
+    ///
+    /// Two arms delayed by t1 and t2 give an admittance carrying
+    /// `(exp(-jw*t1) + exp(-jw*t2))/2`, so the response is **periodic in frequency** with
+    /// spacing `1/(t2 - t1)` -- the free spectral range. The test asserts three things, in
+    /// increasing order of how hard they are to fake:
+    ///
+    /// 1. point-by-point agreement with the closed form;
+    /// 2. fringe periodicity across a full free spectral range -- a rational filter can imitate
+    ///    one fringe and cannot repeat it forever;
+    /// 3. the destructive point, where the arms cancel, the device's admittance vanishes and
+    ///    the output rises to the source voltage.
+    #[test]
+    fn an_interferometer_shows_fringes_at_its_free_spectral_range() {
+        let src = include_str!("../../../models/interferometer.va");
+        let design = compile_model(src, "interferometer.va");
+        let net =
+            va_netlist::parser::parse(include_str!("../../../circuits/interferometer_ac.net"))
+                .expect("parse interferometer_ac");
+        let resp = solve_ac(&net, &design.modules).expect("solves");
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("`out` node");
+
+        let (t1, t2, k) = (0.0_f64, 1e-6_f64, 500.0 / 1000.0); // from the deck's device line
+        let closed_form = |f: f64| {
+            let (w1, w2) = (
+                2.0 * std::f64::consts::PI * f * t1,
+                2.0 * std::f64::consts::PI * f * t2,
+            );
+            // Arm sum, averaged: (e^{-jw t1} + e^{-jw t2}) / 2.
+            let (ar, ai) = (0.5 * (w1.cos() + w2.cos()), -0.5 * (w1.sin() + w2.sin()));
+            // V = 1 / (1 + k * armsum)
+            let (dr, di) = (1.0 + k * ar, k * ai);
+            let d2 = dr * dr + di * di;
+            (dr / d2, -di / d2)
+        };
+
+        for (i, &f) in resp.f.iter().enumerate() {
+            let (re, im) = resp.x[i][out];
+            let (wr, wi) = closed_form(f);
+            let err = ((re - wr).powi(2) + (im - wi).powi(2)).sqrt();
+            assert!(
+                err < 1e-9,
+                "at {f:e} Hz: ({re:.9}, {im:.9}) vs ({wr:.9}, {wi:.9})"
+            );
+        }
+
+        // The comb: one free spectral range apart, the response repeats exactly.
+        let fsr = 1.0 / (t2 - t1);
+        let at = |target: f64| {
+            let i = resp
+                .f
+                .iter()
+                .position(|&f| (f - target).abs() < 1.0)
+                .unwrap_or_else(|| panic!("no sweep point at {target:e} Hz"));
+            resp.x[i][out]
+        };
+        for base in [5e4, 3.5e5] {
+            let (a_re, a_im) = at(base);
+            let (b_re, b_im) = at(base + fsr);
+            assert!(
+                (a_re - b_re).abs() < 1e-9 && (a_im - b_im).abs() < 1e-9,
+                "one FSR apart must repeat: {base:e} -> ({a_re}, {a_im}),                  {:e} -> ({b_re}, {b_im})",
+                base + fsr
+            );
+        }
+
+        // Destructive interference: at w*(t2 - t1) = pi the arms cancel, the device draws no
+        // current, and the output must sit at the full source voltage.
+        let (re, im) = closed_form(0.5 * fsr);
+        assert!(
+            (re - 1.0).abs() < 1e-12 && im.abs() < 1e-12,
+            "the arms should cancel at half the FSR, giving unity: ({re}, {im})"
+        );
+    }
+
     /// Controlled sources, against values computable by hand rather than against golden:
     /// a 3 V source across a 2k/1k divider gives V(mid) = 1 V, an E with gain 4 holds
     /// V(eout) = 4 V, and a G pushing 2 mA through 500 ohms gives V(gout) = -1 V.

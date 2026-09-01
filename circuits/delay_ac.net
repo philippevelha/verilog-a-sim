@@ -1,0 +1,15 @@
+* A pure transport delay, swept in frequency — the exactness check for `absdelay` in AC.
+* V1 drives a 1 V small signal through R1 into the delay line's own conductance. KCL gives
+* V(out)/V(in) = 1 / (1 + (R1/r)*exp(-jw*td)), so the phase falls linearly with frequency and
+* the whole response repeats every 1/td = 1 MHz.
+*
+* R1/r = 0.5 deliberately, not 1. At unity the denominator vanishes at f = 1/(2*td), where the
+* delayed feedback exactly cancels the source -- a real pole (an oscillation condition), not a
+* numerical artifact, but a singular point is a poor place to check an identity.
+* Swept to 2 MHz so the sweep covers two full phase wraps: a rational filter approximating a
+* delay matches the first few degrees and then diverges, so the wrap is the discriminating part.
+V1 in  gnd  DC 0 AC 1
+R1 in  out  500
+D1 out gnd  delay_line r=1000 td=1e-6
+.ac lin 41 1e5 2.1e6
+.end

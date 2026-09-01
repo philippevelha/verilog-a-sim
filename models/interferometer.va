@@ -1,0 +1,30 @@
+// A two-path interferometer, expressed as two transport delays recombined.
+//
+// The physics an interferometer runs on is that two copies of one signal, delayed by different
+// amounts, add with a frequency-dependent phase difference:
+//
+//     H(jw) = ( exp(-jw*t1) + exp(-jw*t2) ) / 2
+//
+// whose magnitude is |cos(w*(t2-t1)/2)| -- fringes, periodic in frequency with spacing
+// 1/(t2-t1), the free spectral range. That is the Mach-Zehnder response, and it is the reason
+// `absdelay` has to be a *real* delay rather than a rational approximation of one: the fringes
+// repeat forever, and no finite-order filter does that.
+//
+// Written on an electrical discipline rather than the corpus's optical one so it needs no
+// vector nets or complex-field submodules; the transfer function is the same object. Each
+// delay carries its own 1/(2r) so the sum is an average, keeping the arms as bare top-level
+// terms (this engine requires a frequency-domain term not be scaled from outside).
+`include "disciplines.vams"
+
+module interferometer(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r  = 1000.0 from (0:inf);   // load resistance, ohms
+    parameter real t1 = 0.0    from [0:inf);   // short-arm delay, seconds
+    parameter real t2 = 1e-6   from [0:inf);   // long-arm delay, seconds
+
+    analog begin
+        I(p, n) <+ absdelay(V(p, n) / (2 * r), t1);
+        I(p, n) <+ absdelay(V(p, n) / (2 * r), t2);
+    end
+endmodule

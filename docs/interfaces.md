@@ -140,6 +140,36 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > then sorts the pairs ascending, which is the invariant `va_abi::noise::table_psd_at` reads them
 > under. See Interface β's matching `table_current` revision, below.
 
+> **Revision (§6 change, ratified 2026-09-01):** added `Builtin::Absdelay`, the IR spelling of
+> `absdelay(value, delay [, maxdelay])` (LRM §4.5.9). Additive, in the same shape as the two
+> revisions below. Proposal: `docs/proposals/absdelay.md`.
+>
+> Arguments are normalized at elaboration to `[value, delay]`; a third `maxdelay` is accepted
+> and dropped, because only a time-domain implementation needs it (to size a history buffer).
+>
+> **Why this needed a §6 event at all.** `absdelay` used to be *folded away at elaboration*
+> — lowered to its own value argument, delay discarded. That is correct at DC, where a delayed
+> signal equals its input, and silently wrong everywhere else. Because the fold happened in the
+> frontend, nothing survived into the IR for any later pass to implement, so putting the
+> operator back is by definition an Interface α change.
+>
+> **No Interface β change was needed**, verified rather than assumed: the AC path already
+> exists. A pure delay is the transfer function `H(jw) = exp(-jw*tau)`, so `va-codegen` stamps
+> it through the identical `G = Re(H)`, `C = Im(H)/w` route the `laplace_*` family already
+> uses, reading the frequency from `AnalysisCtx::freq`. That is **exact**, not a rational
+> approximation of a delay: the response repeats every `1/tau` in frequency, which no
+> finite-order filter reproduces.
+>
+> `absdelay` rides `lower::LaplaceTerm` (which gained an `Option<ExprId>` delay field) rather
+> than a parallel type of its own, because it *is* a frequency-domain term: it needs the same
+> stamping, the same "must be a bare top-level additive term" restriction (a complex gain has
+> nowhere to live in a real-valued `Dual`), and the same "this model is frequency-dependent"
+> flag.
+>
+> **In transient it still folds to its undelayed input**, and says so: `va-cli` warns, and
+> `check` counts such files separately from plain passes. A real time-domain delay needs an
+> interpolated history buffer — stage 2 of the proposal.
+>
 > **Revision (§6 change, 2026-08-05):** added `Builtin::NoiseTableLog`, the IR spelling of
 > `noise_table_log()` (LRM §4.6.4.4) — the same table, interpolated in `log₁₀ f`/`log₁₀ power`.
 > Additive in exactly the same way as the revision above, and matched in exactly the same two

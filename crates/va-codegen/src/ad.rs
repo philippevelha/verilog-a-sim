@@ -896,6 +896,14 @@ fn eval_call(
                  gain is complex, so there is nowhere in an ordinary expression to put it)",
             ))
         }
+        // `absdelay` is in the same position and for the same reason: its gain
+        // `exp(-jw*tau)` is complex, so a buried one has no real-valued answer either.
+        Builtin::Absdelay => {
+            return Err(unsupported(
+                "absdelay must be a top-level additive term of a contribution (its gain \
+                 is complex, so there is nowhere in an ordinary expression to put it)",
+            ))
+        }
         // `@(initial_step)`'s desugared condition. Pure solver knowledge, no state, no gradient.
         Builtin::InitialStep => Dual::constant(
             if ctx.analysis.is_initial_step {
