@@ -337,6 +337,13 @@ pub fn check_models(paths: &[String], codegen: bool) -> Result<()> {
         tally.failed_incomplete, tally.failed
     );
     println!("  => self-contained files declaring a module: {whole_passed}/{whole_total}");
+    // Separated from the headline for the same reason `passed_incomplete` is: building is not
+    // the same as computing what the source says, and a number that merges the two overstates
+    // what the engine actually supports.
+    println!(
+        "  of the {} passes, {} use an operator approximated in transient (absdelay, laplace_*)",
+        tally.passed, tally.passed_approximated
+    );
     println!("  {total} file(s) scanned in total");
     Ok(())
 }
@@ -377,6 +384,16 @@ struct CheckTally {
     failed_incomplete: usize,
     /// Files that parsed but declare no module — headers and statement-body fragments.
     no_module: usize,
+    /// The subset of `passed` that uses an analog operator this engine **approximates rather
+    /// than evaluates** (§ [`TRANSIENT_APPROXIMATIONS`]), and so builds into a `ModelInstance`
+    /// that computes something other than what the source says in a transient run.
+    ///
+    /// This exists because "passed" measures *builds*, not *is right*. `absdelay` folds to its
+    /// undelayed input and a `laplace_*` filter folds to its DC gain, so a file using either
+    /// contributes to the headline number while silently returning the wrong waveform. That is
+    /// the same class of overcounting the `passed_incomplete` split above was introduced to
+    /// stop — a file scored as coverage for something it does not actually do.
+    passed_approximated: usize,
 }
 
 impl std::ops::AddAssign for CheckTally {
@@ -386,6 +403,7 @@ impl std::ops::AddAssign for CheckTally {
         self.failed += rhs.failed;
         self.failed_incomplete += rhs.failed_incomplete;
         self.no_module += rhs.no_module;
+        self.passed_approximated += rhs.passed_approximated;
     }
 }
 
@@ -645,6 +663,19 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         // files report "0 params, 0 funcs" and still be scored as coverage.
         if !skipped.is_empty() {
             tally.passed_incomplete += 1;
+        }
+        // Built, but out of a source whose meaning this engine does not fully honour. Re-read
+        // rather than threaded down from `parse_file`: this is a diagnostic command, and the
+        // cost of one extra read per passing file is not worth widening a return type for.
+        let approximated = std::fs::read_to_string(file)
+            .map(|src| approximations_in(&src))
+            .unwrap_or_default();
+        if !approximated.is_empty() {
+            tally.passed_approximated += 1;
+            println!(
+                "  [approx] {file}: builds, but uses {} (approximated in transient)",
+                approximated.join(", ")
+            );
         }
     }
     tally
