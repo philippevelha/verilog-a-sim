@@ -559,8 +559,29 @@ impl Parser<'_> {
 
     /// Parse a ground declaration, `ground gnd, vss;` (LRM §3.6.4, Syntax 3-7) — see
     /// `Item::Ground`'s doc comment for the supported subset.
+    ///
+    /// Syntax 3-7 is `ground [ discipline_identifier ] [ range ] list_of_net_identifiers ;`,
+    /// so the discipline slot lets one statement both *declare* the nets and ground them
+    /// (`ground electrical gnd;`) instead of requiring the two-statement `electrical gnd;
+    /// ground gnd;` idiom. When that slot is present this yields two items — the `Item::Net`
+    /// goes through [`Self::pending_items`] exactly as the combined `inout electrical p, n;`
+    /// port form does, so both spellings share one declaration code path and cannot drift.
+    /// Item order is irrelevant to the result: `Elaborator::collect_ground` is its own pass
+    /// over all items, run after `collect_nodes`.
     fn parse_ground_item(&mut self) -> Result<Item, FrontendError> {
         self.pos += 1; // consume `ground`
+        if let Some(discipline) = self.peek_port_discipline() {
+            self.pos += 1;
+            // `parse_net_item` consumes the range(s), the name list (including per-name
+            // `bus[3:0]` suffixes) and the `;`.
+            let net = self.parse_net_item(discipline)?;
+            let Item::Net { nets, .. } = &net else {
+                unreachable!("parse_net_item always yields Item::Net")
+            };
+            let names = nets.iter().map(|n| n.name.clone()).collect();
+            self.pending_items.push(net);
+            return Ok(Item::Ground { names });
+        }
         let names = self.ident_list()?;
         self.eat(&Token::Semicolon)?;
         Ok(Item::Ground { names })
@@ -696,14 +717,91 @@ impl Parser<'_> {
         }
     }
 
+    /// Resolve the `parent_nature` of a derived-nature declaration (LRM A.1.6) to the parent's
+    /// already-parsed [`NatureDecl`], which the derived nature starts out as a copy of.
+    ///
+    /// Both spellings the grammar allows are accepted:
+    /// `parent_nature ::= nature_identifier | discipline_identifier . potential_or_flow`,
+    /// so `nature HighVoltage : Voltage` and `nature HighVoltage : electrical.potential` name
+    /// the same parent whenever `electrical`'s `potential` is `Voltage`.
+    ///
+    /// The parent must already be declared — LRM §3.6.1.1 ("A nature can be derived from an
+    /// **already declared** nature"), so a forward reference is an error here rather than the
+    /// silent no-op [`Self::register_access`] uses for the analogous discipline case. That
+    /// asymmetry is deliberate: `register_access` only *widens* a recognized-name set, whereas
+    /// an unresolved parent here would silently drop every attribute the derived nature was
+    /// supposed to inherit.
+    fn parse_parent_nature(&mut self) -> Result<NatureDecl, FrontendError> {
+        let head = self.expect_discipline_or_nature_name()?;
+        if !self.at(&Token::Dot) {
+            return self.natures.get(&head).cloned().ok_or(()).or_else(|()| {
+                self.err(format!(
+                    "`nature ... : {head}`: `{head}` is not a previously declared nature"
+                ))
+            });
+        }
+        // `discipline_identifier . potential_or_flow`
+        self.pos += 1; // consume `.`
+        let which = if self.at_keyword("potential") {
+            "potential"
+        } else if self.at_keyword("flow") {
+            "flow"
+        } else {
+            return self.err(format!(
+                "`nature ... : {head}.`: expected `potential` or `flow` after a discipline name"
+            ));
+        };
+        self.pos += 1;
+        let Some(discipline) = self.disciplines.get(&head) else {
+            return self.err(format!(
+                "`nature ... : {head}.{which}`: `{head}` is not a previously declared discipline"
+            ));
+        };
+        let bound = match which {
+            "potential" => discipline.potential.clone(),
+            _ => discipline.flow.clone(),
+        };
+        let Some(nature_name) = bound else {
+            return self.err(format!(
+                "`nature ... : {head}.{which}`: discipline `{head}` binds no `{which}` nature"
+            ));
+        };
+        self.natures
+            .get(&nature_name)
+            .cloned()
+            .ok_or(())
+            .or_else(|()| {
+                self.err(format!(
+                    "`nature ... : {head}.{which}`: `{head}`'s {which} nature `{nature_name}` is \
+                     not a previously declared nature"
+                ))
+            })
+    }
+
     /// Parse one `nature ... endnature` block (LRM §4), registering it in [`Self::natures`].
+    ///
+    /// Handles both base and *derived* natures (`nature HighVoltage : Voltage`, LRM §3.6.1.1):
+    /// a derived nature starts as a copy of its parent's attributes, and any attribute it
+    /// declares itself overrides the inherited one. The LRM's two override *restrictions* are
+    /// enforced rather than ignored: `access` and `units` "always inherit" from the parent, so
+    /// restating either identically is accepted as redundant but changing it is rejected (LRM
+    /// §3.6.1.2). `abstol`/`idt_nature`/`ddt_nature` are freely overridable.
     fn parse_nature(&mut self) -> Result<(), FrontendError> {
         self.eat_keyword("nature")?;
         let name = self.expect_discipline_or_nature_name()?;
+        // LRM A.1.6: `nature nature_identifier [ : parent_nature ] [ ; ]`.
+        let parent = if self.at(&Token::Colon) {
+            self.pos += 1;
+            Some(self.parse_parent_nature()?)
+        } else {
+            None
+        };
         self.eat_optional(&Token::Semicolon);
         let mut decl = NatureDecl {
             name: name.clone(),
-            ..Default::default()
+            // A derived nature inherits every attribute of its parent; a base nature starts
+            // empty. Either way its own `name` is its own.
+            ..parent.clone().unwrap_or_default()
         };
         loop {
             if self.at_keyword("endnature") {
@@ -715,12 +813,43 @@ impl Parser<'_> {
             if self.at_keyword("units") {
                 self.pos += 1;
                 self.eat(&Token::Assign)?;
-                decl.units = Some(self.expect_string()?);
+                let units = self.expect_string()?;
+                // LRM §3.6.1.2: "It is illegal for a derived nature to define or change the
+                // units; the derived nature always inherits its parent nature units."
+                if let Some(p) = &parent {
+                    if p.units.as_deref() != Some(units.as_str()) {
+                        return self.err(format!(
+                            "nature `{name}` derives from `{}` and so always inherits its \
+                             `units` ({}), which LRM §3.6.1.2 forbids it from defining or \
+                             changing to \"{units}\"",
+                            p.name,
+                            p.units
+                                .as_deref()
+                                .map_or("unspecified".to_string(), |u| format!("\"{u}\"")),
+                        ));
+                    }
+                }
+                decl.units = Some(units);
                 self.eat(&Token::Semicolon)?;
             } else if self.at_keyword("access") {
                 self.pos += 1;
                 self.eat(&Token::Assign)?;
-                decl.access = Some(self.expect_ident()?);
+                let access = self.expect_ident()?;
+                // LRM §3.6.1.2: "It is illegal for a derived nature to change the access
+                // attribute; the derived nature always inherits the access attribute of its
+                // parent nature."
+                if let Some(p) = &parent {
+                    if p.access.as_deref() != Some(access.as_str()) {
+                        return self.err(format!(
+                            "nature `{name}` derives from `{}` and so always inherits its \
+                             `access` function ({}), which LRM §3.6.1.2 forbids it from \
+                             changing to `{access}`",
+                            p.name,
+                            p.access.as_deref().unwrap_or("unspecified"),
+                        ));
+                    }
+                }
+                decl.access = Some(access);
                 self.eat(&Token::Semicolon)?;
             } else if self.at_keyword("abstol") {
                 self.pos += 1;
@@ -813,13 +942,24 @@ impl Parser<'_> {
         self.eat(&Token::Module)?;
         let name = self.expect_ident()?;
 
-        self.eat(&Token::LParen)?;
-        let ports = if self.at(&Token::RParen) {
-            Vec::new()
+        // LRM A.1.2's second `module_declaration` alternative makes the port list *optional*:
+        // `module_keyword module_identifier [ module_parameter_port_list ]
+        //  [ list_of_port_declarations ] ; { non_port_module_item } endmodule`.
+        // So all three of `module m(a, b);`, `module m();` and `module m;` are legal. The
+        // last is the idiomatic header for a self-contained structural circuit — a top-level
+        // module that instantiates components and has no ports of its own to export.
+        let ports = if self.at(&Token::LParen) {
+            self.pos += 1;
+            let ports = if self.at(&Token::RParen) {
+                Vec::new()
+            } else {
+                self.ident_list()?
+            };
+            self.eat(&Token::RParen)?;
+            ports
         } else {
-            self.ident_list()?
+            Vec::new()
         };
-        self.eat(&Token::RParen)?;
         self.eat(&Token::Semicolon)?;
 
         let mut items = Vec::new();
@@ -3282,5 +3422,147 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    // --- LRM A.1.6 derived natures / A.1.2 optional port list / Syntax 3-7 ground ----------
+    //
+    // All three arrived together (2026-09-05) from `external/basic`, a transcription of the
+    // examples in Kundert's *Designer's Guide to Verilog-AMS*. A single unsupported production
+    // — the derived nature in its shared `disciplines.va` header — failed every one of that
+    // folder's eleven modules, so these are deliberately gated construct by construct rather
+    // than only through the corpus figure they move.
+
+    /// The `disciplines.va` header shape that gated all of `external/basic`: a derived nature
+    /// bound as a discipline's potential. The derived nature must inherit `access` for `V` to
+    /// still be recognized on an `hv_electrical` net, which is what this really checks.
+    #[test]
+    fn derived_nature_inherits_parent_attributes() {
+        let src = "nature Voltage units=\"V\"; access=V; abstol=1u; endnature \
+                   nature Current units=\"A\"; access=I; abstol=1p; endnature \
+                   nature HighVoltage : Voltage abstol = 1; endnature \
+                   discipline hv_electrical potential HighVoltage; flow Current; enddiscipline \
+                   module m(a, b); inout a, b; hv_electrical a, b; \
+                   analog I(a, b) <+ V(a, b); endmodule";
+        let unit = parse_with_disciplines(&lex(src).expect("lex")).expect("parse");
+        let hv = unit.1.get("HighVoltage").expect("derived nature parsed");
+        // Overridden by the derived nature.
+        assert_eq!(hv.abstol, Some(1.0));
+        // Inherited, never restated in the derived block.
+        assert_eq!(hv.access.as_deref(), Some("V"));
+        assert_eq!(hv.units.as_deref(), Some("V"));
+        // The parent is untouched by the derivation.
+        let v = unit.1.get("Voltage").expect("parent nature");
+        assert_eq!(v.abstol, Some(1e-6));
+    }
+
+    /// `parent_nature`'s second spelling: `discipline_identifier . potential_or_flow`.
+    #[test]
+    fn derived_nature_parent_named_through_a_discipline() {
+        let src = "nature Voltage units=\"V\"; access=V; abstol=1u; endnature \
+                   nature Current units=\"A\"; access=I; abstol=1p; endnature \
+                   discipline electrical potential Voltage; flow Current; enddiscipline \
+                   nature HighVoltage : electrical.potential abstol = 1; endnature \
+                   nature BigCurrent : electrical.flow endnature \
+                   module m(a, b); inout a, b; electrical a, b; \
+                   analog I(a, b) <+ V(a, b); endmodule";
+        let unit = parse_with_disciplines(&lex(src).expect("lex")).expect("parse");
+        let hv = unit.1.get("HighVoltage").expect("nature");
+        assert_eq!(hv.access.as_deref(), Some("V"));
+        assert_eq!(hv.abstol, Some(1.0));
+        // `flow` resolves to the other nature, and inherits its abstol when unspecified.
+        let bc = unit.1.get("BigCurrent").expect("nature");
+        assert_eq!(bc.access.as_deref(), Some("I"));
+        assert_eq!(bc.abstol, Some(1e-12));
+    }
+
+    /// LRM §3.6.1.2 forbids a derived nature from changing `access` or `units`, and §3.6.1.1
+    /// requires the parent to be already declared. Each is rejected rather than silently
+    /// accepted — a changed `access` would otherwise bind a bogus access-function name.
+    #[test]
+    fn derived_nature_rejects_illegal_overrides_and_unknown_parents() {
+        let base = "nature Voltage units=\"V\"; access=V; abstol=1u; endnature ";
+        for (src, want) in [
+            (
+                format!("{base} nature Bad : Voltage access = W; endnature"),
+                "access",
+            ),
+            (
+                format!("{base} nature Bad : Voltage units = \"kV\"; endnature"),
+                "units",
+            ),
+            (
+                format!("{base} nature Bad : Nope abstol = 1; endnature"),
+                "not a previously declared nature",
+            ),
+            (
+                format!("{base} nature Bad : Voltage.potential abstol = 1; endnature"),
+                "not a previously declared discipline",
+            ),
+        ] {
+            let toks = lex(&src).expect("lex");
+            let err = parse_with_disciplines(&toks).expect_err("must reject");
+            let msg = err.to_string();
+            assert!(msg.contains(want), "expected {want:?} in {msg:?}");
+        }
+        // Restating the inherited value identically is redundant, not illegal.
+        let src = format!("{base} nature Ok : Voltage units = \"V\"; access = V; endnature");
+        parse_with_disciplines(&lex(&src).expect("lex")).expect("redundant restatement is legal");
+    }
+
+    /// LRM A.1.2 makes the port list optional, so a self-contained structural circuit may be
+    /// headed `module smpl_ckt;`. All three spellings must agree on an empty port list.
+    #[test]
+    fn module_header_port_list_is_optional() {
+        for src in [
+            "module m; electrical n; analog begin end endmodule",
+            "module m(); electrical n; analog begin end endmodule",
+        ] {
+            let m = parse_src(src);
+            assert_eq!(m.name, "m");
+            assert!(m.ports.is_empty(), "{src:?} should declare no ports");
+        }
+        // The ported form still works, i.e. this did not become "always empty".
+        let m =
+            parse_src("module m(a, b); inout a, b; electrical a, b; analog begin end endmodule");
+        assert_eq!(m.ports, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// Syntax 3-7's optional discipline slot: `ground electrical gnd;` both declares and
+    /// grounds, expanding to an `Item::Ground` *and* an `Item::Net` so the net is really
+    /// declared (the two-statement idiom's elaboration path is unchanged).
+    #[test]
+    fn ground_declaration_accepts_an_inline_discipline() {
+        let m = parse_src(
+            "module m(a); inout a; electrical a; ground electrical gnd; \
+             analog I(a) <+ 0.0; endmodule",
+        );
+        let grounded: Vec<&String> = m
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Ground { names } => Some(names),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(grounded, vec!["gnd"]);
+        // The same statement must also have declared `gnd` as a net, or `collect_ground`
+        // would reject it as "not a previously declared net".
+        let declared = m.items.iter().any(|it| match it {
+            Item::Net { nets, .. } => nets.iter().any(|n| n.name == "gnd"),
+            _ => false,
+        });
+        assert!(
+            declared,
+            "`ground electrical gnd;` must also declare the net"
+        );
+        // The bare form still parses, and does *not* invent a net declaration.
+        let m = parse_src(
+            "module m(a); inout a; electrical a, gnd; ground gnd; analog I(a) <+ 0.0; endmodule",
+        );
+        assert!(m
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Ground { names } if names == &vec!["gnd".to_string()])));
     }
 }

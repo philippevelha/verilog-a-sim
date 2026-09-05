@@ -544,11 +544,19 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   per-instance runtime state itself. Multiple `module...endmodule` blocks in one source unit
   are now expected, not exceptional (§ module instantiation): a file may define a subcircuit
   alongside the top module that instantiates it.
-- **Declaration and Assignment**: `module name ( port_list ) ; ... endmodule` (LRM §6, "Hierar-
-  chical structures"; `parse_module`). `parser::parse` loops `parse_module` until the token
-  stream is exhausted, returning every module the source defines, in source order (`Vec
+- **Declaration and Assignment**: `module name [ ( port_list ) ] ; ... endmodule` (LRM §6,
+  "Hierarchical structures"; `parse_module`). `parser::parse` loops `parse_module` until the
+  token stream is exhausted, returning every module the source defines, in source order (`Vec
   <ModuleAst>`) — no change to `parse_module` itself was needed, since it already drained its
-  own expression arena per call.
+  own expression arena per call. The port list is **optional** (LRM A.1.2's second
+  `module_declaration` alternative, `[ list_of_port_declarations ]`; parsed since 2026-09-05),
+  so `module m(a, b);`, `module m();` and `module m;` are all legal and the last two yield an
+  empty port list. The bare form is the idiomatic header for a self-contained structural
+  circuit — a top module that instantiates components and exports no ports of its own, e.g.
+  `external/basic/circuit1.va`. **Not yet parsed:** the preceding `module_parameter_port_list`
+  (`module m #(parameter real r = 1) (a, b);`) — a separate slot of the same production, and a
+  pre-existing gap this change did not touch; parameters are declared in the module body
+  instead.
 - **Expressions and Evaluation**: N/A — pure structure.
 - **Structural and Analog Usage**: Module-level only; this *is* the module-level scope.
 - **Comparison with Traditional Constructs**: A C translation unit is the loose analogue
@@ -804,13 +812,19 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 
 - **Purpose and Static Nature**: Structural — declares that an already-declared net is the
   module's global reference node.
-- **Declaration and Assignment**: `ground list_of_net_identifiers;` (LRM §3.6.4, Syntax 3-7),
-  e.g. `electrical gnd; ground gnd;` — the LRM's own idiom, and every real-world example this
-  project has seen. `Item::Ground { names }` (`Parser::parse_ground_item`) parses a
-  comma-separated identifier list terminated by `;`. **v1 limitation:** the grammar's optional
-  leading `discipline_identifier`/`range` (declaring a net inline as part of the *same*
-  statement, rather than referencing an already-declared one) is not parsed — no corpus need
-  found for it.
+- **Declaration and Assignment**: `ground [ discipline_identifier ] [ range ]
+  list_of_net_identifiers;` (LRM §3.6.4, Syntax 3-7), e.g. `electrical gnd; ground gnd;` — the
+  LRM's own idiom — or the one-statement `ground electrical gnd;`. `Item::Ground { names }`
+  (`Parser::parse_ground_item`) parses a comma-separated identifier list terminated by `;`.
+  The optional leading `discipline_identifier` **is** parsed (added 2026-09-05, for
+  `external/basic`'s structural circuits): that form declares the nets inline and expands to an
+  `Item::Ground` *plus* an `Item::Net`, routed through `Parser::pending_items` exactly as the
+  combined `inout electrical p, n;` port form is, so both spellings share one net-declaration
+  code path and cannot drift apart. Item order is irrelevant — `Elaborator::collect_ground` is
+  its own pass over all items, run after `collect_nodes`. **Remaining limitation:** the `range`
+  slot is only accepted *after* a discipline (`ground electrical [0:3] bus;`); a bare
+  `ground [0:3] bus;`, grounding a slice of an already-declared bus, is not parsed, since
+  `names` records whole nets rather than bit-selects.
 - **Expressions and Evaluation**: N/A — pure declaration, resolved once during elaboration
   (`Elaborator::collect_ground`, run right after `collect_nodes` and before anything that could
   lazily create the implicit reference node). Each named net must already exist; an undeclared
@@ -1336,14 +1350,33 @@ See `docs/proposals/model-state.md` §1.1.
   before every `module` in the token stream (`Parser::parse_preamble`, called from
   `parse_module`), so blocks interleaved between modules — or an expanded
   `` `include "disciplines.vams" `` preceding just the first — are all reached the same way.
-- **Declaration and Assignment**: `discipline name [;] ... enddiscipline` / `nature name [;]
-  ... endnature` (LRM §4). The `;` after the name is optional — both the canonical
-  `disciplines.vams` (semicolon) and the real `external/ekv3_natures.va` (no semicolon) shapes
-  parse. A nature's body is `units = "...";`/`access = Name;`/`abstol = value;`/
-  `idt_nature = Other;`/`ddt_nature = Other;`; a discipline's is `potential Nature;`/
-  `flow Nature;`/`domain discrete|continuous;`. An unrecognized attribute keyword inside either
-  body is a hard parse error — the LRM's attribute set is fixed, not user-extensible, matching
-  every other unknown-construct error in this parser.
+- **Declaration and Assignment**: `discipline name [;] ... enddiscipline` /
+  `nature name [ : parent_nature ] [;] ... endnature` (LRM §4, Annex A.1.6). The `;` after the
+  name is optional — both the canonical `disciplines.vams` (semicolon) and the real
+  `external/ekv3_natures.va` (no semicolon) shapes parse. A nature's body is
+  `units = "...";`/`access = Name;`/`abstol = value;`/`idt_nature = Other;`/
+  `ddt_nature = Other;`; a discipline's is `potential Nature;`/`flow Nature;`/
+  `domain discrete|continuous;`. An unrecognized attribute keyword inside either body is a hard
+  parse error — the LRM's attribute set is fixed, not user-extensible, matching every other
+  unknown-construct error in this parser.
+- **Derived natures** (LRM §3.6.1.1, added 2026-09-05): `nature HighVoltage : Voltage` derives
+  from an already-declared parent, and the derived nature starts as a copy of every parent
+  attribute, with any attribute it declares itself overriding the inherited one. Both spellings
+  of `parent_nature` are accepted — `nature_identifier` and
+  `discipline_identifier . potential_or_flow` (`nature HV : electrical.potential`), which
+  resolve to the same parent whenever `electrical`'s `potential` is that nature. The parent must
+  already be declared (§3.6.1.1's own wording); a forward reference is an error rather than the
+  silent no-op `Parser::register_access` uses for the analogous discipline case, because an
+  unresolved parent would silently drop every attribute meant to be inherited. The LRM's two
+  override *restrictions* (§3.6.1.2) are enforced, not ignored: `access` and `units` "always
+  inherit", so restating either identically is accepted as redundant while **changing** either
+  is rejected; `abstol`/`idt_nature`/`ddt_nature` are freely overridable. Inheritance of
+  `access` is what makes a derived nature usable at all — binding `HighVoltage` as a
+  discipline's `potential` widens the recognized access-function set through the inherited `V`,
+  so `V(a, b)` still resolves on an `hv_electrical` net.
+  This one production gated the whole of `external/basic`: it appears in that folder's shared
+  `disciplines.va`, so before it parsed, all eleven of its modules failed — a reminder that a
+  corpus failure *count* can measure one missing construct rather than N broken files.
 - **Expressions and Evaluation**: `units`/`idt_nature`/`ddt_nature` are parsed but remain
   **unused metadata** — no `va-core` unit-checking code consults them yet (like `ast::Range`'s
   inclusive/exclusive flags). `abstol` (§ nature-metadata wiring, added 2026-07-09) is the
@@ -1465,7 +1498,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `function` | Function-definition keyword, §1.5 | `analog function ...` | — | Module-level | C `static` pure function |
 | `generate` | Syntactic bracket only, §1.5 | `generate ... endgenerate` | N/A | Analog-block only | No C analogue |
 | `genvar` | **Elaboration-only construct**, dedicated token, full treatment in §1.4 | — | — | — | — |
-| `ground` | Dedicated token, real grammar production, §1.4 | `ground list_of_net_identifiers;` | Aliases each named (already-declared) net to the module's reference node | Module-level declaration | No general-purpose analogue |
+| `ground` | Dedicated token, real grammar production, §1.4 | `ground [ discipline ] [ range ] list_of_net_identifiers;` | Aliases each named net to the module's reference node; with a discipline, also declares the nets inline | Module-level declaration | No general-purpose analogue |
 | `highz0` | Reserved, no grammar production (net strength: high-impedance driving 0) | N/A | N/A | Digital net-strength only | No C analogue |
 | `highz1` | Reserved, no grammar production (net strength: high-impedance driving 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `hypot` | Dynamic/static dual, §1.5 | `hypot(x, y)` call | `sqrt(x²+y²)` | Analog expr / const context | C99 `hypot()` |
@@ -1495,9 +1528,9 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `max` | Dynamic/static dual, §1.5 | `max(x, y)` call | Maximum | Analog expr / const context | C's `fmax()`/a `max` macro |
 | `medium` | Reserved, no grammar production (net-strength charge-storage keyword) | N/A | N/A | Digital net-strength only | No C analogue |
 | `min` | Dynamic/static dual, §1.5 | `min(x, y)` call | Minimum | Analog expr / const context | C's `fmin()`/a `min` macro |
-| `module` | Dedicated token, §1.4 | — | — | — | — |
+| `module` | Dedicated token, §1.4 | `module name [ ( port_list ) ] ; ... endmodule` — the port list is optional | — | — | — |
 | `nand` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a && b)`, minus gate timing |
-| `nature` | Genuinely parsed into `NatureDecl` (§1.5, `Parser::parse_nature`) | `nature name [;] ... endnature` | Its `units`/`access`/`abstol`/`idt_nature`/`ddt_nature` attributes are all parsed (§1.5) | Module preamble | Closest to a C units-of-measure/tolerance struct |
+| `nature` | Genuinely parsed into `NatureDecl` (§1.5, `Parser::parse_nature`) | `nature name [ : parent_nature ] [;] ... endnature` | Its `units`/`access`/`abstol`/`idt_nature`/`ddt_nature` attributes are all parsed (§1.5); a derived nature inherits its parent's and may override `abstol`/`idt_nature`/`ddt_nature` but not `access`/`units` | Module preamble | Closest to a C units-of-measure/tolerance struct, with single inheritance |
 | `negedge` | Reserved, no grammar production as a bare word outside `@()`; would appear as `@(negedge sig)`, itself discarded wholesale | Digital falling-edge event trigger | N/A | Digital event control only | No C analogue |
 | `nmos` | Reserved, no grammar production (NMOS switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `noise_table` | Lowered to `Builtin::NoiseTable` (§1.5, T5.6) | `noise_table({f1, p1, f2, p2, …}[, "name"])` call | Table const-folded, validated and sorted at elaboration; PSD interpolated piecewise-linearly in `f`, clamped outside the range; value `0` outside noise analysis | Analog-block only | No general-purpose analogue |

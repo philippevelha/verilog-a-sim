@@ -279,10 +279,15 @@ pub enum Item {
     /// already be declared (typically `electrical gnd; ground gnd;`, the LRM's own idiom); the
     /// node it resolves to becomes the module's global reference node, exactly like the
     /// implicit single-terminal-access ground `Elaborator::reference_node` otherwise creates on
-    /// first use (§ ground declaration). **v1 limitation:** the grammar's optional leading
-    /// `discipline_identifier`/`range` (declaring a net inline as part of the same statement,
-    /// rather than referencing an already-declared one) is not parsed — no corpus need found,
-    /// and every real-world example this project has seen uses the already-declared idiom.
+    /// first use (§ ground declaration).
+    ///
+    /// The grammar's optional leading `discipline_identifier` *is* parsed (`ground electrical
+    /// gnd;`), declaring the nets inline rather than referencing already-declared ones; that
+    /// form expands to this item plus a separate [`Item::Net`], so `names` here always refers
+    /// to nets declared somewhere in the same module either way. **Limitation:** the grammar's
+    /// `range` slot is only accepted *after* a discipline (`ground electrical [0:3] bus;`); a
+    /// bare `ground [0:3] bus;` — grounding a slice of an already-declared bus — is not
+    /// parsed, since `names` records whole nets, not bit-selects.
     Ground {
         /// The declared-ground net names.
         names: Vec<String>,
