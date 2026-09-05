@@ -1,0 +1,56 @@
+* Cross-domain transient: a voice-coil actuator driving a sprung mass, from a sine source.
+*
+*   X0 (vsin) --> in --> X1 (actuator_plant) --> shaft
+*                        |                       |
+*                        actuator (elec<->mech)  spring_load (mass, spring, damper)
+*
+* Three disciplines' worth of quantities end up in ONE solution vector, and `va-cli` reports
+* each in its own terms:
+*   V(in)        volts        the drive
+*   Vel(shaft)   m/s          the mechanical velocity
+*   I(V?)/X1.b*  amperes      the coil current and the plant's internal branch rows
+*
+* The load resonates at w0 = sqrt(k/mass) = sqrt(5000/0.5) = 100 rad/s exactly, i.e.
+* f0 = 15.9155 Hz, with Q = 10. The drive here sits ON that resonance, which is the condition
+* worth looking at: at w0 the inertial and spring forces cancel, the load looks purely
+* resistive (d = 5 N*s/m), and the velocity amplitude is just F/d.
+*
+* What to look for -- the cross-domain coupling, not just two domains side by side:
+*   1. `Vel(shaft)` builds up over roughly Q cycles rather than jumping to its final value:
+*      a Q of 10 means the resonance takes ~10 cycles to charge.
+*   2. The coil current is NOT simply V/R. The actuator's back-EMF (kb*Vel(shaft)) opposes the
+*      drive as the shaft speeds up, so the current *falls* as the mechanical amplitude grows.
+*      That is mechanical resonance appearing as an electrical impedance, and it is the whole
+*      reason the two models are coupled both ways rather than one.
+*   3. Force saturates. `Fmax*tanh(I/i0)` limits |F| to 10 N however hard the coil is driven,
+*      so at this 60 V drive the force waveform is visibly flattened while the current is not.
+*
+* Drive level, and why 60 V. Hard into saturation, so the limiter does real work rather than
+* sitting idle. Getting the expected numbers right here needs first-harmonic (describing-
+* function) balance, not a sinusoidal one: once `tanh` saturates, the force is nearly a square
+* wave, whose fundamental is 4/pi larger than its own amplitude. Assuming a sinusoidal force
+* instead predicts 1.99 m/s and is wrong by 21 %. The correct balance at resonance is
+*   60 = R*I + kb*F1(I)/d,  F1(I) = fundamental of Fmax*tanh(I*sin/i0),
+* giving I = 5.991 A, F1 = 12.07 N and v = 2.414 m/s -- measured 5.992 A and 2.413 m/s.
+* Peak force stays at 9.95 N, under the 10 N limit, as it must.
+*
+* At 2 V amplitude the same circuit is essentially linear (I ~ 0.154 A, tanh ~ 0.077), and
+* small-signal theory applies directly:
+*   Zm(jw) = d + j(w*mass - k/w),  Ze = (R + jwL) + kb*Kf/Zm,  Kf = Fmax/i0 = 5 N/A
+* Measured against that across two decades (1.59 / 7.96 / 15.92 / 31.83 / 63.66 Hz), the coil
+* current agrees to 4-6 digits. Swapping the amplitude is the cheapest way to see the
+* nonlinearity appear and disappear.
+*
+* The motional term `kb*Kf/Zm` is the cross-domain signature, and it is worth stating as a
+* number: off resonance the coil draws 0.250 A, and *at* resonance it draws 0.154 A -- the
+* current falls where the mechanical amplitude peaks, because the shaft's velocity is feeding
+* back as EMF. A one-way coupling would show no such dip.
+*
+* 200 ms is exactly one mechanical time constant (tau = 2Q/w0 = 2*10/100 = 0.2 s), so the
+* resonance reaches only ~63 % of its final amplitude inside this window -- that build-up is
+* the point, not an artefact. Extend `.tran` to ~1.5 s (about 7 tau) to reach steady state;
+* that is what the numbers quoted above were measured on.
+X0 in gnd vsin ampl=60 freq=15.9155
+X1 shaft in gnd actuator_plant
+.tran 200u 200m
+.end

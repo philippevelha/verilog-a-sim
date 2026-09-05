@@ -1,0 +1,59 @@
+// Sprung mass with viscous damping -- the mechanical load the actuator works against.
+//
+// A mass on a spring, damped, all referenced to the inertial frame. In the mobility analogy
+// (`mechanical.vams`) each element is one contribution and the node's force balance is a
+// Kirchhoff sum:
+//
+//   F(a) = mass*ddt(Vel(a))     inertia   <- a capacitor to ground
+//        + k*idt(Vel(a))        spring    <- an inductor to ground
+//        + d*Vel(a)             damping   <- a resistor to ground
+//
+// Summing the flows out of `a` to zero against whatever the actuator injects *is* Newton's
+// second law, `m*dv/dt + d*v + k*x = F_applied`, with `x = idt(v)` the displacement. Nothing in
+// this model is mechanics-specific machinery; it is the same second-order system an RLC is, and
+// deliberately so.
+//
+// # What it does
+//
+// Undamped natural frequency `w0 = sqrt(k/mass)`, damping ratio `zeta = d/(2*sqrt(k*mass))`,
+// quality factor `Q = 1/(2*zeta)`. The defaults are chosen to land on round numbers rather than
+// realistic ones, so a result can be checked by hand:
+//
+//   w0   = sqrt(5000/0.5) = 100 rad/s exactly   ->   f0 = w0/2pi = 15.9155 Hz
+//   zeta = 5/(2*sqrt(5000*0.5)) = 0.05          ->   Q  = 10
+//
+// A Q of 10 is sharp enough that driving at f0 versus a decade away is an unmistakable
+// difference, which is the point: it makes the mechanical resonance legible in the *electrical*
+// current waveform, through the actuator's back-EMF.
+//
+// # Steady state
+//
+// At `w0` the inertial and spring forces cancel exactly and the load looks purely resistive:
+// the velocity amplitude is `F/d`, in phase with the applied force. Well below `w0` the spring
+// dominates and the load is stiff (velocity leads force by 90 deg); well above, the mass
+// dominates (velocity lags by 90 deg). All three regimes are reachable by changing only the
+// drive frequency, which makes this a good load for checking that the coupling is real.
+//
+// # Limitations
+//
+// Linear spring (no progressive rate, no end stops), linear viscous damping (no dry friction,
+// which is what a real bearing actually contributes at low velocity), no gravity preload -- the
+// rest position is `x = 0` and the model has no notion of "up". A gravity term would be a
+// constant force contribution and is deliberately left out so the zero-input state is exactly
+// zero and a transient can start cold.
+`include "mechanical.vams"
+
+module spring_load(a);
+    inout a;
+    kinematic_v a;
+
+    parameter real mass = 0.5    from (0:inf);   // moving mass / inertia (kg)
+    parameter real k    = 5000.0 from (0:inf);   // spring rate (N/m)
+    parameter real d    = 5.0    from [0:inf);   // viscous damping (N*s/m)
+
+    analog begin
+        F(a) <+ mass * ddt(Vel(a));   // inertia
+        F(a) <+ k * idt(Vel(a));      // spring: idt(velocity) is displacement
+        F(a) <+ d * Vel(a);           // viscous damping
+    end
+endmodule

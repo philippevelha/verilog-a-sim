@@ -587,6 +587,7 @@ fn newton_step(
     is_initial_step: bool,
     state: &mut StateBuffers,
     companion: &Companion,
+    junction: &[bool],
 ) -> Result<Vec<f64>, TransientError> {
     const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
@@ -629,7 +630,20 @@ fn newton_step(
         let mut update_small = true;
         for i in 0..dim {
             let vold = x[i];
-            let vnew = convergence::limit_junction(vold + dx[i], vold, vt, vcrit);
+            // Only unknowns that actually sit across an exponential junction are step-limited
+            // (§ junction limiting). This loop is `va-core::newton::solve_from`'s counterpart
+            // for the transient solve, and it carried the same blanket-limiting bug: the clamp
+            // compresses a step to roughly vt*ln(...), so any node whose solution is more than
+            // a few volts from the previous point could not be reached inside `MAX_ITERS`.
+            // Fixing `va-core` alone left this copy throttling every transient run — a driven
+            // node above ~10-20 V simply failed to converge. Two implementations of one rule
+            // is how that happened; they are kept in step by both reading
+            // `mna::classify_junctions`.
+            let vnew = if junction[i] {
+                convergence::limit_junction(vold + dx[i], vold, vt, vcrit)
+            } else {
+                vold + dx[i]
+            };
             x[i] = vnew;
             let applied = vnew - vold;
             if applied.abs() > RELTOL * vnew.abs() + ABSTOL {
@@ -716,6 +730,9 @@ pub fn run_with_events(
     );
     state.commit();
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
+    // Computed once per run, exactly as `va-core::newton::solve` does for the DC solve: which
+    // unknowns are junction potentials is a property of the instances, not of the timepoint.
+    let junction = va_core::mna::classify_junctions(instances, dim);
     let mut q_prev = initial.charge;
     let mut r_prev = initial.residual;
     // BDF2 needs the charge from *two* accepted steps back and the previous step size. Seeded
@@ -795,7 +812,9 @@ pub fn run_with_events(
                 h_prev,
                 &is_dynamic,
             );
-            let x_primary = newton_step(instances, dim, &x, t_next, false, &mut state, &primary)?;
+            let x_primary = newton_step(
+                instances, dim, &x, t_next, false, &mut state, &primary, &junction,
+            )?;
 
             // Divided differences first when configured: they need no second solve, so the
             // embedded pair below is only ever paid for when the history is too short to say
@@ -835,6 +854,7 @@ pub fn run_with_events(
                         false,
                         &mut state,
                         &reference_companion,
+                        &junction,
                     )?;
                     lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol)
                 }

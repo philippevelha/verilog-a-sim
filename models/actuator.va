@@ -1,0 +1,70 @@
+// Voice-coil actuator: an electrical winding on one side, a mechanical shaft on the other.
+//
+// Two ports in two different disciplines, coupled both ways -- this is the model that makes a
+// cross-domain simulation cross-domain. It is a **gyrator**, not a transformer: current on the
+// electrical side produces force on the mechanical side, and velocity on the mechanical side
+// produces back-EMF on the electrical side.
+//
+//   V(p,n)   = R*I(p,n) + L*ddt(I(p,n)) + kb*Vel(shaft)     <- winding + back-EMF
+//   F(shaft) = -Fmax*tanh(I(p,n)/i0)                        <- saturating force, into the shaft
+//
+// **The coupling is what makes this interesting.** Without the `kb*Vel(shaft)` term the
+// electrical side would not know the mechanical side exists, and the "cross-domain" simulation
+// would be one-way -- an electrical circuit driving a mechanical one that never answers back.
+// With it, mechanical resonance is visible *as an electrical impedance*: at the load's resonant
+// frequency the shaft moves fastest, the back-EMF is largest, and the current drawn dips. That
+// motional impedance is the physical signature worth looking for in the results.
+//
+// # Saturation
+//
+// Force is limited by `tanh`, so |F| < Fmax however hard the coil is driven. A real actuator
+// saturates because the magnetic circuit does; `tanh` is the conventional smooth stand-in, and
+// it is chosen here over an `exp`-based logistic for two reasons. It is bounded, so it cannot
+// overflow at any bias. And it lowers to `Builtin::Tanh` rather than `Builtin::Exp`, which
+// keeps this model out of `va-core`'s junction step limiting (§ junction limiting): that clamp
+// exists to stop an *unbounded* exponential overflowing, and applying it to a bounded force law
+// would throttle the mechanical node's Newton steps for no reason.
+//
+// # Energy consistency
+//
+// An ideal lossless gyrator has the same constant in both directions: the force per amp equals
+// the back-EMF per metre-per-second, in SI, numerically. The small-signal force constant here
+// is `d/dI [Fmax*tanh(I/i0)]` at `I=0`, i.e. `Fmax/i0` N/A, so the defaults below are chosen to
+// satisfy `kb == Fmax/i0` (5 V*s/m against 10 N / 2 A). Change `Fmax` or `i0` without changing
+// `kb` and the model will quietly create or destroy energy at small signal -- it is not
+// enforced here, because a real actuator's two constants do differ slightly and a model has no
+// business refusing that.
+//
+// # Sign convention
+//
+// `F(shaft) <+ expr` contributes `expr` newtons of flow *out of* `shaft`, so the leading minus
+// is what makes a positive current *drive* the shaft rather than oppose it. Its reaction is
+// carried by the `kb*Vel(shaft)` term on the electrical side, which is where the mechanical
+// power comes from.
+//
+// # Limitations
+//
+// No mechanical end stops, no coil inductance variation with position, no eddy-current loss,
+// no thermal port. The winding is a plain R-L: a real coil's inductance falls as the core
+// saturates, which this does not model even though the force law does saturate.
+`include "disciplines.vams"
+`include "mechanical.vams"
+
+module actuator(shaft, p, n);
+    inout shaft, p, n;
+    kinematic_v shaft;
+    electrical p, n;
+
+    parameter real R    = 8.0  from (0:inf);   // winding resistance (Ohm)
+    parameter real L    = 2e-3 from [0:inf);   // winding inductance (H)
+    parameter real Fmax = 10.0 from (0:inf);   // force limit (N)
+    parameter real i0   = 2.0  from (0:inf);   // current scale of the tanh knee (A)
+    parameter real kb   = 5.0  from [0:inf);   // back-EMF constant (V*s/m); see above
+
+    analog begin
+        // Electrical side: winding impedance plus the motional (back-EMF) term.
+        V(p, n) <+ R * I(p, n) + L * ddt(I(p, n)) + kb * Vel(shaft);
+        // Mechanical side: saturating drive force, injected into the shaft.
+        F(shaft) <+ -Fmax * tanh(I(p, n) / i0);
+    end
+endmodule

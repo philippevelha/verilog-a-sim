@@ -1,0 +1,50 @@
+// The cross-domain plant: an actuator working against a sprung mass.
+//
+//        p  o---+                        +--- shaft (mechanical)
+//               |    actuator            |
+//        n  o---+  (electrical <-> mech) +--- spring_load (mass, spring, damper)
+//
+// This is the top level of the mechanical assembly, and it is a *placeable* module rather than
+// a self-contained circuit on purpose. A portless Verilog-A module -- `module plant;` with the
+// source instantiated inside it -- is legal and elaborates here, but nothing can simulate it:
+// in this simulator the circuit is always the `.net` deck, and a device line places a module by
+// connecting at least one node (`va-cli` warns about exactly this). Keeping ports means the
+// deck can place the plant, drive it, and *observe* it -- `shaft` is exposed for no other
+// reason than that a node has to be named in the deck before it can be reported.
+//
+// See `circuits/actuator_plant.net` for the drive and the analysis.
+//
+// # Why the two halves are separate modules
+//
+// The actuator and the load are separate files because the coupling between them is the thing
+// under study, and a single fused module would hide it. Split, the only path from electrical to
+// mechanical is the shaft node itself: the actuator injects force into it and reads its
+// velocity back as EMF, and `spring_load` never mentions electricity at all. If the
+// cross-domain interaction shows up in the results, it came through that one node.
+//
+// Discipline checking is what makes that claim solid rather than hopeful. `shaft` is
+// `kinematic_v` on both sides, and `p`/`n` are `electrical` on both sides; wiring an electrical
+// net into the mechanical port (or the reverse) is rejected at elaboration rather than silently
+// producing one node that stands for both a velocity and a voltage.
+`include "disciplines.vams"
+`include "mechanical.vams"
+
+module actuator_plant(shaft, p, n);
+    inout shaft, p, n;
+    kinematic_v shaft;
+    electrical p, n;
+
+    // Forwarded to the sub-instances below, so a deck can move the resonance or the force limit
+    // without editing a model. `R`/`L` are left at the actuator's own defaults.
+    parameter real Fmax = 10.0   from (0:inf);   // actuator force limit (N)
+    parameter real i0   = 2.0    from (0:inf);   // tanh knee current (A)
+    parameter real kb   = 5.0    from [0:inf);   // back-EMF constant (V*s/m)
+    parameter real mass = 0.5    from (0:inf);   // load mass (kg)
+    parameter real k    = 5000.0 from (0:inf);   // spring rate (N/m)
+    parameter real d    = 5.0    from [0:inf);   // viscous damping (N*s/m)
+
+    // The actuator drives `shaft`; the load hangs off the same node. Their only connection is
+    // that shared mechanical node -- which is the whole model.
+    actuator   #(.Fmax(Fmax), .i0(i0), .kb(kb)) A1 (shaft, p, n);
+    spring_load #(.mass(mass), .k(k), .d(d))    L1 (shaft);
+endmodule

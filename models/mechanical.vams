@@ -1,0 +1,68 @@
+// Translational-mechanics natures and disciplines, in the Verilog-AMS standard spelling.
+//
+// The shipped `disciplines.vams` in this repo is electrical-only, so the mechanical half lives
+// here. Names, units and access functions follow the LRM's own `disciplines.vams` so a model
+// written against the standard header parses against this one unchanged.
+//
+// Two disciplines are declared because the choice of *potential* decides how much of the
+// mechanics a model has to differentiate itself:
+//
+//   `kinematic`   — potential = position, flow = force. Newton's law is then
+//                   `F = m*ddt(ddt(Pos))`, a second derivative.
+//   `kinematic_v` — potential = velocity, flow = force. Newton's law is `F = m*ddt(Vel)` and
+//                   a spring is `F = k*idt(Vel)`, so every element needs at most one `ddt` or
+//                   one `idt`.
+//
+// The models here use **`kinematic_v`**. That is the "mobility" analogy, and it is not merely a
+// convenience: velocity-as-potential maps a mechanical network onto MNA exactly the way an
+// electrical one maps, element for element —
+//
+//   mass    <-> capacitor to ground   `F(a) <+ m*ddt(Vel(a))`
+//   spring  <-> inductor              `F(a,b) <+ k*idt(Vel(a,b))`
+//   damper  <-> resistor              `F(a,b) <+ d*Vel(a,b)`
+//
+// — so a Kirchhoff current sum at a node *is* a force balance (d'Alembert), and the solver
+// needs no mechanics-specific machinery at all. A mass is referenced to ground because inertia
+// is referenced to the inertial frame, which is the same statement.
+
+`ifdef MECHANICAL_VAMS
+`else
+`define MECHANICAL_VAMS 1
+
+nature Position
+    units      = "m";
+    access     = Pos;
+    abstol     = 1e-6;
+endnature
+
+nature Velocity
+    units      = "m/s";
+    access     = Vel;
+    abstol     = 1e-6;
+endnature
+
+nature Acceleration
+    units      = "m/s^2";
+    access     = Acc;
+    abstol     = 1e-6;
+endnature
+
+nature Force
+    units      = "N";
+    access     = F;
+    abstol     = 1e-9;
+endnature
+
+// Position-as-potential: Newton's law becomes a second derivative.
+discipline kinematic
+    potential Position;
+    flow      Force;
+enddiscipline
+
+// Velocity-as-potential: the mobility analogy this project's mechanical models use.
+discipline kinematic_v
+    potential Velocity;
+    flow      Force;
+enddiscipline
+
+`endif

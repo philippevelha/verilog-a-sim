@@ -68,6 +68,7 @@ const SWEEP_CIRCUITS: &[(&str, Option<&str>)] = &[
 /// `va-abi::reference::Bjt` via `va-cli::reference_instance`, so `model` is `None` here too.
 const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rc_step.net", None),
+    ("circuits/rc_step_hv.net", None),
     ("circuits/rc_discharge.net", None),
     ("circuits/rlc_ring.net", None),
     ("circuits/rl_decay.net", None),
@@ -555,6 +556,9 @@ const QSPICE_SWEEP_MODEL_TRANSLATIONS: &[(&str, &str)] = &[
 /// `.qraw` parsing ([`golden_tran_from_qraw`]) instead of the single-`.op`-point path.
 const QSPICE_NATIVE_TRAN_CIRCUITS: &[&str] = &[
     "circuits/rc_step.net",
+    // The transient-path junction-limiting gate (§ its own deck header): the same RC step at
+    // 400 V, so the only difference from the line above is magnitude.
+    "circuits/rc_step_hv.net",
     "circuits/rc_discharge.net",
     "circuits/rlc_ring.net",
     "circuits/rl_decay.net",

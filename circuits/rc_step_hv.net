@@ -1,0 +1,41 @@
+* High-voltage RC transient -- the junction-limiting regression gate for the TRANSIENT path.
+* A 400 V, 200 Hz sine into a 1 kOhm / 1 uF lowpass (RC = 1 ms, so f_-3dB = 159.15 Hz).
+*
+* Why this exists alongside circuits/divider_hv.net (2026-09-05). The blanket junction-step
+* clamp that made a linear circuit unsolvable above ~20 V lived in *two* places: `va-core`'s DC
+* Newton loop and `va-transient`'s own, which is a separate implementation of the same
+* iteration. Fixing `va-core` left the transient copy throttling every run, and `divider_hv.net`
+* could not see it -- that deck is `.op` only, so it gates the DC path and nothing else. The
+* second copy was found by a cross-domain model failing to converge at 20 V, not by a gate.
+* Two implementations of one rule is how that happened; they are kept in step now by both
+* reading `mna::classify_junctions`, and this deck notices if they ever diverge again.
+*
+* Why a sine and not a 400 V step, which would be the closer analogue of rc_step.net: a step is
+* a discontinuity at t=0, and this simulator's LTE controller cannot take a first step across a
+* large one -- an instantaneous step into this same RC works to about 50 V and reports
+* `timestep underflow at t=0` beyond it, while a *smooth* drive of 400 V, or even 4000 V, runs
+* fine. That is a real and separate limitation (the cold-start scale is `lte_abstol` alone,
+* since `lte_reltol*|x|` is zero when x is zero), and it is deliberately NOT what this deck
+* gates: mixing the two would mean a failure here could mean either, which is the opposite of
+* what a regression gate is for. A smooth drive isolates the clamp, which is the thing under
+* test -- the node still reaches 400 V, which is all the clamp needs to see.
+*
+* The step is 2 us, not the 20 us rc_step.net uses, and the reason is the harness resample
+* rather than accuracy: on its own timebase this deck already agrees with golden to 0.0041 %,
+* but QSPICE emits ~1046 points here against our ~265, and resampling the sparser onto the
+* denser costs interpolation error. Measured: 1.321e-2 at 20 us, 7.104e-4 at 5 us, 2.179e-4 at
+* 2 us, 2.516e-4 at 1 us -- i.e. it improves until it floors, and 2 us sits comfortably inside
+* the 1e-3 tolerance with margin rather than against it. Do not coarsen without re-deriving
+* those numbers.
+*
+* Deliberately linear: no diode, no exponential, nothing that legitimately wants limiting.
+* Confirmed discriminating: with the transient clamp restored to its pre-fix blanket form this
+* deck fails to converge, while circuits/rc_step.net at 5 V still passes.
+*
+* QSPICE reference: the same deck, unmodified -- pure R/C/V with a built-in SIN source needs no
+* translation.
+V1 in  gnd  SIN(0 400 200)
+R1 in  out  1000
+C1 out gnd  1e-6
+.tran 2u 5m
+.end
