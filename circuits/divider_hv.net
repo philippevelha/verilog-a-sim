@@ -1,0 +1,44 @@
+* High-voltage DC operating point -- the junction-limiting regression gate.
+*
+* A 400 V bus with two things hung off it: a high-impedance sense divider, and a heavy
+* low-impedance load. Entirely linear, so every value below is exact arithmetic, not a
+* tolerance:
+*   V(bus) = 400 V
+*   V(mid) = 400 * 10k/(1M + 10k) = 3.9603960396... V
+*   I(V1)  = -(400/4 + 400/1.01M) = -100.000396... A
+*
+* Why this deck exists (2026-09-05). `va-core` used to apply `convergence::limit_junction` to
+* *every* unknown rather than only to junction potentials. That clamp compresses a Newton step
+* logarithmically -- which is what stops `exp(V/vt)` overflowing on the way to a diode's
+* operating point, and is pure damage anywhere else: it throttles a good linear step to roughly
+* vt*ln(...) ~ 0.2 V per iteration, so a node whose solution is 400 V needs some 1900 iterations
+* and `NewtonConfig::max_iters` (100) cuts it off long before. A plain resistor divider -- the
+* project's own bring-up rung 1 -- silently failed to converge above about 20 V.
+*
+* It survived because *every other golden circuit runs at 5 V or less*, so a 25/25 green gate
+* sat on top of a simulator that could not solve two resistors at mains voltage. The bug was
+* found while building an unrelated non-electrical test case, not by any gate. This deck is the
+* gate that would have caught it on day one, and its whole job is to be numerically ordinary
+* and electrically large.
+*
+* Both of the old clamp's victims are represented on purpose:
+*   - a node far above `vcrit` (V(bus) = 400 V, and V(mid) = 3.96 V as a control that was
+*     always fine), and
+*   - a branch current of ~100 A, since branch-current rows were clamped too, as though an
+*     ampere were a volt.
+*
+* Deliberately linear: no diode, no exponential, nothing that legitimately *wants* limiting.
+* A discrepancy here can only mean the solver mishandled an ordinary large operating point.
+*
+* Confirmed discriminating, not assumed: with `classify_junctions` temporarily forced back to
+* "every unknown is a junction" -- the exact pre-fix behaviour -- this deck reports NOCONV
+* (residual 3.75e2) and `xtask validate` exits non-zero, while `circuits/divider.net` at 1 V
+* still passes. That asymmetry is the whole point of the deck.
+*
+* QSPICE reference: the same deck, unmodified -- pure R/V needs no translation.
+V1 bus gnd DC 400
+R1 bus mid 1e6
+R2 mid gnd 1e4
+R3 bus gnd 4
+.op
+.end

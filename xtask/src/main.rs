@@ -50,6 +50,7 @@ fn print_usage() {
 /// primitives.
 const DC_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/divider.net", None),
+    ("circuits/divider_hv.net", None),
     ("circuits/vcvs_amp.net", None),
     ("circuits/cccs_mirror.net", None),
     ("circuits/mos_dc.net", Some("models/mosfet.va")),
@@ -515,6 +516,10 @@ fn validate() -> Result<()> {
 /// reference-model copy) were moved to the 300.15 K/QSPICE-matching convention.
 const QSPICE_NATIVE_CIRCUITS: &[&str] = &[
     "circuits/divider.net",
+    // The junction-limiting regression gate (§ its own deck header): a 400 V bus, entirely
+    // linear, so QSPICE's built-in primitives reproduce it with no translation and no
+    // temperature sensitivity — the same standing this deck's 1 V sibling has.
+    "circuits/divider_hv.net",
     "circuits/vcvs_amp.net",
     "circuits/cccs_mirror.net",
 ];
