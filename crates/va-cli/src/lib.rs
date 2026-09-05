@@ -302,6 +302,7 @@ pub fn run_sim(
     analysis: Analysis,
     plot: Option<&str>,
     integration: Integration,
+    report_only: &[String],
 ) -> Result<()> {
     let (net, compiled) = load(netlist, model)?;
 
@@ -330,7 +331,10 @@ pub fn run_sim(
             }
         }
         let wf = solve_transient(&net, &compiled, integration)?;
-        report_transient(&net, &wf);
+        report_transient(
+            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
+            &wf,
+        );
         if let Some(path) = plot {
             plot::plot_transient(path, &net, &wf).with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote transient plot to {path}");
@@ -352,8 +356,11 @@ pub fn run_sim(
         }
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
-        let currents = branch_currents(&net, &compiled)?;
-        report_sweep(&net, &currents, sweep, &points);
+        report_sweep(
+            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
+            sweep,
+            &points,
+        );
         if let Some(path) = plot {
             plot::plot_sweep(path, &net, sweep, &points)
                 .with_context(|| format!("plotting to {path}"))?;
@@ -361,8 +368,10 @@ pub fn run_sim(
         }
     } else {
         let op = solve_dc(&net, &compiled)?;
-        let currents = branch_currents(&net, &compiled)?;
-        report(&net, &currents, &op.x);
+        report(
+            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
+            &op.x,
+        );
     }
     Ok(())
 }
@@ -888,7 +897,78 @@ fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
 
 /// [`build_instances`]'s return: built instances, the total unknown count (`dim`), and every
 /// `vsource` device's own name paired with its assigned branch-current global index.
-type BuiltInstances = (Vec<Box<dyn ModelInstance>>, usize, Vec<(String, usize)>);
+/// Every IR node of one built instance, paired with the global unknown index it was assigned
+/// (§ quantity reporting). Produced by `build_from_model`, which *is* where the assignment
+/// happens — reporting reads it rather than re-deriving it, because a second implementation of
+/// the same index arithmetic would be free to drift, and a label silently attached to the wrong
+/// unknown is worse than no label.
+type NodeAssignment = Vec<(usize, va_ir::NodeDecl)>;
+
+/// A built device instance: the instance itself, its own branch-current unknown if it claimed
+/// one, and its [`NodeAssignment`].
+type BuiltDevice = (Box<dyn ModelInstance>, Option<usize>, NodeAssignment);
+
+type BuiltInstances = (
+    Vec<Box<dyn ModelInstance>>,
+    usize,
+    Vec<(String, usize)>,
+    Vec<Quantity>,
+);
+
+/// One labelled entry of the solution vector (§ quantity reporting).
+///
+/// A simulation is not necessarily electrical, so a report is not entitled to assume its
+/// unknowns are volts and amperes: printing `V(shaft) = 5.2 V` for a mechanical node is not a
+/// formatting blemish, it is a false statement about what was computed. Every quantity
+/// therefore carries the access-function name and units its own discipline declares
+/// (`va_ir::NodeDecl::access`/`units`, resolved from the potential nature), falling back to the
+/// electrical spelling only where nothing better is known — which is correct for a deck built
+/// from the built-in `R`/`C`/`L`/`V` primitives, since those *are* electrical by definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Quantity {
+    /// How the quantity is written, access function and all: `V(in)`, `I(V1)`,
+    /// `Omega(M1.shaft)`.
+    pub label: String,
+    /// The unit string to print after the value, or empty when the discipline declares none.
+    pub unit: String,
+    /// Position in the solution vector `x`.
+    pub index: usize,
+    /// The bare name inside the access function (`in`, `V1`, `M1.shaft`), for `--report`
+    /// matching — so a user can ask for `mid` without also having to know it is a potential.
+    pub name: String,
+}
+
+impl Quantity {
+    /// Render one value of this quantity, e.g. `V(in) = 0.500000 V`.
+    fn render(&self, value: f64) -> String {
+        let unit = if self.unit.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.unit)
+        };
+        // Node potentials read naturally in fixed point; a current is routinely microamps, where
+        // fixed point would print six zeros. Split on the access function rather than on the
+        // discipline, which is the same rule `report` used before quantities existed.
+        if self.label.starts_with("V(") {
+            format!("{} = {:.6}{unit}", self.label, value)
+        } else {
+            format!("{} = {:.6e}{unit}", self.label, value)
+        }
+    }
+}
+
+/// The access-function name and units to print for a node, given whatever its discipline
+/// resolved to. `None`/absent means no `discipline...enddiscipline` preamble reached this node —
+/// which is the normal case for a deck of built-in primitives, and those are electrical.
+fn node_label(decl: Option<&va_ir::NodeDecl>) -> (String, String) {
+    let access = decl
+        .and_then(|d| d.access.clone())
+        .unwrap_or_else(|| "V".to_string());
+    let units = decl
+        .and_then(|d| d.units.clone())
+        .unwrap_or_else(|| "V".to_string());
+    (access, units)
+}
 
 /// Build every device instance, returning them alongside the total unknown count (`dim`) and
 /// every `vsource` device's own name paired with its assigned branch-current global index (§
@@ -914,11 +994,72 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     // and that element may be written after it in the deck. Deferring is only safe because
     // branch identity is carried by the `currents` map rather than inferred from device order
     // (§ `report`'s own doc comment, and the bug that established it).
+    // Per-netlist-node discipline metadata, filled in by whichever device model declares it.
+    // **Limitation:** first writer wins. `Elaborator::check_port_discipline` compares
+    // disciplines *within* a module, but nothing compares two deck devices that attach
+    // different disciplines to the same net, so a deck-level conflict is silently resolved
+    // here rather than reported.
+    let mut node_decls: Vec<Option<va_ir::NodeDecl>> = vec![None; n_nodes];
+    // Unknowns a compiled model introduced beyond the netlist's own nodes: its internal
+    // (non-port) nodes, and the auxiliary branch rows `va-codegen` allocates for a potential
+    // contribution. Recorded per device so they can be named `<device>.<node>`.
+    let mut internal: Vec<Quantity> = Vec::new();
     for dev in &net.devices {
         if matches!(dev.model.as_str(), "cccs" | "ccvs" | "mutual") {
             continue;
         }
-        let (inst, branch) = build_instance(dev, compiled, &mut next_unknown)?;
+        let before = next_unknown;
+        let (inst, branch, assignment) = build_instance(dev, compiled, &mut next_unknown)?;
+        let mut assigned_here: Vec<usize> = Vec::new();
+        // Auxiliary rows are numbered per device, so `X1.b0` is X1's first regardless of what
+        // any earlier device claimed.
+        let mut aux = 0usize;
+        for (g, decl) in &assignment {
+            assigned_here.push(*g);
+            if *g < n_nodes {
+                // A port node: it *is* one of the deck's nets, so this is where a netlist node
+                // learns what discipline governs it.
+                if node_decls[*g].is_none() {
+                    node_decls[*g] = Some(decl.clone());
+                }
+            } else if *g >= before {
+                let (access, units) = node_label(Some(decl));
+                let name = format!("{}.{}", dev.name, decl.name);
+                internal.push(Quantity {
+                    label: format!("{access}({name})"),
+                    unit: units,
+                    index: *g,
+                    name,
+                });
+            }
+        }
+        // Whatever is left in `[before, next_unknown)` is an auxiliary row `va-codegen` claimed
+        // while lowering the model — a branch flow for a potential contribution (`V(p,n) <+
+        // ...`), an `idt` accumulator, and so on. These are reported, because they are genuine
+        // entries of the solution vector and one of them is often the quantity a user actually
+        // wants (a series-RLC model's branch current is an auxiliary row, not a deck net).
+        //
+        // They are deliberately reported *without* an access function or a unit. Their physical
+        // meaning is the model's own business and nothing in Interface α records it: a branch
+        // row carries a flow, but an `idt` accumulator carries that flow's time integral, so
+        // labelling the pair alike as `I(...)`/`A` would be confidently wrong about half of
+        // them. A bare name and no unit says exactly as much as is actually known.
+        for g in before..next_unknown {
+            // `branch` is already reported by name as this device's own current (`I(V1)`);
+            // labelling it again here would print the same unknown twice under two names.
+            if assigned_here.contains(&g) || branch == Some(g) {
+                continue;
+            }
+            let k = aux;
+            aux += 1;
+            let name = format!("{}.b{k}", dev.name);
+            internal.push(Quantity {
+                label: name.clone(),
+                unit: String::new(),
+                index: g,
+                name,
+            });
+        }
         if let Some(branch) = branch {
             currents.push((dev.name.clone(), branch));
         }
@@ -991,7 +1132,30 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
             instances.push(Box::new(Ccvs::new(p, n, ctl, branch, gain)));
         }
     }
-    Ok((instances, next_unknown, currents))
+    // Assemble the reportable quantities in solution-vector order: every deck net first (with
+    // whatever discipline its attached models declared), then every named device branch
+    // current, then whatever a compiled model introduced of its own.
+    let mut quantities: Vec<Quantity> = Vec::with_capacity(n_nodes + currents.len());
+    for (i, name) in net.node_order.iter().enumerate() {
+        let (access, unit) = node_label(node_decls[i].as_ref());
+        quantities.push(Quantity {
+            label: format!("{access}({name})"),
+            unit,
+            index: i,
+            name: name.clone(),
+        });
+    }
+    for (name, idx) in &currents {
+        quantities.push(Quantity {
+            label: format!("I({name})"),
+            unit: "A".to_string(),
+            index: *idx,
+            name: name.clone(),
+        });
+    }
+    quantities.extend(internal);
+
+    Ok((instances, next_unknown, currents, quantities))
 }
 
 /// Map every `vsource` device's own name to its assigned branch-current global index —
@@ -1005,15 +1169,59 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
 /// trivially matches golden regardless of whether the diode model itself is right; the source's
 /// own current is the quantity that actually depends on it).
 pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String, usize)>> {
-    let (_, _, currents) = build_instances(net, compiled)?;
+    let (_, _, currents, _) = build_instances(net, compiled)?;
     Ok(currents)
+}
+
+/// Every reportable entry of the solution vector, in report order (§ quantity reporting):
+/// each deck net, each named device branch current, then whatever a compiled Verilog-A model
+/// introduced of its own (internal nodes, auxiliary branch rows). `pub` for the same reason
+/// [`branch_currents`] is — so a caller can label results without re-deriving index assignment.
+pub fn quantities(net: &Netlist, compiled: &[Module]) -> Result<Vec<Quantity>> {
+    let (_, _, _, quantities) = build_instances(net, compiled)?;
+    Ok(quantities)
+}
+
+/// Narrow `quantities` to those the user asked for with `--report`.
+///
+/// A selector matches a quantity when it equals either the full label (`V(mid)`) or the bare
+/// name inside it (`mid`), case-insensitively — so a user who wants a net does not have to know
+/// whether it is reported as a potential or a flow, and someone who wants to disambiguate still
+/// can. Unmatched selectors are an error rather than a silent empty column: a typo in a net name
+/// would otherwise look exactly like a quantity that was computed and found to be zero.
+pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Quantity>> {
+    if selectors.is_empty() {
+        return Ok(all.to_vec());
+    }
+    let mut out: Vec<Quantity> = Vec::new();
+    for sel in selectors {
+        let s = sel.trim();
+        let hits: Vec<&Quantity> = all
+            .iter()
+            .filter(|q| q.name.eq_ignore_ascii_case(s) || q.label.eq_ignore_ascii_case(s))
+            .collect();
+        if hits.is_empty() {
+            let mut known: Vec<&str> = all.iter().map(|q| q.label.as_str()).collect();
+            known.sort_unstable();
+            bail!(
+                "--report names `{s}`, which this circuit does not compute (it has: {})",
+                known.join(", ")
+            );
+        }
+        for h in hits {
+            if !out.iter().any(|q| q.index == h.index) {
+                out.push(h.clone());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Build every device instance and solve the DC operating point. `pub` so `va-harness` can get
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
-    let (instances, dim, _currents) = build_instances(net, compiled)?;
+    let (instances, dim, _currents, _) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
 }
@@ -1235,7 +1443,7 @@ pub fn solve_transient(
         lte_estimator: LteEstimator::DividedDifference,
     };
 
-    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let (instances, dim, currents, _quantities) = build_instances(net, compiled)?;
     let x0 = initial_solution(net, dim, &currents);
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
@@ -1353,7 +1561,7 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
         .ac
         .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
 
-    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let (instances, dim, currents, _quantities) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, NewtonConfig::default())
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
@@ -1402,7 +1610,7 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         )
     })?;
 
-    let (instances, dim, currents) = build_instances(net, compiled)?;
+    let (instances, dim, currents, _quantities) = build_instances(net, compiled)?;
     // The `.noise` card's input source, resolved to its own branch-current row — the row an AC
     // stimulus would excite, and therefore (§ `va_acnoise::noise`) the row of the adjoint vector
     // that already holds the forward gain. Only a `vsource` has such a row, so naming anything
@@ -1501,7 +1709,7 @@ fn build_instance(
     dev: &Device,
     compiled: &[Module],
     next_unknown: &mut usize,
-) -> Result<(Box<dyn ModelInstance>, Option<usize>)> {
+) -> Result<BuiltDevice> {
     // Read lazily rather than up front: every *letter* device has at least two terminals, but
     // an `X` line places a model with whatever port count that model declares, and a
     // one-terminal model is legal (the photonic library's `CwLaser(out)` is one). Indexing
@@ -1532,7 +1740,7 @@ fn build_instance(
             }),
             None => Box::new(VSource::new(p, n, branch, dev.value.unwrap_or(0.0))),
         };
-        return Ok((inst, Some(branch)));
+        return Ok((inst, Some(branch), Vec::new()));
     }
 
     if dev.model == "vccs" {
@@ -1547,7 +1755,7 @@ fn build_instance(
         );
         let inst: Box<dyn ModelInstance> =
             Box::new(Vccs::new(p, n, cp, cn, dev.value.unwrap_or(0.0)));
-        return Ok((inst, None));
+        return Ok((inst, None, Vec::new()));
     }
 
     if dev.model == "vcvs" {
@@ -1563,7 +1771,7 @@ fn build_instance(
         *next_unknown += 1;
         let inst: Box<dyn ModelInstance> =
             Box::new(Vcvs::new(p, n, cp, cn, branch, dev.value.unwrap_or(0.0)));
-        return Ok((inst, Some(branch)));
+        return Ok((inst, Some(branch), Vec::new()));
     }
 
     if dev.model == "inductor" {
@@ -1577,18 +1785,17 @@ fn build_instance(
         *next_unknown += 1;
         let inst: Box<dyn ModelInstance> =
             Box::new(Inductor::new(p, n, branch, dev.value.unwrap_or(0.0)));
-        return Ok((inst, Some(branch)));
+        return Ok((inst, Some(branch), Vec::new()));
     }
 
     // Use the compiled Verilog-A model when its name matches the device's model.
     if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
-        return Ok((
-            build_from_model(module, dev.value, &dev.params, &dev.terminals, next_unknown)?,
-            None,
-        ));
+        let (inst, assignment) =
+            build_from_model(module, dev.value, &dev.params, &dev.terminals, next_unknown)?;
+        return Ok((inst, None, assignment));
     }
 
-    Ok((reference_instance(dev)?, None))
+    Ok((reference_instance(dev)?, None, Vec::new()))
 }
 
 /// Build a device instance from a compiled IR module, applying the device's parameter
@@ -1604,7 +1811,7 @@ fn build_from_model(
     overrides: &[(String, f64)],
     terminals: &[usize],
     next_unknown: &mut usize,
-) -> Result<Box<dyn ModelInstance>> {
+) -> Result<(Box<dyn ModelInstance>, NodeAssignment)> {
     let mut m = module.clone();
     if let (Some(v), Some(param)) = (value, m.params.first_mut()) {
         param.default = v;
@@ -1669,8 +1876,20 @@ fn build_from_model(
         })
         .collect();
 
-    va_codegen::build_instance(&m, &full, next_unknown)
-        .with_context(|| format!("generating instance for model `{}`", module.name))
+    // Pair every IR node with the global unknown it was just assigned, so reporting can name
+    // that entry of the solution vector (§ quantity reporting). Built here rather than
+    // re-derived by the reporting code, because `full` above *is* the assignment — a second
+    // implementation of it would be free to drift, and a label silently attached to the wrong
+    // unknown is worse than no label at all.
+    let assignment: NodeAssignment = full
+        .iter()
+        .zip(&m.nodes)
+        .map(|(&g, decl)| (g, decl.clone()))
+        .collect();
+
+    let inst = va_codegen::build_instance(&m, &full, next_unknown)
+        .with_context(|| format!("generating instance for model `{}`", module.name))?;
+    Ok((inst, assignment))
 }
 
 /// Build a device instance from the hand-written `va-abi` reference primitives.
@@ -1716,14 +1935,11 @@ fn reference_instance(dev: &Device) -> Result<Box<dyn ModelInstance>> {
 /// when only `vsource` did, and became silently wrong once inductors and controlled sources
 /// claimed them too. A deck declaring an inductor before its source then printed the
 /// inductor's current under the source's name.
-fn report(net: &Netlist, currents: &[(String, usize)], x: &[f64]) {
+fn report(quantities: &[Quantity], x: &[f64]) {
     println!("DC operating point:");
-    for (i, name) in net.node_order.iter().enumerate() {
-        println!("  V({name}) = {:.6} V", x[i]);
-    }
-    for (name, idx) in currents {
-        if let Some(v) = x.get(*idx) {
-            println!("  I({name}) = {v:.6e} A");
+    for q in quantities {
+        if let Some(v) = x.get(q.index) {
+            println!("  {}", q.render(*v));
         }
     }
 }
@@ -1731,8 +1947,7 @@ fn report(net: &Netlist, currents: &[(String, usize)], x: &[f64]) {
 /// Print a `.dc` sweep: one line per swept value, every node's voltage and source current —
 /// the same per-point content [`report`] prints for a single operating point, repeated.
 fn report_sweep(
-    net: &Netlist,
-    currents: &[(String, usize)],
+    quantities: &[Quantity],
     sweep: &va_netlist::DcSweep,
     points: &[(f64, va_core::dc::OperatingPoint)],
 ) {
@@ -1746,12 +1961,9 @@ fn report_sweep(
     );
     for (value, op) in points {
         print!("  {}={value:.6}:", sweep.source);
-        for (i, name) in net.node_order.iter().enumerate() {
-            print!(" V({name})={:.6}V", op.x[i]);
-        }
-        for (name, idx) in currents {
-            if let Some(v) = op.x.get(*idx) {
-                print!(" I({name})={v:.6e}A");
+        for q in quantities {
+            if let Some(v) = op.x.get(q.index) {
+                print!(" {}", q.render(*v).replace(" = ", "="));
             }
         }
         println!();
@@ -1857,18 +2069,16 @@ fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
 }
 
 /// Print the transient waveform: one line per accepted timepoint, every node's voltage.
-fn report_transient(net: &Netlist, wf: &Waveform) {
+fn report_transient(quantities: &[Quantity], wf: &Waveform) {
     println!(
         "Transient analysis ({} points, t=0 to t={:e}s):",
         wf.t.len(),
         wf.t.last().copied().unwrap_or(0.0)
     );
     for (t, x) in wf.t.iter().zip(&wf.x) {
-        let cols: Vec<String> = net
-            .node_order
+        let cols: Vec<String> = quantities
             .iter()
-            .enumerate()
-            .map(|(i, name)| format!("V({name})={:.6}", x[i]))
+            .filter_map(|q| x.get(q.index).map(|v| q.render(*v).replace(" = ", "=")))
             .collect();
         println!("  t={t:.6e}s  {}", cols.join("  "));
     }
@@ -4066,5 +4276,99 @@ R1 out gnd 1000
             unplaceable_clause(top, &["disciplines.vams".to_string()]),
             ""
         );
+    }
+
+    // --- § quantity reporting ------------------------------------------------------------
+
+    /// Every entry of the solution vector is reported, and each is labelled with the access
+    /// function and units its *own* discipline declares — not with an assumed `V`/volts.
+    #[test]
+    fn quantities_use_each_disciplines_own_access_function_and_units() {
+        // A deliberately non-electrical model: potential is angular velocity in rads/s.
+        let src = "nature Angular_Velocity units=\"rads/s\"; access=Omega; abstol=1e-6; endnature \
+                   nature Angular_Force units=\"N-m\"; access=Tau; abstol=1e-6; endnature \
+                   discipline rotational_omega potential Angular_Velocity; \
+                   flow Angular_Force; enddiscipline \
+                   module damper(shaft, ref); inout shaft, ref; \
+                   rotational_omega shaft, ref; parameter real d = 0.1; \
+                   analog Tau(shaft, ref) <+ d * Omega(shaft, ref); endmodule";
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        // The discipline metadata must survive into Interface α, or reporting has nothing to
+        // read: this is the half of the change that lives in `va-ir`.
+        let shaft = design.modules[0]
+            .nodes
+            .iter()
+            .find(|n| n.name == "shaft")
+            .expect("shaft node");
+        assert_eq!(shaft.access.as_deref(), Some("Omega"));
+        assert_eq!(shaft.units.as_deref(), Some("rads/s"));
+
+        let net =
+            va_netlist::parser::parse("X1 shaft gnd damper d=0.1\n.op\n.end\n").expect("parses");
+        let qs = quantities(&net, &design.modules).expect("quantities");
+        let shaft_q = qs
+            .iter()
+            .find(|q| q.name == "shaft")
+            .expect("shaft reported");
+        assert_eq!(shaft_q.label, "Omega(shaft)");
+        assert_eq!(shaft_q.unit, "rads/s");
+        // ...and it renders as such, rather than as volts.
+        let line = shaft_q.render(20.0);
+        assert!(line.contains("Omega(shaft)"), "{line}");
+        assert!(line.contains("rads/s"), "{line}");
+        assert!(
+            !line.contains(" V"),
+            "a mechanical node must not be reported in volts: {line}"
+        );
+    }
+
+    /// A deck of built-in primitives has no discipline preamble anywhere, and those primitives
+    /// really are electrical — so the fallback must stay `V`/volts rather than going blank.
+    /// Branch currents are reported alongside the nodes, which is what makes `I(V1)` available
+    /// to a transient run.
+    #[test]
+    fn quantities_cover_nodes_and_branch_currents_of_a_primitive_deck() {
+        let net = va_netlist::parser::parse(include_str!("../../../circuits/divider.net"))
+            .expect("parse divider");
+        let qs = quantities(&net, &[]).expect("quantities");
+        let labels: Vec<&str> = qs.iter().map(|q| q.label.as_str()).collect();
+        assert!(labels.contains(&"V(in)"), "{labels:?}");
+        assert!(labels.contains(&"V(mid)"), "{labels:?}");
+        // The source's branch current is a quantity like any other -- this is what
+        // `report_transient` gained.
+        assert!(labels.contains(&"I(V1)"), "{labels:?}");
+        // Each index is distinct: the source's branch row must not be reported twice, once as
+        // `I(V1)` and again as an auxiliary row.
+        let mut idx: Vec<usize> = qs.iter().map(|q| q.index).collect();
+        let n = idx.len();
+        idx.sort_unstable();
+        idx.dedup();
+        assert_eq!(idx.len(), n, "a quantity was reported twice: {labels:?}");
+        assert!(qs.iter().all(|q| q.unit == "V" || q.unit == "A"), "{qs:?}");
+    }
+
+    /// `--report` selects by bare net name or by full label, and refuses a name the circuit
+    /// does not compute rather than silently printing nothing.
+    #[test]
+    fn select_quantities_matches_by_name_or_label_and_rejects_typos() {
+        let net = va_netlist::parser::parse(include_str!("../../../circuits/divider.net"))
+            .expect("parse divider");
+        let all = quantities(&net, &[]).expect("quantities");
+
+        // No selectors: everything, unchanged.
+        assert_eq!(select_quantities(&all, &[]).unwrap(), all);
+
+        let by_name = select_quantities(&all, &["mid".to_string()]).unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].label, "V(mid)");
+        // The full label selects the same one, so a user may disambiguate when they want to.
+        let by_label = select_quantities(&all, &["V(mid)".to_string()]).unwrap();
+        assert_eq!(by_label, by_name);
+        // Case-insensitive, and a repeated selector does not duplicate the column.
+        let dup = select_quantities(&all, &["MID".to_string(), "mid".to_string()]).unwrap();
+        assert_eq!(dup, by_name);
+
+        let err = select_quantities(&all, &["midd".to_string()]).expect_err("typo must error");
+        assert!(err.to_string().contains("midd"), "{err}");
     }
 }

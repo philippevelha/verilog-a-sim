@@ -19,12 +19,24 @@ Module {
             abstol: Some(
                 1e-6,
             ),
+            access: Some(
+                "V",
+            ),
+            units: Some(
+                "V",
+            ),
         },
         NodeDecl {
             name: "cathode",
             discipline: Electrical,
             abstol: Some(
                 1e-6,
+            ),
+            access: Some(
+                "V",
+            ),
+            units: Some(
+                "V",
             ),
         },
     ],

@@ -89,8 +89,22 @@ pub fn resolve_abstol(
     disciplines: &std::collections::HashMap<String, DisciplineDecl>,
     natures: &std::collections::HashMap<String, NatureDecl>,
 ) -> Option<f64> {
-    let nature_name = disciplines.get(name)?.potential.as_deref()?;
-    natures.get(nature_name)?.abstol
+    resolve_potential_nature(name, disciplines, natures)?.abstol
+}
+
+/// Resolve a net's discipline (by name) to its **potential** [`NatureDecl`] — the one hop
+/// [`resolve_abstol`] takes before reading a single field, factored out so other per-node
+/// metadata can take the same hop (§ quantity reporting).
+///
+/// `None` in exactly the circumstances [`resolve_abstol`] documents: the discipline was never
+/// declared, it has no `potential` attribute, or the nature it names was never declared. This
+/// never errors — a missing link means "no metadata to give this node", not a malformed program.
+pub fn resolve_potential_nature<'a>(
+    name: &str,
+    disciplines: &std::collections::HashMap<String, DisciplineDecl>,
+    natures: &'a std::collections::HashMap<String, NatureDecl>,
+) -> Option<&'a NatureDecl> {
+    natures.get(disciplines.get(name)?.potential.as_deref()?)
 }
 
 #[cfg(test)]

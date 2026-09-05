@@ -39,7 +39,11 @@ fn print_usage() {
          -h, --help    Print this help\n    \
          --plot <out.svg>        Write an SVG plot: transient waveform, .dc sweep, or AC Bode
     \n         --integration be|trap|gear  Integration method for a transient run.
-                                 Default trapezoidal (second order)"
+                                 Default trapezoidal (second order)
+    
+         --report <a,b,...>      Report only these quantities (default: all of them).
+                                 Names a net (`mid`), a device current (`V1`), or a full
+                                 label (`V(mid)`); an unknown name is an error."
     );
 }
 
@@ -89,12 +93,26 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         })?,
     };
 
+    // `--report a,b,...` narrows the printed quantities. Without it every quantity the
+    // circuit computes is reported -- node potentials in their own discipline's access
+    // function and units, device branch currents, and a compiled model's internal unknowns.
+    let report_only: Vec<String> = parse_flag(args, "--report")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
     run_sim(
         netlist,
         model.as_deref(),
         analysis,
         plot.as_deref(),
         integration,
+        &report_only,
     )
 }
 

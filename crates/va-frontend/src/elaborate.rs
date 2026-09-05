@@ -517,13 +517,22 @@ impl Elaborator<'_> {
                     ast::Discipline::Custom(name) => name.as_str(),
                 };
                 let abstol = disciplines::resolve_abstol(disc_name, self.disciplines, self.natures);
+                // The same one-hop resolution the abstol above takes, kept together so a node
+                // can never end up with one and not the other (§ quantity reporting).
+                let nature = disciplines::resolve_potential_nature(
+                    disc_name,
+                    self.disciplines,
+                    self.natures,
+                );
+                let access = nature.and_then(|n| n.access.clone());
+                let units = nature.and_then(|n| n.units.clone());
                 // Each name carries its own optional dimension range(s) — `electrical [0:w-1]
                 // in;` and `electrical in[`W-1:0], out;` both reach here as one `NetDecl` per
                 // name, the prefix-vs-suffix distinction already resolved by the parser (§2.2).
                 // A second dimension (§ 2-D vector net) is a non-standard extension.
                 for net in nets {
                     if net.ranges.is_empty() {
-                        self.intern_node(&net.name, disc, abstol);
+                        self.intern_node(&net.name, disc, abstol, access.clone(), units.clone());
                         continue;
                     }
                     // A vector net interns one node per index tuple (§ vector nets); a branch
@@ -535,7 +544,13 @@ impl Elaborator<'_> {
                         dims.push(if msb <= lsb { (msb, lsb) } else { (lsb, msb) });
                     }
                     for idxs in dim_indices(&dims) {
-                        self.intern_node(&indexed_key(&net.name, &idxs), disc, abstol);
+                        self.intern_node(
+                            &indexed_key(&net.name, &idxs),
+                            disc,
+                            abstol,
+                            access.clone(),
+                            units.clone(),
+                        );
                     }
                     self.vectors.insert(net.name.clone(), dims);
                 }
@@ -574,7 +589,14 @@ impl Elaborator<'_> {
         Ok(())
     }
 
-    fn intern_node(&mut self, name: &str, discipline: Discipline, abstol: Option<f64>) -> NodeId {
+    fn intern_node(
+        &mut self,
+        name: &str,
+        discipline: Discipline,
+        abstol: Option<f64>,
+        access: Option<String>,
+        units: Option<String>,
+    ) -> NodeId {
         if let Some(id) = self.nodes.get(name) {
             return *id;
         }
@@ -583,6 +605,8 @@ impl Elaborator<'_> {
             name: name.to_string(),
             discipline,
             abstol,
+            access,
+            units,
         });
         self.nodes.insert(name.to_string(), id);
         id
@@ -3131,7 +3155,7 @@ impl Elaborator<'_> {
         if let Some(id) = self.ground {
             return id;
         }
-        let id = self.intern_node("gnd", Discipline::Electrical, None);
+        let id = self.intern_node("gnd", Discipline::Electrical, None, None, None);
         self.ground = Some(id);
         id
     }
@@ -3334,7 +3358,7 @@ impl Elaborator<'_> {
                 if let Some(id) = self.ground {
                     id
                 } else {
-                    let id = self.intern_node("gnd", Discipline::Electrical, None);
+                    let id = self.intern_node("gnd", Discipline::Electrical, None, None, None);
                     self.ground = Some(id);
                     id
                 }
@@ -3427,6 +3451,12 @@ impl Elaborator<'_> {
                     name: format!("{inst_name}.{}", decl.name),
                     discipline: decl.discipline,
                     abstol: decl.abstol,
+                    // An inlined submodule node keeps its own discipline's metadata: the
+                    // submodule elaborated against the same file-scoped nature tables, and a
+                    // mechanical node inside an instantiated block is still mechanical once
+                    // flattened into an otherwise electrical parent.
+                    access: decl.access.clone(),
+                    units: decl.units.clone(),
                 });
                 node_off.push(new_id);
             }

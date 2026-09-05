@@ -123,6 +123,31 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > `Current`'s `abstol`): only a `Node`-kind unknown (a KCL potential) has a natural per-`NodeDecl`
 > home for one.
 
+> **Revision (§6 change, 2026-09-05):** added `NodeDecl.access: Option<String>` and
+> `NodeDecl.units: Option<String>` (§ quantity reporting) — the node's discipline's **potential**
+> nature's `access` function name (`"V"`, `"Temp"`, `"Omega"`) and `units` string (`"V"`, `"K"`,
+> `"rads/s"`), resolved from a parsed preamble by
+> `va_frontend::disciplines::resolve_potential_nature` and `None` under exactly the conditions
+> the `abstol` revision above lists. Same one-hop resolution, factored out so both take it
+> together and a node can never end up with one and not the other.
+>
+> The motivation is that a solution vector is not necessarily electrical. `va-cli` previously
+> printed every node as `V(name) = … V`, which for a mechanical or thermal node is not a
+> formatting blemish but a false statement about what was computed; `va_ir::Discipline` could not
+> fix it, since it collapses every custom discipline to `Other` and so cannot distinguish
+> `rotational_omega` from `optical`. Additive and backward compatible: every existing `NodeDecl`
+> construction site needed only `access: None, units: None` added, and a consumer that ignores
+> both fields behaves exactly as before. The `Some`/`None` split carries real information —
+> `None` means "no preamble reached this node", which for a deck of built-in `R`/`C`/`L`/`V`
+> primitives correctly leaves the electrical spelling as the fallback.
+>
+> There is deliberately **no** field for the discipline's *flow* nature, for the same reason the
+> `abstol` revision gives: only a `Node`-kind unknown has a natural per-`NodeDecl` home. The
+> visible consequence is that `va-cli` reports a compiled model's auxiliary branch rows with a
+> bare name and no unit rather than guessing — a branch row carries a flow, but an `idt`
+> accumulator carries that flow's time integral, so labelling the pair alike would be
+> confidently wrong about half of them.
+
 > **Revision (§6 change, 2026-08-04):** added `Builtin::NoiseTable`, the IR spelling of
 > Verilog-A's `noise_table()` (LRM §4.6.4.3). Additive in the strictest sense — one new variant
 > on an existing enum, matched exhaustively in exactly two places (`va-codegen`'s `ad::eval`,

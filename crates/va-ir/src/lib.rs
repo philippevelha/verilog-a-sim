@@ -188,6 +188,21 @@ pub struct NodeDecl {
     /// `abstol` (e.g. `Current`'s) — only a `Node`-kind unknown (a KCL potential) has a natural
     /// per-`NodeDecl` home; a branch-current unknown stays on the solver's global default.
     pub abstol: Option<f64>,
+    /// The node's discipline's **potential** nature's `access` function name — `"V"` for
+    /// `electrical`, `"Temp"` for `thermal`, `"Omega"` for a rotational discipline, and so on
+    /// (§ quantity reporting, added 2026-09-05). Resolved from a parsed
+    /// `discipline...enddiscipline`/`nature...endnature` preamble exactly as [`Self::abstol`]
+    /// is, and `None` in the same circumstances (no preamble parsed, the discipline has no
+    /// `potential` nature, or that nature declares no `access`).
+    ///
+    /// This exists because a solution vector is not necessarily electrical: a result printed as
+    /// `V(shaft) = 5.2 V` when `shaft` is a mechanical node is not a formatting blemish but a
+    /// wrong statement about what was computed. Reporting code should fall back to a neutral
+    /// label rather than to `"V"` when this is `None`.
+    pub access: Option<String>,
+    /// The node's discipline's **potential** nature's `units` string — `"V"`, `"K"`,
+    /// `"rads/s"`. Resolved and `None` under exactly the same conditions as [`Self::access`].
+    pub units: Option<String>,
 }
 
 /// A branch between two nodes (the `+` and `-` terminals of an `Access`).
