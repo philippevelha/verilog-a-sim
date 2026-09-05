@@ -241,7 +241,47 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
         "[va-cli] compiled {} Verilog-A module(s) from {path}",
         modules.len()
     );
+    warn_unplaceable_modules(&modules, path);
     Ok(modules)
+}
+
+/// Warn about each compiled module that declares no ports, and so can never be placed by a
+/// deck line (§ portless top-level modules).
+///
+/// In this simulator the *circuit* is always the `.net` deck; a `.va` file supplies component
+/// definitions the deck places. Every device line connects at least one node — `va-netlist`
+/// rejects an `X` line with none, and every other device letter has a fixed terminal count — so
+/// a zero-port module is unplaceable by construction. `ports.is_empty()` is therefore not a
+/// heuristic but a decision procedure, which is why nothing else (instances present, no analog
+/// block, a `ground` declaration) is consulted: each of those also describes legitimate
+/// components, e.g. `models/series_divider.va`, a two-port model built from two instances and
+/// with no analog block of its own.
+///
+/// A warning rather than an error, for the same reason as
+/// [`warn_transient_approximations`]: a file may legitimately hold a circuit module *alongside*
+/// the components it instantiates — `external/basic/circuit1.va` does exactly that, and its
+/// `vsrc`/`resistor` are perfectly placeable. What is not acceptable is the current silence, in
+/// which the module is compiled, never placed, and never mentioned, so the run exits 0 with a
+/// confident answer computed entirely without it.
+fn warn_unplaceable_modules(modules: &[va_ir::Module], path: &str) {
+    for m in modules.iter().filter(|m| m.ports.is_empty()) {
+        eprintln!(
+            "[va-cli] warning: {path}: module `{}` declares no ports, so no deck line can \
+             place it — it was compiled and then ignored.",
+            m.name
+        );
+        eprintln!(
+            "[va-cli]   In this simulator the circuit is the `.net` deck; a `.va` file supplies \
+             components the deck places, and every device line connects at least one node \
+             (`X<name> <node>... <model> [param=value]`)."
+        );
+        eprintln!(
+            "[va-cli]   To simulate `{}`, keep its component modules in `.va` files and rewrite \
+             its instance lines as deck lines: `vsrc #(.dc(1)) V1(n, gnd);` becomes \
+             `X1 n gnd vsrc dc=1`. See `circuits/divider.net`.",
+            m.name
+        );
+    }
 }
 
 /// Run the full pipeline for `netlist` + an optional Verilog-A `model` under `analysis`.
@@ -529,6 +569,29 @@ struct ParsedFile {
     skipped_includes: Vec<String>,
 }
 
+/// Note a module that declares no ports, as a trailing clause on its `[ok]` line
+/// (§ portless top-level modules).
+///
+/// The module really did elaborate, so this is a *note* on a pass, never a new verdict, and it
+/// is deliberately not folded into the headline figure: `check` measures "does the frontend
+/// handle this file", and a portless structural circuit that elaborates is a genuine frontend
+/// success. It is a different axis from `CheckTally::passed_approximated` — that one builds but
+/// computes something approximate, this one computes correctly but cannot be reached from a
+/// deck.
+///
+/// Suppressed when an `` `include `` was dropped: a truncated vendor distribution whose port
+/// list lived in the absent header elaborates with zero ports too, and calling that a
+/// self-contained circuit would point at the wrong thing — the same reason
+/// [`skipped_clause`] exists.
+fn unplaceable_clause(m: &va_ir::Module, skipped: &[String]) -> String {
+    if !m.ports.is_empty() || !skipped.is_empty() {
+        return String::new();
+    }
+    " — declares no ports, so no `.net` deck line can place it; this is a \
+     self-contained circuit, not a component. Write it as a deck instead."
+        .to_string()
+}
+
 /// Render a skipped-include list as a trailing clause for a status line, or `""` if none were
 /// skipped. Attached to *failures* as well as passes: the ten corpus files that fail with
 /// "port `D` has no discipline declaration" fail only because their whole module body lived in
@@ -734,11 +797,13 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
                         }
                     }
                     println!(
-                        "  [ok   ] {file}: module `{}` ({} nodes, {} params, {} funcs){}",
+                        "  [ok   ] {file}: module `{}` ({} ports, {} nodes, {} params, {} funcs){}{}",
                         m.name,
+                        m.ports.len(),
                         m.nodes.len(),
                         m.params.len(),
                         m.functions.len(),
+                        unplaceable_clause(&m, &skipped),
                         skipped_clause(&skipped)
                     );
                 }
@@ -3949,5 +4014,57 @@ R1 out gnd 1000
                 "V({name}) max = {v_max}, expected a high excursion"
             );
         }
+    }
+
+    // --- § portless top-level modules ---------------------------------------------------
+
+    /// The detection rule is exactly "declares no ports", and it is a decision procedure rather
+    /// than a heuristic: `va-netlist`'s minimum placeable arity is 1, so a zero-port module is
+    /// unplaceable by construction.
+    ///
+    /// The control that matters is `models/series_divider.va`: it is built from two `leg`
+    /// instances and has no `analog` block of its own, so every *other* candidate signal
+    /// ("contains instances", "has no analog block") would false-positive on it — yet it is a
+    /// perfectly placeable two-port component that `circuits/hier_divider.net` places today.
+    #[test]
+    fn only_a_portless_module_is_reported_as_unplaceable() {
+        let design = compile_model(
+            include_str!("../../../models/series_divider.va"),
+            "series_divider.va",
+        );
+        for m in &design.modules {
+            assert!(
+                !m.ports.is_empty(),
+                "`{}` is a real component and must not be flagged",
+                m.name
+            );
+            assert_eq!(unplaceable_clause(m, &[]), "", "`{}` flagged", m.name);
+        }
+
+        // A genuinely portless structural circuit is flagged, and the note says what to do.
+        let design = compile_model(
+            "module smpl_ckt; electrical n; ground electrical gnd; \
+             leg #(.R(1000)) R1(n, gnd); endmodule \
+             module leg(p, n); parameter real R = 1; inout p, n; electrical p, n; \
+             analog I(p, n) <+ V(p, n) / R; endmodule",
+            "portless circuit",
+        );
+        let top = design
+            .modules
+            .iter()
+            .find(|m| m.name == "smpl_ckt")
+            .expect("top module");
+        assert!(top.ports.is_empty());
+        let note = unplaceable_clause(top, &[]);
+        assert!(note.contains("no ports"), "{note}");
+        assert!(note.contains("deck"), "{note}");
+
+        // ...but not when an `include` was dropped: a truncated distribution whose port list
+        // lived in the absent header also elaborates with zero ports, and calling that a
+        // self-contained circuit would point at the wrong thing.
+        assert_eq!(
+            unplaceable_clause(top, &["disciplines.vams".to_string()]),
+            ""
+        );
     }
 }
