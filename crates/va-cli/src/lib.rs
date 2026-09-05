@@ -331,22 +331,24 @@ pub fn run_sim(
             }
         }
         let wf = solve_transient(&net, &compiled, integration)?;
-        report_transient(
-            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
-            &wf,
-        );
+        let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
+        report_transient(&shown, &wf);
         if let Some(path) = plot {
-            plot::plot_transient(path, &net, &wf).with_context(|| format!("plotting to {path}"))?;
+            // The plot shows exactly what the report shows, `--report` included: a chart and a
+            // table of the same run disagreeing about which series exist would be worse than
+            // either alone. It is also the practical way to plot a cross-domain result, whose
+            // series differ by orders of magnitude and share no axis.
+            plot::plot_transient(path, &shown, &wf)
+                .with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote transient plot to {path}");
         }
     } else if analysis == Analysis::Ac {
         let response = solve_ac(&net, &compiled)?;
-        report_ac(
-            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
-            &response,
-        );
+        let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
+        report_ac(&shown, &response);
         if let Some(path) = plot {
-            plot::plot_ac(path, &net, &response).with_context(|| format!("plotting to {path}"))?;
+            plot::plot_ac(path, &shown, &response)
+                .with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote AC plot to {path}");
         }
     } else if analysis == Analysis::Noise {
@@ -360,13 +362,10 @@ pub fn run_sim(
         }
     } else if let Some(sweep) = &net.dc {
         let points = solve_dc_sweep(&net, &compiled, sweep)?;
-        report_sweep(
-            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
-            sweep,
-            &points,
-        );
+        let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
+        report_sweep(&shown, sweep, &points);
         if let Some(path) = plot {
-            plot::plot_sweep(path, &net, sweep, &points)
+            plot::plot_sweep(path, &shown, sweep, &points)
                 .with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote sweep plot to {path}");
         }

@@ -9,8 +9,37 @@
 
 use anyhow::{Context, Result};
 use plotters::prelude::*;
-use va_netlist::Netlist;
 use va_transient::integrator::Waveform;
+
+use crate::Quantity;
+
+/// The y-axis title for a set of plotted quantities (§ quantity reporting).
+///
+/// A plot is not entitled to assume its series are volts any more than a report is. When every
+/// series shares a unit the axis says so (`Voltage (V)`, `Velocity (m/s)`); when they do not —
+/// a cross-domain result with volts and metres per second on one canvas — no single label is
+/// true, so the axis stays generic and each series carries its own unit in the legend instead.
+fn axis_label(quantities: &[Quantity]) -> String {
+    let mut units = quantities.iter().map(|q| q.unit.as_str());
+    let first = units.next().unwrap_or("");
+    if first.is_empty() || !units.all(|u| u == first) {
+        return "Value".to_string();
+    }
+    match first {
+        "V" => "Voltage (V)".to_string(),
+        "A" => "Current (A)".to_string(),
+        other => format!("Value ({other})"),
+    }
+}
+
+/// A legend entry: the quantity's label, plus its unit when the axis could not carry one.
+fn series_label(q: &Quantity) -> String {
+    if q.unit.is_empty() {
+        q.label.clone()
+    } else {
+        format!("{} [{}]", q.label, q.unit)
+    }
+}
 
 /// A small fixed palette, cycled by node index. Plain `RGBColor`s rather than `Palette99`
 /// (fewer moving parts, no dependency on exactly which palette plotters ships) — plenty for
@@ -22,15 +51,17 @@ const PALETTE: [RGBColor; 6] = [RED, BLUE, GREEN, MAGENTA, CYAN, BLACK];
 /// # Errors
 ///
 /// Returns an error if `wf` has no accepted points, or if drawing/writing the SVG fails.
-pub fn plot_transient(path: &str, net: &Netlist, wf: &Waveform) -> Result<()> {
+pub fn plot_transient(path: &str, quantities: &[Quantity], wf: &Waveform) -> Result<()> {
     let t_min = *wf.t.first().context("waveform has no points to plot")?;
     let t_max = *wf.t.last().context("waveform has no points to plot")?;
 
     let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
     for x in &wf.x {
-        for &v in x.iter().take(net.node_order.len()) {
-            y_min = y_min.min(v);
-            y_max = y_max.max(v);
+        for q in quantities {
+            if let Some(&v) = x.get(q.index) {
+                y_min = y_min.min(v);
+                y_max = y_max.max(v);
+            }
         }
     }
     // A flat signal (e.g. a single-node circuit sitting at 0 V throughout) would otherwise
@@ -58,19 +89,22 @@ pub fn plot_transient(path: &str, net: &Netlist, wf: &Waveform) -> Result<()> {
     chart
         .configure_mesh()
         .x_desc("Time (s)")
-        .y_desc("Voltage (V)")
+        .y_desc(axis_label(quantities))
         .draw()
         .context("drawing the chart mesh")?;
 
-    for (i, name) in net.node_order.iter().enumerate() {
+    for (i, q) in quantities.iter().enumerate() {
         let color = PALETTE[i % PALETTE.len()];
+        let idx = q.index;
         chart
             .draw_series(LineSeries::new(
-                wf.t.iter().zip(&wf.x).map(|(&t, x)| (t, x[i])),
+                wf.t.iter()
+                    .zip(&wf.x)
+                    .filter_map(|(&t, x)| x.get(idx).map(|&v| (t, v))),
                 &color,
             ))
-            .with_context(|| format!("drawing V({name})"))?
-            .label(format!("V({name})"))
+            .with_context(|| format!("drawing {}", q.label))?
+            .label(series_label(q))
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
     }
 
@@ -103,7 +137,7 @@ pub fn plot_transient(path: &str, net: &Netlist, wf: &Waveform) -> Result<()> {
 /// Returns an error if `points` is empty, or if drawing/writing the SVG fails.
 pub fn plot_sweep(
     path: &str,
-    net: &Netlist,
+    quantities: &[Quantity],
     sweep: &va_netlist::DcSweep,
     points: &[(f64, va_core::dc::OperatingPoint)],
 ) -> Result<()> {
@@ -116,12 +150,13 @@ pub fn plot_sweep(
         (x_min - 1.0, x_max + 1.0)
     };
 
-    let n_nodes = net.node_order.len();
     let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
     for (_, op) in points {
-        for &v in op.x.iter().take(n_nodes) {
-            y_min = y_min.min(v);
-            y_max = y_max.max(v);
+        for q in quantities {
+            if let Some(&v) = op.x.get(q.index) {
+                y_min = y_min.min(v);
+                y_max = y_max.max(v);
+            }
         }
     }
     if y_max <= y_min {
@@ -147,19 +182,22 @@ pub fn plot_sweep(
     chart
         .configure_mesh()
         .x_desc(format!("{} (V)", sweep.source))
-        .y_desc("Voltage (V)")
+        .y_desc(axis_label(quantities))
         .draw()
         .context("drawing the chart mesh")?;
 
-    for (i, name) in net.node_order.iter().enumerate() {
+    for (i, q) in quantities.iter().enumerate() {
         let color = PALETTE[i % PALETTE.len()];
+        let idx = q.index;
         chart
             .draw_series(LineSeries::new(
-                points.iter().map(|(v, op)| (*v, op.x[i])),
+                points
+                    .iter()
+                    .filter_map(|(v, op)| op.x.get(idx).map(|&y| (*v, y))),
                 &color,
             ))
-            .with_context(|| format!("drawing V({name})"))?
-            .label(format!("V({name})"))
+            .with_context(|| format!("drawing {}", q.label))?
+            .label(series_label(q))
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
     }
 
@@ -194,10 +232,13 @@ pub fn plot_sweep(
 ///
 /// Returns an error if the response is empty, if every frequency point is non-positive, or if
 /// drawing/writing the SVG fails.
-pub fn plot_ac(path: &str, net: &Netlist, resp: &va_acnoise::ac::AcResponse) -> Result<()> {
-    let n_nodes = net.node_order.len();
+pub fn plot_ac(
+    path: &str,
+    quantities: &[Quantity],
+    resp: &va_acnoise::ac::AcResponse,
+) -> Result<()> {
     let usable: Vec<usize> = (0..resp.f.len()).filter(|&i| resp.f[i] > 0.0).collect();
-    if usable.is_empty() || n_nodes == 0 {
+    if usable.is_empty() || quantities.is_empty() {
         anyhow::bail!("AC response has no positive frequency point to plot");
     }
 
@@ -225,11 +266,13 @@ pub fn plot_ac(path: &str, net: &Netlist, resp: &va_acnoise::ac::AcResponse) -> 
     let (mut db_min, mut db_max) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut ph_min, mut ph_max) = (f64::INFINITY, f64::NEG_INFINITY);
     for &i in &usable {
-        for c in resp.x[i].iter().take(n_nodes) {
-            db_min = db_min.min(db(*c));
-            db_max = db_max.max(db(*c));
-            ph_min = ph_min.min(deg(*c));
-            ph_max = ph_max.max(deg(*c));
+        for q in quantities {
+            if let Some(c) = resp.x[i].get(q.index) {
+                db_min = db_min.min(db(*c));
+                db_max = db_max.max(db(*c));
+                ph_min = ph_min.min(deg(*c));
+                ph_max = ph_max.max(deg(*c));
+            }
         }
     }
     let pad = |lo: &mut f64, hi: &mut f64| {
@@ -276,22 +319,29 @@ pub fn plot_ac(path: &str, net: &Netlist, resp: &va_acnoise::ac::AcResponse) -> 
         .draw()
         .context("drawing the phase mesh")?;
 
-    for (i, name) in net.node_order.iter().enumerate() {
+    for (i, q) in quantities.iter().enumerate() {
         let color = PALETTE[i % PALETTE.len()];
+        let idx = q.index;
         mag_chart
             .draw_series(LineSeries::new(
-                usable.iter().map(|&k| (resp.f[k], db(resp.x[k][i]))),
+                usable
+                    .iter()
+                    .filter_map(|&k| resp.x[k].get(idx).map(|c| (resp.f[k], db(*c)))),
                 &color,
             ))
-            .with_context(|| format!("drawing the magnitude series for {name}"))?
-            .label(format!("V({name})"))
+            .with_context(|| format!("drawing the magnitude series for {}", q.label))?
+            // A dB magnitude is a ratio, so the unit belongs on the series name rather than on
+            // the axis: `V(out) [V]` says what was measured, `Magnitude (dB)` how.
+            .label(series_label(q))
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         ph_chart
             .draw_series(LineSeries::new(
-                usable.iter().map(|&k| (resp.f[k], deg(resp.x[k][i]))),
+                usable
+                    .iter()
+                    .filter_map(|&k| resp.x[k].get(idx).map(|c| (resp.f[k], deg(*c)))),
                 &color,
             ))
-            .with_context(|| format!("drawing the phase series for {name}"))?;
+            .with_context(|| format!("drawing the phase series for {}", q.label))?;
     }
 
     mag_chart
@@ -460,7 +510,8 @@ mod tests {
         let path = dir.join("rc_step.svg");
         let path_str = path.to_str().expect("utf8 path");
 
-        plot_transient(path_str, &net, &wf).expect("plots without error");
+        let qs = crate::quantities(&net, &[]).expect("quantities");
+        plot_transient(path_str, &qs, &wf).expect("plots without error");
 
         let contents = std::fs::read_to_string(&path).expect("reads back the SVG");
         assert!(contents.starts_with("<?xml") || contents.contains("<svg"));
@@ -483,7 +534,8 @@ mod tests {
             .to_str()
             .expect("utf8 path")
             .to_string();
-        assert!(plot_transient(&path, &net, &empty).is_err());
+        let qs = crate::quantities(&net, &[]).expect("quantities");
+        assert!(plot_transient(&path, &qs, &empty).is_err());
     }
 
     #[test]
@@ -502,7 +554,8 @@ mod tests {
         let path = dir.join("diode_iv_sweep.svg");
         let path_str = path.to_str().expect("utf8 path");
 
-        plot_sweep(path_str, &net, &sweep, &points).expect("plots without error");
+        let qs = crate::quantities(&net, &[]).expect("quantities");
+        plot_sweep(path_str, &qs, &sweep, &points).expect("plots without error");
 
         let contents = std::fs::read_to_string(&path).expect("reads back the SVG");
         assert!(contents.starts_with("<?xml") || contents.contains("<svg"));
@@ -527,7 +580,8 @@ mod tests {
             .to_str()
             .expect("utf8 path")
             .to_string();
-        plot_ac(&path, &net, &resp).expect("renders");
+        let qs = crate::quantities(&net, &[]).expect("quantities");
+        plot_ac(&path, &qs, &resp).expect("renders");
         let contents = std::fs::read_to_string(&path).expect("reads back");
         let _ = std::fs::remove_file(&path);
 
@@ -622,15 +676,16 @@ mod tests {
             .expect("utf8 path")
             .to_string();
 
+        let qs = crate::quantities(&net, &[]).expect("quantities");
         let empty = va_acnoise::ac::AcResponse::default();
-        assert!(plot_ac(&path, &net, &empty).is_err(), "empty response");
+        assert!(plot_ac(&path, &qs, &empty).is_err(), "empty response");
 
         let dc_only = va_acnoise::ac::AcResponse {
             f: vec![0.0],
             x: vec![vec![(1.0, 0.0); net.node_order.len()]],
         };
         assert!(
-            plot_ac(&path, &net, &dc_only).is_err(),
+            plot_ac(&path, &qs, &dc_only).is_err(),
             "a zero-frequency-only sweep has nothing a log axis can show"
         );
     }
@@ -646,6 +701,7 @@ mod tests {
             .to_str()
             .expect("utf8 path")
             .to_string();
-        assert!(plot_sweep(&path, &net, &sweep, &[]).is_err());
+        let qs = crate::quantities(&net, &[]).expect("quantities");
+        assert!(plot_sweep(&path, &qs, &sweep, &[]).is_err());
     }
 }
