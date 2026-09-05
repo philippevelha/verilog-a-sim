@@ -1706,6 +1706,20 @@ depends on surrounding context), organized by what they do rather than by a sing
   the wrong same-named module). `run_sim`'s `--model <path>` (the actual simulation front door,
   as opposed to the `check` diagnostic) still only ever compiles the one given file via
   `compile_with_includes`, so this fix is `check`-only for now — a stated remaining v1 limit.
+  **Port-connection discipline checking** (added 2026-09-05): a port carries the discipline of
+  the net it was declared with, and wiring it to a net of a *different* discipline is rejected at
+  elaboration (`Elaborator::check_port_discipline`), for both positional and named connections.
+  It is an error rather than a warning because the two nets become one node in the flat IR, so a
+  mismatch leaves a single unknown standing for two physical quantities and every downstream
+  stamp on it sums, say, amperes with newton-metres. Compatibility follows LRM §3.8 — the natures
+  a discipline binds, not its spelling — so two differently *named* disciplines over the same
+  potential/flow natures are accepted, while an equal name is the fast path. The check runs on
+  the **AST**, not the IR, because `va_ir::Discipline` collapses every custom discipline to
+  `Other` and so cannot tell `rotational_omega` from `optical`. A net with no discipline
+  declaration is skipped rather than guessed at. Note this required `va-cli`'s `check` path to
+  start threading the parsed discipline table into elaboration (`check_group`), which it
+  previously discarded — `check` had been elaborating with empty tables while `sim` used full
+  ones, so the two could disagree about the same file.
   **Other stated v1 limits**: no module-item-level `generate`/`endgenerate` around an instance
   (so no genvar-driven *array* of instances — see §1.4 `Genvar`'s and §2.14's comparison notes);
   and a submodule's own implicit ground (from a

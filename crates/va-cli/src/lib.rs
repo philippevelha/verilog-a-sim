@@ -514,6 +514,15 @@ struct ParsedFile {
     /// Every module the file's own text defines — possibly empty, which is itself a verdict
     /// (a macro/nature header or a statement-body fragment declares none).
     asts: Vec<va_frontend::ast::ModuleAst>,
+    /// The file's parsed `nature`/`discipline` preamble. Kept, not discarded: elaboration needs
+    /// the discipline table to resolve a net's `abstol` (§ nature-metadata wiring) and to decide
+    /// whether two differently *named* disciplines are compatible at a port connection
+    /// (§ port-connection discipline checking). Dropping it here used to make `check` elaborate
+    /// with empty tables while `sim` (via `va_frontend::compile_with_includes`) elaborated with
+    /// full ones — the same file could then pass one and fail the other.
+    natures: std::collections::HashMap<String, va_frontend::disciplines::NatureDecl>,
+    /// The file's parsed `discipline...enddiscipline` table; see `natures`.
+    disciplines: std::collections::HashMap<String, va_frontend::disciplines::DisciplineDecl>,
     /// Every `` `include `` the preprocessor could not resolve and therefore dropped. A
     /// non-empty list means what parsed is **less than the file says it is**; see
     /// [`va_frontend::preprocess::preprocess_reporting`].
@@ -585,11 +594,11 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
             return Err(skipped_includes);
         }
     };
-    match va_frontend::parser::parse_with_disciplines_located(&tokens, Some((&src, &offsets)))
-        .map(|(asts, _, _)| asts)
-    {
-        Ok(asts) => Ok(ParsedFile {
+    match va_frontend::parser::parse_with_disciplines_located(&tokens, Some((&src, &offsets))) {
+        Ok((asts, natures, disciplines)) => Ok(ParsedFile {
             asts,
+            natures,
+            disciplines,
             skipped_includes,
         }),
         Err(e) => {
@@ -640,6 +649,15 @@ fn cannot_declare_a_module(path: &str) -> bool {
 fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTally {
     let mut tally = CheckTally::default();
     let mut library: Vec<va_frontend::ast::ModuleAst> = Vec::new();
+    // Merged the same way `library` is: a group is one directory's files elaborated together,
+    // so a discipline declared in a shared `disciplines.va` header reaches every file that
+    // `` `include ``s it, exactly as its modules do.
+    let mut natures: std::collections::HashMap<String, va_frontend::disciplines::NatureDecl> =
+        std::collections::HashMap::new();
+    let mut disciplines: std::collections::HashMap<
+        String,
+        va_frontend::disciplines::DisciplineDecl,
+    > = std::collections::HashMap::new();
     // Each successfully-parsed file's own modules, as a `library` index range — avoids cloning
     // every `ModuleAst` a second time just to report per-file status.
     let mut file_ranges: Vec<(&str, std::ops::Range<usize>, Vec<String>)> = Vec::new();
@@ -658,6 +676,8 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
             Ok(parsed) => {
                 let start = library.len();
                 library.extend(parsed.asts);
+                natures.extend(parsed.natures);
+                disciplines.extend(parsed.disciplines);
                 file_ranges.push((file.as_str(), start..library.len(), parsed.skipped_includes));
             }
             // `parse_file` already printed the reason. A failure that also dropped an
@@ -688,7 +708,12 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         }
         let mut all_ok = true;
         for ast in &library[range] {
-            match va_frontend::elaborate::elaborate_with_library(ast, &library) {
+            match va_frontend::elaborate::elaborate_with_library_and_disciplines(
+                ast,
+                &library,
+                &disciplines,
+                &natures,
+            ) {
                 Ok(m) => {
                     // Every node gets its own global unknown, so codegen sees the same shape it
                     // would in a circuit where no terminal happens to be shared or grounded.

@@ -3240,12 +3240,30 @@ impl Elaborator<'_> {
             )));
         }
 
+        // § port-connection discipline checking: a port carries the discipline of the net it was
+        // declared with, and wiring it to a net of a *different* discipline is a category error
+        // — `electrical` current into a `rotational_omega` port is not a unit conversion, it is
+        // two unrelated physics sharing a node. Checked on the AST rather than the IR because
+        // `va_ir::Discipline` collapses every custom discipline to `Other` (va-ir/src/lib.rs),
+        // which cannot tell `rotational_omega` from `optical`.
+        let parent_disc = net_disciplines(self.ast);
+        let sub_disc = net_disciplines(sub_ast);
+
         let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
         if all_positional {
             for (i, conn) in connections.iter().enumerate() {
                 let ast::PortConn::Positional(net_arg) = conn else {
                     unreachable!()
                 };
+                self.check_port_discipline(
+                    inst_name,
+                    module_name,
+                    &sub_ast.ports[i],
+                    &(i + 1).to_string(),
+                    net_arg,
+                    &parent_disc,
+                    &sub_disc,
+                )?;
                 let parent_nodes = self.resolve_conn_nodes(net_arg)?;
                 bind_port_nodes(
                     inst_name,
@@ -3278,6 +3296,15 @@ impl Elaborator<'_> {
                     )));
                 }
                 covered[idx] = true;
+                self.check_port_discipline(
+                    inst_name,
+                    module_name,
+                    port,
+                    port,
+                    net,
+                    &parent_disc,
+                    &sub_disc,
+                )?;
                 let parent_nodes = self.resolve_conn_nodes(net)?;
                 bind_port_nodes(
                     inst_name,
@@ -3343,6 +3370,51 @@ impl Elaborator<'_> {
     /// single forward pass per arena, building an old→new index table as it goes, needs no
     /// fixup pass. The submodule's whole inlined analog body is pushed as one
     /// [`va_ir::Stmt::Block`], grouped per instance for readability.
+    /// Reject a port connection that wires nets of incompatible disciplines
+    /// (§ port-connection discipline checking, LRM §3.8).
+    ///
+    /// `port_name` names the submodule port; `port_label` is how the connection is identified in
+    /// diagnostics (the port name for a named connection, its 1-based position for a positional
+    /// one). Silently passes whenever either side's discipline is undeclared — see
+    /// [`disciplines_compatible`] for why absence of evidence is not treated as evidence.
+    ///
+    /// This is an elaboration *error*, not a warning: the two nets become one node, so a
+    /// mismatch means the flat IR has one unknown standing for two different physical
+    /// quantities. Every downstream stamp on that node would be summing, say, amperes and
+    /// newton-metres.
+    #[allow(clippy::too_many_arguments)]
+    fn check_port_discipline(
+        &self,
+        inst_name: &str,
+        module_name: &str,
+        port_name: &str,
+        port_label: &str,
+        net_arg: &ast::NetArg,
+        parent_disc: &HashMap<&str, &ast::Discipline>,
+        sub_disc: &HashMap<&str, &ast::Discipline>,
+    ) -> Result<(), FrontendError> {
+        let (Some(port_d), Some(net_d)) = (
+            sub_disc.get(port_name),
+            parent_disc.get(net_arg.name.as_str()),
+        ) else {
+            return Ok(());
+        };
+        if disciplines_compatible(port_d, net_d, self.disciplines) {
+            return Ok(());
+        }
+        let show = discipline_name;
+        Err(elab(format!(
+            "instance `{inst_name}` of `{module_name}`: port `{port_label}` is `{}` but is \
+             connected to net `{}`, which is `{}`. Connecting them would make one node stand \
+             for two different physical quantities; wire the port to a `{}` net, or declare the \
+             two disciplines over the same natures if they really are the same physics.",
+            show(port_d),
+            net_arg.name,
+            show(net_d),
+            show(port_d),
+        )))
+    }
+
     fn merge_submodule(&mut self, inst_name: &str, sub: Module, node_map: HashMap<NodeId, NodeId>) {
         let mut node_off: Vec<NodeId> = Vec::with_capacity(sub.nodes.len());
         for (i, decl) in sub.nodes.iter().enumerate() {
@@ -3419,6 +3491,90 @@ fn elab(msg: String) -> FrontendError {
 /// ascending-index-order lists ([`Elaborator::resolve_ports`], [`Elaborator::resolve_conn_nodes`]),
 /// so a width mismatch here means the connection's own width — not just port count — disagrees
 /// with the module's declared port width.
+/// Map every net name a module declares to the discipline it was declared with
+/// (§ port-connection discipline checking).
+///
+/// Built from [`Item::Net`], which is the single declaration path — the combined port form
+/// `inout electrical p, n;` expands to an `Item::Direction` *plus* an `Item::Net`
+/// (`Parser::parse_item`), and `ground electrical gnd;` likewise, so both are covered without
+/// inspecting them separately. A net with no discipline declaration simply does not appear,
+/// which the caller reads as "unknown" and skips rather than guessing.
+fn net_disciplines(ast: &ModuleAst) -> HashMap<&str, &ast::Discipline> {
+    let mut out = HashMap::new();
+    for item in &ast.items {
+        if let Item::Net { discipline, nets } = item {
+            for net in nets {
+                out.insert(net.name.as_str(), discipline);
+            }
+        }
+    }
+    out
+}
+
+/// Resolve an [`ast::Discipline`] to its parsed `discipline...enddiscipline` declaration, if the
+/// compilation unit declared one. `electrical`/`thermal` are dedicated keywords rather than
+/// identifiers, so they resolve by their lowercase spelling — the same name
+/// `Parser::parse_discipline` registers them under when a `disciplines.vams` preamble is present.
+fn resolve_discipline<'a>(
+    d: &ast::Discipline,
+    table: &'a HashMap<String, DisciplineDecl>,
+) -> Option<&'a DisciplineDecl> {
+    table.get(match d {
+        ast::Discipline::Electrical => "electrical",
+        ast::Discipline::Thermal => "thermal",
+        ast::Discipline::Custom(name) => name.as_str(),
+    })
+}
+
+/// The name a discipline is declared and looked up under.
+fn discipline_name(d: &ast::Discipline) -> &str {
+    match d {
+        ast::Discipline::Electrical => "electrical",
+        ast::Discipline::Thermal => "thermal",
+        ast::Discipline::Custom(n) => n.as_str(),
+    }
+}
+
+/// Whether two declared disciplines may be wired together by a port connection
+/// (§ port-connection discipline checking).
+///
+/// Same name, same discipline — that is the common case and settles it. Two *differently named*
+/// disciplines are compatible only when they resolve to the same potential **and** flow natures:
+/// LRM §3.8's compatibility rule is about the natures a discipline binds, not its spelling, so a
+/// user-defined discipline over the same `Voltage`/`Current` natures as `electrical` really is
+/// interchangeable with it. Anything else is a mismatch.
+///
+/// Requiring proof of *equivalence* rather than proof of difference is the right way round here,
+/// and it is affordable because a `Discipline::Custom` can only exist if its
+/// `discipline...enddiscipline` block was parsed — `Parser::parse_item` resolves a bare
+/// `foo a, b;` as a net declaration only when `foo` is already in the discipline table, and
+/// otherwise reads it as a module instantiation. So a custom discipline always resolves here.
+/// The only names that can fail to resolve are the built-in `electrical`/`thermal` keywords,
+/// which are usable without any preamble; when one of those meets a *differently named*
+/// discipline and no declaration is available to compare natures against, the mismatch stands
+/// rather than being waved through — a model that bothers to declare its own discipline means
+/// something by it.
+fn disciplines_compatible(
+    a: &ast::Discipline,
+    b: &ast::Discipline,
+    table: &HashMap<String, DisciplineDecl>,
+) -> bool {
+    // Covers `Electrical == Electrical` and a built-in keyword meeting a custom name that
+    // spells the same thing (`electrical` vs `Custom("electrical")`).
+    if discipline_name(a) == discipline_name(b) {
+        return true;
+    }
+    let (Some(da), Some(db)) = (resolve_discipline(a, table), resolve_discipline(b, table)) else {
+        return false;
+    };
+    // Two declarations that bind no natures at all carry no evidence of sameness; equal-but-empty
+    // must not read as "equivalent".
+    if da.potential.is_none() && da.flow.is_none() {
+        return false;
+    }
+    da.potential == db.potential && da.flow == db.flow
+}
+
 fn bind_port_nodes(
     inst_name: &str,
     module_name: &str,
@@ -6937,5 +7093,126 @@ mod tests {
             .next()
             .expect("at least one module");
         assert!(elaborate(&ast).is_err());
+    }
+
+    // --- § port-connection discipline checking -------------------------------------------
+    //
+    // Added 2026-09-05 after `external/basic/motortest.va` wired an `electrical` net into a
+    // `rotational_omega` port and elaborated without complaint, because nothing compared the
+    // two. The IR cannot do this check: `va_ir::Discipline` collapses every custom discipline
+    // to `Other`, so it cannot tell `rotational_omega` from `optical`. Hence the AST.
+
+    /// Elaborate `top` with the compilation unit's `discipline`/`nature` preamble threaded in,
+    /// which the discipline check needs to compare *natures* rather than only spellings.
+    fn elaborate_top_with_disciplines(src: &str, top: &str) -> Result<Module, FrontendError> {
+        let toks = lex(src).expect("lex");
+        let (asts, natures, disciplines) =
+            crate::parser::parse_with_disciplines(&toks).expect("parse");
+        let ast = asts
+            .iter()
+            .find(|m| m.name == top)
+            .unwrap_or_else(|| panic!("top module `{top}` present"));
+        elaborate_with_library_and_disciplines(ast, &asts, &disciplines, &natures)
+    }
+
+    /// Two natures + two disciplines over them, plus a `comp` whose first port is mechanical
+    /// and whose other two are electrical — the shape of `motortest.va`'s motor.
+    const TWO_PHYSICS: &str = "\
+        nature Voltage units=\"V\"; access=V; abstol=1u; endnature \
+        nature Current units=\"A\"; access=I; abstol=1p; endnature \
+        discipline electrical potential Voltage; flow Current; enddiscipline \
+        nature Omega units=\"rad/s\"; access=Om; abstol=1u; endnature \
+        nature Torque units=\"N-m\"; access=Tau; abstol=1u; endnature \
+        discipline rotational potential Omega; flow Torque; enddiscipline \
+        module comp(shaft, p, n); inout shaft, p, n; rotational shaft; electrical p, n; \
+        analog begin V(p,n) <+ I(p,n); Tau(shaft) <+ Om(shaft); end endmodule ";
+
+    #[test]
+    fn port_connection_rejects_a_discipline_mismatch() {
+        // Positional: port 1 (`shaft`, rotational) wired to `drive` (electrical).
+        let err = elaborate_top_with_disciplines(
+            &format!(
+                "{TWO_PHYSICS} module top; electrical drive; rotational sh; \
+                 ground electrical gnd; comp M1 (drive, gnd, sh); endmodule"
+            ),
+            "top",
+        )
+        .expect_err("a rotational port wired to an electrical net must be rejected");
+        let msg = err.to_string();
+        // Both disciplines must be named, or the message cannot be acted on.
+        assert!(msg.contains("rotational"), "{msg}");
+        assert!(msg.contains("electrical"), "{msg}");
+        assert!(msg.contains("drive"), "{msg}");
+
+        // Named connections take the same path and must be caught identically — the bug this
+        // check was written for could otherwise hide behind the other spelling.
+        let err = elaborate_top_with_disciplines(
+            &format!(
+                "{TWO_PHYSICS} module top; electrical drive; rotational sh; \
+                 ground electrical gnd; comp M1 (.shaft(drive), .p(gnd), .n(sh)); endmodule"
+            ),
+            "top",
+        )
+        .expect_err("named connections must be checked too");
+        assert!(err.to_string().contains("shaft"), "{err}");
+    }
+
+    /// The control: the same circuit wired correctly must still elaborate. Without this the
+    /// test above would pass even if the check rejected *every* instantiation.
+    #[test]
+    fn port_connection_accepts_matching_disciplines() {
+        let m = elaborate_top_with_disciplines(
+            &format!(
+                "{TWO_PHYSICS} module top; electrical drive; rotational sh; \
+                 ground electrical gnd; comp M1 (.shaft(sh), .p(drive), .n(gnd)); endmodule"
+            ),
+            "top",
+        )
+        .expect("correctly wired instance must elaborate");
+        assert_eq!(m.name, "top");
+    }
+
+    /// LRM §3.8: compatibility is about the natures a discipline binds, not its spelling. Two
+    /// differently *named* disciplines over the same potential/flow natures are interchangeable,
+    /// so the check must not fire on the name alone.
+    #[test]
+    fn port_connection_allows_differently_named_but_equivalent_disciplines() {
+        let src = "\
+            nature Voltage units=\"V\"; access=V; abstol=1u; endnature \
+            nature Current units=\"A\"; access=I; abstol=1p; endnature \
+            discipline electrical potential Voltage; flow Current; enddiscipline \
+            discipline wiring potential Voltage; flow Current; enddiscipline \
+            module comp(p, n); inout p, n; electrical p, n; \
+            analog V(p,n) <+ I(p,n); endmodule \
+            module top; wiring a; ground wiring gnd; comp M1 (a, gnd); endmodule";
+        let m = elaborate_top_with_disciplines(src, "top")
+            .expect("`wiring` and `electrical` bind the same natures, so they are compatible");
+        assert_eq!(m.name, "top");
+
+        // ...but a discipline over *different* natures with an equally innocuous name is not.
+        let src = src.replace(
+            "discipline wiring potential Voltage; flow Current; enddiscipline",
+            "nature Heat units=\"K\"; access=T; abstol=1u; endnature \
+             discipline wiring potential Heat; flow Current; enddiscipline",
+        );
+        elaborate_top_with_disciplines(&src, "top")
+            .expect_err("different potential nature must not be waved through");
+    }
+
+    /// A net with no discipline declaration at all yields no comparison, and must not be
+    /// reported as a mismatch — "we cannot tell" is not "this is wrong".
+    #[test]
+    fn port_connection_skips_nets_with_no_declared_discipline() {
+        let m = elaborate_top_with_disciplines(
+            "nature Voltage units=\"V\"; access=V; abstol=1u; endnature \
+             nature Current units=\"A\"; access=I; abstol=1p; endnature \
+             discipline electrical potential Voltage; flow Current; enddiscipline \
+             module comp(p, n); inout p, n; electrical p, n; \
+             analog V(p,n) <+ I(p,n); endmodule \
+             module top(a, b); inout a, b; electrical a, b; comp M1 (a, b); endmodule",
+            "top",
+        )
+        .expect("declared-and-matching still elaborates");
+        assert_eq!(m.ports.len(), 2);
     }
 }
