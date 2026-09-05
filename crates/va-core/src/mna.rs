@@ -105,6 +105,25 @@ pub fn classify_abstol(instances: &[&dyn ModelInstance], dim: usize, default: f6
     abstol
 }
 
+/// Which global unknowns `0..dim` sit across an exponential junction, by asking each instance
+/// about the unknowns it owns ([`ModelInstance::unknown_is_junction`]).
+///
+/// Built exactly like [`classify_unknowns`] and [`classify_abstol`], and with the same "any
+/// instance that claims it, wins" merge: a node shared between a diode and a resistor is still
+/// a junction node, because the diode's exponential is what would overflow without the clamp.
+/// The default is `false`, so an unknown is limited only because some model asked for it.
+pub fn classify_junctions(instances: &[&dyn ModelInstance], dim: usize) -> Vec<bool> {
+    let mut junction = vec![false; dim];
+    for inst in instances {
+        for (local, &global) in inst.unknowns().iter().enumerate() {
+            if global < dim && inst.unknown_is_junction(local) {
+                junction[global] = true;
+            }
+        }
+    }
+    junction
+}
+
 impl StampSink for System {
     fn residual(&mut self, row: usize, value: f64) {
         if row < self.dim {

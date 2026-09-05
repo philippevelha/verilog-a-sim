@@ -936,6 +936,12 @@ pub struct Quantity {
     /// The bare name inside the access function (`in`, `V1`, `M1.shaft`), for `--report`
     /// matching — so a user can ask for `mid` without also having to know it is a potential.
     pub name: String,
+    /// Whether this is a node *potential* rather than a flow or an auxiliary row. Decides the
+    /// number format only: a potential reads naturally in fixed point, while a flow is
+    /// routinely microamps and would print as six zeros there. Recorded as a flag rather than
+    /// re-derived from the label, which would mean testing for a literal `"V("` and so format
+    /// a mechanical node's `Omega(shaft)` as though it were a current.
+    pub is_potential: bool,
 }
 
 impl Quantity {
@@ -946,10 +952,7 @@ impl Quantity {
         } else {
             format!(" {}", self.unit)
         };
-        // Node potentials read naturally in fixed point; a current is routinely microamps, where
-        // fixed point would print six zeros. Split on the access function rather than on the
-        // discipline, which is the same rule `report` used before quantities existed.
-        if self.label.starts_with("V(") {
+        if self.is_potential {
             format!("{} = {:.6}{unit}", self.label, value)
         } else {
             format!("{} = {:.6e}{unit}", self.label, value)
@@ -1030,6 +1033,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
                     unit: units,
                     index: *g,
                     name,
+                    is_potential: true,
                 });
             }
         }
@@ -1058,6 +1062,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
                 unit: String::new(),
                 index: g,
                 name,
+                is_potential: false,
             });
         }
         if let Some(branch) = branch {
@@ -1143,6 +1148,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
             unit,
             index: i,
             name: name.clone(),
+            is_potential: true,
         });
     }
     for (name, idx) in &currents {
@@ -1151,6 +1157,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
             unit: "A".to_string(),
             index: *idx,
             name: name.clone(),
+            is_potential: false,
         });
     }
     quantities.extend(internal);

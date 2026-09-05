@@ -65,6 +65,44 @@ pub trait ModelInstance {
     /// override this, and only for their own node-kind unknowns (an auxiliary branch-current
     /// unknown has no natural per-unknown tolerance source and stays `None` too — see
     /// `va_ir::NodeDecl::abstol`'s doc comment).
+    /// Whether `unknowns()[i]` is a potential across an **exponential junction**, and so
+    /// benefits from `va-core`'s `limit_junction` step clamp (`unknowns()[i]`'s own position,
+    /// not a global index — same convention as [`Self::unknown_kind`]).
+    ///
+    /// Default `false`, and that default is the point. Junction limiting replaces a proposed
+    /// Newton step with a logarithmically compressed one, which is what keeps `exp(V/vt)` from
+    /// overflowing on the way to a diode's operating point. Applied to an unknown with *no*
+    /// exponential in it, the same clamp is pure damage: it throttles a perfectly good linear
+    /// step to roughly `vt·ln(...)` ≈ 0.2 V per iteration, so a node whose solution is 100 V
+    /// needs some 475 iterations to arrive and `NewtonConfig::max_iters` (100) cuts it off
+    /// first. Before this method existed the clamp was applied blanket to every unknown, and a
+    /// plain linear resistor divider failed to converge above about 20 V — including branch
+    /// *current* unknowns, where a 100 A current was clamped as though it were a junction
+    /// voltage.
+    ///
+    /// So an instance must opt **in**, and only for the unknowns that really are junction
+    /// potentials: `crate::reference::Diode`/`Bjt` do, and a `va-codegen`-generated model does
+    /// exactly when its source contains an exponential (`exp`/`limexp`). Everything else — a
+    /// resistor, a capacitor, a source, a linear Verilog-A model — leaves it `false` and gets
+    /// undamped Newton, which for a linear circuit lands in one step.
+    fn unknown_is_junction(&self, i: usize) -> bool {
+        let _ = i;
+        false
+    }
+
+    /// A per-unknown absolute-tolerance override for `va-core`'s Newton convergence check
+    /// (`unknowns()[i]`'s own tolerance, not indexed globally — same convention as
+    /// [`Self::unknown_kind`]), sourced from a Verilog-A model's discipline/nature metadata
+    /// (§ nature-metadata wiring, e.g. `nature Voltage; abstol = 1e-6; endnature`).
+    ///
+    /// Default `None`: no override, so `va-core` falls back to its own configured default
+    /// (`va-core::newton::NewtonConfig::abstol`) — correct for every hand-written
+    /// `crate::reference` model (none of them are compiled from Verilog-A source, so none has
+    /// discipline metadata to report) and for a `va-codegen`-generated model whose module
+    /// declared no `discipline`/`nature` preamble. Only `va-codegen`'s generated models
+    /// override this, and only for their own node-kind unknowns (an auxiliary branch-current
+    /// unknown has no natural per-unknown tolerance source and stays `None` too — see
+    /// `va_ir::NodeDecl::abstol`'s doc comment).
     fn unknown_abstol(&self, i: usize) -> Option<f64> {
         let _ = i;
         None

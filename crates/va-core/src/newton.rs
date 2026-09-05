@@ -109,13 +109,32 @@ pub fn solve(
     // Unlike `kinds`, this always runs: every `solve_from` call's per-iteration convergence
     // check needs it, not just `shunt_gmin` (§ nature-metadata wiring's module doc comment).
     let per_abstol = mna::classify_abstol(instances, dim, cfg.abstol);
+    // Which unknowns actually sit across an exponential junction. Only these are step-limited:
+    // see `ModelInstance::unknown_is_junction` for why applying the clamp to everything is
+    // damage rather than caution. Skipped entirely when limiting is switched off.
+    let junction = if cfg.limit_junctions {
+        mna::classify_junctions(instances, dim)
+    } else {
+        vec![false; dim]
+    };
 
     let mut x = vec![0.0; dim];
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
         let gmin = convergence::gmin_for_step(step, cfg.gmin_steps);
-        x = solve_from(x, instances, dim, cfg, gmin, &kinds, &per_abstol)?;
+        x = solve_from(
+            x,
+            instances,
+            dim,
+            cfg,
+            gmin,
+            &Classification {
+                kinds: &kinds,
+                per_abstol: &per_abstol,
+                junction: &junction,
+            },
+        )?;
     }
     Ok(x)
 }
@@ -123,15 +142,29 @@ pub fn solve(
 /// The inner Newton iteration, starting from `x0` and shunting `gmin` onto every `Node`-kind
 /// row each iteration (see [`mna::System::shunt_gmin`]). [`solve`] is `gmin_steps + 1` calls to
 /// this, chained by warm-starting each stage's `x0` from the previous stage's solution.
+/// The per-unknown classifications [`solve`] computes once and every iteration reads: which
+/// rows `gmin` may shunt, each row's own convergence tolerance, and which rows are junction
+/// potentials. Grouped because all three are the same shape (one entry per global unknown),
+/// have the same lifetime, and are always passed together.
+struct Classification<'a> {
+    kinds: &'a [UnknownKind],
+    per_abstol: &'a [f64],
+    junction: &'a [bool],
+}
+
 fn solve_from(
     mut x: Vec<f64>,
     instances: &[&dyn ModelInstance],
     dim: usize,
     cfg: NewtonConfig,
     gmin: f64,
-    kinds: &[UnknownKind],
-    per_abstol: &[f64],
+    class: &Classification<'_>,
 ) -> Result<Vec<f64>, CoreError> {
+    let Classification {
+        kinds,
+        per_abstol,
+        junction,
+    } = class;
     let vt = convergence::VT_NOMINAL;
     let vcrit = convergence::default_vcrit(vt);
 
@@ -161,13 +194,14 @@ fn solve_from(
             vt,
             vcrit,
             residual_norm,
+            junction,
         );
 
         let mut update_small = true;
         for i in 0..dim {
             let vold = x[i];
             let vnew_raw = vold + scale * dx[i];
-            let vnew = if cfg.limit_junctions {
+            let vnew = if junction[i] {
                 convergence::limit_junction(vnew_raw, vold, vt, vcrit)
             } else {
                 vnew_raw
@@ -213,6 +247,7 @@ fn damped_scale(
     vt: f64,
     vcrit: f64,
     residual_norm: f64,
+    junction: &[bool],
 ) -> f64 {
     if cfg.max_damping_halvings == 0 {
         return 1.0;
@@ -222,7 +257,7 @@ fn damped_scale(
         let candidate: Vec<f64> = (0..dim)
             .map(|i| {
                 let raw = x[i] + scale * dx[i];
-                if cfg.limit_junctions {
+                if junction[i] {
                     convergence::limit_junction(raw, x[i], vt, vcrit)
                 } else {
                     raw
@@ -301,6 +336,73 @@ mod tests {
             (id - ir).abs() < 1e-9 * ir.abs().max(1e-6),
             "KCL at the junction: diode {id} vs resistor {ir} (V(d) = {vd})"
         );
+        assert!(
+            (0.4..1.0).contains(&vd),
+            "a forward-biased silicon junction should sit near 0.6-0.8 V, got {vd}"
+        );
+    }
+
+    /// § junction limiting, in the same "fails one way, succeeds the other" shape the damping
+    /// and gmin-stepping demonstrations use, so it cannot pass by being decorative.
+    ///
+    /// A linear resistor divider at 100 V has no exponential anywhere, so no instance claims a
+    /// junction unknown and Newton takes its full step. Wrapped in `JunctionOverride` — which
+    /// is exactly the blanket "limit every unknown" behaviour this replaced — the identical
+    /// circuit fails, because `limit_junction`'s logarithmic clamp compresses each step to
+    /// about `vt*ln(...)` and 100 iterations cannot walk a node to 100 V.
+    ///
+    /// That was a real bug, not a hypothetical: before `unknown_is_junction` existed this
+    /// divider failed to converge above roughly 20 V, and every golden circuit happened to run
+    /// at 5 V or less, so nothing caught it.
+    #[test]
+    fn junction_limiting_no_longer_throttles_a_linear_circuit() {
+        let vs = VSource::new(0, GROUND, 2, 100.0);
+        let r1 = Resistor::new(0, 1, 1000.0);
+        let r2 = Resistor::new(1, GROUND, 1000.0);
+
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r1, &r2];
+        let x = solve(&insts, 3, NewtonConfig::default())
+            .expect("a linear divider must converge at any operating voltage");
+        assert!((x[1] - 50.0).abs() < 1e-9, "V(mid) = {}, want 50 V", x[1]);
+
+        // The same circuit, every unknown claiming to be a junction: the old behaviour.
+        let (wvs, wr1, wr2) = (
+            crate::testutil::JunctionOverride { inner: &vs },
+            crate::testutil::JunctionOverride { inner: &r1 },
+            crate::testutil::JunctionOverride { inner: &r2 },
+        );
+        let wrapped: [&dyn ModelInstance; 3] = [&wvs, &wr1, &wr2];
+        let throttled = solve(&wrapped, 3, NewtonConfig::default());
+        assert!(
+            throttled.is_err(),
+            "blanket junction limiting was expected to throttle this to a non-convergence; it              returned {throttled:?} -- if that stopped being true, this test no longer              demonstrates why `unknown_is_junction` exists"
+        );
+    }
+
+    /// The other half: an unknown that *is* a junction still gets limited, and that limiting is
+    /// what carries a hard-driven diode to its operating point with damping switched off.
+    /// Paired with the test above, this pins both directions — the clamp is applied where it
+    /// helps and withheld where it hurts.
+    #[test]
+    fn a_diode_still_opts_into_junction_limiting() {
+        // The reference diode declares its terminals as junction potentials...
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
+        assert!(d.unknown_is_junction(0), "a diode terminal is a junction");
+        // ...a resistor does not.
+        let r = Resistor::new(0, 1, 1.0);
+        assert!(!r.unknown_is_junction(0), "a resistor terminal is not");
+
+        // Limiting on, damping off: the same circuit the damping test drives, solved by the
+        // clamp alone. `classify_junctions` must therefore be picking the diode's claim up.
+        let vs = VSource::new(0, GROUND, 2, 10.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
+        let cfg = NewtonConfig {
+            limit_junctions: true,
+            max_damping_halvings: 0,
+            ..NewtonConfig::default()
+        };
+        let x = solve(&insts, 3, cfg).expect("junction limiting alone should carry this");
+        let vd = x[1];
         assert!(
             (0.4..1.0).contains(&vd),
             "a forward-biased silicon junction should sit near 0.6-0.8 V, got {vd}"

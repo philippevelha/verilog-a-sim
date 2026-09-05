@@ -123,6 +123,30 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > `Current`'s `abstol`): only a `Node`-kind unknown (a KCL potential) has a natural per-`NodeDecl`
 > home for one.
 
+> **Revision (§6 change, 2026-09-05):** added
+> `ModelInstance::unknown_is_junction(i) -> bool`, defaulting to `false` (§ junction limiting).
+> Says whether `unknowns()[i]` sits across an exponential junction and so wants `va-core`'s
+> `limit_junction` step clamp. Additive in the same shape as `unknown_kind`/`unknown_abstol`: a
+> defaulted method, so no existing implementor changed.
+>
+> This fixed a real bug. `va-core` applied the clamp **blanket to every unknown**, including
+> branch-current rows. The clamp replaces a Newton step with a logarithmically compressed one,
+> which is what stops `exp(V/vt)` overflowing on the way to a diode's operating point; applied
+> to an unknown with no exponential in it, it throttles a good linear step to roughly
+> `vt·ln(...)` ≈ 0.2 V per iteration, so a node whose solution is 100 V needs ~475 iterations
+> and `NewtonConfig::max_iters` (100) cuts it off first. A plain linear resistor divider —
+> bring-up rung 1 — failed to converge above about 20 V, and a 100 A branch current was clamped
+> as though it were a junction voltage. Every golden circuit runs at 5 V or less, which is why
+> 25/25 stayed green over it.
+>
+> Opting in rather than out is the safe direction: a model that forgets to claim a junction
+> converges more slowly or needs damping, whereas the previous default made every circuit
+> above a few volts unsolvable. `va-abi`'s `Diode`/`Bjt` claim their terminals; a
+> `va-codegen`-generated model claims its node unknowns exactly when its source contains an
+> exponential (`exp`, or `limexp`, which the frontend lowers to the same `Builtin::Exp`),
+> scanned once at build time. Auxiliary branch/`idt` unknowns never claim it — they carry
+> flows, and clamping a current with a voltage-shaped rule is meaningless.
+
 > **Revision (§6 change, 2026-09-05):** added `NodeDecl.access: Option<String>` and
 > `NodeDecl.units: Option<String>` (§ quantity reporting) — the node's discipline's **potential**
 > nature's `access` function name (`"V"`, `"Temp"`, `"Omega"`) and `units` string (`"V"`, `"K"`,

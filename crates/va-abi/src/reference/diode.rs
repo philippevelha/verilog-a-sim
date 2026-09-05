@@ -57,6 +57,12 @@ impl ModelInstance for Diode {
         &self.terminals
     }
 
+    /// Both terminals sit across the `Is*(exp(V/(N*vt)) - 1)` junction this model is,
+    /// so both are exactly what [`ModelInstance::unknown_is_junction`] is for.
+    fn unknown_is_junction(&self, _i: usize) -> bool {
+        true
+    }
+
     fn load(
         &self,
         x: &[f64],

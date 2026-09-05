@@ -148,6 +148,12 @@ pub fn build_instance(
     }
     let params: Vec<f64> = module.params.iter().map(|p| p.default).collect();
 
+    // Scanned once here rather than per Newton iteration: `unknown_is_junction` is consulted
+    // for every unknown on every solve, and the answer is a property of the source text.
+    let has_exponential = module
+        .exprs
+        .iter()
+        .any(|e| matches!(e, Expr::Call(Builtin::Exp, _)));
     let model = GeneratedModel {
         module: module.clone(),
         terminals: full,
@@ -155,6 +161,7 @@ pub fn build_instance(
         lowered,
         vt: VT,
         temp: TEMP,
+        has_exponential,
     };
 
     // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -173,6 +180,12 @@ struct GeneratedModel {
     lowered: Lowered,
     vt: f64,
     temp: f64,
+    /// Whether the module's source contains an exponential (`exp`, or `limexp`, which the
+    /// frontend lowers to the same [`Builtin::Exp`]). Drives
+    /// [`ModelInstance::unknown_is_junction`]: a model with no exponential must not be
+    /// step-limited, because the clamp exists to stop `exp(V/vt)` overflowing and does nothing
+    /// but throttle convergence anywhere else.
+    has_exponential: bool,
 }
 
 impl GeneratedModel {
@@ -1194,6 +1207,21 @@ impl ModelInstance for GeneratedModel {
     /// mirroring `unknown_kind`'s `Node`/`Branch` split above.
     fn unknown_abstol(&self, i: usize) -> Option<f64> {
         self.module.nodes.get(i).and_then(|n| n.abstol)
+    }
+
+    /// A node-kind unknown of a model whose source contains an exponential is treated as a
+    /// junction potential, so `va-core` clamps its Newton step (§ junction limiting).
+    ///
+    /// This is a per-*model* property, not a per-node one: the IR records where the `exp` is,
+    /// but not which node pair its argument ultimately reads, and a diode written
+    /// `I(a,c) <+ Is*(limexp(V(a,c)/vt) - 1)` wants both its terminals limited anyway.
+    /// Over-approximating within a model that genuinely has an exponential is the safe
+    /// direction — it costs convergence speed on a node that did not need it, whereas
+    /// under-approximating risks the overflow the clamp exists to prevent. Auxiliary
+    /// (branch-current/`idt`) unknowns are excluded: those carry flows, not junction
+    /// potentials, and clamping a current with a voltage-shaped rule is meaningless.
+    fn unknown_is_junction(&self, i: usize) -> bool {
+        self.has_exponential && i < self.module.nodes.len()
     }
 
     /// Emit this model's own noise sources (T5.2) — Interface β's noise channel, fed from the

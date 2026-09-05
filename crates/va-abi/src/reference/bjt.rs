@@ -63,6 +63,12 @@ impl ModelInstance for Bjt {
         &self.terminals
     }
 
+    /// Every terminal sits across one of the two `exp(V/vt)` junctions this model is
+    /// (base-emitter and base-collector), so all of them want junction limiting.
+    fn unknown_is_junction(&self, _i: usize) -> bool {
+        true
+    }
+
     fn load(
         &self,
         x: &[f64],

@@ -46,6 +46,39 @@ pub(crate) mod testutil {
     /// `va-abi::reference` device) — so a multi-unknown instance like `VSource` can have some
     /// of its unknowns overridden and others left at the solver's default in one wrapper,
     /// without double-stamping `inner.load()` via two separate wrapper instances.
+    /// Wraps any [`va_abi::ModelInstance`] and claims **every** one of its unknowns is a
+    /// junction potential, so a test can put a circuit back under the blanket step limiting
+    /// that `unknown_is_junction` replaced (§ junction limiting). Used to demonstrate that the
+    /// fix is load-bearing: the same linear circuit converges normally and fails through this
+    /// wrapper.
+    pub struct JunctionOverride<'a> {
+        pub inner: &'a dyn va_abi::ModelInstance,
+    }
+
+    impl va_abi::ModelInstance for JunctionOverride<'_> {
+        fn unknowns(&self) -> &[usize] {
+            self.inner.unknowns()
+        }
+        fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+            self.inner.unknown_kind(i)
+        }
+        fn state_len(&self) -> usize {
+            self.inner.state_len()
+        }
+        fn unknown_is_junction(&self, _i: usize) -> bool {
+            true
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &va_abi::AnalysisCtx,
+            state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::stamps::StampSink,
+        ) {
+            self.inner.load(x, ctx, state, sink)
+        }
+    }
+
     pub struct AbstolOverride<'a> {
         pub inner: &'a dyn va_abi::ModelInstance,
         pub overrides: &'a [(usize, f64)],
