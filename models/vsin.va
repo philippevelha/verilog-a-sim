@@ -1,0 +1,50 @@
+// Sinusoidal voltage source, written in Verilog-A — the `$abstime`-as-stimulus gate.
+//
+//     V(p, n) = offset + ampl * sin(2*pi*freq*$abstime + phase)
+//
+// The point of this model is that a stimulus needs no state. `$abstime` (LRM §9.17.1) is
+// absolute simulation time in seconds, so the source is a pure *function of time*, re-evaluated
+// at whatever timepoints the integrator happens to choose. Nothing here depends on the solution
+// vector, so the contribution's derivative with respect to every unknown is zero and the source
+// adds nothing to the Jacobian — it is excitation, not a nonlinearity. That is why writing a
+// waveform generator in Verilog-A does not require the model author to think about integration
+// at all, even though the circuit it drives very much does.
+//
+// `$bound_step` (LRM §9.17.2) is the other half. The transient controller sizes its steps from
+// the *circuit's* local truncation error, which is a statement about the solution's curvature —
+// it has no way to anticipate a feature of a stimulus that has not happened yet. A source that
+// knows its own timescale can say so, and `va-abi`'s `StampSink::bound_step` keeps the tightest
+// request across every instance that makes one. Measured on `circuits/vsin_rlc_probe.net`'s
+// circuit at a deliberately coarse `.tran 1e-4`: 824 accepted points and 0.094 % steady-state
+// amplitude error without it, 1347 points and 0.032 % with `ppc = 64`.
+//
+// Sign convention: `V(p, n) <+ expr` forces the potential of `p` above `n` to `expr`, the same
+// convention SPICE's `V<name> n+ n- SIN(...)` uses, so a deck line and this model's terminal
+// order map one-to-one with no sign fixup.
+//
+// **Limitations.** The LRM's `sin`-source has damping and delay parameters; this one has
+// neither — it starts at t = 0 and runs undamped forever. `phase` is in degrees, matching
+// SPICE's `SIN` rather than Verilog-A's radian-valued `sin()`, because the deck syntax this is
+// meant to stand in for spells it that way.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module vsin(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real ampl   = 1.0;                 // amplitude (V)
+    parameter real freq   = 1e3 from (0:inf);    // frequency (Hz)
+    parameter real offset = 0.0;                 // DC offset (V)
+    parameter real phase  = 0.0;                 // phase at t=0 (degrees)
+    // Requested points per cycle, as a `$bound_step` hint. The default is deliberately loose
+    // enough to be inert whenever the deck already asks for a finer step — a gate on this model
+    // should measure `$abstime` and `sin`, not the step controller.
+    parameter real ppc    = 32 from (1:inf);
+
+    analog begin
+        V(p, n) <+ offset
+                 + ampl * sin(`M_TWO_PI * freq * $abstime + phase * `M_PI / 180.0);
+        $bound_step(1.0 / (freq * ppc));
+    end
+endmodule

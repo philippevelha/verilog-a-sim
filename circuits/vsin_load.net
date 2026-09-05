@@ -1,0 +1,36 @@
+* Verilog-A sine source into a resistive load -- the `vsin` golden gate (Tier A).
+* A compiled models/vsin.va (1 V amplitude, 1 kHz) driving `in`, loaded by 1 kOhm to ground.
+* The source forces its own terminal voltage, so
+*   V(in) = sin(2*pi*1000*t) volts
+* exactly, for the full 20 ms (20 cycles) window.
+*
+* Resistive-only, for the same two reasons circuits/abstime_ramp.net is:
+*   1. Every timepoint is an exact algebraic solve, so the comparison against golden measures
+*      `$abstime` and `sin()` and nothing else -- no integration error can contribute to it.
+*      A reactive load would fold the integrator's accuracy into a gate meant for the source.
+*   2. With nothing reactive, QSPICE's "solve the DC operating point first" lands on exactly
+*      the V(in)=0 our own cold start begins from (sin(0)=0), so the golden deck needs no `UIC`.
+*      That matters here more than anywhere: `UIC` shifts QSPICE's own `time` variable by a
+*      fixed ~1e-7 s (measured 2026-08-06, see docs/validation.md), and `time` is precisely the
+*      quantity under test -- the offset would appear as a phase error and nothing else.
+*
+* `models/vsin.va`'s default `ppc = 32` asks for at most 31.25 us per step, which is looser than
+* the 2 us this deck requests, so `$bound_step` is inert here by construction. That is on
+* purpose: this gate is about `$abstime`, not about step control.
+*
+* Why 2 us and not 20 us: both simulators compute this waveform to machine precision, so the
+* only real error source is the harness resampling the two onto a shared timebase, and linear
+* interpolation of a sine costs (w*dt)^2/8. At 20 us that is ~2e-3 -- the gate passed at
+* 9.901e-4 against a 1e-3 tolerance, i.e. it was measuring the resampler rather than `$abstime`,
+* and 99 % of the budget was spent before the model was even consulted. At 2 us the same gate
+* reports 1.018e-5: a 97x drop for a 10x finer step, which is the quadratic scaling that
+* confirms the residual is interpolation and not either simulator. Do not coarsen this step
+* without re-deriving that number.
+*
+* QSPICE reference: `V1 in 0 SIN(0 1 1k)` -- the same device, described independently. Neither
+* side can be tuned toward the other; one is a Verilog-A expression in simulation time, the
+* other is a built-in SPICE waveform.
+X1 in gnd vsin ampl=1 freq=1e3
+R1 in gnd 1000
+.tran 2u 20m
+.end

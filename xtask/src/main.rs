@@ -73,6 +73,7 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/rectifier.net", Some("models/diode.va")),
     ("circuits/ring_osc.net", None),
     ("circuits/abstime_ramp.net", Some("models/abstime_ramp.va")),
+    ("circuits/vsin_load.net", Some("models/vsin.va")),
 ];
 
 /// The `.ac` small-signal circuits `validate`/`gen-golden` know how to drive (T5).
@@ -600,14 +601,28 @@ const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str, Option<f64>)] = &[
 /// default operating-point solve lands on the same `t = 0` state our own cold start begins
 /// from. A future behavioral entry that *does* contain a reactive element would have to
 /// reconcile the two, not simply inherit this exemption.
-const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[(
-    "circuits/abstime_ramp.net",
-    "D1",
-    // `I(p,n) <+ K*$abstime` with K = 1 A/s. Verilog-A's `I(p,n)` and SPICE's `B n+ n- I=`
-    // share a sign convention (current out of the first node), so the terminal order carries
-    // over unchanged — no sign fixup, which is what keeps this a translation rather than a tuning.
-    "B1 out 0 I=1*time",
-)];
+const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[
+    (
+        "circuits/abstime_ramp.net",
+        "D1",
+        // `I(p,n) <+ K*$abstime` with K = 1 A/s. Verilog-A's `I(p,n)` and SPICE's `B n+ n- I=`
+        // share a sign convention (current out of the first node), so the terminal order carries
+        // over unchanged — no sign fixup, which is what keeps this a translation rather than a
+        // tuning.
+        "B1 out 0 I=1*time",
+    ),
+    (
+        "circuits/vsin_load.net",
+        "X1",
+        // `V(p,n) <+ ampl*sin(2*pi*freq*$abstime)` with ampl = 1 V, freq = 1 kHz, no offset,
+        // no phase. SPICE's `SIN(offset amplitude frequency)` is the same waveform written as a
+        // built-in rather than as an expression in `$abstime`, and `V n+ n-` matches Verilog-A's
+        // `V(p,n)` sign convention, so terminal order carries over unchanged. The two
+        // descriptions share no arithmetic, which is what makes this a comparison rather than a
+        // restatement.
+        "V1 in 0 SIN(0 1 1k)",
+    ),
+];
 
 /// Like [`QSPICE_NATIVE_CIRCUITS`], for the `.ac` small-signal circuits (T5):
 /// `circuits/rc_ac.net` is a pure `R`/`C`/`V` deck needing no model translation, just complex
