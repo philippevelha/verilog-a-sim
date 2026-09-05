@@ -341,15 +341,19 @@ pub fn run_sim(
         }
     } else if analysis == Analysis::Ac {
         let response = solve_ac(&net, &compiled)?;
-        let currents = branch_currents(&net, &compiled)?;
-        report_ac(&net, &currents, &response);
+        report_ac(
+            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
+            &response,
+        );
         if let Some(path) = plot {
             plot::plot_ac(path, &net, &response).with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote AC plot to {path}");
         }
     } else if analysis == Analysis::Noise {
         let spectrum = solve_noise(&net, &compiled)?;
-        report_noise(&net, &spectrum);
+        // Not `select_quantities`: a `.noise` run reports one output the card itself names,
+        // so the table is consulted for that output's *units*, not to choose columns.
+        report_noise(&net, &quantities(&net, &compiled)?, &spectrum);
         if let Some(path) = plot {
             plot::plot_noise(path, &spectrum).with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote noise plot to {path}");
@@ -957,6 +961,20 @@ impl Quantity {
         } else {
             format!("{} = {:.6e}{unit}", self.label, value)
         }
+    }
+}
+
+/// Bracket a compound unit so it can safely carry an exponent or a denominator
+/// (§ quantity reporting).
+///
+/// `rads/s` squared per hertz is `(rads/s)^2/Hz`; written unbracketed as `rads/s^2/Hz` it reads
+/// as rads per second-squared per hertz, which is a different quantity. A simple unit like `V`
+/// needs no brackets and keeps the conventional `V^2/Hz` spelling.
+fn bracket_unit(unit: &str) -> String {
+    if unit.contains(['/', '*', '-', ' ']) {
+        format!("({unit})")
+    } else {
+        unit.to_string()
     }
 }
 
@@ -1648,10 +1666,18 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
 
     if !has_noise_sources(&refs, &op.x) {
+        // The trailing note used to say Verilog-A's noise functions "are not lowered yet, so a
+        // `--model`-compiled device is silent". That stopped being true when T5.3/T5.6 landed —
+        // `circuits/resistor_noise_va.net` gates a *compiled* model's own `white_noise()`
+        // against golden — so the message was telling users something false about why their
+        // spectrum was empty, and pointing them away from the real cause.
         bail!(
             "no device in this circuit contributes any noise, so the spectrum would be \
-             identically zero — note that Verilog-A `white_noise()`/`flicker_noise()` is not \
-             lowered yet, so a `--model`-compiled device is silent (see va_abi::noise)"
+             identically zero. A device is only a noise source if it says so: a resistor and \
+             the reference diode contribute thermal/shot noise inherently, and a compiled \
+             Verilog-A model contributes exactly what its own `white_noise()`/\
+             `flicker_noise()`/`noise_table()` calls declare — a model with none is silent by \
+             construction, not by omission in this simulator"
         );
     }
 
@@ -1987,7 +2013,7 @@ fn report_sweep(
 /// compiled Verilog-A model can claim internal unknowns of its own from the same counter (§
 /// [`build_instances`]), so "one branch row per source, contiguously after the nodes" is only
 /// true for a deck of pure primitives.
-fn report_ac(net: &Netlist, currents: &[(String, usize)], response: &va_acnoise::ac::AcResponse) {
+fn report_ac(quantities: &[Quantity], response: &va_acnoise::ac::AcResponse) {
     use va_acnoise::ac::{magnitude, phase};
     println!(
         "AC analysis ({} point(s), f={:e} to {:e} Hz):",
@@ -1995,19 +2021,26 @@ fn report_ac(net: &Netlist, currents: &[(String, usize)], response: &va_acnoise:
         response.f.first().copied().unwrap_or(0.0),
         response.f.last().copied().unwrap_or(0.0)
     );
-    let polar = |z| format!("{:.6e}∠{:.2}°", magnitude(z), phase(z).to_degrees());
     for (f, x) in response.f.iter().zip(&response.x) {
-        let mut cols: Vec<String> = net
-            .node_order
+        let cols: Vec<String> = quantities
             .iter()
-            .enumerate()
-            .map(|(i, name)| format!("V({name})={}", polar(x[i])))
+            .filter_map(|q| {
+                let z = *x.get(q.index)?;
+                // The magnitude of a small-signal response carries the quantity's own unit; the
+                // phase is an angle whatever the discipline, so it never takes one.
+                let unit = if q.unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", q.unit)
+                };
+                Some(format!(
+                    "{}={:.6e}{unit}∠{:.2}°",
+                    q.label,
+                    magnitude(z),
+                    phase(z).to_degrees()
+                ))
+            })
             .collect();
-        cols.extend(
-            currents
-                .iter()
-                .map(|(name, idx)| format!("I({name})={}", polar(x[*idx]))),
-        );
         println!("  f={f:.6e}Hz  {}", cols.join("  "));
     }
 }
@@ -2015,12 +2048,35 @@ fn report_ac(net: &Netlist, currents: &[(String, usize)], response: &va_acnoise:
 /// Print the noise spectrum: one line per frequency, the output PSD in V²/Hz alongside the more
 /// commonly-read amplitude density V/√Hz (just its square root — printed because datasheets and
 /// noise plots are conventionally in nV/√Hz, not V²/Hz), then the band-integrated RMS total.
-fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
+fn report_noise(
+    net: &Netlist,
+    quantities: &[Quantity],
+    spectrum: &va_acnoise::noise::NoiseSpectrum,
+) {
     let card = net.noise.as_ref();
     let output = card.map(|c| c.output.as_str()).unwrap_or("?");
     let source = card.map(|c| c.source.as_str()).unwrap_or("?");
+    // A power spectral density is in (whatever the observed quantity is)² per hertz, so the
+    // output node's own discipline sets every unit printed below — `V^2/Hz` is only right
+    // because the output is usually a voltage. `rads/s^2/Hz` is what a mechanical output
+    // would correctly read.
+    let out_q = quantities.iter().find(|q| q.name == output);
+    let out_label = out_q.map_or_else(|| format!("V({output})"), |q| q.label.clone());
+    let u = bracket_unit(out_q.map_or("V", |q| q.unit.as_str()));
+    // The input-referred spectrum is referred to the named source, so it carries *that*
+    // quantity's unit rather than the output's — the two differ whenever the analysis crosses
+    // disciplines (an electrical output driven by a mechanical input, say). Resolved through
+    // the source device's own first terminal, falling back to the output's unit when the deck
+    // names a source this circuit does not have.
+    let src_u = net
+        .devices
+        .iter()
+        .find(|d| d.name == source)
+        .and_then(|d| d.terminals.first())
+        .and_then(|&t| quantities.iter().find(|q| q.index == t && q.is_potential))
+        .map_or_else(|| u.clone(), |q| bracket_unit(&q.unit));
     println!(
-        "Noise analysis at V({output}) ({} point(s), f={:e} to {:e} Hz):",
+        "Noise analysis at {out_label} ({} point(s), f={:e} to {:e} Hz):",
         spectrum.f.len(),
         spectrum.f.first().copied().unwrap_or(0.0),
         spectrum.f.last().copied().unwrap_or(0.0)
@@ -2028,21 +2084,21 @@ fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
     for (i, (f, psd)) in spectrum.f.iter().zip(&spectrum.psd).enumerate() {
         // The input-referred column exists only when the card named a resolvable source.
         let referred = match spectrum.input_psd.get(i) {
-            Some(inp) => format!("  Sin={inp:.6e} V^2/Hz"),
+            Some(inp) => format!("  Sin={inp:.6e} {src_u}^2/Hz"),
             None => String::new(),
         };
         println!(
-            "  f={f:.6e}Hz  S={psd:.6e} V^2/Hz  ({:.6e} V/sqrt(Hz)){referred}",
+            "  f={f:.6e}Hz  S={psd:.6e} {u}^2/Hz  ({:.6e} {u}/sqrt(Hz)){referred}",
             psd.sqrt()
         );
     }
     println!(
-        "  total integrated output noise = {:.6e} V rms",
+        "  total integrated output noise = {:.6e} {u} rms",
         spectrum.total
     );
     if !spectrum.input_psd.is_empty() {
         println!(
-            "  total integrated input-referred noise (at {source}) = {:.6e} V rms",
+            "  total integrated input-referred noise (at {source}) = {:.6e} {src_u} rms",
             spectrum.input_total
         );
     }
@@ -2070,7 +2126,7 @@ fn report_noise(net: &Netlist, spectrum: &va_acnoise::noise::NoiseSpectrum) {
         println!("  per-device contribution to the integrated output noise:");
         for (name, power) in shares {
             let pct = if sum > 0.0 { 100.0 * power / sum } else { 0.0 };
-            println!("    {name:<8} {:.6e} V rms  ({pct:5.1}%)", power.sqrt());
+            println!("    {name:<8} {:.6e} {u} rms  ({pct:5.1}%)", power.sqrt());
         }
     }
 }
@@ -4377,5 +4433,64 @@ R1 out gnd 1000
 
         let err = select_quantities(&all, &["midd".to_string()]).expect_err("typo must error");
         assert!(err.to_string().contains("midd"), "{err}");
+    }
+
+    /// A power spectral density is in (observed quantity)² per hertz, so a compound unit has to
+    /// be bracketed before it carries the exponent — `(rads/s)^2/Hz`, not `rads/s^2/Hz`, which
+    /// reads as rads per second-squared per hertz and is a different quantity. A simple unit
+    /// keeps the conventional unbracketed spelling.
+    #[test]
+    fn compound_units_are_bracketed_before_taking_an_exponent() {
+        assert_eq!(bracket_unit("V"), "V");
+        assert_eq!(bracket_unit("K"), "K");
+        assert_eq!(bracket_unit("rads/s"), "(rads/s)");
+        assert_eq!(bracket_unit("N-m"), "(N-m)");
+        assert_eq!(bracket_unit(""), "");
+    }
+
+    /// The case AC and noise reporting exist for: one solution vector holding two disciplines.
+    /// Each quantity must carry its *own* access function and units, since a report that called
+    /// the mechanical node a voltage would be stating something false about what was solved.
+    #[test]
+    fn a_mixed_discipline_circuit_reports_each_quantity_in_its_own_terms() {
+        let src = "nature Angular_Velocity units=\"rads/s\"; access=Omega; abstol=1e-6; endnature \
+                   nature Angular_Force units=\"N-m\"; access=Tau; abstol=1e-6; endnature \
+                   discipline rotational_omega potential Angular_Velocity; \
+                   flow Angular_Force; enddiscipline \
+                   nature Voltage units=\"V\"; access=V; abstol=1u; endnature \
+                   nature Current units=\"A\"; access=I; abstol=1p; endnature \
+                   discipline electrical potential Voltage; flow Current; enddiscipline \
+                   module motor(shaft, p, n); inout shaft, p, n; \
+                   rotational_omega shaft; electrical p, n; \
+                   parameter real km = 4.5; parameter real kf = 6.2; \
+                   parameter real d = 0.1; parameter real r = 5.0; \
+                   analog begin \
+                   V(p, n) <+ r * I(p, n) + km * Omega(shaft); \
+                   Tau(shaft) <+ d * Omega(shaft) - kf * I(p, n); end endmodule";
+        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
+        let net =
+            va_netlist::parser::parse("V1 drive gnd DC 1\nX1 shaft drive gnd motor\n.op\n.end\n")
+                .expect("parses");
+        let qs = quantities(&net, &design.modules).expect("quantities");
+
+        let shaft = qs.iter().find(|q| q.name == "shaft").expect("shaft");
+        assert_eq!(shaft.label, "Omega(shaft)");
+        assert_eq!(shaft.unit, "rads/s");
+        let drive = qs.iter().find(|q| q.name == "drive").expect("drive");
+        assert_eq!(drive.label, "V(drive)");
+        assert_eq!(drive.unit, "V");
+        // Both disciplines really are in one solution vector, at distinct indices.
+        assert_ne!(shaft.index, drive.index);
+
+        // And the circuit solves to its closed form, so those labels sit on real numbers:
+        // I = V/(r + km*kf/d), Omega = kf*I/d.
+        let op = solve_dc(&net, &design.modules).expect("solves");
+        let i_expected = 1.0 / (5.0 + 4.5 * 6.2 / 0.1);
+        let omega_expected = 6.2 * i_expected / 0.1;
+        assert!(
+            (op.x[shaft.index] - omega_expected).abs() < 1e-9,
+            "Omega(shaft) = {}, want {omega_expected}",
+            op.x[shaft.index]
+        );
     }
 }
