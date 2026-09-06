@@ -2,6 +2,14 @@
 
 **Status: stage 1 RATIFIED and implemented, 2026-09-01.** Stages 2-3 remain proposed.
 
+**2026-09-06** — the other half of implement-or-refuse landed first: a transient run now
+**refuses** a model calling `absdelay` or any `laplace_*`, instead of warning and printing
+a folded waveform (`va_cli::refuse_transient_approximations`). That is this document's own
+§4 principle — "an error naming the limit, never a quietly wrong waveform" — applied to the
+operators while stage 2 is still outstanding. DC, AC and noise are untouched and remain
+correct, since these operators genuinely settle to the folded value in a static solve.
+Stage 2 is what lifts the refusal.
+
 > Stage 1 outcome: `absdelay` is now exact in AC and unchanged (identity) at DC; transient
 > still folds, warned and counted. Validated against the closed form rather than QSPICE —
 > `models/delay_line.va` + `circuits/delay_ac.net` check `1/(1 + (R1/r)e^(-jwt))` point by

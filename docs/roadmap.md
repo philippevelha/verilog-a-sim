@@ -4015,6 +4015,15 @@ noted. Recorded so the next pass does not have to re-derive them.
 - [ ] **`I(<port>)` cannot sum a flow contribution made inside a `case` arm or a loop.** A
       genuine, narrow elaboration restriction, correctly *refused* rather than silently
       mis-summed. Not an expired premise; listed so it is not mistaken for one.
+- [x] **`absdelay`/`laplace_*` folded in transient, behind a stderr warning.** Not an expired
+      premise — the fold is still all this engine can do — but the same silent-wrong-answer
+      shape, and the warning was the wrong instrument: it scrolls past and does not survive
+      being piped into a file next to the waveform. A `.tran` run now **refuses** such a model
+      outright (`refuse_transient_approximations`), naming every offender and pointing at the
+      analyses that remain correct. Fixing this also closed a hole in the old check: it read
+      only the `--model` path with `read_to_string`, so pointing it at a *directory* — the
+      documented way to use a model library — silently skipped the check entirely. Lifting the
+      refusal is `docs/proposals/absdelay.md` stage 2.
 - [ ] **Analog events other than `initial_step`** — see the next section, which is where that
       whole family is tracked.
 

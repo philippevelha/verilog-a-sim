@@ -59,7 +59,7 @@ pub enum Analysis {
 }
 
 /// Analog operators this engine **approximates in a transient run**, paired with what it
-/// actually computes instead. Reported by [`warn_transient_approximations`].
+/// actually computes instead. Enforced by [`refuse_transient_approximations`].
 ///
 /// Deliberately not a list of everything unimplemented: these are the constructs that
 /// produce a *plausible number that is wrong* rather than an error. `transition` and
@@ -87,23 +87,84 @@ const TRANSIENT_APPROXIMATIONS: &[(&str, &str)] = &[
 /// `Keyword` token. (`absdelay` only became reserved on 2026-08-31; before that this check
 /// would have had to match raw identifiers and would have been the weaker for it.)
 ///
-/// A warning rather than an error, on purpose: the fold is *correct* for DC and AC, where
-/// these operators settle to their steady-state value, so refusing the model outright
-/// would block analyses that are perfectly sound. What is not acceptable is a transient
-/// run returning a confident waveform without saying that one of its operators was never
-/// really evaluated.
-fn warn_transient_approximations(src: &str, path: &str) {
-    for name in approximations_in(src) {
-        let effect = TRANSIENT_APPROXIMATIONS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, e)| *e)
-            .unwrap_or("is approximated");
-        eprintln!(
-            "[va-cli] warning: {path} uses `{name}`, which this engine {effect} \
-             in a transient run"
-        );
+/// **An error, not a warning** (changed 2026-09-06). The fold is *correct* for DC and AC, where
+/// these operators settle to their steady-state value, so those analyses are untouched and stay
+/// perfectly sound. A transient run is the case where the fold is simply wrong, and a warning
+/// on stderr is not enough: it scrolls past, it does not survive being piped into a file
+/// alongside the waveform, and the numbers that follow it look exactly like numbers that were
+/// computed. `docs/proposals/absdelay.md` states the principle for this operator family
+/// directly - "an error naming the limit, never a quietly wrong waveform".
+///
+/// The real fix is that proposal's stage 2 (a ring buffer of `(t, value)` on the state channel,
+/// with an interpolation weight carried through AD); until it lands, refusing is the honest
+/// half of implement-or-refuse.
+///
+/// # Errors
+///
+/// If any model source calls an operator in [`TRANSIENT_APPROXIMATIONS`].
+fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
+    // Every offender, not just the first: a model library hitting two of these should say so
+    // once rather than make the reader fix them one run at a time.
+    let mut found: Vec<String> = Vec::new();
+    for (path, src) in models {
+        for name in approximations_in(src) {
+            let effect = TRANSIENT_APPROXIMATIONS
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, e)| *e)
+                .unwrap_or("is approximated");
+            found.push(format!("{path} uses `{name}`, which {effect}"));
+        }
     }
+    if found.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "this engine does not evaluate the following in a transient run:\n  - {}\n\n  \
+         A `.tran` result would be a plausible waveform that is simply wrong, so it is \
+         refused rather than printed.\n\n  \
+         DC (`.op`/`.dc`), AC (`--ac`) and noise (`--noise`) are unaffected: these \
+         operators settle to exactly this value in a static solve, so those analyses \
+         are correct.\n\n  \
+         Tracking: `docs/proposals/absdelay.md` stage 2.",
+        found.join("\n  - ")
+    );
+}
+
+/// Every model source `sim` actually compiled, as `(path, source)`.
+///
+/// Mirrors [`compile_model_path`]'s file-or-directory handling rather than re-deriving it: the
+/// previous check read only `model` itself with `std::fs::read_to_string`, so pointing
+/// `--model` at a *directory* - the documented way to use a real model library - silently
+/// skipped the check entirely, which is precisely the case a photonic library would have hit.
+fn model_sources(model: Option<&str>) -> Vec<(String, String)> {
+    let Some(path) = model else {
+        return Vec::new();
+    };
+    let p = std::path::Path::new(path);
+    let files: Vec<std::path::PathBuf> = if p.is_dir() {
+        let Ok(rd) = std::fs::read_dir(p) else {
+            return Vec::new();
+        };
+        rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|f| {
+                matches!(
+                    f.extension().and_then(|e| e.to_str()),
+                    Some("va") | Some("vams")
+                )
+            })
+            .collect()
+    } else {
+        vec![p.to_path_buf()]
+    };
+    files
+        .into_iter()
+        .filter_map(|f| {
+            std::fs::read_to_string(&f)
+                .ok()
+                .map(|src| (f.display().to_string(), src))
+        })
+        .collect()
 }
 
 /// The [`TRANSIENT_APPROXIMATIONS`] operators `src` actually calls, in table order, each named
@@ -260,7 +321,7 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
 /// with no analog block of its own.
 ///
 /// A warning rather than an error, for the same reason as
-/// [`warn_transient_approximations`]: a file may legitimately hold a circuit module *alongside*
+/// [`refuse_transient_approximations`]: a file may legitimately hold a circuit module *alongside*
 /// the components it instantiates — `external/basic/circuit1.va` does exactly that, and its
 /// `vsrc`/`resistor` are perfectly placeable. What is not acceptable is the current silence, in
 /// which the module is compiled, never placed, and never mentioned, so the run exits 0 with a
@@ -326,12 +387,9 @@ pub fn run_sim(
     }
 
     if analysis == Analysis::Transient {
-        // Said *before* the numbers, so the caveat is not buried under a waveform.
-        if let Some(path) = model {
-            if let Ok(src) = std::fs::read_to_string(path) {
-                warn_transient_approximations(&src, path);
-            }
-        }
+        // Checked *before* solving, so the refusal is not buried under a waveform -- and so no
+        // waveform is produced at all.
+        refuse_transient_approximations(&model_sources(model))?;
         let wf = solve_transient(&net, &compiled, integration)?;
         let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
         report_transient(&shown, &wf);
@@ -3066,6 +3124,56 @@ mod tests {
     /// quiet on models using none, and is driven by the *lexer* rather than a substring
     /// search -- so the word in a comment, or an identifier merely containing it, is ignored.
     /// That precision is only available because `absdelay` became a reserved word on
+    /// A transient run **refuses** a model whose operator this engine only folds, rather than
+    /// printing a waveform that looks computed. DC and AC on the same model stay fine, which is
+    /// the whole reason this is analysis-scoped rather than a compile-time rejection.
+    #[test]
+    fn a_transient_run_refuses_an_approximated_operator() {
+        let model = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/laplace_lowpass.va"
+        );
+        let src = std::fs::read_to_string(model).expect("read laplace_lowpass.va");
+        let models = vec![(model.to_string(), src)];
+
+        let err = refuse_transient_approximations(&models).expect_err("laplace_nd is folded");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("laplace_nd"), "names the operator: {msg}");
+        assert!(msg.contains("refused"), "says it refused: {msg}");
+        assert!(
+            msg.contains("--ac") && msg.contains("unaffected"),
+            "points at the analyses that are still correct: {msg}"
+        );
+
+        // A model using none of them is not refused.
+        let plain = vec![(
+            "r.va".to_string(),
+            "module r(p,n); electrical p,n; analog I(p,n) <+ V(p,n); endmodule".to_string(),
+        )];
+        refuse_transient_approximations(&plain).expect("an ordinary model is fine");
+    }
+
+    /// `--model` may name a *directory* -- the documented way to use a real model library --
+    /// and the check must see every file in it. The previous implementation read only the path
+    /// itself with `read_to_string`, which fails on a directory and was silently skipped, so a
+    /// library was exactly the case that escaped the check.
+    #[test]
+    fn the_approximation_check_sees_a_model_directory() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
+        let srcs = model_sources(Some(dir));
+        assert!(
+            srcs.len() > 1,
+            "a directory must yield every model in it, got {}",
+            srcs.len()
+        );
+        assert!(
+            srcs.iter().any(|(p, _)| p.contains("laplace_lowpass")),
+            "including the one that would be refused"
+        );
+        refuse_transient_approximations(&srcs)
+            .expect_err("the directory contains an approximated model");
+    }
+
     /// 2026-08-31; before that it lexed as a plain identifier.
     #[test]
     fn transient_approximations_are_detected_by_token_not_by_substring() {
