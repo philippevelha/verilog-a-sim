@@ -284,7 +284,11 @@ impl Parser<'_> {
     /// if any.
     ///
     /// A monitored event fires on a condition evaluated *as the solution moves*: `cross`, its
-    /// one-sided sibling `above`, `timer`, and `absdelta`. This engine evaluates none of them,
+    /// one-sided sibling `above`, `timer`, and `absdelta`. A **bare** `@(cross(...))` is
+    /// implemented (§ `@(cross)`) and is handled before this check ever runs; `cross` is still
+    /// listed here so that a *compound* trigger containing one is refused rather than falling
+    /// through to the discard-and-run-unconditionally path, which is the 0.9.1 defect. This
+    /// engine evaluates none of the rest,
     /// and the distinction that matters is that they never fire in a **static** solve either —
     /// a DC operating point has no trajectory to cross anything. So a discarded trigger whose
     /// body then runs unconditionally is wrong in *every* analysis, not just transient, which
@@ -325,6 +329,53 @@ impl Parser<'_> {
             i += 1;
         }
         None
+    }
+
+    /// Whether the trigger starting at `self.pos` is exactly `cross ( ... )` — i.e. the whole
+    /// event control is `@(cross(...))`, not a compound like `initial_step or cross(...)`,
+    /// which stays unsupported and is caught before this is reached.
+    fn trigger_is_bare_cross(&self) -> bool {
+        matches!(
+            (self.toks.get(self.pos), self.toks.get(self.pos + 1)),
+            (Some(Token::Keyword(kw)), Some(Token::LParen)) if kw.as_str() == "cross"
+        )
+    }
+
+    /// Parse `cross(expr [, dir [, time_tol [, expr_tol]]])` from just after the `@(`, leaving
+    /// the trigger's closing `)` unconsumed, and return the synthetic condition
+    /// `@cross(expr, dir)` that elaboration turns into a `va_ir::CrossSite`.
+    ///
+    /// `dir` defaults to `0` — the LRM's "either direction" — when omitted. The two tolerance
+    /// arguments are parsed and **discarded**: this engine resolves a crossing through the
+    /// integrator's own step control rather than a per-site tolerance, which is a stated
+    /// limitation rather than a silent one (`docs/token-reference.md`).
+    ///
+    /// The name `@cross` cannot collide with anything a user writes: `@` is not an identifier
+    /// character, so no source can produce a call by that name.
+    fn parse_cross_trigger(&mut self) -> Result<ExprRef, FrontendError> {
+        self.pos += 1; // `cross`
+        self.eat(&Token::LParen)?;
+        let expr = self.parse_expr()?;
+        let mut args = vec![expr];
+        let mut extra = 0;
+        while self.at(&Token::Comma) {
+            self.pos += 1;
+            let e = self.parse_expr()?;
+            if extra == 0 {
+                args.push(e); // the direction
+            }
+            extra += 1;
+        }
+        self.eat(&Token::RParen)?;
+        if args.len() == 1 {
+            // No direction written: the LRM's default is both edges, spelled `0`.
+            let zero = self.push(ExprAst::Number(0.0));
+            args.push(zero);
+        }
+        Ok(self.push(ExprAst::Call {
+            name: "@cross".to_string(),
+            args,
+        }))
     }
 
     fn skip_balanced_parens(&mut self) -> Result<(), FrontendError> {
@@ -1530,6 +1581,19 @@ impl Parser<'_> {
             Some(Token::At) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
+                if self.trigger_is_bare_cross() {
+                    let cond = self.parse_cross_trigger()?;
+                    self.eat(&Token::RParen)?;
+                    let body = self.parse_stmt()?;
+                    return Ok(Stmt::If {
+                        cond,
+                        then_: vec![body],
+                        else_: Vec::new(),
+                    });
+                }
+                // A *compound* trigger containing `cross`, or any other monitored event, is
+                // still refused: this parser can honour neither half, and discarding the
+                // trigger runs the body unconditionally (§ v0.9.1).
                 if let Some(event) = self.monitored_event_in_trigger() {
                     return self.err(format!(
                         "`@({event}(...))` is not supported: this engine cannot schedule a \
@@ -3056,34 +3120,77 @@ mod tests {
         assert!(matches!(body[1], Stmt::Contribute { .. }));
     }
 
-    /// A **monitored** trigger is refused, not discarded.
+    /// A **bare** `@(cross(...))` parses into the same guarded-`if` shape `@(initial_step)`
+    /// desugars to, with the trigger's expression and direction carried on the condition for
+    /// elaboration to turn into a `va_ir::CrossSite`.
     ///
-    /// These two tests previously asserted the opposite — that the trigger was dropped and the
-    /// body "still runs unconditionally". That was the bug: `cross` never fires in a static
-    /// solve and cannot be scheduled in transient, so running its body was wrong in every
-    /// analysis, silently. Refusing is the conservative reading; scheduling it is the
-    /// roadmap's analog-event work.
+    /// This test asserted the opposite twice over: first that the trigger was discarded and the
+    /// body ran unconditionally (the pre-0.9.1 bug), then that it was refused (0.9.1). It now
+    /// runs, which is what 0.9.3 implements.
     #[test]
-    fn a_monitored_event_trigger_is_refused() {
-        let err = parse_err(
+    fn a_bare_cross_trigger_parses_into_a_guarded_body() {
+        let m = parse_src(
             "module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0, 1)) begin x = 1.0; end I(a, b) <+ x; end endmodule",
         );
-        assert!(err.contains("cross"), "names the event: {err}");
-        assert!(
-            err.contains("not supported") && err.contains("initial_step"),
-            "says what is supported instead: {err}"
-        );
+        let body = analog_body(&m);
+        match &body[0] {
+            Stmt::If { cond, then_, else_ } => {
+                assert!(else_.is_empty());
+                assert!(matches!(&then_[0], Stmt::Block(inner)
+                    if matches!(inner[0], Stmt::Assign { .. })));
+                match m.expr(*cond) {
+                    ExprAst::Call { name, args } => {
+                        assert_eq!(name, "@cross", "the synthetic, unwritable trigger name");
+                        assert_eq!(args.len(), 2, "monitored expression and direction");
+                    }
+                    other => panic!("expected the synthetic trigger call, got {other:?}"),
+                }
+            }
+            other => panic!("expected a guarded if, got {other:?}"),
+        }
     }
 
-    /// Caught anywhere in the trigger, not just at its head — a compound
-    /// `initial_step or cross(...)` cannot be honoured either, and treating it as a plain
-    /// `initial_step` would silently drop the half this engine cannot do.
+    /// The direction argument is optional, and defaults to the LRM's `0` (either edge).
     #[test]
-    fn a_monitored_event_is_refused_inside_a_compound_trigger() {
+    fn a_cross_trigger_without_a_direction_defaults_to_either() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        let Stmt::If { cond, .. } = &body[0] else {
+            panic!("expected a guarded if")
+        };
+        let ExprAst::Call { args, .. } = m.expr(*cond) else {
+            panic!("expected the trigger call")
+        };
+        assert_eq!(args.len(), 2, "a direction is synthesised when omitted");
+        assert!(matches!(m.expr(args[1]), ExprAst::Number(d) if *d == 0.0));
+    }
+
+    /// Only the **bare** form is implemented. A compound `initial_step or cross(...)` is still
+    /// refused, and that is load-bearing rather than pedantic: implementing the bare form moved
+    /// `cross` out of the refusal path, and without keeping the compound case there it would
+    /// fall through to discard-the-trigger-and-run-the-body-unconditionally — the exact defect
+    /// 0.9.1 removed.
+    #[test]
+    fn a_compound_trigger_containing_cross_is_still_refused() {
         let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(initial_step or cross(V(a, b) - 1.0, 1)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         assert!(err.contains("cross"), "names the offending half: {err}");
+        assert!(err.contains("not supported"), "and refuses it: {err}");
+    }
+
+    /// The other monitored events stay refused — they are not implemented at all.
+    #[test]
+    fn the_other_monitored_events_are_still_refused() {
+        for src in [
+            "module t(a, b); electrical a, b; analog begin @(timer(1.0, 2.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); electrical a, b; analog begin @(above(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        ] {
+            let err = parse_err(src);
+            assert!(err.contains("not supported"), "should refuse: {err}");
+        }
     }
 
     /// A **step-scoped** trigger keeps the old treatment: `final_step` is correct in a static

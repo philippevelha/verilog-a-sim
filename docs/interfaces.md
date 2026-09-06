@@ -718,3 +718,32 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > honest simplification the consumer-supplied watches already document, and sound for the same
 > reason: the LTE control that bounds the state's error between two accepted points bounds the
 > interpolation error too.
+
+> **Revision (§6 change, ratified 2026-09-06b):** added the event channel's **notification**
+> half — `ModelState::with_events` and `ModelState::event_fired(slot)`. This is what makes an
+> `@(cross(...))` body actually run: the consumer determines which of an instance's monitored
+> events fired at the timepoint being solved, and the model reads that back to gate the body.
+>
+> **Why it rides `ModelState` rather than a fifth `load` parameter.** It is the same kind of
+> thing `prev`/`next` already are — a per-instance, consumer-owned view of *this* evaluation,
+> constructed at the same site with the same lifetime. Adding a `load` argument would have the
+> wider blast radius and buy nothing. Note this is the opposite call to the one made for
+> `AnalysisCtx`, deliberately: the analysis context justified changing `load`'s signature
+> because a model that ignored it was *quietly wrong in transient*, so every implementor had to
+> see it. A model with no events has nothing here to ignore.
+>
+> It does **not** weaken `load`'s purity. Which events fired is an input the consumer fixes
+> before the evaluation and holds constant across every Newton iteration of that timepoint,
+> exactly like `prev` — so `load` stays a pure function of
+> `(x, ctx, committed state, fired events)`.
+>
+> **The consumer's obligation**, met by `va_transient::integrator`: poll the registration half
+> at an accepted timepoint, decide which slots fired, and then **re-solve that same timepoint**
+> with the firings set, because the body changes the equations and the accepted solution must be
+> the one solved with it. Clear the flags afterwards — an event fires *at* a timepoint, not
+> continuously.
+>
+> **Stated limitation.** The body runs at the accepted timepoint that *ends* the bracketing
+> step, not at the interpolated crossing time inside it. A model needing the crossing resolved
+> more tightly controls the step the way any model does — `bound_step`, or a breakpoint through
+> the registration half.

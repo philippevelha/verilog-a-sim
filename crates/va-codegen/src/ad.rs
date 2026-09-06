@@ -390,6 +390,13 @@ pub struct Ctx<'a> {
     /// What the simulator says about the evaluation being performed — the analysis kind and
     /// the absolute time, read by `$abstime`, `analysis()` and `ac_stim`.
     pub analysis: va_abi::AnalysisCtx,
+    /// Which of this instance's monitored `cross` sites fired at the timepoint being
+    /// evaluated — the notification half of Interface β's event channel
+    /// (`va_abi::ModelState::event_fired`), indexed by `va_ir::Module::cross_sites` position.
+    ///
+    /// Empty for the overwhelming majority of evaluations: an event fires at one timepoint,
+    /// not continuously, and most models declare no events at all.
+    pub events_fired: &'a [bool],
     /// This instance's state slots **as committed at the last accepted timepoint** — the
     /// read half of Interface β's state channel (`va_abi::ModelState::get`).
     pub state_prev: &'a [f64],
@@ -673,6 +680,22 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         // per instance, hence zero-gradient.
         Expr::PortConnected(i) => Ok(Dual::constant(
             if ctx.module.port_is_connected(*i as usize) {
+                1.0
+            } else {
+                0.0
+            },
+            count,
+        )),
+        // `@(cross(...))`'s guard: whether the consumer determined this site fired at the
+        // timepoint being evaluated. Held fixed across the Newton iterations of one timepoint
+        // (`va_abi::ModelState::event_fired`), so it is a constant here and zero-gradient.
+        Expr::CrossFired(slot) => Ok(Dual::constant(
+            if ctx
+                .events_fired
+                .get(*slot as usize)
+                .copied()
+                .unwrap_or(false)
+            {
                 1.0
             } else {
                 0.0
@@ -1400,6 +1423,7 @@ mod tests {
             vt: crate::VT,
             temp: crate::TEMP,
             analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
             state_prev: &[],
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
@@ -1460,6 +1484,7 @@ mod tests {
             vt: vt_ref,
             temp: temp_ref,
             analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
             state_prev: &[],
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
@@ -1548,6 +1573,7 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
             state_prev: &[],
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
@@ -1633,6 +1659,7 @@ mod tests {
             vt,
             temp: crate::TEMP,
             analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
             state_prev: &[],
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
@@ -1673,6 +1700,7 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
             state_prev: &[],
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
@@ -1700,6 +1728,7 @@ mod tests {
             vt: 0.0,
             temp: 0.0,
             analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
             state_prev: &[],
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),

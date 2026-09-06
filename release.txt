@@ -14,6 +14,26 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.3 — 2026-09-06
+------------------
+`@(cross(...))` bodies actually run. Interface beta gains the event channel's notification
+half (`ModelState::event_fired`), `va-ir` gains `CrossSite` + `Expr::CrossFired`, the
+parser and elaborator turn `@(cross(e, dir)) stmt` into a registered monitored site plus a
+guarded body, and codegen reports the expression and reads the firing back. The integrator
+re-solves the timepoint once firings are known, because the body changes the equations.
+
+  Corpus back to 113/132 module-declaring files (95/99 self-contained), recovering the
+  seven verilogaLib-master clocked blocks 0.9.1 refused -- they now genuinely work rather
+  than latching at every solve point.
+
+  Bare form only: a compound `initial_step or cross(...)` is still refused, and so are
+  `final_step`, `timer`, `above` and `absdelta`. The body runs at the accepted timepoint
+  ending the bracketing step, not at the interpolated crossing time inside it; the two
+  tolerance arguments are parsed and discarded.
+
+  711 tests, 27/27 golden circuits, clippy and fmt clean.
+
+
 0.9.2 — 2026-09-06
 ------------------
 Interface beta gains an event-registration channel (a section 6 coordinated change):
@@ -85,14 +105,12 @@ Road to 1.0
 -----------
 Tracked in docs/roadmap.md; listed here so the release log is self-contained.
 
-  [ ] Analog events. Only `@(initial_step)` is honoured; every other trigger is
-      refused rather than silently mis-run (0.9.1). The Interface beta
-      event-registration channel landed in 0.9.2, so a model can now register
-      crossings and breakpoints and the integrator detects and lands on them. What
-      remains: codegen emitting registrations from a `cross(...)` site, and the
-      *notification* input `load` needs to actually run the body at the firing
-      timepoint. That pair lifts the refusal. See roadmap "Analog events: what exists,
-      and what each one still needs".
+  [ ] Analog events. `@(initial_step)` and `@(cross(...))` both work as of 0.9.3.
+      Still refused, and each needing its own work: `final_step`, `timer`, `above`,
+      `absdelta`, and compound triggers (`initial_step or cross(...)`). `timer` is the
+      cheapest -- the breakpoint half of the channel already carries it. See roadmap
+      "Analog events: what exists, and what each one still needs" for the per-event
+      checklist.
 
   [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of
       0.9.0), which is honest but not implemented. Lifting the refusal is

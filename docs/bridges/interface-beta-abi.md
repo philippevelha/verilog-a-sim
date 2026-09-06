@@ -243,5 +243,16 @@ a new sub-trait when the addition is optional (e.g. a future small-signal noise 
       `@(cross(...))` body still cannot be run at the firing timepoint and `va-frontend` still
       refuses the construct. That is the next §6 step, and it needs a per-instance
       "these fired" input alongside `state` rather than a change to this channel.
+- [x] **Done (2026-09-06b): the event channel's notification half** — `ModelState::with_events`
+      and `ModelState::event_fired(slot)`, which is what lets an `@(cross(...))` body run.
+      Carried on `ModelState` rather than as a fifth `load` parameter: it is the same kind of
+      per-instance, consumer-owned per-evaluation view `prev`/`next` are, built at the same site
+      with the same lifetime. Deliberately the *opposite* call to the one made for
+      `AnalysisCtx` — that one justified changing `load`'s signature because a model ignoring it
+      was quietly wrong in transient, whereas a model with no events has nothing here to ignore.
+      Purity is intact: the firing set is fixed by the consumer before the evaluation and held
+      constant across the timepoint's Newton iterations, like `prev`. The consumer owes a
+      **re-solve** of the timepoint once firings are known, since the body changes the
+      equations.
 - [ ] Decide how AC small-signal noise sources attach — extra channel vs separate trait.
 - [ ] Specify the `Result`-returning constructor pattern for degenerate parameters.

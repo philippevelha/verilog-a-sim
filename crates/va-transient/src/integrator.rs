@@ -138,6 +138,54 @@ pub struct Waveform {
     pub model_crossings: Vec<(usize, usize, f64)>,
 }
 
+/// The consumer half of Interface β's event **notification**: one flat buffer of "did slot `k`
+/// of instance `i` fire at the timepoint being evaluated", sliced per instance the same way
+/// [`StateBuffers`] slices state.
+///
+/// Held fixed across every Newton iteration of a timepoint, which is what keeps `load` a pure
+/// function of `(x, ctx, committed state, fired events)`. Cleared after each accepted step: an
+/// event fires *at* a timepoint, not continuously.
+struct FiredEvents {
+    /// Per-instance `[start, end)` bounds; length `instances.len() + 1`.
+    offsets: Vec<usize>,
+    flags: Vec<bool>,
+}
+
+impl FiredEvents {
+    fn new(instances: &[&dyn ModelInstance]) -> Self {
+        let mut offsets = Vec::with_capacity(instances.len() + 1);
+        let mut total = 0usize;
+        offsets.push(0);
+        for inst in instances {
+            total += inst.event_count();
+            offsets.push(total);
+        }
+        FiredEvents {
+            offsets,
+            flags: vec![false; total],
+        }
+    }
+
+    fn slice(&self, i: usize) -> &[bool] {
+        &self.flags[self.offsets[i]..self.offsets[i + 1]]
+    }
+
+    fn set(&mut self, i: usize, slot: usize) {
+        let at = self.offsets[i] + slot;
+        if at < self.offsets[i + 1] {
+            self.flags[at] = true;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.flags.fill(false);
+    }
+
+    fn any(&self) -> bool {
+        self.flags.iter().any(|&f| f)
+    }
+}
+
 /// The registrations every instance reports at one accepted timepoint — Interface β's event
 /// channel (`va_abi::events`).
 ///
@@ -544,6 +592,7 @@ fn assemble(
     is_initial_step: bool,
     dim: usize,
     state: &mut StateBuffers,
+    fired: &FiredEvents,
     ddt: (f64, f64, f64),
 ) -> DenseStamp {
     let ctx = AnalysisCtx::transient(t)
@@ -556,7 +605,9 @@ fn assemble(
     let mut sink = DenseStamp::new(dim);
     for (i, inst) in instances.iter().enumerate() {
         let (prev, next) = state.slices(i);
-        let mut st = va_abi::ModelState::new(prev, next);
+        // Which of this instance's monitored events the consumer determined fired at this
+        // timepoint — the input an `@(cross(...))` body is gated on.
+        let mut st = va_abi::ModelState::with_events(prev, next, fired.slice(i));
         inst.load(x, &ctx, &mut st, &mut sink);
     }
     sink
@@ -640,6 +691,7 @@ fn newton_step(
     t: f64,
     is_initial_step: bool,
     state: &mut StateBuffers,
+    fired: &FiredEvents,
     companion: &Companion,
     junction: &[bool],
 ) -> Result<Vec<f64>, TransientError> {
@@ -662,6 +714,7 @@ fn newton_step(
             is_initial_step,
             dim,
             state,
+            fired,
             (
                 companion.coeff,
                 companion.prev_rate_weight,
@@ -774,6 +827,7 @@ pub fn run_with_events(
     // seeds itself from its input here rather than from a zero-filled `prev`.
     // No step has been taken, so there is no rate to report: `is_initial_step` already
     // makes every `ddt` site read zero and seed its own history here.
+    let mut fired = FiredEvents::new(instances);
     let initial = assemble(
         instances,
         &x,
@@ -781,6 +835,7 @@ pub fn run_with_events(
         true,
         dim,
         &mut state,
+        &fired,
         (0.0, 0.0, 0.0),
     );
     state.commit();
@@ -894,7 +949,7 @@ pub fn run_with_events(
                 &is_dynamic,
             );
             let x_primary = newton_step(
-                instances, dim, &x, t_next, false, &mut state, &primary, &junction,
+                instances, dim, &x, t_next, false, &mut state, &fired, &primary, &junction,
             )?;
 
             // Divided differences first when configured: they need no second solve, so the
@@ -934,6 +989,7 @@ pub fn run_with_events(
                         t_next,
                         false,
                         &mut state,
+                        &fired,
                         &reference_companion,
                         &junction,
                     )?;
@@ -944,6 +1000,53 @@ pub fn run_with_events(
             if err_ratio <= 1.0 {
                 let x_before = std::mem::replace(&mut x, x_primary);
                 let t_before = t;
+
+                // Interface β's event channel, polled here and nowhere else: this is the only
+                // point in the loop that is on the trajectory. Newton runs many times per
+                // timepoint and every rejected candidate is thrown away, so neither is a place
+                // to decide that something happened.
+                let poll = poll_events(instances, &x, &AnalysisCtx::transient(t_next));
+                fired.clear();
+                let mut crossings: Vec<(usize, usize, f64)> = Vec::new();
+                for (i, slots) in poll.values.iter().enumerate() {
+                    let Some(before) = event_prev.values.get(i) else {
+                        continue;
+                    };
+                    for (slot, &(now, dir)) in slots.iter().enumerate() {
+                        let Some(&(was, _)) = before.get(slot) else {
+                            continue;
+                        };
+                        if !dir.fires(was, now) {
+                            continue;
+                        }
+                        fired.set(i, slot);
+                        // Linear interpolation between the two bracketing accepted points --
+                        // not a re-solve at the crossing, the honest simplification this
+                        // engine's own watches already document, and sound for the same
+                        // reason: the LTE control that bounds the state's error between two
+                        // accepted points bounds this too.
+                        let frac = if (was - now).abs() > 0.0 {
+                            was / (was - now)
+                        } else {
+                            1.0
+                        };
+                        crossings.push((i, slot, t_before + frac * (t_next - t_before)));
+                    }
+                }
+
+                // An `@(cross(...))` body changes the equations, so the accepted solution has to
+                // be the one solved *with* it. Re-solve this same timepoint with the firings
+                // set, seeded from the un-fired solution so Newton starts close.
+                //
+                // Stated limitation: the body runs at this accepted timepoint, not at the
+                // interpolated crossing time inside the step. A model that needs the crossing
+                // resolved more tightly asks for it the way any model controls the step --
+                // `bound_step`, or a breakpoint through the event channel.
+                if fired.any() {
+                    x = newton_step(
+                        instances, dim, &x, t_next, false, &mut state, &fired, &primary, &junction,
+                    )?;
+                }
 
                 // The commit point: a full, fresh evaluation at the accepted `x` and `t`,
                 // whose proposal is the one that actually becomes history.
@@ -956,6 +1059,7 @@ pub fn run_with_events(
                     false,
                     dim,
                     &mut state,
+                    &fired,
                     (
                         primary.coeff,
                         primary.prev_rate_weight,
@@ -977,36 +1081,21 @@ pub fn run_with_events(
                 history.insert(0, (t, x.clone()));
                 history.truncate(history_cap);
 
-                // Interface β's event channel, polled here and nowhere else: this is the
-                // only point in the loop that is on the trajectory.
-                let poll = poll_events(instances, &x, &AnalysisCtx::transient(t));
-                for (i, slots) in poll.values.iter().enumerate() {
-                    let Some(before) = event_prev.values.get(i) else {
-                        continue;
-                    };
-                    for (slot, &(now, dir)) in slots.iter().enumerate() {
-                        let Some(&(was, _)) = before.get(slot) else {
-                            continue;
-                        };
-                        if !dir.fires(was, now) {
-                            continue;
-                        }
-                        // Same linear interpolation the consumer-supplied watches use, and the
-                        // same honest simplification: not a re-solve at the crossing, but two
-                        // accepted points bracketing one are close together, because the LTE
-                        // control that bounds the state's error between them bounds this too.
-                        let frac = if (was - now).abs() > 0.0 {
-                            was / (was - now)
-                        } else {
-                            1.0
-                        };
-                        waveform
-                            .model_crossings
-                            .push((i, slot, t_before + frac * (t - t_before)));
-                    }
-                }
+                waveform.model_crossings.extend(crossings);
                 model_breakpoints.extend(poll.breakpoints.iter().copied().filter(|&bp| bp > t));
-                event_prev = poll;
+                // Re-poll when a body ran, so the baseline for the *next* step is the
+                // trajectory actually accepted. Using the pre-body values instead would
+                // compare the next step against a solution that was superseded — and where a
+                // body pushes its own monitored expression back across zero, that is exactly
+                // what would make it fire again immediately.
+                event_prev = if fired.any() {
+                    poll_events(instances, &x, &AnalysisCtx::transient(t))
+                } else {
+                    poll
+                };
+                // An event fires *at* a timepoint, not continuously: the next candidate step is
+                // solved with nothing fired unless it earns its own crossing.
+                fired.clear();
 
                 for (watch_idx, watch) in events.watches().iter().enumerate() {
                     let before = x_before[watch.unknown] - watch.threshold;

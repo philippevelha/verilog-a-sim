@@ -3198,6 +3198,227 @@ mod tests {
         refuse_transient_approximations(&plain).expect("an ordinary model is fine");
     }
 
+    /// `@(cross(...))`'s body runs, and only when the event fires.
+    ///
+    /// The whole chain in one test, which is why it lives here rather than in `va-codegen`
+    /// (which may not depend on `va-frontend`, CLAUDE.md §3): the parser turns the trigger into
+    /// a guarded body, elaboration registers a `cross_sites` entry and an `Expr::CrossFired`
+    /// guard, `va-codegen` reports the monitored expression through Interface β's event channel
+    /// and reads the firing back out of `ModelState`.
+    ///
+    /// The model is a resistor whose conductance the body changes, so "did the body run" shows
+    /// up in the stamp rather than in a flag: 1 mS normally, 1 S when the event fires.
+    #[test]
+    fn a_cross_body_runs_only_when_the_event_fires() {
+        const SRC: &str = "
+module xd(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p, n) - 2.5, 1)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let m = &design.modules[0];
+        assert_eq!(m.cross_sites.len(), 1, "one monitored site registered");
+        assert_eq!(m.cross_sites[0].dir, 1, "rising, as written");
+
+        let mut next = 2;
+        let inst = va_codegen::build_instance(m, &[0, 1], &mut next).expect("builds");
+        assert_eq!(
+            inst.event_count(),
+            1,
+            "one event slot reaches Interface beta"
+        );
+
+        // The registration reports the monitored *expression*, not the node voltage.
+        let mut ev = va_abi::events::RecordingEventSink::new();
+        inst.events(&[4.0, 0.0], &va_abi::ANALYSIS_DC, &mut ev);
+        assert_eq!(
+            ev.value_of(0),
+            Some(1.5),
+            "reports V(p,n) - 2.5 at V(p,n) = 4"
+        );
+
+        // Conductance with the event not fired, and with it fired.
+        let g_of = |fired: &[bool]| -> f64 {
+            let mut sink = va_abi::stamps::DenseStamp::new(2);
+            let mut scratch = vec![0.0; inst.state_len()];
+            let mut st = va_abi::ModelState::with_events(&[], &mut scratch, fired);
+            inst.load(&[1.0, 0.0], &va_abi::ANALYSIS_DC, &mut st, &mut sink);
+            sink.jacobian[0] // dI(p)/dV(p) = g
+        };
+        let quiet = g_of(&[false]);
+        let fired = g_of(&[true]);
+        assert!(
+            (quiet - 1e-3).abs() < 1e-12,
+            "body must not run when nothing fired, got g = {quiet}"
+        );
+        assert!(
+            (fired - 1.0).abs() < 1e-12,
+            "body must run when the event fired, got g = {fired}"
+        );
+    }
+
+    /// A `cross` site inside an instantiated submodule keeps its identity through inlining: the
+    /// parent's slot numbering shifts it, and the site list shifts with it. Two instances of
+    /// one submodule must get *two* distinct slots, not one shared one — otherwise both
+    /// instances' bodies would fire together.
+    #[test]
+    fn inlined_cross_sites_get_distinct_slots() {
+        const SRC: &str = "
+module leaf(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p) - 1.0, 1)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+module top(a, b);
+  inout a, b;
+  electrical a, b;
+  leaf L1 (a, b);
+  leaf L2 (a, b);
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let top = design
+            .modules
+            .iter()
+            .find(|m| m.name == "top")
+            .expect("top module");
+        assert_eq!(
+            top.cross_sites.len(),
+            2,
+            "each instance contributes its own monitored site"
+        );
+        let slots: Vec<u32> = top
+            .exprs
+            .iter()
+            .filter_map(|e| match *e {
+                va_ir::Expr::CrossFired(k) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(slots, vec![0, 1], "the second instance's guard is remapped");
+    }
+
+    /// The end of the chain: an `@(cross(...))` body fires during a **real transient run**,
+    /// through the deck → frontend → codegen → Interface β → integrator path.
+    ///
+    /// This is the test that distinguishes "the pieces compile" from "the feature works". The
+    /// model is a 1 mS resistor whose body switches it to 1 S, driven directly across a
+    /// sinusoidal source so the monitored expression is source-driven and cannot be perturbed
+    /// by the conductance it controls.
+    ///
+    /// One period of a 5 V sine crosses +2.5 V **twice** — once rising, once falling — so the
+    /// discriminator is *when* each direction fires, not whether. Rising must fire at the first
+    /// solution of `5·sin(2πft) = 2.5` (t = 1/12 of a period) and falling at the second
+    /// (5/12 of a period). A registration that ignored direction would fire both at both times.
+    /// A third case, a threshold the signal never reaches, is the control that shows the spike
+    /// comes from the event at all.
+    #[test]
+    fn a_cross_body_fires_during_a_real_transient_run() {
+        const PERIOD: f64 = 1e-3; // 1 kHz
+        let run = |dir: i32, threshold: f64| -> (f64, Vec<f64>) {
+            let src = format!(
+                "
+module xd(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p, n) - {threshold}, {dir})) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 a gnd SIN(0 5 1k)
+X1 a gnd xd
+.tran 2u 1m
+.end
+",
+            )
+            .expect("parses");
+            let wf =
+                solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+            let branch = net.node_order.len(); // I(V1) follows the node unknowns
+            let peak =
+                wf.x.iter()
+                    .map(|row| row[branch].abs())
+                    .fold(0.0f64, f64::max);
+            (
+                peak,
+                wf.model_crossings.iter().map(|&(_, _, t)| t).collect(),
+            )
+        };
+
+        // Rising: 5·sin(2πft) = 2.5 first at ft = 1/12.
+        let (rising_peak, rising_times) = run(1, 2.5);
+        assert_eq!(
+            rising_times.len(),
+            1,
+            "one rising crossing: {rising_times:?}"
+        );
+        let expected_rise = PERIOD / 12.0;
+        assert!(
+            (rising_times[0] - expected_rise).abs() < 0.05 * PERIOD,
+            "rising crossing at {:e}, expected ~{expected_rise:e}",
+            rising_times[0]
+        );
+        assert!(
+            rising_peak > 1.0,
+            "the body must run and switch the conductance: peak |I(V1)| = {rising_peak:e}"
+        );
+
+        // Falling: the same level on the way back down, at ft = 5/12.
+        let (falling_peak, falling_times) = run(-1, 2.5);
+        assert_eq!(
+            falling_times.len(),
+            1,
+            "one falling crossing: {falling_times:?}"
+        );
+        let expected_fall = 5.0 * PERIOD / 12.0;
+        assert!(
+            (falling_times[0] - expected_fall).abs() < 0.05 * PERIOD,
+            "falling crossing at {:e}, expected ~{expected_fall:e}",
+            falling_times[0]
+        );
+        assert!(falling_peak > 1.0, "the falling body must run too");
+
+        // The two directions fire at genuinely different times — the discrimination that a
+        // direction-blind implementation would fail.
+        assert!(
+            falling_times[0] - rising_times[0] > 0.25 * PERIOD,
+            "rising and falling must be distinct events: {:e} vs {:e}",
+            rising_times[0],
+            falling_times[0]
+        );
+
+        // Control: a threshold the 5 V sine never reaches fires nothing, and the model stays at
+        // its quiescent 1 mS.
+        let (quiet_peak, quiet_times) = run(1, 7.5);
+        assert!(
+            quiet_times.is_empty(),
+            "a threshold above the peak must not fire: {quiet_times:?}"
+        );
+        assert!(
+            quiet_peak < 1e-2,
+            "with nothing firing the model stays at 1 mS: peak |I(V1)| = {quiet_peak:e}"
+        );
+    }
+
     /// A step-scoped trigger is refused in transient, where its body would re-run at every
     /// timepoint -- but not in a static solve, where running it once is correct.
     ///

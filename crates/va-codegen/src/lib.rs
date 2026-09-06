@@ -194,6 +194,7 @@ impl GeneratedModel {
         x: &'a [f64],
         analysis: &va_abi::AnalysisCtx,
         state_prev: &'a [f64],
+        events_fired: &'a [bool],
         validating: bool,
     ) -> Ctx<'a> {
         // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
@@ -231,6 +232,7 @@ impl GeneratedModel {
             vt: self.vt,
             temp: self.temp,
             analysis: *analysis,
+            events_fired,
             state_prev,
             // Pre-seeded from the committed state, so a `transition`/`slew` on a control-flow
             // path this evaluation doesn't take leaves its history untouched rather than
@@ -406,7 +408,7 @@ impl GeneratedModel {
         // regardless of which analysis eventually runs. Nothing here depends on the answer —
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
-        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], true);
+        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], true);
         Self::validate_stmts(&ctx, &self.lowered.taint, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
@@ -1242,11 +1244,42 @@ impl ModelInstance for GeneratedModel {
     /// was compiled at — see [`ad::Ctx::temp`]), rather than having a `4kT` applied for it the
     /// way `va-abi`'s hand-written [`va_abi::reference::Resistor`] does. Its `kind` is passed
     /// through so a source whose PSD expression calls `analysis()` sees the truth.
+    /// One event slot per `cross(...)` site the source declared (`va_ir::Module::cross_sites`).
+    fn event_count(&self) -> usize {
+        self.module.cross_sites.len()
+    }
+
+    /// Report each `cross(...)` site's monitored expression at this accepted timepoint —
+    /// Interface β's event-registration channel.
+    ///
+    /// The expression is evaluated **outside** the statement walk, because a registration is a
+    /// property of the site rather than of whichever control-flow path this timepoint happens
+    /// to take: a `cross` inside an `if` arm must keep being watched while the arm is untaken,
+    /// or the crossing that would re-enter the arm is the one you miss. The consequence, stated
+    /// rather than hidden: the monitored expression may only read probes and parameters, not a
+    /// local variable the analog block assigns, since no variable has been bound at this point.
+    /// A site that does is reported as `0.0`, which registers no crossing rather than a wrong
+    /// one — `validate` already rejects a read-before-assignment, so such a module does not
+    /// build in the first place.
+    ///
+    /// No state and no fired-event input: this runs after the timepoint is accepted, and asks
+    /// only "where is the expression now".
+    fn events(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+        if self.module.cross_sites.is_empty() {
+            return;
+        }
+        let ctx = self.ctx(x, actx, &[], &[], false);
+        for (slot, site) in self.module.cross_sites.iter().enumerate() {
+            let value = eval(&ctx, site.expr).map(|d| d.value).unwrap_or(0.0);
+            sink.monitor(slot, value, va_abi::CrossDir::from_lrm(site.dir));
+        }
+    }
+
     fn noise(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::NoiseSink) {
         // No state: a noise analysis linearizes about a fixed operating point and has no
         // accepted-timepoint sequence, so a `transition`/`slew` inside a PSD expression sees
         // `is_initial_step` and settles to its input — the same steady-state reading DC gets.
-        let ctx = self.ctx(x, actx, &[], false);
+        let ctx = self.ctx(x, actx, &[], &[], false);
         // Post-validation the evaluations below cannot fail; a failure mid-walk simply stops
         // emitting further sources, exactly as `load` stops stamping.
         let _ = self.walk(&ctx, &self.lowered.stmts, &mut |me, ctx, c| {
@@ -1283,7 +1316,7 @@ impl ModelInstance for GeneratedModel {
         state: &mut va_abi::ModelState,
         sink: &mut dyn StampSink,
     ) {
-        let ctx = self.ctx(x, actx, state.committed(), false);
+        let ctx = self.ctx(x, actx, state.committed(), state.fired_slots(), false);
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).

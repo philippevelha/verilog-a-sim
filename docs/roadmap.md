@@ -4031,17 +4031,22 @@ noted. Recorded so the next pass does not have to re-derive them.
 
 ## Analog events: what exists, and what each one still needs (2026-09-06)
 
-**The state of play in one sentence** (updated 2026-09-06): `va-transient`'s event engine is
-now **reachable from a model** — Interface β's event channel (v0.9.2) lets an instance register
-monitored expressions and breakpoints, and the integrator polls it once per accepted timepoint.
-What is still missing is the *notification* direction: a model cannot yet be told which of its
-events fired, so an `@(cross(...))` **body** still cannot run at the right time, and the
-frontend's refusal (v0.9.1) stands.
+**The state of play in one sentence** (updated 2026-09-06, v0.9.3): **`@(cross(...))` works**
+— a Verilog-A source registers its monitored expression through Interface β's event channel,
+the integrator detects and times the crossing, and the body runs at that timepoint with the
+solution re-solved so its effect is real. `final_step`, `timer`, `above`, `absdelta` and
+compound triggers remain refused.
 
 Before v0.9.2 this read: "nothing in the pipeline ever puts anything into it —
 `EventQueue::push_breakpoint` and `push_watch` are called only from `integrator.rs`'s own
 tests." That is no longer true of the channel, but remains true of `EventQueue` itself, whose
 consumer-supplied watches are still test-only.
+
+**The trap this work hit, worth keeping:** implementing the bare `@(cross(...))` form moved
+`cross` off the refusal path, and a *compound* `@(initial_step or cross(...))` immediately fell
+through to discard-the-trigger-and-run-the-body-unconditionally — the exact defect v0.9.1
+removed. Two tests caught it. When a construct graduates from refused to implemented, check what
+else was riding on that refusal.
 
 **The sharper problem, and why this ranks above "a missing feature"** — *resolved 2026-09-06,
 kept here because it is what the sequencing below was built around._ `parser.rs`'s `@(...)`
@@ -4084,7 +4089,7 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 |---|:--:|:--:|:--:|---|
 | `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
 | `final_step` | yes | partial | no | **Refused in transient** (2026-09-06); still runs in a static solve, where one point is both first and last, which is correct. Needs a "last accepted timepoint" hook in `run_with_events`. |
-| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | **refused** | channel ready | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
+| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.3)**, bare form only — a compound `initial_step or cross(...)` is still refused. Body runs at the accepted timepoint ending the bracketing step, not at the interpolated crossing time; tolerance arguments parsed and discarded. Was: | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
 | `timer(start[, period[, tol]])` | yes | **refused** | channel ready | `EventSink::breakpoint` carries it as of v0.9.2 and the integrator lands on it exactly. Needs the same channel, plus periodic re-arming. |
 | `above(expr[, tol…])` | no | **refused** | no | Refused by name in a trigger, though not yet reserved as a keyword. Lex and reserve first; semantically a one-sided `cross`. |
 | `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
@@ -4111,10 +4116,11 @@ Sequencing that follows from the table:
    and when it wants solving, and the consumer reports what fired. It does not yet carry
    *notification* back into `load`, which is what an `@(cross(...))` **body** needs to run at
    the firing timepoint, so the frontend's refusal stands until step 3.
-3. **`cross`**, the first real consumer, and the step that lifts the refusal. Two halves:
-   codegen emitting `monitor`/`breakpoint` calls from a `cross(...)` site, and the
-   **notification** input `load` needs to run the body — a per-instance "these fired" slice
-   alongside `state`, which is its own §6 change.
+3. ~~**`cross`**, the first real consumer~~ — **done 2026-09-06 (v0.9.3)**. Both halves
+   landed: `va_ir::CrossSite` + `Expr::CrossFired` with codegen emitting `monitor` from each
+   site, and the notification input (`ModelState::event_fired`) that lets the body run. The
+   integrator re-solves the timepoint once firings are known, because the body changes the
+   equations. Corpus back to 113/132 — the seven files 0.9.1 refused now genuinely work.
 4. **`timer`**, reusing the breakpoint half of the same channel.
 5. `final_step`, then `above`/`last_crossing`, then `absdelta`.
 

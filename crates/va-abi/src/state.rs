@@ -69,6 +69,11 @@ pub struct ModelState<'a> {
     /// This evaluation's proposal. Pre-seeded from `prev` by the consumer, so an unwritten slot
     /// reads as "unchanged".
     next: &'a mut [f64],
+    /// Which of this instance's monitored events (`crate::events`) the consumer has determined
+    /// fired at the timepoint being evaluated — the **notification** half of the event channel
+    /// (§6 change, 2026-09-06). Indexed by the same slot as
+    /// [`crate::EventSink::monitor`]; empty for an instance with no events.
+    fired: &'a [bool],
 }
 
 impl<'a> ModelState<'a> {
@@ -79,7 +84,48 @@ impl<'a> ModelState<'a> {
     /// are bounds-checked rather than panicking, so it degrades to "no state" instead of
     /// bringing down a simulation.
     pub fn new(prev: &'a [f64], next: &'a mut [f64]) -> Self {
-        ModelState { prev, next }
+        ModelState {
+            prev,
+            next,
+            fired: &[],
+        }
+    }
+
+    /// Like [`Self::new`], but also carrying which of this instance's monitored events fired
+    /// at the timepoint being evaluated (§ [`crate::events`]).
+    ///
+    /// `fired` is indexed by event slot, `0..event_count()`.
+    pub fn with_events(prev: &'a [f64], next: &'a mut [f64], fired: &'a [bool]) -> Self {
+        ModelState { prev, next, fired }
+    }
+
+    /// Whether monitored event `slot` fired at the timepoint being evaluated — what the body of
+    /// an `@(cross(...))` statement is gated on.
+    ///
+    /// `false` for an out-of-range slot and for every evaluation the consumer has not marked,
+    /// which is the overwhelming majority: an event fires at one timepoint, not continuously.
+    ///
+    /// # Why this lives on the state object rather than as another `load` argument
+    ///
+    /// It is the same thing `prev`/`next` are — a per-instance, consumer-owned view of *this*
+    /// evaluation, constructed at the same site with the same lifetime. Adding a fifth `load`
+    /// parameter would have the wider blast radius and buy nothing: unlike
+    /// [`crate::AnalysisCtx`], whose whole point was that a model ignoring it is *quietly wrong
+    /// in transient*, a model with no events has nothing here to ignore. That asymmetry is why
+    /// the analysis context justified changing `load`'s signature and this does not.
+    ///
+    /// It does **not** weaken `load`'s purity. Which events fired is an input the consumer
+    /// determines before the evaluation and holds fixed across every Newton iteration of that
+    /// timepoint, exactly like `prev` — so `load` remains a pure function of
+    /// `(x, ctx, committed state, fired events)`.
+    /// The whole fired-event slice, for an implementor that wants it in bulk rather than slot
+    /// by slot (`va-codegen` hands it straight to its evaluation context).
+    pub fn fired_slots(&self) -> &[bool] {
+        self.fired
+    }
+
+    pub fn event_fired(&self, slot: usize) -> bool {
+        self.fired.get(slot).copied().unwrap_or(false)
     }
 
     /// An empty state, for a stateless instance and for tests.
@@ -90,6 +136,7 @@ impl<'a> ModelState<'a> {
         ModelState {
             prev: &[],
             next: &mut [],
+            fired: &[],
         }
     }
 
