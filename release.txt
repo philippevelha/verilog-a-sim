@@ -14,6 +14,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.7 — 2026-09-06
+------------------
+`@(above(...))` works, and it is not the one-sided `cross` it looks like. Per LRM 5.10.2 it
+"also triggers during initialization or dc", which is the whole reason the construct
+exists: a signal already past its threshold never crosses it, so a `cross` on it never
+fires at all -- the LRM's own sample-and-hold example turns on exactly that. Implementing
+only the transient half would have reproduced the bug the construct was invented to avoid.
+
+  So a static solve had to grow events, having had none: va-core gains
+  `mna::assemble_with_events`, `newton::solve_with_events` and
+  `dc::operating_point_with_events`, all additive -- the existing entry points pass an
+  empty set and behave exactly as before. The DC path is two-phase and iterates to a fixed
+  point, because which events fire is a property of the solution while the bodies they
+  guard change the equations that produce it.
+
+  Interface beta: `monitor`'s `dir`/`tol` arguments folded into one `CrossSpec` carrying
+  `at_initialization` too. The method took `dir` at 0.9.2 and `tol` at 0.9.6, so a third
+  widening in four versions was the signal to stop widening. `FiredEvents` moved into
+  va-abi, both consumers now sharing one shape.
+
+  `above` and `absdelta` were added to RESERVED_WORDS, where LRM Table B.1 has them and
+  this lexer did not. Safe: all 24 corpus occurrences of `above` are in comments ("the
+  above copyright notice") and `absdelta` appears nowhere.
+
+  Bare form only; `absdelta` and compound triggers remain refused.
+
+  729 tests, 27/27 golden circuits, corpus steady at 113/132, clippy and fmt clean.
+
+
 0.9.6 — 2026-09-06
 ------------------
 `cross`'s `time_tol`/`expr_tol` are honoured, by a bracketing retry loop. A candidate step
@@ -177,11 +206,11 @@ Road to 1.0
 -----------
 Tracked in docs/roadmap.md; listed here so the release log is self-contained.
 
-  [ ] Analog events. `@(initial_step)`, `@(cross(...))` and `@(timer(...))` all work as
-      of 0.9.4. Still refused, and each needing its own work: `final_step`, `above`,
-      `absdelta`, and compound triggers (`initial_step or cross(...)`). `above` is the
-      cheapest of those -- semantically a one-sided `cross`, whose machinery, tolerances
-      and bracketing all now exist.
+  [ ] Analog events. `@(initial_step)`, `@(cross(...))`, `@(timer(...))` and
+      `@(above(...))` all work as of 0.9.7. Still refused: `final_step`, `absdelta`,
+      and compound triggers (`initial_step or cross(...)`). `final_step` is the cheapest
+      of those: it needs a "last accepted timepoint" hook in the integrator and no new
+      channel.
       See roadmap "Analog events: what exists, and what each one still needs".
 
   [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of

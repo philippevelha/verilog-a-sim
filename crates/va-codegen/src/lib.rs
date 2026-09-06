@@ -1316,6 +1316,7 @@ impl ModelInstance for GeneratedModel {
                     time_tol,
                     expr_tol,
                     enable,
+                    at_initialization,
                 } => {
                     if enabled(enable) {
                         // Tolerances are evaluated here, at registration, and handed to the
@@ -1329,7 +1330,12 @@ impl ModelInstance for GeneratedModel {
                                 .map(value_of)
                                 .filter(|t| t.is_finite() && *t >= 0.0),
                         };
-                        sink.monitor(slot, value_of(expr), va_abi::CrossDir::from_lrm(dir), tol);
+                        let spec = va_abi::CrossSpec {
+                            dir: va_abi::CrossDir::from_lrm(dir),
+                            tol,
+                            at_initialization,
+                        };
+                        sink.monitor(slot, value_of(expr), spec);
                     }
                 }
                 va_ir::EventSite::Timer {

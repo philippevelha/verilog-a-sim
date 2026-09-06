@@ -4031,10 +4031,11 @@ noted. Recorded so the next pass does not have to re-derive them.
 
 ## Analog events: what exists, and what each one still needs (2026-09-06)
 
-**The state of play in one sentence** (updated 2026-09-06, v0.9.4): **`@(cross(...))` and
-`@(timer(...))` both work** — a Verilog-A source registers through Interface β's event channel,
+**The state of play in one sentence** (updated 2026-09-06, v0.9.7): **`@(cross(...))`,
+`@(timer(...))` and `@(above(...))` all work** — a Verilog-A source registers through Interface β's event channel,
 the integrator detects/schedules the event and fires it, and the body runs at that timepoint
-with the solution re-solved so its effect is real. `final_step`, `above`, `absdelta` and
+with the solution re-solved so its effect is real. `above` additionally fires in a **static**
+solve, which needed the DC path to grow events of its own. `final_step`, `absdelta` and
 compound triggers remain refused.
 
 Slot numbering is one flat space across event kinds (`va_ir::Module::event_sites`, unified from
@@ -4095,7 +4096,7 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 | `final_step` | yes | partial | no | **Refused in transient** (2026-09-06); still runs in a static solve, where one point is both first and last, which is correct. Needs a "last accepted timepoint" hook in `run_with_events`. |
 | `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.3)**, bare form only — a compound `initial_step or cross(...)` is still refused. Body runs at the accepted timepoint ending the bracketing step, not at the interpolated crossing time; All five LRM arguments honoured as of v0.9.6, tolerances included. Was: | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
 | `timer(start[, period[, tol]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.4)**, bare form only. The model re-registers its next occurrence at each accepted timepoint through `EventSink::timer(slot, next)`, so it stays stateless about its own schedule; the integrator lands on it exactly and fires the slot. An occurrence falling on the run's *initial* timepoint is not delivered — that point is a seed, not a solved step. Was: Needs the same channel, plus periodic re-arming. |
-| `above(expr[, tol…])` | no | **refused** | no | Refused by name in a trigger, though not yet reserved as a keyword. Lex and reserve first; semantically a one-sided `cross`. |
+| `above(expr[, tol…])` | ✅ | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.7)**, bare form only. *Not* merely a one-sided `cross`: it also fires during **initialization and DC**, which is the whole reason the LRM defines it — a signal already past the threshold never crosses it, so a `cross` on it never fires at all. `above`/`absdelta` were also added to `RESERVED_WORDS`, where Table B.1 has them and this lexer did not. |
 | `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
 | `last_crossing(expr, dir)` | yes | no | no | A *function*, not an event — returns the time of the last crossing. Needs crossing history, so it follows `cross`. |
 | event `or` (`@(a or b)`) | n/a | no | no | Trigger-list composition; needed before any compound trigger works. |
@@ -4136,7 +4137,10 @@ Sequencing that follows from the table:
    brackets, which is what keeps every existing run bit-identical. Measured convergence: ~70
    ulps of the timescale. A request below f64 spacing is counted in
    `Waveform::unresolved_events` and warned about, rather than quietly missed.
-6. `final_step`, then `above`/`last_crossing`, then `absdelta`.
+6. ~~`above`~~ — **done 2026-09-06 (v0.9.7)**. Needed more than the `cross` machinery: a
+   static solve had no events at all, so `va-core` gained an events-aware two-phase operating
+   point (solve, ask what the sites read, re-solve with the firings set, to a fixed point).
+7. `final_step`, then `last_crossing`, then `absdelta`.
 
 ---
 

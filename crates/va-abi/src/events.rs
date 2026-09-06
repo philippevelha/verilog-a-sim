@@ -124,6 +124,53 @@ impl CrossTol {
     }
 }
 
+/// Everything a `cross`/`above` registration says about *how* to watch, beyond the value
+/// itself.
+///
+/// Bundled into one struct rather than added as further [`EventSink::monitor`] parameters: the
+/// method took `dir` at v0.9.2, `tol` at v0.9.6, and `at_initialization` would have been a
+/// third widening in four versions. A spec struct absorbs the next one without touching any
+/// implementor.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct CrossSpec {
+    /// Which edge to watch.
+    pub dir: CrossDir,
+    /// How precisely to resolve the crossing.
+    pub tol: CrossTol,
+    /// Whether this site also fires **during initialization and DC**, where a `cross` does not
+    /// — what distinguishes Verilog-A's `above` from `cross` (LRM §5.10.2).
+    ///
+    /// The distinction is the whole reason `above` exists: a signal that is *already* past the
+    /// threshold never crosses it, so a `cross` on it never fires at all. The LRM's own
+    /// sample-and-hold example turns on exactly that.
+    pub at_initialization: bool,
+}
+
+impl CrossSpec {
+    /// A `cross(expr, dir)` with no tolerance — the plain case.
+    pub fn cross(dir: CrossDir) -> Self {
+        CrossSpec {
+            dir,
+            tol: CrossTol::NONE,
+            at_initialization: false,
+        }
+    }
+
+    /// An `above(expr)`: rising, and firing at initialization too.
+    pub fn above() -> Self {
+        CrossSpec {
+            dir: CrossDir::Rising,
+            tol: CrossTol::NONE,
+            at_initialization: true,
+        }
+    }
+
+    /// The same spec with `tol` attached.
+    pub fn with_tol(self, tol: CrossTol) -> Self {
+        CrossSpec { tol, ..self }
+    }
+}
+
 /// The channel a model registers its transient events on.
 ///
 /// Constructed by the consumer, never by the model — the same ownership shape as
@@ -143,11 +190,12 @@ pub trait EventSink {
     /// "distance from the threshold": `cross(V(out) - 2.5, +1)` reports `V(out) - 2.5`, so a
     /// crossing is a change of sign and the consumer needs no separate threshold.
     ///
-    /// `tol` says how precisely the crossing must be resolved. It rides this call rather than
-    /// a separate optional one because a consumer that ignores it is *silently failing to
+    /// `spec` says which edge to watch, how precisely to resolve it, and whether the site also
+    /// fires at initialization ([`CrossSpec`]). It rides this call rather than sitting behind
+    /// optional accessors because a consumer that ignores any of it is *silently failing to
     /// honour a request the source made* — the same argument that put the analysis context in
     /// `ModelInstance::load`'s signature instead of behind a default.
-    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir, tol: CrossTol);
+    fn monitor(&mut self, slot: usize, value: f64, spec: CrossSpec);
 
     /// Ask for a solve point at absolute time `t` seconds — Verilog-A's `timer`, and what a
     /// `cross` site needs to have its crossing resolved rather than merely noticed.
@@ -186,7 +234,7 @@ pub trait EventSink {
 #[derive(Clone, Debug, Default)]
 pub struct RecordingEventSink {
     /// One entry per [`EventSink::monitor`] call, in call order.
-    pub monitors: Vec<(usize, f64, CrossDir, CrossTol)>,
+    pub monitors: Vec<(usize, f64, CrossSpec)>,
     /// One entry per [`EventSink::breakpoint`] call, in call order.
     pub breakpoints: Vec<f64>,
     /// One `(slot, next_time)` per [`EventSink::timer`] call, in call order.
@@ -209,8 +257,8 @@ impl RecordingEventSink {
 }
 
 impl EventSink for RecordingEventSink {
-    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir, tol: CrossTol) {
-        self.monitors.push((slot, value, dir, tol));
+    fn monitor(&mut self, slot: usize, value: f64, spec: CrossSpec) {
+        self.monitors.push((slot, value, spec));
     }
 
     fn breakpoint(&mut self, t: f64) {
@@ -219,6 +267,81 @@ impl EventSink for RecordingEventSink {
 
     fn timer(&mut self, slot: usize, next: f64) {
         self.timers.push((slot, next));
+    }
+}
+
+/// The consumer half of the event channel's **notification**: one flat buffer of "did slot `k`
+/// of instance `i` fire at the evaluation being solved", sliced per instance.
+///
+/// Lives here rather than in a consumer crate because both consumers need it and must agree on
+/// its shape: `va-transient` fires events across timepoints, and `va-core` fires `above` at a
+/// DC operating point. Held fixed across every Newton iteration of one solve, which is what
+/// keeps [`crate::ModelInstance::load`] a pure function of
+/// `(x, ctx, committed state, fired events)`.
+#[derive(Clone, Debug, Default)]
+pub struct FiredEvents {
+    /// Per-instance `[start, end)` bounds; length `instances.len() + 1`.
+    offsets: Vec<usize>,
+    flags: Vec<bool>,
+}
+
+impl FiredEvents {
+    /// Size from each instance's declared [`crate::ModelInstance::event_count`], read once.
+    pub fn new(instances: &[&dyn crate::ModelInstance]) -> Self {
+        let mut offsets = Vec::with_capacity(instances.len() + 1);
+        let mut total = 0usize;
+        offsets.push(0);
+        for inst in instances {
+            total += inst.event_count();
+            offsets.push(total);
+        }
+        FiredEvents {
+            offsets,
+            flags: vec![false; total],
+        }
+    }
+
+    /// Instance `i`'s own slice, to hand to [`crate::ModelState::with_events`].
+    pub fn slice(&self, i: usize) -> &[bool] {
+        match (self.offsets.get(i), self.offsets.get(i + 1)) {
+            (Some(&a), Some(&b)) => &self.flags[a..b],
+            _ => &[],
+        }
+    }
+
+    /// Mark slot `slot` of instance `i` as fired. Out-of-range is ignored rather than panicking,
+    /// matching the rest of this ABI's bounds behaviour.
+    pub fn set(&mut self, i: usize, slot: usize) {
+        if let (Some(&a), Some(&b)) = (self.offsets.get(i), self.offsets.get(i + 1)) {
+            if a + slot < b {
+                self.flags[a + slot] = true;
+            }
+        }
+    }
+
+    /// Whether slot `slot` of instance `i` is currently marked.
+    pub fn is_set(&self, i: usize, slot: usize) -> bool {
+        self.slice(i).get(slot).copied().unwrap_or(false)
+    }
+
+    /// Clear every flag — an event fires *at* an evaluation, not continuously.
+    pub fn clear(&mut self) {
+        self.flags.fill(false);
+    }
+
+    /// Whether anything is marked.
+    pub fn any(&self) -> bool {
+        self.flags.iter().any(|&f| f)
+    }
+
+    /// Total slots across all instances.
+    pub fn len(&self) -> usize {
+        self.flags.len()
+    }
+
+    /// Whether no instance declared any event.
+    pub fn is_empty(&self) -> bool {
+        self.flags.is_empty()
     }
 }
 
@@ -278,7 +401,7 @@ mod tests {
     fn the_default_timer_falls_back_to_a_breakpoint() {
         struct OnlyBreakpoints(Vec<f64>);
         impl EventSink for OnlyBreakpoints {
-            fn monitor(&mut self, _s: usize, _v: f64, _d: CrossDir, _t: CrossTol) {}
+            fn monitor(&mut self, _s: usize, _v: f64, _spec: CrossSpec) {}
             fn breakpoint(&mut self, t: f64) {
                 self.0.push(t);
             }
@@ -291,8 +414,8 @@ mod tests {
     #[test]
     fn the_recorder_keeps_call_order_and_finds_a_slot() {
         let mut sink = RecordingEventSink::new();
-        sink.monitor(1, 4.0, CrossDir::Rising, CrossTol::NONE);
-        sink.monitor(0, -2.0, CrossDir::Either, CrossTol::NONE);
+        sink.monitor(1, 4.0, CrossSpec::cross(CrossDir::Rising));
+        sink.monitor(0, -2.0, CrossSpec::cross(CrossDir::Either));
         sink.breakpoint(1e-6);
         assert_eq!(sink.monitors.len(), 2);
         assert_eq!(sink.monitors[0].0, 1, "call order is preserved");

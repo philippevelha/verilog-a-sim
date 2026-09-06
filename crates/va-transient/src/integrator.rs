@@ -199,12 +199,12 @@ fn bracket_target(prev: &EventPoll, cand: &EventPoll, t0: f64, t1: f64, tstep_mi
             continue;
         };
         for (slot, entry) in slots.iter().enumerate() {
-            let (Some(&(now, dir, tol)), Some(Some((was, ..)))) =
-                (entry.as_ref(), before.get(slot))
+            let (Some(&(now, spec)), Some(Some((was, ..)))) = (entry.as_ref(), before.get(slot))
             else {
                 continue;
             };
-            if !tol.is_requested() || !dir.fires(*was, now) {
+            let tol = spec.tol;
+            if !tol.is_requested() || !spec.dir.fires(*was, now) {
                 continue;
             }
             let was = *was;
@@ -303,7 +303,7 @@ struct EventPoll {
     /// point: a `cross` site whose `enable` went false stops reporting, and treating that as a
     /// value of `0.0` would read as a sign change against whatever it last reported — firing
     /// the event precisely because it was disabled.
-    values: Vec<Vec<Option<(f64, va_abi::CrossDir, va_abi::CrossTol)>>>,
+    values: Vec<Vec<Option<(f64, va_abi::CrossSpec)>>>,
     /// Absolute times any instance asked to be solved at.
     breakpoints: Vec<f64>,
     /// `(instance, slot, next_time)` per `timer` registration. Unlike a bare breakpoint these
@@ -328,9 +328,9 @@ fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -
         // with the previous timepoint's entry for the same slot. An unreported slot stays
         // `None` and takes part in no comparison at all.
         let mut per_slot = vec![None; n];
-        for (slot, value, dir, tol) in sink.monitors {
+        for (slot, value, spec) in sink.monitors {
             if slot < n {
-                per_slot[slot] = Some((value, dir, tol));
+                per_slot[slot] = Some((value, spec));
             }
         }
         values.push(per_slot);
@@ -982,6 +982,22 @@ pub fn run_with_events(
     // spent resolving *one* crossing rather than the whole run.
     let mut bracket_retries = 0usize;
     let mut unresolved_events = 0usize;
+    // § `above`. A site that "also triggers during initialization" fires when its expression is
+    // *already* past the threshold at the start of the run — the case `cross` cannot see at
+    // all, because a signal that never moves across never crosses. This engine cold-starts a
+    // transient rather than solving an initial-condition analysis first, so the firing lands on
+    // the first *accepted* timepoint (the earliest point actually solved) rather than on the
+    // seed at `tstart`; that is a stated limitation, not a silent one.
+    let mut pending_initial: Vec<(usize, usize)> = Vec::new();
+    for (i, slots) in event_prev.values.iter().enumerate() {
+        for (slot, entry) in slots.iter().enumerate() {
+            if let Some((value, spec)) = entry {
+                if spec.at_initialization && *value > 0.0 {
+                    pending_initial.push((i, slot));
+                }
+            }
+        }
+    }
     model_breakpoints.extend(
         pending_timers
             .iter()
@@ -1171,13 +1187,13 @@ pub fn run_with_events(
                         // Both timepoints must have reported this slot: a crossing is a
                         // statement about a pair of values, and a slot that was disabled at
                         // either end has no pair.
-                        let (Some(&(now, dir, _)), Some(Some((was, ..)))) =
+                        let (Some(&(now, spec)), Some(Some((was, ..)))) =
                             (entry.as_ref(), before.get(slot))
                         else {
                             continue;
                         };
                         let was = *was;
-                        if !dir.fires(was, now) {
+                        if !spec.dir.fires(was, now) {
                             continue;
                         }
                         fired.set(i, slot);
@@ -1193,6 +1209,12 @@ pub fn run_with_events(
                         };
                         crossings.push((i, slot, t_before + frac * (t_next - t_before)));
                     }
+                }
+
+                // § `above` at initialization: delivered at the first accepted timepoint, once.
+                for (i, slot) in pending_initial.drain(..) {
+                    fired.set(i, slot);
+                    crossings.push((i, slot, t_before));
                 }
 
                 // A timer fires when the step lands on the time it was scheduled for. The
@@ -1998,7 +2020,8 @@ mod tests {
         }
 
         fn events(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
-            sink.monitor(0, x[self.node] - self.threshold, self.dir, self.tol);
+            let spec = va_abi::CrossSpec::cross(self.dir).with_tol(self.tol);
+            sink.monitor(0, x[self.node] - self.threshold, spec);
             if let Some(t) = self.breakpoint_at {
                 sink.breakpoint(t);
             }

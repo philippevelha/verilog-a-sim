@@ -436,6 +436,14 @@ pub enum EventSite {
         /// `enable`, if written — the event is active only where this is non-zero
         /// (LRM §5.10.1). **Honoured**: a disabled site registers nothing, so it cannot fire.
         enable: Option<ExprId>,
+        /// `true` when the source wrote `above(...)` rather than `cross(...)`.
+        ///
+        /// `above` is "`cross`, except that it also triggers during initialization or DC"
+        /// (LRM §5.10.2) — always rising, and firing when the expression is *already* past the
+        /// threshold rather than only when it moves across. It shares this variant because the
+        /// LRM itself defines it as a `cross` with that one addition, and duplicating the
+        /// variant would duplicate every walk over it.
+        at_initialization: bool,
     },
     /// `timer(start, period)` — fires at absolute time `start`, and every `period` seconds
     /// thereafter (LRM §5.10.3).

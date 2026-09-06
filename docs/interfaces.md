@@ -786,3 +786,22 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > crossings that fired without meeting their request, which happens when the tolerance is finer
 > than f64 spacing at that time or the retry cap is reached. The LRM permits ignoring a
 > tolerance below the tool's time precision; it does not permit ignoring one in silence.
+
+> **Revision (§6 change, ratified 2026-09-06e):** `EventSink::monitor`'s `dir`/`tol` arguments
+> were folded into a single `CrossSpec { dir, tol, at_initialization }`, and `FiredEvents` — the
+> consumer's per-instance fired-flag buffer — moved into `va-abi` so both consumers share one
+> shape.
+>
+> The spec struct is a response to churn: `monitor` took `dir` at v0.9.2, `tol` at v0.9.6, and
+> `at_initialization` would have been a third widening in four versions. A struct absorbs the
+> next one without touching any implementor.
+>
+> `at_initialization` is what makes `above` more than a one-sided `cross`. Per LRM §5.10.2 it
+> "also triggers during initialization or dc", and that is the whole reason the construct
+> exists: a signal already past its threshold never crosses it, so a `cross` on it never fires
+> at all. Honouring it meant a **static solve had to grow events**, which it had none of —
+> hence `va_core::mna::assemble_with_events`, `newton::solve_with_events` and
+> `dc::operating_point_with_events`, all additive (the existing entry points pass an empty set
+> and are unchanged). The DC path is two-phase and iterates to a fixed point, because which
+> events fire is a property of the solution while the bodies they guard change the equations
+> that produce it.

@@ -149,8 +149,13 @@ pub enum Token {
     /// This covers the math/analog built-ins (`exp`, `ln`, `ddt`, `idt`, …) — which the
     /// parser routes to call expressions — plus gate primitives and constructs outside the
     /// v0 subset. The `kw` callback maps the matched lexeme back to its [`Keyword`].
+    /// `above` and `absdelta` are in the LRM's Table B.1 reserved list; both were missing
+    /// here until 2026-09-06. Safe to add: all 24 corpus occurrences of `above` are in
+    /// comments ("the above copyright notice"), and `absdelta` appears nowhere.
+    #[token("above", kw)]
     #[token("abs", kw)]
     #[token("absdelay", kw)]
+    #[token("absdelta", kw)]
     #[token("abstol", kw)]
     #[token("access", kw)]
     #[token("acos", kw)]

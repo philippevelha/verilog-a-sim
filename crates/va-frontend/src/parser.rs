@@ -1575,7 +1575,11 @@ impl Parser<'_> {
                 // A bare `@(cross(...))` or `@(timer(...))` — the two monitored events this
                 // engine implements. Recognised *before* the refusal below, which still
                 // catches every compound trigger and the events that remain unimplemented.
-                for (kw, synthetic) in [("cross", "@cross"), ("timer", "@timer")] {
+                for (kw, synthetic) in [
+                    ("cross", "@cross"),
+                    ("above", "@above"),
+                    ("timer", "@timer"),
+                ] {
                     if self.trigger_is_bare(kw) {
                         let cond = self.parse_event_trigger(synthetic)?;
                         self.eat(&Token::RParen)?;
@@ -3210,16 +3214,45 @@ mod tests {
         }
     }
 
-    /// The monitored events that remain unimplemented stay refused.
+    /// `absdelta` is the last monitored event still unimplemented, and stays refused.
     #[test]
     fn the_other_monitored_events_are_still_refused() {
-        for src in [
-            "module t(a, b); electrical a, b; analog begin @(above(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(absdelta(V(a), 0.1)) x = 1.0; I(a, b) <+ x; end endmodule",
-        ] {
-            let err = parse_err(src);
-            assert!(err.contains("not supported"), "should refuse: {err}");
+        );
+        assert!(err.contains("not supported"), "should refuse: {err}");
+    }
+
+    /// A bare `@(above(...))` parses, and its argument list is `above`'s own — the second
+    /// position is a *tolerance*, not `cross`'s direction, so the two must not share a shape.
+    #[test]
+    fn a_bare_above_trigger_parses_with_its_own_argument_list() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(above(V(a) - 1.0, 1n)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        let Stmt::If { cond, .. } = &body[0] else {
+            panic!("expected a guarded if, got {:?}", body[0])
+        };
+        match m.expr(*cond) {
+            ExprAst::Call { name, args } => {
+                assert_eq!(name, "@above");
+                assert_eq!(args.len(), 2, "expr and time_tol -- no direction argument");
+            }
+            other => panic!("expected the synthetic trigger call, got {other:?}"),
         }
+    }
+
+    /// A compound trigger containing `above` is still refused, like the other bare-only forms.
+    #[test]
+    fn a_compound_trigger_containing_above_is_still_refused() {
+        let err = parse_err(
+            "module t(a, b); electrical a, b; analog begin @(initial_step or above(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        assert!(
+            err.contains("above") && err.contains("not supported"),
+            "{err}"
+        );
     }
 
     /// A compound trigger containing `timer` is still refused, for the same reason the `cross`

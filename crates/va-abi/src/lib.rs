@@ -42,7 +42,7 @@ pub mod stamps;
 pub mod state;
 
 pub use analysis::{AnalysisCtx, AnalysisKind, ANALYSIS_DC};
-pub use events::{CrossDir, CrossTol, EventSink};
+pub use events::{CrossDir, CrossSpec, CrossTol, EventSink, FiredEvents};
 pub use instance::{ModelInstance, UnknownKind};
 pub use noise::NoiseSink;
 pub use stamps::StampSink;

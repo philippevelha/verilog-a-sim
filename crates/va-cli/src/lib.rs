@@ -1361,7 +1361,11 @@ pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Q
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
     let (instances, dim, _currents, _) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
-    operating_point(&refs, dim, NewtonConfig::default()).context("DC operating-point solve failed")
+    // Events-aware: `above` fires in a static solve when its expression is already past the
+    // threshold, and the body it guards changes the equations (§ `@(above)`).
+    va_core::dc::operating_point_with_events(&refs, dim, NewtonConfig::default(), None)
+        .map(|(op, _)| op)
+        .context("DC operating-point solve failed")
 }
 
 /// Solve a `.dc` sweep (§ ladder rung 2): re-solve the whole circuit fresh at each swept value
@@ -3783,6 +3787,138 @@ X1 a gnd xu
             fired, 1,
             "an unmeetable tolerance costs resolution, not the event"
         );
+    }
+
+    /// `above` fires where `cross` cannot — on a signal that is *already* past the threshold
+    /// and never moves across it.
+    ///
+    /// This is the LRM's own motivating case (§5.10.2, the sample-and-hold example): "if the
+    /// voltage on the smpl port never crosses 2.5V in the positive direction, then the cross()
+    /// function of the previous example would never trigger, even if the voltage on the smpl
+    /// port is always above 2.5V." A DC deck holds the node at a constant 4 V, so there is no
+    /// crossing anywhere in the run — `cross` must stay silent and `above` must fire.
+    #[test]
+    fn above_fires_on_a_signal_that_never_crosses_where_cross_cannot() {
+        let conductance = |event: &str| -> f64 {
+            let src = format!(
+                "
+module ab(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @({event}) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 a gnd DC 4
+X1 a gnd ab
+.op
+.end
+",
+            )
+            .expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            // I(V1) = -g * 4, so the conductance is recoverable from the source current.
+            op.x[net.node_order.len()].abs() / 4.0
+        };
+
+        let with_above = conductance("above(V(p, n) - 2.5)");
+        let with_cross = conductance("cross(V(p, n) - 2.5, 1)");
+
+        assert!(
+            (with_above - 1.0).abs() < 1e-9,
+            "`above` must fire at the operating point: g = {with_above}"
+        );
+        assert!(
+            (with_cross - 1e-3).abs() < 1e-12,
+            "`cross` must not fire in a static solve: g = {with_cross}"
+        );
+    }
+
+    /// `above` fires in transient too, at the first solved timepoint, when its expression starts
+    /// out past the threshold — the same signal a `cross` would never see.
+    #[test]
+    fn above_fires_at_the_start_of_a_transient_run() {
+        const SRC: &str = "
+module abt(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(above(V(p, n) - 2.5)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 4
+X1 a gnd abt
+.tran 10u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        assert_eq!(
+            wf.model_crossings.len(),
+            1,
+            "fires once, at initialization: {:?}",
+            wf.model_crossings
+        );
+        let branch = net.node_order.len();
+        let peak =
+            wf.x.iter()
+                .map(|row| row[branch].abs())
+                .fold(0.0f64, f64::max);
+        assert!(peak > 1.0, "the body must run: peak |I(V1)| = {peak:e}");
+    }
+
+    /// `above`'s `enable` still gates it, and an `above` on a *negative* expression does not
+    /// fire — the initialization rule is "already positive", not "always".
+    #[test]
+    fn above_respects_enable_and_the_sign_of_its_expression() {
+        let conductance = |args: &str| -> f64 {
+            let src = format!(
+                "
+module abe(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(above({args})) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 a gnd DC 4
+X1 a gnd abe
+.op
+.end
+",
+            )
+            .expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs() / 4.0
+        };
+        // Below the threshold: nothing to be above.
+        assert!((conductance("V(p, n) - 100.0") - 1e-3).abs() < 1e-12);
+        // Above it, but disabled.
+        assert!((conductance("V(p, n) - 2.5, 0, 0, 0") - 1e-3).abs() < 1e-12);
+        // Above it and enabled.
+        assert!((conductance("V(p, n) - 2.5, 0, 0, 1") - 1.0).abs() < 1e-9);
     }
 
     /// A step-scoped trigger is refused in transient, where its body would re-run at every

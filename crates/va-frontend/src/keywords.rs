@@ -94,9 +94,11 @@ impl std::fmt::Display for Keyword {
 /// `endmodule`, `exclude`, `from`, `genvar`, `ground`, `if`, `inf`, `inout`, `input`,
 /// `integer`, `localparam`, `module`, `output`, `parameter`, `real`, `thermal`) appear here for
 /// completeness but are tokenized directly.
-pub const RESERVED_WORDS: [&str; 184] = [
+pub const RESERVED_WORDS: [&str; 186] = [
+    "above",
     "abs",
     "absdelay",
+    "absdelta",
     "abstol",
     "access",
     "acos",

@@ -95,6 +95,23 @@ pub fn solve(
     dim: usize,
     cfg: NewtonConfig,
 ) -> Result<Vec<f64>, CoreError> {
+    solve_with_events(instances, dim, cfg, &va_abi::FiredEvents::default())
+}
+
+/// [`solve`], with the events the consumer has determined fired at this operating point.
+///
+/// See [`crate::mna::assemble_with_events`] for why a static solve has events at all. `solve`
+/// passes an empty set, so a caller with no events behaves exactly as before.
+///
+/// # Errors
+///
+/// As [`solve`].
+pub fn solve_with_events(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    fired: &va_abi::FiredEvents,
+) -> Result<Vec<f64>, CoreError> {
     if dim == 0 {
         return Ok(Vec::new());
     }
@@ -134,6 +151,7 @@ pub fn solve(
                 per_abstol: &per_abstol,
                 junction: &junction,
             },
+            fired,
         )?;
     }
     Ok(x)
@@ -159,6 +177,7 @@ fn solve_from(
     cfg: NewtonConfig,
     gmin: f64,
     class: &Classification<'_>,
+    fired: &va_abi::FiredEvents,
 ) -> Result<Vec<f64>, CoreError> {
     let Classification {
         kinds,
@@ -173,7 +192,7 @@ fn solve_from(
         // This crate solves DC operating points only (`crate::dc`), so the context is fixed
         // here rather than plumbed in from the caller: an AC or noise run linearizes about a
         // point this same DC solve produced, and asks its own analysis's question later.
-        let mut sys = mna::assemble(instances, &x, &va_abi::ANALYSIS_DC, dim);
+        let mut sys = mna::assemble_with_events(instances, &x, &va_abi::ANALYSIS_DC, dim, fired);
         sys.shunt_gmin(&x, gmin, kinds);
         let residual_norm = inf_norm(&sys.residual);
 
@@ -195,6 +214,7 @@ fn solve_from(
             vcrit,
             residual_norm,
             junction,
+            fired,
         );
 
         let mut update_small = true;
@@ -248,6 +268,7 @@ fn damped_scale(
     vcrit: f64,
     residual_norm: f64,
     junction: &[bool],
+    fired: &va_abi::FiredEvents,
 ) -> f64 {
     if cfg.max_damping_halvings == 0 {
         return 1.0;
@@ -264,7 +285,8 @@ fn damped_scale(
                 }
             })
             .collect();
-        let mut sys = mna::assemble(instances, &candidate, &va_abi::ANALYSIS_DC, dim);
+        let mut sys =
+            mna::assemble_with_events(instances, &candidate, &va_abi::ANALYSIS_DC, dim, fired);
         sys.shunt_gmin(&candidate, gmin, kinds);
         // A non-finite residual (an exponential that overflowed at this trial point) is not an
         // improvement by any reading, and `<` against a NaN is false, so it backtracks.

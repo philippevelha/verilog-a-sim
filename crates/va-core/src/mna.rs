@@ -160,9 +160,28 @@ pub fn assemble(
     ctx: &AnalysisCtx,
     dim: usize,
 ) -> System {
+    assemble_with_events(instances, x, ctx, dim, &va_abi::FiredEvents::default())
+}
+
+/// [`assemble`], with the events the consumer has determined fired at this evaluation.
+///
+/// Needed for `above`, which — unlike `cross` — fires in a **static** solve when its expression
+/// is already past the threshold (LRM §5.10.2). A DC operating point therefore has events, and
+/// the body they guard changes the equations, so the flags have to reach `load`.
+///
+/// `fired` is held fixed across every Newton iteration of the solve, which is what keeps `load`
+/// pure. [`assemble`] passes an empty set, so a caller with no events is unchanged.
+pub fn assemble_with_events(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    dim: usize,
+    fired: &va_abi::FiredEvents,
+) -> System {
     let mut sys = System::new(dim);
-    for inst in instances {
-        inst.load(x, ctx, &mut va_abi::ModelState::stateless(), &mut sys);
+    for (i, inst) in instances.iter().enumerate() {
+        let mut st = va_abi::ModelState::with_events(&[], &mut [], fired.slice(i));
+        inst.load(x, ctx, &mut st, &mut sys);
     }
     sys
 }

@@ -16,6 +16,95 @@ pub struct OperatingPoint {
 /// # Errors
 ///
 /// Propagates [`CoreError`] from the underlying Newton solve.
+/// Each instance's `above`-site values at one operating point, indexed `[instance][slot]`.
+///
+/// `None` marks a slot that is not an `above`: a `cross` never fires in a static solve and a
+/// `timer` has no value there, so those slots take part in nothing. Carried between the points
+/// of a DC sweep, where the LRM wants a crossing from below rather than a bare "is positive".
+pub type AboveValues = Vec<Vec<Option<f64>>>;
+
+/// Solve an operating point, firing any `above` event whose expression is already past its
+/// threshold — Verilog-A's one analog event that triggers in a **static** solve (LRM §5.10.2).
+///
+/// Two phases, because the two facts depend on each other: which events fire is a property of
+/// the solution, and the bodies they guard change the equations that produce it. So this solves
+/// once with nothing fired, asks each instance what its sites read there, and re-solves with the
+/// firings set. `previous` supplies the values from the preceding point of a DC *sweep*, where
+/// the LRM asks for a crossing from below rather than a bare "is positive"; pass `None` for a
+/// standalone operating point, which is the initialization case.
+///
+/// It iterates to a fixed point rather than re-solving once, because a body may push another
+/// site past its own threshold. Bounded: an event can only ever turn on here (a fired set that
+/// stopped growing is the fixed point), so the loop is at most one pass per site.
+///
+/// # Errors
+///
+/// As [`operating_point`].
+pub fn operating_point_with_events(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    previous: Option<&AboveValues>,
+) -> Result<(OperatingPoint, AboveValues), CoreError> {
+    let mut fired = va_abi::FiredEvents::new(instances);
+    let mut x = newton::solve_with_events(instances, dim, cfg, &fired)?;
+    let mut values = poll_above(instances, &x);
+
+    if !fired.is_empty() {
+        for _ in 0..=fired.len() {
+            let mut changed = false;
+            for (i, slots) in values.iter().enumerate() {
+                for (slot, v) in slots.iter().enumerate() {
+                    let Some(now) = *v else { continue };
+                    // Initialization fires on "already positive"; a sweep point fires only on a
+                    // crossing from below, so a signal that stays positive fires once, at the
+                    // point it arrived, and not at every point thereafter.
+                    let trigger = match previous.and_then(|p| p.get(i)).and_then(|s| s.get(slot)) {
+                        Some(Some(was)) => *was <= 0.0 && now > 0.0,
+                        _ => now > 0.0,
+                    };
+                    if trigger && !fired.is_set(i, slot) {
+                        fired.set(i, slot);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+            x = newton::solve_with_events(instances, dim, cfg, &fired)?;
+            values = poll_above(instances, &x);
+        }
+    }
+
+    Ok((OperatingPoint { x }, values))
+}
+
+/// Each instance's `above` sites' values at `x`, indexed `[instance][slot]`.
+///
+/// `None` for a slot that is not an `above` — a `cross` never fires in a static solve, and a
+/// `timer` has no value here — so those slots take part in nothing.
+fn poll_above(instances: &[&dyn ModelInstance], x: &[f64]) -> AboveValues {
+    instances
+        .iter()
+        .map(|inst| {
+            let n = inst.event_count();
+            if n == 0 {
+                return Vec::new();
+            }
+            let mut sink = va_abi::events::RecordingEventSink::new();
+            inst.events(x, &va_abi::ANALYSIS_DC, &mut sink);
+            let mut per_slot = vec![None; n];
+            for (slot, value, spec) in sink.monitors {
+                if slot < n && spec.at_initialization {
+                    per_slot[slot] = Some(value);
+                }
+            }
+            per_slot
+        })
+        .collect()
+}
+
 pub fn operating_point(
     instances: &[&dyn ModelInstance],
     dim: usize,

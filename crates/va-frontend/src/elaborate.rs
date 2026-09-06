@@ -1866,6 +1866,37 @@ impl Elaborator<'_> {
                     time_tol,
                     expr_tol,
                     enable,
+                    at_initialization: false,
+                });
+                Expr::EventFired(slot)
+            }
+            // `@(above(expr, time_tol, expr_tol, enable))` (LRM §5.10.2). The LRM defines it as
+            // "almost identical to cross, except that it also triggers during initialization or
+            // dc", so it lowers to the same site with `at_initialization` set — and with no
+            // direction argument of its own, `above` being always "crosses zero from below".
+            //
+            // Note the argument list is shifted by one against `cross`'s: position 2 is the
+            // first *tolerance* here, not a direction. Sharing the parse but not the
+            // interpretation is exactly why the parser passes arguments through verbatim.
+            ExprAst::Call { name, args } if name == "@above" => {
+                if args.is_empty() || args.len() > 4 {
+                    return Err(elab(format!(
+                        "`above` takes 1 to 4 arguments (expr, time_tol, expr_tol, enable),                          got {}",
+                        args.len()
+                    )));
+                }
+                let expr = self.lower_expr(args[0])?;
+                let time_tol = args.get(1).map(|&r| self.lower_expr(r)).transpose()?;
+                let expr_tol = args.get(2).map(|&r| self.lower_expr(r)).transpose()?;
+                let enable = args.get(3).map(|&r| self.lower_expr(r)).transpose()?;
+                let slot = self.out.event_sites.len() as u32;
+                self.out.event_sites.push(va_ir::EventSite::Cross {
+                    expr,
+                    dir: 1, // always rising: "crosses zero from below"
+                    time_tol,
+                    expr_tol,
+                    enable,
+                    at_initialization: true,
                 });
                 Expr::EventFired(slot)
             }
@@ -3680,12 +3711,14 @@ impl Elaborator<'_> {
                     time_tol,
                     expr_tol,
                     enable,
+                    at_initialization,
                 } => va_ir::EventSite::Cross {
                     expr: remap(expr),
                     dir,
                     time_tol: time_tol.map(remap),
                     expr_tol: expr_tol.map(remap),
                     enable: enable.map(remap),
+                    at_initialization,
                 },
                 va_ir::EventSite::Timer {
                     start,
