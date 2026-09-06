@@ -169,12 +169,19 @@ class of lexemes.
   restoring the old fold moves it to `5.838e-1`. See `docs/validation.md` for the deck's
   resistive-only design and the `UIC`-shifts-`time` gotcha behind it. `$mfactor` (the instance multiplicity/`m=` factor)
   folds to `1.0`, its LRM default, since v0 has no netlist-driven instance parameters to override
-  it; `$param_given(name)`/`$port_connected(name)` both fold to `0.0`/false — `name` is read
-  directly off the AST as a bare parameter/port-name reference (validated against the module's
-  own declarations, but never lowered as a value expression), and since v0's pipeline has no
-  netlist-driven instantiation at all, no parameter is ever explicitly overridden and no optional
-  port is ever connected, making `false` the honest answer in every case rather than an
-  approximation; `$limit(access, "fn_name"[, args...])` (a Newton convergence aid, LRM §4.5.14)
+  it; `$param_given(name)` **is answered, not folded** (changed 2026-09-06) — `name` is
+  read directly off the AST as a bare parameter-name reference (validated against the module's
+  own declarations, never lowered as a value expression), then lowered to `va_ir::Expr::
+  ParamGiven`, which the *instantiation boundary* resolves against `Module::given_params`.
+  It used to fold to `false` on the grounds that "v0's pipeline has no netlist-driven
+  instantiation at all"; that stopped being true when a device line gained `name=value`
+  overrides, so a deck could set a parameter and the model would still be told it was not
+  given. Both instantiation paths now answer honestly: `va-frontend`'s submodule inlining folds
+  each instance's own `#(...)` list, and `va-cli`'s `build_from_model` marks every parameter a
+  deck sets (positional value included). A module with no instantiating context still reports
+  `false`, which for it is the truth rather than an approximation. An `aliasparam` resolves to
+  its target's `ParamId`, so querying an alias reports the target's givenness.
+  `$port_connected(name)` still folds to `0.0`/false — see its own entry; `$limit(access, "fn_name"[, args...])` (a Newton convergence aid, LRM §4.5.14)
   folds transparently to its first argument's value — a converged Newton solve is a fixed point
   of the *unlimited* equations, so the limiter changes only the iteration path toward that point,
   never the point itself, and this project's stateless `ModelInstance::load` ABI has no

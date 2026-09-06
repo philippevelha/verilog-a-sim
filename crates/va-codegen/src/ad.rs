@@ -659,6 +659,16 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 .ok_or_else(|| unsupported("parameter index out of range"))?;
             Ok(Dual::constant(v, count))
         }
+        // `$param_given(p)`: resolved at the instantiation boundary, read here. Constant per
+        // instance (the override set cannot change during a solve), hence zero-gradient.
+        Expr::ParamGiven(p) => Ok(Dual::constant(
+            if ctx.module.param_is_given(*p) {
+                1.0
+            } else {
+                0.0
+            },
+            count,
+        )),
         Expr::Var(id) => ctx.get_var(*id),
         Expr::Probe(access) => match access.kind {
             va_ir::AccessKind::Potential => {

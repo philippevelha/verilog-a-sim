@@ -717,6 +717,13 @@ impl Elaborator<'_> {
                         min,
                         max,
                     });
+                    // § `$param_given`: an instantiating parent that supplied a `#(...)`
+                    // override for this name is exactly what "given" means, and this is the
+                    // one point in elaboration that knows. A module elaborated standalone has
+                    // an empty `param_overrides` and so marks nothing.
+                    if self.param_overrides.contains_key(name) {
+                        self.out.mark_param_given(id);
+                    }
                     self.params.insert(name.clone(), id);
                     self.param_vals.insert(name.clone(), default_val);
                 }
@@ -1520,13 +1527,19 @@ impl Elaborator<'_> {
                 Expr::Const(1.0)
             }
             // `$param_given(name)` asks whether `name` was explicitly set by the instantiating
-            // netlist, as opposed to left at its declared default. `name` is a parameter-name
+            // context, as opposed to left at its declared default. `name` is a parameter-name
             // reference, not a value expression — read directly off the AST rather than lowered
-            // (mirrors `$simparam`'s unevaluated name argument above). v0's pipeline has no
-            // netlist-driven parameter overrides yet (`va-netlist` doesn't wire instance
-            // parameters into elaboration), so no parameter is ever "given": every instance
-            // always sees every parameter at its default, making `false` the honest answer in
-            // every case rather than an approximation of a case that could go the other way.
+            // (mirrors `$simparam`'s unevaluated name argument above).
+            //
+            // Lowered to `Expr::ParamGiven`, *not* folded here. This used to fold to `false`,
+            // justified by "v0's pipeline has no netlist-driven parameter overrides yet" — a
+            // premise that stopped being true once a device line gained `name=value` overrides.
+            // A deck could set `Is=1e-15` and the model would still be told `Is` was not given,
+            // silently taking the wrong branch. The answer belongs at the instantiation
+            // boundary, and that is where the marker is resolved (`va_ir::Module::given_params`).
+            //
+            // An `aliasparam` resolves to its target's `ParamId`, so asking about an alias
+            // correctly reports whether the *target* was given.
             ExprAst::SysFunc { name, args } if name == "param_given" => {
                 let &[param_ref] = args.as_slice() else {
                     return Err(elab(
@@ -1541,13 +1554,13 @@ impl Elaborator<'_> {
                         ))
                     }
                 };
-                if !self.params.contains_key(param_name) {
+                let Some(&pid) = self.params.get(param_name) else {
                     return Err(elab(format!(
                         "`$param_given` names `{param_name}`, which is not a declared parameter \
                          of this module"
                     )));
-                }
-                Expr::Const(0.0)
+                };
+                Expr::ParamGiven(pid)
             }
             // `$port_connected(name)` asks whether the named port has a real connection in the
             // instantiating netlist — the standard idiom for an optional terminal (e.g. a
@@ -2705,6 +2718,7 @@ impl Elaborator<'_> {
     fn contains_ddt(&self, expr: ExprId, tainted: &HashSet<u32>) -> bool {
         match self.out.expr(expr) {
             Expr::Call(va_ir::Builtin::Ddt, _) => true,
+            Expr::ParamGiven(_) => false,
             Expr::Var(id) => tainted.contains(&id.0),
             Expr::Call(_, args) | Expr::CallUser(_, args) => {
                 args.iter().any(|&a| self.contains_ddt(a, tainted))
@@ -2795,6 +2809,7 @@ impl Elaborator<'_> {
     /// directly (`if (ddt(q) > 0)`), with no tainted variable involved.
     fn first_tainted_var(&self, expr: ExprId, tainted: &HashSet<u32>) -> Option<VarId> {
         match self.out.expr(expr) {
+            Expr::ParamGiven(_) => None,
             Expr::Var(id) if tainted.contains(&id.0) => Some(*id),
             Expr::Call(_, args) | Expr::CallUser(_, args) => args
                 .iter()
@@ -3643,6 +3658,11 @@ fn remap_expr(
     match e {
         Expr::Const(v) => Expr::Const(*v),
         Expr::Param(pid) => Expr::Const(sub.params[pid.0 as usize].default),
+        // The submodule was elaborated with this instance's own `#(...)` overrides, so its
+        // `given_params` already answers for *this* instantiation. Folding here (rather than
+        // carrying the marker into the parent) is what lets two instances of one module with
+        // different override lists inline to different constants.
+        Expr::ParamGiven(pid) => Expr::Const(if sub.param_is_given(*pid) { 1.0 } else { 0.0 }),
         Expr::Var(vid) => Expr::Var(var_off[vid.0 as usize]),
         Expr::Probe(a) => Expr::Probe(remap_access(a, branch_off)),
         Expr::Unary(op, a) => Expr::Unary(*op, expr_off[a.0 as usize]),
@@ -4080,7 +4100,11 @@ mod tests {
             }
             seen.push(e);
             match &m.exprs[e.0 as usize] {
-                Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => {}
+                Expr::Const(_)
+                | Expr::Param(_)
+                | Expr::ParamGiven(_)
+                | Expr::Var(_)
+                | Expr::Probe(_) => {}
                 Expr::Unary(_, a) | Expr::Ddx(a, _) => stack.push(*a),
                 Expr::Binary(_, a, b) => {
                     stack.push(*a);
@@ -4812,15 +4836,20 @@ mod tests {
         assert!(elaborate(&ast).is_err());
     }
 
+    /// `$param_given` reaches the IR as a marker and validates its argument.
+    ///
+    /// This test used to assert the query *folded to `false`* here. It no longer does: the
+    /// answer is a property of the instantiation, so it is carried to that boundary instead
+    /// (see `param_given_survives_elaboration_as_a_marker` and the per-instance fold test).
     #[test]
-    fn param_given_folds_to_false_and_validates_the_name() {
+    fn param_given_lowers_to_a_marker_and_validates_the_name() {
         let m = elaborate_src(
             "module t(a, b); electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0)) I(a, b) <+ V(a, b); else I(a, b) <+ 2.0 * V(a, b); end endmodule",
         );
         assert!(m
             .exprs
             .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+            .any(|e| matches!(e, va_ir::Expr::ParamGiven(p) if *p == ParamId(0))));
 
         // Names an undeclared parameter.
         let src = "module t(a, b); electrical a, b; analog begin if ($param_given(nope)) I(a, b) <+ V(a, b); end endmodule";
@@ -7244,5 +7273,80 @@ mod tests {
         )
         .expect("declared-and-matching still elaborates");
         assert_eq!(m.ports.len(), 2);
+    }
+
+    /// A module with no instantiating context keeps `$param_given` as a marker rather than
+    /// folding it, and reports "not given" — which is the truth for it, since nothing has
+    /// given anything. The marker is what lets the instantiation boundary answer properly.
+    #[test]
+    fn param_given_survives_elaboration_as_a_marker() {
+        let m = elaborate_top(
+            "module sub(p, n); inout p, n; electrical p, n; parameter real r = 3.0;              analog I(p,n) <+ $param_given(r) * V(p,n); endmodule",
+            "sub",
+        );
+        let pid = ParamId(0);
+        assert!(
+            m.exprs
+                .iter()
+                .any(|e| matches!(e, Expr::ParamGiven(p) if *p == pid)),
+            "`$param_given` must reach the IR as a marker, not a folded constant"
+        );
+        assert!(
+            !m.param_is_given(pid),
+            "nothing instantiated this module, so no parameter is given"
+        );
+    }
+
+    /// The instantiation boundary answers `$param_given`, and answers it *per instance*: the
+    /// same submodule inlined with a `#(...)` override folds to 1, and without one folds to 0.
+    ///
+    /// Counting `Const(1.0)` is sound here because the fixture contains no other 1.0 — `r`'s
+    /// default is 3.0 and the override is 2000.0.
+    #[test]
+    fn an_override_makes_a_parameter_given_in_the_inlined_instance() {
+        const SUB: &str = "module sub(p, n); inout p, n; electrical p, n;                            parameter real r = 3.0;                            analog I(p,n) <+ $param_given(r) * V(p,n); endmodule ";
+        let ones = |src: &str| -> usize {
+            elaborate_top(src, "top")
+                .exprs
+                .iter()
+                .filter(|e| matches!(e, Expr::Const(v) if *v == 1.0))
+                .count()
+        };
+        let with = ones(&format!(
+            "{SUB} module top(a, b); inout a, b; electrical a, b;              sub #(.r(2000.0)) s1 (a, b); endmodule"
+        ));
+        let without = ones(&format!(
+            "{SUB} module top(a, b); inout a, b; electrical a, b;              sub s1 (a, b); endmodule"
+        ));
+        assert_eq!(with, 1, "an overridden parameter inlines as given");
+        assert_eq!(without, 0, "a defaulted parameter inlines as not given");
+    }
+
+    /// `aliasparam` resolves to its target's `ParamId`, so asking about the alias must report
+    /// whether the *target* was given -- the alias is another spelling, not another parameter.
+    #[test]
+    fn param_given_through_an_aliasparam_follows_the_target() {
+        const SUB: &str = "module sub(p, n); inout p, n; electrical p, n;                            parameter real r = 3.0; aliasparam res = r;                            analog I(p,n) <+ $param_given(res) * V(p,n); endmodule ";
+        let ones = |src: &str| -> usize {
+            elaborate_top(src, "top")
+                .exprs
+                .iter()
+                .filter(|e| matches!(e, Expr::Const(v) if *v == 1.0))
+                .count()
+        };
+        assert_eq!(
+            ones(&format!(
+                "{SUB} module top(a, b); inout a, b; electrical a, b;                  sub #(.r(2000.0)) s1 (a, b); endmodule"
+            )),
+            1,
+            "overriding `r` must make `$param_given(res)` true"
+        );
+        assert_eq!(
+            ones(&format!(
+                "{SUB} module top(a, b); inout a, b; electrical a, b;                  sub s1 (a, b); endmodule"
+            )),
+            0,
+            "leaving `r` at its default must make `$param_given(res)` false"
+        );
     }
 }

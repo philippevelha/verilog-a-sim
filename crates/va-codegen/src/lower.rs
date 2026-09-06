@@ -1093,7 +1093,7 @@ fn collect_flow_probe_branches_in_expr(module: &Module, expr: ExprId, out: &mut 
         Expr::Probe(access) if access.kind == AccessKind::Flow => {
             out.insert(access.branch.0);
         }
-        Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => {}
+        Expr::Const(_) | Expr::Param(_) | Expr::ParamGiven(_) | Expr::Var(_) | Expr::Probe(_) => {}
         Expr::Unary(_, e) => collect_flow_probe_branches_in_expr(module, *e, out),
         Expr::Binary(_, l, r) => {
             collect_flow_probe_branches_in_expr(module, *l, out);
@@ -1183,7 +1183,7 @@ fn collect_idt_calls_in_expr(module: &Module, expr: ExprId, out: &mut Vec<ExprId
                 collect_idt_calls_in_expr(module, a, out);
             }
         }
-        Expr::Const(_) | Expr::Param(_) | Expr::Var(_) | Expr::Probe(_) => {}
+        Expr::Const(_) | Expr::Param(_) | Expr::ParamGiven(_) | Expr::Var(_) | Expr::Probe(_) => {}
         Expr::Unary(_, e) => collect_idt_calls_in_expr(module, *e, out),
         Expr::Binary(_, l, r) => {
             collect_idt_calls_in_expr(module, *l, out);

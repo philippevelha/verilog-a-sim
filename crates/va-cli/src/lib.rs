@@ -1845,16 +1845,29 @@ fn build_from_model(
     next_unknown: &mut usize,
 ) -> Result<(Box<dyn ModelInstance>, NodeAssignment)> {
     let mut m = module.clone();
+    // § `$param_given`: setting a parameter *is* giving it, so every override recorded below
+    // also marks givenness on the clone. A deck that writes `Is=1e-15` and a model that asks
+    // `$param_given(Is)` must agree, which they did not while the query folded to `false` at
+    // elaboration (see `va_ir::Module::given_params`).
     if let (Some(v), Some(param)) = (value, m.params.first_mut()) {
         param.default = v;
+        m.mark_param_given(va_ir::ParamId(0));
     }
     // Named overrides are applied after the positional value, so a line that somehow states
     // both has the explicit name win over the implicit position. An unknown name is an error:
     // dropping it silently would leave a deck looking like it set something it did not, and
     // the whole reason to write `Is=1e-12` rather than rely on parameter order is to be sure.
     for (name, v) in overrides {
-        match m.params.iter_mut().find(|p| p.name == *name) {
-            Some(param) => param.default = *v,
+        match m
+            .params
+            .iter_mut()
+            .enumerate()
+            .find(|(_, p)| p.name == *name)
+        {
+            Some((i, param)) => {
+                param.default = *v;
+                m.mark_param_given(va_ir::ParamId(i as u32));
+            }
             None => {
                 let mut known: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
                 known.sort_unstable();
@@ -3471,6 +3484,116 @@ R1 out gnd 1000
         assert!(
             ratio > 10.0,
             "overrides should change the answer by orders of magnitude: {i_with} vs {i_without}"
+        );
+    }
+
+    /// `$param_given` reports what the *deck* did, not a fixed `false`.
+    ///
+    /// The regression this pins: the query used to fold to `false` at elaboration, justified
+    /// by "v0 has no netlist-driven parameter overrides" — a premise that expired when a
+    /// device line gained `name=value` overrides. A model branching on `$param_given` then
+    /// took the not-given branch even when the deck had plainly given the parameter.
+    ///
+    /// The fixture makes the two branches differ by 1000x, so a wrong answer cannot hide in a
+    /// tolerance: `r` given means a 1 kOhm resistor, `r` not given means 1 MOhm.
+    #[test]
+    fn param_given_reports_whether_the_deck_set_the_parameter() {
+        const MODEL: &str = "
+module pg(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real r = 1000.0;
+  real rr;
+  analog begin
+    if ($param_given(r)) rr = r;
+    else rr = 1.0e6;
+    I(p, n) <+ V(p, n) / rr;
+  end
+endmodule
+";
+        let design = compile_model(MODEL, "pg.va");
+
+        // A 1 V source across the model alone: I(V1) is -1/rr, so the current *is* the answer.
+        let current = |deck: &str| -> f64 {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs() // I(V1) follows the node unknowns
+        };
+
+        let given = current(
+            "V1 a gnd DC 1.0
+X1 a gnd pg r=1000
+.op
+.end
+",
+        );
+        let not_given = current(
+            "V1 a gnd DC 1.0
+X1 a gnd pg
+.op
+.end
+",
+        );
+
+        assert!(
+            (given - 1e-3).abs() < 1e-9,
+            "`r=1000` on the device line must read as given (1 kOhm), got I = {given}"
+        );
+        assert!(
+            (not_given - 1e-6).abs() < 1e-12,
+            "an absent `r` must read as not given (1 MOhm), got I = {not_given}"
+        );
+        assert!(
+            given / not_given > 100.0,
+            "the two branches must be distinguishable: {given} vs {not_given}"
+        );
+    }
+
+    /// An `R`/`C`/`L` line's SPICE positional value sets the model's *first* parameter, so it
+    /// gives that parameter just as surely as the named `name=value` form does. Checked against
+    /// the same model placed with no value at all, via the general `X` form.
+    #[test]
+    fn a_positional_value_also_counts_as_given() {
+        const MODEL: &str = "
+module resistor(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real r = 1000.0;
+  real rr;
+  analog begin
+    if ($param_given(r)) rr = r;
+    else rr = 1.0e6;
+    I(p, n) <+ V(p, n) / rr;
+  end
+endmodule
+";
+        let design = compile_model(MODEL, "resistor.va");
+        let current = |deck: &str| -> f64 {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs()
+        };
+        let positional = current(
+            "V1 a gnd DC 1.0
+R1 a gnd 2000
+.op
+.end
+",
+        );
+        assert!(
+            (positional - 5e-4).abs() < 1e-9,
+            "a positional 2000 must be applied *and* reported as given, got I = {positional}"
+        );
+        let no_value = current(
+            "V1 a gnd DC 1.0
+X1 a gnd resistor
+.op
+.end
+",
+        );
+        assert!(
+            (no_value - 1e-6).abs() < 1e-12,
+            "the same model placed with no value must read as not given, got I = {no_value}"
         );
     }
 

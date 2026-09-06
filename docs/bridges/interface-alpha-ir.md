@@ -40,6 +40,27 @@
 > `mvsg_cmc_2.1.0.va`'s `calc_iq`/`calc_capt` idiom (a function computing several results at
 > once). Additive: every existing `Function` construction site only needed
 > `arg_dirs: vec![ArgDir::Input; args.len()]`, an exact behavioral no-op.
+>
+> Revised 2026-09-06 (§6): added `Expr::ParamGiven(ParamId)` and `Module.given_params:
+> Vec<ParamId>`, carrying `$param_given` (LRM §9.19) to the **instantiation boundary** instead
+> of folding it during elaboration.
+>
+> The change is a bug fix, not a feature. `$param_given` used to fold to `false` at
+> elaboration, justified in the code by "v0's pipeline has no netlist-driven parameter
+> overrides yet." That premise expired when a device line gained `name=value` overrides: a deck
+> could write `Is=1e-15` and the model would still be told `Is` was not given, silently taking
+> the wrong branch. Givenness is a property of an *instantiation*, and a module is elaborated
+> once but instantiated many times — so no answer folded at elaboration can be right for all of
+> them.
+>
+> Whoever builds an instance records the truth in `given_params`; `va-codegen` reads it via
+> `Module::param_is_given`. Both instantiation paths now do so: `va-frontend`'s submodule
+> inlining folds each instance's own answer to a `Const` (so two instances of one module with
+> different `#(...)` lists inline to different constants), and `va-cli`'s `build_from_model`
+> marks every parameter a deck sets, positional value included. A module with no instantiating
+> context carries an empty set — "nothing has given anything," which is the truth for it.
+> Additive: `Module` derives `Default`, so no construction site changed, and the committed
+> golden IR moved by exactly one `given_params: []` line per zoo model.
 
 ## 1. Role
 
@@ -95,8 +116,9 @@ Module
   `Call(Builtin, …)`, `CallUser(FuncId, …)`, `Select(cond, then, else)` (the ternary `?:`),
   `Ddx(ExprId, Access)` (`ddx(expr, probe)`, the analog partial-derivative operator — `Access`
   is carried directly, not as another `ExprId`, since it names which unknown to differentiate
-  against rather than being evaluated to a value). Children are `ExprId`s — never `Box`, never
-  `&`.
+  against rather than being evaluated to a value), `ParamGiven(ParamId)` (`$param_given`,
+  resolved at the instantiation boundary against `Module.given_params`). Children are
+  `ExprId`s — never `Box`, never `&`.
 - **`Stmt`** is `Contribute { target, value }` (`<+`), `If`, `Assign { lhs, rhs }`, `Block`,
   and the analog control-flow forms `While`, `For`, `Repeat`, `Case` (with `CaseArm`).
   Control flow nests via owned `Vec<Stmt>`; `For` boxes its single `init`/`step` statements
@@ -158,6 +180,12 @@ consumer may rely on them without re-checking.
     the frontend never emits a flow-kind `Ddx` (v0 codegen has no independent unknown for a
     branch current to differentiate against; the frontend rejects `ddx(..., I(...))` before it
     would reach this bridge).
+12. **`ParamGiven`'s `ParamId` is valid, and `given_params` is a set of valid ids.** Every
+    `Expr::ParamGiven(p)` and every entry of `Module.given_params` has `p.0 < params.len()`,
+    and `given_params` holds no duplicates (use `Module::mark_param_given`, which is
+    idempotent). An empty `given_params` is well-formed and means "no instantiating context has
+    given anything" — it is the correct state for a module elaborated standalone, not a
+    missing-data sentinel.
 
 > These invariants are the draft acceptance criteria for `va-frontend`'s elaboration output
 > and should become a `va-ir::validate(&Module) -> Result<(), IrError>` checker (open item,

@@ -44,6 +44,7 @@ pub enum Expr {
     CallUser(FuncId, Vec<ExprId>), // user-defined analog function call
     Select(ExprId, ExprId, ExprId),// ternary cond ? then : else
     Ddx(ExprId, Access),           // ddx(expr, probe): partial derivative w.r.t. probe's node
+    ParamGiven(ParamId),           // $param_given: resolved at the instantiation boundary
 }
 
 pub enum Stmt {

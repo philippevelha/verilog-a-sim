@@ -124,6 +124,15 @@ pub struct Module {
     pub branches: Vec<Branch>,
     /// Parameters with optional ranges/defaults.
     pub params: Vec<Param>,
+    /// The parameters the *instantiating context* explicitly set, as opposed to leaving at
+    /// their declared default — the question `$param_given` asks (LRM §9.19).
+    ///
+    /// Givenness is a property of an instantiation, not of a module: the same `module diode`
+    /// has `Is` given when a deck writes `Is=1e-15` on the device line and not given when it
+    /// does not. A module elaborated with no instantiating context therefore carries an empty
+    /// set, which is the honest answer for it — every parameter is at its default. Whoever
+    /// builds the instance records the truth here; see [`Self::param_is_given`].
+    pub given_params: Vec<ParamId>,
     /// Expression arena. [`ExprId`]s index into this `Vec`.
     pub exprs: Vec<Expr>,
     /// Local analog variables referenced by [`VarId`]. Function arguments and locals share
@@ -149,6 +158,22 @@ impl Module {
         let id = ExprId(self.exprs.len() as u32);
         self.exprs.push(expr);
         id
+    }
+
+    /// Whether the instantiating context explicitly set parameter `p` — the value
+    /// [`Expr::ParamGiven`] evaluates to. `false` for a module with no instantiating context,
+    /// where no parameter has been given.
+    pub fn param_is_given(&self, p: ParamId) -> bool {
+        self.given_params.contains(&p)
+    }
+
+    /// Record that the instantiating context explicitly set parameter `p`. Idempotent, so a
+    /// caller that applies a positional value and then a same-named override records one
+    /// givenness, not two.
+    pub fn mark_param_given(&mut self, p: ParamId) {
+        if !self.given_params.contains(&p) {
+            self.given_params.push(p);
+        }
     }
 
     /// Borrow an expression by handle.
@@ -291,6 +316,15 @@ pub enum Expr {
     /// `va-codegen` rejects `probe.kind == Flow`). The result is treated as having zero further
     /// gradient (second derivatives are out of scope for this forward-mode, single-pass AD).
     Ddx(ExprId, Access),
+    /// `$param_given(p)`: whether the instantiating context explicitly set parameter `p`
+    /// (LRM §9.19), as `1.0`/`0.0`.
+    ///
+    /// Carried to the instantiation boundary rather than folded at elaboration, because that
+    /// is the first point where the answer is known — a module is elaborated once but may be
+    /// instantiated many times, each with a different override set. `va-codegen` reads
+    /// [`Module::given_params`], which whoever builds the instance has filled in. Constant per
+    /// instance, and so zero-gradient.
+    ParamGiven(ParamId),
 }
 
 /// Unary operators.
