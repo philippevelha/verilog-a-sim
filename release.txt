@@ -1,0 +1,65 @@
+verilog-a-sim — release log
+===========================
+
+Versioning, from 0.9.0 onward:
+
+  * Every integrated feature or fix bumps the patch: 0.9.0 -> 0.9.1 -> 0.9.2 -> ...
+  * Each bump gets a dated entry below with a sentence or two saying what changed.
+  * 1.0.0 is reached when the remaining 1.0 blockers (see the "Road to 1.0" list at
+    the bottom) are closed. Until then the version stays in the 0.9.x range.
+  * The version lives in the workspace Cargo.toml (`[workspace.package] version`);
+    every crate inherits it with `version.workspace = true`. Bump both together —
+    the number in this file and the one in Cargo.toml must always agree.
+
+Newest first.
+
+
+0.9.0 — 2026-09-06
+------------------
+Baseline. First numbered release; the workspace had been sitting at 0.0.0 since
+bootstrap. Everything below this line is the state that number describes, measured
+rather than asserted.
+
+  Verified at this version:
+    - 694 tests passing, 0 failed, 0 ignored (`cargo test --workspace`)
+    - 27/27 golden circuits vs real QSPICE, convergence 27/27 (`cargo xtask validate`)
+    - `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt` clean
+    - Corpus: 113/132 module-declaring files pass frontend + codegen; 95/99 of the
+      self-contained ones (`va-cli check external --codegen`, 171 files scanned)
+    - 21 Quarto tutorials
+
+  What works end to end: DC operating point and `.dc` sweep, transient with adaptive
+  timestep and LTE control, small-signal AC, and noise (output, input-referred, and
+  per-device attribution) — each driven through the real Verilog-A frontend -> codegen
+  -> core pipeline from a SPICE-style deck, and each gated against committed QSPICE
+  golden output. All six bring-up-ladder rungs pass.
+
+  Language: the full Verilog-A grammar is the target and most of it is in — module
+  hierarchy and instantiation, the discipline/nature system including user-defined
+  disciplines, contributions, ddt/idt, the analog control-flow set, analog functions,
+  genvar/generate, vector nets and ports, array variables, ddx, the Laplace/Z filter
+  family, and the three noise builtins. `docs/token-reference.md` is the token-by-token
+  record.
+
+
+Road to 1.0
+-----------
+Tracked in docs/roadmap.md; listed here so the release log is self-contained.
+
+  [ ] Analog events. Only `@(initial_step)` is parsed; every other trigger is
+      discarded and its body runs unconditionally. `va-transient` already has the
+      event engine (exact breakpoint landings, interpolated crossing detection) but
+      nothing in the pipeline reaches it. Needs an Interface beta event-registration
+      channel. See roadmap "Analog events: what exists, and what each one still needs".
+
+  [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of
+      0.9.0), which is honest but not implemented. Lifting the refusal is
+      docs/proposals/absdelay.md stage 2.
+
+  [ ] Decide the sparse-solve question for the shipped configuration. The production
+      path is dense LU; the project's own benchmark measured sparse winning 12-33x
+      above ~20 nodes. Either wire it or state the circuit-size limit in the release.
+
+  [ ] Close the remaining expired-premise items ($mfactor from a deck's `m=`,
+      $simparam against the real NewtonConfig values, $limit's model-declared
+      junctions). See roadmap "Expired premises: a standing review".
