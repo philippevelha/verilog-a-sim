@@ -747,3 +747,22 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > step, not at the interpolated crossing time inside it. A model needing the crossing resolved
 > more tightly controls the step the way any model does — `bound_step`, or a breakpoint through
 > the registration half.
+
+> **Revision (§6 change, ratified 2026-09-06c):** added `EventSink::timer(slot, next)`, a
+> **default method** forwarding to `breakpoint`. A breakpoint only asks the solver to stop
+> somewhere; a timer firing must also say *which* of the instance's events fires when it does,
+> so the consumer can report it back through `ModelState::event_fired` and the body can run.
+> The default keeps every existing implementor working — a consumer that only places timepoints
+> still lands on the right one and merely cannot attribute the firing.
+>
+> `next` is **strictly after** the current evaluation time, which is what lets a periodic timer
+> be re-registered at every accepted timepoint: the model reports its next occurrence as a pure
+> function of `(start, period, now)` and needs no memory of its own schedule. Having just fired
+> at `now`, it must report the *following* occurrence or the consumer would fire it forever.
+> Consequence, stated rather than hidden: an occurrence falling exactly on the run's initial
+> timepoint is not delivered, because that point is a seed rather than a solved step.
+>
+> Interface α's `Module::cross_sites` became `event_sites: Vec<EventSite>` in the same change
+> (`EventSite::Cross`/`Timer`), and `Expr::CrossFired` became `Expr::EventFired`. One flat slot
+> space across event kinds, so the consumer's fired-flag buffer has a single source of truth
+> and does not care which kind claimed a slot.

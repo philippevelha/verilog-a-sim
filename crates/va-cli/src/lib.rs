@@ -3202,7 +3202,7 @@ mod tests {
     ///
     /// The whole chain in one test, which is why it lives here rather than in `va-codegen`
     /// (which may not depend on `va-frontend`, CLAUDE.md §3): the parser turns the trigger into
-    /// a guarded body, elaboration registers a `cross_sites` entry and an `Expr::CrossFired`
+    /// a guarded body, elaboration registers a `event_sites` entry and an `Expr::EventFired`
     /// guard, `va-codegen` reports the monitored expression through Interface β's event channel
     /// and reads the firing back out of `ModelState`.
     ///
@@ -3224,8 +3224,12 @@ endmodule
 ";
         let design = va_frontend::compile(SRC).expect("compiles");
         let m = &design.modules[0];
-        assert_eq!(m.cross_sites.len(), 1, "one monitored site registered");
-        assert_eq!(m.cross_sites[0].dir, 1, "rising, as written");
+        assert_eq!(m.event_sites.len(), 1, "one monitored site registered");
+        assert!(
+            matches!(m.event_sites[0], va_ir::EventSite::Cross { dir: 1, .. }),
+            "a rising cross site, as written: {:?}",
+            m.event_sites[0]
+        );
 
         let mut next = 2;
         let inst = va_codegen::build_instance(m, &[0, 1], &mut next).expect("builds");
@@ -3269,7 +3273,7 @@ endmodule
     /// one submodule must get *two* distinct slots, not one shared one — otherwise both
     /// instances' bodies would fire together.
     #[test]
-    fn inlined_cross_sites_get_distinct_slots() {
+    fn inlined_event_sites_get_distinct_slots() {
         const SRC: &str = "
 module leaf(p, n);
   inout p, n;
@@ -3295,7 +3299,7 @@ endmodule
             .find(|m| m.name == "top")
             .expect("top module");
         assert_eq!(
-            top.cross_sites.len(),
+            top.event_sites.len(),
             2,
             "each instance contributes its own monitored site"
         );
@@ -3303,7 +3307,7 @@ endmodule
             .exprs
             .iter()
             .filter_map(|e| match *e {
-                va_ir::Expr::CrossFired(k) => Some(k),
+                va_ir::Expr::EventFired(k) => Some(k),
                 _ => None,
             })
             .collect();
@@ -3416,6 +3420,107 @@ X1 a gnd xd
         assert!(
             quiet_peak < 1e-2,
             "with nothing firing the model stays at 1 mS: peak |I(V1)| = {quiet_peak:e}"
+        );
+    }
+
+    /// `@(timer(...))` fires at its scheduled times during a real transient run, and only
+    /// there.
+    ///
+    /// A periodic timer is the case that would break a naive implementation two ways: firing
+    /// once and never re-arming, or re-registering the same occurrence forever. So this checks
+    /// the *count* over a known window and the *spacing* between firings, not merely that
+    /// something happened.
+    ///
+    /// `timer(200u, 200u)` over a 1 ms run fires at 200, 400, 600, 800 and 1000 µs — five
+    /// times. The last one counts: `tstop` is itself an accepted timepoint, so an occurrence
+    /// landing exactly on it is solved like any other.
+    #[test]
+    fn a_periodic_timer_fires_at_each_scheduled_time() {
+        const SRC: &str = "
+module tk(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(timer(200u, 200u)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        assert_eq!(design.modules[0].event_sites.len(), 1, "one timer site");
+
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 5
+X1 a gnd tk
+.tran 5u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+
+        let times: Vec<f64> = wf.model_crossings.iter().map(|&(_, _, t)| t).collect();
+        assert_eq!(
+            times.len(),
+            5,
+            "200us period over a 1ms run fires at 200/400/600/800/1000us: {times:?}"
+        );
+        for (k, t) in times.iter().enumerate() {
+            let expected = 200e-6 * (k as f64 + 1.0);
+            assert!(
+                (t - expected).abs() < 1e-9,
+                "firing {k} at {t:e}, expected {expected:e}"
+            );
+        }
+
+        // The body really ran: the conductance jumps from 1 mS to 1 S at each firing, so the
+        // source current peaks three orders of magnitude above quiescent.
+        let branch = net.node_order.len();
+        let peak =
+            wf.x.iter()
+                .map(|row| row[branch].abs())
+                .fold(0.0f64, f64::max);
+        assert!(
+            peak > 1.0,
+            "the timer body must run: peak |I(V1)| = {peak:e}"
+        );
+    }
+
+    /// A timer with no period fires exactly once, and does not re-arm.
+    #[test]
+    fn a_one_shot_timer_fires_once() {
+        const SRC: &str = "
+module tk1(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(timer(300u)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 5
+X1 a gnd tk1
+.tran 5u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let times: Vec<f64> = wf.model_crossings.iter().map(|&(_, _, t)| t).collect();
+        assert_eq!(times.len(), 1, "a period-less timer fires once: {times:?}");
+        assert!(
+            (times[0] - 300e-6).abs() < 1e-9,
+            "at 300us, got {:e}",
+            times[0]
         );
     }
 

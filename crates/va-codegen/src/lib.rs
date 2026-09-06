@@ -1188,6 +1188,38 @@ impl GeneratedModel {
     }
 }
 
+/// The first fire time of `timer(start, period)` **strictly after** `now`, or `None` if the
+/// timer has no further occurrence.
+///
+/// A non-positive or non-finite `period` means "fire once", which is also what an omitted
+/// period lowers to; such a timer has no occurrence left once `now` has passed `start`.
+///
+/// Strictly after, not at-or-after, and that is what makes a periodic timer safe to
+/// re-register at every accepted timepoint: having just fired at `now`, the model must report
+/// the *next* one or the consumer would fire it again forever. The arithmetic is a pure
+/// function of `(start, period, now)`, so the model needs no memory of its own schedule.
+fn next_fire_after(start: f64, period: f64, now: f64) -> Option<f64> {
+    if !start.is_finite() {
+        return None;
+    }
+    if start > now {
+        return Some(start);
+    }
+    if !period.is_finite() || period <= 0.0 {
+        return None; // one-shot, already past
+    }
+    let elapsed = now - start;
+    let mut n = (elapsed / period).floor() + 1.0;
+    let mut next = start + n * period;
+    // Floating point can land the computed occurrence on or just before `now`; step to the
+    // following one rather than emit a time the consumer would treat as already reached.
+    if next <= now {
+        n += 1.0;
+        next = start + n * period;
+    }
+    next.is_finite().then_some(next)
+}
+
 impl ModelInstance for GeneratedModel {
     fn unknowns(&self) -> &[usize] {
         &self.terminals
@@ -1244,34 +1276,46 @@ impl ModelInstance for GeneratedModel {
     /// was compiled at — see [`ad::Ctx::temp`]), rather than having a `4kT` applied for it the
     /// way `va-abi`'s hand-written [`va_abi::reference::Resistor`] does. Its `kind` is passed
     /// through so a source whose PSD expression calls `analysis()` sees the truth.
-    /// One event slot per `cross(...)` site the source declared (`va_ir::Module::cross_sites`).
+    /// One event slot per `@(...)` site the source declared (`va_ir::Module::event_sites`),
+    /// across both kinds — the slot numbering the consumer's fired-flag buffer is indexed by.
     fn event_count(&self) -> usize {
-        self.module.cross_sites.len()
+        self.module.event_sites.len()
     }
 
-    /// Report each `cross(...)` site's monitored expression at this accepted timepoint —
-    /// Interface β's event-registration channel.
+    /// Register each event site at this accepted timepoint — Interface β's event-registration
+    /// channel.
     ///
-    /// The expression is evaluated **outside** the statement walk, because a registration is a
-    /// property of the site rather than of whichever control-flow path this timepoint happens
-    /// to take: a `cross` inside an `if` arm must keep being watched while the arm is untaken,
-    /// or the crossing that would re-enter the arm is the one you miss. The consequence, stated
-    /// rather than hidden: the monitored expression may only read probes and parameters, not a
-    /// local variable the analog block assigns, since no variable has been bound at this point.
-    /// A site that does is reported as `0.0`, which registers no crossing rather than a wrong
-    /// one — `validate` already rejects a read-before-assignment, so such a module does not
-    /// build in the first place.
+    /// A `cross` reports where its monitored expression currently is; a `timer` reports when it
+    /// next fires. Both are evaluated **outside** the statement walk, because a registration is
+    /// a property of the site rather than of whichever control-flow path this timepoint happens
+    /// to take: an event inside an `if` arm must keep being registered while the arm is untaken,
+    /// or the very firing that would re-enter the arm is the one missed. The consequence,
+    /// stated rather than hidden: a site's expressions may read probes and parameters but not a
+    /// local variable the analog block assigns, since no variable is bound at this point. Such
+    /// a site reads as `0.0`, registering nothing rather than something wrong — and `validate`
+    /// rejects a read-before-assignment anyway, so the module would not build.
     ///
     /// No state and no fired-event input: this runs after the timepoint is accepted, and asks
-    /// only "where is the expression now".
+    /// only "where is this site now".
     fn events(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
-        if self.module.cross_sites.is_empty() {
+        if self.module.event_sites.is_empty() {
             return;
         }
         let ctx = self.ctx(x, actx, &[], &[], false);
-        for (slot, site) in self.module.cross_sites.iter().enumerate() {
-            let value = eval(&ctx, site.expr).map(|d| d.value).unwrap_or(0.0);
-            sink.monitor(slot, value, va_abi::CrossDir::from_lrm(site.dir));
+        let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
+        for (slot, site) in self.module.event_sites.iter().enumerate() {
+            match *site {
+                va_ir::EventSite::Cross { expr, dir } => {
+                    sink.monitor(slot, value_of(expr), va_abi::CrossDir::from_lrm(dir));
+                }
+                va_ir::EventSite::Timer { start, period } => {
+                    if let Some(next) =
+                        next_fire_after(value_of(start), value_of(period), actx.time)
+                    {
+                        sink.timer(slot, next);
+                    }
+                }
+            }
         }
     }
 

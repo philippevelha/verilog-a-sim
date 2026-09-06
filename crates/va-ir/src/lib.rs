@@ -124,11 +124,15 @@ pub struct Module {
     pub branches: Vec<Branch>,
     /// Parameters with optional ranges/defaults.
     pub params: Vec<Param>,
-    /// Monitored `cross(...)` sites, in the order elaboration met them. A `CrossSite`'s
-    /// position in this list is its **event slot** — the index a model reports through
-    /// `va_abi::EventSink::monitor` and reads back via `va_abi::ModelState::event_fired`, and
-    /// what [`Expr::CrossFired`] carries.
-    pub cross_sites: Vec<CrossSite>,
+    /// Analog event sites, in the order elaboration met them. A site's position in this list
+    /// is its **event slot** — the index a model registers under through `va_abi::EventSink`
+    /// and reads back via `va_abi::ModelState::event_fired`, and what [`Expr::EventFired`]
+    /// carries.
+    ///
+    /// One flat list across event kinds, rather than a list per kind, precisely so that slot
+    /// numbering has a single source of truth: the consumer's fired-flag buffer is indexed by
+    /// this position and does not care which kind of event claimed it.
+    pub event_sites: Vec<EventSite>,
     /// The parameters declared `localparam` — module-internal constants that an
     /// instantiation may not override (LRM §3.4.2).
     ///
@@ -389,30 +393,48 @@ pub enum Expr {
     /// elaboration, many instantiations, and only the instantiation knows. `va-codegen` reads
     /// [`Module::unconnected_ports`]. Constant per instance, and so zero-gradient.
     PortConnected(u32),
-    /// Whether monitored `cross` site `slot` ([`Module::cross_sites`]) fired at the timepoint
-    /// being evaluated, as `1.0`/`0.0` — the condition an `@(cross(...))` body is gated on.
+    /// Whether event site `slot` ([`Module::event_sites`]) fired at the timepoint being
+    /// evaluated, as `1.0`/`0.0` — the condition an `@(cross(...))` or `@(timer(...))` body is
+    /// gated on.
     ///
-    /// Elaboration desugars `@(cross(e, d)) stmt` into `if (CrossFired(k)) stmt`, exactly the
-    /// shape `@(initial_step)` already uses, so every downstream control-flow walk handles the
-    /// body for free and no new `Stmt` kind is needed. The value comes from the consumer via
+    /// Elaboration desugars `@(<event>) stmt` into `if (EventFired(k)) stmt`, exactly the shape
+    /// `@(initial_step)` already uses, so every downstream control-flow walk handles the body
+    /// for free and no new `Stmt` kind is needed. The value comes from the consumer via
     /// `va_abi::ModelState::event_fired`; it is constant across the Newton iterations of one
     /// timepoint, and so zero-gradient.
-    CrossFired(u32),
+    EventFired(u32),
 }
 
-/// A monitored `cross(expr, dir)` site (LRM §5.10.1).
-///
-/// The expression is stored already reduced to distance-from-threshold — `cross(V(o) - 2.5, 1)`
-/// keeps `V(o) - 2.5` — so a crossing is a change of sign and no separate threshold is carried.
-/// Tolerance arguments are parsed but not retained: this engine resolves a crossing by the
-/// integrator's own step control, not by a per-site tolerance (a stated limitation).
+/// An analog event a module asks to be notified of — one entry per `@(...)` site elaboration
+/// met, and its position in [`Module::event_sites`] is its event slot.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct CrossSite {
-    /// The monitored expression, in [`Module::exprs`].
-    pub expr: ExprId,
-    /// Direction: `+1` rising, `-1` falling, `0` either — the LRM's own spelling, mapped by
-    /// `va_abi::CrossDir::from_lrm`.
-    pub dir: i64,
+pub enum EventSite {
+    /// `cross(expr, dir)` — fires when `expr` changes sign in direction `dir` (LRM §5.10.1).
+    ///
+    /// The expression is stored already reduced to distance-from-threshold —
+    /// `cross(V(o) - 2.5, 1)` keeps `V(o) - 2.5` — so a crossing is a change of sign and no
+    /// separate threshold is carried. Tolerance arguments are parsed but not retained: this
+    /// engine resolves a crossing by the integrator's own step control, not by a per-site
+    /// tolerance (a stated limitation).
+    Cross {
+        /// The monitored expression, in [`Module::exprs`].
+        expr: ExprId,
+        /// Direction: `+1` rising, `-1` falling, `0` either — the LRM's own spelling, mapped
+        /// by `va_abi::CrossDir::from_lrm`.
+        dir: i64,
+    },
+    /// `timer(start, period)` — fires at absolute time `start`, and every `period` seconds
+    /// thereafter (LRM §5.10.3).
+    ///
+    /// Both are expressions rather than folded constants, because the LRM allows a timer to be
+    /// scheduled from parameters. A non-positive `period` means "fire once", which is also what
+    /// an omitted period lowers to.
+    Timer {
+        /// First fire time, in [`Module::exprs`].
+        start: ExprId,
+        /// Repeat interval; `<= 0` fires once.
+        period: ExprId,
+    },
 }
 
 /// Unary operators.

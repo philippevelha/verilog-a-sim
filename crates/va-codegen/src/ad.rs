@@ -392,7 +392,7 @@ pub struct Ctx<'a> {
     pub analysis: va_abi::AnalysisCtx,
     /// Which of this instance's monitored `cross` sites fired at the timepoint being
     /// evaluated — the notification half of Interface β's event channel
-    /// (`va_abi::ModelState::event_fired`), indexed by `va_ir::Module::cross_sites` position.
+    /// (`va_abi::ModelState::event_fired`), indexed by `va_ir::Module::event_sites` position.
     ///
     /// Empty for the overwhelming majority of evaluations: an event fires at one timepoint,
     /// not continuously, and most models declare no events at all.
@@ -689,7 +689,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         // `@(cross(...))`'s guard: whether the consumer determined this site fired at the
         // timepoint being evaluated. Held fixed across the Newton iterations of one timepoint
         // (`va_abi::ModelState::event_fired`), so it is a constant here and zero-gradient.
-        Expr::CrossFired(slot) => Ok(Dual::constant(
+        Expr::EventFired(slot) => Ok(Dual::constant(
             if ctx
                 .events_fired
                 .get(*slot as usize)

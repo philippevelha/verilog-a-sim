@@ -91,6 +91,21 @@
 > is for. Both override paths now refuse one by name. Additive, and no `Expr` variant needed:
 > this is metadata about a parameter, never a value an expression reads.
 
+> Revised 2026-09-06 (§6): added analog **event sites**. `Module.event_sites:
+> Vec<EventSite>` (`EventSite::Cross { expr, dir }` / `Timer { start, period }`) and
+> `Expr::EventFired(slot)`, where a site's position in the list *is* its event slot.
+>
+> Elaboration desugars `@(cross(e, d)) stmt` and `@(timer(s, p)) stmt` into
+> `if (EventFired(k)) stmt` — exactly the shape `@(initial_step)` already used — so every
+> downstream control-flow walk handles the body for free and no new `Stmt` kind was needed.
+> Submodule inlining remaps slots, so two instances of one submodule get two distinct sites
+> rather than firing together.
+>
+> Landed as `cross_sites`/`CrossFired` for `cross` alone (v0.9.3) and generalised one version
+> later (v0.9.4) when `timer` needed a slot in the same space. One flat list across kinds is the
+> point: the consumer's fired-flag buffer is indexed by this position and must not have to know
+> which kind claimed it.
+
 ## 1. Role
 
 Bridge α is the seam between the **language half** and the **model-generation half** of the

@@ -14,6 +14,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.4 — 2026-09-06
+------------------
+`@(timer(...))` works, and the IR's event sites are unified. `va_ir::Module::cross_sites`
+becomes `event_sites: Vec<EventSite>` with `Cross`/`Timer` variants and `Expr::CrossFired`
+becomes `EventFired`, so slot numbering is one flat space across event kinds -- the
+consumer's fired-flag buffer indexes it and must not care which kind claimed a slot.
+Interface beta gains `EventSink::timer(slot, next)`, defaulted to forward to `breakpoint`:
+a breakpoint only says "stop here", while a firing must say which event fires there.
+
+  A model re-registers its next occurrence at every accepted timepoint, so it stays
+  stateless about its own schedule -- the arithmetic is a pure function of
+  (start, period, now). Period defaults to 0, the LRM's "fire once".
+
+  Stated limitations: bare form only (a compound `initial_step or timer(...)` is still
+  refused, as are `above` and `absdelta`); an occurrence landing on the run's *initial*
+  timepoint is not delivered, that point being a seed rather than a solved step; tolerance
+  arguments are parsed and discarded.
+
+  718 tests, 27/27 golden circuits, corpus steady at 113/132, clippy and fmt clean.
+
+
 0.9.3 — 2026-09-06
 ------------------
 `@(cross(...))` bodies actually run. Interface beta gains the event channel's notification
@@ -105,12 +126,11 @@ Road to 1.0
 -----------
 Tracked in docs/roadmap.md; listed here so the release log is self-contained.
 
-  [ ] Analog events. `@(initial_step)` and `@(cross(...))` both work as of 0.9.3.
-      Still refused, and each needing its own work: `final_step`, `timer`, `above`,
-      `absdelta`, and compound triggers (`initial_step or cross(...)`). `timer` is the
-      cheapest -- the breakpoint half of the channel already carries it. See roadmap
-      "Analog events: what exists, and what each one still needs" for the per-event
-      checklist.
+  [ ] Analog events. `@(initial_step)`, `@(cross(...))` and `@(timer(...))` all work as
+      of 0.9.4. Still refused, and each needing its own work: `final_step`, `above`,
+      `absdelta`, and compound triggers (`initial_step or cross(...)`). `above` is the
+      cheapest of those -- semantically a one-sided `cross`, whose machinery now exists.
+      See roadmap "Analog events: what exists, and what each one still needs".
 
   [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of
       0.9.0), which is honest but not implemented. Lifting the refusal is

@@ -1823,7 +1823,7 @@ impl Elaborator<'_> {
             // parsed but never evaluated (same treatment as the noise-source builtins above).
             // The synthetic condition `crate::parser` desugars `@(cross(e, d)) stmt` into
             // (§ `@(cross)`). Registers a monitored site and returns the guard that reads
-            // whether it fired; the site's slot is its position in `Module::cross_sites`,
+            // whether it fired; the site's slot is its position in `Module::event_sites`,
             // which is the same index the model reports on and reads back through Interface
             // β's event channel.
             //
@@ -1848,9 +1848,30 @@ impl Elaborator<'_> {
                         "`cross`'s direction argument must be -1 (falling), 0 (either) or                          +1 (rising), got {dir}"
                     )));
                 }
-                let slot = self.out.cross_sites.len() as u32;
-                self.out.cross_sites.push(va_ir::CrossSite { expr, dir });
-                Expr::CrossFired(slot)
+                let slot = self.out.event_sites.len() as u32;
+                self.out
+                    .event_sites
+                    .push(va_ir::EventSite::Cross { expr, dir });
+                Expr::EventFired(slot)
+            }
+            // The synthetic condition `crate::parser` desugars `@(timer(s, p)) stmt` into
+            // (§ `@(timer)`), the sibling of `@cross` above. `start`/`period` stay expressions
+            // rather than being folded: the LRM lets a timer be scheduled from parameters, and
+            // the model evaluates them when it registers.
+            ExprAst::Call { name, args } if name == "@timer" => {
+                let &[start_ref, period_ref] = args.as_slice() else {
+                    return Err(elab(
+                        "internal error: `@timer` takes exactly a start time and a period"
+                            .to_string(),
+                    ));
+                };
+                let start = self.lower_expr(start_ref)?;
+                let period = self.lower_expr(period_ref)?;
+                let slot = self.out.event_sites.len() as u32;
+                self.out
+                    .event_sites
+                    .push(va_ir::EventSite::Timer { start, period });
+                Expr::EventFired(slot)
             }
             // The synthetic condition `crate::parser` desugars `@(initial_step) stmt` into. It
             // is not user-writable syntax — `initial_step` is an event name, not a function —
@@ -2791,7 +2812,7 @@ impl Elaborator<'_> {
     fn contains_ddt(&self, expr: ExprId, tainted: &HashSet<u32>) -> bool {
         match self.out.expr(expr) {
             Expr::Call(va_ir::Builtin::Ddt, _) => true,
-            Expr::ParamGiven(_) | Expr::PortConnected(_) | Expr::CrossFired(_) => false,
+            Expr::ParamGiven(_) | Expr::PortConnected(_) | Expr::EventFired(_) => false,
             Expr::Var(id) => tainted.contains(&id.0),
             Expr::Call(_, args) | Expr::CallUser(_, args) => {
                 args.iter().any(|&a| self.contains_ddt(a, tainted))
@@ -2882,7 +2903,7 @@ impl Elaborator<'_> {
     /// directly (`if (ddt(q) > 0)`), with no tainted variable involved.
     fn first_tainted_var(&self, expr: ExprId, tainted: &HashSet<u32>) -> Option<VarId> {
         match self.out.expr(expr) {
-            Expr::ParamGiven(_) | Expr::PortConnected(_) | Expr::CrossFired(_) => None,
+            Expr::ParamGiven(_) | Expr::PortConnected(_) | Expr::EventFired(_) => None,
             Expr::Var(id) if tainted.contains(&id.0) => Some(*id),
             Expr::Call(_, args) | Expr::CallUser(_, args) => args
                 .iter()
@@ -3606,7 +3627,7 @@ impl Elaborator<'_> {
             .map(|i| FuncId(func_base + i as u32))
             .collect();
 
-        let cross_base = self.out.cross_sites.len() as u32;
+        let cross_base = self.out.event_sites.len() as u32;
 
         let mut expr_off: Vec<ExprId> = Vec::with_capacity(sub.exprs.len());
         for e in &sub.exprs {
@@ -3625,12 +3646,18 @@ impl Elaborator<'_> {
         // Appended after the arena, so each site's monitored expression can be remapped through
         // `expr_off`, and in submodule order so slot `k` of the sub becomes `cross_base + k` —
         // the shift `remap_expr` above applied to every `CrossFired` referring to it.
-        for site in &sub.cross_sites {
-            let expr = expr_off[site.expr.0 as usize];
-            self.out.cross_sites.push(va_ir::CrossSite {
-                expr,
-                dir: site.dir,
-            });
+        for site in &sub.event_sites {
+            let remapped = match *site {
+                va_ir::EventSite::Cross { expr, dir } => va_ir::EventSite::Cross {
+                    expr: expr_off[expr.0 as usize],
+                    dir,
+                },
+                va_ir::EventSite::Timer { start, period } => va_ir::EventSite::Timer {
+                    start: expr_off[start.0 as usize],
+                    period: expr_off[period.0 as usize],
+                },
+            };
+            self.out.event_sites.push(remapped);
         }
 
         for f in &sub.functions {
@@ -3808,7 +3835,7 @@ fn remap_expr(
         // not something resolvable at elaboration — so the slot index shifts by however many
         // sites the parent already holds. `merge_submodule` appends the sites themselves in the
         // same order, which is what keeps the two in step.
-        Expr::CrossFired(k) => Expr::CrossFired(cross_base + *k),
+        Expr::EventFired(k) => Expr::EventFired(cross_base + *k),
         Expr::Var(vid) => Expr::Var(var_off[vid.0 as usize]),
         Expr::Probe(a) => Expr::Probe(remap_access(a, branch_off)),
         Expr::Unary(op, a) => Expr::Unary(*op, expr_off[a.0 as usize]),
@@ -4250,7 +4277,7 @@ mod tests {
                 | Expr::Param(_)
                 | Expr::ParamGiven(_)
                 | Expr::PortConnected(_)
-                | Expr::CrossFired(_)
+                | Expr::EventFired(_)
                 | Expr::Var(_)
                 | Expr::Probe(_) => {}
                 Expr::Unary(_, a) | Expr::Ddx(a, _) => stack.push(*a),

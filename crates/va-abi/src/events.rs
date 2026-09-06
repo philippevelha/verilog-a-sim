@@ -113,6 +113,28 @@ pub trait EventSink {
     /// current time, or a non-finite one, is meaningless and is ignored rather than stalling
     /// the run.
     fn breakpoint(&mut self, t: f64);
+
+    /// Schedule event `slot` to fire at absolute time `next` seconds — Verilog-A's `timer`
+    /// (LRM §5.10.3).
+    ///
+    /// Differs from [`Self::breakpoint`] in carrying an **identity**: a breakpoint only asks
+    /// the solver to stop somewhere, while this also says *which* of the instance's events
+    /// fires when it does, so the consumer can report it through
+    /// [`crate::ModelState::event_fired`] and the body can run.
+    ///
+    /// `next` must be **strictly after** the current evaluation time. A periodic timer is
+    /// therefore re-registered at every accepted timepoint with its next occurrence, which
+    /// keeps the model stateless about its own schedule: the arithmetic is a pure function of
+    /// `(start, period, now)`. The consequence, stated rather than hidden: a fire time falling
+    /// exactly on the run's initial timepoint is not delivered, because that point is a seed
+    /// rather than a solved step.
+    ///
+    /// Default: forwards to [`Self::breakpoint`], so a consumer that only knows how to place
+    /// timepoints still lands on the right one and merely cannot attribute the firing.
+    fn timer(&mut self, slot: usize, next: f64) {
+        let _ = slot;
+        self.breakpoint(next);
+    }
 }
 
 /// An [`EventSink`] that records into plain vectors — for tests, and for a consumer that wants
@@ -123,6 +145,8 @@ pub struct RecordingEventSink {
     pub monitors: Vec<(usize, f64, CrossDir)>,
     /// One entry per [`EventSink::breakpoint`] call, in call order.
     pub breakpoints: Vec<f64>,
+    /// One `(slot, next_time)` per [`EventSink::timer`] call, in call order.
+    pub timers: Vec<(usize, f64)>,
 }
 
 impl RecordingEventSink {
@@ -147,6 +171,10 @@ impl EventSink for RecordingEventSink {
 
     fn breakpoint(&mut self, t: f64) {
         self.breakpoints.push(t);
+    }
+
+    fn timer(&mut self, slot: usize, next: f64) {
+        self.timers.push((slot, next));
     }
 }
 
@@ -185,6 +213,35 @@ mod tests {
     fn landing_on_zero_fires_once() {
         assert!(CrossDir::Rising.fires(-1.0, 0.0));
         assert!(!CrossDir::Rising.fires(0.0, 1.0));
+    }
+
+    /// A timer registration keeps its slot, rather than degrading to an anonymous breakpoint —
+    /// which is the whole difference between "stop here" and "this event fires here".
+    #[test]
+    fn a_timer_registration_carries_its_slot() {
+        let mut sink = RecordingEventSink::new();
+        sink.timer(2, 3e-6);
+        assert_eq!(sink.timers, vec![(2, 3e-6)]);
+        assert!(
+            sink.breakpoints.is_empty(),
+            "the recorder attributes it rather than falling back to the anonymous form"
+        );
+    }
+
+    /// The default implementation forwards to `breakpoint`, so a consumer that only places
+    /// timepoints still lands on the right one.
+    #[test]
+    fn the_default_timer_falls_back_to_a_breakpoint() {
+        struct OnlyBreakpoints(Vec<f64>);
+        impl EventSink for OnlyBreakpoints {
+            fn monitor(&mut self, _s: usize, _v: f64, _d: CrossDir) {}
+            fn breakpoint(&mut self, t: f64) {
+                self.0.push(t);
+            }
+        }
+        let mut sink = OnlyBreakpoints(Vec::new());
+        sink.timer(0, 1.5);
+        assert_eq!(sink.0, vec![1.5]);
     }
 
     #[test]

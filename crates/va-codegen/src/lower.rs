@@ -1097,7 +1097,7 @@ fn collect_flow_probe_branches_in_expr(module: &Module, expr: ExprId, out: &mut 
         | Expr::Param(_)
         | Expr::ParamGiven(_)
         | Expr::PortConnected(_)
-        | Expr::CrossFired(_)
+        | Expr::EventFired(_)
         | Expr::Var(_)
         | Expr::Probe(_) => {}
         Expr::Unary(_, e) => collect_flow_probe_branches_in_expr(module, *e, out),
@@ -1193,7 +1193,7 @@ fn collect_idt_calls_in_expr(module: &Module, expr: ExprId, out: &mut Vec<ExprId
         | Expr::Param(_)
         | Expr::ParamGiven(_)
         | Expr::PortConnected(_)
-        | Expr::CrossFired(_)
+        | Expr::EventFired(_)
         | Expr::Var(_)
         | Expr::Probe(_) => {}
         Expr::Unary(_, e) => collect_idt_calls_in_expr(module, *e, out),

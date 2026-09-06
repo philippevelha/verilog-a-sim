@@ -60,7 +60,7 @@ Module {
             max: None,
         },
     ],
-    cross_sites: [],
+    event_sites: [],
     local_params: [],
     unconnected_ports: [],
     given_params: [],

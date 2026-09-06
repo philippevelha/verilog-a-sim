@@ -198,12 +198,17 @@ struct EventPoll {
     values: Vec<Vec<(f64, va_abi::CrossDir)>>,
     /// Absolute times any instance asked to be solved at.
     breakpoints: Vec<f64>,
+    /// `(instance, slot, next_time)` per `timer` registration. Unlike a bare breakpoint these
+    /// carry an identity, which is what lets the firing be reported back to the model that
+    /// asked for it.
+    timers: Vec<(usize, usize, f64)>,
 }
 
 fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -> EventPoll {
     let mut values = Vec::with_capacity(instances.len());
     let mut breakpoints = Vec::new();
-    for inst in instances {
+    let mut timers = Vec::new();
+    for (i, inst) in instances.iter().enumerate() {
         let n = inst.event_count();
         if n == 0 {
             values.push(Vec::new());
@@ -222,10 +227,17 @@ fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -
         }
         values.push(per_slot);
         breakpoints.extend(sink.breakpoints.into_iter().filter(|t| t.is_finite()));
+        timers.extend(
+            sink.timers
+                .into_iter()
+                .filter(|(slot, t)| *slot < n && t.is_finite())
+                .map(|(slot, t)| (i, slot, t)),
+        );
     }
     EventPoll {
         values,
         breakpoints,
+        timers,
     }
 }
 
@@ -853,6 +865,16 @@ pub fn run_with_events(
         .copied()
         .filter(|&bp| bp > cfg.tstart)
         .collect();
+    // Timer registrations still owed a firing: `(instance, slot, time)`. A model re-registers
+    // its next occurrence at every accepted timepoint, so this is refreshed as the run goes
+    // rather than computed once.
+    let mut pending_timers: Vec<(usize, usize, f64)> = event_prev.timers.clone();
+    model_breakpoints.extend(
+        pending_timers
+            .iter()
+            .map(|&(_, _, t)| t)
+            .filter(|&t| t > cfg.tstart),
+    );
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
     // Computed once per run, exactly as `va-core::newton::solve` does for the DC solve: which
     // unknowns are junction potentials is a property of the instances, not of the timepoint.
@@ -1034,6 +1056,20 @@ pub fn run_with_events(
                     }
                 }
 
+                // A timer fires when the step lands on the time it was scheduled for. The
+                // tolerance is relative to the step actually taken, not absolute: the
+                // integrator lands on a requested breakpoint exactly, but a timer whose time
+                // fell inside a step that was accepted for other reasons should still fire at
+                // the first point at or past it rather than be skipped.
+                let reached = |scheduled: f64| scheduled <= t_next + 1e-12 * t_next.abs().max(1.0);
+                for &(i, slot, scheduled) in &pending_timers {
+                    if reached(scheduled) && scheduled > t_before {
+                        fired.set(i, slot);
+                        crossings.push((i, slot, scheduled));
+                    }
+                }
+                pending_timers.retain(|&(_, _, scheduled)| !reached(scheduled));
+
                 // An `@(cross(...))` body changes the equations, so the accepted solution has to
                 // be the one solved *with* it. Re-solve this same timepoint with the firings
                 // set, seeded from the un-fired solution so Newton starts close.
@@ -1093,6 +1129,14 @@ pub fn run_with_events(
                 } else {
                     poll
                 };
+                // Re-arm: a periodic timer reports its next occurrence at every accepted
+                // timepoint, which is what keeps the model stateless about its own schedule.
+                for &(i, slot, next) in &event_prev.timers {
+                    if next > t && !pending_timers.contains(&(i, slot, next)) {
+                        pending_timers.push((i, slot, next));
+                        model_breakpoints.push(next);
+                    }
+                }
                 // An event fires *at* a timepoint, not continuously: the next candidate step is
                 // solved with nothing fired unless it earns its own crossing.
                 fired.clear();

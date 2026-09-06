@@ -4031,11 +4031,15 @@ noted. Recorded so the next pass does not have to re-derive them.
 
 ## Analog events: what exists, and what each one still needs (2026-09-06)
 
-**The state of play in one sentence** (updated 2026-09-06, v0.9.3): **`@(cross(...))` works**
-— a Verilog-A source registers its monitored expression through Interface β's event channel,
-the integrator detects and times the crossing, and the body runs at that timepoint with the
-solution re-solved so its effect is real. `final_step`, `timer`, `above`, `absdelta` and
+**The state of play in one sentence** (updated 2026-09-06, v0.9.4): **`@(cross(...))` and
+`@(timer(...))` both work** — a Verilog-A source registers through Interface β's event channel,
+the integrator detects/schedules the event and fires it, and the body runs at that timepoint
+with the solution re-solved so its effect is real. `final_step`, `above`, `absdelta` and
 compound triggers remain refused.
+
+Slot numbering is one flat space across event kinds (`va_ir::Module::event_sites`, unified from
+the `cross`-only list in v0.9.4), precisely so the consumer's fired-flag buffer has a single
+source of truth and does not care which kind claimed a slot.
 
 Before v0.9.2 this read: "nothing in the pipeline ever puts anything into it —
 `EventQueue::push_breakpoint` and `push_watch` are called only from `integrator.rs`'s own
@@ -4090,7 +4094,7 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 | `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
 | `final_step` | yes | partial | no | **Refused in transient** (2026-09-06); still runs in a static solve, where one point is both first and last, which is correct. Needs a "last accepted timepoint" hook in `run_with_events`. |
 | `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.3)**, bare form only — a compound `initial_step or cross(...)` is still refused. Body runs at the accepted timepoint ending the bracketing step, not at the interpolated crossing time; tolerance arguments parsed and discarded. Was: | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
-| `timer(start[, period[, tol]])` | yes | **refused** | channel ready | `EventSink::breakpoint` carries it as of v0.9.2 and the integrator lands on it exactly. Needs the same channel, plus periodic re-arming. |
+| `timer(start[, period[, tol]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.4)**, bare form only. The model re-registers its next occurrence at each accepted timepoint through `EventSink::timer(slot, next)`, so it stays stateless about its own schedule; the integrator lands on it exactly and fires the slot. An occurrence falling on the run's *initial* timepoint is not delivered — that point is a seed, not a solved step. Was: Needs the same channel, plus periodic re-arming. |
 | `above(expr[, tol…])` | no | **refused** | no | Refused by name in a trigger, though not yet reserved as a keyword. Lex and reserve first; semantically a one-sided `cross`. |
 | `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
 | `last_crossing(expr, dir)` | yes | no | no | A *function*, not an event — returns the time of the last crossing. Needs crossing history, so it follows `cross`. |
@@ -4121,7 +4125,11 @@ Sequencing that follows from the table:
    site, and the notification input (`ModelState::event_fired`) that lets the body run. The
    integrator re-solves the timepoint once firings are known, because the body changes the
    equations. Corpus back to 113/132 — the seven files 0.9.1 refused now genuinely work.
-4. **`timer`**, reusing the breakpoint half of the same channel.
+4. ~~**`timer`**~~ — **done 2026-09-06 (v0.9.4)**. Needed one addition to the channel rather
+   than pure reuse: `EventSink::timer(slot, next)` alongside the anonymous `breakpoint(t)`,
+   because a breakpoint only says *stop here* while a firing must say *which event*. Defaulted
+   to forward to `breakpoint`, so a consumer that only places timepoints still lands correctly
+   and merely cannot attribute.
 5. `final_step`, then `above`/`last_crossing`, then `absdelta`.
 
 ---

@@ -331,49 +331,54 @@ impl Parser<'_> {
         None
     }
 
-    /// Whether the trigger starting at `self.pos` is exactly `cross ( ... )` — i.e. the whole
-    /// event control is `@(cross(...))`, not a compound like `initial_step or cross(...)`,
-    /// which stays unsupported and is caught before this is reached.
-    fn trigger_is_bare_cross(&self) -> bool {
+    /// Whether the trigger starting at `self.pos` is exactly `<name> ( ... )` — i.e. the whole
+    /// event control is `@(<name>(...))`, not a compound like `initial_step or cross(...)`,
+    /// which stays unsupported and is refused just below.
+    fn trigger_is_bare(&self, name: &str) -> bool {
         matches!(
             (self.toks.get(self.pos), self.toks.get(self.pos + 1)),
-            (Some(Token::Keyword(kw)), Some(Token::LParen)) if kw.as_str() == "cross"
+            (Some(Token::Keyword(kw)), Some(Token::LParen)) if kw.as_str() == name
         )
     }
 
-    /// Parse `cross(expr [, dir [, time_tol [, expr_tol]]])` from just after the `@(`, leaving
-    /// the trigger's closing `)` unconsumed, and return the synthetic condition
-    /// `@cross(expr, dir)` that elaboration turns into a `va_ir::CrossSite`.
+    /// Parse an event trigger's arguments from just after the `@(`, leaving the trigger's
+    /// closing `)` unconsumed, and return the synthetic condition elaboration turns into a
+    /// `va_ir::EventSite`.
     ///
-    /// `dir` defaults to `0` — the LRM's "either direction" — when omitted. The two tolerance
-    /// arguments are parsed and **discarded**: this engine resolves a crossing through the
-    /// integrator's own step control rather than a per-site tolerance, which is a stated
-    /// limitation rather than a silent one (`docs/token-reference.md`).
+    /// Shared by `cross(expr [, dir [, tol…]])` and `timer(start [, period [, tol…]])`, which
+    /// have the same shape: a required first argument, an optional second that defaults
+    /// (`dir = 0`, "either edge"; `period = 0`, "fire once"), and trailing tolerance arguments
+    /// that are parsed and **discarded** — this engine resolves an event through the
+    /// integrator's own step control rather than a per-site tolerance, a stated limitation
+    /// rather than a silent one (`docs/token-reference.md`).
     ///
-    /// The name `@cross` cannot collide with anything a user writes: `@` is not an identifier
-    /// character, so no source can produce a call by that name.
-    fn parse_cross_trigger(&mut self) -> Result<ExprRef, FrontendError> {
-        self.pos += 1; // `cross`
+    /// The synthetic names (`@cross`, `@timer`) cannot collide with anything a user writes:
+    /// `@` is not an identifier character, so no source can produce a call by either name.
+    fn parse_event_trigger(
+        &mut self,
+        synthetic: &str,
+        default_second: f64,
+    ) -> Result<ExprRef, FrontendError> {
+        self.pos += 1; // the event keyword
         self.eat(&Token::LParen)?;
-        let expr = self.parse_expr()?;
-        let mut args = vec![expr];
-        let mut extra = 0;
+        let first = self.parse_expr()?;
+        let mut args = vec![first];
+        let mut seen = 0;
         while self.at(&Token::Comma) {
             self.pos += 1;
             let e = self.parse_expr()?;
-            if extra == 0 {
-                args.push(e); // the direction
+            if seen == 0 {
+                args.push(e); // `cross`'s direction, or `timer`'s period
             }
-            extra += 1;
+            seen += 1;
         }
         self.eat(&Token::RParen)?;
         if args.len() == 1 {
-            // No direction written: the LRM's default is both edges, spelled `0`.
-            let zero = self.push(ExprAst::Number(0.0));
-            args.push(zero);
+            let d = self.push(ExprAst::Number(default_second));
+            args.push(d);
         }
         Ok(self.push(ExprAst::Call {
-            name: "@cross".to_string(),
+            name: synthetic.to_string(),
             args,
         }))
     }
@@ -1581,15 +1586,22 @@ impl Parser<'_> {
             Some(Token::At) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
-                if self.trigger_is_bare_cross() {
-                    let cond = self.parse_cross_trigger()?;
-                    self.eat(&Token::RParen)?;
-                    let body = self.parse_stmt()?;
-                    return Ok(Stmt::If {
-                        cond,
-                        then_: vec![body],
-                        else_: Vec::new(),
-                    });
+                // A bare `@(cross(...))` or `@(timer(...))` — the two monitored events this
+                // engine implements. Recognised *before* the refusal below, which still
+                // catches every compound trigger and the events that remain unimplemented.
+                for (kw, synthetic, default_second) in
+                    [("cross", "@cross", 0.0), ("timer", "@timer", 0.0)]
+                {
+                    if self.trigger_is_bare(kw) {
+                        let cond = self.parse_event_trigger(synthetic, default_second)?;
+                        self.eat(&Token::RParen)?;
+                        let body = self.parse_stmt()?;
+                        return Ok(Stmt::If {
+                            cond,
+                            then_: vec![body],
+                            else_: Vec::new(),
+                        });
+                    }
                 }
                 // A *compound* trigger containing `cross`, or any other monitored event, is
                 // still refused: this parser can honour neither half, and discarding the
@@ -3181,16 +3193,64 @@ mod tests {
         assert!(err.contains("not supported"), "and refuses it: {err}");
     }
 
-    /// The other monitored events stay refused — they are not implemented at all.
+    /// A bare `@(timer(...))` parses like `@(cross(...))` — the same guarded-body shape, with
+    /// start and period carried on the synthetic condition.
+    #[test]
+    fn a_bare_timer_trigger_parses_into_a_guarded_body() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(timer(1.0, 2.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        let Stmt::If { cond, .. } = &body[0] else {
+            panic!("expected a guarded if, got {:?}", body[0])
+        };
+        match m.expr(*cond) {
+            ExprAst::Call { name, args } => {
+                assert_eq!(name, "@timer");
+                assert_eq!(args.len(), 2, "start and period");
+            }
+            other => panic!("expected the synthetic trigger call, got {other:?}"),
+        }
+    }
+
+    /// An omitted period defaults to `0` — the LRM's "fire once".
+    #[test]
+    fn a_timer_without_a_period_fires_once() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        let Stmt::If { cond, .. } = &body[0] else {
+            panic!("expected a guarded if")
+        };
+        let ExprAst::Call { args, .. } = m.expr(*cond) else {
+            panic!("expected the trigger call")
+        };
+        assert!(matches!(m.expr(args[1]), ExprAst::Number(p) if *p == 0.0));
+    }
+
+    /// The monitored events that remain unimplemented stay refused.
     #[test]
     fn the_other_monitored_events_are_still_refused() {
         for src in [
-            "module t(a, b); electrical a, b; analog begin @(timer(1.0, 2.0)) x = 1.0; I(a, b) <+ x; end endmodule",
             "module t(a, b); electrical a, b; analog begin @(above(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); electrical a, b; analog begin @(absdelta(V(a), 0.1)) x = 1.0; I(a, b) <+ x; end endmodule",
         ] {
             let err = parse_err(src);
             assert!(err.contains("not supported"), "should refuse: {err}");
         }
+    }
+
+    /// A compound trigger containing `timer` is still refused, for the same reason the `cross`
+    /// one is: implementing the bare form must not open a fall-through to
+    /// discard-and-run-unconditionally.
+    #[test]
+    fn a_compound_trigger_containing_timer_is_still_refused() {
+        let err = parse_err(
+            "module t(a, b); electrical a, b; analog begin @(initial_step or timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        assert!(err.contains("timer"), "names the offending half: {err}");
+        assert!(err.contains("not supported"), "and refuses it: {err}");
     }
 
     /// A **step-scoped** trigger keeps the old treatment: `final_step` is correct in a static
