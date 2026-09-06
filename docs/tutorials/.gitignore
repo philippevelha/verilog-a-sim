@@ -1,2 +1,8 @@
 /.quarto/
 **/*.quarto_ipynb
+
+# In-place Quarto render output. `_quarto.yml` sends a real render to /target/tutorials;
+# these appear when someone renders a single .qmd from this directory by hand.
+/index.html
+/index_files/
+/*_files/
