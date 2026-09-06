@@ -503,6 +503,7 @@ mod tests {
                 vec![5.0, 4.32, -0.2],
             ],
             crossings: Vec::new(),
+            model_crossings: Vec::new(),
         };
 
         let dir = std::env::temp_dir().join("va-cli-plot-test");
@@ -528,6 +529,7 @@ mod tests {
             t: Vec::new(),
             x: Vec::new(),
             crossings: Vec::new(),
+            model_crossings: Vec::new(),
         };
         let path = std::env::temp_dir()
             .join("va-cli-plot-test-empty.svg")

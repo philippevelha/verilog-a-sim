@@ -228,5 +228,20 @@ a new sub-trait when the addition is optional (e.g. a future small-signal noise 
       (`va-abi::reference`'s two-terminal models, every `va-codegen`-generated model) kept
       compiling unchanged; only `VSource` needed an override. Unblocks `va-core`'s `gmin`
       stepping (`docs/roadmap.md`'s T3.3).
+- [x] **Done (2026-09-06): the event-registration channel** — `EventSink` + `CrossDir`
+      (`va-abi/src/events.rs`) and two more default methods, `event_count`/`events`. Added as
+      default methods per this section's own guidance; every existing implementor kept
+      compiling untouched. Answers the "extra channel vs. more calls on the existing sink"
+      question the same way the noise channel did, and for a sharper reason: **cadence**. `load`
+      runs per Newton iteration and per rejected step; a registration is meaningful once per
+      *accepted* timepoint, because it is a statement about the trajectory and a rejected
+      candidate is not on it. `StampSink::bound_step` rides `load` only because it is
+      idempotent and identity-free; a crossing needs a stable slot and a remembered previous
+      value, so it cannot. Consumed by `va_transient::integrator`, which polls it once per
+      accepted point and reports firings in `Waveform::model_crossings`.
+      **Registration only** — it does not carry *notification* back into `load`, so an
+      `@(cross(...))` body still cannot be run at the firing timepoint and `va-frontend` still
+      refuses the construct. That is the next §6 step, and it needs a per-instance
+      "these fired" input alongside `state` rather than a change to this channel.
 - [ ] Decide how AC small-signal noise sources attach — extra channel vs separate trait.
 - [ ] Specify the `Result`-returning constructor pattern for degenerate parameters.

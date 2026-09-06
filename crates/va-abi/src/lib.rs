@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod events;
 pub mod instance;
 pub mod noise;
 pub mod reference;
@@ -41,6 +42,7 @@ pub mod stamps;
 pub mod state;
 
 pub use analysis::{AnalysisCtx, AnalysisKind, ANALYSIS_DC};
+pub use events::{CrossDir, EventSink};
 pub use instance::{ModelInstance, UnknownKind};
 pub use noise::NoiseSink;
 pub use stamps::StampSink;

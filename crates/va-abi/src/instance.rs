@@ -1,6 +1,7 @@
 //! The [`ModelInstance`] trait — the unit `va-core` solves on.
 
 use crate::analysis::AnalysisCtx;
+use crate::events::EventSink;
 use crate::noise::NoiseSink;
 use crate::stamps::StampSink;
 use crate::state::ModelState;
@@ -192,6 +193,41 @@ pub trait ModelInstance {
     /// [`Self::unknown_abstol`] are (`docs/bridges/interface-beta-abi.md` §8): every existing
     /// implementor keeps compiling untouched.
     fn noise(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn NoiseSink) {
+        let _ = (x, ctx, sink);
+    }
+
+    /// How many monitored-event slots this instance reports through [`Self::events`]
+    /// (§6 change, 2026-09-06 — see [`crate::events`]).
+    ///
+    /// Default **0**: no events, which is every model in [`crate::reference`] and every
+    /// compiled model whose source contains no `cross`/`timer`. A consumer reads this once at
+    /// setup to size the per-instance history of previously-reported values, the same
+    /// "declare your size, the consumer owns the array" shape [`Self::state_len`] uses.
+    ///
+    /// Must be constant for the lifetime of the instance.
+    fn event_count(&self) -> usize {
+        0
+    }
+
+    /// Report this instance's transient event registrations at an **accepted** timepoint —
+    /// Interface β's event-registration channel (§6 additive change, 2026-09-06; see
+    /// [`crate::events`] for the cadence contract and why this is not on [`StampSink`]).
+    ///
+    /// Called once per accepted timepoint, **never** during Newton iteration and never for a
+    /// rejected candidate: a registration is a statement about the trajectory, and a rejected
+    /// candidate is not on it. That cadence is the whole reason this is a separate method
+    /// rather than more calls on the stamp sink.
+    ///
+    /// An implementor reports the current value of each of its `event_count()` monitored
+    /// expressions via [`EventSink::monitor`], and any absolute times it wants solved at via
+    /// [`EventSink::breakpoint`]. Report **every** slot on every call, including ones whose
+    /// enclosing branch is not taken — the consumer pairs slot `k`'s value with slot `k`'s
+    /// previous value, so a skipped slot would compare across a gap.
+    ///
+    /// Default: **no registrations**. Kept a default method for the same reason
+    /// [`Self::noise`] and [`Self::unknown_kind`] are (`docs/bridges/interface-beta-abi.md`
+    /// §8): every existing implementor keeps compiling untouched.
+    fn events(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn EventSink) {
         let _ = (x, ctx, sink);
     }
 }

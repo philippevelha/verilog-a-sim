@@ -125,6 +125,60 @@ pub struct Waveform {
     /// `watch_index` indexes the [`EventQueue::watches`] slice passed to
     /// [`run_with_events`] (always empty for [`run`], which watches nothing).
     pub crossings: Vec<(usize, f64)>,
+    /// Crossings of expressions a **model** registered through Interface β's event channel
+    /// (`va_abi::EventSink::monitor`), in the order they occurred: `(instance_index, slot,
+    /// time)`, where `instance_index` indexes the `instances` slice passed to
+    /// [`run_with_events`] and `slot` is that instance's own event slot.
+    ///
+    /// Kept separate from [`Self::crossings`] rather than merged into it because the two have
+    /// different identities: a `crossings` entry indexes a consumer-supplied
+    /// [`EventQueue::watches`] entry, which watches one *unknown* against a threshold, while
+    /// this one names a model's own monitored *expression*. Merging them would make the index
+    /// ambiguous.
+    pub model_crossings: Vec<(usize, usize, f64)>,
+}
+
+/// The registrations every instance reports at one accepted timepoint — Interface β's event
+/// channel (`va_abi::events`).
+///
+/// Polled **only** at accepted timepoints. That is the channel's cadence contract, and it is
+/// why this is a separate sweep rather than something read off the assembly sink: `load` runs
+/// once per Newton iteration and again for rejected candidates, none of which are on the
+/// trajectory a crossing is a statement about.
+struct EventPoll {
+    /// `values[i][slot]` — instance `i`'s reported value and direction for each of its slots.
+    values: Vec<Vec<(f64, va_abi::CrossDir)>>,
+    /// Absolute times any instance asked to be solved at.
+    breakpoints: Vec<f64>,
+}
+
+fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -> EventPoll {
+    let mut values = Vec::with_capacity(instances.len());
+    let mut breakpoints = Vec::new();
+    for inst in instances {
+        let n = inst.event_count();
+        if n == 0 {
+            values.push(Vec::new());
+            continue;
+        }
+        let mut sink = va_abi::events::RecordingEventSink::new();
+        inst.events(x, ctx, &mut sink);
+        // Indexed by slot, so a model that reports out of order (or skips one) still lines up
+        // with the previous timepoint's entry for the same slot. An unreported slot keeps the
+        // neutral `(0.0, Either)`, which cannot manufacture a sign change against itself.
+        let mut per_slot = vec![(0.0, va_abi::CrossDir::default()); n];
+        for (slot, value, dir) in sink.monitors {
+            if slot < n {
+                per_slot[slot] = (value, dir);
+            }
+        }
+        values.push(per_slot);
+        breakpoints.extend(sink.breakpoints.into_iter().filter(|t| t.is_finite()));
+    }
+    EventPoll {
+        values,
+        breakpoints,
+    }
 }
 
 /// The companion-model contribution a discretization scheme adds to the per-iteration nodal
@@ -708,6 +762,7 @@ pub fn run_with_events(
         t: vec![cfg.tstart],
         x: vec![x0.clone()],
         crossings: Vec::new(),
+        model_crossings: Vec::new(),
     };
     if dim == 0 {
         return Ok(waveform);
@@ -729,6 +784,20 @@ pub fn run_with_events(
         (0.0, 0.0, 0.0),
     );
     state.commit();
+    // Seed the event channel's history at the initial condition. A crossing is a change of
+    // sign between two *accepted* points, so the first accepted point establishes the baseline
+    // and can never itself be a crossing — there is nothing before it to have crossed from.
+    let mut event_prev = poll_events(
+        instances,
+        &x,
+        &AnalysisCtx::transient(cfg.tstart).with_initial_step(true),
+    );
+    let mut model_breakpoints: Vec<f64> = event_prev
+        .breakpoints
+        .iter()
+        .copied()
+        .filter(|&bp| bp > cfg.tstart)
+        .collect();
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
     // Computed once per run, exactly as `va-core::newton::solve` does for the DC solve: which
     // unknowns are junction potentials is a property of the instances, not of the timepoint.
@@ -789,6 +858,18 @@ pub fn run_with_events(
             let trial = step_bound.map_or(h, |b| h.min(b).max(cfg.tstep_min));
             let mut t_next = (t + trial).min(cfg.tstop);
             if let Some(bp) = events.next_after(t) {
+                t_next = t_next.min(bp);
+            }
+            // A model-requested breakpoint (`va_abi::EventSink::breakpoint`) lands exactly like
+            // a consumer-supplied one: earliest wins, and only ever pulls the step *in*, so a
+            // model can tighten the schedule but never stretch it past what the integrator
+            // already chose — the same one-way contract `bound_step` has.
+            if let Some(bp) = model_breakpoints
+                .iter()
+                .copied()
+                .filter(|&bp| bp > t)
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
                 t_next = t_next.min(bp);
             }
             let step_h = t_next - t;
@@ -895,6 +976,37 @@ pub fn run_with_events(
                 waveform.x.push(x.clone());
                 history.insert(0, (t, x.clone()));
                 history.truncate(history_cap);
+
+                // Interface β's event channel, polled here and nowhere else: this is the
+                // only point in the loop that is on the trajectory.
+                let poll = poll_events(instances, &x, &AnalysisCtx::transient(t));
+                for (i, slots) in poll.values.iter().enumerate() {
+                    let Some(before) = event_prev.values.get(i) else {
+                        continue;
+                    };
+                    for (slot, &(now, dir)) in slots.iter().enumerate() {
+                        let Some(&(was, _)) = before.get(slot) else {
+                            continue;
+                        };
+                        if !dir.fires(was, now) {
+                            continue;
+                        }
+                        // Same linear interpolation the consumer-supplied watches use, and the
+                        // same honest simplification: not a re-solve at the crossing, but two
+                        // accepted points bracketing one are close together, because the LTE
+                        // control that bounds the state's error between them bounds this too.
+                        let frac = if (was - now).abs() > 0.0 {
+                            was / (was - now)
+                        } else {
+                            1.0
+                        };
+                        waveform
+                            .model_crossings
+                            .push((i, slot, t_before + frac * (t - t_before)));
+                    }
+                }
+                model_breakpoints.extend(poll.breakpoints.iter().copied().filter(|&bp| bp > t));
+                event_prev = poll;
 
                 for (watch_idx, watch) in events.watches().iter().enumerate() {
                     let before = x_before[watch.unknown] - watch.threshold;
@@ -1566,6 +1678,185 @@ mod tests {
             "should land exactly on the breakpoint: {:?}",
             wf.t
         );
+    }
+
+    /// A model that registers a crossing through Interface β's event channel, used by the two
+    /// tests below.
+    ///
+    /// Electrically it is a plain resistor, so it changes nothing about the solve — which is
+    /// the point: the crossing it reports must come from the channel, not from the circuit
+    /// behaving differently. It watches `V(node) - threshold` on one of its own terminals, and
+    /// optionally asks for a breakpoint at a fixed time.
+    struct Watcher {
+        unknowns: [usize; 2],
+        node: usize,
+        threshold: f64,
+        dir: va_abi::CrossDir,
+        breakpoint_at: Option<f64>,
+    }
+
+    impl ModelInstance for Watcher {
+        fn unknowns(&self) -> &[usize] {
+            &self.unknowns
+        }
+
+        fn load(
+            &self,
+            x: &[f64],
+            _ctx: &AnalysisCtx,
+            _state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::StampSink,
+        ) {
+            // 1 MΩ to ground from `unknowns[0]`: present so the row is not empty, small enough
+            // in conductance that it does not perturb the circuit it is attached to.
+            let g = 1e-6;
+            let v = x[self.unknowns[0]] - x[self.unknowns[1]];
+            sink.residual(self.unknowns[0], g * v);
+            sink.residual(self.unknowns[1], -g * v);
+            sink.jacobian(self.unknowns[0], self.unknowns[0], g);
+            sink.jacobian(self.unknowns[0], self.unknowns[1], -g);
+            sink.jacobian(self.unknowns[1], self.unknowns[0], -g);
+            sink.jacobian(self.unknowns[1], self.unknowns[1], g);
+        }
+
+        fn event_count(&self) -> usize {
+            1
+        }
+
+        fn events(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+            sink.monitor(0, x[self.node] - self.threshold, self.dir);
+            if let Some(t) = self.breakpoint_at {
+                sink.breakpoint(t);
+            }
+        }
+    }
+
+    /// A model-registered crossing is detected, timed, and attributed to the right instance and
+    /// slot.
+    ///
+    /// The RC node rises from 0 V toward 5 V, so `V(node) - 2.5` crosses zero exactly once, at
+    /// the analytic `t = RC·ln 2`. Checked against that closed form rather than against a
+    /// recorded number, and the fixture is arranged so the watcher cannot influence the
+    /// waveform it is watching.
+    #[test]
+    fn a_model_registered_crossing_is_detected_and_timed() {
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let watcher = Watcher {
+            unknowns: [1, 2],
+            node: 1,
+            threshold: 2.5,
+            dir: va_abi::CrossDir::Rising,
+            breakpoint_at: None,
+        };
+        let insts: [&dyn ModelInstance; 4] = [&vs, &r, &c, &watcher];
+        let cfg = default_cfg(3.0 * rc, rc / 200.0, Method::BackwardEuler);
+        let wf = run_with_events(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            cfg,
+            &crate::events::EventQueue::new(),
+        )
+        .expect("integrates");
+
+        assert_eq!(
+            wf.model_crossings.len(),
+            1,
+            "exactly one rising crossing of 2.5 V: {:?}",
+            wf.model_crossings
+        );
+        let (inst, slot, t_cross) = wf.model_crossings[0];
+        assert_eq!((inst, slot), (3, 0), "attributed to the watcher's own slot");
+
+        let expected = rc * std::f64::consts::LN_2;
+        assert!(
+            (t_cross - expected).abs() < 0.02 * expected,
+            "crossing at {t_cross:e}, analytic RC·ln2 = {expected:e}"
+        );
+    }
+
+    /// The direction argument discriminates: the same rising waveform registers no crossing at
+    /// all when the model asks only for falling ones. Without this, a channel that reported
+    /// every sign change regardless of direction would pass the test above.
+    #[test]
+    fn a_falling_only_registration_ignores_a_rising_crossing() {
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let watcher = Watcher {
+            unknowns: [1, 2],
+            node: 1,
+            threshold: 2.5,
+            dir: va_abi::CrossDir::Falling,
+            breakpoint_at: None,
+        };
+        let insts: [&dyn ModelInstance; 4] = [&vs, &r, &c, &watcher];
+        let cfg = default_cfg(3.0 * rc, rc / 200.0, Method::BackwardEuler);
+        let wf = run_with_events(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            cfg,
+            &crate::events::EventQueue::new(),
+        )
+        .expect("integrates");
+
+        assert!(
+            wf.model_crossings.is_empty(),
+            "a rising waveform must not fire a falling-only registration: {:?}",
+            wf.model_crossings
+        );
+    }
+
+    /// A model-requested breakpoint lands exactly, the same way a consumer-supplied one does.
+    #[test]
+    fn a_model_requested_breakpoint_forces_an_exact_landing() {
+        let rc = 1e-3;
+        let awkward_t = 0.37 * rc;
+        let (vs, r, c) = rc_circuit(5.0);
+        let watcher = Watcher {
+            unknowns: [1, 2],
+            node: 1,
+            threshold: 2.5,
+            dir: va_abi::CrossDir::Rising,
+            breakpoint_at: Some(awkward_t),
+        };
+        let insts: [&dyn ModelInstance; 4] = [&vs, &r, &c, &watcher];
+        let cfg = default_cfg(2.0 * rc, rc / 10.0, Method::BackwardEuler);
+        let wf = run_with_events(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            cfg,
+            &crate::events::EventQueue::new(),
+        )
+        .expect("integrates");
+
+        assert!(
+            wf.t.iter().any(|&t| (t - awkward_t).abs() < 1e-15),
+            "should land exactly on the model's breakpoint: {:?}",
+            wf.t
+        );
+    }
+
+    /// A model reporting no events costs nothing and changes nothing — the default-method path
+    /// every existing model takes.
+    #[test]
+    fn a_model_with_no_events_registers_none() {
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let cfg = default_cfg(2.0 * rc, rc / 10.0, Method::BackwardEuler);
+        let wf = run_with_events(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            cfg,
+            &crate::events::EventQueue::new(),
+        )
+        .expect("integrates");
+        assert!(wf.model_crossings.is_empty());
+        assert_eq!(vs.event_count(), 0, "the default is no events");
     }
 
     #[test]

@@ -4031,10 +4031,17 @@ noted. Recorded so the next pass does not have to re-derive them.
 
 ## Analog events: what exists, and what each one still needs (2026-09-06)
 
-**The state of play in one sentence:** `va-transient` has a working event engine — exact
-breakpoint landings and interpolated threshold-crossing detection — and **nothing in the
-pipeline ever puts anything into it**. `EventQueue::push_breakpoint` and `push_watch` are called
-only from `integrator.rs`'s own tests. So the machinery is built and unreachable from a model.
+**The state of play in one sentence** (updated 2026-09-06): `va-transient`'s event engine is
+now **reachable from a model** — Interface β's event channel (v0.9.2) lets an instance register
+monitored expressions and breakpoints, and the integrator polls it once per accepted timepoint.
+What is still missing is the *notification* direction: a model cannot yet be told which of its
+events fired, so an `@(cross(...))` **body** still cannot run at the right time, and the
+frontend's refusal (v0.9.1) stands.
+
+Before v0.9.2 this read: "nothing in the pipeline ever puts anything into it —
+`EventQueue::push_breakpoint` and `push_watch` are called only from `integrator.rs`'s own
+tests." That is no longer true of the channel, but remains true of `EventQueue` itself, whose
+consumer-supplied watches are still test-only.
 
 **The sharper problem, and why this ranks above "a missing feature"** — *resolved 2026-09-06,
 kept here because it is what the sequencing below was built around._ `parser.rs`'s `@(...)`
@@ -4077,8 +4084,8 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 |---|:--:|:--:|:--:|---|
 | `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
 | `final_step` | yes | partial | no | **Refused in transient** (2026-09-06); still runs in a static solve, where one point is both first and last, which is correct. Needs a "last accepted timepoint" hook in `run_with_events`. |
-| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | **refused** | no | The nearest to done: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
-| `timer(start[, period[, tol]])` | yes | **refused** | no | `push_breakpoint`/`next_after` already force exact landings. Needs the same channel, plus periodic re-arming. |
+| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | **refused** | channel ready | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
+| `timer(start[, period[, tol]])` | yes | **refused** | channel ready | `EventSink::breakpoint` carries it as of v0.9.2 and the integrator lands on it exactly. Needs the same channel, plus periodic re-arming. |
 | `above(expr[, tol…])` | no | **refused** | no | Refused by name in a trigger, though not yet reserved as a keyword. Lex and reserve first; semantically a one-sided `cross`. |
 | `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
 | `last_crossing(expr, dir)` | yes | no | no | A *function*, not an event — returns the time of the last crossing. Needs crossing history, so it follows `cross`. |
@@ -4097,8 +4104,17 @@ Sequencing that follows from the table:
 
 1. ~~**Refuse what is not implemented**~~ — **done 2026-09-06** (v0.9.1), in the two tiers
    described above. No interface change, no scheduling.
-2. **Ratify the Interface β event channel** (§6), stub-only, no behaviour change.
-3. **`cross`**, which has the most engine support already, as the first real consumer.
+2. ~~**Ratify the Interface β event channel**~~ — **done 2026-09-06** (v0.9.2), and wired
+   rather than stub-only: `EventSink`/`CrossDir` in `va-abi`, `ModelInstance::event_count`/
+   `events` as default methods, and `va-transient` polling it once per *accepted* timepoint
+   into `Waveform::model_crossings`. Carries **registration** only — a model says what to watch
+   and when it wants solving, and the consumer reports what fired. It does not yet carry
+   *notification* back into `load`, which is what an `@(cross(...))` **body** needs to run at
+   the firing timepoint, so the frontend's refusal stands until step 3.
+3. **`cross`**, the first real consumer, and the step that lifts the refusal. Two halves:
+   codegen emitting `monitor`/`breakpoint` calls from a `cross(...)` site, and the
+   **notification** input `load` needs to run the body — a per-instance "these fired" slice
+   alongside `state`, which is its own §6 change.
 4. **`timer`**, reusing the breakpoint half of the same channel.
 5. `final_step`, then `above`/`last_crossing`, then `absdelta`.
 

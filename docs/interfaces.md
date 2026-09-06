@@ -326,6 +326,20 @@ pub trait ModelInstance {
     /// Emit this instance's own noise sources at `x` and temperature `temp` (K).
     /// Default: none (a noiseless element).
     fn noise(&self, x: &[f64], temp: f64, sink: &mut dyn NoiseSink) {}
+    /// How many monitored-event slots this instance reports. Default 0.
+    fn event_count(&self) -> usize { 0 }
+    /// Report transient event registrations at an *accepted* timepoint. Default: none.
+    fn events(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn EventSink) {}
+}
+
+// va-abi/src/events.rs
+pub enum CrossDir { Rising, Falling, Either }
+
+pub trait EventSink {
+    /// Expression `slot` currently has value `value`; watch it for a sign change in `dir`.
+    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir);
+    /// Ask for a solve point at absolute time `t` seconds.
+    fn breakpoint(&mut self, t: f64);
 }
 ```
 
@@ -665,3 +679,42 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > `q_prev2`), which is that crate's own bookkeeping rather than a channel change: `state_len()`
 > was already instance-declared. The third slot is written under *every* method so a compiled
 > model stays method-agnostic and its history is already correct whenever a run reaches Gear.
+
+> **Revision (§6 change, ratified 2026-09-06):** added the **event-registration channel** — a
+> new `EventSink` trait and `CrossDir` enum (`va-abi/src/events.rs`), plus two more **default
+> trait methods** on `ModelInstance`, `event_count` and `events`. Additive in the same sense as
+> the noise channel: every existing implementor keeps compiling untouched, and a model that
+> reports nothing behaves exactly as before.
+>
+> **Why a separate channel rather than more calls on `StampSink`.** `StampSink::bound_step` is
+> already a model→engine scheduling hint, so adding `cross` beside it is the obvious move. It is
+> wrong on three counts, and they are the same three that gave noise its own channel in T5.2:
+>
+> 1. **Cadence.** `load` runs once per Newton iteration and again for every *rejected* timestep.
+>    A registration is meaningful once per **accepted** timepoint — it is a statement about the
+>    trajectory, and a rejected candidate is not on the trajectory. `bound_step` gets away with
+>    riding `load` only because it is idempotent and identity-free ("no longer than `dt`",
+>    minimum-of-all, no bookkeeping).
+> 2. **Identity.** A crossing is detected by comparing *this* accepted value of an expression
+>    against *the previous* accepted value of the same expression. That needs a stable per-site
+>    slot, which `bound_step`'s shape has nowhere to put.
+> 3. **Purity.** `load` must stay a pure function of `(x, ctx, committed state)`. A crossing is
+>    inherently a statement about two timepoints, so the history belongs to the consumer — the
+>    same read-old/write-new split the state channel uses.
+>
+> **What it carries, and what it deliberately does not.** Registration only: the model says what
+> to watch (`monitor`) and when it wants solving (`breakpoint`), and the consumer reports what
+> fired (`va_transient::Waveform::model_crossings`). It does **not** yet carry *notification*
+> back into `load`, so the body of an `@(cross(...))` statement still cannot be run at the
+> firing timepoint — which is why `va-frontend` continues to refuse that construct (v0.9.1)
+> rather than accept it and mis-run it. Notification is the next step and needs a per-instance
+> "these fired" input alongside `state`, not a change to this channel.
+>
+> The value reported is the expression already reduced to distance-from-threshold, so
+> `cross(V(out) - 2.5, +1)` reports `V(out) - 2.5` and a crossing is simply a change of sign;
+> the consumer needs no separate threshold. Landing exactly on zero counts as arrival, so a
+> signal settling at the threshold fires once rather than twice. The crossing *time* is linearly
+> interpolated between the two bracketing accepted points rather than re-solved there — the same
+> honest simplification the consumer-supplied watches already document, and sound for the same
+> reason: the LTE control that bounds the state's error between two accepted points bounds the
+> interpolation error too.
