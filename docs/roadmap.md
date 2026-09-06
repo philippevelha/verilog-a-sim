@@ -4036,16 +4036,37 @@ breakpoint landings and interpolated threshold-crossing detection — and **noth
 pipeline ever puts anything into it**. `EventQueue::push_breakpoint` and `push_watch` are called
 only from `integrator.rs`'s own tests. So the machinery is built and unreachable from a model.
 
-**The sharper problem, and why this ranks above "a missing feature":** `parser.rs`'s `@(...)`
-handling recognises the bare `initial_step` trigger and **discards every other one**
-(`skip_balanced_parens`), then runs the body *unconditionally*. So a model writing
+**The sharper problem, and why this ranks above "a missing feature"** — *resolved 2026-09-06,
+kept here because it is what the sequencing below was built around._ `parser.rs`'s `@(...)`
+handling recognised the bare `initial_step` trigger and **discarded every other one**
+(`skip_balanced_parens`), then ran the body *unconditionally*. So a model writing
 
     @(cross(V(out) - 2.5, +1)) count = count + 1;
 
-does not fail, and does not warn — it executes at **every timepoint**. That is the same class of
+did not fail, and did not warn — it executed at **every timepoint**. That is the same class of
 defect as the folds above: a limitation that presents as a wrong answer rather than a refusal.
-Refusing an unimplemented trigger is strictly better than the present behaviour and does not
-wait on any of the work below.
+
+**Now refused, in two tiers**, because the right answer differs by trigger:
+
+- **`cross`/`above`/`timer`/`absdelta` — refused at parse time.** These fire on a condition
+  evaluated as the solution *moves*. They never fire in a static solve either (a DC operating
+  point has no trajectory to cross anything), so a discarded trigger was wrong in *every*
+  analysis, not only transient. Caught anywhere in the trigger, so a compound
+  `initial_step or cross(...)` is refused too rather than silently treated as a plain
+  `initial_step`.
+- **`final_step`/`initial_instance`/`initial_model` — refused only in a transient run**
+  (`va-cli`, alongside the operator refusal). In a static solve running these bodies is
+  *correct*: the single solve point really is both the first and the last step, and setup does
+  run once. It is only wrong in transient, where the body re-runs at every timepoint — so this
+  one is analysis-gated rather than a parse error, since the frontend is analysis-agnostic.
+
+**Corpus cost, stated plainly: 113/132 → 107/132** (95/99 → 89/99 self-contained). Seven
+`verilogaLib-master` files now fail — `adc_16bit_ideal`, `amp_dynamic`, `comparator_dynamic`,
+`dff_rsn`, `pfd`, `ramp_gen`, `tah_ideal` — all clocked blocks built on `@(cross(V(clk) …))`.
+They previously *built*, which is precisely the point: a D flip-flop that latches at every solve
+point is not a D flip-flop, so those were builds, not passes. Same correction the metric took on
+2026-08-29 — see "Corpus metric honesty". The count goes back up when `cross` is scheduled for
+real.
 
 ### The checklist
 
@@ -4055,11 +4076,11 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 | Event | Lexed | Parsed | Scheduled | What it still needs |
 |---|:--:|:--:|:--:|---|
 | `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
-| `final_step` | yes | no | no | A "last accepted timepoint" hook in `run_with_events`; the trigger is currently discarded and the body runs every step. |
-| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | no | no | The nearest to done: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
-| `timer(start[, period[, tol]])` | yes | no | no | `push_breakpoint`/`next_after` already force exact landings. Needs the same channel, plus periodic re-arming. |
-| `above(expr[, tol…])` | no | no | no | Not even reserved. Lex and reserve first; semantically a one-sided `cross`. |
-| `absdelta(expr, delta[, tol…])` | no | no | no | Not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
+| `final_step` | yes | partial | no | **Refused in transient** (2026-09-06); still runs in a static solve, where one point is both first and last, which is correct. Needs a "last accepted timepoint" hook in `run_with_events`. |
+| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | **refused** | no | The nearest to done: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
+| `timer(start[, period[, tol]])` | yes | **refused** | no | `push_breakpoint`/`next_after` already force exact landings. Needs the same channel, plus periodic re-arming. |
+| `above(expr[, tol…])` | no | **refused** | no | Refused by name in a trigger, though not yet reserved as a keyword. Lex and reserve first; semantically a one-sided `cross`. |
+| `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
 | `last_crossing(expr, dir)` | yes | no | no | A *function*, not an event — returns the time of the last crossing. Needs crossing history, so it follows `cross`. |
 | event `or` (`@(a or b)`) | n/a | no | no | Trigger-list composition; needed before any compound trigger works. |
 | `@(posedge …)`, named events, `->` | n/a | n/a | n/a | **Out of scope by design** — digital-domain, excluded by LRM Annex C, per `CLAUDE.md` §1. Not a gap. |
@@ -4074,8 +4095,8 @@ could not carry. Event scheduling is likewise information the residual/Jacobian 
 
 Sequencing that follows from the table:
 
-1. **Refuse what is not implemented** (no interface change, no scheduling — just stop running
-   discarded-trigger bodies unconditionally). Independent of everything else.
+1. ~~**Refuse what is not implemented**~~ — **done 2026-09-06** (v0.9.1), in the two tiers
+   described above. No interface change, no scheduling.
 2. **Ratify the Interface β event channel** (§6), stub-only, no behaviour change.
 3. **`cross`**, which has the most engine support already, as the first real consumer.
 4. **`timer`**, reusing the breakpoint half of the same channel.

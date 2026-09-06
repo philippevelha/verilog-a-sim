@@ -115,6 +115,11 @@ fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
                 .unwrap_or("is approximated");
             found.push(format!("{path} uses `{name}`, which {effect}"));
         }
+        for name in step_triggers_in(src) {
+            found.push(format!(
+                "{path} uses `@({name})`, whose body this engine runs at every timepoint                  instead of only when the event fires"
+            ));
+        }
     }
     if found.is_empty() {
         return Ok(());
@@ -124,11 +129,51 @@ fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
          A `.tran` result would be a plausible waveform that is simply wrong, so it is \
          refused rather than printed.\n\n  \
          DC (`.op`/`.dc`), AC (`--ac`) and noise (`--noise`) are unaffected: these \
-         operators settle to exactly this value in a static solve, so those analyses \
-         are correct.\n\n  \
+         constructs are correct in a static solve - an operator settles to exactly this \
+         value, and a single solve point is both the first and the last step.\n\n  \
          Tracking: `docs/proposals/absdelay.md` stage 2.",
         found.join("\n  - ")
     );
+}
+
+/// Step-scoped `@(...)` triggers `src` uses, in table order, each named once.
+///
+/// These are the triggers `va-frontend` deliberately still discards, running the body
+/// unconditionally: `final_step`, and the simulator-specific `initial_instance`/
+/// `initial_model`. That treatment is **correct in a static solve** — one solve point is both
+/// the first and the last step, and setup does run once — and wrong only in transient, where
+/// the body re-runs at every timepoint. Hence an analysis-gated refusal here rather than a
+/// parse error in the frontend, which is analysis-agnostic. (A *monitored* trigger —
+/// `cross`/`above`/`timer`/`absdelta` — never fires in a static solve either, so the frontend
+/// rejects those outright and they never reach this check.)
+///
+/// Matches `@` followed by `(` followed by the name, so a bare mention of `final_step` in an
+/// expression or a comment does not trigger it. `initial_instance`/`initial_model` are not
+/// reserved words and arrive as `Ident`; `final_step` is a `Keyword`.
+fn step_triggers_in(src: &str) -> Vec<&'static str> {
+    const STEP_TRIGGERS: [&str; 3] = ["final_step", "initial_instance", "initial_model"];
+    let Ok(tokens) = va_frontend::lexer::lex(src) else {
+        return Vec::new(); // A model that does not lex will fail louder elsewhere.
+    };
+    let mut seen: Vec<&'static str> = Vec::new();
+    for w in tokens.windows(3) {
+        if !matches!(w[0], va_frontend::lexer::Token::At)
+            || !matches!(w[1], va_frontend::lexer::Token::LParen)
+        {
+            continue;
+        }
+        let name = match &w[2] {
+            va_frontend::lexer::Token::Keyword(kw) => kw.as_str(),
+            va_frontend::lexer::Token::Ident(id) => id.as_str(),
+            _ => continue,
+        };
+        if let Some(found) = STEP_TRIGGERS.iter().find(|t| **t == name) {
+            if !seen.contains(found) {
+                seen.push(found);
+            }
+        }
+    }
+    seen
 }
 
 /// Every model source `sim` actually compiled, as `(path, source)`.
@@ -3151,6 +3196,62 @@ mod tests {
             "module r(p,n); electrical p,n; analog I(p,n) <+ V(p,n); endmodule".to_string(),
         )];
         refuse_transient_approximations(&plain).expect("an ordinary model is fine");
+    }
+
+    /// A step-scoped trigger is refused in transient, where its body would re-run at every
+    /// timepoint -- but not in a static solve, where running it once is correct.
+    ///
+    /// The split matters: `@(final_step)` in a DC operating point is right, because the single
+    /// solve point really is both the first and the last step. So this is analysis-gated here
+    /// rather than a parse error in the frontend. (A *monitored* trigger like `@(cross(...))`
+    /// never fires in a static solve either, so the frontend rejects those outright and they
+    /// never reach this check.)
+    #[test]
+    fn a_transient_run_refuses_a_step_scoped_trigger() {
+        const MODEL: &str = "
+module fs(p, n);
+  inout p, n;
+  electrical p, n;
+  real k;
+  analog begin
+    @(final_step) k = 1.0;
+    I(p, n) <+ V(p, n) / 1000.0;
+  end
+endmodule
+";
+        assert_eq!(step_triggers_in(MODEL), vec!["final_step"]);
+        let err = refuse_transient_approximations(&[("fs.va".to_string(), MODEL.to_string())])
+            .expect_err("`@(final_step)` re-runs every timepoint");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("final_step"), "names the trigger: {msg}");
+        assert!(
+            msg.contains("every timepoint"),
+            "says what actually goes wrong: {msg}"
+        );
+    }
+
+    /// Detection is on `@(` + name, so a bare mention of a trigger word elsewhere -- in an
+    /// expression, or in a comment -- is not mistaken for an event control.
+    #[test]
+    fn a_bare_mention_of_a_trigger_word_is_not_an_event_control() {
+        const MODEL: &str = "
+module m(p, n);
+  inout p, n;
+  electrical p, n;
+  real final_step;
+  analog begin
+    // mentions initial_model and final_step in prose
+    final_step = 2.0;
+    I(p, n) <+ V(p, n) / final_step;
+  end
+endmodule
+";
+        assert!(
+            step_triggers_in(MODEL).is_empty(),
+            "a variable named `final_step` is not an `@(final_step)`"
+        );
+        refuse_transient_approximations(&[("m.va".to_string(), MODEL.to_string())])
+            .expect("nothing to refuse here");
     }
 
     /// `--model` may name a *directory* -- the documented way to use a real model library --

@@ -280,6 +280,53 @@ impl Parser<'_> {
         )
     }
 
+    /// The **monitored** event named anywhere in the `@(...)` trigger starting at `self.pos`,
+    /// if any.
+    ///
+    /// A monitored event fires on a condition evaluated *as the solution moves*: `cross`, its
+    /// one-sided sibling `above`, `timer`, and `absdelta`. This engine evaluates none of them,
+    /// and the distinction that matters is that they never fire in a **static** solve either —
+    /// a DC operating point has no trajectory to cross anything. So a discarded trigger whose
+    /// body then runs unconditionally is wrong in *every* analysis, not just transient, which
+    /// is why these are refused here rather than deferred to an analysis-aware check.
+    ///
+    /// Scans the whole trigger, not just its head, so a compound `initial_step or cross(...)`
+    /// is caught too: this parser cannot honour the `cross` half, and running the body every
+    /// step is not a conservative reading of it.
+    ///
+    /// `above`/`absdelta` are not reserved words, so they arrive as `Ident`; `cross`/`timer`
+    /// are. Both spellings are matched.
+    fn monitored_event_in_trigger(&self) -> Option<&'static str> {
+        const MONITORED: [&str; 4] = ["cross", "above", "timer", "absdelta"];
+        let mut depth = 1usize;
+        let mut i = self.pos;
+        while let Some(tok) = self.toks.get(i) {
+            let name = match tok {
+                Token::LParen => {
+                    depth += 1;
+                    None
+                }
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return None;
+                    }
+                    None
+                }
+                Token::Keyword(kw) => Some(kw.as_str()),
+                Token::Ident(id) => Some(id.as_str()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if let Some(found) = MONITORED.iter().find(|m| **m == name) {
+                    return Some(found);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
     fn skip_balanced_parens(&mut self) -> Result<(), FrontendError> {
         let mut depth = 1usize;
         loop {
@@ -1468,12 +1515,30 @@ impl Parser<'_> {
             // the first step is the only step) and wrong in transient, where initialization code
             // then re-ran at every single timepoint.
             //
-            // Every other trigger keeps the old treatment, and it stays a stated limitation:
-            // `@(cross(...))`/`@(timer(...))` need genuine event scheduling, which is a
-            // transient-engine concern this project does not expose to source yet.
+            // A **monitored** trigger (`cross`/`above`/`timer`/`absdelta`) is now *refused*
+            // rather than discarded (2026-09-06). Discarding it ran the body unconditionally,
+            // which is not a conservative reading of "when this event fires": these events
+            // never fire in a static solve at all, so the body running was wrong in every
+            // analysis, silently. See `monitored_event_in_trigger`.
+            //
+            // Every remaining trigger — `final_step`, and the simulator-specific
+            // `initial_instance`/`initial_model` — keeps the old treatment, and that stays a
+            // stated limitation rather than a bug: in a static solve the single point *is*
+            // both the first and the last step, and setup does run once, so running the body
+            // is correct there. It is only wrong in transient, where it re-runs every
+            // timepoint, and that is checked analysis-aware in `va-cli`.
             Some(Token::At) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
+                if let Some(event) = self.monitored_event_in_trigger() {
+                    return self.err(format!(
+                        "`@({event}(...))` is not supported: this engine cannot schedule a \
+                         monitored event, and the body would otherwise run at every solve \
+                         point instead of when the event fires - a wrong answer rather than \
+                         a missing feature. `@(initial_step)` is supported. See \
+                         `docs/roadmap.md`, section \"Analog events\"."
+                    ));
+                }
                 let is_initial_step = self.trigger_names_initial_step();
                 self.skip_balanced_parens()?;
                 let body = self.parse_stmt()?;
@@ -2352,6 +2417,12 @@ mod tests {
     }
 
     /// Pull the analog block's statement list out of a parsed module.
+    /// The message from a source that must *fail* to parse.
+    fn parse_err(src: &str) -> String {
+        let toks = lex(src).expect("lex");
+        format!("{}", parse(&toks).expect_err("this source must not parse"))
+    }
+
     fn analog_body(m: &ModuleAst) -> Vec<Stmt> {
         m.items
             .iter()
@@ -2985,26 +3056,43 @@ mod tests {
         assert!(matches!(body[1], Stmt::Contribute { .. }));
     }
 
+    /// A **monitored** trigger is refused, not discarded.
+    ///
+    /// These two tests previously asserted the opposite — that the trigger was dropped and the
+    /// body "still runs unconditionally". That was the bug: `cross` never fires in a static
+    /// solve and cannot be scheduled in transient, so running its body was wrong in every
+    /// analysis, silently. Refusing is the conservative reading; scheduling it is the
+    /// roadmap's analog-event work.
     #[test]
-    fn a_non_initial_step_event_still_runs_unconditionally() {
-        // Only the bare `initial_step` trigger is recognized. Everything else keeps the old
-        // treatment rather than being silently mapped onto the initial-step arm, which would
-        // drop the events it actually names — see `trigger_names_initial_step`.
-        let m = parse_src(
+    fn a_monitored_event_trigger_is_refused() {
+        let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0, 1)) begin x = 1.0; end I(a, b) <+ x; end endmodule",
         );
-        let body = analog_body(&m);
-        match &body[0] {
-            Stmt::Block(inner) => assert!(matches!(inner[0], Stmt::Assign { .. })),
-            other => panic!("expected the bare controlled block, got {other:?}"),
-        }
+        assert!(err.contains("cross"), "names the event: {err}");
+        assert!(
+            err.contains("not supported") && err.contains("initial_step"),
+            "says what is supported instead: {err}"
+        );
     }
 
+    /// Caught anywhere in the trigger, not just at its head — a compound
+    /// `initial_step or cross(...)` cannot be honoured either, and treating it as a plain
+    /// `initial_step` would silently drop the half this engine cannot do.
     #[test]
-    fn event_control_with_nested_parens_in_trigger() {
-        // `@(cross(V(a,b) - 1.0, +1))` — nested parens in the event are skipped.
+    fn a_monitored_event_is_refused_inside_a_compound_trigger() {
+        let err = parse_err(
+            "module t(a, b); electrical a, b; analog begin @(initial_step or cross(V(a, b) - 1.0, 1)) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        assert!(err.contains("cross"), "names the offending half: {err}");
+    }
+
+    /// A **step-scoped** trigger keeps the old treatment: `final_step` is correct in a static
+    /// solve, where the single solve point is both the first and the last step. It is only
+    /// wrong in transient, and that is checked analysis-aware in `va-cli`, not here.
+    #[test]
+    fn a_step_scoped_trigger_still_parses() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(cross(V(a, b) - 1.0, 1)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); electrical a, b; analog begin @(final_step) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         assert!(matches!(body[0], Stmt::Assign { .. }));

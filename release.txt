@@ -14,6 +14,24 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.1 — 2026-09-06
+------------------
+Event-trigger refusal. `@(...)` triggers other than `initial_step` used to be discarded,
+running their body unconditionally -- so `@(cross(V(clk) - vt, 1)) ...` executed at every
+solve point instead of on the edge, silently. Monitored triggers (`cross`, `above`,
+`timer`, `absdelta`) are now refused at parse time, because they never fire in a static
+solve either and so were wrong in every analysis; step-scoped ones (`final_step`,
+`initial_instance`, `initial_model`) are refused only in a transient run, since running
+them once in a static solve is correct.
+
+  Corpus cost, stated plainly: 113/132 -> 107/132 module-declaring files (95/99 -> 89/99
+  self-contained). The seven newly-failing verilogaLib-master files are all clocked blocks
+  built on `@(cross(V(clk) ...))` -- a D flip-flop that latches at every solve point was
+  never really passing. The count returns when `cross` is genuinely scheduled.
+
+  697 tests, 27/27 golden circuits, clippy and fmt clean.
+
+
 0.9.0 — 2026-09-06
 ------------------
 Baseline. First numbered release; the workspace had been sitting at 0.0.0 since
@@ -46,11 +64,13 @@ Road to 1.0
 -----------
 Tracked in docs/roadmap.md; listed here so the release log is self-contained.
 
-  [ ] Analog events. Only `@(initial_step)` is parsed; every other trigger is
-      discarded and its body runs unconditionally. `va-transient` already has the
-      event engine (exact breakpoint landings, interpolated crossing detection) but
-      nothing in the pipeline reaches it. Needs an Interface beta event-registration
-      channel. See roadmap "Analog events: what exists, and what each one still needs".
+  [ ] Analog events. Only `@(initial_step)` is honoured; every other trigger is now
+      refused rather than silently mis-run (0.9.1), which is honest but not
+      implemented. `va-transient` already has the event engine (exact breakpoint
+      landings, interpolated crossing detection) but nothing in the pipeline reaches
+      it. Needs an Interface beta event-registration channel, then `cross` as its
+      first consumer. See roadmap "Analog events: what exists, and what each one
+      still needs".
 
   [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of
       0.9.0), which is honest but not implemented. Lifting the refusal is
