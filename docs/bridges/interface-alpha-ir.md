@@ -82,6 +82,15 @@
 > wrong-terminal-count error stands, as it always did. Writing `.dt()` is explicit rather than
 > an omission, so it needs no such test.
 
+> Revised 2026-09-06 (§6, third of the day): added `Module.local_params: Vec<ParamId>`,
+> recording which parameters were declared `localparam`. Same class of expired premise as the
+> two entries above: `parameter` and `localparam` lowered identically because nothing could
+> override anything, so the one difference the keyword *has* — that an instantiation may not
+> override it (LRM §3.4.2) — was unobservable. Once `#(...)` and deck-line `name=value`
+> overrides existed, every `localparam` became silently overridable, inverting what the keyword
+> is for. Both override paths now refuse one by name. Additive, and no `Expr` variant needed:
+> this is metadata about a parameter, never a value an expression reads.
+
 ## 1. Role
 
 Bridge α is the seam between the **language half** and the **model-generation half** of the

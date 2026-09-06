@@ -708,6 +708,7 @@ impl Elaborator<'_> {
                     name,
                     default,
                     range,
+                    is_local,
                     ..
                 } => {
                     let (min, max) = match range {
@@ -739,6 +740,9 @@ impl Elaborator<'_> {
                         min,
                         max,
                     });
+                    if *is_local {
+                        self.out.local_params.push(id);
+                    }
                     // § `$param_given`: an instantiating parent that supplied a `#(...)`
                     // override for this name is exactly what "given" means, and this is the
                     // one point in elaboration that knows. A module elaborated standalone has
@@ -1631,10 +1635,17 @@ impl Elaborator<'_> {
             // that fixed point, never the fixed point itself — so `$limit` folds transparently
             // to its first argument's value, exactly like `transition`/`slew` below. This
             // project's stateless `ModelInstance::load` ABI has no previous-iteration history to
-            // limit against in the first place (`va-core/src/convergence.rs` ships the `pnjlim`
-            // algorithm itself as a tested helper, not yet wired into the Newton loop for this
-            // reason — see `docs/roadmap.md`), so there is no alternative reading available even
-            // if one were wanted. The function-name string and any trailing algorithm-parameter
+            // limit against in the first place, so there is no alternative reading available
+            // even if one were wanted.
+            //
+            // The parenthetical this comment used to carry — that `va-core`'s `pnjlim` was "not
+            // yet wired into the Newton loop" — is false: `NewtonConfig::limit_junctions`
+            // defaults to `true` and `newton::solve` clamps each update through
+            // `convergence::limit_junction`. What is still true is the *reason* for folding:
+            // the fixed point is unchanged by limiting. What is now missed is narrower and
+            // worth recording — `$limit`'s access argument names a junction *authoritatively*,
+            // where `newton::solve` has to infer which unknowns are junctions structurally. See
+            // `docs/roadmap.md`'s expired-premise review. The function-name string and any trailing algorithm-parameter
             // arguments are parsed but never evaluated.
             ExprAst::SysFunc { name, args } if name == "limit" => {
                 let value = *args.first().ok_or_else(|| {
@@ -3266,15 +3277,27 @@ impl Elaborator<'_> {
             overrides.insert(pname.clone(), self.const_eval(*expr)?);
         }
         for pname in overrides.keys() {
-            if !sub_ast
+            match sub_ast
                 .items
                 .iter()
-                .any(|it| matches!(it, Item::Param { name, .. } if name == pname))
+                .find(|it| matches!(it, Item::Param { name, .. } if name == pname))
             {
-                return Err(elab(format!(
-                    "instance `{inst_name}` overrides unknown parameter `{pname}` of module \
+                None => {
+                    return Err(elab(format!(
+                        "instance `{inst_name}` overrides unknown parameter `{pname}` of module \
                      `{module_name}`"
-                )));
+                    )));
+                }
+                // A `localparam` is a module-internal constant, not part of the
+                // instantiation interface (LRM §3.4.2). Silently honouring the override
+                // would let a parent rewrite a constant the module's author declared
+                // precisely so that it could not be.
+                Some(Item::Param { is_local: true, .. }) => {
+                    return Err(elab(format!(
+                        "instance `{inst_name}` overrides `{pname}`, which module \n                         `{module_name}` declares as a `localparam` — a localparam is \n                         a module-internal constant and cannot be overridden"
+                    )));
+                }
+                Some(_) => {}
             }
         }
 
@@ -7444,6 +7467,32 @@ mod tests {
         assert_eq!(
             positional_empty, 1,
             "an empty positional slot must fold to 0"
+        );
+    }
+
+    /// An instantiation may override a `parameter` but not a `localparam` (LRM §3.4.2).
+    #[test]
+    fn an_instantiation_cannot_override_a_localparam() {
+        const SUB: &str = "module sub(p, n); inout p, n; electrical p, n;                            parameter real r = 3.0; localparam real k = 2.0;                            analog I(p,n) <+ V(p,n) / (r * k); endmodule ";
+        // The ordinary parameter overrides fine.
+        elaborate_top(
+            &format!(
+                "{SUB} module top(a, b); inout a, b; electrical a, b;                  sub #(.r(9.0)) s1 (a, b); endmodule"
+            ),
+            "top",
+        );
+        // The localparam does not.
+        let src = format!(
+            "{SUB} module top(a, b); inout a, b; electrical a, b;              sub #(.k(9.0)) s1 (a, b); endmodule"
+        );
+        let toks = lex(&src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let ast = asts.iter().find(|m| m.name == "top").expect("top");
+        let err = elaborate_with_library(ast, &asts).expect_err("`k` is a localparam");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("localparam") && msg.contains('k'),
+            "should name the parameter and say why: {msg}"
         );
     }
 

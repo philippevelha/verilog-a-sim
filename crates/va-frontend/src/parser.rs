@@ -1197,15 +1197,25 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse a `parameter` or `localparam` declaration. v0 does not model instance-parameter
-    /// overrides at all (`va-netlist` has no by-name override path), so a `localparam`'s only
-    /// observable difference from `parameter` — that it cannot be overridden — is moot here;
-    /// both lower to the same [`Item::Param`].
+    /// Parse a `parameter` or `localparam` declaration, recording which one it was.
+    ///
+    /// The distinction is that a `localparam` cannot be overridden by an instantiation (LRM
+    /// §3.4.2). That used to be moot — nothing could override anything — so both lowered to an
+    /// indistinguishable [`Item::Param`]. Once `#(...)` and deck-line `name=value` overrides
+    /// arrived, that conflation made every `localparam` silently overridable, so the kind is
+    /// carried now and the override paths reject it.
     fn parse_param(&mut self) -> Result<Item, FrontendError> {
-        match self.peek() {
-            Some(Token::Parameter) | Some(Token::LocalParam) => self.pos += 1,
+        let is_local = match self.peek() {
+            Some(Token::Parameter) => {
+                self.pos += 1;
+                false
+            }
+            Some(Token::LocalParam) => {
+                self.pos += 1;
+                true
+            }
             _ => return self.err("expected `parameter` or `localparam`".to_string()),
-        }
+        };
         let ty = match self.peek() {
             Some(Token::Real) => {
                 self.pos += 1;
@@ -1248,6 +1258,7 @@ impl Parser<'_> {
         }
         self.eat(&Token::Semicolon)?;
         Ok(Item::Param {
+            is_local,
             ty,
             name,
             default,

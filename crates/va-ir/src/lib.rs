@@ -124,6 +124,14 @@ pub struct Module {
     pub branches: Vec<Branch>,
     /// Parameters with optional ranges/defaults.
     pub params: Vec<Param>,
+    /// The parameters declared `localparam` — module-internal constants that an
+    /// instantiation may not override (LRM §3.4.2).
+    ///
+    /// `parameter` and `localparam` used to lower identically, which was harmless while
+    /// nothing could override anything. Once `#(...)` and deck-line `name=value` overrides
+    /// existed it meant a `localparam` was silently overridable, so the kind is recorded and
+    /// both override paths refuse it. See [`Self::param_is_local`].
+    pub local_params: Vec<ParamId>,
     /// The ports the *instantiating context* explicitly left unconnected — indices into
     /// [`Self::ports`] — the question `$port_connected` asks (LRM §9.19).
     ///
@@ -191,6 +199,12 @@ impl Module {
     /// that port unconnected, since building an instance otherwise wires every port.
     pub fn port_is_connected(&self, i: usize) -> bool {
         !self.unconnected_ports.contains(&i)
+    }
+
+    /// Whether parameter `p` was declared `localparam`, and so may not be overridden by an
+    /// instantiation.
+    pub fn param_is_local(&self, p: ParamId) -> bool {
+        self.local_params.contains(&p)
     }
 
     /// Whether this module actually asks `$port_connected` about port `i`.

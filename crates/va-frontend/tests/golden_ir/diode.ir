@@ -68,6 +68,7 @@ Module {
             max: None,
         },
     ],
+    local_params: [],
     unconnected_ports: [],
     given_params: [],
     exprs: [

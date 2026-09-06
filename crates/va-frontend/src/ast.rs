@@ -204,6 +204,13 @@ pub enum Item {
     Param {
         /// Declared base type (defaults to [`ParamType::Real`] when omitted).
         ty: ParamType,
+        /// `true` for `localparam`. A `localparam` is a module-internal constant that an
+        /// instantiation may **not** override (LRM §3.4.2); an ordinary `parameter` may. The
+        /// two used to lower identically, on the reasoning that nothing could override
+        /// anything anyway — which stopped being true once `#(...)` and deck-line
+        /// `name=value` overrides existed, at which point a `localparam` was silently
+        /// overridable.
+        is_local: bool,
         /// Parameter name.
         name: String,
         /// Default-value expression.

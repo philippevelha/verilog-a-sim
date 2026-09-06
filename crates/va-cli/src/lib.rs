@@ -14,9 +14,11 @@
 //! first parameter. Devices with no matching compiled model fall back to the hand-written
 //! reference primitives in `va-abi`.
 //!
-//! DC (`.op`/`.dc`), transient (`.tran <tstep> <tstop>`), and small-signal AC
-//! (`.ac dec <points-per-decade> <fstart> <fstop>`, T5) are implemented; noise is not.
-//! Transient always starts from the zero vector — v0 has no `.ic`/`UIC`
+//! DC (`.op`/`.dc`), transient (`.tran <tstep> <tstop>`), small-signal AC
+//! (`.ac dec <points-per-decade> <fstart> <fstop>`, T5) and noise
+//! (`.noise V(<out>) <src> dec …`, T5.2, via [`solve_noise`]) are all implemented.
+//! Transient starts from the zero vector except where an element carries a SPICE `IC=`;
+//! there is no `.ic` card or circuit-wide `UIC`
 //! support. A `V` source with a bare `DC <value>` combined with that cold start *is* the step
 //! response — the only shape a constant source could produce. A `V` source with a `SIN(...)`
 //! waveform is genuinely time-varying, and becomes a [`WaveformSource`]: an ordinary
@@ -1388,7 +1390,9 @@ fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
 /// Build every device instance and integrate the transient response over the deck's
 /// `.tran <tstep> <tstop>` window.
 ///
-/// Always starts from the zero vector — v0 has no `.ic`/`UIC` support (this module's doc
+/// Starts from the zero vector unless an element carries a SPICE `IC=` (see the `dev.ic`
+/// handling below, added 2026-08-31); there is no `.ic` card or circuit-wide `UIC` flag (this
+/// module's doc
 /// comment). Every deck takes the same path ([`va_transient::integrator::run`]) whether or not
 /// it contains a time-varying source: a `SIN` source is a [`WaveformSource`], which reads the
 /// time from the analysis context like any other analysis-dependent model. `pub` so
@@ -1865,8 +1869,15 @@ fn build_from_model(
             .find(|(_, p)| p.name == *name)
         {
             Some((i, param)) => {
+                let pid = va_ir::ParamId(i as u32);
+                if module.param_is_local(pid) {
+                    bail!(
+                        "model `{}` declares `{name}` as a `localparam`, which a deck cannot                          set — a localparam is a module-internal constant (LRM 3.4.2)",
+                        module.name
+                    );
+                }
                 param.default = *v;
-                m.mark_param_given(va_ir::ParamId(i as u32));
+                m.mark_param_given(pid);
             }
             None => {
                 let mut known: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
@@ -3395,6 +3406,52 @@ X1 a gnd plain
         assert!(
             msg.contains("not optional") && msg.contains("$port_connected"),
             "should say why the omission was not accepted: {msg}"
+        );
+    }
+
+    /// A `localparam` is a module-internal constant, so a deck cannot set it.
+    ///
+    /// `parameter` and `localparam` used to lower identically -- harmless while nothing could
+    /// override anything, but once device lines gained `name=value` overrides it meant every
+    /// `localparam` was silently overridable, which inverts what the keyword is for.
+    #[test]
+    fn a_deck_cannot_override_a_localparam() {
+        const MODEL: &str = "
+module lp(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real r = 1000.0;
+  localparam real scale = 2.0;
+  analog I(p, n) <+ V(p, n) / (r * scale);
+endmodule
+";
+        let design = compile_model(MODEL, "lp.va");
+
+        // The ordinary parameter is settable...
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 1.0
+X1 a gnd lp r=500
+.op
+.end
+",
+        )
+        .expect("parses");
+        solve_dc(&net, &design.modules).expect("an ordinary parameter may be set");
+
+        // ...the localparam is not.
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 1.0
+X1 a gnd lp scale=5
+.op
+.end
+",
+        )
+        .expect("parses");
+        let err = solve_dc(&net, &design.modules).expect_err("`scale` is a localparam");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("scale") && msg.contains("localparam"),
+            "should name the parameter and say why: {msg}"
         );
     }
 
