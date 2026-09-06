@@ -401,3 +401,52 @@ ownership table with real names once students are assigned.
   completion time) given a fixed seed.
 - Do not mock internals. Run actual functions and modules in tests.
 - Fixtures for standard electronic discipline live in `tests/fixtures/`.
+
+## 12 Releases: every change lands in `release.txt` and moves the version
+
+`release.txt` at the repo root is the release log, and the version lives once in
+`Cargo.toml`'s `[workspace.package]` (every crate inherits it with `version.workspace = true`).
+
+**Every update gets both: a few lines in `release.txt` and a version increase.** Not a
+changelog written later from `git log` — an entry written with the change, because the thing
+worth recording is usually *why* and what it cost, which the diff does not say.
+
+### Which number moves
+
+| Kind of change | Version goes | Example |
+|---|---|---|
+| A new feature, or anything that changes behaviour | next **patch** | `0.9.7` → `0.9.8` |
+| A pure fix, or docs/process with no behaviour change | append a **build digit** | `0.9.8` → `0.9.8+1`, then `+2` |
+| The 1.0 blockers in `release.txt` all close | `1.0.0` | — |
+
+The fix form is spelled `+N`, **not** `0.9.8.1`: Cargo versions are semver, and a fourth
+numeric component is rejected outright (verified, not assumed — `cargo metadata` refuses
+`0.9.7.1` and accepts `0.9.7+1`). `+N` is semver build metadata, which is exactly "one more
+digit for a fix" and is legal everywhere a version is parsed.
+
+After 1.0 the same shape applies one level up: a feature bumps the minor, a fix the patch.
+
+### What an entry says
+
+Newest first, dated, opening with the version. A few lines, not a paragraph of adjectives:
+
+- **what changed**, in a sentence a reader who did not write it can act on;
+- **why**, when the reason is not obvious from the what — especially a design call that had a
+  plausible alternative;
+- **the cost**, stated plainly. A metric that moved the wrong way goes in the entry, with
+  whether it is a regression or a correction (v0.9.1 dropped the corpus 113→107 because it
+  started refusing models that had only ever been *building*; that belongs in the log, not
+  hidden);
+- **measured figures**, from a real run at that version: `cargo test --workspace`,
+  `cargo xtask validate`, the corpus count. Never carried forward from the previous entry.
+
+State limitations in the entry itself. A construct that is implemented "bare form only", or a
+tolerance that is recorded but not honoured, is a fact the next reader needs at the same moment
+they read that it works.
+
+### The mechanics
+
+1. Bump `Cargo.toml` and add the `release.txt` entry **in the same commit** as the change —
+   the two numbers must never disagree.
+2. Verify with `cargo metadata --no-deps` that every crate reports the new version.
+3. The commit subject is the version and the headline: `0.9.7 — Implement @(above(...))`.

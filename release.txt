@@ -3,7 +3,12 @@ verilog-a-sim — release log
 
 Versioning, from 0.9.0 onward:
 
-  * Every integrated feature or fix bumps the patch: 0.9.0 -> 0.9.1 -> 0.9.2 -> ...
+  * A feature, or anything that changes behaviour, bumps the patch:
+    0.9.0 -> 0.9.1 -> 0.9.2 -> ...
+  * A pure fix, or docs/process with no behaviour change, appends a build digit:
+    0.9.8 -> 0.9.8+1 -> 0.9.8+2. Spelled `+N` and not `0.9.8.1` because Cargo versions
+    are semver and a fourth numeric component is rejected outright (verified: `cargo
+    metadata` refuses 0.9.7.1 and accepts 0.9.7+1).
   * Each bump gets a dated entry below with a sentence or two saying what changed.
   * 1.0.0 is reached when the remaining 1.0 blockers (see the "Road to 1.0" list at
     the bottom) are closed. Until then the version stays in the 0.9.x range.
@@ -12,6 +17,14 @@ Versioning, from 0.9.0 onward:
     the number in this file and the one in Cargo.toml must always agree.
 
 Newest first.
+
+
+0.9.7+1 — 2026-09-06
+--------------------
+Process, no behaviour change. CLAUDE.md gains section 12: every update lands a few lines
+in this file and moves the version, in the same commit, with figures measured at that
+version rather than carried forward. Records the fix form as `+N` build metadata, since
+Cargo rejects a fourth numeric component -- and this entry is the first use of it.
 
 
 0.9.7 — 2026-09-06
