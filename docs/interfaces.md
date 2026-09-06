@@ -766,3 +766,23 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > (`EventSite::Cross`/`Timer`), and `Expr::CrossFired` became `Expr::EventFired`. One flat slot
 > space across event kinds, so the consumer's fired-flag buffer has a single source of truth
 > and does not care which kind claimed a slot.
+
+> **Revision (§6 change, ratified 2026-09-06d):** `EventSink::monitor` gained a `CrossTol`
+> argument (`{ time, expr }`, both `Option<f64>`), carrying Verilog-A's `time_tol`/`expr_tol`.
+>
+> A **signature change** rather than a defaulted companion method, and for the reason the
+> analysis context was one: a consumer that ignores a tolerance is *silently failing to honour
+> a request the source made*. There is no correct way to drop it, so no implementor should be
+> able to miss it. Two in-tree implementors were affected.
+>
+> `va-transient` honours it with a **bracketing retry**: a candidate step that reveals a
+> crossing it has overshot by more than the tolerance is rejected and re-taken aiming just past
+> the interpolated crossing, reusing the LTE controller's own rejection path. Aiming *past* it
+> rather than at it is deliberate — the LRM requires the event to fire after the crossing, and
+> landing a hair before would hide it. A site that requested no tolerance never brackets, so
+> every pre-existing run is bit-identical.
+>
+> What cannot be delivered is reported, not hidden: `Waveform::unresolved_events` counts
+> crossings that fired without meeting their request, which happens when the tolerance is finer
+> than f64 spacing at that time or the retry cap is reached. The LRM permits ignoring a
+> tolerance below the tool's time precision; it does not permit ignoring one in silence.

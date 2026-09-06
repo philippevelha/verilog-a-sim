@@ -85,6 +85,45 @@ impl CrossDir {
     }
 }
 
+/// How precisely a `cross` site wants its crossing resolved — Verilog-A's `time_tol` and
+/// `expr_tol` (LRM §5.10.1).
+///
+/// They bound the error between the *true* crossing and the point at which the event triggers:
+/// the event shall fire after the crossing, and while the signal is still inside the box those
+/// two tolerances define. `None` means the model did not ask, and the LRM then leaves the
+/// resolution to the tool.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct CrossTol {
+    /// Maximum time between the crossing and the firing, in seconds.
+    pub time: Option<f64>,
+    /// Maximum magnitude the monitored expression may still have when the event fires.
+    pub expr: Option<f64>,
+}
+
+impl CrossTol {
+    /// No tolerance requested — the tool chooses, which for this engine means firing at the
+    /// first accepted timepoint past the crossing with no extra step control.
+    pub const NONE: CrossTol = CrossTol {
+        time: None,
+        expr: None,
+    };
+
+    /// Whether a firing at `t_fire`, where the interpolated crossing was at `t_cross` and the
+    /// monitored expression now reads `value`, satisfies what was asked for.
+    ///
+    /// A tolerance that was not requested is satisfied by anything. Both must hold when both
+    /// are given, which is the LRM's rule.
+    pub fn satisfied_by(self, t_cross: f64, t_fire: f64, value: f64) -> bool {
+        self.time.is_none_or(|tt| t_fire - t_cross <= tt)
+            && self.expr.is_none_or(|et| value.abs() <= et)
+    }
+
+    /// Whether either tolerance was requested at all.
+    pub fn is_requested(self) -> bool {
+        self.time.is_some() || self.expr.is_some()
+    }
+}
+
 /// The channel a model registers its transient events on.
 ///
 /// Constructed by the consumer, never by the model — the same ownership shape as
@@ -103,7 +142,12 @@ pub trait EventSink {
     /// The value is the expression Verilog-A wrote inside `cross(...)`, already reduced to
     /// "distance from the threshold": `cross(V(out) - 2.5, +1)` reports `V(out) - 2.5`, so a
     /// crossing is a change of sign and the consumer needs no separate threshold.
-    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir);
+    ///
+    /// `tol` says how precisely the crossing must be resolved. It rides this call rather than
+    /// a separate optional one because a consumer that ignores it is *silently failing to
+    /// honour a request the source made* — the same argument that put the analysis context in
+    /// `ModelInstance::load`'s signature instead of behind a default.
+    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir, tol: CrossTol);
 
     /// Ask for a solve point at absolute time `t` seconds — Verilog-A's `timer`, and what a
     /// `cross` site needs to have its crossing resolved rather than merely noticed.
@@ -142,7 +186,7 @@ pub trait EventSink {
 #[derive(Clone, Debug, Default)]
 pub struct RecordingEventSink {
     /// One entry per [`EventSink::monitor`] call, in call order.
-    pub monitors: Vec<(usize, f64, CrossDir)>,
+    pub monitors: Vec<(usize, f64, CrossDir, CrossTol)>,
     /// One entry per [`EventSink::breakpoint`] call, in call order.
     pub breakpoints: Vec<f64>,
     /// One `(slot, next_time)` per [`EventSink::timer`] call, in call order.
@@ -159,14 +203,14 @@ impl RecordingEventSink {
     pub fn value_of(&self, slot: usize) -> Option<f64> {
         self.monitors
             .iter()
-            .find(|(s, _, _)| *s == slot)
-            .map(|(_, v, _)| *v)
+            .find(|(s, ..)| *s == slot)
+            .map(|(_, v, ..)| *v)
     }
 }
 
 impl EventSink for RecordingEventSink {
-    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir) {
-        self.monitors.push((slot, value, dir));
+    fn monitor(&mut self, slot: usize, value: f64, dir: CrossDir, tol: CrossTol) {
+        self.monitors.push((slot, value, dir, tol));
     }
 
     fn breakpoint(&mut self, t: f64) {
@@ -234,7 +278,7 @@ mod tests {
     fn the_default_timer_falls_back_to_a_breakpoint() {
         struct OnlyBreakpoints(Vec<f64>);
         impl EventSink for OnlyBreakpoints {
-            fn monitor(&mut self, _s: usize, _v: f64, _d: CrossDir) {}
+            fn monitor(&mut self, _s: usize, _v: f64, _d: CrossDir, _t: CrossTol) {}
             fn breakpoint(&mut self, t: f64) {
                 self.0.push(t);
             }
@@ -247,8 +291,8 @@ mod tests {
     #[test]
     fn the_recorder_keeps_call_order_and_finds_a_slot() {
         let mut sink = RecordingEventSink::new();
-        sink.monitor(1, 4.0, CrossDir::Rising);
-        sink.monitor(0, -2.0, CrossDir::Either);
+        sink.monitor(1, 4.0, CrossDir::Rising, CrossTol::NONE);
+        sink.monitor(0, -2.0, CrossDir::Either, CrossTol::NONE);
         sink.breakpoint(1e-6);
         assert_eq!(sink.monitors.len(), 2);
         assert_eq!(sink.monitors[0].0, 1, "call order is preserved");

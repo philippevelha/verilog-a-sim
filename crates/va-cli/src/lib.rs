@@ -350,7 +350,6 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
         modules.len()
     );
     warn_unplaceable_modules(&modules, path);
-    warn_unhonoured_event_tolerances(&modules, path);
     Ok(modules)
 }
 
@@ -372,41 +371,6 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
 /// `vsrc`/`resistor` are perfectly placeable. What is not acceptable is the current silence, in
 /// which the module is compiled, never placed, and never mentioned, so the run exits 0 with a
 /// confident answer computed entirely without it.
-/// Warn when a `cross(...)` site asks for a resolution tolerance this engine does not deliver.
-///
-/// `time_tol`/`expr_tol` bound the error between the true crossing and when the event triggers
-/// (LRM §5.10.1). This engine fires at the accepted timepoint that *ends* the bracketing step,
-/// so the achieved error is bounded by the timestep and by nothing related to the request — a
-/// model asking for 1 ns on a 2 µs step gets 2 µs. Accepting the argument and saying nothing is
-/// the pattern this project keeps removing, so it is said.
-///
-/// A warning rather than a refusal, deliberately: the model still computes the right physics at
-/// slightly the wrong instant, which is a precision shortfall rather than a different answer —
-/// unlike the transient operator folds, which are refused because the waveform is simply not
-/// what the source describes. The fix is `docs/roadmap.md`'s bracketing retry loop, after which
-/// this warning goes away rather than the argument being honoured by luck.
-///
-/// A `timer`'s `time_tol` is **not** warned about: the LRM asks for a timepoint *within* it and
-/// this engine lands exactly, so any non-negative tolerance is already met.
-fn warn_unhonoured_event_tolerances(modules: &[va_ir::Module], path: &str) {
-    for m in modules {
-        let n = m
-            .event_sites
-            .iter()
-            .filter(|s| s.has_unhonoured_tolerance())
-            .count();
-        if n > 0 {
-            eprintln!(
-                "[va-cli] warning: {path}: module `{}` has {n} `cross(...)` site(s) with a \
-                 time_tol/expr_tol this engine does not honour — the event fires at the \
-                 accepted timepoint ending the bracketing step, so its resolution is set by \
-                 the timestep, not by the tolerance you asked for.",
-                m.name
-            );
-        }
-    }
-}
-
 fn warn_unplaceable_modules(modules: &[va_ir::Module], path: &str) {
     for m in modules.iter().filter(|m| m.ports.is_empty()) {
         eprintln!(
@@ -472,6 +436,15 @@ pub fn run_sim(
         // waveform is produced at all.
         refuse_transient_approximations(&model_sources(model))?;
         let wf = solve_transient(&net, &compiled, integration)?;
+        // Said only when a request actually went unmet, rather than whenever a tolerance is
+        // written: the bracketing step control (§ `cross`) normally honours it, and a blanket
+        // warning would cry wolf on every model that asks for one.
+        if wf.unresolved_events > 0 {
+            eprintln!(
+                "[va-cli] warning: {} crossing(s) fired without meeting the time_tol/expr_tol                  their `cross(...)` site asked for — the step control hit its retry limit or                  the minimum timestep. Loosen the tolerance, or lower `.tran`'s step.",
+                wf.unresolved_events
+            );
+        }
         let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
         report_transient(&shown, &wf);
         if let Some(path) = plot {
@@ -3671,6 +3644,144 @@ X1 a gnd xn
         assert!(
             !timer[0].has_unhonoured_tolerance(),
             "an exact landing already satisfies a timer tolerance"
+        );
+    }
+
+    /// `cross`'s `time_tol` is **honoured**: the step control re-takes the step until a
+    /// timepoint lands within the requested tolerance of the crossing.
+    ///
+    /// Measured against the analytic crossing of a 5 V sine through +2.5 V (one twelfth of a
+    /// period), and discriminating: the same deck with no tolerance is checked too, and must
+    /// land *further* away. Without that control the test would pass on an engine that ignores
+    /// the tolerance and merely happens to take small steps.
+    #[test]
+    fn a_cross_time_tol_is_honoured_by_the_step_control() {
+        const PERIOD: f64 = 1e-3;
+        let t_star = PERIOD / 12.0; // 5*sin(2*pi*f*t) = 2.5
+
+        // Distance from the analytic crossing to the first accepted timepoint at or after it.
+        let overshoot = |tol: &str| -> (f64, usize) {
+            let src = format!(
+                "
+module xt(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p, n) - 2.5, 1{tol})) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 a gnd SIN(0 5 1k)
+X1 a gnd xt
+.tran 2u 1m
+.end
+",
+            )
+            .expect("parses");
+            let wf =
+                solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+            let first_after =
+                wf.t.iter()
+                    .copied()
+                    .filter(|&t| t >= t_star)
+                    .fold(f64::INFINITY, f64::min);
+            (first_after - t_star, wf.unresolved_events)
+        };
+
+        let (tight, unresolved) = overshoot(", 10n");
+        let (loose, _) = overshoot("");
+
+        assert_eq!(
+            unresolved, 0,
+            "a 10ns tolerance is reachable and must be met"
+        );
+        assert!(
+            tight <= 10e-9,
+            "with time_tol=10ns a timepoint must land within it: overshoot {tight:e}"
+        );
+        assert!(
+            loose > 10.0 * tight,
+            "the control must be meaningfully looser, else this test proves nothing:              tolerance-free overshoot {loose:e} vs {tight:e}"
+        );
+    }
+
+    /// How far the bracketing actually goes, and what happens past that.
+    ///
+    /// Two facts, measured rather than assumed — my first version of this test asserted an
+    /// attosecond tolerance was unreachable and was simply wrong:
+    ///
+    /// - **1e-18 s is met.** f64 spacing near t = 83 µs is about 1.4e-20 s, so an attosecond is
+    ///   ~70 ulps and the retry loop really does converge on it. That is the honest measure of
+    ///   how far this step control goes.
+    /// - **1e-24 s is not**, being below that spacing, and is *reported* rather than quietly
+    ///   missed. The event still fires: an unmeetable tolerance degrades the resolution, not
+    ///   the event.
+    #[test]
+    fn the_bracketing_converges_far_and_reports_when_it_cannot() {
+        let run = |tol: &str| -> (usize, usize, f64) {
+            let src = format!(
+                "
+module xu(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p, n) - 2.5, 1, {tol})) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 a gnd SIN(0 5 1k)
+X1 a gnd xu
+.tran 2u 1m
+.end
+",
+            )
+            .expect("parses");
+            let wf =
+                solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+            let t_star = 1e-3 / 12.0;
+            let first_after =
+                wf.t.iter()
+                    .copied()
+                    .filter(|&t| t >= t_star)
+                    .fold(f64::INFINITY, f64::min);
+            (
+                wf.unresolved_events,
+                wf.model_crossings.len(),
+                first_after - t_star,
+            )
+        };
+
+        let (unresolved, fired, overshoot) = run("1.0e-18");
+        assert_eq!(
+            unresolved, 0,
+            "an attosecond is ~70 ulps here and is reachable"
+        );
+        assert_eq!(fired, 1);
+        assert!(
+            overshoot <= 1e-18,
+            "the retry loop must actually reach it: overshoot {overshoot:e}"
+        );
+
+        let (unresolved, fired, _) = run("1.0e-24");
+        assert!(
+            unresolved > 0,
+            "below f64 spacing the request cannot be met, and must be reported"
+        );
+        assert_eq!(
+            fired, 1,
+            "an unmeetable tolerance costs resolution, not the event"
         );
     }
 

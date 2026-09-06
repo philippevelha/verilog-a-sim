@@ -14,6 +14,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.6 — 2026-09-06
+------------------
+`cross`'s `time_tol`/`expr_tol` are honoured, by a bracketing retry loop. A candidate step
+that reveals a crossing it has overshot by more than the requested tolerance is rejected
+and re-taken, aiming just past the interpolated crossing, through the same retry path the
+LTE controller already uses. Aiming past rather than at the crossing is deliberate: the LRM
+requires the event to fire after it, and landing a hair before would hide it.
+
+  `EventSink::monitor` gained a `CrossTol` argument to carry the request. A signature
+  change rather than a defaulted companion, for the reason the analysis context was one --
+  a consumer that ignores a tolerance is silently failing to honour something the source
+  asked for, so no implementor should be able to miss it.
+
+  Measured convergence: ~70 ulps of the timescale -- a 1e-18 s tolerance really is met at
+  t = 83us, where f64 spacing is ~1.4e-20 s. Below that spacing it cannot be, and the count
+  is reported through `Waveform::unresolved_events` and warned about at the end of the run,
+  rather than quietly missed. The blanket compile-time warning from 0.9.5 is gone, being
+  no longer true.
+
+  A site that requests no tolerance never brackets, so every pre-existing run is
+  bit-identical: 27/27 golden circuits unmoved.
+
+  724 tests, 27/27 golden circuits, corpus steady at 113/132, clippy and fmt clean.
+
+
 0.9.5 — 2026-09-06
 ------------------
 Stop dropping event arguments. The parser kept only the first two arguments of
@@ -155,7 +180,8 @@ Tracked in docs/roadmap.md; listed here so the release log is self-contained.
   [ ] Analog events. `@(initial_step)`, `@(cross(...))` and `@(timer(...))` all work as
       of 0.9.4. Still refused, and each needing its own work: `final_step`, `above`,
       `absdelta`, and compound triggers (`initial_step or cross(...)`). `above` is the
-      cheapest of those -- semantically a one-sided `cross`, whose machinery now exists.
+      cheapest of those -- semantically a one-sided `cross`, whose machinery, tolerances
+      and bracketing all now exist.
       See roadmap "Analog events: what exists, and what each one still needs".
 
   [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of

@@ -1311,10 +1311,25 @@ impl ModelInstance for GeneratedModel {
             let enabled = |e: Option<va_ir::ExprId>| e.is_none_or(|r| value_of(r) != 0.0);
             match *site {
                 va_ir::EventSite::Cross {
-                    expr, dir, enable, ..
+                    expr,
+                    dir,
+                    time_tol,
+                    expr_tol,
+                    enable,
                 } => {
                     if enabled(enable) {
-                        sink.monitor(slot, value_of(expr), va_abi::CrossDir::from_lrm(dir));
+                        // Tolerances are evaluated here, at registration, and handed to the
+                        // consumer: they say how precisely *this* crossing must be resolved,
+                        // and the step control that resolves it lives in the integrator.
+                        let tol = va_abi::CrossTol {
+                            time: time_tol
+                                .map(value_of)
+                                .filter(|t| t.is_finite() && *t >= 0.0),
+                            expr: expr_tol
+                                .map(value_of)
+                                .filter(|t| t.is_finite() && *t >= 0.0),
+                        };
+                        sink.monitor(slot, value_of(expr), va_abi::CrossDir::from_lrm(dir), tol);
                     }
                 }
                 va_ir::EventSite::Timer {

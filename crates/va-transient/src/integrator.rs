@@ -136,6 +136,108 @@ pub struct Waveform {
     /// this one names a model's own monitored *expression*. Merging them would make the index
     /// ambiguous.
     pub model_crossings: Vec<(usize, usize, f64)>,
+    /// How many crossings fired **without** meeting the `time_tol`/`expr_tol` their site asked
+    /// for, because the step control ran out of retries or hit the minimum timestep.
+    ///
+    /// Normally `0`. A non-zero count is the honest report that a request went unmet — the LRM
+    /// permits a tolerance finer than the tool's time precision to be ignored, but not ignored
+    /// in silence.
+    pub unresolved_events: usize,
+}
+
+/// How many times one step may be re-taken to resolve a crossing before the run gives up and
+/// accepts it unresolved.
+///
+/// Each retry at minimum halves the overshoot, so 20 is ~10^6 of tightening — far more than any
+/// realistic tolerance-to-timestep ratio needs, and still a hard bound against a site whose
+/// expression is too ill-behaved for the interpolation to converge on.
+const MAX_BRACKET_RETRIES: usize = 20;
+
+/// Where the step should re-land so that every `cross` site whose tolerance was requested is
+/// resolved to within it — or `None` when the candidate step already satisfies them all.
+///
+/// # Why a step has to be *rejected* for this
+///
+/// A crossing is only detectable once you have a point on the far side of it, so the candidate
+/// that reveals the crossing is also, in general, past it by more than the model asked for.
+/// There is no way to land closer without re-taking the step: hence a rejection, reusing the
+/// same retry path the LTE controller already uses. A site that requested no tolerance never
+/// triggers one, which is what keeps every existing run bit-identical.
+///
+/// # Where it aims
+///
+/// The LRM requires the event to fire *after* the crossing and while the signal is still inside
+/// the box the two tolerances define, so this targets a point just past the interpolated
+/// crossing rather than the crossing itself:
+///
+/// - with `time_tol`, half a tolerance past it — comfortably inside the box, and not so close
+///   that floating-point noise lands the retry *before* the crossing, which would hide the
+///   event entirely;
+/// - with only `expr_tol`, halfway between the crossing and the candidate, which halves the
+///   overshoot per retry and so converges geometrically.
+///
+/// The earliest target across all sites wins: resolving the first crossing tightly cannot make
+/// a later one worse, whereas the reverse is not true.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Bracket {
+    /// Every requested tolerance is met by the candidate step (or none was requested).
+    Resolved,
+    /// Re-take the step so it lands here instead.
+    Retry(f64),
+    /// A tolerance is unmet and no useful target exists — it is finer than the minimum
+    /// timestep can express, or aiming for it would not shorten the step. Distinguished from
+    /// [`Bracket::Resolved`] on purpose: "cannot be improved" is not "satisfied", and
+    /// collapsing the two is how an unmeetable request goes unreported.
+    Unmeetable,
+}
+
+fn bracket_target(prev: &EventPoll, cand: &EventPoll, t0: f64, t1: f64, tstep_min: f64) -> Bracket {
+    let mut best: Option<f64> = None;
+    let mut unmet = false;
+    for (i, slots) in cand.values.iter().enumerate() {
+        let Some(before) = prev.values.get(i) else {
+            continue;
+        };
+        for (slot, entry) in slots.iter().enumerate() {
+            let (Some(&(now, dir, tol)), Some(Some((was, ..)))) =
+                (entry.as_ref(), before.get(slot))
+            else {
+                continue;
+            };
+            if !tol.is_requested() || !dir.fires(*was, now) {
+                continue;
+            }
+            let was = *was;
+            let frac = if (was - now).abs() > 0.0 {
+                was / (was - now)
+            } else {
+                1.0
+            };
+            let t_cross = t0 + frac * (t1 - t0);
+            if tol.satisfied_by(t_cross, t1, now) {
+                continue;
+            }
+            unmet = true;
+            let target = match tol.time {
+                Some(tt) => t_cross + 0.5 * tt,
+                None => t_cross + 0.5 * (t1 - t_cross),
+            };
+            // A target that is not actually inside the step buys nothing: the retry would take
+            // the same step again, or a longer one, and loop forever. The request stays flagged
+            // unmet, which is what turns it into a reported `Unmeetable` rather than silence.
+            if target <= t0 + tstep_min || target >= t1 {
+                continue;
+            }
+            best = Some(best.map_or(target, |b: f64| b.min(target)));
+        }
+    }
+    match (best, unmet) {
+        // A usable target wins even if another site is unmeetable: tightening the step may
+        // bring that one within reach too, and if it does not, the next pass reports it.
+        (Some(t), _) => Bracket::Retry(t),
+        (None, true) => Bracket::Unmeetable,
+        (None, false) => Bracket::Resolved,
+    }
 }
 
 /// The consumer half of Interface β's event **notification**: one flat buffer of "did slot `k`
@@ -201,7 +303,7 @@ struct EventPoll {
     /// point: a `cross` site whose `enable` went false stops reporting, and treating that as a
     /// value of `0.0` would read as a sign change against whatever it last reported — firing
     /// the event precisely because it was disabled.
-    values: Vec<Vec<Option<(f64, va_abi::CrossDir)>>>,
+    values: Vec<Vec<Option<(f64, va_abi::CrossDir, va_abi::CrossTol)>>>,
     /// Absolute times any instance asked to be solved at.
     breakpoints: Vec<f64>,
     /// `(instance, slot, next_time)` per `timer` registration. Unlike a bare breakpoint these
@@ -226,9 +328,9 @@ fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -
         // with the previous timepoint's entry for the same slot. An unreported slot stays
         // `None` and takes part in no comparison at all.
         let mut per_slot = vec![None; n];
-        for (slot, value, dir) in sink.monitors {
+        for (slot, value, dir, tol) in sink.monitors {
             if slot < n {
-                per_slot[slot] = Some((value, dir));
+                per_slot[slot] = Some((value, dir, tol));
             }
         }
         values.push(per_slot);
@@ -834,6 +936,7 @@ pub fn run_with_events(
         x: vec![x0.clone()],
         crossings: Vec::new(),
         model_crossings: Vec::new(),
+        unresolved_events: 0,
     };
     if dim == 0 {
         return Ok(waveform);
@@ -875,6 +978,10 @@ pub fn run_with_events(
     // its next occurrence at every accepted timepoint, so this is refreshed as the run goes
     // rather than computed once.
     let mut pending_timers: Vec<(usize, usize, f64)> = event_prev.timers.clone();
+    // § bracketing. Counted per step and reset on every accept, so the cap bounds the retries
+    // spent resolving *one* crossing rather than the whole run.
+    let mut bracket_retries = 0usize;
+    let mut unresolved_events = 0usize;
     model_breakpoints.extend(
         pending_timers
             .iter()
@@ -1026,14 +1133,34 @@ pub fn run_with_events(
             };
 
             if err_ratio <= 1.0 {
-                let x_before = std::mem::replace(&mut x, x_primary);
-                let t_before = t;
-
                 // Interface β's event channel, polled here and nowhere else: this is the only
                 // point in the loop that is on the trajectory. Newton runs many times per
                 // timepoint and every rejected candidate is thrown away, so neither is a place
                 // to decide that something happened.
-                let poll = poll_events(instances, &x, &AnalysisCtx::transient(t_next));
+                let poll = poll_events(instances, &x_primary, &AnalysisCtx::transient(t_next));
+
+                // § bracketing. A step that reveals a crossing is generally past it by more
+                // than the source asked for, and the only way to land closer is to re-take the
+                // step — so a `cross` site with an unmet `time_tol`/`expr_tol` rejects here,
+                // through the same retry path the LTE controller uses. Sites that requested no
+                // tolerance never reach this, which keeps every other run bit-identical.
+                match bracket_target(&event_prev, &poll, t, t_next, cfg.tstep_min) {
+                    Bracket::Retry(target) if bracket_retries < MAX_BRACKET_RETRIES => {
+                        bracket_retries += 1;
+                        h = (target - t).max(cfg.tstep_min);
+                        continue;
+                    }
+                    // Out of retries, or finer than the minimum timestep can express: accept,
+                    // and record that the request went unmet rather than pretend it was
+                    // honoured. The LRM allows a tolerance below the tool's time precision to
+                    // be ignored; what it does not allow is ignoring one silently.
+                    Bracket::Retry(_) | Bracket::Unmeetable => unresolved_events += 1,
+                    Bracket::Resolved => {}
+                }
+                bracket_retries = 0;
+
+                let x_before = std::mem::replace(&mut x, x_primary);
+                let t_before = t;
                 fired.clear();
                 let mut crossings: Vec<(usize, usize, f64)> = Vec::new();
                 for (i, slots) in poll.values.iter().enumerate() {
@@ -1044,7 +1171,7 @@ pub fn run_with_events(
                         // Both timepoints must have reported this slot: a crossing is a
                         // statement about a pair of values, and a slot that was disabled at
                         // either end has no pair.
-                        let (Some(&(now, dir)), Some(Some((was, _)))) =
+                        let (Some(&(now, dir, _)), Some(Some((was, ..)))) =
                             (entry.as_ref(), before.get(slot))
                         else {
                             continue;
@@ -1176,6 +1303,7 @@ pub fn run_with_events(
         }
     }
 
+    waveform.unresolved_events = unresolved_events;
     Ok(waveform)
 }
 
@@ -1837,6 +1965,7 @@ mod tests {
         node: usize,
         threshold: f64,
         dir: va_abi::CrossDir,
+        tol: va_abi::CrossTol,
         breakpoint_at: Option<f64>,
     }
 
@@ -1869,7 +1998,7 @@ mod tests {
         }
 
         fn events(&self, x: &[f64], _ctx: &AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
-            sink.monitor(0, x[self.node] - self.threshold, self.dir);
+            sink.monitor(0, x[self.node] - self.threshold, self.dir, self.tol);
             if let Some(t) = self.breakpoint_at {
                 sink.breakpoint(t);
             }
@@ -1892,6 +2021,7 @@ mod tests {
             node: 1,
             threshold: 2.5,
             dir: va_abi::CrossDir::Rising,
+            tol: va_abi::CrossTol::NONE,
             breakpoint_at: None,
         };
         let insts: [&dyn ModelInstance; 4] = [&vs, &r, &c, &watcher];
@@ -1933,6 +2063,7 @@ mod tests {
             node: 1,
             threshold: 2.5,
             dir: va_abi::CrossDir::Falling,
+            tol: va_abi::CrossTol::NONE,
             breakpoint_at: None,
         };
         let insts: [&dyn ModelInstance; 4] = [&vs, &r, &c, &watcher];
@@ -1964,6 +2095,7 @@ mod tests {
             node: 1,
             threshold: 2.5,
             dir: va_abi::CrossDir::Rising,
+            tol: va_abi::CrossTol::NONE,
             breakpoint_at: Some(awkward_t),
         };
         let insts: [&dyn ModelInstance; 4] = [&vs, &r, &c, &watcher];

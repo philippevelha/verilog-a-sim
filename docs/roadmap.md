@@ -4093,7 +4093,7 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 |---|:--:|:--:|:--:|---|
 | `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
 | `final_step` | yes | partial | no | **Refused in transient** (2026-09-06); still runs in a static solve, where one point is both first and last, which is correct. Needs a "last accepted timepoint" hook in `run_with_events`. |
-| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.3)**, bare form only — a compound `initial_step or cross(...)` is still refused. Body runs at the accepted timepoint ending the bracketing step, not at the interpolated crossing time; `enable` honoured; `time_tol`/`expr_tol` recorded and **warned about**, not silently dropped — honouring them needs the bracketing retry loop below. Was: | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
+| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.3)**, bare form only — a compound `initial_step or cross(...)` is still refused. Body runs at the accepted timepoint ending the bracketing step, not at the interpolated crossing time; All five LRM arguments honoured as of v0.9.6, tolerances included. Was: | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
 | `timer(start[, period[, tol]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.4)**, bare form only. The model re-registers its next occurrence at each accepted timepoint through `EventSink::timer(slot, next)`, so it stays stateless about its own schedule; the integrator lands on it exactly and fires the slot. An occurrence falling on the run's *initial* timepoint is not delivered — that point is a seed, not a solved step. Was: Needs the same channel, plus periodic re-arming. |
 | `above(expr[, tol…])` | no | **refused** | no | Refused by name in a trigger, though not yet reserved as a keyword. Lex and reserve first; semantically a one-sided `cross`. |
 | `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
@@ -4130,11 +4130,12 @@ Sequencing that follows from the table:
    because a breakpoint only says *stop here* while a firing must say *which event*. Defaulted
    to forward to `breakpoint`, so a consumer that only places timepoints still lands correctly
    and merely cannot attribute.
-5. **Honour `cross`'s `time_tol`/`expr_tol`** — the bracketing retry loop. On detecting a
-   crossing, reject the step and set `h` so the next candidate lands within `time_tol` of the
-   interpolated crossing, reusing the LTE rejection path. Until then those arguments are
-   recorded and warned about (v0.9.5), never silently dropped. A `timer`'s `time_tol` needs
-   nothing: the integrator already lands exactly.
+5. ~~**Honour `cross`'s `time_tol`/`expr_tol`**~~ — **done 2026-09-06 (v0.9.6)**. A step that
+   reveals a crossing overshooting its tolerance is rejected and re-taken to land inside it,
+   through the same retry path the LTE controller uses. A site requesting no tolerance never
+   brackets, which is what keeps every existing run bit-identical. Measured convergence: ~70
+   ulps of the timescale. A request below f64 spacing is counted in
+   `Waveform::unresolved_events` and warned about, rather than quietly missed.
 6. `final_step`, then `above`/`last_crossing`, then `absdelta`.
 
 ---
