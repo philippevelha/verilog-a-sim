@@ -181,7 +181,15 @@ class of lexemes.
   deck sets (positional value included). A module with no instantiating context still reports
   `false`, which for it is the truth rather than an approximation. An `aliasparam` resolves to
   its target's `ParamId`, so querying an alias reports the target's givenness.
-  `$port_connected(name)` still folds to `0.0`/false — see its own entry; `$limit(access, "fn_name"[, args...])` (a Newton convergence aid, LRM §4.5.14)
+  `$port_connected(name)` **is likewise answered, not folded** (changed 2026-09-06): it lowers
+  to `va_ir::Expr::PortConnected`, resolved at the instantiation boundary against
+  `Module::unconnected_ports`. Its default flipped from `false` to **true** in the process,
+  which is the honest reading — building an instance takes a terminal for every port, so a port
+  is connected unless an instantiation explicitly leaves it empty. Two spellings now do that:
+  an empty Verilog-A connection slot (`.dt()`, or a positional gap — both new grammar), and a
+  deck line that stops short of the model's trailing ports. The deck form is accepted only for
+  a port the model actually queries, since an omitted terminal is equally what a typo looks
+  like; the Verilog-A form needs no such guard, being explicit rather than an omission; `$limit(access, "fn_name"[, args...])` (a Newton convergence aid, LRM §4.5.14)
   folds transparently to its first argument's value — a converged Newton solve is a fixed point
   of the *unlimited* equations, so the limiter changes only the iteration path toward that point,
   never the point itself, and this project's stateless `ModelInstance::load` ABI has no

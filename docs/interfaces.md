@@ -45,6 +45,7 @@ pub enum Expr {
     Select(ExprId, ExprId, ExprId),// ternary cond ? then : else
     Ddx(ExprId, Access),           // ddx(expr, probe): partial derivative w.r.t. probe's node
     ParamGiven(ParamId),           // $param_given: resolved at the instantiation boundary
+    PortConnected(u32),            // $port_connected: likewise, by port index
 }
 
 pub enum Stmt {

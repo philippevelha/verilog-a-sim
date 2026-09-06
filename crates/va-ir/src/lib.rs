@@ -124,6 +124,16 @@ pub struct Module {
     pub branches: Vec<Branch>,
     /// Parameters with optional ranges/defaults.
     pub params: Vec<Param>,
+    /// The ports the *instantiating context* explicitly left unconnected — indices into
+    /// [`Self::ports`] — the question `$port_connected` asks (LRM §9.19).
+    ///
+    /// Stated as the *unconnected* set rather than the connected one so that the empty default
+    /// means "every port is connected", which is the truth wherever an instance is actually
+    /// built: `va-codegen::build_instance` takes a terminal for every port node, so a module
+    /// reaching it has all of them wired. A port becomes unconnected only when an instantiation
+    /// says so — an empty Verilog-A connection slot (`sub s1(.dt(), a, b)`), or a deck line
+    /// that stops short of the model's trailing ports. See [`Self::port_is_connected`].
+    pub unconnected_ports: Vec<usize>,
     /// The parameters the *instantiating context* explicitly set, as opposed to leaving at
     /// their declared default — the question `$param_given` asks (LRM §9.19).
     ///
@@ -173,6 +183,34 @@ impl Module {
     pub fn mark_param_given(&mut self, p: ParamId) {
         if !self.given_params.contains(&p) {
             self.given_params.push(p);
+        }
+    }
+
+    /// Whether the instantiating context connected port `i` — the value
+    /// [`Expr::PortConnected`] evaluates to. `true` unless an instantiation explicitly left
+    /// that port unconnected, since building an instance otherwise wires every port.
+    pub fn port_is_connected(&self, i: usize) -> bool {
+        !self.unconnected_ports.contains(&i)
+    }
+
+    /// Whether this module actually asks `$port_connected` about port `i`.
+    ///
+    /// The test for "is this port genuinely optional." A deck line that stops short of a
+    /// model's trailing ports is the SPICE idiom for leaving an optional terminal off, but it
+    /// is equally what a typo looks like — so an omission is only honoured for a port the
+    /// model itself treats as optional by querying it. A model that never asks gets the
+    /// wrong-terminal-count error it always did.
+    pub fn queries_port_connected(&self, i: usize) -> bool {
+        let i = i as u32;
+        self.exprs
+            .iter()
+            .any(|e| matches!(e, Expr::PortConnected(p) if *p == i))
+    }
+
+    /// Record that the instantiating context left port `i` unconnected. Idempotent.
+    pub fn mark_port_unconnected(&mut self, i: usize) {
+        if !self.unconnected_ports.contains(&i) {
+            self.unconnected_ports.push(i);
         }
     }
 
@@ -325,6 +363,13 @@ pub enum Expr {
     /// [`Module::given_params`], which whoever builds the instance has filled in. Constant per
     /// instance, and so zero-gradient.
     ParamGiven(ParamId),
+    /// `$port_connected(i)`: whether the instantiating context connected port `i` of
+    /// [`Module::ports`] (LRM §9.19), as `1.0`/`0.0`.
+    ///
+    /// Carried to the instantiation boundary for the same reason as [`Self::ParamGiven`]: one
+    /// elaboration, many instantiations, and only the instantiation knows. `va-codegen` reads
+    /// [`Module::unconnected_ports`]. Constant per instance, and so zero-gradient.
+    PortConnected(u32),
 }
 
 /// Unary operators.

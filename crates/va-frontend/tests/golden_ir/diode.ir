@@ -68,6 +68,7 @@ Module {
             max: None,
         },
     ],
+    unconnected_ports: [],
     given_params: [],
     exprs: [
         Param(

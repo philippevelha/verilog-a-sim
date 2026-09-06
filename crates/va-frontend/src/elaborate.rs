@@ -144,7 +144,15 @@ pub fn elaborate_with_library_and_disciplines(
     disciplines: &HashMap<String, DisciplineDecl>,
     natures: &HashMap<String, NatureDecl>,
 ) -> Result<Module, FrontendError> {
-    elaborate_inner(ast, library, &[], &HashMap::new(), disciplines, natures)
+    elaborate_inner(
+        ast,
+        library,
+        &[],
+        &HashMap::new(),
+        &HashSet::new(),
+        disciplines,
+        natures,
+    )
 }
 
 fn elaborate_inner(
@@ -152,6 +160,7 @@ fn elaborate_inner(
     library: &[ModuleAst],
     stack: &[String],
     param_overrides: &HashMap<String, f64>,
+    unconnected_ports: &HashSet<String>,
     disciplines: &HashMap<String, DisciplineDecl>,
     natures: &HashMap<String, NatureDecl>,
 ) -> Result<Module, FrontendError> {
@@ -160,6 +169,7 @@ fn elaborate_inner(
         library,
         stack,
         param_overrides,
+        unconnected_ports,
         disciplines,
         natures,
         out: Module::new(&ast.name),
@@ -269,6 +279,11 @@ struct Elaborator<'a> {
     /// (empty when elaborating a top-level module). Consulted by [`Self::collect_params`] in
     /// place of the AST default when present.
     param_overrides: &'a HashMap<String, f64>,
+    /// The names of this module's own ports that the instantiating parent explicitly left
+    /// unconnected (`.dt()` or an empty positional slot) — what `$port_connected` reports on.
+    /// Empty for a module with no instantiating context, where every port is connected by
+    /// whoever builds the instance.
+    unconnected_ports: &'a HashSet<String>,
     /// Parsed `discipline...enddiscipline` blocks, keyed by name (§ nature-metadata wiring),
     /// empty when elaborated via [`elaborate`]/[`elaborate_with_library`] (no preamble
     /// available). File-scoped, shared unchanged across every submodule this elaboration
@@ -623,6 +638,13 @@ impl Elaborator<'_> {
     /// (`va-netlist`) that doesn't exist yet to have an opinion on connection order.
     fn resolve_ports(&mut self) -> Result<(), FrontendError> {
         for port in &self.ast.ports {
+            // § `$port_connected`: the parent named this port in an empty connection slot, so
+            // it is unconnected for *this* instantiation. Recorded by index, which is what
+            // `Expr::PortConnected` carries.
+            if self.unconnected_ports.contains(port) {
+                let idx = self.out.ports.len();
+                self.out.mark_port_unconnected(idx);
+            }
             if let Some(id) = self.nodes.get(port) {
                 self.out.ports.push(vec![*id]);
                 continue;
@@ -1563,13 +1585,22 @@ impl Elaborator<'_> {
                 Expr::ParamGiven(pid)
             }
             // `$port_connected(name)` asks whether the named port has a real connection in the
-            // instantiating netlist — the standard idiom for an optional terminal (e.g. a
+            // instantiating context — the standard idiom for an optional terminal (e.g. a
             // self-heating `dt` thermal port), `if ($port_connected(dt) == 0) begin ... end`.
             // Like `$param_given`, `name` is a port-name reference read directly off the AST,
-            // not a value expression to lower. v0 has no netlist-driven instantiation, so no
-            // port can be connected by one; folding to `false` is the honest answer for the same
-            // reason as `$param_given` above, and matches the corpus's dominant usage (guarding
-            // an optional port's absence).
+            // not a value expression to lower.
+            //
+            // Lowered to `Expr::PortConnected`, *not* folded here, for the same reason as
+            // `$param_given`: one elaboration, many instantiations. It used to fold to `false`
+            // on the grounds that "v0 has no netlist-driven instantiation at all" — untrue
+            // since a deck could place a compiled model of any port count, at which point every
+            // one of those ports is wired and `false` was simply wrong.
+            //
+            // Note the *default* is now `true`, not `false`: building an instance takes a
+            // terminal for every port, so a port is connected unless an instantiation says
+            // otherwise (`.dt()` or an empty positional slot in Verilog-A; a deck line that
+            // stops short of the model's trailing ports). That is the honest reading of what
+            // the pipeline actually does — see `va_ir::Module::unconnected_ports`.
             ExprAst::SysFunc { name, args } if name == "port_connected" => {
                 let &[port_ref] = args.as_slice() else {
                     return Err(elab(
@@ -1584,13 +1615,13 @@ impl Elaborator<'_> {
                         ))
                     }
                 };
-                if !self.ast.ports.iter().any(|p| p == port_name) {
+                let Some(idx) = self.ast.ports.iter().position(|p| p == port_name) else {
                     return Err(elab(format!(
                         "`$port_connected` names `{port_name}`, which is not a declared port of \
                          this module"
                     )));
-                }
-                Expr::Const(0.0)
+                };
+                Expr::PortConnected(idx as u32)
             }
             // `$limit(access, "function_name"[, args...])` is a Newton convergence aid (LRM
             // §4.5.14): it bounds how much `access`'s value is allowed to move from its
@@ -2718,7 +2749,7 @@ impl Elaborator<'_> {
     fn contains_ddt(&self, expr: ExprId, tainted: &HashSet<u32>) -> bool {
         match self.out.expr(expr) {
             Expr::Call(va_ir::Builtin::Ddt, _) => true,
-            Expr::ParamGiven(_) => false,
+            Expr::ParamGiven(_) | Expr::PortConnected(_) => false,
             Expr::Var(id) => tainted.contains(&id.0),
             Expr::Call(_, args) | Expr::CallUser(_, args) => {
                 args.iter().any(|&a| self.contains_ddt(a, tainted))
@@ -2809,7 +2840,7 @@ impl Elaborator<'_> {
     /// directly (`if (ddt(q) > 0)`), with no tainted variable involved.
     fn first_tainted_var(&self, expr: ExprId, tainted: &HashSet<u32>) -> Option<VarId> {
         match self.out.expr(expr) {
-            Expr::ParamGiven(_) => None,
+            Expr::ParamGiven(_) | Expr::PortConnected(_) => None,
             Expr::Var(id) if tainted.contains(&id.0) => Some(*id),
             Expr::Call(_, args) | Expr::CallUser(_, args) => args
                 .iter()
@@ -3247,6 +3278,25 @@ impl Elaborator<'_> {
             }
         }
 
+        // § `$port_connected`: which of the submodule's ports this instance leaves empty has
+        // to be known *before* elaborating it, since the answer is baked into that
+        // elaboration. Read off the connection list by name or by position; an out-of-range or
+        // unknown name is left for the binding loops below to report properly.
+        let mut unconnected: HashSet<String> = HashSet::new();
+        for (i, conn) in connections.iter().enumerate() {
+            match conn {
+                ast::PortConn::Positional(None) => {
+                    if let Some(p) = sub_ast.ports.get(i) {
+                        unconnected.insert(p.clone());
+                    }
+                }
+                ast::PortConn::Named { port, net: None } => {
+                    unconnected.insert(port.clone());
+                }
+                _ => {}
+            }
+        }
+
         let mut child_stack: Vec<String> = self.stack.to_vec();
         child_stack.push(self.ast.name.clone());
         let sub = elaborate_inner(
@@ -3254,6 +3304,7 @@ impl Elaborator<'_> {
             self.library,
             &child_stack,
             &overrides,
+            &unconnected,
             self.disciplines,
             self.natures,
         )?;
@@ -3294,6 +3345,10 @@ impl Elaborator<'_> {
                 let ast::PortConn::Positional(net_arg) = conn else {
                     unreachable!()
                 };
+                // An empty slot leaves the port unconnected: nothing to discipline-check and
+                // nothing to bind, so the submodule's port node stays an ordinary internal
+                // node of the parent (floating, which is exactly what "unconnected" means).
+                let Some(net_arg) = net_arg else { continue };
                 self.check_port_discipline(
                     inst_name,
                     module_name,
@@ -3335,6 +3390,9 @@ impl Elaborator<'_> {
                     )));
                 }
                 covered[idx] = true;
+                // `.port()` — explicitly unconnected. Marked covered above (the slot *was*
+                // written, so it is not a missing connection) but bound to nothing.
+                let Some(net) = net else { continue };
                 self.check_port_discipline(
                     inst_name,
                     module_name,
@@ -3663,6 +3721,13 @@ fn remap_expr(
         // carrying the marker into the parent) is what lets two instances of one module with
         // different override lists inline to different constants.
         Expr::ParamGiven(pid) => Expr::Const(if sub.param_is_given(*pid) { 1.0 } else { 0.0 }),
+        // Likewise resolved against the submodule's own instantiation: it was elaborated
+        // knowing which of its ports this parent left empty.
+        Expr::PortConnected(i) => Expr::Const(if sub.port_is_connected(*i as usize) {
+            1.0
+        } else {
+            0.0
+        }),
         Expr::Var(vid) => Expr::Var(var_off[vid.0 as usize]),
         Expr::Probe(a) => Expr::Probe(remap_access(a, branch_off)),
         Expr::Unary(op, a) => Expr::Unary(*op, expr_off[a.0 as usize]),
@@ -4103,6 +4168,7 @@ mod tests {
                 Expr::Const(_)
                 | Expr::Param(_)
                 | Expr::ParamGiven(_)
+                | Expr::PortConnected(_)
                 | Expr::Var(_)
                 | Expr::Probe(_) => {}
                 Expr::Unary(_, a) | Expr::Ddx(a, _) => stack.push(*a),
@@ -4870,15 +4936,20 @@ mod tests {
         assert!(elaborate(&ast).is_err());
     }
 
+    /// `$port_connected` reaches the IR as a marker and validates its argument. The answer
+    /// itself belongs to the instantiation -- see the two tests above.
     #[test]
-    fn port_connected_folds_to_false_and_validates_the_name() {
+    fn port_connected_lowers_to_a_marker_and_validates_the_name() {
         let m = elaborate_src(
             "module t(a, b, dt); electrical a, b; thermal dt; analog begin if ($port_connected(dt) == 0) I(a, b) <+ V(a, b); else I(a, b) <+ 0; end endmodule",
         );
+        // This used to assert a folded `Const(0.0)` existed -- which the source's own `== 0`
+        // and `<+ 0` literals satisfied on their own, so it would have kept passing whatever
+        // the query lowered to. Assert the marker itself, at the right port index.
         assert!(m
             .exprs
             .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+            .any(|e| matches!(e, va_ir::Expr::PortConnected(i) if *i == 2)));
 
         // Names an undeclared port.
         let src = "module t(a, b); electrical a, b; analog begin if ($port_connected(nope)) I(a, b) <+ V(a, b); end endmodule";
@@ -7320,6 +7391,60 @@ mod tests {
         ));
         assert_eq!(with, 1, "an overridden parameter inlines as given");
         assert_eq!(without, 0, "a defaulted parameter inlines as not given");
+    }
+
+    /// A module with no instantiating context keeps `$port_connected` as a marker, and reports
+    /// **true** — building an instance takes a terminal for every port, so "connected" is the
+    /// truth for it. (It used to report false, which was wrong the moment a deck could place a
+    /// model of any port count.)
+    #[test]
+    fn port_connected_survives_elaboration_and_defaults_to_connected() {
+        let m = elaborate_top(
+            "module sub(p, n, dt); inout p, n, dt; electrical p, n, dt;              analog I(p,n) <+ $port_connected(dt) * V(p,n); endmodule",
+            "sub",
+        );
+        assert!(
+            m.exprs
+                .iter()
+                .any(|e| matches!(e, Expr::PortConnected(i) if *i == 2)),
+            "`$port_connected` must reach the IR as a marker, not a folded constant"
+        );
+        assert!(m.unconnected_ports.is_empty());
+        assert!(
+            m.port_is_connected(2),
+            "with no instantiation leaving it empty, a port is connected"
+        );
+        assert!(m.queries_port_connected(2) && !m.queries_port_connected(0));
+    }
+
+    /// An empty connection slot leaves that port unconnected, in both spellings -- the named
+    /// `.dt()` and the positional gap -- and the inlined instance folds to 0 for it while a
+    /// wired instance folds to 1.
+    #[test]
+    fn an_empty_connection_slot_leaves_a_port_unconnected() {
+        const SUB: &str = "module sub(p, n, dt); inout p, n, dt; electrical p, n, dt;                            analog I(p,n) <+ $port_connected(dt) * V(p,n); endmodule ";
+        let zeros = |src: &str| -> usize {
+            elaborate_top(src, "top")
+                .exprs
+                .iter()
+                .filter(|e| matches!(e, Expr::Const(v) if *v == 0.0))
+                .count()
+        };
+        let wired = zeros(&format!(
+            "{SUB} module top(a, b); inout a, b; electrical a, b;              sub s1 (a, b, a); endmodule"
+        ));
+        let named_empty = zeros(&format!(
+            "{SUB} module top(a, b); inout a, b; electrical a, b;              sub s1 (.p(a), .n(b), .dt()); endmodule"
+        ));
+        let positional_empty = zeros(&format!(
+            "{SUB} module top(a, b); inout a, b; electrical a, b;              sub s1 (a, b, ); endmodule"
+        ));
+        assert_eq!(wired, 0, "a wired `dt` folds to 1, contributing no 0.0");
+        assert_eq!(named_empty, 1, "`.dt()` must fold to 0");
+        assert_eq!(
+            positional_empty, 1,
+            "an empty positional slot must fold to 0"
+        );
     }
 
     /// `aliasparam` resolves to its target's `ParamId`, so asking about the alias must report

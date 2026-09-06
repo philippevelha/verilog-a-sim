@@ -297,14 +297,19 @@ pub enum Item {
 /// One port connection in an [`Item::Instance`].
 #[derive(Clone, Debug)]
 pub enum PortConn {
-    /// A positional connection: binds to the submodule's ports in declaration order.
-    Positional(NetArg),
-    /// A named connection, `.port(net)`: binds one net to one submodule port by name.
+    /// A positional connection: binds to the submodule's ports in declaration order. `None` is
+    /// an empty slot (`sub s1(a, , b)`) — the port is *explicitly* left unconnected, which is
+    /// what `$port_connected` reports on. An empty slot still occupies a position, so the
+    /// connection list stays the same length as the port list.
+    Positional(Option<NetArg>),
+    /// A named connection, `.port(net)`: binds one net to one submodule port by name. `None`
+    /// is the empty form `.port()`, the LRM's idiom for leaving an optional port (a
+    /// self-heating `dt`, say) unconnected.
     Named {
         /// The submodule's port name.
         port: String,
-        /// The net wired to it.
-        net: NetArg,
+        /// The net wired to it, or `None` when the slot is empty.
+        net: Option<NetArg>,
     },
 }
 

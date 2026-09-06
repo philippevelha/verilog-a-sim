@@ -1885,13 +1885,62 @@ fn build_from_model(
     }
 
     let port_nodes: Vec<NodeId> = m.ports.iter().flatten().copied().collect();
-    if port_nodes.len() != terminals.len() {
+    if terminals.len() > port_nodes.len() {
         bail!(
             "model `{}` declares {} port node(s), device connects {}",
             m.name,
             port_nodes.len(),
             terminals.len()
         );
+    }
+    // § `$port_connected`: a deck line may stop short of the model's trailing ports, which is
+    // SPICE's way of leaving an optional terminal (a self-heating `dt`) off — the model then
+    // sees `$port_connected(dt) == 0` and takes its own no-external-network branch. Trailing
+    // ports are unconnected; they still get a node below, just a floating one.
+    //
+    // Only for a port the model *queries*, though. An omitted terminal is also exactly what a
+    // typo looks like, and silently floating a node the deck meant to wire is the worse
+    // failure — so a model that never asks `$port_connected` about the port still gets the
+    // wrong-terminal-count error. (The Verilog-A spelling `.dt()` needs no such guard: writing
+    // an empty slot is explicit, not an omission.)
+    //
+    // Granularity is the *declared* port, not the flattened node: a vector port is connected
+    // or not as a whole, so a terminal list ending mid-port is an error rather than a
+    // half-connected bus.
+    let mut covered = 0usize;
+    let mut unconnected: Vec<usize> = Vec::new();
+    for (i, port) in m.ports.iter().enumerate() {
+        let end = covered + port.len();
+        if terminals.len() >= end {
+            covered = end;
+            continue;
+        }
+        if terminals.len() > covered {
+            bail!(
+                "model `{}`: device connects {} terminal(s), which ends part-way through                  {}-wide port #{} — a port is connected as a whole or not at all",
+                m.name,
+                terminals.len(),
+                port.len(),
+                i + 1
+            );
+        }
+        if !m.queries_port_connected(i) {
+            bail!(
+                "model `{}` declares {} port node(s), device connects {} — and port #{}                  (`{}`) is not optional: the model never asks `$port_connected` about it",
+                m.name,
+                port_nodes.len(),
+                terminals.len(),
+                i + 1,
+                port
+                    .first()
+                    .map(|n| m.nodes[n.0 as usize].name.as_str())
+                    .unwrap_or("?")
+            );
+        }
+        unconnected.push(i);
+    }
+    for i in unconnected {
+        m.mark_port_unconnected(i);
     }
     let mut assigned: Vec<Option<usize>> = vec![None; m.nodes.len()];
     for (nid, &g) in port_nodes.iter().zip(terminals) {
@@ -3264,6 +3313,89 @@ V3 p3 gnd DC 0
         };
         assert!((at("b") - 1.0).abs() < 1e-9, "V(b) = {}", at("b"));
         assert!((at("d") - 2.0).abs() < 1e-9, "V(d) = {}", at("d"));
+    }
+
+    /// A model that asks `$port_connected` about a trailing port may be placed without it --
+    /// SPICE's idiom for an optional terminal, and the reason the query exists at all.
+    ///
+    /// The fixture is the self-heating shape the corpus is full of: a `dt` thermal port that
+    /// the model drives only when something is wired to it, and clamps otherwise. The two
+    /// placements must give *different* answers, which is what proves the query is being
+    /// answered rather than folded to a constant.
+    #[test]
+    fn an_optional_trailing_port_may_be_left_off_the_deck() {
+        const MODEL: &str = "
+module selfheat(p, n, dt);
+  inout p, n, dt;
+  electrical p, n, dt;
+  analog begin
+    if ($port_connected(dt)) I(p, n) <+ V(p, n) / 1000.0;
+    else I(p, n) <+ V(p, n) / 4000.0;
+    I(dt) <+ V(dt) / 1000.0;
+  end
+endmodule
+";
+        let design = compile_model(MODEL, "selfheat.va");
+        let current = |deck: &str| -> f64 {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs()
+        };
+        let connected = current(
+            "V1 a gnd DC 1.0
+X1 a gnd gnd selfheat
+.op
+.end
+",
+        );
+        let omitted = current(
+            "V1 a gnd DC 1.0
+X1 a gnd selfheat
+.op
+.end
+",
+        );
+        assert!(
+            (connected - 1e-3).abs() < 1e-9,
+            "all three terminals wired means `dt` is connected (1 kOhm), got {connected}"
+        );
+        assert!(
+            (omitted - 2.5e-4).abs() < 1e-9,
+            "omitting `dt` must read as unconnected (4 kOhm), got {omitted}"
+        );
+    }
+
+    /// ...but only for a port the model actually treats as optional. Omitting a terminal is
+    /// also what a typo looks like, and silently floating a node the deck meant to wire is the
+    /// worse failure, so a model that never asks `$port_connected` still gets the count error.
+    #[test]
+    fn a_short_deck_line_is_still_an_error_for_a_non_optional_port() {
+        const MODEL: &str = "
+module plain(p, n, x);
+  inout p, n, x;
+  electrical p, n, x;
+  analog begin
+    I(p, n) <+ V(p, n) / 1000.0;
+    I(x) <+ V(x) / 1000.0;
+  end
+endmodule
+";
+        let design = compile_model(MODEL, "plain.va");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 1.0
+X1 a gnd plain
+.op
+.end
+",
+        )
+        .expect("parses");
+        let err = solve_dc(&net, &design.modules).expect_err("two nodes into a three-port model");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("plain"), "should name the model: {msg}");
+        assert!(
+            msg.contains("not optional") && msg.contains("$port_connected"),
+            "should say why the omission was not accepted: {msg}"
+        );
     }
 
     /// Connecting the wrong number of nodes is refused by name and count, not silently

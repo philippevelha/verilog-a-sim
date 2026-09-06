@@ -1158,7 +1158,9 @@ impl Parser<'_> {
         Ok(conns)
     }
 
-    /// Parse one port connection: `.port(net)` (named) or a bare `net` (positional).
+    /// Parse one port connection: `.port(net)` (named) or a bare `net` (positional). Either
+    /// may be *empty* — `.port()` or an omitted positional slot — which explicitly leaves that
+    /// port unconnected rather than shortening the list (§ `$port_connected`).
     fn parse_port_conn(&mut self) -> Result<PortConn, FrontendError> {
         if self.at(&Token::Dot) {
             self.pos += 1;
@@ -1176,11 +1178,22 @@ impl Parser<'_> {
                      the `#(...)` list before the instance name instead"
                 ));
             }
-            let net = self.parse_net_arg()?;
+            // `.port()` — the LRM's explicitly-unconnected form, the standard way to leave
+            // an optional terminal (a self-heating `dt`) off an instance. Distinct from
+            // omitting the slot entirely, which would change the list's length.
+            let net = if self.at(&Token::RParen) {
+                None
+            } else {
+                Some(self.parse_net_arg()?)
+            };
             self.eat(&Token::RParen)?;
             Ok(PortConn::Named { port, net })
+        } else if self.at(&Token::Comma) || self.at(&Token::RParen) {
+            // An empty positional slot, `sub s1(a, , b)`: same meaning as `.port()`, by
+            // position. Consuming nothing here leaves the comma for the list loop.
+            Ok(PortConn::Positional(None))
         } else {
-            Ok(PortConn::Positional(self.parse_net_arg()?))
+            Ok(PortConn::Positional(Some(self.parse_net_arg()?)))
         }
     }
 
@@ -2713,7 +2726,7 @@ mod tests {
         let m = parse_src(src);
         match &m.items[1] {
             Item::Instance { connections, .. } => match &connections[0] {
-                PortConn::Positional(net) => {
+                PortConn::Positional(Some(net)) => {
                     assert_eq!(net.index.len(), 1);
                     assert!(net.slice.is_some());
                 }
@@ -3118,7 +3131,7 @@ mod tests {
                 assert_eq!(connections.len(), 2);
                 for (conn, expected) in connections.iter().zip(["a", "b"]) {
                     match conn {
-                        PortConn::Positional(net) => assert_eq!(net.name, expected),
+                        PortConn::Positional(Some(net)) => assert_eq!(net.name, expected),
                         other => panic!("expected a positional connection, got {other:?}"),
                     }
                 }
@@ -3142,7 +3155,7 @@ mod tests {
             Item::Instance { connections, .. } => {
                 assert_eq!(connections.len(), 3);
                 match &connections[0] {
-                    PortConn::Positional(net) => {
+                    PortConn::Positional(Some(net)) => {
                         assert_eq!(net.name, "transfer");
                         assert!(net.index.is_empty() && net.slice.is_none());
                     }
@@ -3150,7 +3163,7 @@ mod tests {
                 }
                 for (conn, expected_name) in connections[1..].iter().zip(["in", "out"]) {
                     match conn {
-                        PortConn::Positional(net) => {
+                        PortConn::Positional(Some(net)) => {
                             assert_eq!(net.name, expected_name);
                             assert!(net.slice.is_some());
                             assert!(net.index.is_empty());

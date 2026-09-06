@@ -62,6 +62,26 @@
 > Additive: `Module` derives `Default`, so no construction site changed, and the committed
 > golden IR moved by exactly one `given_params: []` line per zoo model.
 
+> Revised 2026-09-06 (§6, later same day): added `Expr::PortConnected(u32)` and
+> `Module.unconnected_ports: Vec<usize>`, doing for `$port_connected` what the entry above did
+> for `$param_given`, and for the same reason — it folded to `false` on the grounds that "v0
+> has no netlist-driven instantiation at all", which stopped being true once a deck could place
+> a compiled model of any port count.
+>
+> One asymmetry is deliberate: the set records the **unconnected** ports, so the empty default
+> means *connected*. That is the truth wherever an instance is actually built —
+> `va-codegen::build_instance` takes a terminal for every port node — and it is the opposite of
+> the old fold, which reported "not connected" for ports that demonstrably were. A port becomes
+> unconnected only when an instantiation says so, in one of two new spellings: an empty
+> Verilog-A connection slot (`.dt()`, or a positional gap), or a deck line that stops short of
+> the model's trailing ports.
+>
+> The deck spelling is guarded, the Verilog-A one is not. Omitting a terminal is also exactly
+> what a typo looks like, so a short deck line is honoured only for a port the model itself
+> treats as optional by querying it (`Module::queries_port_connected`); otherwise the
+> wrong-terminal-count error stands, as it always did. Writing `.dt()` is explicit rather than
+> an omission, so it needs no such test.
+
 ## 1. Role
 
 Bridge α is the seam between the **language half** and the **model-generation half** of the
@@ -117,7 +137,9 @@ Module
   `Ddx(ExprId, Access)` (`ddx(expr, probe)`, the analog partial-derivative operator — `Access`
   is carried directly, not as another `ExprId`, since it names which unknown to differentiate
   against rather than being evaluated to a value), `ParamGiven(ParamId)` (`$param_given`,
-  resolved at the instantiation boundary against `Module.given_params`). Children are
+  resolved at the instantiation boundary against `Module.given_params`),
+  `PortConnected(u32)` (`$port_connected`, likewise resolved against
+  `Module.unconnected_ports`). Children are
   `ExprId`s — never `Box`, never `&`.
 - **`Stmt`** is `Contribute { target, value }` (`<+`), `If`, `Assign { lhs, rhs }`, `Block`,
   and the analog control-flow forms `While`, `For`, `Repeat`, `Case` (with `CaseArm`).
@@ -186,6 +208,12 @@ consumer may rely on them without re-checking.
     idempotent). An empty `given_params` is well-formed and means "no instantiating context has
     given anything" — it is the correct state for a module elaborated standalone, not a
     missing-data sentinel.
+13. **`PortConnected`'s index is valid, and `unconnected_ports` is a set of valid indices.**
+    Every `Expr::PortConnected(i)` and every entry of `Module.unconnected_ports` has
+    `i < ports.len()`, with no duplicates (use `Module::mark_port_unconnected`). Note the
+    polarity: an *empty* `unconnected_ports` means every port is connected, which is the
+    correct state for a module with no instantiating context — building an instance wires every
+    port.
 
 > These invariants are the draft acceptance criteria for `va-frontend`'s elaboration output
 > and should become a `va-ir::validate(&Module) -> Result<(), IrError>` checker (open item,

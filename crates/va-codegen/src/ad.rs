@@ -669,6 +669,16 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             },
             count,
         )),
+        // `$port_connected(i)`: resolved at the instantiation boundary, read here. Constant
+        // per instance, hence zero-gradient.
+        Expr::PortConnected(i) => Ok(Dual::constant(
+            if ctx.module.port_is_connected(*i as usize) {
+                1.0
+            } else {
+                0.0
+            },
+            count,
+        )),
         Expr::Var(id) => ctx.get_var(*id),
         Expr::Probe(access) => match access.kind {
             va_ir::AccessKind::Potential => {
