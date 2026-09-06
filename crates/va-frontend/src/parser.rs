@@ -345,38 +345,24 @@ impl Parser<'_> {
     /// closing `)` unconsumed, and return the synthetic condition elaboration turns into a
     /// `va_ir::EventSite`.
     ///
-    /// Shared by `cross(expr [, dir [, tol…]])` and `timer(start [, period [, tol…]])`, which
-    /// have the same shape: a required first argument, an optional second that defaults
-    /// (`dir = 0`, "either edge"; `period = 0`, "fire once"), and trailing tolerance arguments
-    /// that are parsed and **discarded** — this engine resolves an event through the
-    /// integrator's own step control rather than a per-site tolerance, a stated limitation
-    /// rather than a silent one (`docs/token-reference.md`).
+    /// **Every** argument is kept, not just the ones this engine acts on. The parser has no
+    /// business deciding which are meaningful: it collects them positionally and elaboration
+    /// interprets them per event kind (`cross(expr, dir, time_tol, expr_tol, enable)`,
+    /// `timer(start, period, time_tol, enable)`), applies defaults, and rejects a count the
+    /// LRM does not define. Dropping the trailing ones here is what previously let a written
+    /// `enable` — which *disables the event* — vanish without trace.
     ///
     /// The synthetic names (`@cross`, `@timer`) cannot collide with anything a user writes:
     /// `@` is not an identifier character, so no source can produce a call by either name.
-    fn parse_event_trigger(
-        &mut self,
-        synthetic: &str,
-        default_second: f64,
-    ) -> Result<ExprRef, FrontendError> {
+    fn parse_event_trigger(&mut self, synthetic: &str) -> Result<ExprRef, FrontendError> {
         self.pos += 1; // the event keyword
         self.eat(&Token::LParen)?;
-        let first = self.parse_expr()?;
-        let mut args = vec![first];
-        let mut seen = 0;
+        let mut args = vec![self.parse_expr()?];
         while self.at(&Token::Comma) {
             self.pos += 1;
-            let e = self.parse_expr()?;
-            if seen == 0 {
-                args.push(e); // `cross`'s direction, or `timer`'s period
-            }
-            seen += 1;
+            args.push(self.parse_expr()?);
         }
         self.eat(&Token::RParen)?;
-        if args.len() == 1 {
-            let d = self.push(ExprAst::Number(default_second));
-            args.push(d);
-        }
         Ok(self.push(ExprAst::Call {
             name: synthetic.to_string(),
             args,
@@ -1589,11 +1575,9 @@ impl Parser<'_> {
                 // A bare `@(cross(...))` or `@(timer(...))` — the two monitored events this
                 // engine implements. Recognised *before* the refusal below, which still
                 // catches every compound trigger and the events that remain unimplemented.
-                for (kw, synthetic, default_second) in
-                    [("cross", "@cross", 0.0), ("timer", "@timer", 0.0)]
-                {
+                for (kw, synthetic) in [("cross", "@cross"), ("timer", "@timer")] {
                     if self.trigger_is_bare(kw) {
-                        let cond = self.parse_event_trigger(synthetic, default_second)?;
+                        let cond = self.parse_event_trigger(synthetic)?;
                         self.eat(&Token::RParen)?;
                         let body = self.parse_stmt()?;
                         return Ok(Stmt::If {
@@ -3162,21 +3146,34 @@ mod tests {
         }
     }
 
-    /// The direction argument is optional, and defaults to the LRM's `0` (either edge).
+    /// The parser passes a trigger's arguments through **verbatim** — it synthesises no
+    /// defaults and drops nothing, leaving both to elaboration, which is the layer that knows
+    /// what each position means per event kind. (Defaults are pinned in `elaborate`'s tests.)
     #[test]
-    fn a_cross_trigger_without_a_direction_defaults_to_either() {
-        let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+    fn a_trigger_passes_its_arguments_through_verbatim() {
+        let args_of = |src: &str| -> usize {
+            let m = parse_src(src);
+            let body = analog_body(&m);
+            let Stmt::If { cond, .. } = &body[0] else {
+                panic!("expected a guarded if")
+            };
+            let ExprAst::Call { args, .. } = m.expr(*cond) else {
+                panic!("expected the trigger call")
+            };
+            args.len()
+        };
+        assert_eq!(
+            args_of("module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule"),
+            1,
+            "one written argument stays one argument"
         );
-        let body = analog_body(&m);
-        let Stmt::If { cond, .. } = &body[0] else {
-            panic!("expected a guarded if")
-        };
-        let ExprAst::Call { args, .. } = m.expr(*cond) else {
-            panic!("expected the trigger call")
-        };
-        assert_eq!(args.len(), 2, "a direction is synthesised when omitted");
-        assert!(matches!(m.expr(args[1]), ExprAst::Number(d) if *d == 0.0));
+        // All five of `cross`'s arguments survive — the `enable` in last position especially,
+        // which used to be dropped and with it the ability to switch the event off.
+        assert_eq!(
+            args_of("module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0, 1, 1n, 1u, 0)) x = 1.0; I(a, b) <+ x; end endmodule"),
+            5,
+            "every argument reaches elaboration"
+        );
     }
 
     /// Only the **bare** form is implemented. A compound `initial_step or cross(...)` is still
@@ -3211,22 +3208,6 @@ mod tests {
             }
             other => panic!("expected the synthetic trigger call, got {other:?}"),
         }
-    }
-
-    /// An omitted period defaults to `0` — the LRM's "fire once".
-    #[test]
-    fn a_timer_without_a_period_fires_once() {
-        let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
-        );
-        let body = analog_body(&m);
-        let Stmt::If { cond, .. } = &body[0] else {
-            panic!("expected a guarded if")
-        };
-        let ExprAst::Call { args, .. } = m.expr(*cond) else {
-            panic!("expected the trigger call")
-        };
-        assert!(matches!(m.expr(args[1]), ExprAst::Number(p) if *p == 0.0));
     }
 
     /// The monitored events that remain unimplemented stay refused.

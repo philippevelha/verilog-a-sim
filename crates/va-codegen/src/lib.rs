@@ -1304,15 +1304,31 @@ impl ModelInstance for GeneratedModel {
         let ctx = self.ctx(x, actx, &[], &[], false);
         let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
         for (slot, site) in self.module.event_sites.iter().enumerate() {
+            // `enable` gates the whole site (LRM §5.10.1/§5.10.3): a disabled event registers
+            // nothing, so it cannot fire and its body cannot run. Re-evaluated at every
+            // accepted timepoint rather than once, because it is an ordinary analog expression
+            // and may switch during the run.
+            let enabled = |e: Option<va_ir::ExprId>| e.is_none_or(|r| value_of(r) != 0.0);
             match *site {
-                va_ir::EventSite::Cross { expr, dir } => {
-                    sink.monitor(slot, value_of(expr), va_abi::CrossDir::from_lrm(dir));
+                va_ir::EventSite::Cross {
+                    expr, dir, enable, ..
+                } => {
+                    if enabled(enable) {
+                        sink.monitor(slot, value_of(expr), va_abi::CrossDir::from_lrm(dir));
+                    }
                 }
-                va_ir::EventSite::Timer { start, period } => {
-                    if let Some(next) =
-                        next_fire_after(value_of(start), value_of(period), actx.time)
-                    {
-                        sink.timer(slot, next);
+                va_ir::EventSite::Timer {
+                    start,
+                    period,
+                    enable,
+                    ..
+                } => {
+                    if enabled(enable) {
+                        if let Some(next) =
+                            next_fire_after(value_of(start), value_of(period), actx.time)
+                        {
+                            sink.timer(slot, next);
+                        }
                     }
                 }
             }

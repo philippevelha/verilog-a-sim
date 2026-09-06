@@ -422,6 +422,20 @@ pub enum EventSite {
         /// Direction: `+1` rising, `-1` falling, `0` either — the LRM's own spelling, mapped
         /// by `va_abi::CrossDir::from_lrm`.
         dir: i64,
+        /// `time_tol`, if written — the maximum allowable error between the true crossing and
+        /// when the event triggers (LRM §5.10.1).
+        ///
+        /// **Recorded, not honoured.** This engine fires at the accepted timepoint that ends
+        /// the bracketing step, so the achieved error is bounded by the timestep and by
+        /// nothing related to this value. Carried anyway so the datum survives to the layer
+        /// that warns about it, and so that implementing the bracketing retry loop needs no
+        /// further interface change. See [`Self::has_unhonoured_tolerance`].
+        time_tol: Option<ExprId>,
+        /// `expr_tol`, if written. Recorded, not honoured, exactly as `time_tol`.
+        expr_tol: Option<ExprId>,
+        /// `enable`, if written — the event is active only where this is non-zero
+        /// (LRM §5.10.1). **Honoured**: a disabled site registers nothing, so it cannot fire.
+        enable: Option<ExprId>,
     },
     /// `timer(start, period)` — fires at absolute time `start`, and every `period` seconds
     /// thereafter (LRM §5.10.3).
@@ -434,7 +448,36 @@ pub enum EventSite {
         start: ExprId,
         /// Repeat interval; `<= 0` fires once.
         period: ExprId,
+        /// `time_tol`, if written (LRM §5.10.3).
+        ///
+        /// Recorded but needing nothing: the LRM asks the simulator to place a timepoint
+        /// *within* `time_tol` of the event, and this engine lands on it exactly, so any
+        /// non-negative tolerance is already satisfied. Honouring it could only ever permit
+        /// less precision. Unlike `cross`'s, this one raises no warning.
+        time_tol: Option<ExprId>,
+        /// `enable`, if written. **Honoured**, as for `cross`.
+        enable: Option<ExprId>,
     },
+}
+
+impl EventSite {
+    /// Whether this site carries a tolerance the engine cannot currently act on — true only
+    /// for a `cross` with `time_tol`/`expr_tol`.
+    ///
+    /// A `timer`'s `time_tol` is deliberately excluded: an exact landing already satisfies it,
+    /// so warning about it would be noise rather than information.
+    pub fn has_unhonoured_tolerance(&self) -> bool {
+        matches!(
+            self,
+            EventSite::Cross {
+                time_tol: Some(_),
+                ..
+            } | EventSite::Cross {
+                expr_tol: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 /// Unary operators.

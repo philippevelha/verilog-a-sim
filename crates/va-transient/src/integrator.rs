@@ -194,8 +194,14 @@ impl FiredEvents {
 /// once per Newton iteration and again for rejected candidates, none of which are on the
 /// trajectory a crossing is a statement about.
 struct EventPoll {
-    /// `values[i][slot]` — instance `i`'s reported value and direction for each of its slots.
-    values: Vec<Vec<(f64, va_abi::CrossDir)>>,
+    /// `values[i][slot]` — instance `i`'s reported value and direction for each of its slots,
+    /// or `None` where the slot reported nothing this timepoint.
+    ///
+    /// `None` is not the same as zero, and conflating them is a real bug rather than a tidiness
+    /// point: a `cross` site whose `enable` went false stops reporting, and treating that as a
+    /// value of `0.0` would read as a sign change against whatever it last reported — firing
+    /// the event precisely because it was disabled.
+    values: Vec<Vec<Option<(f64, va_abi::CrossDir)>>>,
     /// Absolute times any instance asked to be solved at.
     breakpoints: Vec<f64>,
     /// `(instance, slot, next_time)` per `timer` registration. Unlike a bare breakpoint these
@@ -217,12 +223,12 @@ fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -
         let mut sink = va_abi::events::RecordingEventSink::new();
         inst.events(x, ctx, &mut sink);
         // Indexed by slot, so a model that reports out of order (or skips one) still lines up
-        // with the previous timepoint's entry for the same slot. An unreported slot keeps the
-        // neutral `(0.0, Either)`, which cannot manufacture a sign change against itself.
-        let mut per_slot = vec![(0.0, va_abi::CrossDir::default()); n];
+        // with the previous timepoint's entry for the same slot. An unreported slot stays
+        // `None` and takes part in no comparison at all.
+        let mut per_slot = vec![None; n];
         for (slot, value, dir) in sink.monitors {
             if slot < n {
-                per_slot[slot] = (value, dir);
+                per_slot[slot] = Some((value, dir));
             }
         }
         values.push(per_slot);
@@ -1034,10 +1040,16 @@ pub fn run_with_events(
                     let Some(before) = event_prev.values.get(i) else {
                         continue;
                     };
-                    for (slot, &(now, dir)) in slots.iter().enumerate() {
-                        let Some(&(was, _)) = before.get(slot) else {
+                    for (slot, entry) in slots.iter().enumerate() {
+                        // Both timepoints must have reported this slot: a crossing is a
+                        // statement about a pair of values, and a slot that was disabled at
+                        // either end has no pair.
+                        let (Some(&(now, dir)), Some(Some((was, _)))) =
+                            (entry.as_ref(), before.get(slot))
+                        else {
                             continue;
                         };
+                        let was = *was;
                         if !dir.fires(was, now) {
                             continue;
                         }

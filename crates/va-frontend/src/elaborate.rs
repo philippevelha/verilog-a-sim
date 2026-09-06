@@ -1830,47 +1830,72 @@ impl Elaborator<'_> {
             // `@cross` is not user-writable syntax — `@` is not an identifier character — so
             // this arm can only ever see what the parser produced.
             ExprAst::Call { name, args } if name == "@cross" => {
-                let &[expr_ref, dir_ref] = args.as_slice() else {
-                    return Err(elab(
-                        "internal error: `@cross` takes exactly the monitored expression and a                          direction"
-                            .to_string(),
-                    ));
-                };
+                // `cross(expr, dir, time_tol, expr_tol, enable)` (LRM §5.10.1), positional.
+                if args.is_empty() || args.len() > 5 {
+                    return Err(elab(format!(
+                        "`cross` takes 1 to 5 arguments                          (expr, dir, time_tol, expr_tol, enable), got {}",
+                        args.len()
+                    )));
+                }
                 // The monitored expression is lowered into the ordinary arena: it is a real
                 // expression of probes and parameters, evaluated by the model at every accepted
                 // timepoint rather than folded here.
-                let expr = self.lower_expr(expr_ref)?;
+                let expr = self.lower_expr(args[0])?;
                 // The direction is a compile-time constant in every LRM example, and has to be:
                 // it selects which edge to watch, not a value that varies with the solution.
-                let dir = self.const_eval(dir_ref)? as i64;
+                let dir = match args.get(1) {
+                    Some(&r) => self.const_eval(r)? as i64,
+                    None => 0, // the LRM's default: either edge
+                };
                 if !(-1..=1).contains(&dir) {
                     return Err(elab(format!(
                         "`cross`'s direction argument must be -1 (falling), 0 (either) or                          +1 (rising), got {dir}"
                     )));
                 }
+                // Tolerances are lowered and kept, though this engine cannot yet act on them
+                // — `va-cli` warns when a site carries one. Keeping them is what lets the
+                // bracketing retry loop land later without another interface change.
+                let time_tol = args.get(2).map(|&r| self.lower_expr(r)).transpose()?;
+                let expr_tol = args.get(3).map(|&r| self.lower_expr(r)).transpose()?;
+                // `enable` *is* honoured: a site whose enable is zero registers nothing.
+                let enable = args.get(4).map(|&r| self.lower_expr(r)).transpose()?;
                 let slot = self.out.event_sites.len() as u32;
-                self.out
-                    .event_sites
-                    .push(va_ir::EventSite::Cross { expr, dir });
+                self.out.event_sites.push(va_ir::EventSite::Cross {
+                    expr,
+                    dir,
+                    time_tol,
+                    expr_tol,
+                    enable,
+                });
                 Expr::EventFired(slot)
             }
-            // The synthetic condition `crate::parser` desugars `@(timer(s, p)) stmt` into
+            // The synthetic condition `crate::parser` desugars `@(timer(s, p, …)) stmt` into
             // (§ `@(timer)`), the sibling of `@cross` above. `start`/`period` stay expressions
             // rather than being folded: the LRM lets a timer be scheduled from parameters, and
             // the model evaluates them when it registers.
             ExprAst::Call { name, args } if name == "@timer" => {
-                let &[start_ref, period_ref] = args.as_slice() else {
-                    return Err(elab(
-                        "internal error: `@timer` takes exactly a start time and a period"
-                            .to_string(),
-                    ));
+                // `timer(start, period, time_tol, enable)` (LRM §5.10.3), positional.
+                if args.is_empty() || args.len() > 4 {
+                    return Err(elab(format!(
+                        "`timer` takes 1 to 4 arguments (start, period, time_tol, enable),                          got {}",
+                        args.len()
+                    )));
+                }
+                let start = self.lower_expr(args[0])?;
+                let period = match args.get(1) {
+                    Some(&r) => self.lower_expr(r)?,
+                    // The LRM's default: a timer with no period fires once.
+                    None => self.out.push_expr(Expr::Const(0.0)),
                 };
-                let start = self.lower_expr(start_ref)?;
-                let period = self.lower_expr(period_ref)?;
+                let time_tol = args.get(2).map(|&r| self.lower_expr(r)).transpose()?;
+                let enable = args.get(3).map(|&r| self.lower_expr(r)).transpose()?;
                 let slot = self.out.event_sites.len() as u32;
-                self.out
-                    .event_sites
-                    .push(va_ir::EventSite::Timer { start, period });
+                self.out.event_sites.push(va_ir::EventSite::Timer {
+                    start,
+                    period,
+                    time_tol,
+                    enable,
+                });
                 Expr::EventFired(slot)
             }
             // The synthetic condition `crate::parser` desugars `@(initial_step) stmt` into. It
@@ -3647,14 +3672,31 @@ impl Elaborator<'_> {
         // `expr_off`, and in submodule order so slot `k` of the sub becomes `cross_base + k` —
         // the shift `remap_expr` above applied to every `CrossFired` referring to it.
         for site in &sub.event_sites {
+            let remap = |e: ExprId| expr_off[e.0 as usize];
             let remapped = match *site {
-                va_ir::EventSite::Cross { expr, dir } => va_ir::EventSite::Cross {
-                    expr: expr_off[expr.0 as usize],
+                va_ir::EventSite::Cross {
+                    expr,
                     dir,
+                    time_tol,
+                    expr_tol,
+                    enable,
+                } => va_ir::EventSite::Cross {
+                    expr: remap(expr),
+                    dir,
+                    time_tol: time_tol.map(remap),
+                    expr_tol: expr_tol.map(remap),
+                    enable: enable.map(remap),
                 },
-                va_ir::EventSite::Timer { start, period } => va_ir::EventSite::Timer {
-                    start: expr_off[start.0 as usize],
-                    period: expr_off[period.0 as usize],
+                va_ir::EventSite::Timer {
+                    start,
+                    period,
+                    time_tol,
+                    enable,
+                } => va_ir::EventSite::Timer {
+                    start: remap(start),
+                    period: remap(period),
+                    time_tol: time_tol.map(remap),
+                    enable: enable.map(remap),
                 },
             };
             self.out.event_sites.push(remapped);
@@ -7580,6 +7622,45 @@ mod tests {
             msg.contains("localparam") && msg.contains('k'),
             "should name the parameter and say why: {msg}"
         );
+    }
+
+    /// The LRM's defaults for an omitted trigger argument are applied at elaboration, which is
+    /// the layer that knows what each position means: `cross`'s direction defaults to `0`
+    /// (either edge), `timer`'s period to `0` (fire once).
+    #[test]
+    fn omitted_event_arguments_take_their_lrm_defaults() {
+        let m = elaborate_top(
+            "module t(a, b); inout a, b; electrical a, b;              analog begin @(cross(V(a, b) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "t",
+        );
+        assert!(
+            matches!(m.event_sites[0], va_ir::EventSite::Cross { dir: 0, .. }),
+            "an omitted direction is `either`: {:?}",
+            m.event_sites[0]
+        );
+
+        let m = elaborate_top(
+            "module t(a, b); inout a, b; electrical a, b;              analog begin @(timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "t",
+        );
+        let va_ir::EventSite::Timer { period, .. } = m.event_sites[0] else {
+            panic!("expected a timer site")
+        };
+        assert!(
+            matches!(m.expr(period), Expr::Const(p) if *p == 0.0),
+            "an omitted period is fire-once"
+        );
+    }
+
+    /// An argument count the LRM does not define is rejected, naming what the event takes.
+    #[test]
+    fn too_many_event_arguments_are_rejected() {
+        let src = "module t(a, b); inout a, b; electrical a, b;                    analog begin @(cross(V(a, b), 1, 1, 1, 1, 1)) x = 1.0; I(a, b) <+ x; end endmodule";
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let err = elaborate_with_library(&asts[0], &asts).expect_err("six arguments");
+        let msg = format!("{err}");
+        assert!(msg.contains("cross") && msg.contains("5"), "{msg}");
     }
 
     /// `aliasparam` resolves to its target's `ParamId`, so asking about the alias must report

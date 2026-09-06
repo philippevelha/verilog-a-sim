@@ -350,6 +350,7 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
         modules.len()
     );
     warn_unplaceable_modules(&modules, path);
+    warn_unhonoured_event_tolerances(&modules, path);
     Ok(modules)
 }
 
@@ -371,6 +372,41 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
 /// `vsrc`/`resistor` are perfectly placeable. What is not acceptable is the current silence, in
 /// which the module is compiled, never placed, and never mentioned, so the run exits 0 with a
 /// confident answer computed entirely without it.
+/// Warn when a `cross(...)` site asks for a resolution tolerance this engine does not deliver.
+///
+/// `time_tol`/`expr_tol` bound the error between the true crossing and when the event triggers
+/// (LRM §5.10.1). This engine fires at the accepted timepoint that *ends* the bracketing step,
+/// so the achieved error is bounded by the timestep and by nothing related to the request — a
+/// model asking for 1 ns on a 2 µs step gets 2 µs. Accepting the argument and saying nothing is
+/// the pattern this project keeps removing, so it is said.
+///
+/// A warning rather than a refusal, deliberately: the model still computes the right physics at
+/// slightly the wrong instant, which is a precision shortfall rather than a different answer —
+/// unlike the transient operator folds, which are refused because the waveform is simply not
+/// what the source describes. The fix is `docs/roadmap.md`'s bracketing retry loop, after which
+/// this warning goes away rather than the argument being honoured by luck.
+///
+/// A `timer`'s `time_tol` is **not** warned about: the LRM asks for a timepoint *within* it and
+/// this engine lands exactly, so any non-negative tolerance is already met.
+fn warn_unhonoured_event_tolerances(modules: &[va_ir::Module], path: &str) {
+    for m in modules {
+        let n = m
+            .event_sites
+            .iter()
+            .filter(|s| s.has_unhonoured_tolerance())
+            .count();
+        if n > 0 {
+            eprintln!(
+                "[va-cli] warning: {path}: module `{}` has {n} `cross(...)` site(s) with a \
+                 time_tol/expr_tol this engine does not honour — the event fires at the \
+                 accepted timepoint ending the bracketing step, so its resolution is set by \
+                 the timestep, not by the tolerance you asked for.",
+                m.name
+            );
+        }
+    }
+}
+
 fn warn_unplaceable_modules(modules: &[va_ir::Module], path: &str) {
     for m in modules.iter().filter(|m| m.ports.is_empty()) {
         eprintln!(
@@ -3521,6 +3557,120 @@ X1 a gnd tk1
             (times[0] - 300e-6).abs() < 1e-9,
             "at 300us, got {:e}",
             times[0]
+        );
+    }
+
+    /// `cross`'s `enable` argument is honoured: a disabled site never fires.
+    ///
+    /// Before 0.9.5 the parser kept only the first two arguments, so a written `enable` — whose
+    /// whole job is to switch the event *off* — vanished without trace and the event fired
+    /// anyway. That is the failure this pins.
+    #[test]
+    fn a_disabled_cross_site_never_fires() {
+        let run = |enable: &str| -> usize {
+            let src = format!(
+                "
+module xe(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p, n) - 2.5, 1, 0, 0, {enable})) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 a gnd SIN(0 5 1k)
+X1 a gnd xe
+.tran 2u 1m
+.end
+",
+            )
+            .expect("parses");
+            solve_transient(&net, &design.modules, Integration::default())
+                .expect("integrates")
+                .model_crossings
+                .len()
+        };
+        assert_eq!(run("1"), 1, "enabled: the rising crossing fires");
+        assert_eq!(run("0"), 0, "disabled: nothing fires");
+    }
+
+    /// Disabling a site must not itself look like a crossing.
+    ///
+    /// A disabled site stops reporting, and if the consumer read "no report" as a value of
+    /// `0.0` it would compare that against whatever the site last reported — firing the event
+    /// precisely because it was switched off. The fixture makes that concrete: the monitored
+    /// expression sits at a large negative value, so a spurious comparison against zero would
+    /// read as a rising crossing.
+    #[test]
+    fn disabling_a_site_is_not_itself_a_crossing() {
+        const SRC: &str = "
+module xn(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(cross(V(p, n) - 100.0, 1, 0, 0, 0)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd SIN(0 5 1k)
+X1 a gnd xn
+.tran 2u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        assert!(
+            wf.model_crossings.is_empty(),
+            "a permanently disabled site fires nothing: {:?}",
+            wf.model_crossings
+        );
+    }
+
+    /// A `cross` tolerance is recorded on the IR so the layer above can say it is not honoured
+    /// — and a `timer`'s is not flagged, because an exact landing already satisfies it.
+    #[test]
+    fn an_unhonoured_cross_tolerance_is_visible_on_the_ir() {
+        let sites = |src: &str| {
+            va_frontend::compile(src).expect("compiles").modules[0]
+                .event_sites
+                .clone()
+        };
+
+        let with_tol = sites(
+            "module a(p, n); inout p, n; electrical p, n;              analog begin @(cross(V(p, n) - 1.0, 1, 1n)) ; I(p, n) <+ V(p, n); end endmodule",
+        );
+        assert!(
+            with_tol[0].has_unhonoured_tolerance(),
+            "a cross time_tol must be visible: {:?}",
+            with_tol[0]
+        );
+
+        let without = sites(
+            "module b(p, n); inout p, n; electrical p, n;              analog begin @(cross(V(p, n) - 1.0, 1)) ; I(p, n) <+ V(p, n); end endmodule",
+        );
+        assert!(!without[0].has_unhonoured_tolerance());
+
+        // A timer's time_tol is met by construction -- the integrator lands exactly -- so it is
+        // deliberately not flagged.
+        let timer = sites(
+            "module c(p, n); inout p, n; electrical p, n;              analog begin @(timer(1u, 1u, 1n)) ; I(p, n) <+ V(p, n); end endmodule",
+        );
+        assert!(
+            !timer[0].has_unhonoured_tolerance(),
+            "an exact landing already satisfies a timer tolerance"
         );
     }
 

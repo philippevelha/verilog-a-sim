@@ -14,6 +14,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.5 — 2026-09-06
+------------------
+Stop dropping event arguments. The parser kept only the first two arguments of
+`cross`/`timer` and silently discarded the rest, which included `enable` -- whose entire
+job is to switch the event off, so a model that disabled an event got it firing anyway.
+All arguments now reach elaboration, which interprets them positionally per event kind
+and rejects a count the LRM does not define.
+
+  `enable` is honoured: a disabled site registers nothing, so it cannot fire, and it is
+  re-evaluated every accepted timepoint since it may switch during a run.
+
+  `cross`'s `time_tol`/`expr_tol` are recorded on the IR and **warned about**. This engine
+  fires at the accepted timepoint ending the bracketing step, so resolution is set by the
+  timestep rather than by the requested tolerance -- a model asking for 1ns on a 2us step
+  gets 2us. Carrying them means the bracketing retry loop that fixes this needs no further
+  interface change. A `timer`'s `time_tol` raises no warning: the LRM asks for a timepoint
+  within it and the integrator lands exactly, so it is already satisfied.
+
+  Fixed along the way: with `enable` honoured, a disabled site stops reporting, and the
+  consumer had been reading "no report" as a value of 0.0 -- which would compare against
+  whatever the site last reported and fire the event precisely because it was switched off.
+  Unreported slots are now distinct from zero.
+
+  722 tests, 27/27 golden circuits, corpus steady at 113/132, clippy and fmt clean.
+
+
 0.9.4 — 2026-09-06
 ------------------
 `@(timer(...))` works, and the IR's event sites are unified. `va_ir::Module::cross_sites`
