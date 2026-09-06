@@ -3952,6 +3952,128 @@ unconditional rule — "a `ddt`-shape assign never becomes a `LoweredStmt::Assig
 §4.5.15 is entirely unenforced. The first is no longer true; the second is now true only of
 `va-frontend`, since `va-codegen` enforces one slice of it.
 
+## Expired premises: a standing review (2026-09-06)
+
+**The rule this section exists to enforce.** Several constructs were folded, dropped, or
+approximated with a code comment justifying it by something absent from the pipeline — "v0 has
+no netlist-driven parameter overrides yet", "`va-netlist` has no by-name override path", "not
+yet wired into the Newton loop". Those justifications were honest when written. The failure mode
+is that **the pipeline grows and the comment does not**: the premise expires, the fold stays, and
+what was a stated limitation silently becomes a wrong answer.
+
+So: *when a feature lands, grep for the premises it just invalidated.* A construct that was
+folded only because something did not exist must be revisited the moment it does. What follows
+is the first full pass, re-derived by reading every `v0 has no …` / `not yet` / `does not exist
+yet` comment in `crates/` and checking each against the code as it stands, not against the
+comment.
+
+### Closed in this pass
+
+- [x] **`$param_given` folded to `false`** — premise "v0's pipeline has no netlist-driven
+      parameter overrides yet", expired at `b34ddf0`. A deck could set `Is=1e-12` and the model
+      was still told it was not given. Now answered at the instantiation boundary
+      (`va_ir::Expr::ParamGiven`, `Module::given_params`). 21 corpus files query it.
+- [x] **`$port_connected` folded to `false`** — premise "v0 has no netlist-driven instantiation
+      at all", expired when a deck gained the ability to place a model of any port count. Now
+      answered against `Module::unconnected_ports`, with the default flipped to *connected*
+      (building an instance wires every port). Required inventing the two ways a port can now
+      genuinely *be* unconnected: an empty Verilog-A connection slot (`.dt()` or a positional
+      gap) and a deck line stopping short of the model's trailing ports.
+- [x] **`localparam` lowered identically to `parameter`** — premise "v0 does not model
+      instance-parameter overrides at all". Once overrides existed, the one property the keyword
+      has (LRM §3.4.2: an instantiation may not override it) was silently untrue. Both override
+      paths now refuse one by name.
+- [x] **Three comments contradicted the code beside them**: `va-cli` claimed transient "always
+      starts from the zero vector — v0 has no `.ic`/`UIC` support" 100 lines above the `dev.ic`
+      handling that consumes a SPICE `IC=`; the same doc said "noise is not [implemented]",
+      which it has been since T5.2; and `$limit`'s rationale said `pnjlim` was "not yet wired
+      into the Newton loop" when `NewtonConfig::limit_junctions` defaults to `true`.
+
+### Open, with the premise re-checked
+
+Each of these is a real remaining limitation — the premise has *not* expired — except where
+noted. Recorded so the next pass does not have to re-derive them.
+
+- [ ] **`$mfactor` folds to `1.0`.** Premise "v0 has no netlist-driven instance parameters" is
+      now only half true: a deck line carries `name=value` pairs, so a conventional SPICE `m=`
+      *could* be read there and applied as a multiplicity factor on the instance's
+      contributions. This is the closest of the open items to being simply available.
+- [ ] **`$simparam("gmin", …)` folds to its `default` argument.** Premise "v0 has no
+      simulator-parameter store". Partly expired: `va_core::newton::NewtonConfig` really does
+      hold `gmin`/tolerances, so at least `gmin`, `reltol` and `abstol` have a real value to
+      report. Wiring it needs those values to reach elaboration, which today they do not.
+- [ ] **`$limit(access, …)` folds transparently.** The *conclusion* stands — a converged solve
+      is a fixed point of the unlimited equations, and the stateless `ModelInstance::load` ABI
+      keeps no previous-iteration history. What is genuinely thrown away is narrower: `$limit`'s
+      access argument names a junction **authoritatively**, where `newton::solve` currently has
+      to infer which unknowns are junctions structurally. Feeding model-declared junctions to
+      the limiter is a real, small integration.
+- [ ] **`$rdist_*` folds to its distribution's mean**, and `white_noise`/`flicker_noise` fold to
+      `0.0` in DC. Premise "no simulator random-number generator" — unexpired, and the DC fold
+      is correct physics regardless (noise is a small-signal quantity, and T5 computes it
+      properly in the noise analysis).
+- [ ] **`I(<port>)` cannot sum a flow contribution made inside a `case` arm or a loop.** A
+      genuine, narrow elaboration restriction, correctly *refused* rather than silently
+      mis-summed. Not an expired premise; listed so it is not mistaken for one.
+- [ ] **Analog events other than `initial_step`** — see the next section, which is where that
+      whole family is tracked.
+
+---
+
+## Analog events: what exists, and what each one still needs (2026-09-06)
+
+**The state of play in one sentence:** `va-transient` has a working event engine — exact
+breakpoint landings and interpolated threshold-crossing detection — and **nothing in the
+pipeline ever puts anything into it**. `EventQueue::push_breakpoint` and `push_watch` are called
+only from `integrator.rs`'s own tests. So the machinery is built and unreachable from a model.
+
+**The sharper problem, and why this ranks above "a missing feature":** `parser.rs`'s `@(...)`
+handling recognises the bare `initial_step` trigger and **discards every other one**
+(`skip_balanced_parens`), then runs the body *unconditionally*. So a model writing
+
+    @(cross(V(out) - 2.5, +1)) count = count + 1;
+
+does not fail, and does not warn — it executes at **every timepoint**. That is the same class of
+defect as the folds above: a limitation that presents as a wrong answer rather than a refusal.
+Refusing an unimplemented trigger is strictly better than the present behaviour and does not
+wait on any of the work below.
+
+### The checklist
+
+Cross an item off when its trigger is parsed **and** genuinely scheduled — a body that runs at
+the right times, gated by a test that fails if it runs at the wrong ones.
+
+| Event | Lexed | Parsed | Scheduled | What it still needs |
+|---|:--:|:--:|:--:|---|
+| `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
+| `final_step` | yes | no | no | A "last accepted timepoint" hook in `run_with_events`; the trigger is currently discarded and the body runs every step. |
+| `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | no | no | The nearest to done: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
+| `timer(start[, period[, tol]])` | yes | no | no | `push_breakpoint`/`next_after` already force exact landings. Needs the same channel, plus periodic re-arming. |
+| `above(expr[, tol…])` | no | no | no | Not even reserved. Lex and reserve first; semantically a one-sided `cross`. |
+| `absdelta(expr, delta[, tol…])` | no | no | no | Not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
+| `last_crossing(expr, dir)` | yes | no | no | A *function*, not an event — returns the time of the last crossing. Needs crossing history, so it follows `cross`. |
+| event `or` (`@(a or b)`) | n/a | no | no | Trigger-list composition; needed before any compound trigger works. |
+| `@(posedge …)`, named events, `->` | n/a | n/a | n/a | **Out of scope by design** — digital-domain, excluded by LRM Annex C, per `CLAUDE.md` §1. Not a gap. |
+
+### The one piece of shared plumbing all of them need
+
+A model has no way to tell the transient engine "watch this" or "stop at that time". Every
+scheduled row above is blocked on the same thing: an **Interface β channel for event
+registration** — a §6 coordinated change, and closely analogous to the noise channel T5.2
+added (`NoiseSink`/`ModelInstance::noise`) when it turned out noise was physics the Jacobian
+could not carry. Event scheduling is likewise information the residual/Jacobian cannot carry.
+
+Sequencing that follows from the table:
+
+1. **Refuse what is not implemented** (no interface change, no scheduling — just stop running
+   discarded-trigger bodies unconditionally). Independent of everything else.
+2. **Ratify the Interface β event channel** (§6), stub-only, no behaviour change.
+3. **`cross`**, which has the most engine support already, as the first real consumer.
+4. **`timer`**, reusing the breakpoint half of the same channel.
+5. `final_step`, then `above`/`last_crossing`, then `absdelta`.
+
+---
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.
