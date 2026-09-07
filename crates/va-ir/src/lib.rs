@@ -151,6 +151,19 @@ pub struct Module {
     /// says so — an empty Verilog-A connection slot (`sub s1(.dt(), a, b)`), or a deck line
     /// that stops short of the model's trailing ports. See [`Self::port_is_connected`].
     pub unconnected_ports: Vec<usize>,
+    /// The instance multiplicity the *instantiating context* set — the conventional SPICE `m=`
+    /// device-line parameter, and the value `$mfactor` reports (LRM §6.3.6).
+    ///
+    /// `None` means "not set", which reads as the LRM default of `1.0`; use
+    /// [`Self::multiplicity`] rather than this field, which exists in this shape for one
+    /// specific reason: [`Module`] derives [`Default`], and a bare `f64` field would default to
+    /// **`0.0`** — a multiplicity that silently zeroes every contribution the module makes. The
+    /// `Option` is what makes the derived default correct instead of catastrophic.
+    ///
+    /// Set per instance, on the clone a device line builds, exactly as
+    /// [`Self::given_params`] is: multiplicity is a property of an instantiation, not of a
+    /// module.
+    pub mfactor: Option<f64>,
     /// The parameters the *instantiating context* explicitly set, as opposed to leaving at
     /// their declared default — the question `$param_given` asks (LRM §9.19).
     ///
@@ -214,6 +227,64 @@ impl Module {
     /// instantiation.
     pub fn param_is_local(&self, p: ParamId) -> bool {
         self.local_params.contains(&p)
+    }
+
+    /// Whether the module scales a **flow** contribution by `$mfactor` itself — the
+    /// double-scaling misuse LRM §6.3.6 requires a simulator to warn about.
+    ///
+    /// The simulator already multiplies every flow contribution by the multiplicity
+    /// (`va_abi::multiplicity`), so a model that *also* writes `$mfactor` as a factor gets `m²`.
+    /// The LRM's own examples are the specification of what to catch and what to leave alone:
+    ///
+    /// ```text
+    /// I(a,b) <+ V(a,b) / r * $mfactor;      // badres   — double-scaled, warn
+    /// if (r / $mfactor < 1.0e-3) …          // parares  — a condition, not a factor; fine
+    /// ```
+    ///
+    /// So the test is exactly "does `$mfactor` occur inside the *value* of a flow contribution",
+    /// not "does it occur at all". Conditions, potential contributions, and plain variable
+    /// assignments are all left alone — a variable assigned from `$mfactor` and then used as a
+    /// factor would slip through, which is a **stated limit of the detection, not of the
+    /// scaling**: the automatic scaling is applied either way, so the miss costs a warning, not
+    /// a wrong answer for models that use it as the LRM intends.
+    pub fn mfactor_scales_a_flow_contribution(&self) -> bool {
+        fn expr_uses_mfactor(m: &Module, e: ExprId) -> bool {
+            match m.expr(e) {
+                Expr::Call(Builtin::Mfactor, _) => true,
+                Expr::Call(_, args) => args.iter().any(|&a| expr_uses_mfactor(m, a)),
+                Expr::Unary(_, x) => expr_uses_mfactor(m, *x),
+                Expr::Binary(_, l, r) => expr_uses_mfactor(m, *l) || expr_uses_mfactor(m, *r),
+                Expr::Select(c, t, f) => {
+                    expr_uses_mfactor(m, *c) || expr_uses_mfactor(m, *t) || expr_uses_mfactor(m, *f)
+                }
+                Expr::CallUser(_, args) => args.iter().any(|&a| expr_uses_mfactor(m, a)),
+                Expr::Ddx(x, _) => expr_uses_mfactor(m, *x),
+                _ => false,
+            }
+        }
+        fn stmts(m: &Module, ss: &[Stmt]) -> bool {
+            ss.iter().any(|s| stmt(m, s))
+        }
+        fn stmt(m: &Module, s: &Stmt) -> bool {
+            match s {
+                Stmt::Contribute { target, value } => {
+                    target.kind == AccessKind::Flow && expr_uses_mfactor(m, *value)
+                }
+                Stmt::If { then_, else_, .. } => stmts(m, then_) || stmts(m, else_),
+                Stmt::Block(b) => stmts(m, b),
+                _ => false,
+            }
+        }
+        stmts(self, &self.analog)
+    }
+
+    /// This module's instance multiplicity — [`Self::mfactor`] if the instantiating context set
+    /// one, else the LRM default of `1.0` (§6.3.6).
+    ///
+    /// Every reader goes through this rather than the field, so "not set" and "set to one"
+    /// cannot diverge.
+    pub fn multiplicity(&self) -> f64 {
+        self.mfactor.unwrap_or(1.0)
     }
 
     /// Whether this module actually asks `$port_connected` about port `i`.
@@ -682,6 +753,21 @@ pub enum Builtin {
     /// before making it and only knows its last one after the run has ended, so a transient
     /// engine has to solve the last accepted timepoint a second time with this flag set.
     FinalStep,
+    /// `$mfactor` — the instance multiplicity (LRM §6.3.6), read from
+    /// [`Module::multiplicity`].
+    ///
+    /// Zero arguments, no state, no gradient. It is **not** const-folded at elaboration, for the
+    /// reason `$param_given` is not: a module is elaborated once and instantiated many times, so
+    /// no instantiation-dependent value folded at elaboration can be right for all of them. The
+    /// old fold to `1.0` was justified by "v0 has no netlist-driven instance parameters", a
+    /// premise that expired when a device line gained `name=value` overrides.
+    ///
+    /// A model rarely needs to read it: the simulator applies §6.3.6's scaling rules itself
+    /// (see `va_abi::Multiplied`). It exists for models that use the multiplicity in a
+    /// *condition* rather than as a factor — the LRM's own `parares` example — and using it as a
+    /// factor on a flow contribution is the `badres` double-scaling error the LRM asks a
+    /// simulator to warn about.
+    Mfactor,
     /// `laplace_nd(value, num, den)` — a rational transfer function `H(s) = N(s)/D(s)` given as
     /// polynomial coefficient lists in `s`, lowest degree first (LRM §4.5.11).
     ///

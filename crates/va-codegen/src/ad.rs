@@ -956,6 +956,10 @@ fn eval_call(
             },
             count,
         ),
+        // `$mfactor` (LRM 6.3.6), read from the module clone this instance was built from. A
+        // number the instantiation fixed, so no gradient and no state -- and deliberately not
+        // folded at elaboration, where the instance is not yet known.
+        Builtin::Mfactor => Dual::constant(ctx.module.multiplicity(), count),
         // `@(final_step)`'s, likewise. `true` in every static analysis, and in transient only at
         // the last accepted timepoint — which the driver has to solve twice to know.
         Builtin::FinalStep => {

@@ -208,8 +208,9 @@ analog partial-derivative operator (LRM §4.5.13) — lowered to `Expr::Ddx` (In
 as the LRM's own VCCS and diode worked examples require (both now regression tests, the latter
 cross-checked against a central finite difference); confirmed needed by 10+ corpus files
 (BSIM4/6/BULK, MVSG) and part of what moved the pass count from 34 to 44; and
-**`$param_given(name)`/`$port_connected(name)`/`$mfactor`/`$limit`** — `$mfactor` (the
-instance `m=` multiplicity factor) folds to its LRM default `1.0`; `$param_given`/
+**`$param_given(name)`/`$port_connected(name)`/`$mfactor`/`$limit`** — `$mfactor` is
+implemented as of v0.9.11 (a deck's `m=`/`mult=`, with LRM §6.3.6's automatic scaling);
+`$param_given`/
 `$port_connected` fold to `false` (their argument is a bare parameter/port-name reference,
 validated against the module's own declarations but never lowered as a value — v0's pipeline
 has no netlist-driven instantiation, so no parameter is ever explicitly overridden and no
@@ -3994,10 +3995,16 @@ comment.
 Each of these is a real remaining limitation — the premise has *not* expired — except where
 noted. Recorded so the next pass does not have to re-derive them.
 
-- [ ] **`$mfactor` folds to `1.0`.** Premise "v0 has no netlist-driven instance parameters" is
-      now only half true: a deck line carries `name=value` pairs, so a conventional SPICE `m=`
-      *could* be read there and applied as a multiplicity factor on the instance's
-      contributions. This is the closest of the open items to being simply available.
+- [x] **`$mfactor` folded to `1.0`** — premise "v0 has no netlist-driven instance parameters",
+      expired once a device line carried `name=value` pairs. **Closed 2026-09-07 (v0.9.11).**
+      `$mfactor` lowers to `va_ir::Builtin::Mfactor` and is answered at the instantiation
+      boundary from `Module::multiplicity`, the same shape `$param_given` uses. A deck line's
+      `m=`/`mult=` sets it, and LRM §6.3.6's automatic scaling is applied by
+      `va_abi::Multiplied`, which wraps the built instance and scales its whole stamp — residual,
+      Jacobian, charge, charge Jacobian, AC excitation, and noise **power** — so one rule covers
+      hand-written and generated models alike. Gated by
+      `an_m_of_three_equals_three_instances_in_parallel`, which compares against three real
+      instances rather than against arithmetic.
 - [ ] **`$simparam("gmin", …)` folds to its `default` argument.** Premise "v0 has no
       simulator-parameter store". Partly expired: `va_core::newton::NewtonConfig` really does
       hold `gmin`/tolerances, so at least `gmin`, `reltol` and `abstol` have a real value to

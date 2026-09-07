@@ -1543,14 +1543,19 @@ impl Elaborator<'_> {
                 Expr::Call(Builtin::Abstime, Vec::new())
             }
             // `$mfactor` is the instance multiplicity factor (device paralleling count, the
-            // conventional `m=` netlist parameter). v0 has no netlist-driven instance
-            // parameters at all yet, so every instance behaves as if `m` were left at its LRM
-            // default of 1.
+            // conventional `m=` netlist parameter, LRM §6.3.6).
+            //
+            // Lowered to `Builtin::Mfactor`, **not** folded here. It used to fold to `1.0`,
+            // justified by "v0 has no netlist-driven instance parameters at all yet" -- a premise
+            // that stopped being true once a device line gained `name=value` overrides. A module
+            // is elaborated once and instantiated many times, so the answer belongs at the
+            // instantiation boundary (`va_ir::Module::multiplicity`), which is where it is now
+            // resolved.
             ExprAst::SysFunc { name, args } if name == "mfactor" => {
                 if !args.is_empty() {
                     return Err(elab("`$mfactor` takes no arguments".to_string()));
                 }
-                Expr::Const(1.0)
+                Expr::Call(Builtin::Mfactor, Vec::new())
             }
             // `$param_given(name)` asks whether `name` was explicitly set by the instantiating
             // context, as opposed to left at its declared default. `name` is a parameter-name
@@ -5072,15 +5077,29 @@ mod tests {
         assert!(elaborate(&ast).is_err());
     }
 
+    /// `$mfactor` survives to the IR as `Builtin::Mfactor` rather than folding to `1.0`.
+    ///
+    /// It used to fold, justified by "v0 has no netlist-driven instance parameters" — a premise
+    /// that expired once a device line gained `name=value` overrides. A module is elaborated
+    /// once and instantiated many times, so an instantiation-dependent value cannot be folded
+    /// here and be right for every instance; it is resolved at the instantiation boundary
+    /// (`va_ir::Module::multiplicity`).
     #[test]
-    fn mfactor_folds_to_one() {
+    fn mfactor_lowers_to_a_builtin_rather_than_folding() {
         let m = elaborate_src(
             "module t(a, b); electrical a, b; parameter real r = 1; analog begin I(a, b) <+ $mfactor * V(a, b) / r; end endmodule",
         );
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 1.0)));
+        assert!(
+            m.exprs.iter().any(
+                |e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::Mfactor, args) if args.is_empty())
+            ),
+            "`$mfactor` must reach the IR, not be folded at elaboration"
+        );
+        assert_eq!(
+            m.multiplicity(),
+            1.0,
+            "an un-instantiated module reads the LRM default"
+        );
 
         let src =
             "module t(a, b); electrical a, b; analog begin I(a, b) <+ $mfactor(1); end endmodule";

@@ -362,6 +362,7 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
         modules.len()
     );
     warn_unplaceable_modules(&modules, path);
+    warn_mfactor_double_scaling(&modules, path);
     Ok(modules)
 }
 
@@ -450,6 +451,40 @@ pub fn refusal_block(err: &anyhow::Error) -> Option<String> {
         }
     }
     None
+}
+
+/// Warn about each module that scales a flow contribution by `$mfactor` itself — the
+/// double-scaling misuse LRM §6.3.6 requires a simulator to report.
+///
+/// The simulator already multiplies every flow contribution by the multiplicity, so a model
+/// doing it too gets `m²`. A warning rather than a refusal, because that is exactly what the LRM
+/// asks for ("the simulator shall issue a warning"), and because the model is still perfectly
+/// correct at the default `m = 1` — which is how every deck that never writes `m=` runs it.
+///
+/// The detection is deliberately narrow (`va_ir::Module::mfactor_scales_a_flow_contribution`):
+/// it catches the LRM's own `badres` and leaves its `parares` alone. A model that launders
+/// `$mfactor` through a variable first slips past, which costs a warning, not a wrong answer.
+fn warn_mfactor_double_scaling(modules: &[va_ir::Module], path: &str) {
+    for m in modules
+        .iter()
+        .filter(|m| m.mfactor_scales_a_flow_contribution())
+    {
+        eprintln!(
+            "[va-cli] warning: {path}: module `{}` multiplies a flow contribution by \
+             `$mfactor`, which the simulator already applies (LRM 6.3.6) - an instance with \
+             `m=N` would be scaled by N twice.",
+            m.name
+        );
+        eprintln!(
+            "[va-cli]   Drop the explicit factor: `I(a,b) <+ V(a,b)/r;` already behaves as N \
+             devices in parallel. `$mfactor` is for reading the multiplicity in a *condition* \
+             (the LRM's `parares` example), not for scaling the output."
+        );
+        eprintln!(
+            "[va-cli]   Harmless at the default `m=1`, which is how a deck that never writes \
+             `m=` runs this model."
+        );
+    }
 }
 
 /// Warn about each compiled module that declares no ports, and so can never be placed by a
@@ -1016,6 +1051,10 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
                 &natures,
             ) {
                 Ok(m) => {
+                    // Scanning a model library is the case where a double-scaling `$mfactor` is
+                    // most worth hearing about, so `check` reports it too rather than leaving it
+                    // to the run that eventually places the model (§ `warn_mfactor_double_scaling`).
+                    warn_mfactor_double_scaling(std::slice::from_ref(&m), file);
                     // Every node gets its own global unknown, so codegen sees the same shape it
                     // would in a circuit where no terminal happens to be shared or grounded.
                     // `build_instance` allocates its own extra unknowns past `next_unknown`.
@@ -2070,6 +2109,67 @@ fn build_instance(
 /// not declare is an error rather than a no-op — see the loop's own comment. Each of `module`'s port nodes is assigned the netlist terminal
 /// it connects to; any other node (e.g. an internal node a flattened submodule instance
 /// introduced, § module instantiation) claims a fresh global unknown from `next_unknown`.
+/// A device line's overrides, with the instance multiplicity separated out: the multiplicity
+/// (`None` when the line set none) and the remaining model-parameter overrides.
+type SplitOverrides = (Option<f64>, Vec<(String, f64)>);
+
+/// Separate a device line's instance **multiplicity** from its model-parameter overrides.
+///
+/// Returns the multiplicity (`None` when the line sets none, which reads as the LRM default of
+/// `1.0`) and the overrides with that entry removed.
+///
+/// # Which spelling means what, and why it is not simply `m=`
+///
+/// SPICE spells multiplicity `m=`, and that is the spelling a user will reach for. But `m` is
+/// also an extremely common *model parameter* name: in the corpus it is the junction grading
+/// coefficient (`external/diode.va`, `diode_basic.va`, `angelov_gan.va` all declare
+/// `parameter real m = 0.5`), a completely different physical quantity. Silently reinterpreting
+/// `m=0.5` on such a line as "half a device in parallel" would be a wrong answer of exactly the
+/// kind this project refuses to produce.
+///
+/// So:
+///
+/// - **`mult=`** is always the multiplicity. Unambiguous, and the spelling to reach for when a
+///   model declares its own `m`.
+/// - **`m=`** is the multiplicity **only when the model declares no parameter named `m`**.
+///   Otherwise it sets that parameter, exactly as it always has — no existing deck changes
+///   meaning.
+///
+/// A model that declares `mult` *and* a line that sets it is genuinely ambiguous, and is refused
+/// rather than guessed at.
+fn split_multiplicity(module: &Module, overrides: &[(String, f64)]) -> Result<SplitOverrides> {
+    let declares = |name: &str| module.params.iter().any(|p| p.name == name);
+    let mut multiplicity = None;
+    let mut rest = Vec::with_capacity(overrides.len());
+    for (name, v) in overrides {
+        let is_multiplicity = match name.as_str() {
+            "mult" => {
+                if declares("mult") {
+                    bail!(
+                        "model `{}` declares its own parameter `mult`, so `mult=` on a device                          line is ambiguous: it could set that parameter or the instance                          multiplicity. Rename the model's parameter, or set the multiplicity                          with `m=` if the model declares no `m` either.",
+                        module.name
+                    );
+                }
+                true
+            }
+            // The conventional spelling, yielded to a model that declares `m` itself.
+            "m" => !declares("m"),
+            _ => false,
+        };
+        if is_multiplicity {
+            if !v.is_finite() || *v <= 0.0 {
+                bail!(
+                    "instance multiplicity must be a positive, finite number, got `{name}={v}`                      (it is a count of identical devices in parallel; LRM 6.3.6)"
+                );
+            }
+            multiplicity = Some(*v);
+        } else {
+            rest.push((name.clone(), *v));
+        }
+    }
+    Ok((multiplicity, rest))
+}
+
 fn build_from_model(
     module: &Module,
     value: Option<f64>,
@@ -2078,6 +2178,10 @@ fn build_from_model(
     next_unknown: &mut usize,
 ) -> Result<(Box<dyn ModelInstance>, NodeAssignment)> {
     let mut m = module.clone();
+    // § instance multiplicity. Split out of the override list *before* anything is applied, so
+    // the rest of this function keeps seeing only real model parameters.
+    let (multiplicity, overrides) = split_multiplicity(module, overrides)?;
+    m.mfactor = multiplicity;
     // § `$param_given`: setting a parameter *is* giving it, so every override recorded below
     // also marks givenness on the clone. A deck that writes `Is=1e-15` and a model that asks
     // `$param_given(Is)` must agree, which they did not while the query folded to `false` at
@@ -2090,7 +2194,7 @@ fn build_from_model(
     // both has the explicit name win over the implicit position. An unknown name is an error:
     // dropping it silently would leave a deck looking like it set something it did not, and
     // the whole reason to write `Is=1e-12` rather than rely on parameter order is to be sure.
-    for (name, v) in overrides {
+    for (name, v) in &overrides {
         match m
             .params
             .iter_mut()
@@ -2223,7 +2327,12 @@ fn build_from_model(
 
     let inst = va_codegen::build_instance(&m, &full, next_unknown)
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
-    Ok((inst, assignment))
+    // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
+    // than inside the generated model, which is what makes it one rule for every model and keeps
+    // the instance's own internal unknowns per-device (see `va_abi::multiplicity`). At m = 1
+    // `wrap` returns this very box, so a deck with no `m=` is bit-identical to one run before
+    // multiplicity existed.
+    Ok((va_abi::Multiplied::wrap(inst, m.multiplicity()), assignment))
 }
 
 /// Build a device instance from the hand-written `va-abi` reference primitives.
@@ -4048,6 +4157,206 @@ X1 a gnd fst
             (last - 4.0).abs() < 1e-6,
             "the body must run at tstop, and its effect must be solved for: |I(V1)| = {last:e}"
         );
+    }
+
+    /// The LRM's own two examples are the specification for the double-scaling warning, so they
+    /// are the test: `badres` is caught, `parares` is not.
+    ///
+    /// Warning rather than refusal, per §6.3.6's wording — and the model is genuinely correct at
+    /// `m = 1`, which is how every deck that never writes `m=` runs it.
+    #[test]
+    fn the_lrm_double_scaling_examples_are_told_apart() {
+        // LRM 6.3.6's `badres`: the contributed current is multiplied by $mfactor explicitly,
+        // and would be again by the simulator.
+        let badres = va_frontend::compile(
+            "module badres(a, b); inout a, b; electrical a, b;
+             parameter real r = 1.0;
+             analog begin I(a,b) <+ V(a,b) / r * $mfactor; end endmodule",
+        )
+        .expect("compiles");
+        assert!(
+            badres.modules[0].mfactor_scales_a_flow_contribution(),
+            "the LRM's `badres` is the double-scaling case and must be caught"
+        );
+
+        // LRM 6.3.6's `parares`: $mfactor is read in a condition only, and does not scale the
+        // output. No warning.
+        let parares = va_frontend::compile(
+            "module parares(a, b); inout a, b; electrical a, b;
+             parameter real r = 1.0;
+             analog begin
+               if (r / $mfactor < 1.0e-3) V(a,b) <+ 0.0;
+               else I(a,b) <+ V(a,b) / r;
+             end endmodule",
+        )
+        .expect("compiles");
+        assert!(
+            !parares.modules[0].mfactor_scales_a_flow_contribution(),
+            "the LRM's `parares` uses it in a condition and must not be warned about"
+        );
+
+        // A model that never mentions it at all is obviously clean -- stated so that a detector
+        // which simply returned `true` could not pass this test.
+        let plain = va_frontend::compile(
+            "module p(a, b); inout a, b; electrical a, b;
+             analog I(a,b) <+ V(a,b) / 1000.0; endmodule",
+        )
+        .expect("compiles");
+        assert!(!plain.modules[0].mfactor_scales_a_flow_contribution());
+    }
+
+    /// A resistor model placed once with `m=3` draws exactly what three of it in parallel draw.
+    ///
+    /// The end-to-end statement of LRM §6.3.6's guarantee, measured through the real pipeline
+    /// rather than asserted against arithmetic: the reference deck instantiates the same model
+    /// three times on the same nodes, and the two solutions must agree. That is a stronger check
+    /// than `I == 3*V/r` because it would still fail if the scaling reached some channel that
+    /// parallel copies do not.
+    #[test]
+    fn an_m_of_three_equals_three_instances_in_parallel() {
+        const SRC: &str = "
+module res(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real r = 1000.0;
+  analog I(p, n) <+ V(p, n) / r;
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let solve = |deck: &str| -> f64 {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            // The source's branch current: what the whole network draws.
+            op.x[net.node_order.len()].abs()
+        };
+        let multiplied = solve(
+            "V1 a gnd DC 4
+X1 a gnd res m=3
+.op
+.end
+",
+        );
+        let parallel = solve(
+            "V1 a gnd DC 4
+X1 a gnd res
+X2 a gnd res
+X3 a gnd res
+.op
+.end
+",
+        );
+        assert!(
+            (multiplied - parallel).abs() < 1e-12,
+            "m=3 must equal three in parallel: {multiplied:e} vs {parallel:e}"
+        );
+        // And it must actually be doing something -- a scaling that silently did nothing would
+        // pass the comparison above only if the reference deck were also broken, but stating the
+        // expected value pins both.
+        assert!(
+            (multiplied - 3.0 * 4.0 / 1000.0).abs() < 1e-12,
+            "expected 3*V/r = 12 mA, got {multiplied:e}"
+        );
+    }
+
+    /// `$mfactor` reports the multiplicity the deck line set, and the LRM default of `1.0` when
+    /// it set none.
+    ///
+    /// Read in a *condition*, which is the use the LRM's own `parares` example sanctions —
+    /// reading it as a factor on a flow contribution is the `badres` double-scaling error, and
+    /// is warned about separately.
+    #[test]
+    fn mfactor_reports_the_deck_lines_multiplicity() {
+        const SRC: &str = "
+module mf(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    if ($mfactor > 2.0)
+      g = 1.0;
+    else
+      g = 1e-3;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        // Per-device conductance, with the automatic m scaling divided back out, so the number
+        // reflects what the *model* chose rather than how many copies there are.
+        let per_device_g = |deck: &str, m: f64| -> f64 {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs() / 4.0 / m
+        };
+        assert!(
+            (per_device_g("V1 a gnd DC 4\nX1 a gnd mf\n.op\n.end\n", 1.0) - 1e-3).abs() < 1e-9,
+            "no `m=` reads the LRM default of 1"
+        );
+        assert!(
+            (per_device_g("V1 a gnd DC 4\nX1 a gnd mf m=5\n.op\n.end\n", 5.0) - 1.0).abs() < 1e-9,
+            "`m=5` must reach `$mfactor`"
+        );
+    }
+
+    /// `m=` yields to a model that declares its own parameter `m`, and `mult=` is the
+    /// unambiguous spelling.
+    ///
+    /// This is the case that stops multiplicity from silently changing what an existing deck
+    /// means: in the corpus `m` is the junction grading coefficient (`external/diode.va` and
+    /// friends declare `parameter real m = 0.5`), so reinterpreting `m=0.5` as "half a device"
+    /// would be a wrong answer, not a feature.
+    #[test]
+    fn m_yields_to_a_model_that_declares_its_own_m() {
+        const SRC: &str = "
+module gm(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real m = 0.5;
+  analog I(p, n) <+ m * V(p, n);
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let current = |deck: &str| -> f64 {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs()
+        };
+        // `m=0.25` sets the model's own parameter: one device of conductance 0.25.
+        let as_param = current("V1 a gnd DC 4\nX1 a gnd gm m=0.25\n.op\n.end\n");
+        assert!(
+            (as_param - 0.25 * 4.0).abs() < 1e-9,
+            "`m=` must set the model's own `m`, not the multiplicity: {as_param:e}"
+        );
+        // `mult=` is unambiguous, and leaves the model's `m` at its default of 0.5.
+        let as_multiplicity = current("V1 a gnd DC 4\nX1 a gnd gm mult=3\n.op\n.end\n");
+        assert!(
+            (as_multiplicity - 3.0 * 0.5 * 4.0).abs() < 1e-9,
+            "`mult=` must set the multiplicity: {as_multiplicity:e}"
+        );
+    }
+
+    /// A multiplicity that is not a positive, finite count is rejected rather than applied.
+    #[test]
+    fn a_nonsensical_multiplicity_is_rejected() {
+        const SRC: &str = "
+module r2(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) / 1000.0;
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        for bad in ["m=0", "m=-2"] {
+            let net = va_netlist::parser::parse(&format!(
+                "V1 a gnd DC 4\nX1 a gnd r2 {bad}\n.op\n.end\n"
+            ))
+            .expect("parses");
+            let err = solve_dc(&net, &design.modules)
+                .err()
+                .unwrap_or_else(|| panic!("`{bad}` must be rejected"));
+            let msg = format!("{err:#}");
+            assert!(msg.contains("multiplicity"), "says what is wrong: {msg}");
+        }
     }
 
     /// **Every refusal, from every layer, reaches the user saying what was refused and why.**

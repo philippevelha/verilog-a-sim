@@ -167,7 +167,7 @@ class of lexemes.
   (`I(p,n) <+ K*$abstime`) against a QSPICE behavioral source (`B1 out 0 I=1*time`) computing
   the same ramp from an independent description — error `4.382e-17`. It discriminates:
   restoring the old fold moves it to `5.838e-1`. See `docs/validation.md` for the deck's
-  resistive-only design and the `UIC`-shifts-`time` gotcha behind it. `$mfactor` (the instance multiplicity/`m=` factor)
+  resistive-only design and the `UIC`-shifts-`time` gotcha behind it. `$mfactor` (the instance multiplicity/`m=` factor, implemented v0.9.11: a deck's `m=`/`mult=`, with LRM §6.3.6's automatic scaling applied by `va_abi::Multiplied`)
   folds to `1.0`, its LRM default, since v0 has no netlist-driven instance parameters to override
   it; `$param_given(name)` **is answered, not folded** (changed 2026-09-06) — `name` is
   read directly off the AST as a bare parameter-name reference (validated against the module's
