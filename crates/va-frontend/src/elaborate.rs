@@ -815,12 +815,20 @@ impl Elaborator<'_> {
                     self.const_eval(*else_)
                 }
             }
-            // `$simparam("name", default)` folds to `default` here exactly as `lower_expr`
-            // folds it in the analog block (v0 has no simulator-parameter store, so the queried
-            // name is never actually looked up) — a parameter default is just as legitimate a
-            // place for this idiom as an ordinary expression (`external/bsim6.0.va`:
-            // `parameter real GMIN = $simparam("gmin", 1.0e-15);`). Without a default it's still
-            // an error, matching the LRM's behavior for an unknown simulator parameter.
+            // `$simparam("name", default)` in a **parameter context** folds to `default`, and
+            // keeps doing so now that the analog-block path resolves known names for real
+            // (§ `lower_expr`'s arm). That is not an oversight but the only correct answer here:
+            // a `parameter`'s value is fixed at elaboration by definition, while every
+            // simulator parameter this engine knows is a property of the solve in progress —
+            // `iteration` changes within a single timepoint. A parameter cannot hold one.
+            //
+            // The idiom is real and common: `external/bsim6.0.va` writes
+            // `parameter real GMIN = $simparam("gmin", 1.0e-15);`, and folding to the stated
+            // fallback is exactly what that model is asking for when the value is not
+            // constant-foldable. A model that wants the live value reads `$simparam` in the
+            // analog block, where it is answered live.
+            //
+            // Without a default it is still an error, matching the LRM for an unknown parameter.
             ExprAst::SysFunc { name, args } if name == "simparam" => match args.get(1) {
                 Some(&default) => self.const_eval(default),
                 None => Err(elab(
@@ -1514,18 +1522,61 @@ impl Elaborator<'_> {
             // variable indexing) expands into a `Select` chain — see `lower_indexed_var_read`.
             ExprAst::IndexedIdent(name, index) => return self.lower_indexed_var_read(name, index),
             ExprAst::SysFunc { name, args } if name == "simparam" => {
-                // `$simparam(param_name [, default])`: the queried parameter is always unknown
-                // in v0 (no simulator parameter store), so the call returns the `default`
-                // expression. With no default, an unknown parameter is an error — matching the
-                // LRM, where `$simparam` errors on an unknown parameter when no default is
-                // given. The `param_name` (a string) is not evaluated.
-                match args.get(1) {
-                    Some(&default) => return self.lower_expr(default),
-                    None => {
-                        return Err(elab(
-                            "$simparam without a default: the parameter is unknown in v0 (no \
-                             simulator parameters)"
-                                .to_string(),
+                // `$simparam(param_name [, default])` (LRM §9.18). Three outcomes, and which one
+                // applies is decided **here**, by whether this simulator knows the name:
+                //
+                //   - known    → `Builtin::SimParam`, read from `va_abi::AnalysisCtx::sim` at
+                //                load. Deliberately not folded: `iteration` changes on every
+                //                Newton iteration and `gmin` on every homotopy stage, so the
+                //                answer is a property of the solve in progress, not of the
+                //                module. This is the premise that expired — "v0 has no
+                //                simulator-parameter store" — and it expired at the *evaluation*
+                //                boundary, not at elaboration, which is why wiring the values
+                //                into elaboration (the shape the roadmap first imagined) would
+                //                have been the wrong fix.
+                //   - unknown, with a default → the default. The LRM's own second example.
+                //   - unknown, no default     → an error, per the LRM. Refused with the list of
+                //                names that would have worked, since the overwhelmingly likely
+                //                cause is a name this engine has no concept of.
+                //
+                // The `param_name` argument is a string literal read off the AST, not lowered:
+                // it names a parameter rather than computing a value, exactly as
+                // `$param_given`'s argument does.
+                let queried = args.first().and_then(|&r| match self.ast.expr(r) {
+                    ExprAst::Str(name) => Some(name.clone()),
+                    _ => None,
+                });
+                let Some(queried) = queried else {
+                    return Err(elab(
+                        "`$simparam` takes a string parameter name as its first argument \
+                         (LRM §9.18)"
+                            .to_string(),
+                    ));
+                };
+                match (va_ir::SimParam::from_name(&queried), args.get(1)) {
+                    (Some(p), _) => {
+                        let sel = self.out.push_expr(Expr::Const(p.to_selector()));
+                        Expr::Call(Builtin::SimParam, vec![sel])
+                    }
+                    (None, Some(&default)) => return self.lower_expr(default),
+                    (None, None) => {
+                        return Err(FrontendError::Refused(
+                            crate::Refusal::new(
+                                format!("`$simparam(\"{queried}\")`, with no default value"),
+                                "this simulator does not know that parameter, and the LRM \
+                                 (§9.18) makes an unknown name with no default an error rather \
+                                 than a guess. Answering it with a plausible number would be \
+                                 worse: a simulation parameter is a promise about the solver's \
+                                 behaviour, and this engine would not keep one it never \
+                                 implemented",
+                            )
+                            .instead(format!(
+                                "supply a fallback - `$simparam(\"{queried}\", <value>)` is \
+                                 valid and returns it - or query one of the names this engine \
+                                 does know: {}",
+                                va_ir::SimParam::KNOWN_NAMES.join(", ")
+                            ))
+                            .tracking("docs/token-reference.md, `$simparam`"),
                         ))
                     }
                 }

@@ -4205,6 +4205,125 @@ X1 a gnd fst
         assert!(!plain.modules[0].mfactor_scales_a_flow_contribution());
     }
 
+    /// `$simparam("iteration")` really counts Newton iterations **in a transient run** — it is
+    /// not stuck at the `0` a folded-at-elaboration answer would give.
+    ///
+    /// The model is keyed on it so the two possible answers are far apart: at iteration 0 it is
+    /// a 1 Ω resistor, from iteration 1 on it is a 1 kΩ one. Since the equations stop changing
+    /// after the first iteration, the solve settles on the 1 kΩ circuit — but *only if the
+    /// iteration number advances*. If `$simparam("iteration")` were frozen at 0, every
+    /// iteration would see 1 Ω and the run would settle on that instead. The two RC time
+    /// constants differ by 1000×, so the assertion cannot be satisfied by accident.
+    #[test]
+    fn simparam_iteration_advances_during_a_transient_solve() {
+        const SRC: &str = "
+module itr(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    if ($simparam(\"iteration\") < 1.0)
+      g = 1.0;
+    else
+      g = 1e-3;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        // A 1 uF cap charging through the model's resistance from a 1 V step. With g = 1e-3
+        // (1 kOhm) tau is 1 ms; with g = 1.0 (1 Ohm) it is 1 us -- already fully charged at the
+        // first sample, which is exactly what a frozen iteration number would produce.
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 1
+X1 a mid itr
+C1 mid gnd 1u
+.tran 10u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let mid = net
+            .node_order
+            .iter()
+            .position(|n| n == "mid")
+            .expect("the deck names `mid`");
+        let (t_end, x_end) = (
+            *wf.t.last().expect("a last time"),
+            wf.x.last().expect("a last point")[mid],
+        );
+        // 1 - exp(-t/tau) at tau = 1 ms. The LTE-controlled run is well inside 1 % of it.
+        let expected = 1.0 - (-t_end / 1e-3).exp();
+        assert!(
+            (x_end - expected).abs() < 1e-2,
+            "expected the 1 kOhm time constant (V(mid) ~ {expected:.4} at t = {t_end:e}), got \
+             {x_end:.4} -- a value near 1.0 means `$simparam(\"iteration\")` never left 0"
+        );
+    }
+
+    /// A **known** simulator parameter resolves to the solver's real value; an **unknown** one
+    /// falls back to the query's own default; an unknown one with no default is refused.
+    ///
+    /// The middle case is the one with 21 occurrences in the corpus (`$simparam("gmin", 1e-12)`
+    /// and friends), and the one that must not change: this engine has no permanent `gmin`
+    /// floor, so it does not claim to know the name, and each model keeps the fallback it stated.
+    #[test]
+    fn simparam_resolves_known_names_and_falls_back_on_unknown_ones() {
+        let conductance = |expr: &str| -> f64 {
+            let src = format!(
+                "
+module sp(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ ({expr}) * V(p, n);
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse("V1 a gnd DC 4\nX1 a gnd sp\n.op\n.end\n")
+                .expect("parses");
+            let op = solve_dc(&net, &design.modules).expect("solves");
+            op.x[net.node_order.len()].abs() / 4.0
+        };
+        // Unknown name, with a default: the default is returned. This is the corpus's case.
+        assert!(
+            (conductance(r#"$simparam("gmin", 1e-3)"#) - 1e-3).abs() < 1e-12,
+            "an unknown name must return the model's own fallback"
+        );
+        // Known name: the solver's real value, not the fallback. `sourceScaleFactor` is 1.0
+        // here because this engine never ramps sources -- a true statement about the solve.
+        assert!(
+            (conductance(r#"$simparam("sourceScaleFactor", 99.0)"#) - 1.0).abs() < 1e-12,
+            "a known name must return the solver's value, not the fallback"
+        );
+        // Known name: `gdev` is 0.0 in an ordinary solve, so this contributes nothing and the
+        // node is left floating -- which is itself the observation, so add a fixed shunt.
+        assert!(
+            (conductance(r#"$simparam("gdev", 7.0) + 1e-3"#) - 1e-3).abs() < 1e-12,
+            "`gdev` is 0 with no homotopy running, and must not fall back to 7.0"
+        );
+    }
+
+    /// An unknown simulator parameter with **no** default is refused, per LRM §9.18, and the
+    /// refusal lists the names that would have worked.
+    #[test]
+    fn an_unknown_simparam_with_no_default_is_refused() {
+        let err = va_frontend::compile(
+            r#"module sp(p, n); inout p, n; electrical p, n;
+               analog I(p, n) <+ $simparam("imelt") * V(p, n); endmodule"#,
+        )
+        .err()
+        .expect("an unknown parameter with no default is an error");
+        let block = refusal_block(&anyhow::Error::new(err)).expect("reported as a refusal");
+        assert!(block.contains("imelt"), "names what was asked for: {block}");
+        assert!(
+            block.contains("iteration") && block.contains("sourceScaleFactor"),
+            "lists the names this engine does know: {block}"
+        );
+    }
+
     /// A resistor model placed once with `m=3` draws exactly what three of it in parallel draw.
     ///
     /// The end-to-end statement of LRM §6.3.6's guarantee, measured through the real pipeline

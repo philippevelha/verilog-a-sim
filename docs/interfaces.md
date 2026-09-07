@@ -831,3 +831,28 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > convergence, so an unconditional re-solve would shift the final point of every existing run by
 > a step's worth of round-off in exchange for nothing. Measured: all 27 gates reproduce their
 > previous numbers exactly.
+
+> **Revision (§6 change, ratified 2026-09-07b):** added `AnalysisCtx::sim` — a `SimParams`
+> block carrying the simulator parameters `$simparam` reports (LRM §9.18) — plus the `with_sim`
+> builder. Purely **additive**: every constructor fills it with `SimParams::new()`, so no
+> implementor breaks and every existing evaluation is bit-identical (checked: all 27 gates
+> reproduced their previous numbers byte-for-byte).
+>
+> **Why it belongs on the context rather than being folded at elaboration.** `iteration` changes
+> on every Newton iteration and `gdev` on every homotopy stage, so these are properties of the
+> *solve in progress*, not of the module — the same argument that put `ddt_coeff` here. A module
+> is elaborated once and solved many times, under different configs; no value folded at
+> elaboration can be right for all of them. A `parameter` context is the one place the fold
+> stays correct, because a parameter is fixed at elaboration by definition.
+>
+> **The struct holds only what this simulator genuinely has**: `gdev`, `iteration`,
+> `sourceScaleFactor`, `abstol`, `reltol`. Every other Table 9-27 name is *unknown*, which the
+> LRM defines an answer for. That restraint is load-bearing rather than fastidious — see
+> `va_ir::SimParam::from_name` for the `gmin` case, where claiming to know a name would have
+> silently changed 21 corpus models' circuits.
+>
+> **What a transient consumer owes a model that reads `iteration`.** The evaluation that commits
+> state must be made at the iteration the solve converged at, not at `0`: a model may key its
+> behaviour on the iteration number, and committing at a different one writes history from a
+> different model than the one that produced the accepted solution. `va_transient`'s
+> `newton_step` returns `Solved { x, iterations }` for exactly this.

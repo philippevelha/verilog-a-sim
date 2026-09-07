@@ -390,6 +390,95 @@ pub struct Access {
     pub branch: BranchId,
 }
 
+/// The simulator parameters this project answers `$simparam` with (LRM §9.18, Table 9-27).
+///
+/// Deliberately short. The LRM's table lists thirteen names and asks a simulator to accept the
+/// ones it supports; these are the ones this engine has a real answer for. Everything else is
+/// *not known*, which is a defined outcome rather than a gap — see
+/// `va_abi::SimParams` for why answering `imax` or `shrink` with a plausible number would be
+/// worse than not answering at all.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SimParam {
+    /// `gdev` — the *additional* conductance a conductance-homotopy stage places across
+    /// nonlinear branches.
+    ///
+    /// **Not `gmin`.** The LRM lists both and means different things by them: `gdev` is the
+    /// homotopy's extra conductance, `gmin` a permanent floor placed in parallel with every
+    /// nonlinear branch. This engine has the first and not the second — `gmin` stepping is off
+    /// unless asked for, and applies nothing when it is off — so `gmin` is deliberately **not**
+    /// a name this simulator claims to know. See [`SimParam::from_name`].
+    Gdev,
+    /// `iteration` — the analog solver's iteration number at this evaluation.
+    Iteration,
+    /// `sourceScaleFactor` — the factor applied to independent sources by source stepping.
+    SourceScaleFactor,
+    /// `abstol` — the solve's absolute residual tolerance.
+    Abstol,
+    /// `reltol` — the solve's relative update tolerance.
+    Reltol,
+}
+
+impl SimParam {
+    /// The parameter a `$simparam` name string queries, or `None` if this simulator does not
+    /// know that name.
+    ///
+    /// **`gmin` is deliberately absent**, and that is the most consequential decision in this
+    /// list. The LRM separates `gmin` (a permanent conductance floor across every nonlinear
+    /// branch) from `gdev` (a homotopy's additional conductance); this engine has only the
+    /// second, and only while `gmin` stepping is switched on, which it is not by default.
+    ///
+    /// Claiming to know `gmin` and answering `0.0` would be true of the solver and *harmful to
+    /// models*: 21 occurrences in the corpus write `$simparam("gmin", 1e-12)` or
+    /// `$simparam("gmin", 0)`, using the fallback to decide how much conductance to add
+    /// themselves. Answering "known, and it is zero" would silently strip the 1e-12 shunt those
+    /// models add for their own conditioning — a real change to a circuit, made on a
+    /// technicality. Leaving the name unknown returns each model its own stated fallback, which
+    /// is both what they mean and what they got before this was implemented.
+    ///
+    /// Matched **case-sensitively**, as the LRM's table is written: `sourceScaleFactor` is
+    /// camel-case there, and silently accepting `sourcescalefactor` would be guessing at a name
+    /// the standard spells exactly.
+    pub fn from_name(name: &str) -> Option<SimParam> {
+        Some(match name {
+            "gdev" => SimParam::Gdev,
+            "iteration" => SimParam::Iteration,
+            "sourceScaleFactor" => SimParam::SourceScaleFactor,
+            "abstol" => SimParam::Abstol,
+            "reltol" => SimParam::Reltol,
+            _ => return None,
+        })
+    }
+
+    /// Every name this simulator knows, in the order a diagnostic should list them.
+    pub const KNOWN_NAMES: [&'static str; 5] =
+        ["gdev", "iteration", "sourceScaleFactor", "abstol", "reltol"];
+
+    /// This parameter as the number [`Builtin::SimParam`] carries in its `Const` argument.
+    pub fn to_selector(self) -> f64 {
+        match self {
+            SimParam::Gdev => 0.0,
+            SimParam::Iteration => 1.0,
+            SimParam::SourceScaleFactor => 2.0,
+            SimParam::Abstol => 3.0,
+            SimParam::Reltol => 4.0,
+        }
+    }
+
+    /// The inverse of [`Self::to_selector`]. `None` for a number no selector uses, which can
+    /// only happen if an IR was hand-built wrong — a consumer should treat it as such rather
+    /// than pick an arbitrary parameter.
+    pub fn from_selector(v: f64) -> Option<SimParam> {
+        Some(match v {
+            0.0 => SimParam::Gdev,
+            1.0 => SimParam::Iteration,
+            2.0 => SimParam::SourceScaleFactor,
+            3.0 => SimParam::Abstol,
+            4.0 => SimParam::Reltol,
+            _ => return None,
+        })
+    }
+}
+
 /// A parameter with an optional default and inclusive numeric range.
 #[derive(Clone, Debug)]
 pub struct Param {
@@ -768,6 +857,20 @@ pub enum Builtin {
     /// factor on a flow contribution is the `badres` double-scaling error the LRM asks a
     /// simulator to warn about.
     Mfactor,
+    /// `$simparam("name" [, default])` — a simulator parameter (LRM §9.18, Table 9-27).
+    ///
+    /// Carries **exactly one argument**, an [`Expr::Const`] holding the queried parameter's
+    /// [`SimParam`] selector as a number. That is the same trick [`Builtin::NoiseTable`] and
+    /// [`Builtin::LaplaceNd`] use to keep non-expression data out of an [`Expr`] variant, and it
+    /// is enough here because elaboration has already done the interesting work: a name this
+    /// simulator does not know never reaches the IR at all, having been answered with the query's
+    /// own default or refused (LRM §9.18: an unknown name with no default is an error).
+    ///
+    /// Not folded at elaboration, and that is the point of the construct existing in the IR at
+    /// all: `iteration` changes on every Newton iteration and `gmin` on every homotopy stage, so
+    /// the value is a property of the *solve in progress*. It is read from
+    /// `va_abi::AnalysisCtx::sim`.
+    SimParam,
     /// `laplace_nd(value, num, den)` — a rational transfer function `H(s) = N(s)/D(s)` given as
     /// polynomial coefficient lists in `s`, lowest degree first (LRM §4.5.11).
     ///

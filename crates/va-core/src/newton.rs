@@ -187,12 +187,19 @@ fn solve_from(
     let vt = convergence::VT_NOMINAL;
     let vcrit = convergence::default_vcrit(vt);
 
+    // The simulator parameters `$simparam` reports, fixed for this stage: the tolerances come
+    // from the caller's config, and `gmin` is this homotopy stage's actual shunt -- so a model
+    // asking for it is told the conductance really in the circuit, not a nominal one.
+    let sim = va_abi::SimParams::new().with_tolerances(cfg.abstol, cfg.reltol);
     let mut last_residual = f64::INFINITY;
-    for _ in 0..cfg.max_iters {
-        // This crate solves DC operating points only (`crate::dc`), so the context is fixed
-        // here rather than plumbed in from the caller: an AC or noise run linearizes about a
-        // point this same DC solve produced, and asks its own analysis's question later.
-        let mut sys = mna::assemble_with_events(instances, &x, &va_abi::ANALYSIS_DC, dim, fired);
+    for iteration in 0..cfg.max_iters {
+        // This crate solves DC operating points only (`crate::dc`), so the analysis kind is
+        // fixed here rather than plumbed in from the caller: an AC or noise run linearizes about
+        // a point this same DC solve produced, and asks its own analysis's question later. The
+        // *iteration number* is not fixed, which is exactly why `$simparam("iteration")` cannot
+        // be answered anywhere earlier than here.
+        let ctx = va_abi::ANALYSIS_DC.with_sim(sim.at_iteration(iteration, gmin));
+        let mut sys = mna::assemble_with_events(instances, &x, &ctx, dim, fired);
         sys.shunt_gmin(&x, gmin, kinds);
         let residual_norm = inf_norm(&sys.residual);
 
@@ -305,6 +312,27 @@ fn inf_norm(v: &[f64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// `va_abi::SimParams::new()` duplicates `NewtonConfig`'s default tolerances, because
+    /// `va-abi` is a leaf crate and may not depend on `va-core` (`CLAUDE.md` §3). Two copies of
+    /// one number is exactly the shape that drifts, so this pins them together.
+    ///
+    /// If this fails, the fix is to change the constant in `va_abi::SimParams::new` to match —
+    /// `NewtonConfig` is the authority, and a model asking `$simparam("abstol")` must be told
+    /// the tolerance the solve actually uses.
+    #[test]
+    fn newton_config_and_simparams_agree_on_tolerances() {
+        let cfg = super::NewtonConfig::default();
+        let sim = va_abi::SimParams::new();
+        assert_eq!(
+            sim.abstol, cfg.abstol,
+            "abstol drifted between the two crates"
+        );
+        assert_eq!(
+            sim.reltol, cfg.reltol,
+            "reltol drifted between the two crates"
+        );
+    }
+
     use super::*;
     use crate::testutil::VSource;
     use va_abi::reference::diode::VT_NOMINAL;

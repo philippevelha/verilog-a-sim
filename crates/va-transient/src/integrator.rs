@@ -746,10 +746,12 @@ fn assemble(
     state: &mut StateBuffers,
     fired: &FiredEvents,
     ddt: (f64, f64, f64),
+    sim: va_abi::SimParams,
 ) -> DenseStamp {
     let ctx = AnalysisCtx::transient(t)
         .with_initial_step(phase.initial)
         .with_final_step(phase.last)
+        .with_sim(sim)
         .with_ddt(ddt.0, ddt.1)
         .with_ddt_prev2(ddt.2);
     // Every evaluation starts from the last *committed* state, so an unwritten slot means
@@ -833,6 +835,20 @@ impl StateBuffers {
 /// Solve one implicit step's nodal equation `residual(x) + coeff·charge(x) + offset = 0` for
 /// `x`, warm-started from `x_prev` (the previous step's solution — Newton's initial guess).
 ///
+/// A converged Newton solve: the solution, and the iteration index it converged at.
+///
+/// The iteration count is not diagnostics — it is needed for **correctness**, and only became so
+/// when `$simparam("iteration")` started being answered for real. A model may legitimately
+/// change its own behaviour with the iteration number (softening a nonlinearity while the solve
+/// settles), so the post-accept evaluation that *commits* state has to be made at the same
+/// iteration the solve converged at. Committing at iteration 0 instead would write history from
+/// a different model than the one that produced the accepted solution — a silent
+/// commit-does-not-match-solve defect of the kind this file's `StateBuffers` exists to prevent.
+struct Solved {
+    x: Vec<f64>,
+    iterations: usize,
+}
+
 /// Structurally identical to `va-core`'s DC Newton loop (same convergence criteria, same
 /// [`convergence::limit_junction`] clamp), except the assembled system is the companion-model
 /// combination of the resistive and charge channels rather than the resistive channel alone.
@@ -847,7 +863,7 @@ fn newton_step(
     fired: &FiredEvents,
     companion: &Companion,
     junction: &[bool],
-) -> Result<Vec<f64>, TransientError> {
+) -> Result<Solved, TransientError> {
     const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
     const RELTOL: f64 = 1e-9;
@@ -856,10 +872,16 @@ fn newton_step(
     let vcrit = convergence::default_vcrit(vt);
 
     let mut x = x_prev.to_vec();
+    // The simulator parameters `$simparam` reports during this step's solve. This engine runs no
+    // homotopy in transient, so `gmin` is `0.0` -- the conductance actually in the circuit, which
+    // is the honest answer rather than a nominal floor it does not apply.
+    let sim = va_abi::SimParams::new().with_tolerances(ABSTOL, RELTOL);
     let mut last_residual = f64::INFINITY;
-    for _ in 0..MAX_ITERS {
-        // Every iteration re-evaluates at the same candidate landing time `t`: the context is a
-        // property of the timepoint being solved for, not of how many iterations it takes.
+    for iteration in 0..MAX_ITERS {
+        // Every iteration re-evaluates at the same candidate landing time `t`: the *timepoint*
+        // context is a property of the point being solved for, not of how many iterations it
+        // takes. `$simparam("iteration")` is the exception, and is exactly why the context is
+        // rebuilt per iteration rather than hoisted out of this loop.
         let sink = assemble(
             instances,
             &x,
@@ -873,6 +895,7 @@ fn newton_step(
                 companion.prev_rate_weight,
                 companion.prev2_weight,
             ),
+            sim.at_iteration(iteration, 0.0),
         );
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
@@ -912,7 +935,10 @@ fn newton_step(
         }
 
         if residual_norm <= ABSTOL || update_small {
-            return Ok(x);
+            return Ok(Solved {
+                x,
+                iterations: iteration,
+            });
         }
         last_residual = residual_norm;
     }
@@ -990,6 +1016,9 @@ pub fn run_with_events(
     // No step has been taken, so there is no rate to report: `is_initial_step` already
     // makes every `ddt` site read zero and seed its own history here.
     let mut fired = FiredEvents::new(instances);
+    // The seed at `tstart` is the analysis's first evaluation and is not a Newton iterate at
+    // all, so it reports iteration 0 -- which is what it genuinely is.
+    let sim = va_abi::SimParams::new();
     let initial = assemble(
         instances,
         &x,
@@ -999,6 +1028,7 @@ pub fn run_with_events(
         &mut state,
         &fired,
         (0.0, 0.0, 0.0),
+        sim,
     );
     state.commit();
     // Seed the event channel's history at the initial condition. A crossing is a change of
@@ -1144,7 +1174,7 @@ pub fn run_with_events(
             // LTE controller is measuring this step's *discretization* error, and an
             // end-of-analysis body is not part of the trajectory whose error is being bounded.
             // The final-step solve happens once, after the step is accepted.
-            let x_primary = newton_step(
+            let primary_solved = newton_step(
                 instances,
                 dim,
                 &x,
@@ -1155,6 +1185,10 @@ pub fn run_with_events(
                 &primary,
                 &junction,
             )?;
+            let x_primary = primary_solved.x;
+            // Carried to the post-accept evaluations below, so they are made at the iteration
+            // this step actually converged at -- see `Solved`.
+            let mut converged_at = primary_solved.iterations;
 
             // Divided differences first when configured: they need no second solve, so the
             // embedded pair below is only ever paid for when the history is too short to say
@@ -1196,7 +1230,8 @@ pub fn run_with_events(
                         &fired,
                         &reference_companion,
                         &junction,
-                    )?;
+                    )?
+                    .x;
                     lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol)
                 }
             };
@@ -1313,6 +1348,7 @@ pub fn run_with_events(
                         primary.prev_rate_weight,
                         primary.prev2_weight,
                     );
+                    let probe_sim = sim.at_iteration(converged_at, 0.0);
                     let last = assemble(
                         instances,
                         &x,
@@ -1322,6 +1358,7 @@ pub fn run_with_events(
                         &mut state,
                         &fired,
                         ddt,
+                        probe_sim,
                     );
                     let ordinary = assemble(
                         instances,
@@ -1332,6 +1369,7 @@ pub fn run_with_events(
                         &mut state,
                         &fired,
                         ddt,
+                        probe_sim,
                     );
                     if last.residual == ordinary.residual
                         && last.jacobian == ordinary.jacobian
@@ -1347,15 +1385,21 @@ pub fn run_with_events(
                 };
 
                 if fired.any() || phase.last {
-                    x = newton_step(
+                    let resolved = newton_step(
                         instances, dim, &x, t_next, phase, &mut state, &fired, &primary, &junction,
                     )?;
+                    x = resolved.x;
+                    converged_at = resolved.iterations;
                 }
 
                 // The commit point: a full, fresh evaluation at the accepted `x` and `t`,
                 // whose proposal is the one that actually becomes history.
                 // The accepted step's own discretization, so each `ddt` site commits the rate that
                 // actually holds over the step being recorded.
+                // At `converged_at`, not at 0: this evaluation's proposals become committed
+                // state, so it has to be made by the same model the accepted solution came from
+                // (§ `Solved`).
+                let commit_sim = sim.at_iteration(converged_at, 0.0);
                 let sink = assemble(
                     instances,
                     &x,
@@ -1369,6 +1413,7 @@ pub fn run_with_events(
                         primary.prev_rate_weight,
                         primary.prev2_weight,
                     ),
+                    commit_sim,
                 );
                 state.commit();
                 // Shift the charge history before overwriting it: what was `q_prev` becomes

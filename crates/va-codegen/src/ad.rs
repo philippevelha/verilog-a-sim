@@ -956,6 +956,33 @@ fn eval_call(
             },
             count,
         ),
+        // `$simparam("name")` (LRM 9.18), read from the analysis context. The argument is the
+        // resolved selector, not a value to evaluate -- elaboration already decided that this
+        // name is one this simulator knows, so there is no fallback to consider here.
+        Builtin::SimParam => {
+            let sel = match args.first().map(|&a| ctx.module.expr(a)) {
+                Some(va_ir::Expr::Const(v)) => *v,
+                _ => {
+                    return Err(unsupported(
+                        "`$simparam` must carry its resolved parameter selector as a constant                          (an IR built by hand got this wrong; see `va_ir::Builtin::SimParam`)",
+                    ))
+                }
+            };
+            let Some(p) = va_ir::SimParam::from_selector(sel) else {
+                return Err(unsupported(
+                    "`$simparam` carries a parameter selector no `va_ir::SimParam` uses",
+                ));
+            };
+            let sim = &ctx.analysis.sim;
+            let value = match p {
+                va_ir::SimParam::Gdev => sim.gdev,
+                va_ir::SimParam::Iteration => sim.iteration,
+                va_ir::SimParam::SourceScaleFactor => sim.source_scale_factor,
+                va_ir::SimParam::Abstol => sim.abstol,
+                va_ir::SimParam::Reltol => sim.reltol,
+            };
+            Dual::constant(value, count)
+        }
         // `$mfactor` (LRM 6.3.6), read from the module clone this instance was built from. A
         // number the instantiation fixed, so no gradient and no state -- and deliberately not
         // folded at elaboration, where the instance is not yet known.

@@ -42,7 +42,7 @@ pub mod reference;
 pub mod stamps;
 pub mod state;
 
-pub use analysis::{AnalysisCtx, AnalysisKind, ANALYSIS_DC};
+pub use analysis::{AnalysisCtx, AnalysisKind, SimParams, ANALYSIS_DC};
 pub use events::{CrossDir, CrossSpec, CrossTol, EventSink, FiredEvents};
 pub use instance::{ModelInstance, UnknownKind};
 pub use multiplicity::Multiplied;

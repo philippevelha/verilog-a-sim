@@ -4005,10 +4005,28 @@ noted. Recorded so the next pass does not have to re-derive them.
       hand-written and generated models alike. Gated by
       `an_m_of_three_equals_three_instances_in_parallel`, which compares against three real
       instances rather than against arithmetic.
-- [ ] **`$simparam("gmin", …)` folds to its `default` argument.** Premise "v0 has no
-      simulator-parameter store". Partly expired: `va_core::newton::NewtonConfig` really does
-      hold `gmin`/tolerances, so at least `gmin`, `reltol` and `abstol` have a real value to
-      report. Wiring it needs those values to reach elaboration, which today they do not.
+- [x] **`$simparam(…)` folded to its `default` argument** — premise "v0 has no
+      simulator-parameter store". **Closed 2026-09-07 (v0.9.12).** Answered live from
+      `va_abi::AnalysisCtx::sim` for the five names this engine genuinely has (`gdev`,
+      `iteration`, `sourceScaleFactor`, `abstol`, `reltol`); every other name stays *unknown*,
+      which returns the query's own default or, with no default, is refused per LRM §9.18.
+
+      **Two things this item got wrong when it was written**, both worth keeping:
+
+      1. *"Wiring it needs those values to reach elaboration."* It does not, and doing that would
+         have been the wrong fix. `iteration` changes on every Newton iteration and `gdev` on
+         every homotopy stage, so the answer is a property of the **solve in progress**, not of
+         the module — the same shape `ddt_coeff` has. Elaboration is the wrong boundary; the
+         evaluation is the right one. A `parameter` context still folds to the default, because a
+         parameter is fixed at elaboration by definition and cannot hold a per-iteration value.
+      2. *"At least `gmin` … has a real value to report."* No. The LRM separates `gmin` (a
+         permanent conductance floor across every nonlinear branch) from `gdev` (a homotopy's
+         additional conductance). This engine has only the second. Claiming to know `gmin` and
+         answering `0.0` would be true of the solver and **harmful to models**: 21 corpus
+         occurrences write `$simparam("gmin", 1e-12)` or `("gmin", 0)` and use the fallback to
+         decide how much conductance to add themselves, so "known, and it is zero" would
+         silently strip a shunt those models add for their own conditioning. `gmin` is therefore
+         deliberately *not* a name this simulator claims to know.
 - [ ] **`$limit(access, …)` folds transparently.** The *conclusion* stands — a converged solve
       is a fixed point of the unlimited equations, and the stateless `ModelInstance::load` ABI
       keeps no previous-iteration history. What is genuinely thrown away is narrower: `$limit`'s

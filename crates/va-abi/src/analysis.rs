@@ -84,6 +84,98 @@ impl AnalysisKind {
     }
 }
 
+/// The simulator parameters `$simparam` can report (LRM §9.18, Table 9-27).
+///
+/// # Only what is genuinely known
+///
+/// The LRM's table lists thirteen names and says a simulator shall accept the ones "it
+/// supports". This struct holds the ones this simulator actually has a real answer for; every
+/// other name is **not known**, which `$simparam(name, default)` answers with the model's own
+/// default and `$simparam(name)` answers with an error, exactly as §9.18 specifies.
+///
+/// That restraint is the whole design. Reporting a plausible number for `imax` or `shrink` —
+/// thresholds and scale factors this engine has no concept of and would never honour — would
+/// hand a model a value it then computes with, producing a confidently wrong answer instead of
+/// a diagnosable one. A simulator parameter is a *promise about the solver's behaviour*, and
+/// this project does not make promises it does not keep.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SimParams {
+    /// `gdev` — the additional conductance a conductance-homotopy stage is currently shunting
+    /// across nonlinear branches (1/Ω).
+    ///
+    /// **`0.0` in an ordinary solve**, which is the honest answer rather than a placeholder:
+    /// this engine adds no conductance unless `gmin` stepping is switched on, and during that
+    /// homotopy this is the stage's actual shunt (`va_core::convergence::gmin_for_step`).
+    /// Always `0.0` in transient, where no homotopy runs.
+    ///
+    /// This is **not** the LRM's `gmin`, which is a permanent floor across every nonlinear
+    /// branch. This engine has no such floor, so `$simparam("gmin")` is answered as an *unknown*
+    /// name — see `va_ir::SimParam::from_name` for why that matters more than it sounds.
+    pub gdev: f64,
+    /// `iteration` — the analog solver's iteration number for this evaluation, counting from
+    /// `0` for the first residual assembled at a solve point.
+    ///
+    /// The one parameter in this struct that changes *within* a single timepoint, and the
+    /// reason `$simparam` cannot be answered at elaboration. A model uses it to soften its own
+    /// behaviour on early iterations.
+    pub iteration: f64,
+    /// `sourceScaleFactor` — the multiplicative factor currently applied to independent sources
+    /// by a source-stepping homotopy.
+    ///
+    /// Always `1.0`: this engine has no source stepping, so sources are always at full strength.
+    /// That is a true statement about the solve rather than a stand-in — a model that ramps its
+    /// own behaviour with the source scale is correctly told the sources are not being ramped.
+    pub source_scale_factor: f64,
+    /// `abstol` — the absolute residual tolerance the solve in progress converges to.
+    pub abstol: f64,
+    /// `reltol` — the relative update tolerance the solve in progress converges to.
+    pub reltol: f64,
+}
+
+impl SimParams {
+    /// The parameters of an ordinary solve: no homotopy conductance, first iteration, sources at
+    /// full strength, and the tolerances `va-core`'s `NewtonConfig` defaults to.
+    ///
+    /// The tolerances are duplicated from that default rather than imported, because `va-abi` is
+    /// a leaf crate and must not depend on `va-core` (`CLAUDE.md` §3). A driver that has a real
+    /// config overwrites them with [`SimParams::with_tolerances`]; this is what a caller with no
+    /// config in hand reports, and `newton_config_and_simparams_agree_on_tolerances` is the test
+    /// that keeps the two numbers from drifting apart.
+    pub const fn new() -> Self {
+        SimParams {
+            gdev: 0.0,
+            iteration: 0.0,
+            source_scale_factor: 1.0,
+            abstol: 1e-12,
+            reltol: 1e-9,
+        }
+    }
+
+    /// These parameters with the solve's tolerances substituted.
+    pub const fn with_tolerances(self, abstol: f64, reltol: f64) -> Self {
+        SimParams {
+            abstol,
+            reltol,
+            ..self
+        }
+    }
+
+    /// These parameters at iteration `iteration`, with homotopy conductance `gdev`.
+    pub const fn at_iteration(self, iteration: usize, gdev: f64) -> Self {
+        SimParams {
+            iteration: iteration as f64,
+            gdev,
+            ..self
+        }
+    }
+}
+
+impl Default for SimParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// What the simulator knows about the evaluation a model is being asked for.
 ///
 /// Passed by reference to [`crate::ModelInstance::load`] and
@@ -182,6 +274,13 @@ pub struct AnalysisCtx {
     /// derived rate: the previous rate was itself built under a *different* step ratio, so no
     /// algebraic identity recovers `Q_(n-2)`'s weight from `rate_(n-1)` alone.
     pub ddt_prev2_weight: f64,
+    /// The simulator parameters a model can query with `$simparam` (LRM §9.18, Table 9-27).
+    ///
+    /// Carried here rather than folded at elaboration because that is the boundary where the
+    /// answers are *known*: `iteration` changes on every Newton iteration, `gmin` on every
+    /// homotopy stage, and the tolerances belong to the solve's configuration rather than to
+    /// the module. A module is elaborated once and solved many times, under different configs.
+    pub sim: SimParams,
     /// Small-signal frequency in **hertz** — the `ω/2π` a frequency-dependent model needs to
     /// evaluate its own transfer function.
     ///
@@ -207,6 +306,7 @@ impl AnalysisCtx {
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
             is_final_step: true,
+            sim: SimParams::new(),
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -228,6 +328,7 @@ impl AnalysisCtx {
             // timepoint was the last one once the run has ended, so anything that has not
             // decided yet must say "not final" rather than run end-of-analysis code mid-run.
             is_final_step: false,
+            sim: SimParams::new(),
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -245,6 +346,7 @@ impl AnalysisCtx {
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
             is_final_step: true,
+            sim: SimParams::new(),
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -260,6 +362,7 @@ impl AnalysisCtx {
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
             is_final_step: true,
+            sim: SimParams::new(),
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -307,6 +410,14 @@ impl AnalysisCtx {
             is_initial_step,
             ..self
         }
+    }
+
+    /// This context carrying the simulator parameters `$simparam` reports — see [`SimParams`].
+    ///
+    /// Only a solver driver calls this; every other caller leaves the constructor's defaults,
+    /// which describe an ordinary un-aided solve.
+    pub const fn with_sim(self, sim: SimParams) -> Self {
+        AnalysisCtx { sim, ..self }
     }
 
     /// This context marked as (or as not) the analysis's last evaluation.

@@ -19,6 +19,61 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.12 - 2026-09-07
+-------------------
+`$simparam` is answered for real, and answered **during the solve** rather than at elaboration.
+Closes the second of the remaining expired-premise items ("v0 has no simulator-parameter store").
+
+  The premise expired at the *evaluation* boundary, not at elaboration, and that distinction is
+  the whole design. `iteration` changes on every Newton iteration; `gdev` changes on every
+  homotopy stage; the tolerances belong to the solve's configuration, and one module is solved
+  many times under different configs. So the values ride `va_abi::AnalysisCtx::sim`
+  (`SimParams`, an additive Interface beta change) and are read at load, exactly as `ddt_coeff`
+  is. The roadmap's own note said this would need "those values to reach elaboration" -- that
+  would have been the wrong fix, and is corrected there now.
+
+  A `parameter` context still folds to the stated default, deliberately: a parameter's value is
+  fixed at elaboration by definition and cannot hold a per-iteration quantity.
+  `external/bsim6.0.va`'s `parameter real GMIN = $simparam("gmin", 1.0e-15);` keeps working and
+  keeps meaning what it meant.
+
+  **Five names are known**: `gdev`, `iteration`, `sourceScaleFactor`, `abstol`, `reltol`. Every
+  other name is *unknown*, which is a defined LRM outcome rather than a gap -- it returns the
+  query's own default, or, with no default, is refused (LRM 9.18) with the list of names that
+  would have worked.
+
+  **`gmin` is deliberately NOT one of them, and this is the correction worth reading.** The first
+  cut of this work treated `gmin` and `gdev` as one quantity. The LRM separates them: `gmin` is a
+  permanent conductance floor across every nonlinear branch, `gdev` the additional conductance a
+  homotopy adds. This engine has only the second, and only while gmin stepping is on, which it is
+  not by default. Grepping the corpus decided it rather than argument: **21 occurrences** write
+  `$simparam("gmin", 1e-12)` or `$simparam("gmin", 0)` and use the fallback to decide how much
+  conductance to add themselves. Answering "known, and it is zero" would have been true of the
+  solver and silently stripped the 1e-12 shunt those models add for their own conditioning -- a
+  real change to a circuit, made on a technicality. Leaving the name unknown returns each model
+  its own fallback, which is both what they mean and what they got before.
+
+  **A correctness consequence in the transient loop, not just a plumbing one.** A model may
+  legitimately key its behaviour on the iteration number, so the post-accept evaluation that
+  *commits* state has to be made at the iteration the solve actually converged at -- committing
+  at 0 would write history from a different model than the one that produced the accepted
+  solution. `newton_step` therefore returns a `Solved { x, iterations }` and the commit and
+  final-step-probe assembles use it. This is the `StateBuffers` commit-matches-solve invariant,
+  extended to a channel that did not exist when it was written.
+
+  Gated by `simparam_iteration_advances_during_a_transient_solve`, whose model is a 1 Ohm
+  resistor on iteration 0 and a 1 kOhm one thereafter, so a frozen iteration number lands on an
+  RC time constant 1000x wrong. Checked that it discriminates by freezing the number and watching
+  it fail, not by assuming. Also `newton_config_and_simparams_agree_on_tolerances`, which pins
+  the tolerance constants `va-abi` must duplicate (it is a leaf crate and cannot depend on
+  `va-core`) to `NewtonConfig`'s.
+
+  No behaviour change anywhere it is not used: `cargo xtask validate` is byte-identical across
+  all 27 gates against the previous commit, and the corpus is steady at 113/132.
+
+  752 tests, 27/27 golden circuits, corpus 113/132 (95/99 self-contained), clippy and fmt clean.
+
+
 0.9.11 - 2026-09-07
 -------------------
 Instance multiplicity: a deck line's `m=` now means something, and `$mfactor` reports it. Closes
@@ -445,5 +500,5 @@ Tracked in docs/roadmap.md; listed here so the release log is self-contained.
       release entry, which no entry yet does.
 
   [ ] Close the remaining expired-premise items. $mfactor from a deck's `m=` is **done**
-      (0.9.11). Left: $simparam against the real NewtonConfig values, and $limit's
-      model-declared junctions. See roadmap "Expired premises: a standing review".
+      (0.9.11) and $simparam is **done** (0.9.12). Left: $limit's model-declared
+      junctions. See roadmap "Expired premises: a standing review".
