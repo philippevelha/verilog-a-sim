@@ -19,6 +19,55 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.9 - 2026-09-07
+------------------
+Closes a hole 0.9.8 opened, and corrects a claim 0.9.8 made. **0.9.8's entry said compound
+triggers "remain refused". They did not.** A trigger naming a step-scoped event that was not
+exactly `@(initial_step)`/`@(final_step)` fell straight through to the discard path and ran its
+body at every timepoint -- the same wrong-answer-not-missing-feature defect 0.9.1 was written to
+remove. Verified before fixing, not assumed: `@(initial_step or final_step)`,
+`@(final_step("tran"))` and `@(initial_step("dc"))` all compiled to an unguarded body.
+
+  Worse, 0.9.8 *caused* half of it. `va-cli`'s transient gate matched on the trigger's **name**,
+  so `@(final_step("tran"))` and `@(final_step or ...)` had been refused in transient purely as
+  a side effect of `final_step` being on that list. Removing the name -- correct for the bare
+  form, which is now implemented -- silently reopened the other forms. The `@(initial_step ...)`
+  forms had never been covered by anything.
+
+  The rule this earns, and the reason it is in the log rather than only in the code: **when a
+  construct graduates from refused to implemented, check the refusals keyed on its name, not
+  just the ones keyed on its behaviour.** 0.9.3 recorded the behaviour-keyed version of this
+  trap ("check what else was riding on that refusal") and it recurred anyway, one layer down.
+
+  What now happens, with no path left that discards a step event:
+
+    - `@(initial_step or final_step)` **composes** into `if (initial_step() || final_step())`.
+      That is what an event trigger list means, and it is sound here only because both halves
+      are solver knowledge answerable at any evaluation. A list mixing in a scheduled event
+      (`initial_step or cross(...)`) is still refused -- that is real trigger-list composition
+      and needs the fired flag to reach the composed condition.
+    - The **analysis-filter** form is refused at parse time, not analysis-gated. A filter says
+      "not in this analysis", so discarding it runs the body precisely where the model excluded
+      it: wrong in every analysis, which is the project's own test for which tier a refusal
+      belongs in.
+    - Anything else naming a step event is refused with a message saying which forms are honoured.
+
+  **A limitation this work surfaced rather than introduced, now stated where it will be read.**
+  `is_initial_step` is set on exactly one transient evaluation -- the seed assemble at `tstart`,
+  which establishes state history and is never *solved*, `x0` being the caller's initial
+  condition. So an `@(initial_step)` body influences committed state (the reason the flag was
+  added, 2026-08-06) but changes no recorded point. `@(final_step)` is asymmetric with it as of
+  0.9.8, its timepoint being re-solved. Making them symmetric means re-solving the run's first
+  accepted timepoint, which changes what a supplied initial condition means -- deliberately not
+  done here, and recorded in the roadmap rather than left for someone to rediscover.
+
+  Corpus cost: none. The one occurrence in the corpus (`external/hisim2.va`'s
+  `@(final_step("tran"))`) sits inside a ``ifdef` block that is not enabled, so it never
+  reaches the parser; 113/132 either way.
+
+  737 tests, 27/27 golden circuits, corpus 113/132 (95/99 self-contained), clippy and fmt clean.
+
+
 0.9.8 — 2026-09-07
 ------------------
 `@(final_step)` works, and stops being refused in transient. It is `initial_step`'s mirror in
@@ -44,9 +93,12 @@ only after the run has ended.
   `is_final_step` is `true` in DC, AC and noise, so a *swept* DC runs the body at every point.
   That is the rule `is_initial_step` already follows -- each point is its own static solve, not
   a step within one -- and it is a stated limitation rather than the LRM's reading of a sweep.
-  Two further limits: bare form only (a compound `initial_step or final_step` is still refused),
-  and a run with no accepted step (`tstop <= tstart`) reports no final step, its only point
-  being the unsolved seed.
+  Two further limits: bare form only, and a run with no accepted step (`tstop <= tstart`)
+  reports no final step, its only point being the unsolved seed.
+
+  [Corrected in 0.9.9: this entry originally said a compound `initial_step or final_step` was
+  "still refused". It was not -- it was discarded, and its body ran at every timepoint. See
+  0.9.9's entry, which closes that and the analysis-filter form with it.]
 
   `va-cli`'s transient refusal of `@(final_step)` is gone with the reason for it;
   `initial_instance`/`initial_model` are the last two triggers still discarded and still

@@ -4037,8 +4037,9 @@ through Interface β's event channel, the integrator detects/schedules the event
 the body runs at that timepoint with the solution re-solved so its effect is real. `above`
 additionally fires in a **static** solve, which needed the DC path to grow events of its own;
 `final_step` needed no event channel at all, being solver knowledge like `initial_step`, but did
-need the integrator to re-solve the timepoint that ends the run. `absdelta` and compound triggers
-remain refused.
+need the integrator to re-solve the timepoint that ends the run. An `or` list of the two
+step-scoped events composes (v0.9.9); `absdelta` and every other compound trigger remain
+refused.
 
 Slot numbering is one flat space across event kinds (`va_ir::Module::event_sites`, unified from
 the `cross`-only list in v0.9.4), precisely so the consumer's fired-flag buffer has a single
@@ -4096,14 +4097,14 @@ the right times, gated by a test that fails if it runs at the wrong ones.
 
 | Event | Lexed | Parsed | Scheduled | What it still needs |
 |---|:--:|:--:|:--:|---|
-| `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial:** the optional `(analysis_list)` filter is not honoured, and a compound `initial_step or …` is not parsed. |
-| `final_step` | yes | ✅ | ✅ | **Implemented 2026-09-07 (v0.9.8)**, bare form only. Not an event-channel construct at all: like `initial_step` it is solver knowledge, so it desugars to `Builtin::FinalStep` reading the new `AnalysisCtx::is_final_step` (§6 change, additive). `true` in every static analysis — so a *swept* DC runs the body at every point, the rule `initial_step` already follows. In transient the integrator re-solves the last accepted timepoint with the flag set, so a body writing a variable that feeds a contribution has its effect in the point recorded. The re-solve is **probed**: two assembles say whether anything reads the flag, and a model that does not leaves every run bit-identical (measured — all 27 gates reproduce their previous numbers exactly). A run with no accepted step (`tstop <= tstart`) reports no final step. |
+| `initial_step` | yes | yes | yes | Desugars to `Builtin::InitialStep` (2026-08-06). **Partial, and the partiality changed shape on 2026-09-07 (v0.9.9):** the optional `(analysis_list)` filter is now **refused** rather than silently dropped (dropping it ran the body in analyses the model excluded — wrong everywhere, not merely unimplemented), and `initial_step or final_step` composes. **Separate limitation, older and easier to miss:** `is_initial_step` is set on exactly one transient evaluation — the seed assemble at `tstart`, which is never *solved* — so an `@(initial_step)` body influences committed state but changes no recorded point. `final_step` is asymmetric here because its timepoint *is* re-solved; making the two symmetric would mean re-solving the first accepted timepoint, which changes what a supplied initial condition means, and is deliberately not done. |
+| `final_step` | yes | ✅ | ✅ | **Implemented 2026-09-07 (v0.9.8)**, bare form only. Not an event-channel construct at all: like `initial_step` it is solver knowledge, so it desugars to `Builtin::FinalStep` reading the new `AnalysisCtx::is_final_step` (§6 change, additive). `true` in every static analysis — so a *swept* DC runs the body at every point, the rule `initial_step` already follows. In transient the integrator re-solves the last accepted timepoint with the flag set, so a body writing a variable that feeds a contribution has its effect in the point recorded. The re-solve is **probed**: two assembles say whether anything reads the flag, and a model that does not leaves every run bit-identical (measured — all 27 gates reproduce their previous numbers exactly). A run with no accepted step (`tstop <= tstart`) reports no final step. **Corrected 2026-09-07 (v0.9.9):** v0.9.8 claimed compound triggers stayed refused; they did not — a compound naming a step event fell through to the discard path and ran its body at every timepoint, and dropping `final_step` from `va-cli`'s gate had removed the analysis-gated refusal that used to cover `@(final_step("tran"))` and `@(final_step or …)`. Both are closed: an `or` list of step events composes, everything else naming one is refused at parse time. |
 | `cross(expr[, dir[, time_tol[, expr_tol]]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.3)**, bare form only — a compound `initial_step or cross(...)` is still refused. Body runs at the accepted timepoint ending the bracketing step, not at the interpolated crossing time; All five LRM arguments honoured as of v0.9.6, tolerances included. Was: | Interface β's event channel now carries the registration (v0.9.2) and `va-transient` detects and times the crossing. What remains is codegen emitting it from a `cross(...)` site, and the notification input the body needs. Was: `EventQueue::push_watch` + `CrossingWatch` + `run_with_events`'s sign-change interpolation already exist. Needs a **model to scheduler channel** (below), plus direction and tolerance handling. Today's interpolation is not a re-solve at the crossing — an honest simplification already documented in `events.rs`. |
 | `timer(start[, period[, tol]])` | yes | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.4)**, bare form only. The model re-registers its next occurrence at each accepted timepoint through `EventSink::timer(slot, next)`, so it stays stateless about its own schedule; the integrator lands on it exactly and fires the slot. An occurrence falling on the run's *initial* timepoint is not delivered — that point is a seed, not a solved step. Was: Needs the same channel, plus periodic re-arming. |
 | `above(expr[, tol…])` | ✅ | ✅ | ✅ | **Implemented 2026-09-06 (v0.9.7)**, bare form only. *Not* merely a one-sided `cross`: it also fires during **initialization and DC**, which is the whole reason the LRM defines it — a signal already past the threshold never crosses it, so a `cross` on it never fires at all. `above`/`absdelta` were also added to `RESERVED_WORDS`, where Table B.1 has them and this lexer did not. |
 | `absdelta(expr, delta[, tol…])` | no | **refused** | no | Refused by name in a trigger; not reserved (LRM §5.10.4). Needs a per-step delta watch, which the queue has no shape for yet. |
 | `last_crossing(expr, dir)` | yes | no | no | A *function*, not an event — returns the time of the last crossing. Needs crossing history, so it follows `cross`. |
-| event `or` (`@(a or b)`) | n/a | no | no | Trigger-list composition; needed before any compound trigger works. |
+| event `or` (`@(a or b)`) | n/a | **partial** | **partial** | **Step-scoped events only, 2026-09-07 (v0.9.9)**: `@(initial_step or final_step)` composes into a `||` chain, which is sound because both halves are solver knowledge answerable at any evaluation. A list mixing in a *scheduled* event (`initial_step or cross(...)`) is still refused — that needs the fired-flag notification to reach the composed condition, which is real trigger-list composition. |
 | `@(posedge …)`, named events, `->` | n/a | n/a | n/a | **Out of scope by design** — digital-domain, excluded by LRM Annex C, per `CLAUDE.md` §1. Not a gap. |
 
 ### The one piece of shared plumbing all of them need
@@ -4148,7 +4149,15 @@ Sequencing that follows from the table:
    needing no event channel: it is `initial_step`'s mirror, and the whole of the work was on the
    consumer side, where a driver knows its first evaluation in advance and its last one only in
    retrospect.
-8. `last_crossing`, then `absdelta`.
+8. ~~Close the compound/filter holes `final_step` exposed~~ — **done 2026-09-07** (v0.9.9).
+   Implementing a construct moved it off one refusal path and, exactly as the `cross` trap
+   above predicted, something else was riding on that path: `@(final_step("tran"))` and
+   `@(final_step or …)` had been covered by `va-cli`'s analysis gate purely because the gate
+   matched on the *name*, and removing the name reopened the discard-and-run-unconditionally
+   hole. `@(initial_step …)` had never been covered at all. **The trap generalises: when a
+   construct graduates, check the refusals keyed on its name, not just the ones keyed on its
+   behaviour.**
+9. `last_crossing`, then `absdelta`.
 
 ---
 

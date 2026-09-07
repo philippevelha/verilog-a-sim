@@ -220,6 +220,12 @@ struct Parser<'a> {
     pending_items: Vec<Item>,
 }
 
+/// The **step-scoped** global events of LRM §5.10.3 — the two `@(...)` triggers this parser
+/// answers from solver knowledge rather than by scheduling anything. Shared by
+/// [`Parser::step_event_list`] and [`Parser::step_event_in_trigger`] so the set they recognise
+/// and the set they refuse can never drift apart.
+const STEP_EVENTS: [&str; 2] = ["initial_step", "final_step"];
+
 impl Parser<'_> {
     // --- cursor helpers --------------------------------------------------------------
 
@@ -269,27 +275,70 @@ impl Parser<'_> {
 
     /// Consume tokens through the `)` matching an already-consumed `(`, honouring nesting.
     /// Used to skip the contents of an `@(...)` event expression.
-    /// Which **step-scoped** global event the trigger starting at the current position (just
-    /// past its `(`) names, if it is exactly that and nothing else — without consuming anything.
+    /// The **step-scoped** global events the trigger starting at the current position (just past
+    /// its `(`) is composed of, if it is composed of nothing else — without consuming anything.
     ///
-    /// The two the LRM defines (§5.10.3) are `initial_step` and `final_step`, and they desugar
-    /// identically: a synthetic zero-argument call of the same name, which elaboration lowers to
+    /// The two the LRM defines (§5.10.3) are `initial_step` and `final_step`. Both desugar to a
+    /// synthetic zero-argument call of the same name, which elaboration lowers to
     /// `va_ir::Builtin::InitialStep`/`FinalStep` and every downstream control-flow walk then
-    /// treats as an ordinary `if` condition. The returned name *is* the synthetic call's name.
+    /// treats as an ordinary `if` condition; the returned names *are* those calls' names.
     ///
-    /// Deliberately narrow: only the bare trigger, not `initial_step or cross(...)`. A compound
-    /// trigger means "run at the initial step *and* at these other events", and answering it
-    /// with the initial-step arm alone would silently drop the rest — a wrong answer dressed as
-    /// support. Those keep the old run-unconditionally treatment until real event scheduling
-    /// exists.
-    fn trigger_names_step_event(&self) -> Option<&'static str> {
-        const STEP_EVENTS: [&str; 2] = ["initial_step", "final_step"];
-        match (self.toks.get(self.pos), self.toks.get(self.pos + 1)) {
-            (Some(Token::Keyword(kw)), Some(Token::RParen)) => {
-                STEP_EVENTS.iter().copied().find(|e| *e == kw.as_str())
-            }
+    /// A list of them joined by `or` composes into a `||` chain. That is exactly what an event
+    /// trigger list means — "run when any of these fires" — and it is sound *here* only because
+    /// both halves are answerable at any evaluation, being solver knowledge rather than
+    /// scheduled events. It is not sound for an `initial_step or cross(...)`, where one half is
+    /// a scheduled event this parser must refuse rather than half-answer.
+    ///
+    /// Returns `None` for every other form, including the **analysis-filter**
+    /// `initial_step("dc")`, which [`Parser::parse_stmt`] then refuses.
+    fn step_event_list(&self) -> Option<Vec<&'static str>> {
+        let step_event = |i: usize| match self.toks.get(i) {
+            Some(Token::Keyword(kw)) => STEP_EVENTS.iter().copied().find(|e| *e == kw.as_str()),
             _ => None,
+        };
+        let mut names = vec![step_event(self.pos)?];
+        let mut i = self.pos + 1;
+        loop {
+            match self.toks.get(i) {
+                Some(Token::RParen) => return Some(names),
+                Some(Token::Keyword(kw)) if kw.as_str() == "or" => {
+                    names.push(step_event(i + 1)?);
+                    i += 2;
+                }
+                _ => return None,
+            }
         }
+    }
+
+    /// The step-scoped event named anywhere in the `@(...)` trigger starting at `self.pos`, if
+    /// any — the counterpart of [`Parser::monitored_event_in_trigger`], and there for the same
+    /// purpose: to refuse a trigger this parser cannot honour instead of discarding it.
+    ///
+    /// Consulted only after [`Parser::step_event_list`] has declined, so everything it catches is
+    /// a form that is genuinely unsupported: an analysis filter, or a step event compounded with
+    /// a trigger this engine cannot schedule.
+    fn step_event_in_trigger(&self) -> Option<&'static str> {
+        let mut depth = 1usize;
+        let mut i = self.pos;
+        while let Some(tok) = self.toks.get(i) {
+            match tok {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return None;
+                    }
+                }
+                Token::Keyword(kw) => {
+                    if let Some(found) = STEP_EVENTS.iter().find(|e| **e == kw.as_str()) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
     }
 
     /// The **monitored** event named anywhere in the `@(...)` trigger starting at `self.pos`,
@@ -314,6 +363,7 @@ impl Parser<'_> {
     /// are. Both spellings are matched.
     fn monitored_event_in_trigger(&self) -> Option<&'static str> {
         const MONITORED: [&str; 4] = ["cross", "above", "timer", "absdelta"];
+
         let mut depth = 1usize;
         let mut i = self.pos;
         while let Some(tok) = self.toks.get(i) {
@@ -1619,14 +1669,42 @@ impl Parser<'_> {
                          `docs/roadmap.md`, section \"Analog events\"."
                     ));
                 }
-                let step_event = self.trigger_names_step_event();
+                let step_events = self.step_event_list();
+                // A step event written in a form this parser cannot honour: an analysis filter,
+                // or a compound with a trigger nothing here can schedule. Refused rather than
+                // discarded, on exactly the reasoning the monitored events above use --
+                // discarding runs the body unconditionally, which is a *wrong answer* rather
+                // than a missing feature. The analysis filter is the sharp case: it says "not in
+                // this analysis", so discarding it runs the body precisely where the model
+                // excluded it, and it is wrong in every analysis rather than only in transient.
+                if step_events.is_none() {
+                    if let Some(event) = self.step_event_in_trigger() {
+                        return self.err(format!(
+                            "this form of `@({event} ...)` is not supported: only the bare \
+                             `@({event})`, and an `or` list of bare `initial_step`/`final_step`, \
+                             are honoured. An analysis filter and a compound with an \
+                             unschedulable trigger are both refused, because discarding either \
+                             would run the body at every solve point instead of when the event \
+                             fires - a wrong answer rather than a missing feature. See \
+                             `docs/roadmap.md`, section \"Analog events\"."
+                        ));
+                    }
+                }
                 self.skip_balanced_parens()?;
                 let body = self.parse_stmt()?;
-                if let Some(name) = step_event {
-                    let cond = self.push(ExprAst::Call {
-                        name: name.to_string(),
+                if let Some(names) = step_events {
+                    // `@(a or b)` composes into `if (a() || b())` -- see `step_event_list`.
+                    let mut cond = self.push(ExprAst::Call {
+                        name: names[0].to_string(),
                         args: Vec::new(),
                     });
+                    for name in &names[1..] {
+                        let rhs = self.push(ExprAst::Call {
+                            name: (*name).to_string(),
+                            args: Vec::new(),
+                        });
+                        cond = self.push(ExprAst::Binary(BinOp::Or, cond, rhs));
+                    }
                     Ok(Stmt::If {
                         cond,
                         then_: vec![body],
@@ -3300,6 +3378,73 @@ mod tests {
                 assert!(else_.is_empty());
             }
             other => panic!("expected a guarded `if`, got {other:?}"),
+        }
+    }
+
+    /// An `or` list of step-scoped events composes into a `||` chain rather than being
+    /// discarded. Both halves are answerable at any evaluation, so the disjunction *is* the
+    /// trigger list's meaning — unlike a compound with a scheduled event, which is refused.
+    #[test]
+    fn an_or_list_of_step_events_composes() {
+        for src in [
+            "module t(a, b); electrical a, b; analog begin @(initial_step or final_step) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); electrical a, b; analog begin @(final_step or initial_step) x = 1.0; I(a, b) <+ x; end endmodule",
+        ] {
+            let m = parse_src(src);
+            let body = analog_body(&m);
+            match &body[0] {
+                Stmt::If { cond, then_, .. } => {
+                    let ExprAst::Binary(BinOp::Or, lhs, rhs) = m.expr(*cond) else {
+                        panic!("expected a `||` of the two triggers, got {:?}", m.expr(*cond));
+                    };
+                    let name = |r: &ExprRef| match m.expr(*r) {
+                        ExprAst::Call { name, args } if args.is_empty() => name.clone(),
+                        other => panic!("expected a bare step-event call, got {other:?}"),
+                    };
+                    let mut names = [name(lhs), name(rhs)];
+                    names.sort();
+                    assert_eq!(names, ["final_step", "initial_step"]);
+                    assert!(matches!(then_[0], Stmt::Assign { .. }));
+                }
+                other => panic!("expected a guarded `if`, got {other:?}"),
+            }
+        }
+    }
+
+    /// The **analysis-filter** form is refused, not discarded. This is the sharpest case in the
+    /// family: `@(final_step("tran"))` says "not outside transient", so discarding the trigger
+    /// runs the body precisely in the analyses the model excluded — wrong everywhere, which is
+    /// why it is a parse error rather than `va-cli`'s analysis-gated refusal.
+    ///
+    /// `external/hisim2.va` writes exactly this, so the refusal has a real reader.
+    #[test]
+    fn a_step_event_with_an_analysis_filter_is_refused() {
+        for (trigger, event) in [
+            ("final_step(\"tran\")", "final_step"),
+            ("initial_step(\"dc\")", "initial_step"),
+        ] {
+            let err = parse_err(&format!(
+                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+            ));
+            assert!(err.contains(event), "names the trigger: {err}");
+            assert!(err.contains("not supported"), "and refuses it: {err}");
+        }
+    }
+
+    /// A step event compounded with a trigger this engine cannot schedule is refused too —
+    /// honouring the step half alone would silently drop the other, which is the 0.9.1 defect.
+    /// The `cross` case is caught earlier, by `monitored_event_in_trigger`; `initial_model` has
+    /// no monitored half and would otherwise have fallen straight through to the discard path.
+    #[test]
+    fn a_step_event_compounded_with_an_unschedulable_trigger_is_refused() {
+        for trigger in [
+            "initial_step or initial_model",
+            "final_step or initial_instance",
+        ] {
+            let err = parse_err(&format!(
+                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+            ));
+            assert!(err.contains("not supported"), "{trigger}: {err}");
         }
     }
 

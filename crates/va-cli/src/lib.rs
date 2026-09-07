@@ -3943,6 +3943,68 @@ X1 a gnd fst
         );
     }
 
+    /// `@(initial_step or final_step)` runs its body at the end of a transient run and at no
+    /// interior timepoint.
+    ///
+    /// This is the case that exposed the hole 0.9.8 left: before 0.9.9 a compound step trigger
+    /// was silently discarded and its body ran at every timepoint, which the middle assertion
+    /// below catches.
+    ///
+    /// **The asymmetry this test documents, which predates the compound form.** Only the
+    /// `final_step` half is visible in the waveform. `is_initial_step` is set on exactly one
+    /// evaluation — the seed assemble at `tstart`, whose job is to establish state history — and
+    /// that evaluation is never *solved*: `x0` is the caller's initial condition, not a Newton
+    /// result. So an `@(initial_step)` body that writes a variable feeding a contribution
+    /// influences committed state (which is what the flag was added for, in 2026-08-06's state
+    /// channel) but changes no recorded point. `final_step` is re-solved and therefore does.
+    /// Making the two symmetric would mean re-solving the run's first accepted timepoint as
+    /// well, which changes the meaning of a supplied initial condition — a deliberate
+    /// non-decision here, recorded in `docs/roadmap.md`'s events section.
+    #[test]
+    fn an_or_list_of_step_events_does_not_fire_at_every_timepoint() {
+        const SRC: &str = "
+module bts(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(initial_step or final_step) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 4
+X1 a gnd bts
+.tran 10u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let branch = net.node_order.len();
+        let current = |row: &Vec<f64>| row[branch].abs();
+        assert!(wf.x.len() > 10, "expected a real run, got {}", wf.x.len());
+        // Row 0 is the cold-start seed, not a solved step (see this test's doc comment for why
+        // the `initial_step` half leaves no mark on it either). Rows 1..n-1 are interior
+        // accepted timepoints, where neither half of the trigger fires.
+        for (t, row) in wf.t.iter().zip(&wf.x).skip(1).take(wf.x.len() - 2) {
+            assert!(
+                (current(row) - 4e-3).abs() < 1e-9,
+                "neither half fires at t = {t:e}: |I(V1)| = {:e}",
+                current(row)
+            );
+        }
+        let last = current(wf.x.last().expect("a last point"));
+        assert!(
+            (last - 4.0).abs() < 1e-6,
+            "the final-step half must fire at tstop: |I(V1)| = {last:e}"
+        );
+    }
+
     /// The same model in a **static** solve runs the body: a single operating point is both the
     /// analysis's first step and its last, which is why `AnalysisCtx::is_final_step` is `true`
     /// in DC/AC/noise. This is also what the old analysis-gated refusal in `va-cli` protected —
