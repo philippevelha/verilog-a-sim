@@ -124,16 +124,22 @@ fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
     if found.is_empty() {
         return Ok(());
     }
-    bail!(
-        "this engine does not evaluate the following in a transient run:\n  - {}\n\n  \
-         A `.tran` result would be a plausible waveform that is simply wrong, so it is \
-         refused rather than printed.\n\n  \
-         DC (`.op`/`.dc`), AC (`--ac`) and noise (`--noise`) are unaffected: these \
-         constructs are correct in a static solve - an operator settles to exactly this \
-         value, and a single solve point is both the first and the last step.\n\n  \
-         Tracking: `docs/proposals/absdelay.md` stage 2.",
-        found.join("\n  - ")
-    );
+    // Raised as a `Refusal` rather than a bare `bail!`, so this - the one refusal that is about
+    // a whole model in a given analysis rather than about a construct the frontend can point at
+    // - reaches the user in the same labelled, greppable shape as every other (§ `report_refusal`).
+    Err(anyhow::Error::new(
+        va_frontend::Refusal::new(
+            found.join("\n"),
+            "a `.tran` result would be a plausible waveform that is simply wrong, so it is \
+             refused rather than printed",
+        )
+        .instead(
+            "run this model as DC (`.op`/`.dc`), AC (`--ac`) or noise (`--noise`), which are \
+             unaffected: these constructs are correct in a static solve - an operator settles \
+             to exactly this value, and a single solve point is both the first and the last step",
+        )
+        .tracking("docs/proposals/absdelay.md stage 2"),
+    ))
 }
 
 /// Step-scoped `@(...)` triggers `src` uses, in table order, each named once.
@@ -357,6 +363,93 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
     );
     warn_unplaceable_modules(&modules, path);
     Ok(modules)
+}
+
+/// Print a refusal's labelled fields under a `check` verdict line, on stdout with the rest of
+/// the listing, skipping the `refused:` line the verdict already carries.
+///
+/// Shared by every stage of the listing that can produce one, so `check`'s output does not
+/// explain a frontend refusal and leave a codegen refusal as a bare sentence.
+fn print_refusal_detail(err: &anyhow::Error) {
+    if let Some(block) = refusal_block(err) {
+        for line in block.lines().skip(1) {
+            println!("        {line}");
+        }
+    }
+}
+
+/// The one-line verdict for `e` in a `check` listing: a refusal's marker line alone, or the
+/// whole error otherwise.
+///
+/// A refusal's full block is printed separately by [`report_refusal`]; repeating all five of its
+/// lines inside the per-file verdict would bury the listing that makes `check` readable over a
+/// 130-file corpus.
+fn refusal_headline(e: &va_frontend::FrontendError) -> String {
+    match e {
+        va_frontend::FrontendError::Refused(r) => {
+            format!("refused: {}", r.what)
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Print every refusal carried in `err`'s cause chain, and say whether one was found.
+///
+/// A **refusal** is this project's name for a construct the implementation recognises and
+/// deliberately declines to support, as opposed to malformed input or a numerical failure. The
+/// distinction is the first thing someone debugging a failed run needs — "my model is wrong"
+/// and "this simulator will not run my correct model" call for completely different next steps —
+/// and before this existed the two were indistinguishable in the output: a frontend refusal
+/// arrived labelled `parse error` with a debug-formatted token appended, reading exactly like a
+/// syntax error in a construct the user had spelled correctly.
+///
+/// Every refusal therefore reaches the user in **one shape, from whichever layer raised it**,
+/// opening with a greppable `refused:` marker and carrying what / where / why / instead /
+/// tracking. `va-frontend` supplies those as fields ([`va_frontend::Refusal`]);
+/// [`va_codegen::CodegenError::Unsupported`] states its reason inline in the message instead, so
+/// its `why` line says where to read it rather than inventing a second one.
+///
+/// Returns `false` if `err` is an ordinary error, which is the caller's cue to report it the
+/// usual way — this function never prints anything for a non-refusal.
+pub fn report_refusal(err: &anyhow::Error) -> bool {
+    match refusal_block(err) {
+        Some(block) => {
+            for line in block.lines() {
+                eprintln!("[va-cli] {line}");
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// The formatted refusal carried anywhere in `err`'s cause chain, or `None` for an ordinary
+/// error — the shared half of [`report_refusal`], so a caller writing to stdout (`check`'s
+/// per-file listing) emits the identical block rather than a second rendering of it.
+///
+/// Walks the whole chain, not just the head: `compile_model_path` wraps a refusal in a
+/// `parsing <path>` context, and the refusal is what the reader needs to see.
+pub fn refusal_block(err: &anyhow::Error) -> Option<String> {
+    for cause in err.chain() {
+        if let Some(va_frontend::FrontendError::Refused(r)) = cause.downcast_ref() {
+            return Some(r.to_string());
+        }
+        // A `Refusal` raised directly, not wrapped in a `FrontendError` — see
+        // `refuse_transient_approximations`.
+        if let Some(r) = cause.downcast_ref::<va_frontend::Refusal>() {
+            return Some(r.to_string());
+        }
+        if let Some(va_codegen::CodegenError::Unsupported(msg)) = cause.downcast_ref() {
+            return Some(format!(
+                "refused: {msg}\n  why:      stated above - `va-codegen` recognises this \
+                 construct but cannot lower it into a differentiable model instance, and an \
+                 instance with a wrong Jacobian would converge to a wrong answer rather than \
+                 fail\n  tracking: docs/roadmap.md, and `docs/token-reference.md` for this \
+                 construct's status"
+            ));
+        }
+    }
+    None
 }
 
 /// Warn about each compiled module that declares no ports, and so can never be placed by a
@@ -797,7 +890,20 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
             skipped_includes,
         }),
         Err(e) => {
-            println!("  [parse] {path}: {e}{}", skipped_clause(&skipped_includes));
+            // A refusal gets its full labelled block as well as the one-line verdict, **on
+            // stdout with the rest of the listing**: a scan over a model library is exactly the
+            // case where "which constructs did this simulator decline, and why" has to survive
+            // being redirected to a file, and splitting the verdict from its reason across two
+            // streams is how that gets lost.
+            println!(
+                "  [parse] {path}: {}{}",
+                refusal_headline(&e),
+                skipped_clause(&skipped_includes)
+            );
+            // The block's own `refused: <what>` line is skipped -- the verdict above already
+            // carries it, and repeating it pushes the `why` a line further from the file name
+            // it belongs to.
+            print_refusal_detail(&anyhow::Error::new(e));
             Err(skipped_includes)
         }
     }
@@ -924,6 +1030,7 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
                                 m.name,
                                 skipped_clause(&skipped)
                             );
+                            print_refusal_detail(&anyhow::Error::new(e));
                             all_ok = false;
                             continue;
                         }
@@ -3940,6 +4047,88 @@ X1 a gnd fst
         assert!(
             (last - 4.0).abs() < 1e-6,
             "the body must run at tstop, and its effect must be solved for: |I(V1)| = {last:e}"
+        );
+    }
+
+    /// **Every refusal, from every layer, reaches the user saying what was refused and why.**
+    ///
+    /// The standing requirement this locks in: a refusal is a construct the implementation
+    /// recognises and declines, and a user who hits one needs to be told which construct and
+    /// what would have gone wrong — otherwise the only way to find out is to read this source.
+    /// The three layers that can refuse are checked together here on purpose, because the
+    /// failure mode is one of them drifting into a bare sentence while the others stay
+    /// labelled, and no per-layer test would notice that.
+    #[test]
+    fn every_refusal_says_what_was_refused_and_why() {
+        // 1. `va-frontend` — a construct refused at parse time.
+        let frontend = va_frontend::compile(
+            "module f(p, n); inout p, n; electrical p, n; real k;
+             analog begin @(final_step(\"tran\")) k = 1.0; I(p, n) <+ V(p, n); end endmodule",
+        )
+        .err()
+        .expect("an analysis-filtered trigger is refused");
+        // 2. `va-codegen` — a construct that elaborates but cannot be lowered.
+        let design = va_frontend::compile(
+            "module c(p, n); inout p, n; electrical p, n;
+             analog begin I(p, n) <+ 1.0 / (1.0 + absdelay(V(p, n), 1u)); end endmodule",
+        )
+        .expect("this one elaborates; codegen is what refuses it");
+        let terminals: Vec<usize> = (0..design.modules[0].nodes.len()).collect();
+        let mut next = terminals.len();
+        let codegen = va_codegen::build_instance(&design.modules[0], &terminals, &mut next)
+            .err()
+            .expect("a buried absdelay is refused");
+        // 3. `va-cli` — a whole model refused in one analysis.
+        let cli = refuse_transient_approximations(&[(
+            "m.va".to_string(),
+            "module m(p, n); inout p, n; electrical p, n;
+             analog I(p, n) <+ absdelay(V(p, n), 1u); endmodule"
+                .to_string(),
+        )])
+        .expect_err("absdelay folds in transient");
+
+        for (layer, err) in [
+            ("va-frontend", anyhow::Error::new(frontend)),
+            ("va-codegen", anyhow::Error::new(codegen)),
+            ("va-cli", cli),
+        ] {
+            let block = refusal_block(&err)
+                .unwrap_or_else(|| panic!("{layer}: a refusal must be recognised as one: {err:#}"));
+            assert!(
+                block.starts_with("refused: "),
+                "{layer}: must open with the greppable marker: {block}"
+            );
+            assert!(
+                block.contains("why:"),
+                "{layer}: must say why, not just what: {block}"
+            );
+            assert!(
+                block.contains("tracking:"),
+                "{layer}: must point at where the limitation is tracked: {block}"
+            );
+            // The `what` has to name something the user actually wrote. Each of the three
+            // sources above is about `absdelay` or `final_step`; a message naming neither would
+            // be the `laplace_*`-for-an-`absdelay` defect that prompted this.
+            let names_the_construct = block.contains("absdelay") || block.contains("final_step");
+            assert!(
+                names_the_construct,
+                "{layer}: must name the construct the user wrote: {block}"
+            );
+        }
+    }
+
+    /// A refusal is **not** reported as an ordinary error, and an ordinary error is not reported
+    /// as a refusal — the distinction `report_refusal` exists to draw.
+    #[test]
+    fn an_ordinary_error_is_not_mistaken_for_a_refusal() {
+        // A genuine syntax error: malformed source, not a recognised-and-declined construct.
+        let malformed = va_frontend::compile("module m(a, b); electrical a b; endmodule")
+            .err()
+            .expect("this does not parse");
+        assert!(
+            refusal_block(&anyhow::Error::new(malformed)).is_none(),
+            "a parse error is not a refusal: telling a user their correct model was declined, \
+             when in fact they mistyped, sends them in exactly the wrong direction"
         );
     }
 

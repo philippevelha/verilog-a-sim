@@ -12,7 +12,26 @@
 use anyhow::{bail, Context, Result};
 use va_cli::{check_models, run_sim, Analysis};
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        // A **refusal** — a construct this implementation recognises and declines — is reported
+        // in its own labelled shape and swallowed here, rather than returned for the default
+        // `Error: {}` rendering. Two reasons, both about the reader: the default rendering
+        // flattens the whole block onto one line, and it opens with `Error:`, which reads as
+        // "your model is broken" when the truth is "your model is fine and this simulator will
+        // not pretend to run it". Anything else is an ordinary error and prints the usual way.
+        Err(e) => {
+            if !va_cli::report_refusal(&e) {
+                eprintln!("Error: {e:?}");
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// The real entry point; [`main`] only decides how a failure is rendered.
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("sim") => cmd_sim(&args[1..]),

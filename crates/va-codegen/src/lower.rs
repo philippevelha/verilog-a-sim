@@ -394,23 +394,24 @@ fn laplace_term_shape(
 /// Whether `expr` contains a `laplace_*` call anywhere in its tree — used to reject one buried
 /// where [`laplace_term_shape`] cannot pull it out, the exact counterpart of
 /// [`contains_noise_call`].
-pub(crate) fn contains_laplace_call(module: &Module, expr: ExprId) -> bool {
+pub(crate) fn buried_frequency_domain_call(module: &Module, expr: ExprId) -> Option<&'static str> {
     match module.expr(expr) {
         Expr::Call(
-            Builtin::LaplaceNd
-            | Builtin::LaplaceNp
-            | Builtin::LaplaceZd
-            | Builtin::LaplaceZp
-            // Same restriction, same reason: a complex gain has nowhere to live in a `Dual`.
-            | Builtin::Absdelay,
+            Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp,
             _,
-        ) => true,
-        Expr::Call(_, args) => args.iter().any(|&a| contains_laplace_call(module, a)),
-        Expr::Unary(_, e) => contains_laplace_call(module, *e),
-        Expr::Binary(_, l, r) => {
-            contains_laplace_call(module, *l) || contains_laplace_call(module, *r)
-        }
-        _ => false,
+        ) => Some("a laplace_* filter"),
+        // Same restriction, same reason: a complex gain has nowhere to live in a `Dual`. It is
+        // named separately rather than folded into the laplace message because the diagnostic is
+        // read by someone who wrote `absdelay` and needs to see that word -- being told about
+        // `laplace_*` sends them looking for a filter they never wrote.
+        Expr::Call(Builtin::Absdelay, _) => Some("`absdelay`"),
+        Expr::Call(_, args) => args
+            .iter()
+            .find_map(|&a| buried_frequency_domain_call(module, a)),
+        Expr::Unary(_, e) => buried_frequency_domain_call(module, *e),
+        Expr::Binary(_, l, r) => buried_frequency_domain_call(module, *l)
+            .or_else(|| buried_frequency_domain_call(module, *r)),
+        _ => None,
     }
 }
 

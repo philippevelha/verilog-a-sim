@@ -269,6 +269,18 @@ this trait at bootstrap, so `va-core` has something real to solve on commit #1.
   No exceptions — a wrong Jacobian silently destroys Newton convergence.
 - **Numerics validated against QSPICE.** No analysis result is trusted until `va-harness`
   checks it against a committed golden output to a stated tolerance (§7).
+- **Every refusal is logged, saying what was refused and why.** A *refusal* is a construct the
+  implementation recognises and deliberately declines — distinct from malformed input and from a
+  numerical failure, and the distinction is the first thing a user debugging a failed run needs
+  ("my model is wrong" and "this simulator won't run my correct model" call for opposite next
+  steps). Raise one as `va_frontend::Refusal` (or `CodegenError::Unsupported`), never as a plain
+  parse/elaboration error, and never as a bare sentence: it carries **what** was refused,
+  **where**, **why** it is refused rather than approximated — say what the wrong answer would
+  have been — what to write **instead**, and where the limitation is **tracked**. `va-cli` prints
+  every one in the same `refused:`-marked block whichever layer raised it, on the same stream as
+  the surrounding output so redirecting to a file does not separate a verdict from its reason.
+  Gated by `every_refusal_says_what_was_refused_and_why`. A refusal that names the wrong
+  construct is worse than a terse one.
 - **Every public item has a doc comment**, and limitations are stated, not hidden.
 - **Small PRs, one crate each.** Touching another crate means an interface change (§6).
 - `cargo fmt` + `cargo clippy -- -D warnings` clean before every commit.

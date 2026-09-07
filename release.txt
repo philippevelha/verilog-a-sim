@@ -19,6 +19,68 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.10 - 2026-09-07
+-------------------
+Every refusal now says **what** was refused and **why**, in one shape, from whichever layer
+raised it. Asked for directly: a user hitting a refusal needs to know what went wrong and why,
+and until now the answer depended on which layer said no.
+
+  The worst of it was a mislabelling. A frontend refusal arrived as
+
+    Error: parse error: at preprocessed line 7, column 7 (`@(final_step("tran")) ...`): this
+    form of ... is not supported: ..., found Some(Keyword(Keyword("final_step")))
+
+  - one unbroken line, opening with `parse error`, closing with a debug-formatted token. Both
+  halves actively mislead: `parse error` says *your source is malformed* when the truth is the
+  opposite (the source is valid Verilog-A and this simulator declines to pretend to run it), and
+  the `found ...` tail is the shape of an unexpected-token diagnostic, so a correctly spelled
+  construct read as a typo. That distinction is the whole point - "my model is wrong" and "this
+  simulator will not run my correct model" call for completely different next steps.
+
+  `va_frontend::Refusal` now carries the four things a reader needs, and refusals are a distinct
+  `FrontendError::Refused` rather than a `Parse`:
+
+    [va-cli] refused: `@(final_step ...)` in a form this engine does not honour
+    [va-cli]   where:    at preprocessed line 7, column 7 (`@(final_step("tran")) g = 1.0;`)
+    [va-cli]   why:      discarding the trigger would run the body at every solve point instead
+    [va-cli]             of when the event fires. For the analysis-filter form that is sharper
+    [va-cli]             still: the filter says "not in this analysis", so dropping it runs the
+    [va-cli]             body precisely where the model excluded it - wrong in every analysis
+    [va-cli]   instead:  write the bare `@(final_step)`, or an `or` list of bare
+    [va-cli]             `initial_step`/`final_step`; both are honoured
+    [va-cli]   tracking: docs/roadmap.md, section "Analog events"
+
+  All three layers that can refuse go through it: `va-frontend` (parse-time construct
+  refusals), `va-codegen` (`CodegenError::Unsupported` - its messages already state their reason,
+  so its `why` line says where to read it rather than inventing a second one), and `va-cli`'s
+  transient-analysis gate, which refuses whole *models* and previously printed in a shape of its
+  own. `refused:` is a deliberately greppable marker: "which constructs did this simulator
+  decline, and why" should be answerable over a captured log.
+
+  **A wrong `what`, found while testing this.** A buried `absdelay` was refused with a message
+  naming `laplace_*` - the recognizer covers both and only the filter was named, so a user who
+  wrote `absdelay` was sent looking for a filter they had never written. `contains_laplace_call`
+  became `buried_frequency_domain_call`, returning which construct it found. A refusal that names
+  the wrong construct is worse than a terse one.
+
+  In `check`, a refusal's fields print to **stdout with the rest of the listing**, not to stderr:
+  splitting a verdict from its reason across two streams is how the reason gets lost the moment
+  anyone redirects the output to a file. In `sim`, `main` now renders a refusal itself and
+  swallows the anyhow default, so the block is not also flattened onto one `Error:` line.
+
+  Gated by `every_refusal_says_what_was_refused_and_why`, which checks all three layers together
+  - the failure mode is one drifting back to a bare sentence while the others stay labelled, and
+  no per-layer test would see that - and by `an_ordinary_error_is_not_mistaken_for_a_refusal`,
+  because telling a user their correct model was declined when they merely mistyped sends them
+  exactly the wrong way.
+
+  Not covered: `FrontendError::Elaborate` refusals still print as plain elaboration errors. They
+  state their reason inline and are not mislabelled, so they were left rather than churned; the
+  `Refusal` shape is there when one of them earns it.
+
+  739 tests, 27/27 golden circuits, corpus 113/132 (95/99 self-contained), clippy and fmt clean.
+
+
 0.9.9 - 2026-09-07
 ------------------
 Closes a hole 0.9.8 opened, and corrects a claim 0.9.8 made. **0.9.8's entry said compound

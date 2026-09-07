@@ -35,7 +35,108 @@ pub enum FrontendError {
     /// Elaboration could not lower the AST into the IR (e.g. unknown identifier).
     #[error("elaboration error: {0}")]
     Elaborate(String),
+    /// A construct this implementation recognises and **deliberately declines** to support.
+    ///
+    /// Kept distinct from [`FrontendError::Parse`] and [`FrontendError::Elaborate`] because it
+    /// means something different to whoever is reading it, and that difference is the first
+    /// thing a user debugging a failed run needs. `Parse` says *your source is malformed*. A
+    /// refusal says the opposite: the source is valid Verilog-A, and this simulator will not
+    /// pretend to run it, because the alternatives — silently approximating the construct, or
+    /// discarding it and running the body anyway — produce a **wrong answer** rather than a
+    /// missing feature. Carrying that in the type rather than in prose is also what lets
+    /// `va-cli` log every refusal in one marked, uniform shape (§ `va_cli::report_refusal`).
+    #[error("{0}")]
+    Refused(Refusal),
 }
+
+/// A recognised construct this implementation declines to support, and the reasoning a user
+/// needs in order to do something about it.
+///
+/// Four fields, because four questions come up every time and answering fewer of them sends the
+/// reader to the source: *what* was refused, *where* it was written, *why* it is refused rather
+/// than approximated, and what to write *instead*. `tracking` points at the document that says
+/// when the limitation might lift.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Refusal {
+    /// The construct, quoted as the user wrote it where possible — e.g. ``@(final_step("tran"))``.
+    pub what: String,
+    /// Why it is refused rather than approximated or ignored. This is the field that stops a
+    /// refusal reading as an arbitrary gap: it should say what the wrong answer would have been.
+    pub why: String,
+    /// What to write instead, when there is a supported spelling. `None` when there is not.
+    pub instead: Option<String>,
+    /// Where it was written, as the parser's human-readable location. `None` when the refusing
+    /// pass has no position to report.
+    pub at: Option<String>,
+    /// Where the limitation is tracked, so a reader can find out whether it is temporary.
+    pub tracking: Option<String>,
+}
+
+impl Refusal {
+    /// A refusal of `what`, because `why`. Location and advice are added with the builders.
+    pub fn new(what: impl Into<String>, why: impl Into<String>) -> Self {
+        Refusal {
+            what: what.into(),
+            why: why.into(),
+            instead: None,
+            at: None,
+            tracking: None,
+        }
+    }
+
+    /// This refusal, naming a supported spelling to use instead.
+    pub fn instead(mut self, instead: impl Into<String>) -> Self {
+        self.instead = Some(instead.into());
+        self
+    }
+
+    /// This refusal, carrying the source location it was raised at.
+    pub fn at(mut self, at: impl Into<String>) -> Self {
+        self.at = Some(at.into());
+        self
+    }
+
+    /// This refusal, pointing at the document that tracks the limitation.
+    pub fn tracking(mut self, tracking: impl Into<String>) -> Self {
+        self.tracking = Some(tracking.into());
+        self
+    }
+}
+
+/// Width of the `  why:      ` style label column, so a field's continuation lines hang under
+/// its text rather than under its label.
+const REFUSAL_INDENT: &str = "            ";
+
+impl std::fmt::Display for Refusal {
+    /// One labelled field per line, opening with a stable `refused:` marker.
+    ///
+    /// The marker is deliberately greppable: a run over a model library produces one of these
+    /// per offending file, and "which constructs did this simulator decline, and why" should be
+    /// answerable with `grep refused:` over a captured log rather than by reading it.
+    ///
+    /// A field may itself be several lines — `what` is a list when one run refuses several
+    /// constructs at once — so continuation lines are indented to hang under the field's text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hang = |v: &str| v.replace('\n', &format!("\n{REFUSAL_INDENT}"));
+        write!(f, "refused: {}", hang(&self.what))?;
+        if let Some(at) = &self.at {
+            write!(f, "\n  where:    {}", hang(at))?;
+        }
+        write!(f, "\n  why:      {}", hang(&self.why))?;
+        if let Some(instead) = &self.instead {
+            write!(f, "\n  instead:  {}", hang(instead))?;
+        }
+        if let Some(tracking) = &self.tracking {
+            write!(f, "\n  tracking: {}", hang(tracking))?;
+        }
+        Ok(())
+    }
+}
+
+/// A refusal is an error in its own right, so a caller outside this crate — `va-cli`'s
+/// transient-analysis gate, which refuses whole *models* rather than constructs — can raise one
+/// directly and have it reported in the same shape as the frontend's.
+impl std::error::Error for Refusal {}
 
 /// The result of compiling a source file: one elaborated [`va_ir::Module`] per `module` the
 /// file defines, each already flattened against every sibling module in the file as its

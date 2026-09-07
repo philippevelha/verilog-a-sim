@@ -456,11 +456,14 @@ impl GeneratedModel {
                         // A laplace still buried in a resistive term could not be split out,
                         // and `ad::eval` has no real-valued answer for a complex gain — so it
                         // would be a hard error mid-solve rather than a build diagnostic.
-                        if lower::contains_laplace_call(ctx.module, term.expr) {
-                            return Err(CodegenError::Unsupported(
-                                "a laplace_* filter must be a top-level additive term of a contribution (its gain is complex, so there is nowhere in an ordinary expression to put it)"
-                                    .to_string(),
-                            ));
+                        if let Some(what) =
+                            lower::buried_frequency_domain_call(ctx.module, term.expr)
+                        {
+                            return Err(CodegenError::Unsupported(format!(
+                                "{what} must be a top-level additive term of a contribution \
+                                 (its gain is complex, so there is nowhere in an ordinary \
+                                 expression to put it)"
+                            )));
                         }
                         if lower::contains_ac_stim_call(ctx.module, term.expr, &taint.ac_stim) {
                             return Err(CodegenError::Unsupported(

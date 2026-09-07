@@ -68,7 +68,7 @@ use crate::ast::{
 };
 use crate::disciplines::{DisciplineDecl, DomainKind, NatureDecl};
 use crate::lexer::Token;
-use crate::FrontendError;
+use crate::{FrontendError, Refusal};
 
 /// Parse a token stream into every module it defines, in source order. A stream that defines
 /// **no** module at all is not an error — it's a valid, if degenerate, compilation unit: real
@@ -456,6 +456,27 @@ impl Parser<'_> {
             what,
             self.peek()
         )))
+    }
+
+    /// Refuse a construct this parser recognises and declines to support, at the current
+    /// location — see [`crate::Refusal`].
+    ///
+    /// Deliberately **not** [`Parser::err`]. That one appends `, found {token:?}`, which is the
+    /// right tail for "your source is malformed" and exactly the wrong one here: a refusal is
+    /// not a surprise about the next token, and the debug-formatted token made the message read
+    /// as a syntax error in a construct the user had spelled correctly.
+    fn refuse<T>(
+        &self,
+        what: impl Into<String>,
+        why: impl Into<String>,
+        instead: impl Into<String>,
+    ) -> Result<T, FrontendError> {
+        Err(FrontendError::Refused(
+            Refusal::new(what, why)
+                .at(self.location())
+                .instead(instead)
+                .tracking("docs/roadmap.md, section \"Analog events\""),
+        ))
     }
 
     /// Where the parser is, phrased for a human if [`parse_with_disciplines_located`] supplied
@@ -1661,13 +1682,19 @@ impl Parser<'_> {
                 // still refused: this parser can honour neither half, and discarding the
                 // trigger runs the body unconditionally (§ v0.9.1).
                 if let Some(event) = self.monitored_event_in_trigger() {
-                    return self.err(format!(
-                        "`@({event}(...))` is not supported: this engine cannot schedule a \
-                         monitored event, and the body would otherwise run at every solve \
-                         point instead of when the event fires - a wrong answer rather than \
-                         a missing feature. `@(initial_step)` is supported. See \
-                         `docs/roadmap.md`, section \"Analog events\"."
-                    ));
+                    return self.refuse(
+                        format!("`@(... {event}(...) ...)`, a compound event trigger"),
+                        format!(
+                            "this engine can schedule a bare `{event}(...)` but not one \
+                             composed with `or`, and discarding the trigger would run the body \
+                             at every solve point instead of when the event fires - a wrong \
+                             answer rather than a missing feature"
+                        ),
+                        format!(
+                            "split the trigger: a bare `@({event}(...))` is supported, as is a \
+                             bare `@(initial_step)`/`@(final_step)`"
+                        ),
+                    );
                 }
                 let step_events = self.step_event_list();
                 // A step event written in a form this parser cannot honour: an analysis filter,
@@ -1679,15 +1706,18 @@ impl Parser<'_> {
                 // excluded it, and it is wrong in every analysis rather than only in transient.
                 if step_events.is_none() {
                     if let Some(event) = self.step_event_in_trigger() {
-                        return self.err(format!(
-                            "this form of `@({event} ...)` is not supported: only the bare \
-                             `@({event})`, and an `or` list of bare `initial_step`/`final_step`, \
-                             are honoured. An analysis filter and a compound with an \
-                             unschedulable trigger are both refused, because discarding either \
-                             would run the body at every solve point instead of when the event \
-                             fires - a wrong answer rather than a missing feature. See \
-                             `docs/roadmap.md`, section \"Analog events\"."
-                        ));
+                        return self.refuse(
+                            format!("`@({event} ...)` in a form this engine does not honour"),
+                            "discarding the trigger would run the body at every solve point \
+                             instead of when the event fires. For the analysis-filter form that \
+                             is sharper still: the filter says \"not in this analysis\", so \
+                             dropping it runs the body precisely where the model excluded it - \
+                             wrong in every analysis, not merely unimplemented",
+                            format!(
+                                "write the bare `@({event})`, or an `or` list of bare \
+                                 `initial_step`/`final_step`; both are honoured"
+                            ),
+                        );
                     }
                 }
                 self.skip_balanced_parens()?;
@@ -1812,9 +1842,13 @@ impl Parser<'_> {
                         args,
                     })
                 }
-                other => self.err(format!(
-                    "reserved word `{other}` begins a construct outside the v0 subset"
-                )),
+                other => self.refuse(
+                    format!("the reserved word `{other}`"),
+                    "it begins a Verilog-A construct this implementation does not yet parse, \
+                     and guessing at its meaning would silently change what the model says",
+                    "see `docs/token-reference.md` for this token's status, and \
+                     `docs/roadmap.md` for whether it is planned",
+                ),
             },
             _ => self.err("expected a statement".to_string()),
         }
@@ -2581,6 +2615,23 @@ mod tests {
         format!("{}", parse(&toks).expect_err("this source must not parse"))
     }
 
+    /// Assert `err` is a refusal in the shape [`crate::Refusal`] guarantees — the greppable
+    /// marker plus every field a reader needs — and that it names `construct`.
+    ///
+    /// One helper rather than an ad-hoc `contains` per test, because the field that actually
+    /// matters is the one easiest to forget: `why:`. A refusal without it reads as an arbitrary
+    /// gap, which is precisely the impression these messages exist to prevent. Enforcing the
+    /// shape in a test is what keeps the next refusal from regressing to a bare sentence.
+    fn assert_refusal(err: &str, construct: &str) {
+        for field in ["refused:", "where:", "why:", "instead:", "tracking:"] {
+            assert!(err.contains(field), "a refusal must carry `{field}`: {err}");
+        }
+        assert!(
+            err.contains(construct),
+            "a refusal must name the construct `{construct}`: {err}"
+        );
+    }
+
     fn analog_body(m: &ModuleAst) -> Vec<Stmt> {
         m.items
             .iter()
@@ -3284,8 +3335,7 @@ mod tests {
         let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(initial_step or cross(V(a, b) - 1.0, 1)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
-        assert!(err.contains("cross"), "names the offending half: {err}");
-        assert!(err.contains("not supported"), "and refuses it: {err}");
+        assert_refusal(&err, "cross");
     }
 
     /// A bare `@(timer(...))` parses like `@(cross(...))` — the same guarded-body shape, with
@@ -3314,7 +3364,7 @@ mod tests {
         let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(absdelta(V(a), 0.1)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
-        assert!(err.contains("not supported"), "should refuse: {err}");
+        assert_refusal(&err, "absdelta");
     }
 
     /// A bare `@(above(...))` parses, and its argument list is `above`'s own — the second
@@ -3343,10 +3393,7 @@ mod tests {
         let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(initial_step or above(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
-        assert!(
-            err.contains("above") && err.contains("not supported"),
-            "{err}"
-        );
+        assert_refusal(&err, "above");
     }
 
     /// A compound trigger containing `timer` is still refused, for the same reason the `cross`
@@ -3357,8 +3404,7 @@ mod tests {
         let err = parse_err(
             "module t(a, b); electrical a, b; analog begin @(initial_step or timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
-        assert!(err.contains("timer"), "names the offending half: {err}");
-        assert!(err.contains("not supported"), "and refuses it: {err}");
+        assert_refusal(&err, "timer");
     }
 
     /// `@(final_step)` desugars into a guarded `if`, exactly as `@(initial_step)` does — it is
@@ -3426,8 +3472,7 @@ mod tests {
             let err = parse_err(&format!(
                 "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
             ));
-            assert!(err.contains(event), "names the trigger: {err}");
-            assert!(err.contains("not supported"), "and refuses it: {err}");
+            assert_refusal(&err, event);
         }
     }
 
@@ -3444,7 +3489,7 @@ mod tests {
             let err = parse_err(&format!(
                 "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
             ));
-            assert!(err.contains("not supported"), "{trigger}: {err}");
+            assert_refusal(&err, "@(");
         }
     }
 
