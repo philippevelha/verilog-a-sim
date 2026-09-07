@@ -113,6 +113,23 @@ pub struct AnalysisCtx {
     /// immediately to its input in a static solve — the LRM-correct steady-state answer, and
     /// the same one this project produced when those constructs were const-folded.
     pub is_initial_step: bool,
+    /// Whether this is the **last evaluation** of the analysis — Verilog-A's
+    /// `@(final_step)` (LRM §5.10.3).
+    ///
+    /// `true` for the last accepted timepoint of a transient run, and **always `true` in DC, AC
+    /// and noise**, for the mirror of the reason [`AnalysisCtx::is_initial_step`] is: a static
+    /// solve is definitionally its own final step, having no later timepoint to be followed by.
+    /// A *swept* DC therefore reports `true` at every point, exactly as `is_initial_step` does —
+    /// each point is its own static solve, not a step within one.
+    ///
+    /// # What a consumer owes a model that reads it
+    ///
+    /// A `@(final_step)` body may write variables that feed contributions, so the timepoint it
+    /// runs at has to be **solved with the body's effect included**, the way an `@(cross(...))`
+    /// body's timepoint is. A transient driver therefore cannot simply set the flag on the
+    /// post-accept evaluation and record the pre-body solution — see `va_transient`'s
+    /// `Phase::LAST`.
+    pub is_final_step: bool,
     /// The integrator's companion coefficient for the charge channel this evaluation, and the
     /// weight it puts on each `ddt` site's *previous* rate -- together enough for a model to
     /// evaluate `ddt(q)` as a **number** consistent with the discretization actually being
@@ -189,6 +206,7 @@ impl AnalysisCtx {
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
+            is_final_step: true,
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -206,6 +224,10 @@ impl AnalysisCtx {
             // `with_initial_step`; defaulting to `false` makes the *safe* mistake, since a
             // model then reads committed state instead of re-initialising mid-run.
             is_initial_step: false,
+            // Same safe default, and for a sharper reason: a transient driver only knows a
+            // timepoint was the last one once the run has ended, so anything that has not
+            // decided yet must say "not final" rather than run end-of-analysis code mid-run.
+            is_final_step: false,
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -222,6 +244,7 @@ impl AnalysisCtx {
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
+            is_final_step: true,
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -236,6 +259,7 @@ impl AnalysisCtx {
             time: 0.0,
             temp: crate::noise::TEMP_NOMINAL,
             is_initial_step: true,
+            is_final_step: true,
             freq: 0.0,
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
@@ -281,6 +305,17 @@ impl AnalysisCtx {
     pub const fn with_initial_step(self, is_initial_step: bool) -> Self {
         AnalysisCtx {
             is_initial_step,
+            ..self
+        }
+    }
+
+    /// This context marked as (or as not) the analysis's last evaluation.
+    ///
+    /// Only a transient driver calls this: every static analysis is its own final step and its
+    /// constructor already says so.
+    pub const fn with_final_step(self, is_final_step: bool) -> Self {
+        AnalysisCtx {
+            is_final_step,
             ..self
         }
     }

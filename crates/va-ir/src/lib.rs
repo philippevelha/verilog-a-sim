@@ -671,6 +671,17 @@ pub enum Builtin {
     /// frontend wraps it into an ordinary `Stmt::If`, so the existing control-flow walk selects
     /// the arm with no new statement kind.
     InitialStep,
+    /// `@(final_step)` — whether this is the last evaluation of the analysis (LRM §5.10.3).
+    ///
+    /// [`Builtin::InitialStep`]'s mirror in every respect: zero arguments, no state, no
+    /// gradient, desugared by the frontend into an ordinary `Stmt::If` so no consumer needs a
+    /// new statement kind. It reads `va_abi::AnalysisCtx::is_final_step`, which a static solve
+    /// always sets — one solve point is both the first and the last step.
+    ///
+    /// The asymmetry is entirely on the *consumer* side: a driver knows its first evaluation
+    /// before making it and only knows its last one after the run has ended, so a transient
+    /// engine has to solve the last accepted timepoint a second time with this flag set.
+    FinalStep,
     /// `laplace_nd(value, num, den)` — a rational transfer function `H(s) = N(s)/D(s)` given as
     /// polynomial coefficient lists in `s`, lowest degree first (LRM §4.5.11).
     ///

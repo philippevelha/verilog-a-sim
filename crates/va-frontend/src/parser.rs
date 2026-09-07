@@ -38,9 +38,13 @@
 //!   `docs/roadmap.md`).
 //! - Analog functions retain argument directions and body only; argument/local *types*
 //!   (`real x;`) are parsed and discarded.
-//! - Event control `@(event) stmt` is parsed but the trigger is discarded — the controlled
-//!   statement runs unconditionally. This matches DC operating-point semantics (`initial_step`
-//!   setup runs once regardless); proper event scheduling is a transient-analysis concern.
+//! - Event control `@(event) stmt`: the bare `initial_step`, `final_step`, `cross`, `above` and
+//!   `timer` triggers are honoured, each desugared into a guarded `if`. Any *compound* trigger,
+//!   and any trigger naming an event this engine cannot schedule, is **refused** — see
+//!   `Parser::monitored_event_in_trigger`. The simulator-specific `initial_instance`/
+//!   `initial_model` are the last two still discarded, running their body unconditionally: that
+//!   matches DC operating-point semantics (setup runs once regardless), and `va-cli` refuses
+//!   them in transient, where it would not.
 //! - Vector nets and array variables carry at most 2 declared dimensions: 1-D is the standard
 //!   form; a 2-D array variable (`real tile[0:R][0:C];`) is standard LRM grammar too, but a 2-D
 //!   vector net (`electrical [0:R][0:C] grid;`) is a deliberate, documented **non-standard**
@@ -265,19 +269,27 @@ impl Parser<'_> {
 
     /// Consume tokens through the `)` matching an already-consumed `(`, honouring nesting.
     /// Used to skip the contents of an `@(...)` event expression.
-    /// Whether the event trigger starting at the current position (just past its `(`) is
-    /// exactly `initial_step`, without consuming anything.
+    /// Which **step-scoped** global event the trigger starting at the current position (just
+    /// past its `(`) names, if it is exactly that and nothing else — without consuming anything.
+    ///
+    /// The two the LRM defines (§5.10.3) are `initial_step` and `final_step`, and they desugar
+    /// identically: a synthetic zero-argument call of the same name, which elaboration lowers to
+    /// `va_ir::Builtin::InitialStep`/`FinalStep` and every downstream control-flow walk then
+    /// treats as an ordinary `if` condition. The returned name *is* the synthetic call's name.
     ///
     /// Deliberately narrow: only the bare trigger, not `initial_step or cross(...)`. A compound
     /// trigger means "run at the initial step *and* at these other events", and answering it
     /// with the initial-step arm alone would silently drop the rest — a wrong answer dressed as
     /// support. Those keep the old run-unconditionally treatment until real event scheduling
     /// exists.
-    fn trigger_names_initial_step(&self) -> bool {
-        matches!(
-            (self.toks.get(self.pos), self.toks.get(self.pos + 1)),
-            (Some(Token::Keyword(kw)), Some(Token::RParen)) if kw.as_str() == "initial_step"
-        )
+    fn trigger_names_step_event(&self) -> Option<&'static str> {
+        const STEP_EVENTS: [&str; 2] = ["initial_step", "final_step"];
+        match (self.toks.get(self.pos), self.toks.get(self.pos + 1)) {
+            (Some(Token::Keyword(kw)), Some(Token::RParen)) => {
+                STEP_EVENTS.iter().copied().find(|e| *e == kw.as_str())
+            }
+            _ => None,
+        }
     }
 
     /// The **monitored** event named anywhere in the `@(...)` trigger starting at `self.pos`,
@@ -1563,8 +1575,12 @@ impl Parser<'_> {
             // never fire in a static solve at all, so the body running was wrong in every
             // analysis, silently. See `monitored_event_in_trigger`.
             //
-            // Every remaining trigger — `final_step`, and the simulator-specific
-            // `initial_instance`/`initial_model` — keeps the old treatment, and that stays a
+            // `@(final_step)` desugars the same way as of 2026-09-07 (`Builtin::FinalStep`),
+            // which is what lifted `va-cli`'s transient refusal of it: the flag it reads is
+            // `false` at every timepoint but the last, so the body no longer re-runs at each.
+            //
+            // Every remaining trigger — the simulator-specific `initial_instance`/
+            // `initial_model` — keeps the old discard-and-run treatment, and that stays a
             // stated limitation rather than a bug: in a static solve the single point *is*
             // both the first and the last step, and setup does run once, so running the body
             // is correct there. It is only wrong in transient, where it re-runs every
@@ -1603,12 +1619,12 @@ impl Parser<'_> {
                          `docs/roadmap.md`, section \"Analog events\"."
                     ));
                 }
-                let is_initial_step = self.trigger_names_initial_step();
+                let step_event = self.trigger_names_step_event();
                 self.skip_balanced_parens()?;
                 let body = self.parse_stmt()?;
-                if is_initial_step {
+                if let Some(name) = step_event {
                     let cond = self.push(ExprAst::Call {
-                        name: "initial_step".to_string(),
+                        name: name.to_string(),
                         args: Vec::new(),
                     });
                     Ok(Stmt::If {
@@ -3267,13 +3283,33 @@ mod tests {
         assert!(err.contains("not supported"), "and refuses it: {err}");
     }
 
-    /// A **step-scoped** trigger keeps the old treatment: `final_step` is correct in a static
-    /// solve, where the single solve point is both the first and the last step. It is only
-    /// wrong in transient, and that is checked analysis-aware in `va-cli`, not here.
+    /// `@(final_step)` desugars into a guarded `if`, exactly as `@(initial_step)` does — it is
+    /// no longer discarded (2026-09-07). The distinction the assertion makes is the whole
+    /// point: a bare `Stmt::Assign` here would mean the body runs unconditionally.
     #[test]
-    fn a_step_scoped_trigger_still_parses() {
+    fn a_final_step_trigger_desugars_to_a_guarded_if() {
         let m = parse_src(
             "module t(a, b); electrical a, b; analog begin @(final_step) x = 1.0; I(a, b) <+ x; end endmodule",
+        );
+        let body = analog_body(&m);
+        match &body[0] {
+            Stmt::If { cond, then_, else_ } => {
+                assert!(matches!(m.expr(*cond), ExprAst::Call { name, args }
+                    if name == "final_step" && args.is_empty()));
+                assert!(matches!(then_[0], Stmt::Assign { .. }));
+                assert!(else_.is_empty());
+            }
+            other => panic!("expected a guarded `if`, got {other:?}"),
+        }
+    }
+
+    /// The simulator-specific triggers this parser does **not** implement are still discarded,
+    /// running the body unconditionally — correct in a static solve, and refused in transient by
+    /// `va-cli`, not here.
+    #[test]
+    fn an_unimplemented_step_scoped_trigger_still_parses() {
+        let m = parse_src(
+            "module t(a, b); electrical a, b; analog begin @(initial_model) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         assert!(matches!(body[0], Stmt::Assign { .. }));

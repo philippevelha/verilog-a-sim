@@ -956,6 +956,11 @@ fn eval_call(
             },
             count,
         ),
+        // `@(final_step)`'s, likewise. `true` in every static analysis, and in transient only at
+        // the last accepted timepoint — which the driver has to solve twice to know.
+        Builtin::FinalStep => {
+            Dual::constant(if ctx.analysis.is_final_step { 1.0 } else { 0.0 }, count)
+        }
         // `slew(value, pos_rate, neg_rate)` (LRM §4.5.6) — a rate limiter over the *committed*
         // history. `y = clamp(value, y_prev − |neg|·Δt, y_prev + pos·Δt)`.
         //

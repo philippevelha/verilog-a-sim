@@ -805,3 +805,29 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > and are unchanged). The DC path is two-phase and iterates to a fixed point, because which
 > events fire is a property of the solution while the bodies they guard change the equations
 > that produce it.
+
+> **Revision (§6 change, ratified 2026-09-07):** added `AnalysisCtx::is_final_step` and the
+> `with_final_step` builder, so `@(final_step)` could be implemented (v0.9.8). Purely
+> **additive**, and the exact mirror of `is_initial_step`: a zero-argument piece of solver
+> knowledge, no state, no gradient.
+>
+> **It is `true` in DC, AC and noise**, for the same reason `is_initial_step` is — a static solve
+> is definitionally its own final step, having no later timepoint to be followed by. A swept DC
+> therefore reports `true` at every point, because each point is its own static solve rather
+> than a step within one; that is the rule `is_initial_step` has always followed, stated here
+> because it is the one place the two flags surprise a reader.
+>
+> **The asymmetry is entirely on the consumer's side, and it is the whole content of this
+> change.** A driver knows its first evaluation before making it; it knows its last one only
+> after the run has ended. So a transient consumer cannot simply set the flag on the post-accept
+> evaluation and record the pre-body solution: an `@(final_step)` body may write a variable that
+> feeds a contribution, and the recorded point would then be one at which the model's own
+> statements do not hold. `va_transient::integrator` therefore **re-solves** the last accepted
+> timepoint with the flag set, exactly as it re-solves a timepoint where a `cross` fired.
+>
+> **What keeps that from costing every run.** The re-solve is *probed*, not assumed: the
+> integrator assembles the last accepted point twice, once with the flag and once without, and
+> only re-solves if the stamps actually differ. `newton_step` applies its update before testing
+> convergence, so an unconditional re-solve would shift the final point of every existing run by
+> a step's worth of round-off in exchange for nothing. Measured: all 27 gates reproduce their
+> previous numbers exactly.

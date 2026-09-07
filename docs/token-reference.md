@@ -445,14 +445,20 @@ class of lexemes.
 
 ### `At` (`@`)
 
-- **Purpose and Static Nature**: Introduces an event controller. In full Verilog-AMS this is a
-  genuinely simulation-time construct (the controlled statement runs when the event triggers);
-  v0 flattens this to "runs unconditionally," which is exact for `@(initial_step)` under a
-  DC-only analysis and an approximation everywhere else (a stated limitation).
+- **Purpose and Static Nature**: Introduces an event controller — a genuinely simulation-time
+  construct: the controlled statement runs when the event triggers. As of 2026-09-07 the **bare**
+  forms of `initial_step`, `final_step`, `cross`, `above` and `timer` are all honoured, each
+  desugared into a guarded `if` whose condition the solver answers. The old flattening to "runs
+  unconditionally" survives only for the simulator-specific `initial_instance`/`initial_model`,
+  and `va-cli` refuses those in a transient run rather than let the flattening produce a wrong
+  waveform.
 - **Declaration and Assignment**: `@(event_expr) statement`.
-- **Expressions and Evaluation**: v0 does not parse `event_expr` as an expression at all — it
-  calls `skip_balanced_parens` to discard everything between the matching `(`/`)`, then parses
-  the controlled statement and runs it unconditionally.
+- **Expressions and Evaluation**: A recognised bare trigger is parsed properly — `cross`/`above`/
+  `timer` keep every LRM argument and become a `va_ir::EventSite`; `initial_step`/`final_step`
+  become a zero-argument `Builtin` reading the analysis context. Anything else — every *compound*
+  trigger, and every event this engine cannot schedule — is **refused**, not discarded: running a
+  body unconditionally is a wrong answer rather than a missing feature. The two remaining
+  discarded triggers are named above.
 - **Structural and Analog Usage**: Analog-block only.
 - **Comparison with Traditional Constructs**: No C equivalent (C has no event/wait model at the
   language level). Closer to digital Verilog's `@(posedge clk)`, except digital Verilog's
@@ -1503,7 +1509,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `event` | Reserved, no grammar production (declares a named digital event variable, `event e;`, triggered with `->e;`) | N/A | N/A | Digital procedural only | No C analogue |
 | `exclude` | Range-clause keyword, §1.4 | `exclude value` / `exclude (lo:hi)` | Const-evaluated then discarded | Module-level (parameter ranges) | No C analogue (closest: a validated-range precondition, minus the "hole" it punches out) |
 | `exp` | Dynamic/static dual, §1.5 | `exp(x)` call | Exponential | Analog expr / const context | C `exp()` |
-| `final_step` | Reserved, no grammar production as a bare word outside `@()`; realistically only appears inside the discarded `@(final_step)` | Global analog event: fires once at analysis end | N/A | Analog-block only (event control) | No C analogue (closest: an `atexit()` hook) |
+| `final_step` | Reserved, no grammar production as a bare word outside `@()`; its real usage, `@(final_step)`, is **implemented** (2026-09-07, v0.9.8): the parser desugars it to `if (final_step()) …`, elaboration lowers that to `va_ir::Builtin::FinalStep`, and codegen reads `va_abi::AnalysisCtx::is_final_step`. `true` in every static analysis (one solve point is both first and last, so a swept DC runs the body at each point — the same rule `initial_step` already follows) and, in transient, only at the last accepted timepoint, which the integrator solves a second time so the body's effect is in the point recorded. Bare form only: a compound `initial_step or final_step` is still refused | Global analog event: fires once at analysis end | N/A | Analog-block only (event control) | No C analogue (closest: an `atexit()` hook) |
 | `flicker_noise` | Dynamic (noise-channel), §1.5 | `flicker_noise(pwr, exp[, "name"])` call | Lowers to `Builtin::FlickerNoise(pwr, exp)`; value `0` outside noise analysis, PSD `pwr/f^exp` within it | Analog-block only | No general-purpose analogue |
 | `floor` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `floor(x)` call | Round toward −∞ | Analog expr / const context | C `floor()` |
 | `flow` | A discipline attribute keyword (§1.5), fully parsed and given real effect | `flow Nature;` inside a `discipline` body | Parsed into `DisciplineDecl::flow`; also calls `Parser::register_access` (§2.17), binding that nature's `access` name as a recognized `Flow`-kind access function | Module preamble | Names the conserved "current-like" quantity of a discipline; no C analogue |
@@ -1525,7 +1531,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `ifnone` | Reserved, no grammar production (specify-block conditional-path fallback) | N/A | N/A | Specify-block (timing-check) only | No C analogue |
 | `inf` | Dedicated token, §1.4 | — | — | — | — |
 | `initial` | Reserved, no grammar production (digital one-shot-at-time-0 procedural block) | N/A | N/A | Digital procedural only | Closest to running code once before `main()`, e.g. a static initializer |
-| `initial_step` | Reserved, no grammar production as a bare word outside `@()`; realistically only appears inside the discarded `@(initial_step)` | Global analog event: fires once at analysis start | N/A | Analog-block only (event control) | No C analogue (closest: a one-time setup routine) |
+| `initial_step` | Reserved, no grammar production as a bare word outside `@()`; its real usage, `@(initial_step)`, is **implemented** (2026-08-06): desugared to `if (initial_step()) …` and lowered to `va_ir::Builtin::InitialStep`, which reads `va_abi::AnalysisCtx::is_initial_step`. Bare form only — the optional `(analysis_list)` filter is not honoured, and a compound trigger is refused | Global analog event: fires once at analysis start | N/A | Analog-block only (event control) | No C analogue (closest: a one-time setup routine) |
 | `inout` | Dedicated token, §1.4 | — | — | — | — |
 | `input` | Dedicated token, §1.4 | — | — | — | — |
 | `int` | Dynamic/static dual, §1.5 Math builtins (newly reserved — see §1.7) | `int(x)` call | Truncate toward zero | Analog expr / const context | C's `(int)` cast, but as a genuine callable function |

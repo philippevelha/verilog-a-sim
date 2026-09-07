@@ -1935,6 +1935,12 @@ impl Elaborator<'_> {
             ExprAst::Call { name, args } if name == "initial_step" && args.is_empty() => {
                 Expr::Call(Builtin::InitialStep, Vec::new())
             }
+            // `@(final_step)`'s synthetic condition, the mirror of the arm above. Same
+            // reasoning, same shape; the whole of the difference lives in the consumer, which
+            // knows its first evaluation in advance and its last one only in retrospect.
+            ExprAst::Call { name, args } if name == "final_step" && args.is_empty() => {
+                Expr::Call(Builtin::FinalStep, Vec::new())
+            }
             // `transition(value, delay, rise_time, fall_time)` (LRM §4.5.5) and
             // `slew(value, pos_rate, neg_rate)` (§4.5.6) both smooth a signal over *time*. They
             // used to fold transparently to `value` — correct in a static solve, where both

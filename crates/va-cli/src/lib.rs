@@ -139,19 +139,25 @@ fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
 /// Step-scoped `@(...)` triggers `src` uses, in table order, each named once.
 ///
 /// These are the triggers `va-frontend` deliberately still discards, running the body
-/// unconditionally: `final_step`, and the simulator-specific `initial_instance`/
-/// `initial_model`. That treatment is **correct in a static solve** — one solve point is both
-/// the first and the last step, and setup does run once — and wrong only in transient, where
-/// the body re-runs at every timepoint. Hence an analysis-gated refusal here rather than a
-/// parse error in the frontend, which is analysis-agnostic. (A *monitored* trigger —
-/// `cross`/`above`/`timer`/`absdelta` — never fires in a static solve either, so the frontend
-/// rejects those outright and they never reach this check.)
+/// unconditionally: the simulator-specific `initial_instance`/`initial_model`. That treatment
+/// is **correct in a static solve** — one solve point is both the first and the last step, and
+/// setup does run once — and wrong only in transient, where the body re-runs at every
+/// timepoint. Hence an analysis-gated refusal here rather than a parse error in the frontend,
+/// which is analysis-agnostic. (A *monitored* trigger — `cross`/`above`/`timer`/`absdelta` —
+/// never fires in a static solve either, so the frontend rejects those outright and they never
+/// reach this check.)
 ///
-/// Matches `@` followed by `(` followed by the name, so a bare mention of `final_step` in an
+/// **`final_step` left this list on 2026-09-07**, when it stopped being discarded: it now
+/// desugars to `va_ir::Builtin::FinalStep`, which reads `AnalysisCtx::is_final_step` and is
+/// therefore `false` at every transient timepoint except the last. There is nothing left for an
+/// analysis-gated refusal to protect against.
+///
+/// Matches `@` followed by `(` followed by the name, so a bare mention of a trigger word in an
 /// expression or a comment does not trigger it. `initial_instance`/`initial_model` are not
-/// reserved words and arrive as `Ident`; `final_step` is a `Keyword`.
+/// reserved words and arrive as `Ident`; a reserved one would arrive as a `Keyword`, which is
+/// why both token kinds are still read.
 fn step_triggers_in(src: &str) -> Vec<&'static str> {
-    const STEP_TRIGGERS: [&str; 3] = ["final_step", "initial_instance", "initial_model"];
+    const STEP_TRIGGERS: [&str; 2] = ["initial_instance", "initial_model"];
     let Ok(tokens) = va_frontend::lexer::lex(src) else {
         return Vec::new(); // A model that does not lex will fail louder elsewhere.
     };
@@ -3882,6 +3888,96 @@ X1 a gnd abt
         assert!(peak > 1.0, "the body must run: peak |I(V1)| = {peak:e}");
     }
 
+    /// `@(final_step)`'s body runs at the **last** accepted transient timepoint and nowhere
+    /// else, and the point recorded there is solved *with* its effect.
+    ///
+    /// The discriminating shape: the body switches the conductance by three orders of
+    /// magnitude, so the assertion fails in both directions that matter — if the body never
+    /// runs, the last point looks like all the others; if it runs unconditionally (the
+    /// pre-2026-09-07 discard treatment), every point looks like the last one.
+    #[test]
+    fn final_step_fires_only_at_the_last_transient_timepoint() {
+        const SRC: &str = "
+module fst(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(final_step) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 4
+X1 a gnd fst
+.tran 10u 1m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let branch = net.node_order.len();
+        let current = |row: &Vec<f64>| row[branch].abs();
+        assert!(
+            wf.x.len() > 10,
+            "expected a real run, got {} points",
+            wf.x.len()
+        );
+        // Row 0 is the cold-start seed at `tstart`, not a solved step (`I(V1) = 0` there), so
+        // the interior points are rows 1..n-1.
+        for (t, row) in wf.t.iter().zip(&wf.x).skip(1).take(wf.x.len() - 2) {
+            assert!(
+                (current(row) - 4e-3).abs() < 1e-9,
+                "the body must not run at t = {t:e}: |I(V1)| = {:e}",
+                current(row)
+            );
+        }
+        let last = current(wf.x.last().expect("a last point"));
+        assert!(
+            (last - 4.0).abs() < 1e-6,
+            "the body must run at tstop, and its effect must be solved for: |I(V1)| = {last:e}"
+        );
+    }
+
+    /// The same model in a **static** solve runs the body: a single operating point is both the
+    /// analysis's first step and its last, which is why `AnalysisCtx::is_final_step` is `true`
+    /// in DC/AC/noise. This is also what the old analysis-gated refusal in `va-cli` protected —
+    /// it was only ever wrong in transient.
+    #[test]
+    fn final_step_runs_in_a_static_solve() {
+        const SRC: &str = "
+module fso(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(final_step) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 4
+X1 a gnd fso
+.op
+.end
+",
+        )
+        .expect("parses");
+        let op = solve_dc(&net, &design.modules).expect("solves");
+        let g = op.x[net.node_order.len()].abs() / 4.0;
+        assert!(
+            (g - 1.0).abs() < 1e-9,
+            "one solve point is its own final step: g = {g:e}"
+        );
+    }
+
     /// `above`'s `enable` still gates it, and an `above` on a *negative* expression does not
     /// fire — the initialization rule is "already positive", not "always".
     #[test]
@@ -3921,36 +4017,62 @@ X1 a gnd abe
         assert!((conductance("V(p, n) - 2.5, 0, 0, 1") - 1.0).abs() < 1e-9);
     }
 
-    /// A step-scoped trigger is refused in transient, where its body would re-run at every
-    /// timepoint -- but not in a static solve, where running it once is correct.
+    /// A step-scoped trigger that is still *discarded* is refused in transient, where its body
+    /// would re-run at every timepoint -- but not in a static solve, where running it once is
+    /// correct.
     ///
-    /// The split matters: `@(final_step)` in a DC operating point is right, because the single
-    /// solve point really is both the first and the last step. So this is analysis-gated here
+    /// The split matters: `@(initial_model)` in a DC operating point is right, because the
+    /// single solve point really is the one and only evaluation. So this is analysis-gated here
     /// rather than a parse error in the frontend. (A *monitored* trigger like `@(cross(...))`
     /// never fires in a static solve either, so the frontend rejects those outright and they
     /// never reach this check.)
     #[test]
     fn a_transient_run_refuses_a_step_scoped_trigger() {
         const MODEL: &str = "
+module im(p, n);
+  inout p, n;
+  electrical p, n;
+  real k;
+  analog begin
+    @(initial_model) k = 1.0;
+    I(p, n) <+ V(p, n) / 1000.0;
+  end
+endmodule
+";
+        assert_eq!(step_triggers_in(MODEL), vec!["initial_model"]);
+        let err = refuse_transient_approximations(&[("im.va".to_string(), MODEL.to_string())])
+            .expect_err("`@(initial_model)` re-runs every timepoint");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("initial_model"), "names the trigger: {msg}");
+        assert!(
+            msg.contains("every timepoint"),
+            "says what actually goes wrong: {msg}"
+        );
+    }
+
+    /// `@(final_step)` is **not** refused any more (2026-09-07): it is scheduled rather than
+    /// discarded, so the reason the refusal existed -- a body running at every timepoint -- is
+    /// gone. This is the check that fails if the refusal is ever reinstated by reflex.
+    #[test]
+    fn a_transient_run_accepts_final_step() {
+        const MODEL: &str = "
 module fs(p, n);
   inout p, n;
   electrical p, n;
   real k;
   analog begin
+    k = 0.0;
     @(final_step) k = 1.0;
     I(p, n) <+ V(p, n) / 1000.0;
   end
 endmodule
 ";
-        assert_eq!(step_triggers_in(MODEL), vec!["final_step"]);
-        let err = refuse_transient_approximations(&[("fs.va".to_string(), MODEL.to_string())])
-            .expect_err("`@(final_step)` re-runs every timepoint");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("final_step"), "names the trigger: {msg}");
         assert!(
-            msg.contains("every timepoint"),
-            "says what actually goes wrong: {msg}"
+            step_triggers_in(MODEL).is_empty(),
+            "`final_step` is implemented, not discarded"
         );
+        refuse_transient_approximations(&[("fs.va".to_string(), MODEL.to_string())])
+            .expect("nothing to refuse");
     }
 
     /// Detection is on `@(` + name, so a bare mention of a trigger word elsewhere -- in an
@@ -3961,17 +4083,17 @@ endmodule
 module m(p, n);
   inout p, n;
   electrical p, n;
-  real final_step;
+  real initial_model;
   analog begin
-    // mentions initial_model and final_step in prose
-    final_step = 2.0;
-    I(p, n) <+ V(p, n) / final_step;
+    // mentions initial_model and initial_instance in prose
+    initial_model = 2.0;
+    I(p, n) <+ V(p, n) / initial_model;
   end
 endmodule
 ";
         assert!(
             step_triggers_in(MODEL).is_empty(),
-            "a variable named `final_step` is not an `@(final_step)`"
+            "a variable named `initial_model` is not an `@(initial_model)`"
         );
         refuse_transient_approximations(&[("m.va".to_string(), MODEL.to_string())])
             .expect("nothing to refuse here");

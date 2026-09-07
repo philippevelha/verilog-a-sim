@@ -696,6 +696,38 @@ fn step_factor(err_ratio: f64, method: Method, accepted: bool) -> f64 {
     }
 }
 
+/// Where an evaluation sits in the run, as the two step-scoped global events see it
+/// (LRM §5.10.3): `@(initial_step)` and `@(final_step)`.
+///
+/// One type rather than two adjacent `bool` parameters, because the call sites read very badly
+/// otherwise -- `assemble(.., false, false, ..)` says nothing about which flag is which -- and
+/// because the two are mutually exclusive in a transient run of more than one step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Phase {
+    initial: bool,
+    last: bool,
+}
+
+impl Phase {
+    /// The run's first evaluation, at `tstart`: the seed, before any step is taken.
+    const FIRST: Phase = Phase {
+        initial: true,
+        last: false,
+    };
+    /// Any evaluation that is neither -- every candidate step, and every accepted timepoint
+    /// except the one that ends the run.
+    const MIDDLE: Phase = Phase {
+        initial: false,
+        last: false,
+    };
+    /// The last accepted timepoint, evaluated a second time so that an `@(final_step)` body's
+    /// effect is part of the solution actually recorded.
+    const LAST: Phase = Phase {
+        initial: false,
+        last: true,
+    };
+}
+
 /// Assemble every instance's stamps at `x`, at absolute time `t`, into a fresh dense sink.
 ///
 /// `t` becomes the [`AnalysisCtx::time`] every instance reads as `$abstime`, and the context's
@@ -709,14 +741,15 @@ fn assemble(
     instances: &[&dyn ModelInstance],
     x: &[f64],
     t: f64,
-    is_initial_step: bool,
+    phase: Phase,
     dim: usize,
     state: &mut StateBuffers,
     fired: &FiredEvents,
     ddt: (f64, f64, f64),
 ) -> DenseStamp {
     let ctx = AnalysisCtx::transient(t)
-        .with_initial_step(is_initial_step)
+        .with_initial_step(phase.initial)
+        .with_final_step(phase.last)
         .with_ddt(ddt.0, ddt.1)
         .with_ddt_prev2(ddt.2);
     // Every evaluation starts from the last *committed* state, so an unwritten slot means
@@ -809,7 +842,7 @@ fn newton_step(
     dim: usize,
     x_prev: &[f64],
     t: f64,
-    is_initial_step: bool,
+    phase: Phase,
     state: &mut StateBuffers,
     fired: &FiredEvents,
     companion: &Companion,
@@ -831,7 +864,7 @@ fn newton_step(
             instances,
             &x,
             t,
-            is_initial_step,
+            phase,
             dim,
             state,
             fired,
@@ -914,6 +947,14 @@ pub fn run(
 /// charging transient). Step size adapts within `[cfg.tstep_min, cfg.tstep]` to keep the
 /// embedded-pair LTE estimate (this module's doc comment) within `cfg.lte_reltol`/
 /// `cfg.lte_abstol`, further clamped so it never steps past the next unconsumed breakpoint.
+/// The last accepted timepoint is additionally the analysis's **final step** — Verilog-A's
+/// `@(final_step)`. It is solved twice: once as an ordinary step, and, if any instance's stamps
+/// actually change when `va_abi::AnalysisCtx::is_final_step` is set, once more with the flag on,
+/// so the body's effect is part of the point recorded. A run whose models never read the flag is
+/// bit-identical to one taken before this existed, and pays two extra `load` calls for the whole
+/// run. **Stated limitation:** a run with no accepted step at all (`tstop <= tstart`) reports no
+/// final step — its only point is the unsolved seed, not an evaluation of the analysis.
+///
 /// Crossings are detected between consecutive *accepted* points only (see
 /// [`crate::events::CrossingWatch`]'s doc comment on why interpolation, not a genuine re-solve
 /// at the crossing time, is enough here).
@@ -953,7 +994,7 @@ pub fn run_with_events(
         instances,
         &x,
         cfg.tstart,
-        true,
+        Phase::FIRST,
         dim,
         &mut state,
         &fired,
@@ -1099,8 +1140,20 @@ pub fn run_with_events(
                 h_prev,
                 &is_dynamic,
             );
+            // Always `Phase::MIDDLE`, including on the step that turns out to end the run: the
+            // LTE controller is measuring this step's *discretization* error, and an
+            // end-of-analysis body is not part of the trajectory whose error is being bounded.
+            // The final-step solve happens once, after the step is accepted.
             let x_primary = newton_step(
-                instances, dim, &x, t_next, false, &mut state, &fired, &primary, &junction,
+                instances,
+                dim,
+                &x,
+                t_next,
+                Phase::MIDDLE,
+                &mut state,
+                &fired,
+                &primary,
+                &junction,
             )?;
 
             // Divided differences first when configured: they need no second solve, so the
@@ -1138,7 +1191,7 @@ pub fn run_with_events(
                         dim,
                         &x,
                         t_next,
-                        false,
+                        Phase::MIDDLE,
                         &mut state,
                         &fired,
                         &reference_companion,
@@ -1239,9 +1292,63 @@ pub fn run_with_events(
                 // interpolated crossing time inside the step. A model that needs the crossing
                 // resolved more tightly asks for it the way any model controls the step --
                 // `bound_step`, or a breakpoint through the event channel.
-                if fired.any() {
+                // § `@(final_step)`. This engine knows which accepted timepoint is the
+                // analysis's last one exactly when it reaches it: the outer loop runs
+                // `while t < cfg.tstop`, so the step being accepted here ends the run precisely
+                // when its landing time does. Its body has to run *before* the point is
+                // recorded and be solved for, on the same reasoning as an `@(cross(...))`
+                // body's -- a body that writes a variable feeding a contribution changes the
+                // equations, and recording the pre-body solution would report a point at which
+                // the model's own statements do not hold.
+                //
+                // **Probed, not assumed.** `newton_step` applies its update before testing
+                // convergence, so re-solving every run's last point unconditionally would move
+                // it by a step's worth of round-off, for a construct almost no model contains.
+                // Two evaluations at the already-accepted `x` say whether anything reads the
+                // flag at all; identical stamps mean there is nothing to re-solve. The cost is
+                // two extra `load`s per run, and existing runs stay bit-identical.
+                let phase = if t_next >= cfg.tstop {
+                    let ddt = (
+                        primary.coeff,
+                        primary.prev_rate_weight,
+                        primary.prev2_weight,
+                    );
+                    let last = assemble(
+                        instances,
+                        &x,
+                        t_next,
+                        Phase::LAST,
+                        dim,
+                        &mut state,
+                        &fired,
+                        ddt,
+                    );
+                    let ordinary = assemble(
+                        instances,
+                        &x,
+                        t_next,
+                        Phase::MIDDLE,
+                        dim,
+                        &mut state,
+                        &fired,
+                        ddt,
+                    );
+                    if last.residual == ordinary.residual
+                        && last.jacobian == ordinary.jacobian
+                        && last.charge == ordinary.charge
+                        && last.dcharge == ordinary.dcharge
+                    {
+                        Phase::MIDDLE
+                    } else {
+                        Phase::LAST
+                    }
+                } else {
+                    Phase::MIDDLE
+                };
+
+                if fired.any() || phase.last {
                     x = newton_step(
-                        instances, dim, &x, t_next, false, &mut state, &fired, &primary, &junction,
+                        instances, dim, &x, t_next, phase, &mut state, &fired, &primary, &junction,
                     )?;
                 }
 
@@ -1253,7 +1360,7 @@ pub fn run_with_events(
                     instances,
                     &x,
                     t_next,
-                    false,
+                    phase,
                     dim,
                     &mut state,
                     &fired,

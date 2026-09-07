@@ -19,6 +19,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.8 — 2026-09-07
+------------------
+`@(final_step)` works, and stops being refused in transient. It is `initial_step`'s mirror in
+the frontend -- desugared to a guarded `if`, lowered to `va_ir::Builtin::FinalStep`, reading a
+new `va_abi::AnalysisCtx::is_final_step` (Interface beta, additive) -- and the entire difficulty
+is on the consumer side: a driver knows its first evaluation before making it and its last one
+only after the run has ended.
+
+  So the integrator re-solves the last accepted timepoint with the flag set, the same way it
+  re-solves a timepoint where a `cross` fired, and for the same reason: a body writing a
+  variable that feeds a contribution changes the equations, and recording the pre-body solution
+  would report a point at which the model's own statements do not hold. Knowing *which* point
+  is last needs no lookahead -- the loop runs `while t < tstop` and clamps its landing to
+  `tstop`, so the step being accepted ends the run exactly when its landing time does.
+
+  The re-solve is **probed, not assumed**. `newton_step` applies its update before testing
+  convergence, so re-solving every run's last point unconditionally would move it by a step's
+  worth of round-off in exchange for nothing. Two assembles at the already-accepted point say
+  whether any instance's stamps actually change when the flag is set. Cost: two extra `load`
+  calls per run. Measured, not asserted: `cargo xtask validate` output is byte-identical to
+  0.9.7+1's across all 27 gates.
+
+  `is_final_step` is `true` in DC, AC and noise, so a *swept* DC runs the body at every point.
+  That is the rule `is_initial_step` already follows -- each point is its own static solve, not
+  a step within one -- and it is a stated limitation rather than the LRM's reading of a sweep.
+  Two further limits: bare form only (a compound `initial_step or final_step` is still refused),
+  and a run with no accepted step (`tstop <= tstart`) reports no final step, its only point
+  being the unsolved seed.
+
+  `va-cli`'s transient refusal of `@(final_step)` is gone with the reason for it;
+  `initial_instance`/`initial_model` are the last two triggers still discarded and still
+  refused there. Cost of that: nothing measurable -- the corpus scan does not run transient, and
+  the count is steady.
+
+  733 tests, 27/27 golden circuits, corpus 113/132 (95/99 self-contained), clippy and fmt clean.
+
+
 0.9.7+1 — 2026-09-06
 --------------------
 Process, no behaviour change. CLAUDE.md gains section 12: every update lands a few lines
