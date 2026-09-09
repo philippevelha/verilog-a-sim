@@ -190,11 +190,12 @@ class of lexemes.
   deck line that stops short of the model's trailing ports. The deck form is accepted only for
   a port the model actually queries, since an omitted terminal is equally what a typo looks
   like; the Verilog-A form needs no such guard, being explicit rather than an omission; `$limit(access, "fn_name"[, args...])` (a Newton convergence aid, LRM §4.5.14)
-  folds transparently to its first argument's value — a converged Newton solve is a fixed point
+  folds to its first argument's *value* — a converged Newton solve is a fixed point
   of the *unlimited* equations, so the limiter changes only the iteration path toward that point,
   never the point itself, and this project's stateless `ModelInstance::load` ABI has no
-  previous-iteration history to limit against in the first place (see `va-core/src/convergence.rs`
-  and `docs/roadmap.md`); `$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/
+  previous-iteration history to limit against in the first place — but the access it names is
+  **recorded**, not discarded: it declares a junction, and `va_ir::Module::limited_junctions`
+  carries that declaration to `va-core`'s limiter (2026-09-09; see the `$limit` section below); `$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/
   `$rdist_chi_square`/`$rdist_t`/`$rdist_erlang` (LRM §9.13.2, the repeatable seeded
   random-distribution family) fold to their own distribution's *mean* — `(start+end)/2` for
   `rdist_uniform` (built as a real `Add`/`Div` IR pair, since no single argument carries it), the
@@ -1300,28 +1301,64 @@ including the ones with no implemented behavior at all.
   with its own depth/accuracy story, which is a second design (`docs/proposals/model-state.md`
   §1.3). The state channel is shaped so as not to preclude it. **Still wrong in transient** — Tier B of `docs/proposals/analysis-context.md`: this construct needs the model to *remember* something between evaluations (a slew accumulator, a delay line), and Interface β is deliberately stateless — `load` takes `&self` and may be re-entered on a rejected timestep. The analysis context Tier A added does not help; a state channel needs its own contract answering who owns the storage and what is committed versus rolled back.
 
-### `$limit` — deliberately out of Tier B's scope
+### `$limit` — its value folds; its junction declaration does not (2026-09-09)
 
-`$limit(V(a,b), "pnjlim", vt, vcrit)` still folds to its first argument, and after Tier B that
-is a **considered** decision rather than a gap.
+- **Purpose and Static Nature**: **Both.** `$limit(V(a,b), "pnjlim", vt, vcrit)` (LRM §4.5.14)
+  is a Newton convergence aid: it bounds how far the accessed quantity may move from its
+  previous-iteration value, using a named limiting algorithm. It carries two separable things,
+  and this engine treats them separately — an **expression value**, which folds at elaboration,
+  and a **junction declaration**, which is elaboration-time structure and is kept.
+- **Declaration and Assignment**: An expression, almost always assigned to a local and then used
+  as the exponential's argument (`vbe = $limit(V(bi,ei), "pnjlim", VT, Vcrit); ... exp(vbe/VT)` —
+  the shape all 72 corpus call sites take). At least one argument is required; an empty
+  argument list is a hard elaboration error.
+- **Expressions and Evaluation**: The call lowers to its first argument, so no wrapper node
+  survives — the value is the unlimited one. **That is not a wrong answer**: a converged Newton
+  solve is a fixed point of the *unlimited* equations, so a limiter reshapes the iteration path
+  toward that fixed point and never moves it. (Contrast `transition`, where folding changes the
+  waveform itself.) The lifetime it wants is the Newton *iterate* within one timepoint solve,
+  which is never committed across accepted steps and never rolled back — so Interface β's state
+  channel (`va_abi::state`) is the wrong shape for it by construction, and the value fold is a
+  considered decision rather than a gap. See `docs/proposals/model-state.md` §1.1.
 
-It is the **most-used** construct in the whole corpus (10 files, 72 call sites — more than
-`transition`, `absdelay` and `slew` combined), so excluding it needs saying plainly. Three
-reasons, all pointing the same way:
+  What is **no longer** discarded is the access argument. It names a junction
+  *authoritatively*, where the consumer would otherwise have to guess:
 
-1. **Its fold is not a wrong answer.** A converged Newton solve is a fixed point of the
-   *unlimited* equations; a limiter reshapes the iteration path toward that fixed point and
-   never moves it. So the fold costs convergence robustness on a hard circuit, not correctness —
-   unlike `transition`, where folding changes the waveform itself.
-2. **Its lifetime is the Newton iteration, not the timestep.** It wants the previous *iterate*
-   within one timepoint solve, which is never committed across accepted steps and never rolled
-   back. Interface β's state channel (`va_abi::state`) is the wrong shape for it by construction.
-3. **The solver already limits.** `va-core`'s Newton loop applies `convergence::limit_junction`
-   to every unknown, so the project is not un-limited today — it is limited *globally* rather
-   than where the model asked. The remaining work is "let a model direct the existing limiter",
-   which belongs with convergence work, not with a state channel.
+  - `va-frontend` records both endpoints of the accessed branch in
+    `va_ir::Module::limited_junctions` (Interface α's revision of 2026-09-09) — both, because
+    `pnjlim` clamps a potential *difference* while `va-core` limits per unknown. A branch
+    limited in both polarity arms of an `if` (`V(bi,ei)` in one, `V(ei,bi)` in the other — what
+    every corpus compact model writes) records one junction per node, not two.
+  - `va-codegen` reports exactly those nodes through `ModelInstance::unknown_is_junction`, and
+    reports `false` for every node the declaration left out. A module that declares nothing
+    keeps the structural guess: every node of a module whose source contains an `exp` is
+    treated as a junction, and none of a module without one.
+  - `va-core`'s `newton::solve` clamps a junction unknown's step through
+    `convergence::limit_junction`, as it already did — no ABI change was needed, only a
+    truthful answer to a question it was already asking.
 
-See `docs/proposals/model-state.md` §1.1.
+  The gain is precision on exactly the models that write `$limit`. A compact BJT limits
+  `V(bi,ei)`/`V(bi,ci)` and says nothing about its external `b`/`c`/`e` terminals behind their
+  series resistances, or about its thermal node — none of which have an exponential across them,
+  and all of which the per-module guess would throttle to roughly `vt·ln(...)` per iteration.
+- **Stated limitations**, all of them costing iteration path and never the answer:
+  - **The algorithm name is not honoured.** `"pnjlim"`, `"fetlim"`, `"typedpnjlim_new"` and any
+    user-written limiter all get `convergence::limit_junction`'s `pnjlim`, the one algorithm
+    this engine has; the trailing algorithm-parameter arguments are parsed and never evaluated,
+    the clamp using `VT_NOMINAL`/`default_vcrit` instead of the model's `vt`/`vcrit`.
+  - **A flow access declares nothing.** `$limit(I(b), …)` folds as before and records no
+    junction: `limit_junction` is a voltage-shaped rule, and applying it to a current unknown is
+    the precise bug `unknown_is_junction` exists to prevent (a 100 A current clamped as though
+    it were a junction voltage). Likewise a first argument that is not a probe at all.
+  - **A declaration is trusted exclusively.** A model that limits one junction and leaves a
+    second exponential unlimited now gets what it asked for, where the blanket guess would have
+    covered it. That is the LRM's own division of labour, and the fix for such a model is the
+    `$limit` it omitted.
+- **Structural and Analog Usage**: Analog-block only.
+- **Comparison with Traditional Constructs**: No C analogue. SPICE's internal `pnjlim`/`fetlim`
+  are the direct ancestors — the difference being that there the device model *is* the
+  simulator's own code, while `$limit` is how a Verilog-A model reaches the same lever from
+  outside.
 
 ### `Bound_step`
 

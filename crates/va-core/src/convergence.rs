@@ -5,22 +5,33 @@
 //!
 //! # Status
 //!
-//! **`limit_junction` is now wired into [`crate::newton::solve`]**
-//! (`NewtonConfig::limit_junctions`, default on): applied as a blanket per-unknown clamp each
-//! iteration, using [`VT_NOMINAL`] and [`default_vcrit`]. The earlier blocker ("needs the
-//! device's previous-iteration voltage") doesn't actually hold — the Newton loop already has
-//! both `x[i]` (before the update) and `x[i] + dx[i]` (the proposed update) for every unknown,
-//! with no ABI change needed. The *real* limitation is that `va-core` has no way to know
-//! *which* unknowns are junction voltages specifically (the stateless
-//! [`va_abi::ModelInstance`] ABI exposes no per-device `Is`/`n`), so this clamps every unknown
-//! alike rather than only recognized junctions the way a real SPICE implementation would.
-//! That's sound, not just convenient: a converged Newton solve is a fixed point of the
-//! *unlimited* equations (same reasoning as `$limit`'s elaboration-time fold in
-//! `va-frontend`) — limiting only reshapes the iteration path, never the answer it settles
-//! on. The known cost is it can slow convergence on unknowns that were never exponential in
-//! the first place (a purely linear resistor network's node voltages, or a branch-current
-//! unknown numerically large enough to cross [`default_vcrit`]'s threshold) — disable via
-//! `NewtonConfig::limit_junctions = false` if that matters more than the diode/BJT robustness.
+//! **`limit_junction` is wired into [`crate::newton::solve`]**
+//! (`NewtonConfig::limit_junctions`, default on): applied each iteration to the unknowns
+//! [`crate::mna::classify_junctions`] marks, using [`VT_NOMINAL`] and [`default_vcrit`]. The
+//! original blocker ("needs the device's previous-iteration voltage") never held — the Newton
+//! loop already has both `x[i]` (before the update) and `x[i] + dx[i]` (the proposed update)
+//! for every unknown, with no ABI change needed.
+//!
+//! It *was* a blanket clamp on every unknown, on the reasoning that `va-core` had no way to
+//! know which unknowns are junction voltages. That reasoning is dead twice over, and the note
+//! recording it outlived both:
+//!
+//! 1. `va_abi::ModelInstance::unknown_is_junction` (2026-07-25) lets an instance say. Blanket
+//!    limiting was not merely slow, it was a **bug** — a linear resistor divider failed to
+//!    converge above about 20 V, because a step to a 100 V node was compressed to roughly
+//!    `vt·ln(...)` ≈ 0.2 V (see `newton::tests::junction_limiting_no_longer_throttles_a_linear_
+//!    circuit`, and `unknown_is_junction`'s own doc comment).
+//! 2. `va_ir::Module::limited_junctions` (2026-09-09) lets the *model* say, which is where the
+//!    answer was always most authoritative: `$limit(V(bi,ei), "pnjlim", …)` names a junction
+//!    outright, so `va-codegen` no longer has to guess one from the presence of an `exp`.
+//!
+//! What remains true is the reason limiting is sound at all: a converged Newton solve is a
+//! fixed point of the *unlimited* equations (the same reasoning as `$limit`'s value fold in
+//! `va-frontend`) — limiting only reshapes the iteration path, never the answer it settles on.
+//! The remaining cost is that this engine has exactly one algorithm and one pair of constants:
+//! every junction is clamped with `pnjlim` at [`VT_NOMINAL`]/[`default_vcrit`], whatever
+//! algorithm name and `vt`/`vcrit` arguments the model wrote. Disable the whole aid via
+//! `NewtonConfig::limit_junctions = false` if a circuit is better off without it.
 //!
 //! **`gmin_for_step` is now wired in too (2026-07-04)**, via the Interface β change this
 //! blocker actually called for: `va_abi::ModelInstance::unknown_kind` (default

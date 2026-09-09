@@ -215,10 +215,12 @@ implemented as of v0.9.11 (a deck's `m=`/`mult=`, with LRM §6.3.6's automatic s
 validated against the module's own declarations but never lowered as a value — v0's pipeline
 has no netlist-driven instantiation, so no parameter is ever explicitly overridden and no
 optional port is ever connected, making `false` the honest answer rather than an approximation);
-`$limit(access, "fn_name", ...)` (a Newton convergence aid, LRM §4.5.14) folds transparently to
-`access`'s value, since a converged solve is a fixed point of the *unlimited* equations and the
+`$limit(access, "fn_name", ...)` (a Newton convergence aid, LRM §4.5.14) folds to
+`access`'s *value*, since a converged solve is a fixed point of the *unlimited* equations and the
 stateless `ModelInstance::load` ABI has no previous-iteration history to limit against regardless
-(`token-reference.md`'s `SysFunc` entry). Part of what moved the pass count from 44 to 56
+— but as of 2026-09-09 the access it names is kept, as a model-declared junction that reaches
+`va-core`'s limiter through `va_ir::Module::limited_junctions`
+(`token-reference.md`'s `$limit` section). Part of what moved the pass count from 44 to 56
 (BSIM6.1.1/bsimbulk*/asmhemt/asmhemt101_0/fbh_hbt-2_3 and others); and **`$simparam` folding
 inside a parameter default**, not just the analog block — `const_eval` (the separate,
 non-mutating evaluator behind parameter defaults/ranges/genvar bounds) gets the same
@@ -2885,7 +2887,9 @@ needed no new AST or IR statement kind and the existing control-flow walk select
   convergence robustness, **not correctness**: a converged Newton solve is a fixed point of the
   *unlimited* equations. Its lifetime is the Newton iterate, and `va-core` already limits every
   unknown globally. The real work is "let a model direct the existing limiter" — convergence
-  work, not a state channel.
+  work, not a state channel. *(That work landed on 2026-09-09, through Interface α
+  rather than the state channel: the value still folds, the junction the access names no longer
+  does. See the v0.9.13 entry.)*
 - **`absdelay`** — needs an interpolated history buffer; no fixed-size state vector holds a
   trajectory.
 - **Exact `transition` breakpoints** — approximated with Tier A's `bound_step` (~8 points per
@@ -4027,12 +4031,17 @@ noted. Recorded so the next pass does not have to re-derive them.
          decide how much conductance to add themselves, so "known, and it is zero" would
          silently strip a shunt those models add for their own conditioning. `gmin` is therefore
          deliberately *not* a name this simulator claims to know.
-- [ ] **`$limit(access, …)` folds transparently.** The *conclusion* stands — a converged solve
-      is a fixed point of the unlimited equations, and the stateless `ModelInstance::load` ABI
-      keeps no previous-iteration history. What is genuinely thrown away is narrower: `$limit`'s
-      access argument names a junction **authoritatively**, where `newton::solve` currently has
-      to infer which unknowns are junctions structurally. Feeding model-declared junctions to
-      the limiter is a real, small integration.
+- [x] **`$limit(access, …)` folds transparently.** *Half-expired, and the half that had expired
+      was fixed on 2026-09-09 (v0.9.13).* The *conclusion* about the **value** stands — a
+      converged solve is a fixed point of the unlimited equations, and the stateless
+      `ModelInstance::load` ABI keeps no previous-iteration history — so the value still folds.
+      What was genuinely thrown away was narrower: `$limit`'s access argument names a junction
+      **authoritatively**, where `va-codegen` had to infer one from the presence of an `exp`,
+      per module. `va_ir::Module::limited_junctions` (Interface α, §6) now carries the
+      declaration to `ModelInstance::unknown_is_junction`, and a model that declares its
+      junctions gets exactly those limited. No golden number moves — all 27 gates are
+      byte-identical — because no zoo model writes `$limit`; the gain is on the ten corpus
+      compact models that do.
 - [ ] **`$rdist_*` folds to its distribution's mean**, and `white_noise`/`flicker_noise` fold to
       `0.0` in DC. Premise "no simulator random-number generator" — unexpired, and the DC fold
       is correct physics regardless (noise is a small-signal quantity, and T5 computes it

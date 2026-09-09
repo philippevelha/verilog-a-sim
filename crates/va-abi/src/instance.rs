@@ -83,9 +83,11 @@ pub trait ModelInstance {
     ///
     /// So an instance must opt **in**, and only for the unknowns that really are junction
     /// potentials: `crate::reference::Diode`/`Bjt` do, and a `va-codegen`-generated model does
-    /// exactly when its source contains an exponential (`exp`/`limexp`). Everything else — a
-    /// resistor, a capacitor, a source, a linear Verilog-A model — leaves it `false` and gets
-    /// undamped Newton, which for a linear circuit lands in one step.
+    /// for the junctions its Verilog-A source declared with `$limit(V(a,b), "pnjlim", …)` —
+    /// falling back, for a source that declares none, to the coarser guess "this module
+    /// contains an exponential (`exp`/`limexp`), so every one of its nodes is a junction".
+    /// Everything else — a resistor, a capacitor, a source, a linear Verilog-A model — leaves
+    /// it `false` and gets undamped Newton, which for a linear circuit lands in one step.
     fn unknown_is_junction(&self, i: usize) -> bool {
         let _ = i;
         false

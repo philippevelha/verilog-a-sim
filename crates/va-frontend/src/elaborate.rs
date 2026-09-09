@@ -1694,20 +1694,23 @@ impl Elaborator<'_> {
             // limit against in the first place, so there is no alternative reading available
             // even if one were wanted.
             //
-            // The parenthetical this comment used to carry — that `va-core`'s `pnjlim` was "not
-            // yet wired into the Newton loop" — is false: `NewtonConfig::limit_junctions`
-            // defaults to `true` and `newton::solve` clamps each update through
-            // `convergence::limit_junction`. What is still true is the *reason* for folding:
-            // the fixed point is unchanged by limiting. What is now missed is narrower and
-            // worth recording — `$limit`'s access argument names a junction *authoritatively*,
-            // where `newton::solve` has to infer which unknowns are junctions structurally. See
-            // `docs/roadmap.md`'s expired-premise review. The function-name string and any trailing algorithm-parameter
-            // arguments are parsed but never evaluated.
+            // The *value* is all that folds, and one part of the call is not a value: the
+            // access argument names a junction **authoritatively**, which is exactly what
+            // `va-core`'s limiter otherwise has to infer. So the access is recorded in
+            // `Module::limited_junctions` (see `Self::record_limited_junctions`) while the
+            // expression folds as before. The function-name string and any trailing
+            // algorithm-parameter arguments are still parsed but never evaluated: this engine
+            // has one limiting algorithm, `convergence::limit_junction`'s `pnjlim`, and applies
+            // it to every declared junction whatever name the model wrote — a stated
+            // limitation, and a cheap one, since the algorithm choice moves the iteration path
+            // and not the answer.
             ExprAst::SysFunc { name, args } if name == "limit" => {
                 let value = *args.first().ok_or_else(|| {
                     elab("`$limit` requires at least an access argument".to_string())
                 })?;
-                return self.lower_expr(value);
+                let lowered = self.lower_expr(value)?;
+                self.record_limited_junctions(lowered);
+                return Ok(lowered);
             }
             // `$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/
             // `$rdist_chi_square`/`$rdist_t`/`$rdist_erlang` (LRM §9.13.2) generate repeatable
@@ -2383,6 +2386,49 @@ impl Elaborator<'_> {
         self.out.branches.push(Branch { p, n });
         self.branches.insert(key, id);
         id
+    }
+
+    /// Record the junctions a `$limit(access, …)` call declares, given the already-lowered
+    /// `access` argument (LRM §4.5.14).
+    ///
+    /// Both endpoints of the accessed branch are recorded, because `pnjlim` clamps a potential
+    /// *difference* while `va-core` limits per unknown: limiting only `bi` of `V(bi,ei)` would
+    /// leave the difference across the junction free to take the very step the model asked to
+    /// have bounded.
+    ///
+    /// **Only a potential access declares anything.** A flow access (`$limit(I(b), …)`) folds
+    /// exactly as before and records nothing: `limit_junction` is a voltage-shaped rule and
+    /// applying it to a current unknown is meaningless (`va_abi::ModelInstance::
+    /// unknown_is_junction`'s own doc comment says so — it is the bug that clamped a 100 A
+    /// current as though it were a junction voltage). Likewise an argument that is not a probe
+    /// at all — the LRM requires one there, and this engine does not guess a junction out of
+    /// arithmetic. Both cases are stated limitations, not silent ones: the value is still
+    /// right, only the limiter is left to its structural guess.
+    ///
+    /// The walk descends through [`Expr::Select`] because a runtime-indexed vector-net access
+    /// (`$limit(V(vec[j]), …)`) lowers to an if/else-if chain of probes, one per declared
+    /// index; every index the chain can select is a junction the model may land on, so all of
+    /// them are recorded.
+    fn record_limited_junctions(&mut self, access: ExprId) {
+        let mut stack = vec![access];
+        let mut nodes = Vec::new();
+        while let Some(id) = stack.pop() {
+            match self.out.exprs[id.0 as usize] {
+                Expr::Probe(a) if a.kind == AccessKind::Potential => {
+                    let branch = self.out.branches[a.branch.0 as usize];
+                    nodes.push(branch.p);
+                    nodes.push(branch.n);
+                }
+                Expr::Select(_, then_, else_) => {
+                    stack.push(then_);
+                    stack.push(else_);
+                }
+                _ => {}
+            }
+        }
+        for n in nodes {
+            self.out.mark_limited_junction(n);
+        }
     }
 
     /// Which (if any) position of `idxs` (0, 1, or 2 entries) is genuinely dynamic (not
@@ -5237,6 +5283,75 @@ mod tests {
             .next()
             .expect("at least one module");
         assert!(elaborate(&ast).is_err());
+    }
+
+    /// The junction a `$limit` names is recorded on the module, both endpoints of it, and a
+    /// second `$limit` on the same branch (the `if (polarity)` / `else` shape every corpus
+    /// compact model writes) adds nothing further.
+    #[test]
+    fn limit_declares_its_junction_nodes() {
+        let m = elaborate_src(
+            r#"module t(b, e, c); electrical b, e, c; real v; analog begin
+                 v = $limit(V(b, e), "pnjlim", 0.5, 1.0);
+                 I(b, e) <+ exp(v);
+               end endmodule"#,
+        );
+        // `b` and `e` — both endpoints, because `pnjlim` clamps the difference across them —
+        // and emphatically not `c`, which no `$limit` named.
+        assert!(m.declares_limited_junctions());
+        assert!(
+            m.node_is_limited_junction(NodeId(0)),
+            "b: {:?}",
+            m.limited_junctions
+        );
+        assert!(
+            m.node_is_limited_junction(NodeId(1)),
+            "e: {:?}",
+            m.limited_junctions
+        );
+        assert!(
+            !m.node_is_limited_junction(NodeId(2)),
+            "c: {:?}",
+            m.limited_junctions
+        );
+        assert_eq!(m.limited_junctions.len(), 2);
+
+        // Both polarity arms limit the same pair; the record is deduplicated.
+        let both = elaborate_src(
+            r#"module t(b, e); electrical b, e; parameter real type_ = 1; real v; analog begin
+                 if (type_ > 0) v = $limit(V(b, e), "pnjlim", 0.5, 1.0);
+                 else v = $limit(V(e, b), "pnjlim", 0.5, 1.0);
+                 I(b, e) <+ exp(v);
+               end endmodule"#,
+        );
+        assert_eq!(
+            both.limited_junctions.len(),
+            2,
+            "{:?}",
+            both.limited_junctions
+        );
+    }
+
+    /// A `$limit` on a **flow** access declares no junction: `limit_junction` is a
+    /// voltage-shaped clamp and a current unknown is not a junction potential. The value still
+    /// folds, so the model is not otherwise affected.
+    #[test]
+    fn limit_on_a_flow_access_declares_nothing() {
+        let m = elaborate_src(
+            r#"module t(a, b); electrical a, b; analog begin
+                 I(a, b) <+ $limit(I(a, b), "pnjlim", 0.5, 1.0) + V(a, b);
+               end endmodule"#,
+        );
+        assert!(
+            !m.declares_limited_junctions(),
+            "a flow access is not a junction declaration: {:?}",
+            m.limited_junctions
+        );
+        // …and the fold still happened: the flow probe survives as the call's value.
+        assert!(m
+            .exprs
+            .iter()
+            .any(|e| matches!(e, va_ir::Expr::Probe(a) if a.kind == AccessKind::Flow)));
     }
 
     #[test]

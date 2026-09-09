@@ -65,6 +65,7 @@ Module {
     unconnected_ports: [],
     mfactor: None,
     given_params: [],
+    limited_junctions: [],
     exprs: [
         Probe(
             Access {

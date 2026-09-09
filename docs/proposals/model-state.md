@@ -67,9 +67,16 @@ So folding `$limit` to its first argument yields *the same answer*, just reached
 (or not at all, on a hard circuit). Contrast `transition`, where folding changes the waveform
 itself.
 
-`va-core` also already applies `convergence::limit_junction` to every unknown in its Newton
-loop, so the project is not un-limited today — it is limited *globally* rather than where the
-model asked.
+`va-core` also already applies `convergence::limit_junction` in its Newton loop, so the project
+is not un-limited today — it was limited *globally* rather than where the model asked.
+
+> **Update, 2026-09-09 (v0.9.13).** That last sentence is the part of §1.1 that expired, and the
+> half of `$limit` it describes is now implemented — through **Interface α**, not this channel,
+> exactly as "belongs with convergence work" predicted. The value still folds, for every reason
+> below. What no longer happens is discarding the access: `va_ir::Module::limited_junctions`
+> carries the junctions a model declares to `ModelInstance::unknown_is_junction`, so a model
+> that writes `$limit` gets its own nodes limited and its external terminals left alone. This
+> proposal's non-goal (§8) stands as written — no per-instance state was added for it.
 
 **Consequence for this proposal: `$limit` is out of scope, and belongs with convergence work,
 not with a state channel.** Putting the most-used construct out of scope needs saying plainly,
@@ -319,7 +326,8 @@ success criterion — the same split that made Tier A's risky half reviewable.
 ## 8. Explicit non-goals
 
 - **`$limit`** (§1.1) — different lifetime, different failure mode; belongs with `va-core`'s
-  convergence work.
+  convergence work. *(Done there on 2026-09-09, with no state channel involved —
+  see §1.1's update.)*
 - **`absdelay`** (§1.3) — needs an interpolated history buffer, a second design.
 - **`idt` initial conditions** — an initialization concern for an unknown that already exists,
   not a per-evaluation state one.

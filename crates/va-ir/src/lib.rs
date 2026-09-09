@@ -173,6 +173,26 @@ pub struct Module {
     /// set, which is the honest answer for it — every parameter is at its default. Whoever
     /// builds the instance records the truth here; see [`Self::param_is_given`].
     pub given_params: Vec<ParamId>,
+    /// The nodes the module declared to be **junction potentials**, by writing
+    /// `$limit(V(a,b), "pnjlim", …)` across them (LRM §4.5.14).
+    ///
+    /// `$limit` still folds to its first argument's *value* — a converged Newton solve is a
+    /// fixed point of the unlimited equations, so a limiter reshapes the iteration path and
+    /// never the answer — but the fold used to throw the whole call away, and one part of it
+    /// is not a value at all: the access argument names a junction **authoritatively**.
+    /// Without it a consumer has to guess which unknowns are junctions from the source's
+    /// shape, and `va-codegen`'s guess is deliberately coarse ("this module contains an
+    /// `exp`, so treat every one of its nodes as a junction"), which over-limits every node a
+    /// compact model has that is not a junction — the external terminals sitting behind
+    /// series resistances, the thermal node.
+    ///
+    /// Ordered as elaboration met the calls, deduplicated, and holding *both* endpoints of
+    /// each limited branch: `pnjlim` clamps a potential difference, and `va-core` limits
+    /// per-unknown, so both nodes of the pair must be limited for the difference across them
+    /// to be. Empty for a module that never writes `$limit` — which is every model in the zoo
+    /// — and an empty list means "not declared", not "no junctions": see
+    /// [`Self::declares_limited_junctions`] for how a consumer distinguishes the two.
+    pub limited_junctions: Vec<NodeId>,
     /// Expression arena. [`ExprId`]s index into this `Vec`.
     pub exprs: Vec<Expr>,
     /// Local analog variables referenced by [`VarId`]. Function arguments and locals share
@@ -221,6 +241,36 @@ impl Module {
     /// that port unconnected, since building an instance otherwise wires every port.
     pub fn port_is_connected(&self, i: usize) -> bool {
         !self.unconnected_ports.contains(&i)
+    }
+
+    /// Whether this module declared its junctions itself, by writing `$limit` at least once
+    /// ([`Self::limited_junctions`]).
+    ///
+    /// The question a consumer must ask *before* [`Self::node_is_limited_junction`], because
+    /// the two answers to "is node `n` a junction?" have different meanings when nothing was
+    /// declared. A module that wrote no `$limit` has said nothing, and a consumer falls back
+    /// to whatever structural guess it makes; a module that wrote one has enumerated its
+    /// junctions, and every node it left out is authoritatively *not* one.
+    pub fn declares_limited_junctions(&self) -> bool {
+        !self.limited_junctions.is_empty()
+    }
+
+    /// Whether node `n` is one of the junctions this module declared with `$limit`.
+    ///
+    /// Meaningful only when [`Self::declares_limited_junctions`] is true — it is `false` for
+    /// every node of a module that declared nothing, which reads as "not declared", not as
+    /// "not a junction".
+    pub fn node_is_limited_junction(&self, n: NodeId) -> bool {
+        self.limited_junctions.contains(&n)
+    }
+
+    /// Record node `n` as a declared junction. Idempotent, so the same branch limited in both
+    /// polarity arms of an `if` (the shape every corpus compact model writes) records one
+    /// junction per node, not two.
+    pub fn mark_limited_junction(&mut self, n: NodeId) {
+        if !self.limited_junctions.contains(&n) {
+            self.limited_junctions.push(n);
+        }
     }
 
     /// Whether parameter `p` was declared `localparam`, and so may not be overridden by an

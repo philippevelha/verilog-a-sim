@@ -277,10 +277,42 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 >
 > **Explicitly not delivered** (Tiers B and C of the same proposal): `transition`, `slew`,
 > `absdelay`, `$limit`, `@(initial_step)` and `idt` initial conditions still fold, because they
-> need per-instance *state* across evaluations and Interface β is deliberately stateless;
+> need per-instance *state* across evaluations and Interface β is deliberately stateless
+> *(`transition`/`slew`/`@(initial_step)` were delivered later by the state channel; `$limit`
+> still folds its value, but no longer discards its junction declaration — see the α revision
+> of 2026-09-09)*;
 > `laplace_*`/`zi_*` still fold to their DC gain, because they need per-frequency
 > re-linearization. `docs/token-reference.md` says so per construct rather than implying the
 > whole family is fixed.
+
+> **Revision (§6 change, 2026-09-09):** added `Module::limited_junctions: Vec<NodeId>` —
+> the junctions a module declared by writing `$limit(V(a,b), "pnjlim", …)` (LRM §4.5.14) —
+> with `Module::{declares_limited_junctions, node_is_limited_junction, mark_limited_junction}`.
+> Purely additive: a `Vec` that defaults empty, so every existing producer and consumer keeps
+> compiling and every module that never writes `$limit` is byte-identical to before (the three
+> committed golden-IR snapshots gained one `limited_junctions: []` line and nothing else).
+>
+> **Why the IR and not a frontend-internal table.** `$limit`'s *value* still folds to its first
+> argument, and that fold is not a wrong answer — a converged Newton solve is a fixed point of
+> the unlimited equations, so a limiter reshapes the iteration path and never the answer. But
+> one part of the call was never a value: the access argument names a junction
+> **authoritatively**, and the consumer that needs to know which unknowns are junctions is
+> `va-core`, three crates downstream. Interface α is the only channel between them.
+>
+> **What a consumer owes it.** An empty list means "the module declared nothing", not "the
+> module has no junctions" — hence `declares_limited_junctions` as a separate question.
+> `va-codegen` asks it first: a module that declared junctions gets exactly those and no
+> others (its `ModelInstance::unknown_is_junction` reports `false` for every node left out);
+> a module that declared none falls back to the structural guess it has always made ("this
+> source contains an `exp`, so treat every node as a junction"). Both endpoints of each limited
+> branch are recorded, because `pnjlim` clamps a potential *difference* while `va-core` limits
+> per unknown. Only a potential access declares anything — a `$limit` on a flow folds as before
+> and declares nothing, since a voltage-shaped clamp on a current unknown is the exact bug
+> `unknown_is_junction` was introduced to stop.
+>
+> Interface β is **unchanged** by this: `unknown_is_junction` already existed (§ 2026-07-04's
+> revision) and already had the right shape. This change only gives `va-codegen` a truthful
+> answer to give it.
 
 ## Interface β — model instance ABI (`va-abi`)
 
@@ -565,7 +597,10 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > - **`$limit`** is the corpus's most-used construct (10 files / 72 uses) and is excluded because
 >   its fold is **not a wrong answer**: a converged Newton solve is a fixed point of the
 >   unlimited equations, so a limiter changes the path, not the answer. Its lifetime is the
->   Newton *iterate*, not the timestep, so this channel is the wrong shape for it.
+>   Newton *iterate*, not the timestep, so this channel is the wrong shape for it. *(Still true of the state
+>   channel, and still why its value folds. What it did **not** justify was throwing the
+>   junction the access names away as well — that half landed on 2026-09-09 through Interface α
+>   instead, which is the channel it always belonged in.)*
 > - **`absdelay`** needs an unbounded interpolated **trajectory**, which no fixed-size state
 >   vector holds. A second design; the channel is shaped not to preclude it.
 > - **True event-scheduled `transition`** — approximated here via `bound_step` rather than exact

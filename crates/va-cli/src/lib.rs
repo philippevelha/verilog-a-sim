@@ -2648,6 +2648,83 @@ mod tests {
         );
     }
 
+    /// § `$limit`'s model-declared junctions, end to end and in the "fails one way, succeeds
+    /// the other" shape: the *same* model, with and without the `$limit`, must solve and fail
+    /// respectively.
+    ///
+    /// The model deliberately mixes the two kinds of node a compact device has — an exponential
+    /// junction (`a`,`c`) and a plain linear pair (`p`,`n`) standing in for the external
+    /// terminals behind a series resistance — and the linear pair is driven to 100 V. Without a
+    /// declaration `va-codegen` can only guess from the presence of `exp`, and its guess is
+    /// per-module: every node is a junction, so `limit_junction`'s logarithmic clamp compresses
+    /// the 100 V node's step to roughly `vt·ln(...)` and Newton's iteration budget runs out —
+    /// exactly the throttling `va-core`'s own `junction_limiting_no_longer_throttles_a_linear_
+    /// circuit` demonstrates. `$limit(V(a,c), …)` names the junction authoritatively, and the
+    /// clamp then lands on `a` alone.
+    ///
+    /// So this pins both directions at once: the declaration is honoured *and* it is honoured
+    /// exclusively — the diode half still converges through the clamp it asked for.
+    #[test]
+    fn a_model_declared_junction_limits_that_node_and_leaves_the_others_alone() {
+        // `p`/`n`: 1 kΩ driven at 100 V. `a`/`c`: a diode, fed from the same 100 V rail through
+        // an external 100 kΩ, so it sits at a genuine forward operating point.
+        const SRC: &str = "module mixed(a, c, p, n); electrical a, c, p, n; \
+             parameter real Is = 1e-15; parameter real vt = 0.025852; \
+             parameter real R = 1000.0; real vd; \
+             analog begin \
+               vd = LIMIT; \
+               I(a, c) <+ Is * (exp(vd / vt) - 1.0); \
+               I(p, n) <+ V(p, n) / R; \
+             end endmodule";
+        let declared = SRC.replace("LIMIT", r#"$limit(V(a, c), "pnjlim", vt, 0.6145)"#);
+        let guessed = SRC.replace("LIMIT", "V(a, c)");
+
+        // Unknown 0 = the 100 V rail, 1 = the diode anode, 2 = the source's branch current.
+        let build = |src: &str| {
+            let design = compile_model(src, "mixed");
+            let module = design.modules.first().expect("one module").clone();
+            let mut next = 3usize;
+            va_codegen::build_instance(&module, &[1, GROUND, 0, GROUND], &mut next).expect("builds")
+        };
+
+        let dev = build(&declared);
+        assert!(dev.unknown_is_junction(0), "`a` was declared a junction");
+        assert!(
+            !dev.unknown_is_junction(2),
+            "`p` was not declared one, and is the node the blanket guess used to throttle"
+        );
+
+        let vs = va_abi::reference::VSource::new(0, GROUND, 2, 100.0);
+        let feed = va_abi::reference::Resistor::new(0, 1, 100e3);
+        let insts: [&dyn ModelInstance; 3] = [dev.as_ref(), &vs, &feed];
+        let op = operating_point(&insts, 3, NewtonConfig::default())
+            .expect("the declared junction leaves the 100 V node unlimited, so this converges");
+        assert!(
+            (op.x[0] - 100.0).abs() < 1e-9,
+            "the rail must reach 100 V: {}",
+            op.x[0]
+        );
+        assert!(
+            (0.4..1.0).contains(&op.x[1]),
+            "the diode must sit at a forward drop: {}",
+            op.x[1]
+        );
+
+        // The identical circuit with the declaration removed: every node is guessed to be a
+        // junction, and the rail cannot be walked to 100 V inside the iteration budget.
+        let plain = build(&guessed);
+        assert!(
+            plain.unknown_is_junction(2),
+            "without a `$limit` the guess is per-module, so `p` is limited too -- if that              stopped being true this test no longer discriminates"
+        );
+        let insts: [&dyn ModelInstance; 3] = [plain.as_ref(), &vs, &feed];
+        let throttled = operating_point(&insts, 3, NewtonConfig::default());
+        assert!(
+            throttled.is_err(),
+            "the blanket guess was expected to throttle this to a non-convergence; it returned              {throttled:?}"
+        );
+    }
+
     /// The whole Tier A pipeline, from Verilog-A source to a solved waveform: a model whose
     /// current is a function of `$abstime` must produce a genuine ramp in transient and its
     /// `t = 0` value at a DC operating point.

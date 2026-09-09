@@ -150,10 +150,7 @@ pub fn build_instance(
 
     // Scanned once here rather than per Newton iteration: `unknown_is_junction` is consulted
     // for every unknown on every solve, and the answer is a property of the source text.
-    let has_exponential = module
-        .exprs
-        .iter()
-        .any(|e| matches!(e, Expr::Call(Builtin::Exp, _)));
+    let node_is_junction = classify_nodes(module);
     let model = GeneratedModel {
         module: module.clone(),
         terminals: full,
@@ -161,7 +158,7 @@ pub fn build_instance(
         lowered,
         vt: VT,
         temp: TEMP,
-        has_exponential,
+        node_is_junction,
     };
 
     // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -180,12 +177,48 @@ struct GeneratedModel {
     lowered: Lowered,
     vt: f64,
     temp: f64,
-    /// Whether the module's source contains an exponential (`exp`, or `limexp`, which the
-    /// frontend lowers to the same [`Builtin::Exp`]). Drives
-    /// [`ModelInstance::unknown_is_junction`]: a model with no exponential must not be
-    /// step-limited, because the clamp exists to stop `exp(V/vt)` overflowing and does nothing
-    /// but throttle convergence anywhere else.
-    has_exponential: bool,
+    /// Which of `module.nodes` are junction potentials — the answer
+    /// [`ModelInstance::unknown_is_junction`] gives for this model's node-kind unknowns, decided
+    /// once by [`classify_nodes`] because it is a property of the source text.
+    node_is_junction: Vec<bool>,
+}
+
+/// Which of `module`'s nodes are junction potentials, for
+/// [`ModelInstance::unknown_is_junction`].
+///
+/// Two sources of truth, in priority order:
+///
+/// 1. **What the model declared.** `$limit(V(bi,ei), "pnjlim", …)` names a junction
+///    authoritatively (LRM §4.5.14), and `va_ir::Module::limited_junctions` carries every one
+///    elaboration met. A module that wrote at least one has enumerated its junctions, so the
+///    nodes it left out are *not* junctions and are not limited — which is the point. A compact
+///    BJT limits `V(bi,ei)`/`V(bi,ci)` and says nothing about the external `b`/`c`/`e`
+///    terminals behind its series resistances, or about its thermal node, none of which have an
+///    exponential across them and all of which the guess below would throttle.
+/// 2. **The structural guess**, for the silent majority of models: a module whose source
+///    contains an exponential (`exp`, or `limexp`, which the frontend lowers to the same
+///    [`Builtin::Exp`]) has *every* node treated as a junction; one without has none. Coarse on
+///    purpose — the IR records where the `exp` is, not which node pair its argument ultimately
+///    reads — and over-approximating within a model that genuinely has an exponential is the
+///    safe direction, since the clamp exists to stop `exp(V/vt)` overflowing.
+///
+/// **The stated cost of trusting a declaration:** a model that limits one junction and leaves a
+/// second exponential unlimited now gets exactly what it asked for, where before it got the
+/// blanket guess. That is the LRM's own division of labour — the model directs the limiter —
+/// and if such a model fails to converge the fix is to write the `$limit` it omitted. Nothing
+/// about the converged answer changes either way: limiting reshapes the iteration path toward a
+/// fixed point of the unlimited equations, never the fixed point.
+fn classify_nodes(module: &Module) -> Vec<bool> {
+    if module.declares_limited_junctions() {
+        return (0..module.nodes.len())
+            .map(|i| module.node_is_limited_junction(va_ir::NodeId(i as u32)))
+            .collect();
+    }
+    let has_exponential = module
+        .exprs
+        .iter()
+        .any(|e| matches!(e, Expr::Call(Builtin::Exp, _)));
+    vec![has_exponential; module.nodes.len()]
 }
 
 impl GeneratedModel {
@@ -1246,19 +1279,16 @@ impl ModelInstance for GeneratedModel {
         self.module.nodes.get(i).and_then(|n| n.abstol)
     }
 
-    /// A node-kind unknown of a model whose source contains an exponential is treated as a
-    /// junction potential, so `va-core` clamps its Newton step (§ junction limiting).
+    /// A node-kind unknown is a junction potential exactly when [`classify_nodes`] says so —
+    /// the junctions the model declared with `$limit`, or, for a model that declared none, every
+    /// node of a module whose source contains an exponential. `va-core` clamps a junction's
+    /// Newton step (§ junction limiting).
     ///
-    /// This is a per-*model* property, not a per-node one: the IR records where the `exp` is,
-    /// but not which node pair its argument ultimately reads, and a diode written
-    /// `I(a,c) <+ Is*(limexp(V(a,c)/vt) - 1)` wants both its terminals limited anyway.
-    /// Over-approximating within a model that genuinely has an exponential is the safe
-    /// direction — it costs convergence speed on a node that did not need it, whereas
-    /// under-approximating risks the overflow the clamp exists to prevent. Auxiliary
-    /// (branch-current/`idt`) unknowns are excluded: those carry flows, not junction
-    /// potentials, and clamping a current with a voltage-shaped rule is meaningless.
+    /// Auxiliary (branch-current/`idt`) unknowns sit beyond `module.nodes.len()` and so are
+    /// excluded by the bounds check `get` performs: those carry flows, not junction potentials,
+    /// and clamping a current with a voltage-shaped rule is meaningless.
     fn unknown_is_junction(&self, i: usize) -> bool {
-        self.has_exponential && i < self.module.nodes.len()
+        self.node_is_junction.get(i).copied().unwrap_or(false)
     }
 
     /// Emit this model's own noise sources (T5.2) — Interface β's noise channel, fed from the
@@ -2628,6 +2658,32 @@ mod tests {
         // at the accumulator's own slot -- Newton needs this to converge on the fixed point.
         assert!((sink.residual[0] - total).abs() < 1e-9);
         assert!((sink.jac(0, 2) - -rs_val).abs() < 1e-12);
+    }
+
+    /// [`classify_nodes`]'s two sources of truth, and their priority. A declaration is
+    /// authoritative — it names the junctions and by omission names the non-junctions — where
+    /// the structural guess can only answer per module.
+    #[test]
+    fn a_declared_junction_overrides_the_structural_guess() {
+        // No declaration: the guess sees the diode's `exp` and claims both terminals.
+        let guessed = build_instance(&diode_ir(), &[0, 1], &mut 2).unwrap();
+        assert!(guessed.unknown_is_junction(0) && guessed.unknown_is_junction(1));
+
+        // The same module, declaring only its anode: the cathode is now authoritatively not a
+        // junction, even though the `exp` the guess keys on is still right there.
+        let mut declared_ir = diode_ir();
+        declared_ir.mark_limited_junction(va_ir::NodeId(0));
+        let declared = build_instance(&declared_ir, &[0, 1], &mut 2).unwrap();
+        assert!(declared.unknown_is_junction(0), "declared");
+        assert!(
+            !declared.unknown_is_junction(1),
+            "left out of the declaration"
+        );
+
+        // A model with no exponential and no declaration claims nothing, which is what keeps a
+        // linear circuit off the clamp.
+        let linear = build_instance(&resistor_ir(), &[0, 1], &mut 2).unwrap();
+        assert!(!linear.unknown_is_junction(0) && !linear.unknown_is_junction(1));
     }
 
     #[test]
