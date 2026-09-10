@@ -1361,12 +1361,18 @@ impl Elaborator<'_> {
             Stmt::While { cond, body } => {
                 let cond = self.lower_expr(*cond)?;
                 let body = self.lower_stmts(body)?;
-                Ok(va_ir::Stmt::While { cond, body })
+                let stmt = va_ir::Stmt::While { cond, body };
+                // LRM §4.5.15/§5.9: a runtime loop may not repeat a construct whose state is
+                // keyed by call site — checked on the *lowered* statement, headers included.
+                self.reject_call_site_state_in_loop("while", &stmt)?;
+                Ok(stmt)
             }
             Stmt::Repeat { count, body } => {
                 let count = self.lower_expr(*count)?;
                 let body = self.lower_stmts(body)?;
-                Ok(va_ir::Stmt::Repeat { count, body })
+                let stmt = va_ir::Stmt::Repeat { count, body };
+                self.reject_call_site_state_in_loop("repeat", &stmt)?;
+                Ok(stmt)
             }
             Stmt::For {
                 init,
@@ -1391,12 +1397,16 @@ impl Elaborator<'_> {
                 let cond = self.lower_expr(*cond)?;
                 let step = Box::new(self.lower_stmt(step)?);
                 let body = self.lower_stmts(body)?;
-                Ok(va_ir::Stmt::For {
+                let stmt = va_ir::Stmt::For {
                     init,
                     cond,
                     step,
                     body,
-                })
+                };
+                // Only this, non-genvar path is restricted: the generate-loop path above
+                // returned already, unrolled, which is what earns it the LRM's §5.9.3 exemption.
+                self.reject_call_site_state_in_loop("for", &stmt)?;
+                Ok(stmt)
             }
             Stmt::Case {
                 selector,
@@ -3237,6 +3247,148 @@ impl Elaborator<'_> {
         })
     }
 
+    /// Reject a runtime loop (`repeat`/`while`/non-genvar `for`) whose body or header contains a
+    /// construct this engine keys by *call site* — LRM §4.5.15 ("Analog operators are not
+    /// allowed in the repeat, while and non-genvar for looping statements") and §5.9's matching
+    /// restriction list, enforced where violating them yields a wrong number rather than merely
+    /// a spec violation.
+    ///
+    /// The LRM's own reason is the one that applies literally here: an analog operator "maintains
+    /// internal state", and it "is important to ensure that all analog operators are evaluated
+    /// every iteration of a simulation to ensure that the internal state is maintained". In this
+    /// pipeline that state is a slot keyed by the operator's `ExprId` — one slot per `ddt`/
+    /// `transition`/… *written in the source*, allocated by `va_codegen`'s `state_slots` map —
+    /// and a monitored event is likewise a fixed [`va_ir::Module::event_sites`] slot registered
+    /// once at elaboration. Neither is per-trip, so a loop running one call site N times does not
+    /// give that call site N states: it pushes N different signals through one history.
+    ///
+    /// **What is deliberately *not* rejected**, though §5.9 lists it: an ordinary contribution
+    /// inside a runtime loop, and `@(initial_step)`/`@(final_step)`, which lower to global flags
+    /// rather than registered sites. Both are evaluated faithfully here — N trips contribute N
+    /// times and read the same correct flag, which is what the source says — so refusing them
+    /// would reject models this engine answers correctly. The line drawn is therefore "this
+    /// engine keys it by call site", not "the LRM lists it"; `docs/token-reference.md`'s
+    /// `While`/`Repeat`/`For` entry states both halves.
+    ///
+    /// Reading the *lowered* IR rather than the AST is what keeps this rule honest as folds
+    /// lift: `transition`/`slew`/`absdelay`/`laplace_*` used to fold to a stateless value at
+    /// elaboration, at which point a loop genuinely could not corrupt them, and they became
+    /// stateful only when they started surviving to Interface β's state channel. A check written
+    /// against the source spelling would have gone stale on that day without anyone noticing;
+    /// this one grew to cover them for free.
+    fn reject_call_site_state_in_loop(
+        &self,
+        keyword: &str,
+        stmt: &va_ir::Stmt,
+    ) -> Result<(), FrontendError> {
+        let Some(found) = self.call_site_state_in(std::slice::from_ref(stmt)) else {
+            return Ok(());
+        };
+        Err(elab(match found {
+            CallSiteState::Operator(name) => format!(
+                "`{name}` inside a `{keyword}` loop: LRM §4.5.15 does not allow analog operators \
+                 in `repeat`, `while` or non-genvar `for` loops, because an operator keeps \
+                 internal state that has to be maintained once per solver iteration. Here that \
+                 state is one slot per call site written in the source, so N trips round this \
+                 loop do not get N histories — they share the single history of this one \
+                 `{name}`, and every trip but the last is overwritten by the next. Running it \
+                 anyway would answer with a filter fed by whichever value the loop happened to \
+                 pass last, not with the N filtered signals the model describes. Write the loop \
+                 as a generate loop instead — declare its control variable `genvar` rather than \
+                 `integer` — which is unrolled at elaboration into N distinct call sites, each \
+                 with its own state; that is exactly why the LRM (§5.9.3) permits analog \
+                 operators in an analog `for` and nowhere else. If the operator does not \
+                 actually vary with the loop, hoist it out of the loop instead"
+            ),
+            CallSiteState::Event => format!(
+                "a monitored event trigger (`@(cross(…))`/`@(above(…))`/`@(timer(…))`) inside a \
+                 `{keyword}` loop: LRM §5.9 does not allow event control statements in `repeat`, \
+                 `while` or non-genvar `for` loops. A monitored event here is a site registered \
+                 once, at elaboration, which the transient loop watches between timepoints; the \
+                 statement inside the loop only reads back whether that one site fired. So the \
+                 trigger would be monitored even on a solve where the loop never runs, and on a \
+                 timepoint where it did fire the body would run once per trip rather than once. \
+                 Put the loop inside the event instead of the event inside the loop: \
+                 `@(cross(…)) begin … end` may contain a loop"
+            ),
+        }))
+    }
+
+    /// The first call-site-keyed construct in `stmts`, at any nesting depth — the presence-only
+    /// scan behind [`Self::reject_call_site_state_in_loop`]. Walks headers as well as bodies: a
+    /// `while`'s condition is re-evaluated every trip, so an operator written there is repeated
+    /// exactly like one in the body.
+    fn call_site_state_in(&self, stmts: &[va_ir::Stmt]) -> Option<CallSiteState> {
+        stmts.iter().find_map(|stmt| match stmt {
+            va_ir::Stmt::Contribute { value, .. } => self.call_site_state_in_expr(*value),
+            va_ir::Stmt::Assign { rhs, .. } => self.call_site_state_in_expr(*rhs),
+            va_ir::Stmt::BoundStep(e) => self.call_site_state_in_expr(*e),
+            va_ir::Stmt::Block(body) => self.call_site_state_in(body),
+            va_ir::Stmt::If { cond, then_, else_ } => self
+                .call_site_state_in_expr(*cond)
+                .or_else(|| self.call_site_state_in(then_))
+                .or_else(|| self.call_site_state_in(else_)),
+            va_ir::Stmt::While { cond, body } => self
+                .call_site_state_in_expr(*cond)
+                .or_else(|| self.call_site_state_in(body)),
+            va_ir::Stmt::Repeat { count, body } => self
+                .call_site_state_in_expr(*count)
+                .or_else(|| self.call_site_state_in(body)),
+            va_ir::Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => self
+                .call_site_state_in(std::slice::from_ref(init.as_ref()))
+                .or_else(|| self.call_site_state_in_expr(*cond))
+                .or_else(|| self.call_site_state_in(std::slice::from_ref(step.as_ref())))
+                .or_else(|| self.call_site_state_in(body)),
+            va_ir::Stmt::Case {
+                selector,
+                arms,
+                default,
+            } => self
+                .call_site_state_in_expr(*selector)
+                .or_else(|| {
+                    arms.iter().find_map(|a| {
+                        a.labels
+                            .iter()
+                            .find_map(|&l| self.call_site_state_in_expr(l))
+                            .or_else(|| self.call_site_state_in(&a.body))
+                    })
+                })
+                .or_else(|| self.call_site_state_in(default)),
+        })
+    }
+
+    /// [`Self::call_site_state_in`] for one expression tree.
+    fn call_site_state_in_expr(&self, expr: ExprId) -> Option<CallSiteState> {
+        match self.out.expr(expr) {
+            // `Expr::EventFired` is the read-back of a registered `Module::event_sites` slot —
+            // the whole monitored-event family (`cross`/`above`/`timer`) reduces to it.
+            Expr::EventFired(_) => Some(CallSiteState::Event),
+            Expr::Call(b, args) => call_site_state_operator(*b)
+                .map(CallSiteState::Operator)
+                .or_else(|| args.iter().find_map(|&a| self.call_site_state_in_expr(a))),
+            Expr::CallUser(_, args) => args.iter().find_map(|&a| self.call_site_state_in_expr(a)),
+            Expr::Unary(_, e) | Expr::Ddx(e, _) => self.call_site_state_in_expr(*e),
+            Expr::Binary(_, l, r) => self
+                .call_site_state_in_expr(*l)
+                .or_else(|| self.call_site_state_in_expr(*r)),
+            Expr::Select(c, t, f) => self
+                .call_site_state_in_expr(*c)
+                .or_else(|| self.call_site_state_in_expr(*t))
+                .or_else(|| self.call_site_state_in_expr(*f)),
+            Expr::Const(_)
+            | Expr::Param(_)
+            | Expr::Var(_)
+            | Expr::Probe(_)
+            | Expr::ParamGiven(_)
+            | Expr::PortConnected(_) => None,
+        }
+    }
+
     /// Resolve one element of an array variable (§ array variables) to its [`VarId`] — the
     /// `VarId` counterpart of [`Self::resolve_net_arg`]'s vector-net indexing. Each entry of
     /// `idxs` must be a compile-time-constant or genvar expression; a genuinely runtime index
@@ -3870,6 +4022,47 @@ impl Elaborator<'_> {
 
 fn elab(msg: String) -> FrontendError {
     FrontendError::Elaborate(msg)
+}
+
+/// A lowered construct whose meaning is keyed by the *call site* it was written at, and which a
+/// runtime loop therefore cannot legally repeat — what
+/// [`Elaborator::reject_call_site_state_in_loop`] looks for.
+enum CallSiteState {
+    /// An analog operator with a state slot, named by its source spelling (`"ddt"`, …).
+    Operator(&'static str),
+    /// A monitored event's fired-flag read-back ([`va_ir::Expr::EventFired`]).
+    Event,
+}
+
+/// The source spelling of `b` if it is an analog operator this engine keeps per-call-site state
+/// for, `None` for a stateless builtin.
+///
+/// The membership test is "does `va-codegen` allocate this a `state_slots` entry (or route it to
+/// a per-site channel)", not "does Annex B call it an operator" — which is why `ddx` is absent
+/// (the LRM excepts it by name: it differentiates the *current* iterate and keeps no history),
+/// and why the noise builtins are present (each is one spectral source per site, so a loop
+/// running the site N times would scale a device's noise power by a trip count).
+fn call_site_state_operator(b: Builtin) -> Option<&'static str> {
+    Some(match b {
+        Builtin::Ddt => "ddt",
+        Builtin::Idt => "idt",
+        Builtin::Transition => "transition",
+        Builtin::Slew => "slew",
+        Builtin::Absdelay => "absdelay",
+        Builtin::LaplaceNd => "laplace_nd",
+        Builtin::LaplaceNp => "laplace_np",
+        Builtin::LaplaceZd => "laplace_zd",
+        Builtin::LaplaceZp => "laplace_zp",
+        Builtin::WhiteNoise => "white_noise",
+        Builtin::FlickerNoise => "flicker_noise",
+        Builtin::NoiseTable => "noise_table",
+        Builtin::NoiseTableLog => "noise_table_log",
+        // Everything else is a pure function of its arguments and the analysis context —
+        // `$vt`/`$temperature`/`$abstime`/`analysis`/`$simparam`/`$mfactor`/`ac_stim`, the maths
+        // builtins, and the `initial_step`/`final_step` flags (see
+        // `Elaborator::reject_call_site_state_in_loop` on why those two are permitted in a loop).
+        _ => return None,
+    })
 }
 
 /// Bind a submodule port's node list to a resolved connection's node list, element-wise, in
@@ -7912,6 +8105,170 @@ mod tests {
             )),
             0,
             "leaving `r` at its default must make `$param_given(res)` false"
+        );
+    }
+    // --- LRM §4.5.15/§5.9: what a runtime loop may not repeat --------------------------------
+
+    /// The rule's own reason, as a test: `ddt`'s state is one slot per call site, so a `while`
+    /// running that site N times gives N signals one shared history — not N histories.
+    #[test]
+    fn an_analog_operator_in_a_while_loop_is_rejected() {
+        let err = elaborate_err(
+            "module t(a, b); electrical a, b; integer i; real acc; \
+             analog begin \
+               acc = 0.0; i = 0; \
+               while (i < 2) begin acc = acc + 1e-9 * ddt(V(a, b)); i = i + 1; end \
+               I(a, b) <+ acc; \
+             end endmodule",
+        );
+        assert!(
+            err.contains("`ddt`") && err.contains("`while` loop"),
+            "the message must name the operator and the loop it sits in; got: {err}"
+        );
+        assert!(
+            err.contains("§4.5.15") && err.contains("genvar"),
+            "and must cite the rule and the legal spelling to use instead; got: {err}"
+        );
+    }
+
+    /// `external/verilogaLib-master/adc_16bit_ideal.va`'s exact shape — the one corpus file this
+    /// rule refuses (v0.9.14). Sixteen bits, one `transition` call site, one filter state.
+    #[test]
+    fn a_filter_in_a_non_genvar_for_loop_is_rejected() {
+        let err = elaborate_err(
+            "module t(a, b); electrical a, b; integer j; real v[0:3]; \
+             analog begin \
+               for (j = 0; j < 4; j = j + 1) v[j] = 1.0; \
+               for (j = 0; j < 4; j = j + 1) I(a, b) <+ transition(v[j], 0.0, 1u, 1u); \
+             end endmodule",
+        );
+        assert!(
+            err.contains("`transition`") && err.contains("`for` loop"),
+            "a filter is an analog operator like `ddt`, and fails for the same reason; got: {err}"
+        );
+    }
+
+    /// A `while`'s condition is re-evaluated every trip, so an operator written in the *header*
+    /// is repeated exactly like one in the body — the walk covers headers, not just bodies.
+    #[test]
+    fn an_analog_operator_in_a_loop_header_is_rejected_too() {
+        let err = elaborate_err(
+            "module t(a, b); electrical a, b; integer i; \
+             analog begin \
+               i = 0; \
+               while (ddt(V(a, b)) > 0.0) i = i + 1; \
+               I(a, b) <+ 1e-3 * V(a, b); \
+             end endmodule",
+        );
+        assert!(err.contains("`ddt`"), "got: {err}");
+    }
+
+    /// `repeat` carries the same restriction as `while` (LRM §4.5.15 names all three).
+    #[test]
+    fn an_analog_operator_in_a_repeat_loop_is_rejected() {
+        let err = elaborate_err(
+            "module t(a, b); electrical a, b; real acc; \
+             analog begin \
+               acc = 0.0; \
+               repeat (3) acc = acc + 1e-9 * ddt(V(a, b)); \
+               I(a, b) <+ acc; \
+             end endmodule",
+        );
+        assert!(
+            err.contains("`ddt`") && err.contains("`repeat` loop"),
+            "got: {err}"
+        );
+    }
+
+    /// A monitored event is a site registered once at elaboration and watched between
+    /// timepoints; a loop cannot re-register it, so §5.9's "no event control statements in a
+    /// loop" is the engine's own truth here, not only the LRM's.
+    #[test]
+    fn a_monitored_event_inside_a_loop_is_rejected() {
+        let err = elaborate_err(
+            "module t(a, b); electrical a, b; integer i; real acc; \
+             analog begin \
+               acc = 0.0; i = 0; \
+               while (i < 2) begin @(cross(V(a, b), 1)) acc = acc + 1.0; i = i + 1; end \
+               I(a, b) <+ 1e-3 * V(a, b) + acc; \
+             end endmodule",
+        );
+        assert!(
+            err.contains("event") && err.contains("§5.9"),
+            "the message must name the restriction it enforces; got: {err}"
+        );
+        assert!(
+            err.contains("@(cross(…)) begin"),
+            "and must name the legal shape — the loop inside the event; got: {err}"
+        );
+    }
+
+    /// The §5.9.3 exemption, and the reason it is sound here: a generate loop is unrolled at
+    /// elaboration into N *distinct* call sites, so each trip gets its own state slot. This is
+    /// what makes the refusals above actionable — the advice they give really does work.
+    #[test]
+    fn a_genvar_for_loop_may_contain_analog_operators() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; genvar k; \
+             analog begin \
+               for (k = 0; k < 3; k = k + 1) I(a, b) <+ 1e-9 * ddt(V(a, b)); \
+             end endmodule",
+        );
+        let sites = m
+            .exprs
+            .iter()
+            .filter(|e| matches!(e, Expr::Call(Builtin::Ddt, _)))
+            .count();
+        assert_eq!(
+            sites, 3,
+            "three trips must unroll into three separate `ddt` call sites, one state slot each"
+        );
+    }
+
+    /// Deliberately *not* refused, though LRM §5.9 lists it: a contribution inside a runtime
+    /// loop. Nothing about it is keyed by call site — N trips contribute N times, which is what
+    /// the source says — so refusing it would reject a model this engine answers correctly.
+    #[test]
+    fn a_contribution_in_a_runtime_loop_is_still_allowed() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; integer i; \
+             analog begin \
+               for (i = 0; i < 3; i = i + 1) I(a, b) <+ 1e-3 * V(a, b); \
+             end endmodule",
+        );
+        fn a_loop_contributes(stmts: &[va_ir::Stmt]) -> bool {
+            stmts.iter().any(|s| match s {
+                va_ir::Stmt::For { body, .. } => body.iter().any(|b| {
+                    matches!(b, va_ir::Stmt::Contribute { .. })
+                        || matches!(b, va_ir::Stmt::Block(inner) if a_loop_contributes(inner))
+                }),
+                va_ir::Stmt::Block(body) => a_loop_contributes(body),
+                _ => false,
+            })
+        }
+        assert!(
+            a_loop_contributes(&m.analog),
+            "the contribution must survive inside the runtime loop, not be refused with it"
+        );
+    }
+
+    /// Also deliberately allowed: the step events, which lower to a global flag rather than a
+    /// registered site, so a loop reads the same correct answer on every trip.
+    #[test]
+    fn a_step_event_inside_a_loop_is_still_allowed() {
+        let m = elaborate_src(
+            "module t(a, b); electrical a, b; integer i; real acc; \
+             analog begin \
+               acc = 0.0; i = 0; \
+               while (i < 2) begin @(initial_step) acc = 1.0; i = i + 1; end \
+               I(a, b) <+ 1e-3 * V(a, b) * acc; \
+             end endmodule",
+        );
+        assert!(
+            m.exprs
+                .iter()
+                .any(|e| matches!(e, Expr::Call(Builtin::InitialStep, _))),
+            "the flag must survive, not be refused with the monitored events"
         );
     }
 }

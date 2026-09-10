@@ -993,9 +993,46 @@ including the ones with no implemented behavior at all.
 - **Purpose and Static Nature**: Simulation-time control flow *except* when `for`'s header
   assigns a declared genvar, in which case it is fully resolved at elaboration instead (see
   `Genvar` above and Part 2 §2.14). Per LRM §4.5.15, analog operators are illegal inside
-  `while`/`repeat`/an ordinary (non-genvar) `for` — a restriction this project does not
-  currently enforce for `while`/`repeat`/ordinary `for` (a stated gap), even though it is
-  automatically satisfied for the genvar case by unrolling.
+  `while`/`repeat`/an ordinary (non-genvar) `for`, and §5.9 adds two more restrictions to the
+  same three loops ("Analog filter functions are not allowed / Event control statements are not
+  allowed / Contribution statements are not allowed"); the genvar case is exempt by §5.9.3 and
+  satisfies the rule automatically here anyway, by unrolling. **Enforced since v0.9.14** — it
+  used to be a stated gap — but deliberately only where breaking it produces a wrong *number*
+  in this engine, which is a narrower set than the LRM's three bullets. The line is drawn at
+  "does this pipeline key the construct by call site":
+  - **Rejected**: any analog operator with a state slot — `ddt`, `idt`, `transition`, `slew`,
+    `absdelay`, the four `laplace_*`, and the four noise builtins — and a **monitored** event
+    trigger (`@(cross …)`/`@(above …)`/`@(timer …)`). `va-codegen` allocates state one slot per
+    `ExprId` (`collect_stateful_calls` scans the *expression arena*, not the statement tree), and
+    an event is one `Module::event_sites` entry registered once at elaboration. So a loop running
+    a single call site N times does not give it N histories — it pushes N signals through one,
+    and each trip but the last is overwritten by the next. `ddx` is excluded exactly as the LRM
+    excludes it: it differentiates the current iterate and keeps no history.
+  - **Allowed, knowingly**: an ordinary contribution inside a runtime loop, and
+    `@(initial_step)`/`@(final_step)`, which lower to a global flag rather than a registered
+    site. Neither carries per-call-site state here: N trips contribute N times and read the same
+    correct flag, which is what the source says. Refusing them would reject models this engine
+    answers correctly, so the LRM's contribution bullet is *not* enforced, and that is a decision
+    rather than an oversight. Stated plainly, because it cuts the other way too: **no corpus file
+    currently relies on the allowance.** A scan of all 171 `external/` files finds exactly one
+    contribution inside a runtime loop — the `adc_16bit_ideal.va` line below, which is refused
+    for its `transition` regardless. So this half of the rule is a principled choice about what a
+    wrong answer is, not a concession propped up by evidence; enforcing §5.9 literally would cost
+    nothing measurable today, and would still be rejecting arithmetic this engine gets right.
+  - The check reads the **lowered IR**, not the source spelling, which is what keeps it honest
+    as folds lift: `transition`/`slew`/`absdelay`/`laplace_*` were once folded away at
+    elaboration, when a loop genuinely could not corrupt them, and became stateful the day they
+    started surviving to Interface β's state channel. A source-level list would have gone stale
+    that day in silence.
+  - **Cost, stated**: one corpus file, `external/verilogaLib-master/adc_16bit_ideal.va`, stops
+    building (112/132 from 113/132). It writes `for (j = 0; j < 16; j = j + 1) V(out[j]) <+
+    transition(out_val[j], …)` over an `integer j`, so all sixteen bits shared one filter state.
+    Its fix is one word — `genvar j` instead of `integer j` — which the diagnostic names.
+  - Not enforced, and still a stated gap: §4.5.15's *first* bullet, analog operators inside an
+    `if`/`case`/`?:` whose condition can change during the run. `va-codegen` catches the narrow
+    sub-case where such a `ddt` escapes its arm through a variable ("constant for the whole
+    run", `lower.rs`); the general rule is unenforced because real compact models rely on it
+    everywhere and this engine evaluates them faithfully.
 - **Declaration and Assignment**: `while (cond) body`; `repeat (count) body`; `for (init; cond;
   step) body`; `case (selector) label,...: body ... [default[:] body] endcase`. `default`'s
   colon is optional, matching general Verilog usage.

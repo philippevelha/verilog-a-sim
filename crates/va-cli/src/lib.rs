@@ -3162,6 +3162,13 @@ mod tests {
     }
 
     /// And inside a loop body, which LRM §4.5.15 forbids outright regardless of the condition.
+    ///
+    /// **This one is now rejected a stage earlier, by the frontend** (v0.9.14): elaboration
+    /// refuses *any* analog operator in a `repeat`/`while`/non-genvar `for`, not only one that
+    /// escapes its arm through a variable, so the source never reaches `build_instance`. The
+    /// codegen check below still guards the `if`-arm half of the same family — a
+    /// solution-dependent guard is not a loop — and hand-built IR that never passed through the
+    /// frontend; what changed is which pass gets to this particular shape first.
     #[test]
     fn an_escaping_ddt_inside_a_loop_body_is_still_refused() {
         let src = "module loopy(p, n);
@@ -3180,13 +3187,14 @@ mod tests {
                    end
                    endmodule
 ";
-        let design = va_frontend::compile_with_includes(src, &[]).expect("compiles");
-        let mut next = 2usize;
-        let msg = match va_codegen::build_instance(&design.modules[0], &[0, GROUND], &mut next) {
+        let msg = match va_frontend::compile_with_includes(src, &[]) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a loop body must still be refused"),
         };
-        assert!(msg.contains("constant for the whole run"), "got: {msg}");
+        assert!(
+            msg.contains("`ddt`") && msg.contains("`while` loop") && msg.contains("§4.5.15"),
+            "got: {msg}"
+        );
     }
 
     /// The control: the *same* variable-indirection shape with the `ddt` assigned **outside**

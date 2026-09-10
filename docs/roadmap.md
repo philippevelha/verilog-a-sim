@@ -4195,6 +4195,88 @@ Sequencing that follows from the table:
 
 ---
 
+## Iteration statements carry their restriction now (2026-09-10, v0.9.14)
+
+`while`/`repeat`/`for` have lexed, parsed, elaborated and executed since T2.2. What they did not
+carry was the restriction that defines them: LRM §4.5.15 ("Analog operators are not allowed in
+the repeat, while and non-genvar for looping statements") and §5.9's matching list for the same
+three loops ("Analog filter functions are not allowed / Event control statements are not allowed
+/ Contribution statements are not allowed"). `token-reference.md` had flagged the §4.5.15 half as
+a stated gap since the token audit; this closes it, and it turned out not to be a paper rule.
+
+**The premise the LRM states is literally true of this pipeline.** An analog operator's state is
+allocated one slot per `ExprId` — `va_codegen::lower::collect_stateful_calls` walks the
+*expression arena*, not the statement tree, deliberately (a call reached only from inside an `if`
+arm still needs a stable slot across the steps its arm is not taken). A monitored event is
+likewise one `va_ir::Module::event_sites` entry, registered once at elaboration and watched by
+the transient loop between timepoints. Neither is per-trip. So a runtime loop that runs one call
+site N times does not hand it N histories: it pushes N signals through one, and every trip but
+the last is overwritten before the step ends.
+
+**That is not hypothetical — one corpus file was doing it.**
+`external/verilogaLib-master/adc_16bit_ideal.va` writes
+
+```verilog
+for (j = 0; j < `NUM_ADC_BITS; j = j + 1) // assign the outputs
+    V(out[j]) <+ transition(out_val[j], tdel, trise, tfall);
+```
+
+over an `integer j`. Sixteen output bits, one `transition` call site, one five-slot filter state
+shared between them, thrashed sixteen times per timepoint — each bit's returned value depending
+on the bits evaluated before it in the same `load`. It built, and it has been building since
+`transition` stopped folding and started carrying state. **Corpus 113/132 → 112/132** (94/99
+self-contained), and this is the v0.9.1 shape of drop again: a file that had only ever been
+*building*. Its fix is one word, `genvar j`, which the diagnostic names — and the genvar path is
+strictly better besides, since unrolling gives each of the sixteen bits its own call site and its
+own state, which is precisely why §5.9.3 exempts an analog `for` and nothing else. A test pins
+that: three trips of a genvar loop must produce three distinct `Builtin::Ddt` entries in the
+arena, so the advice the refusal gives is checked rather than asserted.
+
+**What is enforced is narrower than what the LRM lists, on purpose.** The line drawn is "does
+this pipeline key the construct by call site", not "does the LRM list it":
+
+- **Rejected** — `ddt`, `idt`, `transition`, `slew`, `absdelay`, the four `laplace_*`, the four
+  noise builtins (each a per-site spectral source), and the monitored events
+  `@(cross …)`/`@(above …)`/`@(timer …)`. `ddx` is excluded exactly as the LRM excludes it.
+- **Allowed knowingly** — a plain contribution in a runtime loop, and
+  `@(initial_step)`/`@(final_step)`, which lower to a global flag rather than a registered site.
+  N trips contribute N times and read the same correct flag: that is what the source says, and
+  refusing it would reject arithmetic this engine gets right. A scan of all 171 `external/` files
+  found exactly one contribution inside a runtime loop — the `adc` line above, refused for its
+  filter anyway — so enforcing §5.9 literally would have cost nothing measurable *and* bought
+  nothing; the permission is a decision about what a wrong answer is, not a corpus concession.
+
+**The check reads the lowered IR, not the source spelling**, and that is the durable part.
+`transition`/`slew`/`absdelay`/`laplace_*` used to fold to a stateless value at elaboration, and
+in that era a loop genuinely could not corrupt them — a rule written against the source spelling
+would have been correct when written and silently wrong from the day those operators started
+surviving to Interface β's state channel. Reading the IR made them covered the moment they became
+stateful, with no list to maintain, and will do the same for whatever the `absdelay` proposal's
+stage 2 lands next.
+
+**Raised as an elaboration error, not a `Refusal`** — the one design call here with a plausible
+alternative. The refusal shape would have given the uniform `refused:` block, but a refusal means
+"the source is valid Verilog-A and this simulator declines to run it", and this source is not
+valid Verilog-A. Getting that classification right is the whole point of the distinction: it
+tells the reader "my model is wrong", which is the correct next step here, and mislabelling it
+would be worse than a terse message.
+
+**Still not enforced, and still a stated gap**: §4.5.15's *first* bullet — analog operators
+inside an `if`/`case`/`?:` whose condition can change during the run. `va-codegen` already
+catches the narrow sub-case where such a `ddt` escapes its arm through a variable ("constant for
+the whole run", `lower.rs`), and one `va-cli` test moved to the frontend's message because the
+loop half of that check is now unreachable from source. The general rule stays unenforced because
+real compact models rely on it everywhere and this engine evaluates them faithfully.
+
+Also confirmed against the LRM while here, and left as it was: `forever` is correctly refused in
+an analog block. `analog_loop_statement` (Annex A.6.8) is `repeat`/`while`/`for` only — `forever`
+appears solely in the digital `loop_statement`, which Annex C.7 excludes from Verilog-A.
+
+Measured at this version: `cargo test --workspace` 764 passed / 0 failed, `cargo xtask validate`
+27/27 with convergence 27/27, `va-cli check external --codegen` 112/132 (94/99 self-contained).
+
+---
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

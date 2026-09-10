@@ -19,6 +19,63 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.14 - 2026-09-10
+-------------------
+Iteration statements now carry the restriction that defines them. `while`/`repeat`/`for` have
+run since T2.2; what was missing was LRM 4.5.15 ("Analog operators are not allowed in the
+repeat, while and non-genvar for looping statements") and 5.9's list for the same three loops
+(no analog filter functions, no event control statements, no contribution statements).
+`token-reference.md` had carried the 4.5.15 half as a stated gap since the token audit.
+
+  The LRM's stated reason is literally true here. An operator's state is one slot per `ExprId`
+  -- `va_codegen::lower::collect_stateful_calls` walks the *expression arena*, not the statement
+  tree -- and a monitored event is one `Module::event_sites` entry registered once at
+  elaboration. Neither is per-trip, so a loop running one call site N times does not give it N
+  histories: it pushes N signals through one, and every trip but the last is overwritten before
+  the step ends.
+
+  **One corpus file was doing exactly that.** `external/verilogaLib-master/adc_16bit_ideal.va`
+  writes `for (j = 0; j < 16; j = j + 1) V(out[j]) <+ transition(out_val[j], ...)` over an
+  `integer j`: sixteen bits, one `transition` call site, one filter state thrashed sixteen times
+  per timepoint, each bit's value depending on the ones evaluated before it. **Corpus 113/132 ->
+  112/132** (94/99 self-contained) -- the v0.9.1 shape of drop again, a file that had only ever
+  been *building*, and one that started being wrong the day `transition` stopped folding and
+  started carrying state. Its fix is one word, `genvar j`, which the diagnostic names; a test
+  pins that the advice works, by asserting three trips of a genvar loop unroll into three
+  distinct `Builtin::Ddt` arena entries with a state slot each.
+
+  **Enforced narrower than the LRM lists, deliberately.** The line is "does this pipeline key it
+  by call site", not "does the LRM list it". Rejected: `ddt`, `idt`, `transition`, `slew`,
+  `absdelay`, the four `laplace_*`, the four noise builtins, and `@(cross/above/timer ...)`;
+  `ddx` excluded exactly as the LRM excludes it. Allowed knowingly: a plain contribution in a
+  runtime loop, and `@(initial_step)`/`@(final_step)`, which lower to a global flag rather than a
+  registered site -- N trips contribute N times and read the same correct flag, which is what the
+  source says. A scan of all 171 `external/` files found exactly one contribution inside a
+  runtime loop (the `adc` line above, refused for its filter anyway), so enforcing 5.9 literally
+  would have cost nothing measurable and bought nothing.
+
+  **The check reads the lowered IR, not the source spelling.** `transition`/`slew`/`absdelay`/
+  `laplace_*` used to fold to a stateless value at elaboration, where a loop genuinely could not
+  corrupt them; a rule written against source spellings would have been right when written and
+  silently wrong from the day those operators grew state. Reading the IR covered them the moment
+  they did.
+
+  **Raised as an elaboration error, not a `Refusal`** -- the one call with a plausible
+  alternative. A refusal means "valid Verilog-A that this simulator declines"; this source is not
+  valid Verilog-A, and saying "my model is wrong" is the correct next step for the reader.
+
+  Still not enforced, and still stated: 4.5.15's first bullet (operators under a
+  solution-dependent `if`/`case`/`?:`), beyond the narrow escaping-`ddt` case `va-codegen`
+  already catches. One `va-cli` test moved to assert the frontend's message, since the loop half
+  of that codegen check is no longer reachable from source. Also checked against the LRM and left
+  alone: `forever` is correctly refused -- `analog_loop_statement` (A.6.8) is `repeat`/`while`/
+  `for` only, and `forever` is digital-only, excluded by Annex C.7.
+
+  Measured at this version: `cargo test --workspace` 764 passed / 0 failed (was 756; 8 new tests
+  in `va-frontend`), `cargo xtask validate` 27/27 with convergence 27/27 (100.0%), `va-cli check
+  external --codegen` 112/132.
+
+
 0.9.13 - 2026-09-09
 -------------------
 `$limit`'s model-declared junctions. The value still folds; the junction the access names no
