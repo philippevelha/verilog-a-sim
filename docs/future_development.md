@@ -25,7 +25,9 @@ sparse winning by 12–33× above ~20 unknowns. Dense LU is O(n³) per Newton it
 200-node circuit with a few hundred auxiliary unknowns (branch currents, `idt` accumulators,
 `laplace_*` states — every one of which is another row) is where a `.tran` stops being
 interactive. The decision recorded on 2026-08-31 was "not yet; the trigger is circuit size, not
-the calendar" — the trigger is what the Road to 1.0 asks to be *measured and stated*.
+the calendar" — and the trigger is now measured (`docs/validation.md`, "The dense-LU
+circuit-size limit", v0.9.16+1): a 10 000-point transient is interactive to ~200 unknowns,
+minutes at 400, half an hour at 800, impractical beyond ~1 000.
 
 **Cost and dependencies.** The solver exists and is tested for singular-matrix behaviour
 (`sparse_singular_matrix_is_rejected`). What is missing: (a) the Jacobian is assembled dense

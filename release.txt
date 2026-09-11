@@ -19,6 +19,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.16+1 - 2026-09-11
+---------------------
+The dense-LU circuit-size limit, measured and stated (Road to 1.0, B.2). New
+`cargo xtask bench-scale [--max-nodes N]`: a whole `.op` and a whole `.tran` through `va_cli`
+on an RC ladder of n sections (dim = n + 1), reference primitives only, release profile, on the
+development machine (i7-1185G7 @ 3.0 GHz, single-threaded):
+
+    n_nodes    dim      op_ms     tran_ms  points   tran_ms/pt
+         10     12       0.02         1.4     120        0.011
+         20     22       0.06         2.1     120        0.017
+         50     52       2.61       115.9     120        0.966
+        100    102       1.20       252.6     120        2.105
+        200    202       3.05       745.8     120        6.215
+        400    402      17.48      2989.5     120       24.912
+        800    802      97.46     17675.5     120      147.296
+
+  Points are the same at every size, so `tran_ms/pt` is the solve's growth with dim: 4.0x from
+  200 to 400 nodes, 5.9x from 400 to 800 -- dense LU's O(dim^3). **Stated limit, for a
+  10 000-point transient: ~200 unknowns is interactive (1 min), ~400 is 4 min, ~800 is 25 min,
+  beyond ~1 000 unknowns dense LU is impractical.** A `.op` stays under 0.1 s to 800 nodes; the
+  wall is transient, where the factorization is paid per point. Every auxiliary row (branch
+  currents, `idt` accumulators, `laplace_*` states) counts as an unknown. Written up with the
+  table in docs/validation.md ("The dense-LU circuit-size limit"); the debug-profile numbers
+  are 10-60x worse and are not the ones to plan with. This closes the "state the limit" half of
+  the sparse decision; building sparse is docs/future_development.md section 1.
+
+  No simulator code touched: xtask gained a subcommand, and the usage banner lists it.
+
+
 0.9.16 - 2026-09-11
 -------------------
 `laplace_nd`/`laplace_np`/`laplace_zd`/`laplace_zp` **run in transient.** Since 0.9.0 a `.tran`
@@ -856,10 +885,11 @@ Ordered by what to do first.
       buffer of docs/proposals/absdelay.md stage 2) and is **not** a 1.0 blocker: no corpus
       model this engine otherwise builds needs it in transient, the refusal is logged in the
       standard shape, and it is item 3 of docs/future_development.md.
-  [ ] State the dense-LU circuit-size limit. The sparse decision is recorded (roadmap,
-      2026-08-31: stay dense, the trigger is circuit size). Still owed: measure the node
-      count at which a `.tran` becomes impractical on dense LU and write the number into a
-      release entry, so a user with a 300-node netlist knows before they wait.
+  [x] State the dense-LU circuit-size limit -- measured in 0.9.16+1 (`xtask bench-scale`,
+      release profile, i7-1185G7): for a 10 000-point transient, ~200 unknowns is interactive,
+      ~400 is minutes, ~800 is half an hour, beyond ~1 000 dense LU is impractical; a `.op`
+      is fine to 800 nodes. Table and machine in docs/validation.md. Building the sparse path
+      is post-1.0 (docs/future_development.md section 1).
   [ ] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
       with a scheduled one (`initial_step or cross(...)`) are refused, with what/why/instead.
       **Ship 1.0 with these refused** -- no corpus file needs them and the refusal is

@@ -332,6 +332,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo xtask validate        # run va-harness over the model zoo vs golden/
 cargo xtask gen-golden      # (re)generate golden outputs from QSPICE, if installed
+cargo run --release -p xtask -- bench-scale   # .op/.tran wall time vs circuit size (the dense-LU limit)
 cargo run -p va-cli -- sim circuits/divider.net --model models/resistor.va
 ```
 

@@ -23,6 +23,7 @@ fn main() -> Result<()> {
         Some("gen-golden") => gen_golden(),
         Some("tutorials") => tutorials(&rest),
         Some("bench-linsolve") => bench_linsolve(),
+        Some("bench-scale") => bench_scale(&rest),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -41,7 +42,9 @@ fn print_usage() {
          validate            Run va-harness over the model zoo vs golden/\n    \
          gen-golden          (Re)generate golden outputs from QSPICE, if installed\n    \
          tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)\n    \
-         bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)"
+         bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)\n    \
+         bench-scale [--max-nodes N]  Whole-pipeline .op/.tran wall time vs circuit size on\n                                 \
+                                 an RC ladder: the dense-LU size limit, measured"
     );
 }
 
@@ -2006,6 +2009,117 @@ fn run_bench_row(n_nodes: usize) -> Result<BenchRow> {
 /// If a dense solve fails at some `n_nodes` — this ladder is well-conditioned by construction
 /// (every node has its own shunt to ground), so that would indicate a real bug, not an expected
 /// benchmark outcome.
+/// Ladder sizes `bench-scale` runs, in nodes. Each is a *whole* `.op` and `.tran` through
+/// `va_cli`, not a bare factorization, so the numbers are what a user waits for. The list stops
+/// where a `.tran` is no longer interactive on the development machine; `--max-nodes` caps it.
+const SCALE_NODE_COUNTS: &[usize] = &[10, 20, 50, 100, 200, 400, 800];
+
+/// An RC ladder of `n` sections: `V1 in gnd DC 1`, then `R_k` from node `k-1` to node `k` and
+/// `C_k` from node `k` to ground, `R = 1 kΩ`, `C = 1 nF` (a 1 µs section time constant). The
+/// unknowns are `n` node potentials plus the source's branch current: `dim = n + 1`.
+///
+/// Reference primitives only (`va-abi`), so what is timed is MNA assembly, Newton and dense
+/// LU — not the compiler. The `.tran` window is fixed at 5 µs with a 50 ns step hint whatever
+/// `n` is: the input edge at `t = 0` is the same event at every size, so the accepted-point
+/// count stays comparable and the per-point cost isolates the solve's growth with `dim`.
+fn rc_ladder_deck(n: usize) -> String {
+    let mut deck = String::from("* RC ladder for bench-scale\nV1 in gnd DC 1\n");
+    let mut prev = "in".to_string();
+    for k in 1..=n {
+        let node = format!("n{k}");
+        deck.push_str(&format!("R{k} {prev} {node} 1000\nC{k} {node} gnd 1e-9\n"));
+        prev = node;
+    }
+    deck.push_str(".tran 50n 5u\n.end\n");
+    deck
+}
+
+/// One `bench-scale` row: `.op` and `.tran` wall time on an `n`-node RC ladder.
+struct ScaleRow {
+    n_nodes: usize,
+    dim: usize,
+    op: Duration,
+    tran: Duration,
+    points: usize,
+}
+
+fn run_scale_row(n_nodes: usize) -> Result<ScaleRow> {
+    let deck = rc_ladder_deck(n_nodes);
+    let net = va_netlist::parser::parse(&deck).context("parsing the generated ladder")?;
+    let dim = net.node_order.len() + 1;
+
+    let t0 = Instant::now();
+    let op = va_cli::solve_dc(&net, &[]).context("ladder .op")?;
+    let op_time = t0.elapsed();
+    // Sanity: a DC-driven RC ladder settles to the source voltage everywhere.
+    let last = net.node_order.len() - 1;
+    if (op.x[last] - 1.0).abs() > 1e-9 {
+        bail!("ladder .op is wrong: V(n{n_nodes}) = {}", op.x[last]);
+    }
+
+    let t0 = Instant::now();
+    let wf = va_cli::solve_transient(&net, &[], va_cli::Integration::default())
+        .context("ladder .tran")?;
+    let tran_time = t0.elapsed();
+
+    Ok(ScaleRow {
+        n_nodes,
+        dim,
+        op: op_time,
+        tran: tran_time,
+        points: wf.t.len(),
+    })
+}
+
+/// `cargo xtask bench-scale [--max-nodes N]`: how long a whole `.op` and a whole `.tran`
+/// take as the circuit grows, on the dense-LU production path. This is the measurement the
+/// Road to 1.0 asked for ("state the dense-LU circuit-size limit"): `bench-linsolve` times the
+/// factorization alone and says where sparse *would* win; this says where a user actually
+/// starts waiting.
+///
+/// Every `.tran` row is checked against the previous one for the same accepted-point count
+/// order of magnitude, so a per-point figure is comparable down the table, and the machine is
+/// named in the output because the absolute numbers belong to it.
+fn bench_scale(args: &[String]) -> Result<()> {
+    let max_nodes = args
+        .iter()
+        .position(|a| a == "--max-nodes")
+        .and_then(|i| args.get(i + 1))
+        .map(|v| v.parse::<usize>().context("--max-nodes takes an integer"))
+        .transpose()?
+        .unwrap_or(usize::MAX);
+
+    eprintln!(
+        "[xtask] bench-scale: whole-pipeline .op and .tran wall time on an RC ladder \
+         (va_abi::reference primitives, dense LU) …"
+    );
+    // Warm-up, for the same reason `bench-linsolve` does one.
+    let _ = run_scale_row(5);
+    eprintln!(
+        "[xtask]   {:>7} {:>6} {:>10} {:>11} {:>7} {:>12}",
+        "n_nodes", "dim", "op_ms", "tran_ms", "points", "tran_ms/pt"
+    );
+    for &n in SCALE_NODE_COUNTS.iter().filter(|&&n| n <= max_nodes) {
+        let row = run_scale_row(n)?;
+        let tran_ms = row.tran.as_secs_f64() * 1e3;
+        eprintln!(
+            "[xtask]   {:>7} {:>6} {:>10.2} {:>11.1} {:>7} {:>12.3}",
+            row.n_nodes,
+            row.dim,
+            row.op.as_secs_f64() * 1e3,
+            tran_ms,
+            row.points,
+            tran_ms / row.points.max(1) as f64
+        );
+    }
+    eprintln!(
+        "[xtask] bench-scale: done. Dense LU is O(dim^3) per Newton solve; the per-point column \
+         is the number to watch. See release.txt for the stated limit and the machine it was \
+         measured on."
+    );
+    Ok(())
+}
+
 fn bench_linsolve() -> Result<()> {
     eprintln!(
         "[xtask] bench-linsolve: dense vs. sparse MNA solve over a leaky resistor ladder \

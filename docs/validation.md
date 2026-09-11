@@ -618,6 +618,57 @@ column is the admittance filter `sC/(1 + sτ)`, whose numerator degree equals it
 so the feedthrough path of the realization is on the gate as well. **Not covered:** noise, where
 a Laplace filter still evaluates to `H(0)` — a stated limitation at the construct.
 
+## The dense-LU circuit-size limit (measured 2026-09-11, v0.9.16+1)
+
+The production linear solve is dense LU (`va_core::linsolve::solve_dense`); the sparse solver
+beside it is a benchmark subject, not the shipped path (roadmap, 2026-08-31: "stay dense, the
+trigger is circuit size"). This is the trigger, measured — `cargo run --release -p xtask --
+bench-scale`, a whole `.op` and a whole `.tran` through `va_cli` on an RC ladder of `n`
+sections (`R = 1 kΩ`, `C = 1 nF`, `dim = n + 1` unknowns; reference primitives, so the
+compiler is not in the timing), 5 µs window with a 50 ns step hint, trapezoidal, LTE
+`1e-3`. **Machine:** 11th-gen Intel Core i7-1185G7 @ 3.0 GHz, 16 GB, Windows 11, release
+profile, single-threaded.
+
+```
+  n_nodes    dim      op_ms     tran_ms  points   tran_ms/pt
+       10     12       0.02         1.4     120        0.011
+       20     22       0.06         2.1     120        0.017
+       50     52       2.61       115.9     120        0.966
+      100    102       1.20       252.6     120        2.105
+      200    202       3.05       745.8     120        6.215
+      400    402      17.48      2989.5     120       24.912
+      800    802      97.46     17675.5     120      147.296
+```
+
+The accepted-point count is the same at every size (the input edge at `t = 0` is the same
+event), so the `tran_ms/pt` column isolates the solve's growth with `dim`: from 200 to 400
+nodes it grows 4.0×, from 400 to 800 5.9× — the O(dim³) of a dense factorization, with
+assembly's O(dim²) underneath it. A `.op` is one Newton solve and stays under 0.1 s even at
+800 nodes; the wall is in transient, where the factorization is paid at every accepted point
+and every rejected one.
+
+**The limit, stated for a 10 000-point transient** (a typical `.tran` of this project's decks
+runs 1 000–3 000 accepted points; 10 000 is a long one):
+
+| unknowns | per point | 10 000 points |
+|---:|---:|---:|
+| 100 | 2 ms | 20 s |
+| 200 | 6 ms | 1 min |
+| 400 | 25 ms | 4 min |
+| 800 | 150 ms | 25 min |
+| ~1 600 (extrapolated at 6×/doubling) | ~0.9 s | ~2.5 h |
+
+So: **up to ~200 unknowns a transient is interactive; ~400 is a coffee break; ~800 is a
+batch job; beyond ~1 000 unknowns dense LU is impractical and this simulator should not be
+chosen for the circuit until the sparse path ships** (`docs/future_development.md` §1).
+"Unknowns" counts every auxiliary row too — a branch current per voltage source and inductor,
+an `idt` accumulator, a `laplace_*` filter's state per denominator degree — so a 100-node
+circuit with many such elements sits higher in the table than its node count suggests. The
+debug profile (`cargo xtask bench-scale` without `--release`) is 10–60× slower again and is not
+the number to plan with; the release binary is what 1.0 ships.
+
+Rerun `bench-scale` on the machine at hand before quoting these figures for it.
+
 ## Bring-up ladder
 
 Each rung is a checkpoint; it is "passed" only when `va-harness` is green against golden:
