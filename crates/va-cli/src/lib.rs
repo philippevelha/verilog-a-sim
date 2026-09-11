@@ -6361,15 +6361,41 @@ X1 a gnd resistor
     /// instead of being rejected as unsupported. `ohmmeter` is an instrument model (its ports
     /// don't correspond to any circuit this repo has a netlist for), so this only exercises
     /// frontend → codegen, not a full DC solve.
+    ///
+    /// The idiom is written out here rather than `include_str!`'d from `external/`: that
+    /// directory is gitignored, so the original form of this test made the whole `va-cli` test
+    /// target fail to *compile* on any fresh checkout — found by the first CI run, 2026-09-11.
+    /// Nothing under `external/` may be a compile-time or run-time dependency of the suite.
     #[test]
     fn ohmmeter_probe_compiles_through_codegen() {
-        let src = include_str!("../../../external/verilogaLib-master/ohmmeter.va");
+        // The load-bearing lines of the corpus file, in its own shape: an explicit zero-volt
+        // branch to `iprobe`, and a bare `I(iprobe)` read of the current that branch carries.
+        let src = r#"`include "constants.vams"
+`include "disciplines.vams"
+module ohmmeter(dutp, dutm, iprobe, r, g);
+input dutp, iprobe;
+output dutm, r, g;
+electrical dutp, dutm, iprobe, r, g;
+parameter real max_resistance = 1k;
+real r_val, g_val;
+analog begin
+    V(dutm, iprobe) <+ 0;
+    r_val = V(dutp, dutm) / I(iprobe);
+    g_val = I(iprobe) / V(dutp, dutm);
+    if (r_val > max_resistance) begin
+        r_val = max_resistance;
+    end
+    V(r) <+ r_val;
+    V(g) <+ g_val;
+end
+endmodule
+"#;
         let include_dirs = vec![std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../external"
+            "/../../models"
         ))];
         let design =
-            va_frontend::compile_with_includes(src, &include_dirs).expect("compile ohmmeter.va");
+            va_frontend::compile_with_includes(src, &include_dirs).expect("compile ohmmeter");
         assert_eq!(design.modules.len(), 1);
         let module = &design.modules[0];
         assert_eq!(module.name, "ohmmeter");

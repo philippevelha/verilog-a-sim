@@ -19,6 +19,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.15+2 - 2026-09-11
+---------------------
+The first CI run (0.9.15+1, run 34624556434) was red on all three platforms at the clippy
+step, and the cause is the first cross-platform finding of the road to 1.0: the `va-cli` test
+target did `include_str!("../../../external/verilogaLib-master/ohmmeter.va")`, and `external/`
+is gitignored. On a fresh checkout the suite does not fail -- it does not *compile*. It had
+only ever passed on the one machine that has the corpus on disk. The test now carries the
+idiom it exists for (a bare `I(iprobe)` of a node whose only branch is an explicit
+`V(dutm, iprobe) <+ 0`) inline, with includes resolved from the tracked `models/`. The rule it
+establishes: nothing under `external/` may be a compile-time or run-time dependency of the
+suite. (The CI job logs need repository-admin auth to download, so the failure was reproduced
+by cloning the repository into a scratch directory without `external/` and running the gate
+there -- clippy clean, 768 tests, validate 27/27, on the GNU toolchain.)
+
+  Also: the project logo (`Verilog-A-sim.png`) and its README banner, added by the
+  supervisor.
+
+  Measured (fresh clone, no corpus): `cargo test --workspace` 768 passed / 0 failed,
+  `cargo xtask validate` 27/27, clippy and fmt clean. CI status for this commit is the next
+  entry's business.
+
+
 0.9.15+1 - 2026-09-11
 ---------------------
 Process only: the road to 1.0 re-derived and made checkable. "Road to 1.0" below is rewritten

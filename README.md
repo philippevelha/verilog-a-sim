@@ -1,5 +1,11 @@
 # verilog-a-sim
 
+---
+
+![logo](Verilog-A-sim.png)
+
+---
+
 A clean-room, from-scratch Verilog-A circuit simulator written in pure Rust, built as a
 coordinated set of master's theses. It compiles Verilog-A — the full language is the target,
 and `docs/token-reference.md` records construct by construct how far the implementation is
