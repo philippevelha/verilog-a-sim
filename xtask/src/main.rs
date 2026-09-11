@@ -2180,7 +2180,11 @@ mod tests {
         );
         // ... and is skipped, not trusted, when it does not.
         assert_eq!(
-            find_qspice_with(Some(dir.join("missing.exe").into()), path_var.clone(), &standard),
+            find_qspice_with(
+                Some(dir.join("missing.exe").into()),
+                path_var.clone(),
+                &standard
+            ),
             Some(via_path.clone())
         );
         // 2. Then `QSPICE64.exe` on PATH.
@@ -2189,7 +2193,10 @@ mod tests {
             Some(via_path.clone())
         );
         // 3. Then the standard install location.
-        assert_eq!(find_qspice_with(None, None, &standard), Some(standard.clone()));
+        assert_eq!(
+            find_qspice_with(None, None, &standard),
+            Some(standard.clone())
+        );
         // 4. And nothing at all is `None`, not a guess.
         assert_eq!(find_qspice_with(None, None, &dir.join("nowhere.exe")), None);
 
