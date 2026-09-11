@@ -1750,13 +1750,28 @@ fn golden_tran_from_qraw(
 /// the standard Windows install location. QSPICE is Windows-only, matching this project's own
 /// dev environment.
 fn find_qspice() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("QSPICE_PATH") {
+    find_qspice_with(
+        std::env::var_os("QSPICE_PATH"),
+        std::env::var_os("PATH"),
+        Path::new(r"C:\Program Files\QSPICE\QSPICE64.exe"),
+    )
+}
+
+/// [`find_qspice`]'s search order over explicit inputs, so the order itself is testable on a
+/// machine (or a CI runner) that has no QSPICE at all: `QSPICE_PATH` if it names a file, then
+/// `QSPICE64.exe` on each `PATH` entry, then `standard`.
+fn find_qspice_with(
+    qspice_path: Option<std::ffi::OsString>,
+    path_var: Option<std::ffi::OsString>,
+    standard: &Path,
+) -> Option<PathBuf> {
+    if let Some(p) = qspice_path {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some(p);
         }
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = path_var {
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join("QSPICE64.exe");
             if candidate.is_file() {
@@ -1764,8 +1779,7 @@ fn find_qspice() -> Option<PathBuf> {
             }
         }
     }
-    let standard = PathBuf::from(r"C:\Program Files\QSPICE\QSPICE64.exe");
-    standard.is_file().then_some(standard)
+    standard.is_file().then_some(standard.to_path_buf())
 }
 
 /// Absolute path to the workspace root, derived from this crate's manifest dir so every
@@ -2141,12 +2155,52 @@ mod tests {
         assert_eq!(tally.converged(), 3);
     }
 
+    /// The discovery order, checked without any QSPICE present. Until 2026-09-11 this test
+    /// asserted `find_qspice().is_some()` -- true on the one dev machine that has QSPICE and
+    /// false everywhere else, which the first Linux/macOS CI run duly reported. A test may
+    /// check what the code does with what it is given; it may not assert what is installed.
     #[test]
-    fn find_qspice_finds_the_real_install_on_this_machine() {
-        // QSPICE is genuinely installed in this dev environment (confirmed manually via its own
-        // CLI, not assumed) — a real regression check on the standard-install-location
-        // fallback, not just a "does it compile" test.
-        assert!(find_qspice().is_some());
+    fn find_qspice_search_order_is_env_then_path_then_standard() {
+        let dir = std::env::temp_dir().join("xtask_find_qspice_order_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let on_path = dir.join("onpath");
+        std::fs::create_dir_all(&on_path).unwrap();
+        let explicit = dir.join("explicit.exe");
+        let via_path = on_path.join("QSPICE64.exe");
+        let standard = dir.join("standard.exe");
+        for f in [&explicit, &via_path, &standard] {
+            std::fs::write(f, b"").unwrap();
+        }
+        let path_var = Some(std::env::join_paths([&on_path]).unwrap());
+
+        // 1. `QSPICE_PATH` wins when it names an existing file ...
+        assert_eq!(
+            find_qspice_with(Some(explicit.clone().into()), path_var.clone(), &standard),
+            Some(explicit.clone())
+        );
+        // ... and is skipped, not trusted, when it does not.
+        assert_eq!(
+            find_qspice_with(Some(dir.join("missing.exe").into()), path_var.clone(), &standard),
+            Some(via_path.clone())
+        );
+        // 2. Then `QSPICE64.exe` on PATH.
+        assert_eq!(
+            find_qspice_with(None, path_var.clone(), &standard),
+            Some(via_path.clone())
+        );
+        // 3. Then the standard install location.
+        assert_eq!(find_qspice_with(None, None, &standard), Some(standard.clone()));
+        // 4. And nothing at all is `None`, not a guess.
+        assert_eq!(find_qspice_with(None, None, &dir.join("nowhere.exe")), None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // What this machine actually has is reported, not asserted: `gen-golden` needs it,
+        // the test suite does not.
+        match find_qspice() {
+            Some(p) => eprintln!("QSPICE found at {}", p.display()),
+            None => eprintln!("QSPICE not installed here; `cargo xtask gen-golden` would skip"),
+        }
     }
 
     /// Build a synthetic `.qraw` byte buffer with the same shape a real QSPICE `.op` run

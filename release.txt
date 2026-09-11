@@ -19,6 +19,24 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.15+3 - 2026-09-11
+---------------------
+Second CI run (0.9.15+2, run 34625634614): clippy and build green on all three platforms;
+`test` red on all three, one failure, the same one everywhere --
+`xtask::tests::find_qspice_finds_the_real_install_on_this_machine`, which asserted
+`find_qspice().is_some()`. That is a statement about the machine, not the code: true on the
+one dev box with QSPICE installed, false on every runner and every other computer, which is
+exactly the class of assumption the platform gate exists to expose. `find_qspice` now
+delegates to `find_qspice_with(env, path, standard)`, and the test checks the search order
+(QSPICE_PATH if it names a file, else `QSPICE64.exe` on PATH, else the standard location,
+else `None`) against files it creates itself; whether this machine has QSPICE is printed, not
+asserted. The rule: a test may check what the code does with what it is given, never what is
+installed. CI's test step gained `--no-fail-fast` so one run reports every crate's verdict.
+
+  Measured locally: `cargo test --workspace` 768 passed (the replaced test counts once);
+  clippy/fmt clean. CI verdict for this commit: next entry.
+
+
 0.9.15+2 - 2026-09-11
 ---------------------
 The first CI run (0.9.15+1, run 34624556434) was red on all three platforms at the clippy

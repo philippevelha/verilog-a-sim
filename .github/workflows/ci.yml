@@ -40,7 +40,9 @@ jobs:
       - name: build
         run: cargo build --workspace
       - name: test
-        run: cargo test --workspace
+        # Every crate's verdict in one run: without this a failure in one test binary hides
+        # whatever the later ones would have said, and a red run costs a full cycle to learn.
+        run: cargo test --workspace --no-fail-fast
       - name: validate against committed golden
         run: cargo xtask validate
       - name: version agrees between Cargo.toml and release.txt
