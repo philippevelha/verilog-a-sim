@@ -1,0 +1,85 @@
+// Photonic and thermal natures/disciplines for the model zoo's opto-thermal examples.
+//
+// `disciplines.vams` in this repo is electrical-only and `mechanical.vams` holds the
+// mechanics; this file adds what a thermally tuned microring needs: a temperature node with a
+// heat flow, and two signal-flow quantities for the light on a waveguide.
+//
+// # Thermal — conservative
+//
+//   `thermal`   potential = Temperature (K, access `Temp`), flow = Power (W, access `Pwr`).
+//
+// The names, units and access functions are the Verilog-AMS standard `thermal` discipline's,
+// so a model written against the LRM header parses against this one unchanged. A thermal node
+// referenced to ground reads as a temperature *rise above ambient*, and a heat flow into it
+// obeys a Kirchhoff sum exactly as current does: thermal resistance <-> resistor, thermal
+// capacitance <-> capacitor, heater <-> current source. That is the whole reason the solver
+// needs nothing thermal-specific.
+//
+// # Optical — signal flow, single wavelength, CW
+//
+//   `optical`     potential = Optical_power (W, access `Popt`)
+//   `wavelength`  potential = Wavelength    (m, access `Wl`)
+//
+// Both are **potential-only** (signal-flow) disciplines: a source drives the node, sinks probe
+// it, and nothing is conserved at a junction — fanning one optical net out to two receivers
+// would deliver the full power to both. That is the correct abstraction for a directional
+// waveguide (light does not split at a wire junction, it splits in a coupler you model), and
+// it is what every model here relies on: an output port is an ideal source of the quantity,
+// never a load on the port that feeds it, so there is no back-reflection.
+//
+// The light is described by two real numbers, its power and its wavelength, on two separate
+// nets. That is a deliberately coarse description: no optical phase, no field envelope, no
+// modulation sidebands, no polarisation. It is enough — and only enough — for a CW laser whose
+// wavelength is fixed while something slow (here: a heater with a 12 us time constant, a
+// billion times slower than the ring's photon lifetime) tunes a filter across it. A model that
+// needs the field (an interferometer, a modulator with chirp) needs a field-envelope
+// discipline like the corpus's `microring_modulator.va`, not this one.
+//
+// `abstol` for optical power is 1e-15 W: femtowatt resolution on milliwatt signals, the same
+// nine-decade ratio the electrical `Current` nature gives amps.
+
+`ifdef PHOTONIC_VAMS
+`else
+`define PHOTONIC_VAMS 1
+
+nature Temperature
+    units      = "K";
+    access     = Temp;
+    abstol     = 1e-4;
+endnature
+
+nature Power
+    units      = "W";
+    access     = Pwr;
+    abstol     = 1e-9;
+endnature
+
+nature Optical_power
+    units      = "W";
+    access     = Popt;
+    abstol     = 1e-15;
+endnature
+
+nature Wavelength
+    units      = "m";
+    access     = Wl;
+    abstol     = 1e-15;
+endnature
+
+// Conservative: a node is a temperature, a branch carries heat.
+discipline thermal
+    potential Temperature;
+    flow      Power;
+enddiscipline
+
+// Signal flow: the optical power on a directional waveguide.
+discipline optical
+    potential Optical_power;
+enddiscipline
+
+// Signal flow: the wavelength of the (single) CW carrier on that waveguide.
+discipline wavelength
+    potential Wavelength;
+enddiscipline
+
+`endif

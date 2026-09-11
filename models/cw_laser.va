@@ -1,0 +1,30 @@
+// Continuous-wave laser: a fixed optical power at a fixed wavelength.
+//
+// The simplest possible optical source, and deliberately so. It drives two signal-flow nets —
+// the power on `out` and the carrier wavelength on `wl` — and nothing feeds back into it: no
+// reflection sensitivity, no relative intensity noise, no linewidth, no turn-on transient. A
+// model downstream reads `Popt(out)` and `Wl(wl)`; nothing it does changes either.
+//
+// The wavelength travels on its own net rather than being a parameter of every receiver so
+// that a deck states it once, on the source, and the ring's detuning is computed from the
+// light it actually sees. Change `lambda` here and every filter in the path retunes.
+//
+// # Limitations
+//
+// Two real numbers describe the light (see `photonic.vams`). No phase, no modulation, no
+// polarisation. Power is exactly constant; there is no way to modulate it from this model.
+`include "photonic.vams"
+
+module cw_laser(out, wl);
+    output out, wl;
+    optical    out;
+    wavelength wl;
+
+    parameter real power  = 1e-3     from [0:inf);   // emitted optical power (W)
+    parameter real lambda = 1550.5e-9 from (0:inf);  // carrier wavelength (m)
+
+    analog begin
+        Popt(out) <+ power;
+        Wl(wl)    <+ lambda;
+    end
+endmodule

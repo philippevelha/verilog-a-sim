@@ -19,6 +19,49 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.15 - 2026-09-11
+-------------------
+A four-discipline example, built to find what breaks, and the three simulator fixes it forced.
+`circuits/microring_thermal.net`: a 1 mW CW laser at 1550.5 nm into a thermally tuned add-drop
+microring (L = 188.72 um, resonant at 1550.0 nm cold, n_eff 2.85 / n_g 4.1, FSR 3.105 nm),
+heated by a 2 kOhm resistor with a 12 us thermal plant driven 0->5->0 V in 200 us, read out by
+a reverse-biased photodiode into 200 kOhm. Four new models (`cw_laser`, `heater`, `microring`,
+`photodiode`) and `models/photonic.vams`, which adds `thermal` (conservative) plus two
+**potential-only signal-flow** disciplines, `optical` (power, W) and `wavelength` (m) -- the
+first signal-flow disciplines in the zoo, and they elaborated and solved unchanged. Every
+analytic figure is reproduced: the resonance crosses the laser at a 7.11 K rise, the drop port
+peaks at 787 uW, the photodiode clips at 27.6 uA (5 V through 200 kOhm cannot source 0.71 mA
+-- the deck as specified, and stated as such), and the heater's lag puts the up-crossing at
+4.32 V and the down-crossing at 3.20 V. `microring_thermal_fast.net` (10 us ramps) never
+reaches resonance: max 5.48 K. Plots in docs/examples.md 8-11; findings in the roadmap.
+
+  **Fix 1 (behaviour): the transient refusal is scoped to the models a deck places.**
+  `--model models/` compiles the whole zoo, and the absdelay/laplace refusal scanned every file
+  in it, so this circuit was refused for `delay_line.va` and `laplace_lowpass.va` sitting in the
+  same directory. `files_reached_by` now walks the deck's device lines through each file's
+  declared and instantiated modules (transitively) and the check covers those files only.
+
+  **Fix 2 (behaviour): `CoreError::NonFinite`.** The ring divides by the wavelength probe, which
+  reads 0 on Newton's first iteration; the NaN went through LU and came out as "singular matrix"
+  -- the diagnostic for a floating node, the wrong hunt. `va-core::check_finite` now runs before
+  either factorization and reports the row (and column, for a Jacobian entry) with the likely
+  cause and the model-side guard; `va-cli` names the unknown (`X3.b0`). The model got the guard.
+  Found on the way: `newton.rs`'s gmin test claimed a non-finite Jacobian entry; it is finite
+  and the factorization overflows, so it stays `Singular` and the comment now says so.
+
+  **Fix 3 (behaviour): report format.** A potential below 1e-3 in magnitude prints in
+  scientific notation (`Wl(wl) = 1.550500e-6 m`, not `0.000002 m`), the rule flows already had.
+  Volt-scale lines are byte-identical.
+
+  **Open:** a cross-domain plot on one axis puts the W and A series on the zero line;
+  `--report` subsets are the documented answer and the example uses them. A per-unit-axis plot
+  is wanted, not built, not a 1.0 blocker.
+
+  Measured at this version: `cargo test --workspace` 768 passed / 0 failed (+4); `cargo xtask
+  validate` 27 checked, 0 failed, convergence 27/27; zoo `check models --codegen` 25/25;
+  corpus 112/132 (94/99 self-contained), unchanged. The slow deck runs in 5.7 s (2013 points).
+
+
 0.9.14+2 - 2026-09-11
 ---------------------
 Docs only: `va-netlist`'s parser "Limitations" list had two expired premises. It still said

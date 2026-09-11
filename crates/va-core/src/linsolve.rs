@@ -42,6 +42,8 @@ fn residual_ok(a: &[f64], b: &[f64], n: usize, x: &[f64]) -> bool {
 ///
 /// # Errors
 ///
+/// [`CoreError::NonFinite`] if `a` or `b` already holds a NaN/inf — a model evaluation
+/// problem, checked before factoring so it is not misreported as singularity — or
 /// [`CoreError::Singular`] if `a` is singular to working precision.
 pub fn solve_dense(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreError> {
     debug_assert_eq!(a.len(), n * n);
@@ -49,6 +51,7 @@ pub fn solve_dense(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreError
     if n == 0 {
         return Ok(Vec::new());
     }
+    crate::check_finite(a, b, n)?;
 
     let mat = Mat::from_fn(n, n, |i, j| a[i * n + j]);
     let rhs = Mat::from_fn(n, 1, |i, _| b[i]);
@@ -109,6 +112,7 @@ pub fn solve_sparse(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreErro
     if n == 0 {
         return Ok(Vec::new());
     }
+    crate::check_finite(a, b, n)?;
 
     let triplets: Vec<Triplet<usize, usize, f64>> = (0..n)
         .flat_map(|i| (0..n).map(move |j| (i, j)))
@@ -158,6 +162,37 @@ pub fn solve_sparse(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nan_in_the_system_is_reported_as_non_finite_not_singular() {
+        // The matrix is a perfectly well-conditioned identity; only the residual is bad. Before
+        // 2026-09-11 LU turned the NaN into a NaN solution and this came back as `Singular`,
+        // sending the user to look for a floating node that does not exist.
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let b = [1.0, f64::NAN];
+        assert!(matches!(
+            solve_dense(&a, &b, 2),
+            Err(CoreError::NonFinite { row: 1, col: None })
+        ));
+        assert!(matches!(
+            solve_sparse(&a, &b, 2),
+            Err(CoreError::NonFinite { row: 1, col: None })
+        ));
+        // A Jacobian entry: row-major index 2 of a 2x2 is (1, 0).
+        let a_inf = [1.0, 0.0, f64::INFINITY, 1.0];
+        assert!(matches!(
+            solve_dense(&a_inf, &[1.0, 1.0], 2),
+            Err(CoreError::NonFinite {
+                row: 1,
+                col: Some(0)
+            })
+        ));
+        // And the residual is named first when both are bad.
+        assert!(matches!(
+            solve_dense(&a_inf, &[f64::NAN, 1.0], 2),
+            Err(CoreError::NonFinite { row: 0, col: None })
+        ));
+    }
 
     #[test]
     fn solves_2x2() {

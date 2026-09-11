@@ -1,0 +1,43 @@
+// PIN photodiode: a junction diode in parallel with a light-driven current source.
+//
+//   I(a,c) = Is*(exp(V(a,c)/(N*Vt)) - 1)  -  resp * Popt(in)
+//
+// The photocurrent flows from cathode to anode inside the device — against the diode's
+// forward direction — which is the minus sign. Reverse-biased (cathode positive), the
+// junction term is ~-Is and the terminal current is the photocurrent alone, linear in optical
+// power with slope `resp` (A/W): the photoconductive mode every receiver uses.
+//
+// # What happens when the bias circuit cannot supply the photocurrent
+//
+// Nothing in the model limits the photocurrent, so the limit comes from the circuit around
+// it, and the model reproduces it. With a bias `Vb` through a load `R`, the diode stays reverse
+// biased only while `resp*Popt*R < Vb`. Past that the anode rises above the cathode, the
+// junction turns on, and the excess photocurrent recirculates through the forward-biased
+// junction instead of the load: the load current clamps near `(Vb + ~0.4 V)/R` however bright
+// the light. That is a photodiode in photovoltaic mode, and it is real — but it means a
+// receiver that sees it is measuring its bias supply, not its light. The `microring_thermal`
+// deck runs into exactly this at 1 mW / 200 kOhm / 5 V; see its header.
+//
+// # Limitations
+//
+// No junction capacitance and no transit-time limit, so the response is instantaneous — fine
+// for microsecond thermal tuning, wrong for a gigahertz data signal. Responsivity is
+// wavelength-independent (InGaAs is flat to within ~10 % across the C band, which is the
+// justification). No dark-current temperature dependence beyond `$vt`, no avalanche, no
+// series resistance.
+`include "disciplines.vams"
+`include "photonic.vams"
+
+module photodiode(in, a, c);
+    inout in, a, c;
+    optical    in;
+    electrical a, c;
+
+    parameter real resp = 0.9   from [0:inf);   // responsivity (A/W); InGaAs at 1550 nm
+    parameter real Is   = 1e-12 from (0:inf);   // dark saturation current (A)
+    parameter real N    = 1.0   from (0:inf);   // ideality factor
+
+    analog begin
+        I(a, c) <+ Is * (exp(V(a, c) / (N * $vt)) - 1.0) - resp * Popt(in);
+    end
+endmodule

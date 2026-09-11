@@ -1,0 +1,51 @@
+// Resistive heater with its thermal plant: an electrical resistor on one side, a temperature
+// node on the other.
+//
+//   I(p,n)  = V(p,n) / R                                  <- plain ohmic winding
+//   Pwr(th) = -V*I  +  Temp(th)/Rth  +  Cth*ddt(Temp(th)) <- heat balance at the hot spot
+//
+// The second line is the thermal analogue of a current source feeding an RC to ground: the
+// Joule power `V*I` is injected into `th`, leaks to ambient through the thermal resistance
+// `Rth` (K/W), and is stored in the thermal capacitance `Cth` (J/K). `th` therefore holds the
+// temperature **rise above ambient** in kelvin, ambient being ground, and settles with
+//
+//   tau = Rth * Cth          (12 us at the defaults),   dT_final = Rth * V^2 / R.
+//
+// The plant lives inside the heater rather than in the ring it heats because the heater's own
+// mass and its contact to the substrate are what set the time constant in practice; the ring
+// is a few micrometres of silicon riding on top and adds nothing measurable. A deck that wants
+// a separate thermal network simply attaches one to `th` in parallel.
+//
+// # Coupling direction
+//
+// This is a one-way coupling. The electrical side does not know the temperature: `R` is
+// constant, so there is no TCR feedback and no self-limiting. Real metal heaters have a
+// positive TCR of ~0.3 %/K, which at the 10-20 K rises used here would change the current by a
+// few percent — omitted, and stated so that a mismatch against a measured heater is not
+// mistaken for a solver fault.
+//
+// # Sign convention
+//
+// `Pwr(th) <+ expr` contributes `expr` watts of heat *out of* `th` (into the branch to
+// ground), exactly as `I(a) <+ expr` sources current out of an electrical node. The Joule term
+// carries the leading minus so that dissipation *raises* the temperature.
+`include "disciplines.vams"
+`include "photonic.vams"
+
+module heater(p, n, th);
+    inout p, n, th;
+    electrical p, n;
+    thermal    th;
+
+    parameter real R   = 2e3    from (0:inf);   // heater resistance (Ohm)
+    parameter real Rth = 1e3    from (0:inf);   // thermal resistance to ambient (K/W)
+    parameter real Cth = 1.2e-8 from (0:inf);   // thermal capacitance (J/K); tau = Rth*Cth
+
+    analog begin
+        // Electrical side: an ohmic resistor.
+        I(p, n) <+ V(p, n) / R;
+        // Thermal side: Joule heat in, conduction and storage out.
+        Pwr(th) <+ -V(p, n) * V(p, n) / R;
+        Pwr(th) <+ Temp(th) / Rth + Cth * ddt(Temp(th));
+    end
+endmodule

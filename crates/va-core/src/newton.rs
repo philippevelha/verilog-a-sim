@@ -601,8 +601,10 @@ mod tests {
         // point exists (~0.81 V/diode, ~0.38 A), but plain Newton's log-ramp junction limiting
         // walks the chain's *internal* node voltages there one node at a time with no other
         // conductance path to keep them in check, and some node's voltage crosses into the
-        // exponential's `f64` overflow range en route -- a genuine `Err(Singular)` from a
-        // non-finite Jacobian entry, confirmed independent of iteration budget (still fails at
+        // exponential's `f64` overflow range en route -- a genuine `Err(Singular)`: the stamped
+        // entries are still *finite* (`check_finite` passes; verified 2026-09-11 when
+        // `NonFinite` was added and this test was expected to move to it, and did not), but so
+        // large that the factorization itself overflows. Confirmed independent of iteration budget (still fails at
         // `max_iters: 2000`, ~13x this test's default). `gmin` stepping's early, well-
         // conditioned stages (a competing shunt conductance to ground at every node) keep the
         // whole chain in range long enough to land near the true operating point before the

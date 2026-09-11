@@ -1,0 +1,98 @@
+// Add-drop microring resonator, thermally tuned: a passive optical filter whose pass band
+// moves with the temperature of a thermal port.
+//
+//   in ──►──┐   ┌──►── thru            round-trip phase   phi = 2*pi*n_eff(lambda,T)*L/lambda
+//           ═╤═ │                      resonance          phi = 2*pi*m
+//          ( ring )                    drop transfer      T_drop(phi), a Lorentzian-like comb
+//           ═╧═ │                      thermal tuning     n_eff += dn/dT * Temp(th)
+//   drop ──◄──┘  └── (add: unused)
+//
+// Steady-state add-drop transfer (Bogaerts et al., "Silicon microring resonators", Laser &
+// Photonics Reviews 6, 2012, eqs. 5-6), with `r1`, `r2` the couplers' self-coupling amplitudes
+// and `a` the single-pass amplitude transmission:
+//
+//   T_drop = (1 - r1^2)(1 - r2^2) a          / (1 - 2 r1 r2 a cos(phi) + (r1 r2 a)^2)
+//   T_pass = (r2^2 a^2 - 2 r1 r2 a cos(phi) + r1^2) / (same denominator)
+//
+// # Geometry and where the numbers come from
+//
+// Resonance needs an integer number of guided wavelengths around the loop, n_eff*L = m*lambda.
+// For a ~30 um radius ring (L ~ 188.5 um) at n_eff = 2.85 and 1550 nm, m = 346.6 — not an
+// integer, so a ring of exactly that radius resonates somewhere else. Picking m = 347 and
+// solving for L gives the default here: L = 347 * 1550 nm / 2.85 = 188.7193 um, i.e. a radius
+// of 30.036 um, resonant at exactly 1550.000 nm cold. The free spectral range follows from the
+// group index, FSR = lambda^2 / (n_g L) = 3.105 nm, so neighbouring resonances sit at 1546.9
+// and 1553.1 nm.
+//
+// # Dispersion, and why the group index is here at all
+//
+// The phase's wavelength dependence is what makes the comb, and its slope is set by the
+// *group* index, not the effective one: d(phi)/d(lambda) = -2*pi*L*n_g/lambda^2. The model
+// carries n_eff's first-order dispersion explicitly,
+//
+//   n_eff(lambda) = neff + (neff - ng) * (lambda - lambda0) / lambda0,
+//
+// which is exactly the relation n_g = n_eff - lambda*dn_eff/dlambda evaluated at `lambda0`.
+// Drop the dispersion term and the FSR comes out lambda^2/(n_eff L) = 4.47 nm — wrong by the
+// ratio n_g/n_eff, which is a 44 % error in where the next resonance is.
+//
+// # Thermal tuning
+//
+// The thermo-optic effect adds `dndT * Temp(th)` to n_eff, `Temp(th)` being the rise above
+// ambient the heater delivers (see `heater.va`). The resonance moves by
+//
+//   d(lambda_res)/dT = lambda * dndT / n_g = 1550 nm * 1.86e-4/K / 4.1 = 0.0703 nm/K,
+//
+// so a laser 0.5 nm above the cold resonance is reached at a rise of 7.11 K. This is a
+// one-way coupling: the ring does not heat itself from absorbed light (no thermal
+// bistability), and the heater does not see the ring.
+//
+// # Limitations
+//
+// Quasi-static: the transfer is the steady-state one, applied instantaneously. The ring's
+// photon lifetime is ~10 ps at this Q and the tuning is microseconds, so there is no
+// build-up dynamics worth modelling here — but a modulation faster than the resonance
+// linewidth (~7 GHz) would be wrong. The `add` port is absent (nothing injected). Both
+// couplers are wavelength-independent. Optical power in the ring is not reported. No self
+// heating, no two-photon absorption, no backscatter or counter-propagating mode splitting.
+`include "constants.vams"
+`include "photonic.vams"
+
+module microring(in, thru, drop, wl, th);
+    inout in, thru, drop, wl, th;
+    optical    in, thru, drop;
+    wavelength wl;
+    thermal    th;
+
+    parameter real L       = 188.7193e-6 from (0:inf); // round-trip length (m); see above
+    parameter real neff    = 2.85        from (0:inf); // effective index at lambda0, cold
+    parameter real ng      = 4.1         from (0:inf); // group index
+    parameter real lambda0 = 1550e-9     from (0:inf); // wavelength neff/ng are quoted at (m)
+    parameter real dndT    = 1.86e-4;                  // thermo-optic coefficient (1/K)
+    parameter real k1sq    = 0.05 from (0:1);          // in/thru coupler power coupling
+    parameter real k2sq    = 0.05 from (0:1);          // add/drop coupler power coupling
+    parameter real loss    = 3.0  from [0:inf);        // propagation loss (dB/cm)
+
+    real lam, n, phi, r1, r2, a, den, tdrop, tpass;
+
+    analog begin
+        // Newton starts from the zero vector, so on the first iteration of a cold solve the
+        // wavelength net reads 0 and `phi = .../lam` would be inf -> NaN in the Jacobian.
+        // Fall back to `lambda0` until the source has driven the net; the derivative with
+        // respect to `Wl(wl)` is then zero at that one point, which is harmless.
+        lam = (Wl(wl) > 0.0) ? Wl(wl) : lambda0;
+        // Effective index at this wavelength and temperature.
+        n   = neff + (neff - ng) * (lam - lambda0) / lambda0 + dndT * Temp(th);
+        phi = 2.0 * `M_PI * n * L / lam;
+        r1  = sqrt(1.0 - k1sq);
+        r2  = sqrt(1.0 - k2sq);
+        // Single-pass amplitude transmission from a dB/cm loss over L (in cm).
+        a   = pow(10.0, -loss * (L * 100.0) / 20.0);
+        den = 1.0 - 2.0 * r1 * r2 * a * cos(phi) + (r1 * r2 * a) * (r1 * r2 * a);
+        tdrop = (1.0 - r1 * r1) * (1.0 - r2 * r2) * a / den;
+        tpass = (r2 * r2 * a * a - 2.0 * r1 * r2 * a * cos(phi) + r1 * r1) / den;
+
+        Popt(drop) <+ tdrop * Popt(in);
+        Popt(thru) <+ tpass * Popt(in);
+    end
+endmodule

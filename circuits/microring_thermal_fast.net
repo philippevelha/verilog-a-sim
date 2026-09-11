@@ -1,0 +1,31 @@
+* The `microring_thermal` circuit driven too fast for its heater: 10 us ramps on a 12 us plant.
+*
+* Identical to `microring_thermal.net` except the triangle is 0 -> 5 -> 0 V in 20 us instead
+* of 200 us, i.e. a period of 1.7 thermal time constants. The heater's temperature cannot
+* follow: it climbs while the voltage is high, sags while it is low, and after two cycles
+* settles into a ripple between ~2.4 K and ~5.5 K around the mean dissipation — never reaching
+* the 7.11 K rise that would put the resonance on the laser (measured: Temp(th) max 5.48 K).
+*
+* What to look for:
+*   1. Temp(th) is a smoothed, lagging, low-pass version of V(hp)^2. Compare the slow deck,
+*      where it tracks the ramp with only a small lag.
+*   2. Popt(drop) never exceeds ~46 uW, against 787 uW on resonance in the slow deck: the
+*      resonance gets within ~0.12 nm of the laser and no closer.
+*   3. The electrical readout still clips. 46 uW * 0.9 A/W = 41 uA is above the 25 uA a 5 V
+*      bias through 200 kOhm can supply, so I(Vs) saturates at ~27 uA here too — from the
+*      resistor's current alone this run and the slow one are indistinguishable at their
+*      peaks. Only the optical trace says the resonance was never reached. A load small
+*      enough not to clip (2k) would make the electrical trace faithful, at the cost of
+*      signal.
+*
+* Same models, same parameters; only the source and the run length differ.
+X1 lin  wl            cw_laser    power=1e-3 lambda=1550.5e-9
+Vh hp   gnd           PULSE(0 5 0 10u 10u 0 20u)
+X2 hp   gnd  th       heater      R=2e3 Rth=1e3 Cth=1.2e-8
+X3 lin  thru drop wl th  microring
+X4 drop pa   kpd      photodiode  resp=0.9
+Vb kpd  gnd           DC 5
+Vs pa   rr            DC 0
+R1 rr   gnd           200k
+.tran 0.05u 60u
+.end

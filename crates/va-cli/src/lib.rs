@@ -286,6 +286,53 @@ pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)
 /// a file that is not a model is an error rather than a skip: `sim` is being told *this is the
 /// library*, unlike `check`, whose whole job is to survey files of unknown quality.
 fn compile_model_path(path: &str) -> Result<Vec<Module>> {
+    compile_model_library(path).map(|(modules, _)| modules)
+}
+
+/// One source file of a compiled model library: which modules it declares and which it
+/// instantiates. This is what lets a per-file check ([`refuse_transient_approximations`]) be
+/// applied to the files a deck *uses* rather than to everything the library happens to hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LibraryFile {
+    /// The path as `compile_model_library` printed it — the same spelling
+    /// [`model_sources`] produces, so the two can be matched by string.
+    path: String,
+    /// Names of the modules declared in this file.
+    modules: Vec<String>,
+    /// Names of every module instantiated (`Item::Instance`) by any module in this file.
+    instantiates: Vec<String>,
+}
+
+/// The library files a deck reaches: those declaring a module some device places, plus —
+/// transitively — those declaring a module one of *those* instantiates. Elaboration inlines
+/// submodules, so the flattened IR no longer says which files fed a placed module; the AST-level
+/// instance graph recorded in [`LibraryFile`] does.
+///
+/// A device whose model is a built-in primitive (`resistor`, `vsource`, …) or unknown reaches
+/// nothing here; unknown models are reported when the device is built, not by this walk.
+fn files_reached_by(net: &Netlist, files: &[LibraryFile]) -> Vec<String> {
+    let mut wanted: Vec<String> = net.devices.iter().map(|d| d.model.clone()).collect();
+    let mut reached: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < wanted.len() {
+        let name = wanted[i].clone();
+        i += 1;
+        for f in files.iter().filter(|f| f.modules.contains(&name)) {
+            if !reached.contains(&f.path) {
+                reached.push(f.path.clone());
+                for inst in &f.instantiates {
+                    if !wanted.contains(inst) {
+                        wanted.push(inst.clone());
+                    }
+                }
+            }
+        }
+    }
+    reached
+}
+
+/// [`compile_model_path`], also returning which modules each file declared and instantiated.
+fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> {
     let p = std::path::Path::new(path);
     let files: Vec<std::path::PathBuf> = if p.is_dir() {
         let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(p)
@@ -321,6 +368,7 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
     // own includes brought in. Later files do not override earlier definitions -- a library
     // whose files disagree about a discipline is a problem to report, not to silently resolve.
     let mut library: Vec<va_frontend::ast::ModuleAst> = Vec::new();
+    let mut library_files: Vec<LibraryFile> = Vec::new();
     let mut disciplines = std::collections::HashMap::new();
     let mut natures = std::collections::HashMap::new();
     for f in &files {
@@ -342,6 +390,18 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
         for (k, v) in file_natures {
             natures.entry(k).or_insert(v);
         }
+        library_files.push(LibraryFile {
+            path: name,
+            modules: asts.iter().map(|a| a.name.clone()).collect(),
+            instantiates: asts
+                .iter()
+                .flat_map(|a| a.items.iter())
+                .filter_map(|it| match it {
+                    va_frontend::ast::Item::Instance { module, .. } => Some(module.clone()),
+                    _ => None,
+                })
+                .collect(),
+        });
         library.extend(asts);
     }
 
@@ -363,7 +423,7 @@ fn compile_model_path(path: &str) -> Result<Vec<Module>> {
     );
     warn_unplaceable_modules(&modules, path);
     warn_mfactor_double_scaling(&modules, path);
-    Ok(modules)
+    Ok((modules, library_files))
 }
 
 /// Print a refusal's labelled fields under a `check` verdict line, on stdout with the rest of
@@ -546,7 +606,13 @@ pub fn run_sim(
     integration: Integration,
     report_only: &[String],
 ) -> Result<()> {
-    let (net, compiled) = load(netlist, model)?;
+    let deck =
+        std::fs::read_to_string(netlist).with_context(|| format!("reading netlist {netlist}"))?;
+    let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {netlist}"))?;
+    let (compiled, library_files) = match model {
+        Some(path) => compile_model_library(path)?,
+        None => (Vec::new(), Vec::new()),
+    };
 
     gate_analysis(&net, analysis)?;
     // Plottable analyses are the ones that produce a *curve*: a transient waveform, or a `.dc`
@@ -567,8 +633,16 @@ pub fn run_sim(
 
     if analysis == Analysis::Transient {
         // Checked *before* solving, so the refusal is not buried under a waveform -- and so no
-        // waveform is produced at all.
-        refuse_transient_approximations(&model_sources(model))?;
+        // waveform is produced at all. Checked over the files this deck *reaches*, not the
+        // whole library: `--model models/` names a directory that also holds `delay_line.va`
+        // and `laplace_lowpass.va`, and refusing a circuit that never places them would be a
+        // refusal naming the wrong construct (2026-09-11, found by `microring_thermal.net`).
+        let reached = files_reached_by(&net, &library_files);
+        let sources: Vec<(String, String)> = model_sources(model)
+            .into_iter()
+            .filter(|(path, _)| reached.contains(path))
+            .collect();
+        refuse_transient_approximations(&sources)?;
         let wf = solve_transient(&net, &compiled, integration)?;
         // Said only when a request actually went unmet, rather than whenever a tolerance is
         // written: the bracketing step control (§ `cross`) normally honours it, and a blanket
@@ -1215,13 +1289,20 @@ pub struct Quantity {
 
 impl Quantity {
     /// Render one value of this quantity, e.g. `V(in) = 0.500000 V`.
+    ///
+    /// A potential prints in fixed point only while six decimals still carry at least three
+    /// significant digits, i.e. `|value| >= 1e-3` (or exactly zero); below that it switches to
+    /// scientific, like a flow. Volts are the case fixed point was chosen for, and a
+    /// sub-millivolt node is rare there — but a potential is not always volts: a wavelength net
+    /// holds `1.5505e-6 m` and an optical power net microwatts, and both printed as
+    /// `0.000002` before 2026-09-11, which is not a number anyone can check a model against.
     fn render(&self, value: f64) -> String {
         let unit = if self.unit.is_empty() {
             String::new()
         } else {
             format!(" {}", self.unit)
         };
-        if self.is_potential {
+        if self.is_potential && (value == 0.0 || value.abs() >= 1e-3) {
             format!("{} = {:.6}{unit}", self.label, value)
         } else {
             format!("{} = {:.6e}{unit}", self.label, value)
@@ -1511,13 +1592,44 @@ pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Q
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
-    let (instances, dim, _currents, _) = build_instances(net, compiled)?;
+    let (instances, dim, _currents, quantities) = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
     va_core::dc::operating_point_with_events(&refs, dim, NewtonConfig::default(), None)
         .map(|(op, _)| op)
+        .map_err(|e| name_non_finite_row(e.into(), &quantities))
         .context("DC operating-point solve failed")
+}
+
+/// If `err` is a [`va_core::CoreError::NonFinite`] (bare, or inside a
+/// [`va_transient::TransientError`]), wrap it with the *name* of the unknown whose equation
+/// went non-finite — `Popt(drop)` or `X3.b0`, not "row 7". The row is what the core can know;
+/// which device's contribution lands there is what the user needs, and the unknown's label
+/// (a net in some discipline, a device's branch row, a compiled model's internal unknown) is
+/// the nearest thing this layer has to it. Any other error passes through untouched.
+fn name_non_finite_row(err: anyhow::Error, quantities: &[Quantity]) -> anyhow::Error {
+    let row = match err.downcast_ref::<va_core::CoreError>() {
+        Some(va_core::CoreError::NonFinite { row, .. }) => Some(*row),
+        _ => match err.downcast_ref::<va_transient::TransientError>() {
+            Some(va_transient::TransientError::Core(va_core::CoreError::NonFinite {
+                row, ..
+            })) => Some(*row),
+            _ => None,
+        },
+    };
+    let Some(row) = row else {
+        return err;
+    };
+    match quantities.iter().find(|q| q.index == row) {
+        Some(q) => err.context(format!(
+            "the non-finite value is in the equation of `{}` (unknown #{row}); look at the device(s) contributing to it",
+            q.label
+        )),
+        None => err.context(format!(
+            "the non-finite value is in the equation of unknown #{row}, which no reported quantity names"
+        )),
+    }
 }
 
 /// Solve a `.dc` sweep (§ ladder rung 2): re-solve the whole circuit fresh at each swept value
@@ -1739,11 +1851,13 @@ pub fn solve_transient(
         lte_estimator: LteEstimator::DividedDifference,
     };
 
-    let (instances, dim, currents, _quantities) = build_instances(net, compiled)?;
+    let (instances, dim, currents, quantities) = build_instances(net, compiled)?;
     let x0 = initial_solution(net, dim, &currents);
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
-    va_transient::integrator::run(&refs, dim, x0, cfg).context("transient integration failed")
+    va_transient::integrator::run(&refs, dim, x0, cfg)
+        .map_err(|e| name_non_finite_row(e.into(), &quantities))
+        .context("transient integration failed")
 }
 
 /// The transient run's initial solution vector: zero everywhere, then each reactive element's
@@ -2561,6 +2675,138 @@ fn report_transient(quantities: &[Quantity], wf: &Waveform) {
 mod tests {
     use super::*;
     use va_abi::reference::GROUND;
+
+    /// A library directory may hold models a deck never places, and a *transient* refusal
+    /// (`absdelay`/`laplace_*` fold) must be about the models the deck uses — 2026-09-11,
+    /// found by `circuits/microring_thermal.net` run against `--model models`, which also holds
+    /// `laplace_lowpass.va`. Covers the transitive case too: a placed module that instantiates
+    /// a sibling file's module reaches that file.
+    #[test]
+    fn transient_refusal_is_scoped_to_the_files_a_deck_reaches() {
+        let dir = std::env::temp_dir().join("va_cli_refusal_scoped_to_reached_files_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, src: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, src).unwrap();
+            p.display().to_string()
+        };
+        let plain = write(
+            "plain.va",
+            "module plain(p, n); electrical p, n; analog I(p, n) <+ V(p, n) / 1000.0; endmodule",
+        );
+        let wrapper = write(
+            "wrapper.va",
+            "module wrapper(a, b); electrical a, b; plain inner(a, b); endmodule",
+        );
+        let folded = write(
+            "folded.va",
+            "module folded(p, n); electrical p, n; \
+             analog I(p, n) <+ laplace_nd(V(p, n), {1.0}, {1.0, 1e-6}); endmodule",
+        );
+        let (_, files) = compile_model_library(&dir.display().to_string()).expect("compiles");
+        assert_eq!(files.len(), 3);
+
+        // A deck placing only the wrapper reaches wrapper.va and, through its instance,
+        // plain.va — and not folded.va.
+        let deck =
+            va_netlist::parser::parse("X1 a gnd wrapper\nV1 a gnd DC 1\n.tran 1u 10u\n.end\n")
+                .unwrap();
+        let mut reached = files_reached_by(&deck, &files);
+        reached.sort();
+        let mut expected = vec![plain.clone(), wrapper.clone()];
+        expected.sort();
+        assert_eq!(
+            reached, expected,
+            "wrapper reaches plain transitively, never folded"
+        );
+
+        // The refusal, restricted the way `run_sim` restricts it, passes for that deck ...
+        let sources = |reached: &[String]| -> Vec<(String, String)> {
+            model_sources(Some(&dir.display().to_string()))
+                .into_iter()
+                .filter(|(p, _)| reached.contains(p))
+                .collect()
+        };
+        refuse_transient_approximations(&sources(&reached))
+            .expect("a deck that never places the folded model is not refused");
+
+        // ... and still refuses a deck that does place the folded model.
+        let deck2 =
+            va_netlist::parser::parse("X1 a gnd folded\nV1 a gnd DC 1\n.tran 1u 10u\n.end\n")
+                .unwrap();
+        let reached2 = files_reached_by(&deck2, &files);
+        assert_eq!(reached2, vec![folded.clone()]);
+        let err = refuse_transient_approximations(&sources(&reached2))
+            .expect_err("placing the folded model is still refused");
+        assert!(err.to_string().contains("laplace_nd"), "{err}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A potential below 1e-3 in magnitude prints in scientific notation: `0.000002 m` is not
+    /// a wavelength anyone can check a model against (2026-09-11). Volt-scale values and exact
+    /// zero keep the fixed format every existing report uses.
+    #[test]
+    fn a_small_potential_is_printed_in_scientific_notation() {
+        let q = |label: &str, unit: &str, is_potential: bool| Quantity {
+            label: label.to_string(),
+            unit: unit.to_string(),
+            index: 0,
+            name: label.to_string(),
+            is_potential,
+        };
+        assert_eq!(q("V(in)", "V", true).render(0.5), "V(in) = 0.500000 V");
+        assert_eq!(q("V(in)", "V", true).render(0.0), "V(in) = 0.000000 V");
+        assert_eq!(q("V(in)", "V", true).render(-1e-3), "V(in) = -0.001000 V");
+        assert_eq!(
+            q("Wl(wl)", "m", true).render(1.5505e-6),
+            "Wl(wl) = 1.550500e-6 m"
+        );
+        assert_eq!(
+            q("Popt(drop)", "W", true).render(-3e-6),
+            "Popt(drop) = -3.000000e-6 W"
+        );
+        // Flows were always scientific and stay so.
+        assert_eq!(q("I(V1)", "A", false).render(0.5), "I(V1) = 5.000000e-1 A");
+    }
+
+    /// A model that divides by a probe reads `0/0` on Newton's first (zero-vector) iteration.
+    /// That must reach the user as `NonFinite`, naming the unknown whose equation went bad,
+    /// not as "singular matrix" (2026-09-11 — `models/microring.va` before its guard).
+    #[test]
+    fn a_model_dividing_by_a_zero_probe_is_reported_as_non_finite_with_the_unknown_named() {
+        let dir = std::env::temp_dir().join("va_cli_non_finite_names_unknown_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("divider.va"),
+            "module divider(p, n); electrical p, n; \
+             analog I(p, n) <+ 1.0 / V(p, n); endmodule",
+        )
+        .unwrap();
+        let deck_path = dir.join("d.net");
+        std::fs::write(&deck_path, "V1 a gnd DC 1\nX1 a gnd divider\n.op\n.end\n").unwrap();
+
+        let (net, compiled) = load(
+            &deck_path.display().to_string(),
+            Some(&dir.display().to_string()),
+        )
+        .unwrap();
+        let err = solve_dc(&net, &compiled).expect_err("1/V(a) at V(a)=0 is not finite");
+        let text = format!("{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(text.contains("non-finite"), "{text}");
+        assert!(
+            !text.contains("singular matrix"),
+            "must not be misreported as singular: {text}"
+        );
+        assert!(
+            text.contains("`V(a)`"),
+            "names the unknown whose equation went bad: {text}"
+        );
+    }
 
     /// `models/`, as an include-path root — every model there `include`s `disciplines.vams`
     /// and `constants.vams` from alongside itself, exactly as the real pipeline resolves them

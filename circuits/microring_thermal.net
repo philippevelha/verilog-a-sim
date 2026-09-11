@@ -1,0 +1,59 @@
+* Thermally tuned microring read out by a photodiode: four disciplines in one solution vector.
+*
+*   Vh (triangle) --> heater --Temp(th)--> microring --Popt(drop)--> photodiode --> R1 (200k)
+*                                              ^
+*   cw_laser --Popt(lin), Wl(wl)--------------/
+*
+* A 1 mW laser at 1550.5 nm feeds an add-drop ring that is resonant at 1550.0 nm when cold.
+* A 2 kOhm heater with a 12 us thermal time constant sits on the ring; its drive is a
+* 0 -> 5 -> 0 V triangle, 100 us up and 100 us down, twice. Heat is V^2/R, so the temperature
+* rise follows the *square* of the ramp (parabolic), lagging it by ~12 us, and the resonance
+* moves up in wavelength at 0.0703 nm/K. It reaches the laser at a 7.11 K rise, overshoots
+* (10.6 K, 0.75 nm — past the laser) near the 5 V peak, and comes back through the laser on
+* the way down. The drop port lights up each time the resonance is on the laser, the
+* photodiode turns that into current, and the 200 kOhm load turns the current into the
+* voltage V(pa). `I(Vs)` is the load current, sensed through a 0 V source.
+*
+* What to look for (measured figures are from this deck at v0.9.15):
+*   1. Temp(th) is smooth and delayed — it cannot follow the corners of the triangle. That
+*      is the 12 us heater: Temp(th) peaks at 10.6 K, 8 us *after* the 5 V peak, and short of
+*      the 12.5 K it would reach if 5 V were held.
+*   2. Two pulses of Popt(drop) per triangle: one going up through resonance, one coming down.
+*      Each is at exactly Temp(th) = 7.11 K, but because of the lag that is 4.32 V and t = 86 us
+*      on the way up and 3.20 V and t = 136 us on the way down (a lag-free heater would cross
+*      at 3.77 V both ways, since dT ~ V^2). The pair straddles each peak asymmetrically, and
+*      the gap between them, where the resonance is *beyond* the laser, does not fall to the
+*      floor: 0.4 nm past resonance the Lorentzian tail still passes ~17 uW.
+*   3. Popt(drop) peaks at 787 uW (the ring's on-resonance drop transfer, set by the 5 %
+*      couplers and 3 dB/cm loss) and is Lorentzian-like in detuning, 0.057 nm wide (FWHM) —
+*      0.8 K of temperature, so each pulse is narrow compared with the sweep.
+*   4. **The photodiode output clips.** 787 uW * 0.9 A/W = 0.71 mA of photocurrent, but a
+*      5 V bias through 200 kOhm can supply 25 uA before the diode loses its reverse bias, so
+*      I(Vs) saturates at 27.6 uA and V(pa) at 5.53 V on every pulse, flat-topped, while the
+*      light underneath is a sharp peak. That is the deck as specified (1 mW, 200 kOhm) and it
+*      is correct physics — a real receiver at these numbers would be in photovoltaic mode —
+*      but it means the electrical trace is a *thresholded* copy of the optical one. Drop the
+*      laser to `power=1e-5` (or the load to 2k) and V(pa) becomes a faithful I*R replica of
+*      Popt(drop).
+*
+* Sanity numbers: the ring's FSR is 3.105 nm, so the *next* resonance (1553.1 nm) needs a 44 K
+* rise and is never reached. Cold, the laser sits 0.5 nm off resonance, 17 linewidths out,
+* where the Lorentzian tail passes ~3 uW: the floor between pulses is 2.7 uA and V(pa) = 0.55 V,
+* not zero.
+*
+* The companion deck `microring_thermal_fast.net` runs the same circuit with a 10 us ramp,
+* which the 12 us heater cannot follow.
+*
+* Plot it with `--report`: the five quantities span volts, kelvin, watts and amps, and on one
+* shared axis the watts and amps are a flat line at zero. `--report hp,th`, `--report drop`,
+* and `--report pa` are the three pictures (docs/examples.md).
+X1 lin  wl            cw_laser    power=1e-3 lambda=1550.5e-9
+Vh hp   gnd           PULSE(0 5 0 100u 100u 0 200u)
+X2 hp   gnd  th       heater      R=2e3 Rth=1e3 Cth=1.2e-8
+X3 lin  thru drop wl th  microring
+X4 drop pa   kpd      photodiode  resp=0.9
+Vb kpd  gnd           DC 5
+Vs pa   rr            DC 0
+R1 rr   gnd           200k
+.tran 0.2u 400u
+.end

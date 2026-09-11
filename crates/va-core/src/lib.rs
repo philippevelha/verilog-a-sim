@@ -28,6 +28,54 @@ pub enum CoreError {
     /// The assembled Jacobian was singular / could not be factored.
     #[error("singular matrix during linear solve")]
     Singular,
+    /// A model stamped a NaN or ±inf into the system, so the linear solve was never attempted.
+    ///
+    /// Distinct from [`CoreError::Singular`] on purpose (2026-09-11): a zero pivot and a
+    /// `0.0/0.0` both come out of LU as `NaN`, but they call for opposite next steps — a
+    /// singular matrix is a *topology* problem (a floating node, a loop of voltage sources), a
+    /// non-finite stamp is an *evaluation* problem inside one model at one trial point. The
+    /// commonest cause is a probe used as a divisor or a `log`/`sqrt`/`pow` argument: Newton
+    /// starts from the zero vector, so on the first iteration every probe reads 0.
+    #[error(
+        "a model produced a non-finite (NaN or inf) {} — the equations were not singular; a contribution divides by, or takes log/sqrt/pow of, a quantity outside its domain at this trial point (on Newton's first iteration every probe reads 0.0: guard such a probe in the model, e.g. `(x > 0.0) ? x : x_default`)",
+        non_finite_where(*row, *col)
+    )]
+    NonFinite {
+        /// The system row (global unknown index) the bad value landed on.
+        row: usize,
+        /// `Some(column)` when the value is a Jacobian entry, `None` for the residual.
+        col: Option<usize>,
+    },
+}
+
+/// The "where" clause of [`CoreError::NonFinite`]'s message.
+fn non_finite_where(row: usize, col: Option<usize>) -> String {
+    match col {
+        Some(c) => format!("Jacobian entry at row {row}, column {c}"),
+        None => format!("residual at row {row}"),
+    }
+}
+
+/// Row and column of the first non-finite entry in a dense row-major `n × n` system `a`
+/// with right-hand side `b`, as [`CoreError::NonFinite`]; `Ok(())` when everything is finite.
+///
+/// The residual is scanned first so a bad residual is named as such even when the same row's
+/// Jacobian entries are also bad.
+///
+/// # Errors
+///
+/// [`CoreError::NonFinite`] naming the first offending entry.
+pub fn check_finite(a: &[f64], b: &[f64], n: usize) -> Result<(), CoreError> {
+    if let Some(row) = b.iter().position(|v| !v.is_finite()) {
+        return Err(CoreError::NonFinite { row, col: None });
+    }
+    if let Some(k) = a.iter().position(|v| !v.is_finite()) {
+        return Err(CoreError::NonFinite {
+            row: k / n,
+            col: Some(k % n),
+        });
+    }
+    Ok(())
 }
 
 /// Test-only re-exports. The ideal voltage source used to *excite* the reference devices in

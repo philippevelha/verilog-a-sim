@@ -4277,6 +4277,60 @@ Measured at this version: `cargo test --workspace` 764 passed / 0 failed, `cargo
 
 ---
 
+## A four-discipline example, and what it broke (2026-09-11, v0.9.15)
+
+`circuits/microring_thermal.net`: a CW laser (`cw_laser.va`) at 1550.5 nm into a thermally
+tuned add-drop microring (`microring.va`, L = 188.72 µm, resonant at 1550.0 nm cold, n_eff
+2.85 / n_g 4.1) heated by a 2 kΩ resistor with a 12 µs thermal plant (`heater.va`) driven by a
+0→5→0 V triangle, read out by a reverse-biased photodiode (`photodiode.va`) into 200 kΩ. Four
+disciplines — electrical, `thermal`, and two new potential-only signal-flow ones, `optical`
+(power) and `wavelength` — from `models/photonic.vams`. The run reproduces every analytic
+figure (resonance crossing at a 7.11 K rise, 787 µW drop-port peak, 27.6 µA clipped
+photocurrent, heater lag making the up- and down-crossings land at 4.32 V and 3.20 V), and
+`microring_thermal_fast.net` shows a 10 µs ramp the heater cannot follow (max 5.48 K, never
+reaching resonance). `docs/examples.md` §8–11 has the plots. The purpose was to find what
+breaks; four things did.
+
+**1. The transient refusal fired on models the deck never placed.** `--model models/` compiles
+the whole zoo, and `refuse_transient_approximations` scanned every file in it — so a circuit of
+laser, heater, ring and photodiode was refused for `delay_line.va` and `laplace_lowpass.va`
+being in the same directory. A refusal naming the wrong construct is worse than none
+(CLAUDE.md §5). Fixed: `compile_model_library` now records which modules each file declares
+and instantiates, `files_reached_by` walks that graph from the deck's device lines
+(transitively — a placed `actuator_plant` reaches `actuator.va`), and the check runs over the
+reached files only. A deck that does place a folded model is refused exactly as before.
+
+**2. A divide-by-zero was reported as "singular matrix".** Newton starts from the zero vector,
+so on the first iteration the ring read `Wl(wl) = 0` and computed `phi = 2π n L / 0`. LU turned
+the resulting NaN into a NaN solution, and `solve_dense`'s finite-check called that
+`Singular` — the diagnostic for a floating node or a source loop, i.e. the wrong hunt entirely.
+Fixed in `va-core`: `check_finite` runs before either factorization and raises the new
+`CoreError::NonFinite { row, col }`, whose message says what it is (an evaluation problem in
+one model at one trial point, commonest cause a probe used as a divisor on the zero start
+vector) and what to do (guard it in the model). `va-cli` then names the unknown behind the row
+— `X3.b0`, the ring's branch — since a row number is what the core can know and a label is
+what the user needs. The model-side fix is one line, `lam = (Wl(wl) > 0.0) ? Wl(wl) : lambda0`,
+and the message says so. A curiosity found on the way: `newton.rs`'s 20-diode gmin-stepping
+test claimed its plain-Newton failure was "a non-finite Jacobian entry"; it is not — the
+entries are finite and the *factorization* overflows, so it stays `Singular` and its comment
+now says why.
+
+**3. Six-decimal fixed point erased non-electrical potentials.** `Wl(wl) = 0.000002 m` and
+`Popt(drop) = 0.000003 W`. The rule that already sent flows to scientific notation ("routinely
+microamps and would print as six zeros") now applies to a potential below 1e-3 in magnitude;
+every volt-scale line is byte-identical to before.
+
+**4. (Open) A cross-domain plot on one axis is unreadable.** Five series in V, K, W and A on
+one canvas puts the watts and amps on the zero line. `--report` subsets are the documented
+answer (`docs/examples.md`'s actuator section says the same) and are what the example uses;
+a per-unit-axis plot — one y-axis per unit, or normalised traces with a legend carrying each
+series' scale — is the real fix and is not built. Not a 1.0 blocker: the workaround is the
+documented workflow.
+
+**Not a finding, but worth stating:** the potential-only disciplines elaborated and solved
+first time. A signal-flow net is a potential source with a branch row and no flow, which is
+exactly how the existing `V(p) <+` path already treats a ground-referenced contribution.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.
