@@ -3,6 +3,7 @@ name = "va-codegen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "T2: lower va-ir to differentiated model instances (automatic differentiation)."
 
 [dependencies]

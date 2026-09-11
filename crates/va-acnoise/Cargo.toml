@@ -3,6 +3,7 @@ name = "va-acnoise"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "T5: AC linearization and noise analysis (PSD, adjoint)."
 
 [dependencies]

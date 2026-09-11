@@ -1,9 +1,12 @@
 # verilog-a-sim
 
-A clean-room, from-scratch Verilog-A compact-model circuit simulator written in pure Rust,
-built as a coordinated set of master's theses. It compiles a defined subset of Verilog-A to
-differentiated model instances and solves them with an MNA / Newton core (DC, transient, and
-— as a stretch — AC + noise), validated against QSPICE to stated tolerances.
+A clean-room, from-scratch Verilog-A circuit simulator written in pure Rust, built as a
+coordinated set of master's theses. It compiles Verilog-A — the full language is the target,
+and `docs/token-reference.md` records construct by construct how far the implementation is
+from it — to automatically differentiated model instances and solves them with an MNA / Newton
+core: DC operating point and sweep, transient, AC and noise, validated against QSPICE to stated
+tolerances. Multi-physics comes from Verilog-A disciplines: the model zoo has electrical,
+thermal, mechanical and optical examples solved in one system.
 
 ```
  Verilog-A source                         circuit netlist

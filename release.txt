@@ -19,6 +19,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.15+1 - 2026-09-11
+---------------------
+Process only: the road to 1.0 re-derived and made checkable. "Road to 1.0" below is rewritten
+from the repository as it stands, ordered by what to do first, after the user set the 1.0
+deliverable (the compiled executable, tested on several machines and OSes). Three things it
+found were not on the old list and were cheap:
+
+  * rust-toolchain.toml pinned `1.92.0-x86_64-pc-windows-gnu` -- a Windows target triple in
+    the channel, so a Linux or macOS clone could not even install the toolchain. Now `1.92.0`.
+    This machine keeps GNU via `rustup override set` (an MSYS `link` shadows MSVC's link.exe;
+    verified again today: the MSVC build fails in `zerocopy`'s build script with `link: extra
+    operand`), which is per-machine state and stays out of the repo.
+  * No CI existed. .github/workflows/ci.yml: fmt, clippy -D warnings, build, test, `xtask
+    validate` on ubuntu/windows/macos; `cargo deny check`; and a check that the workspace
+    version has an entry in this file. release.yml builds and publishes the three `va-cli`
+    archives on a `v*` tag. Both are YAML-valid and **have not run yet** -- the push of this
+    commit is their first run, and whatever it finds on Linux/macOS is the next entry.
+  * cargo-deny had never been run, and its first run failed all three of advisories, bans
+    and licenses. None of it was the thing deny.toml exists for -- the native-link ban list
+    was clean. Licenses: `atomic-wait` (BSD-2-Clause, via spindle via faer) was not on the
+    allow-list; added. Bans: `wildcards = "deny"` counted our own `path` dependencies, and
+    `allow-wildcard-paths` only applies to non-publishable crates -- so every crate now
+    inherits `publish = false` from the workspace, which is true and was never stated.
+    Advisories: `anyhow` 1.0.102 (RUSTSEC-2026-0190) and `crossbeam-epoch` 0.9.18
+    (RUSTSEC-2026-0204) updated to 1.0.104 / 0.9.21; `paste` (RUSTSEC-2024-0436,
+    unmaintained) ignored with its reason in deny.toml -- a compile-time proc-macro under
+    faer's gemm with no replacement. Installing cargo-deny itself failed twice on this
+    machine (MSVC: `link: extra operand`; GNU: a CppSim `dlltool.exe` on PATH), so the run
+    used the prebuilt 0.20.2 binary, not installed. Now: advisories ok, bans ok, licenses
+    ok, sources ok.
+
+  Also: README's first paragraph still said "a defined subset of Verilog-A", stale since
+  CLAUDE.md section 1 moved to the full language; rewritten.
+
+  Measured after the dependency updates: `cargo test --workspace` 768 passed / 0 failed,
+  clippy and fmt clean, `cargo xtask validate` 27/27, `cargo deny check` all four ok. No
+  Rust source touched.
+
+
 0.9.15 - 2026-09-11
 -------------------
 A four-discipline example, built to find what breaks, and the three simulator fixes it forced.
@@ -676,34 +715,68 @@ rather than asserted.
 
 Road to 1.0
 -----------
-Tracked in docs/roadmap.md; listed here so the release log is self-contained.
+Tracked in docs/roadmap.md; listed here so the release log is self-contained. Re-derived
+2026-09-11 from the repository as it stands, after the user set the 1.0 deliverable: the
+compiled `va-cli` executable, tested on several different computers and operating systems.
+Ordered by what to do first.
 
-  [ ] Ship and test the executable across platforms. Today the workflow is `cargo run -p
-      va-cli -- sim ...` from source on the Windows development machine (docs/workflow.md).
-      1.0's deliverable is the compiled `va-cli` binary built from the tagged release, and it
-      must be run and validated (`cargo xtask validate` figures, not "it builds") on several
-      different computers and operating systems -- at least Windows, Linux and macOS -- with
-      the machines and results listed in the 1.0 release entry. docs/workflow.md is then
-      rewritten for the binary. Added 2026-09-11.
+  A. Make the 1.0 claim checkable (release plumbing)
 
-  [ ] Analog events. `@(initial_step)`, `@(cross(...))`, `@(timer(...))`, `@(above(...))`
-      and `@(final_step)` all work as of 0.9.8, and an `or` list of the two step-scoped
-      events composes as of 0.9.9. Still refused: `absdelta`, `last_crossing`, and any
-      compound trigger mixing in a scheduled event (`initial_step or cross(...)`) -- that
-      last one is real trigger-list composition and needs the fired flag to reach the
-      composed condition.
-      See roadmap "Analog events: what exists, and what each one still needs".
+  [x] Portable toolchain pin. rust-toolchain.toml read `1.92.0-x86_64-pc-windows-gnu` -- a
+      Windows target triple in the channel, which told rustup on Linux/macOS to install a
+      Windows toolchain. Now `1.92.0`; the GNU choice this dev machine needs (an MSYS `link`
+      shadows MSVC's) lives in a rustup directory override, outside the repo. (0.9.15+1)
+  [x] CI on the three platforms. .github/workflows/ci.yml runs fmt, clippy -D warnings,
+      build, `cargo test --workspace`, `cargo xtask validate` (golden is committed, no QSPICE
+      needed) on ubuntu/windows/macos, plus `cargo deny check` and a check that the workspace
+      version has a release.txt entry. Written and YAML-valid; **not yet seen green** -- the
+      first push after 0.9.15+1 is the test, and a red run on any platform is a 1.0 finding to
+      fix, not to exclude. (0.9.15+1)
+  [x] Release artefact path. .github/workflows/release.yml builds `va-cli` in release mode
+      for x86_64 Linux, x86_64 Windows (MSVC) and arm64 macOS on a `v*` tag, runs the gate,
+      and attaches per-platform archives (binary + models/ + circuits/ + docs/workflow.md) to
+      a GitHub release. Same caveat: written, not yet exercised. (0.9.15+1)
+  [ ] Ship and test the executable across platforms. With the above in place, this is: tag
+      a release candidate, download the three archives, run `va-cli sim` on real machines --
+      not only CI runners -- and record machine, OS, and `cargo xtask validate` figures in the
+      1.0 entry. "It builds" is not the bar; the deck runs and matches golden is.
+  [ ] Rewrite docs/workflow.md for the binary once the archive exists: install/unpack,
+      invoke, where models/ and circuits/ live in it. The `cargo run` form stays documented
+      as the developer path.
+  [x] cargo-deny's first verdict. deny.toml was written at bootstrap and never run until
+      2026-09-11; the first run failed advisories, bans and licenses for reasons unrelated
+      to native linking, all fixed in 0.9.15+1 (see that entry). Green locally on the
+      prebuilt binary; CI runs it on every push from here on.
 
-  [ ] absdelay / laplace_* in transient. Currently refused rather than folded (as of
-      0.9.0), which is honest but not implemented. Lifting the refusal is
-      docs/proposals/absdelay.md stage 2.
+  B. Language and numerics
 
-  [ ] Decide the sparse-solve question for the shipped configuration. The production
-      path is dense LU; the project's own benchmark measured sparse winning 12-33x
-      above ~20 nodes. **The decision is recorded** (roadmap, 2026-08-31): do not build
-      sparse now, the trigger is circuit size rather than the calendar. What is still
-      owed here is the other half of this item -- stating the circuit-size limit in a
-      release entry, which no entry yet does.
+  [ ] absdelay / laplace_* in transient. Refused rather than folded (since 0.9.0), honestly.
+      The one language gap worth closing before 1.0: `laplace_*` filters are common in
+      behavioural models (the corpus PhotoDetector.va uses one) and "works in AC, refused in
+      transient" is an asymmetry users hit early. Design: docs/proposals/absdelay.md stage 2
+      (a (t, value) ring buffer on the state channel, interpolation weight through AD).
+  [ ] State the dense-LU circuit-size limit. The sparse decision is recorded (roadmap,
+      2026-08-31: stay dense, the trigger is circuit size). Still owed: measure the node
+      count at which a `.tran` becomes impractical on dense LU and write the number into a
+      release entry, so a user with a 300-node netlist knows before they wait.
+  [ ] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
+      with a scheduled one (`initial_step or cross(...)`) are refused, with what/why/instead.
+      **Ship 1.0 with these refused** -- no corpus file needs them and the refusal is
+      logged in the standard shape. Listed so the 1.0 entry states them as known.
+
+  C. Known at 1.0, not blocking (state them in the 1.0 entry)
+
+      - A cross-domain plot on one axis puts W and A on the zero line; `--report` one unit at
+        a time is the documented answer (docs/examples.md). Per-unit-axis plots wanted.
+      - Roadmap language backlog 1-3: array-variable arguments to Laplace/Z filters
+        (ctle.va); `Elaborator::reference_node`'s hardcoded electrical ground for *implicit*
+        single-terminal access -- re-verify against the 2026-09-11 photonic example, whose
+        `Temp(th)`/`Popt(drop)` single-terminal accesses solved correctly, and either strike
+        the item or narrow it; `$rdist_*` (no RNG); `I(<port>)` inside case/loops; vector
+        ports scalar-only in `I(<port>)`.
+      - No .gitattributes: line endings are whatever each checkout's autocrlf makes them.
+        Harmless for the build (the lexer accepts CRLF) but worth `* text=auto eol=lf` before
+        a release archive is cut from a Windows checkout.
 
   [x] Close the remaining expired-premise items. $mfactor from a deck's `m=` (0.9.11),
       $simparam answered during the solve (0.9.12), and $limit's model-declared junctions

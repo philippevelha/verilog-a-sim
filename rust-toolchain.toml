@@ -1,4 +1,14 @@
+# Pinned so every machine builds with the same compiler. The channel is a bare version on
+# purpose: rustup appends the host's own target triple, so this one file serves Windows,
+# Linux and macOS. (Until 2026-09-11 it read `1.92.0-x86_64-pc-windows-gnu`, which told rustup
+# on a Linux box to install a Windows toolchain.)
+#
+# A Windows machine that must use the GNU toolchain -- e.g. because an MSYS `link` shadows
+# MSVC's `link.exe`, see `.cargo/config.toml` -- keeps that choice out of the repo with a
+# directory override, which takes precedence over this file:
+#   rustup toolchain install 1.92.0-x86_64-pc-windows-gnu
+#   rustup override set 1.92.0-x86_64-pc-windows-gnu
 [toolchain]
-channel = "1.92.0-x86_64-pc-windows-gnu"
+channel = "1.92.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

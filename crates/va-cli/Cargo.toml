@@ -3,6 +3,7 @@ name = "va-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "T6: the binary front door wiring the whole pipeline together."
 
 # A small `lib.rs` exposes the pipeline so `va-harness` (which depends on va-cli per §3)

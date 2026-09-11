@@ -3,6 +3,7 @@ name = "va-frontend"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "T1: Verilog-A lexer, parser, AST, and elaboration into va-ir (Interface α)."
 
 [dependencies]

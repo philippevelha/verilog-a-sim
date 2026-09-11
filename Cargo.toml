@@ -4,10 +4,13 @@ members = ["crates/*", "xtask"]
 
 [workspace.package]
 # Bump together with release.txt; the two must always agree.
-version = "0.9.15"
+version = "0.9.15+1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/philippevelha/verilog-a-sim"
+# Nothing here is published to crates.io: the deliverable is the `va-cli` executable
+# (release.txt, "Road to 1.0"), and the crates reference each other by path.
+publish = false
 
 # Shared dependency versions. Crates opt in with `dep = { workspace = true }`.
 [workspace.dependencies]

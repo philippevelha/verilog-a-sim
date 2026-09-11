@@ -1,0 +1,93 @@
+# Build the `va-cli` executable for a tagged release on the three supported platforms.
+#
+# The 1.0 deliverable is the compiled executable, not the source tree (docs/workflow.md,
+# "What changes at 1.0"). Pushing a tag `vX.Y.Z` builds `va-cli` in release mode on Windows,
+# Linux and macOS, runs the same gate CI runs, and attaches one archive per platform to a
+# GitHub release. Each archive carries the binary plus the model zoo, the example decks and the
+# workflow document, so a user can run `va-cli sim circuits/rectifier.net --model
+# models/diode.va --tran` from the unpacked directory with no Rust toolchain.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: gate
+        run: |
+          cargo test --workspace
+          cargo xtask validate
+      - name: build va-cli (release)
+        run: cargo build --release -p va-cli --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="va-cli-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          bin=va-cli
+          [[ "${{ matrix.os }}" == windows-latest ]] && bin=va-cli.exe
+          cp "target/${{ matrix.target }}/release/${bin}" "dist/${name}/"
+          cp -r models circuits "dist/${name}/"
+          cp README.md LICENSE release.txt docs/workflow.md "dist/${name}/"
+          cd dist
+          if [[ "${{ matrix.archive }}" == zip ]]; then
+            7z a -tzip "${name}.zip" "${name}" > /dev/null
+          else
+            tar czf "${name}.tar.gz" "${name}"
+          fi
+          ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: va-cli-${{ matrix.target }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: list
+        run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # The release notes are the release.txt entry for this version; edit on GitHub if
+          # the tag was pushed before the entry was written (it should not be).
+          generate_release_notes: false
+          body: |
+            See `release.txt` in the archive for this version's entry and the "Road to 1.0" list.
+            Each archive holds the `va-cli` executable, `models/`, `circuits/` and `docs/workflow.md`.

@@ -3,6 +3,7 @@ name = "va-abi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Interface β: the ModelInstance / StampSink ABI plus hand-written reference models."
 
 # va-abi is a LEAF crate (the project's internal 'OSDI'). Do NOT add internal `va-*`

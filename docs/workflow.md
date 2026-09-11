@@ -175,3 +175,19 @@ blockers recorded in `release.txt`'s "Road to 1.0":
   reference models ship, replacing the `cargo run -p va-cli --` prefix throughout.
 
 Until then, every command in this file is the `cargo run` form, and that form is correct.
+
+### Toolchain note for developers
+
+`rust-toolchain.toml` pins `1.92.0` as a bare version so rustup picks each host's own target.
+On a Windows machine where an MSYS/MinGW install puts its own `link`/`dlltool` ahead of
+MSVC's on `PATH` (the symptom is `link: extra operand` from a build script), use the GNU
+toolchain and keep that choice out of the repo with a directory override:
+
+```bash
+rustup toolchain install 1.92.0-x86_64-pc-windows-gnu
+rustup override set 1.92.0-x86_64-pc-windows-gnu      # inside the checkout
+```
+
+`.cargo/config.toml` already forces the GNU toolchain's self-contained linker for that target.
+CI (`.github/workflows/ci.yml`) runs the full gate — fmt, clippy, tests, `xtask validate`,
+`cargo deny` — on Windows (MSVC), Linux and macOS on every push.

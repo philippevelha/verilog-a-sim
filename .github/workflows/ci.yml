@@ -1,0 +1,62 @@
+# Build, lint, test and validate on the three platforms 1.0 must run on.
+#
+# This is the mechanism behind the "tested on several platforms" 1.0 blocker (release.txt,
+# "Road to 1.0"): every push and pull request runs the full gate -- fmt, clippy with warnings
+# denied, the workspace tests, and `cargo xtask validate` against the committed QSPICE golden
+# files -- on Windows, Linux and macOS. Golden outputs are committed, so validation needs no
+# QSPICE on the runner. `cargo deny` enforces deny.toml (CLAUDE.md section 5: no native-link
+# dependencies), which until 2026-09-11 was a file nobody ran.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      # The version comes from rust-toolchain.toml; the action only makes sure it is installed
+      # with the components the gate needs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: build
+        run: cargo build --workspace
+      - name: test
+        run: cargo test --workspace
+      - name: validate against committed golden
+        run: cargo xtask validate
+      - name: version agrees between Cargo.toml and release.txt
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(sorted({p["version"] for p in json.load(sys.stdin)["packages"]})[0])')
+          echo "workspace version: $v"
+          grep -q "^$v - " release.txt || { echo "release.txt has no entry for $v"; exit 1; }
+
+  deny:
+    name: cargo deny (no native-link deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

@@ -3,6 +3,7 @@ name = "va-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "T6: golden-reference validation harness and accuracy metrics vs QSPICE."
 
 [dependencies]
