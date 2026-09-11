@@ -59,11 +59,11 @@ floors disagree at that scale by construction, not because either model is wrong
 now `1e-8` (`va_harness::metrics::REL_ERROR_FLOOR`'s own doc comment has the full empirical
 derivation).
 
-`golden/*.golden` — all twenty-four — are real, QSPICE-generated data (`cargo xtask
+`golden/*.golden` — all twenty-eight — are real, QSPICE-generated data (`cargo xtask
 gen-golden`): `{divider, vcvs_amp, cccs_mirror, mos_dc, diode_iv, diode_iv_params, diode_clamp,
-rc_step, rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc, abstime_ramp, rc_ac, rc_ac_lin,
-rc_ac_oct, diode_ac, laplace_ac, diode_noise, resistor_noise_va, diode_flicker,
-resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
+divider_hv, rc_step, rc_step_hv, rc_discharge, rl_decay, rlc_ring, rectifier, ring_osc,
+abstime_ramp, vsin_load, laplace_step, rc_ac, rc_ac_lin, rc_ac_oct, diode_ac, laplace_ac,
+diode_noise, resistor_noise_va, diode_flicker, resistor_noise_table, resistor_noise_table_log}`. Every one of `xtask`'s known circuits
 has a committed golden reference, closing the "which circuits aren't regenerated yet" gap this
 file used to track.
 
@@ -608,9 +608,15 @@ admittance** too, `Y(s) = sC/(1 + sτ)`, as a second Laplace form. That is not a
 two circuits genuinely were not the same circuit until both observable properties matched, and
 the repaired model now exercises a numerator with a zero at the origin as a bonus.
 
-**What this gate does not cover:** DC and transient, where a Laplace filter still evaluates to
-`H(0)`. That is unchanged from before Tier C and is a stated limitation at the construct, not an
-oversight — a time-domain Laplace filter is a convolution.
+**Transient, since v0.9.16 (2026-09-11):** `circuits/laplace_step.net` runs the same model as a
+1 V step from a cold start and compares it against the same R-C network in QSPICE, cold-started
+(`UIC` — the behavioural-translation table now says per entry whether the replacement needs it,
+since an R-C reads no `time` and must, while a `B` source reading `time` must not). The filter is
+integrated as an ODE on auxiliary state unknowns (`va_codegen::lower::LaplaceStates`); the R-C is
+two physical components; the two agree to 5.1e-6 RMS on `V(out)` and `I(V1)`. The `I(V1)`
+column is the admittance filter `sC/(1 + sτ)`, whose numerator degree equals its denominator's,
+so the feedthrough path of the realization is on the gate as well. **Not covered:** noise, where
+a Laplace filter still evaluates to `H(0)` — a stated limitation at the construct.
 
 ## Bring-up ladder
 

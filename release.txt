@@ -19,6 +19,46 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.16 - 2026-09-11
+-------------------
+`laplace_nd`/`laplace_np`/`laplace_zd`/`laplace_zp` **run in transient.** Since 0.9.0 a `.tran`
+of any model calling one was refused ("folds to its DC gain"). A rational filter of denominator
+degree `m` is an `m`-th order linear ODE, and the integrator already integrates ODEs through the
+charge channel, so each filter now claims `m` auxiliary state unknowns (controllable canonical
+form, scaled by `ω0 = (|d_0|/|d_m|)^(1/m)` so a chain of derivative states stays O(1)), stamps
+one `ddt`-shaped row per state after the statement walk -- the `idt` accumulator's own
+mechanism -- and its output is a linear combination of the states plus a feedthrough of the
+input when `deg N = deg D`. DC uses the same rows and gets `H(0)` by construction; AC keeps the
+exact `H(jω)` path unchanged; noise keeps its stated `H(0)` limitation. `va-codegen` only, no
+Interface change (`lower::LaplaceStates`). Refused at build with what to write instead: a pole
+at the origin (`idt`), an improper numerator (`ddt`), roots not in conjugate pairs.
+
+  **Gate:** new `circuits/laplace_step.net` + `golden/laplace_step.golden` -- the
+  `laplace_lowpass` model (a `1/(1+sτ)` transfer *and* an `sC/(1+sτ)` admittance, the second
+  being the feedthrough case) stepped from cold against the R-C network it emulates in QSPICE,
+  cold-started: **5.143e-6 RMS** (tol 1e-3). Closed forms: first-order step 6e-7; a
+  `laplace_np` conjugate pair vs the underdamped second-order step 1.25e-4 across 3015 points,
+  the 1.73 overshoot included (the fold gave 1.0). Whole-system finite-difference Jacobian
+  gates for coefficient form, pole-array form and a pinned trailing state, in transient and DC.
+
+  **Found on the way:** xtask's behavioural-translation table cold-started no entry (right for
+  a `B` source reading `time`, wrong for an R-C); it now says per entry, and the first golden
+  generated without it showed the capacitor already charged at t=0 -- caught by looking at the
+  numbers, not the exit code. `{}` as an empty zero list does not parse (future_development
+  §8). Regenerating all goldens: byte-identical modulo CRLF.
+
+  **Also:** `docs/future_development.md`, the post-1.0 list (sparse solve, per-unit plots,
+  absdelay stage 2, optimization/fitting, Monte Carlo, multi-core and the GPU constraint, missing
+  analyses, language long tail, netlist usability, distribution), each entry with what it gives,
+  what it costs, what it depends on and what to decide first. Road to 1.0 B.1 is closed for
+  `laplace_*`; `absdelay` stage 2 moves to the future list as a post-1.0 item.
+
+  Measured: `cargo test --workspace` 773 passed / 0 failed (+5); `cargo xtask validate` 28
+  checked, 0 failed, convergence 28/28 (+1 gate); zoo `check models --codegen` 25/25; corpus
+  112/132 unchanged (the `[approx]` tally no longer counts `laplace_*`, which affects the
+  soundness note, not the pass count).
+
+
 0.9.15+5 - 2026-09-11
 ---------------------
 Record only: the third CI run (0.9.15+4, run 34626238979) is **green on ubuntu-latest,
@@ -810,11 +850,12 @@ Ordered by what to do first.
 
   B. Language and numerics
 
-  [ ] absdelay / laplace_* in transient. Refused rather than folded (since 0.9.0), honestly.
-      The one language gap worth closing before 1.0: `laplace_*` filters are common in
-      behavioural models (the corpus PhotoDetector.va uses one) and "works in AC, refused in
-      transient" is an asymmetry users hit early. Design: docs/proposals/absdelay.md stage 2
-      (a (t, value) ring buffer on the state channel, interpolation weight through AD).
+  [x] laplace_* in transient -- done in 0.9.16 as a state-space realization on auxiliary
+      unknowns, gated against QSPICE (circuits/laplace_step.net, 5.1e-6) and closed forms.
+      `absdelay` in transient stays refused (a pure delay is not an ODE; it needs the history
+      buffer of docs/proposals/absdelay.md stage 2) and is **not** a 1.0 blocker: no corpus
+      model this engine otherwise builds needs it in transient, the refusal is logged in the
+      standard shape, and it is item 3 of docs/future_development.md.
   [ ] State the dense-LU circuit-size limit. The sparse decision is recorded (roadmap,
       2026-08-31: stay dense, the trigger is circuit size). Still owed: measure the node
       count at which a `.tran` becomes impractical on dense LU and write the number into a

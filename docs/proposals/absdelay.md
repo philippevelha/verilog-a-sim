@@ -10,6 +10,11 @@ operators while stage 2 is still outstanding. DC, AC and noise are untouched and
 correct, since these operators genuinely settle to the folded value in a static solve.
 Stage 2 is what lifts the refusal.
 
+**2026-09-11 (v0.9.16)** — the `laplace_*` half of that refusal is lifted: a rational filter
+is now integrated as an ODE on its own state unknowns (`va_codegen::lower::LaplaceStates`),
+which is a different mechanism from the history buffer this document describes and needs
+nothing from it. `absdelay` alone remains refused in transient; stage 2 is unchanged.
+
 > Stage 1 outcome: `absdelay` is now exact in AC and unchanged (identity) at DC; transient
 > still folds, warned and counted. Validated against the closed form rather than QSPICE —
 > `models/delay_line.va` + `circuits/delay_ac.net` check `1/(1 + (R1/r)e^(-jwt))` point by

@@ -554,17 +554,60 @@ impl Ctx<'_> {
 pub struct Cx(pub f64, pub f64);
 
 impl Cx {
-    fn mul(self, o: Cx) -> Cx {
+    pub(crate) fn mul(self, o: Cx) -> Cx {
         Cx(self.0 * o.0 - self.1 * o.1, self.0 * o.1 + self.1 * o.0)
     }
 
-    fn div(self, o: Cx) -> Cx {
+    pub(crate) fn div(self, o: Cx) -> Cx {
         let d = o.0 * o.0 + o.1 * o.1;
         Cx(
             (self.0 * o.0 + self.1 * o.1) / d,
             (self.1 * o.0 - self.0 * o.1) / d,
         )
     }
+}
+
+/// Expand a flattened `(re, im)` root list into real polynomial coefficients in `s`, lowest
+/// degree first, with the LRM's convention that a root `ζ` contributes the factor `(1 − s/ζ)`
+/// and a root at the origin the factor `s` — the same convention [`laplace_at`] evaluates in
+/// product form.
+///
+/// This is the one place the codegen expands roots, and it is for the **time-domain**
+/// realization (`crate::lower::LaplaceStates`), which needs a polynomial to build its state
+/// chain from; the AC path keeps evaluating the product, which is better conditioned. Complex
+/// roots must come in conjugate pairs for the product to be real; if it is not (to `1e-9` of
+/// the largest coefficient), that is an error rather than a silently discarded imaginary part.
+pub fn expand_roots(pairs: &[f64]) -> Result<Vec<f64>, String> {
+    let mut poly = vec![Cx(1.0, 0.0)];
+    for pair in pairs.chunks_exact(2) {
+        let r = Cx(pair[0], pair[1]);
+        let factor = if r == Cx(0.0, 0.0) {
+            [Cx(0.0, 0.0), Cx(1.0, 0.0)]
+        } else {
+            [Cx(1.0, 0.0), Cx(-1.0, 0.0).div(r)]
+        };
+        let mut next = vec![Cx(0.0, 0.0); poly.len() + 1];
+        for (i, a) in poly.iter().enumerate() {
+            for (j, b) in factor.iter().enumerate() {
+                let prod = a.mul(*b);
+                next[i + j] = Cx(next[i + j].0 + prod.0, next[i + j].1 + prod.1);
+            }
+        }
+        poly = next;
+    }
+    let scale = poly
+        .iter()
+        .map(|c| c.0.abs())
+        .fold(0.0_f64, f64::max)
+        .max(f64::MIN_POSITIVE);
+    if poly.iter().any(|c| c.1.abs() > 1e-9 * scale) {
+        return Err(
+            "laplace zeros/poles must come in complex-conjugate pairs: their expanded \
+             polynomial is not real"
+                .to_string(),
+        );
+    }
+    Ok(poly.into_iter().map(|c| c.0).collect())
 }
 
 /// Evaluate a `laplace_*` transfer function `H(s)` at `s = j·omega`.

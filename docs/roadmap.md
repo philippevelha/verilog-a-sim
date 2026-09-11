@@ -4331,6 +4331,69 @@ documented workflow.
 first time. A signal-flow net is a potential source with a branch row and no flow, which is
 exactly how the existing `V(p) <+` path already treats a ground-referenced contribution.
 
+## `laplace_*` in transient: an ODE on state unknowns, not a convolution (2026-09-11, v0.9.16)
+
+The last-but-one transient refusal in the analog-operator family is lifted. Since 0.9.0 a
+`.tran` run of any model calling `laplace_nd`/`np`/`zd`/`zp` was refused ("folds to its DC
+gain"), and both `docs/proposals/frequency-domain.md` §7 and the Road to 1.0 called the
+time-domain filter "a convolution/state-space problem, not a stamping one". Half of that was
+right. A rational filter `H(s) = N(s)/D(s)` with `deg D = m` **is** an `m`-th order linear
+ODE, and this engine already integrates ODEs — through the charge channel, with a companion
+model, LTE control, and a validated order of accuracy. So the implementation is: give each
+filter `m` auxiliary unknowns in controllable canonical form (`w_{i+1} = ẇ_i`,
+`D(d/dt)·w_0 = u`), stamp each state's defining equation as its own `ddt`-shaped row exactly
+the way an `idt` accumulator already does, and make the output `y = N(d/dt)·w_0` a linear
+combination of the states plus a feedthrough of `u` when `deg N = deg D`. No new mechanism
+anywhere: `va-codegen` only (`lower::LaplaceStates`, `GeneratedModel::stamp_laplace_states`
+and the time-domain branch of `stamp_laplace`), no Interface change, `va-transient` untouched.
+
+**Why it was cheap, and where the real design was.** Two things needed thought:
+
+- *Scaling.* In raw form the states are successive time derivatives, `w_i ~ ω^i · w_0`, so a
+  third-order filter with a pole at `1e10 rad/s` would carry states thirty orders of magnitude
+  apart in one dense LU. The realization is written in `v_i = w_i/ω0^i` with
+  `ω0 = (|d_0|/|d_m|)^(1/m)` and the coefficients rescaled to match; every state is then
+  `O(u/d_0)`, every row has a unit charge coefficient and `O(ω0)` conductances.
+- *Which analyses.* DC and transient use the rows (DC is the same rows with the charge
+  channel ignored, giving `H(0)` by construction — the old fold's value, now derived rather
+  than special-cased — and it means the Jacobian gates exercise in DC the exact rows a
+  transient uses). AC keeps the validated exact `H(jω)` path and the states are pinned to
+  zero. Noise keeps its stated `H(0)` limitation for the same reason: switching it needs its
+  own gate. Root forms (`np`/`zd`/`zp`) are expanded to polynomial coefficients for this path
+  only (`ad::expand_roots`), with the imaginary residue checked; AC still evaluates the
+  product.
+
+**Refused at build, with what to write instead:** a pole at the origin (`d_0 = 0` — the
+filter integrates and has no DC operating point; `idt`), an improper numerator
+(`deg N > deg D` — it differentiates its input; `ddt` of a proper filter), and roots not in
+conjugate pairs. A trailing zero coefficient is a declared-but-absent order: it builds and the
+surplus state is pinned. The input is read after the statement walk, as `idt`'s is, so it
+sees end-of-block variable values — the same limitation `idt` carries, stated on the function.
+
+**Gates.** `circuits/laplace_step.net` vs QSPICE: the `laplace_lowpass` model (a voltage
+transfer `1/(1+sτ)` *and* an admittance `sC/(1+sτ)` — the latter is the feedthrough case)
+stepped from cold against the R-C network it emulates, cold-started in QSPICE — **5.1e-6 RMS**
+on `V(out)` and `I(V1)` (tol 1e-3). Closed forms: first-order step to 6e-7; a `laplace_np`
+conjugate-pole pair against the underdamped second-order step response to 1.25e-4 across 3015
+points, overshoot included (the fold gave a flat 1.0; the real peak is 1.73). Finite differences:
+the whole assembled Jacobian (nodes, states, the input's gradient into the last state row, the
+feedthrough) under a transient companion coefficient and at DC, for coefficient form,
+pole-array form, and a pinned trailing state. The refusal-scope test now uses `absdelay` as
+its folded example, which is the only one left.
+
+**Found on the way.** `xtask`'s behavioural-translation table applied no cold start to any
+entry, because `UIC` shifts QSPICE's `time` for a `B` source — true, and irrelevant to an
+R-C replacement, which *must* cold-start or QSPICE reports the capacitor already charged at
+`t = 0` (the first golden did exactly that). The table now says per entry. Also: an empty
+`{}` array literal as a `laplace_zp` zero list does not parse — logged in
+`docs/future_development.md` §8 pending a check of the LRM grammar. And regenerating every
+golden found all 27 byte-identical to the committed ones modulo CRLF — QSPICE is
+deterministic, and the `.gitattributes` item on the 1.0 list is the only thing between a
+clean regeneration and a 14-file diff.
+
+**What is still refused in transient:** `absdelay` alone. It is not an ODE, and stage 2 of
+`docs/proposals/absdelay.md` is unchanged by this.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

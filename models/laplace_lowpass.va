@@ -19,10 +19,11 @@
 //
 // # Limitations
 //
-// AC only. In DC and transient the filter still evaluates to its DC gain `H(0)` — a Laplace
-// filter in the time domain is a convolution, which needs a state-space realization this
-// project does not have (`docs/proposals/frequency-domain.md` §2). So a `.tran` run of this
-// model is a unity-gain buffer, not a filter, and is not claimed otherwise.
+// AC, DC and transient. Until v0.9.16 the filter evaluated to its DC gain `H(0)` outside AC
+// and a `.tran` run was refused; since 2026-09-11 each `laplace_nd` is integrated as an ODE on
+// its own state unknowns (one here per filter, both first order), and `circuits/laplace_step.net`
+// gates the step response against the same R-C network in QSPICE. Noise analysis still sees
+// `H(0)` — the one analysis where the filter is not yet frequency-dependent.
 `include "disciplines.vams"
 
 // Three terminals, with the reference explicit. A single-terminal access (`V(out)`) would make

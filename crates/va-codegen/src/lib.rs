@@ -168,6 +168,19 @@ pub fn build_instance(
     Ok(Box::new(model))
 }
 
+/// A rational `laplace_*` filter's scaled state-space coefficients, ready to stamp — see
+/// `GeneratedModel::laplace_realization` for the scaling and `lower::LaplaceStates` for the
+/// realization.
+struct LaplaceRealization {
+    /// `n'_i = n_i·ω0^i`, lowest degree first, trailing zeros trimmed; `len() − 1 <= m`.
+    num: Vec<f64>,
+    /// `d'_j = d_j·ω0^j`, lowest degree first, trailing zeros trimmed; `d'_0` and `d'_m`
+    /// non-zero, `m = len() − 1` the effective order.
+    den: Vec<f64>,
+    /// The time scale the states are expressed in (`v_i = w_i/ω0^i`).
+    omega0: f64,
+}
+
 /// A model instance generated from IR. Holds the module (for its arena), the resolved
 /// parameter values, the lowered contribution plan, and the global terminal map.
 struct GeneratedModel {
@@ -536,6 +549,13 @@ impl GeneratedModel {
                         for &id in term.num.iter().chain(&term.den) {
                             eval(ctx, id)?;
                         }
+                        // The time-domain realization is a property of the coefficients, which
+                        // are parameter expressions and so known here: a filter this engine
+                        // cannot realize (a pole at the origin, an improper numerator, roots
+                        // not in conjugate pairs) is a build diagnostic, not a mid-solve one.
+                        if term.states.is_some() {
+                            Self::laplace_realization(ctx, term)?;
+                        }
                     }
                     for term in &c.noise {
                         match *term {
@@ -856,6 +876,73 @@ impl GeneratedModel {
             let Ok(u) = eval(ctx, term.input) else {
                 continue;
             };
+            // In DC and transient a rational filter is its state-space realization (2026-09-11):
+            // the output is a linear combination of the state unknowns `Self::stamp_laplace_states`
+            // governs, plus a direct feedthrough of the input when the numerator's degree equals
+            // the denominator's. AC keeps the exact `H(jω)` path below, and noise keeps its
+            // stated `H(0)` limitation; in both the states are pinned to zero instead.
+            if let Some(st) = term.states {
+                if Self::laplace_is_time_domain(ctx) {
+                    let Ok(r) = Self::laplace_realization(ctx, term) else {
+                        continue;
+                    };
+                    let m = r.den.len() - 1;
+                    let k = r.num.len() - 1;
+                    let dm = r.den[m];
+                    let feed = if k == m { r.num[m] / dm } else { 0.0 };
+                    // y = Σ_{i<m} c_i·v_i + feed·u, with c_i = n'_i − feed·d'_i: the feedthrough
+                    // term is `n'_m·v̇_{m-1}`, and the last state row says what `v̇_{m-1}` is.
+                    let mut y = term.sign * feed * u.value;
+                    for i in 0..m {
+                        let g = self.terminals[st.base_slot + i];
+                        let c =
+                            term.sign * (r.num.get(i).copied().unwrap_or(0.0) - feed * r.den[i]);
+                        y += c * ctx.x.get(g).copied().unwrap_or(0.0);
+                        match gb {
+                            None => {
+                                sink.jacobian(gp, g, c);
+                                sink.jacobian(gn, g, -c);
+                            }
+                            Some(gb) => sink.jacobian(gb, g, -c),
+                        }
+                    }
+                    let f = term.sign * feed;
+                    for (slot, &dg) in u.grad.iter().enumerate() {
+                        if dg == 0.0 || f == 0.0 {
+                            continue;
+                        }
+                        let gk = self.terminals[slot];
+                        match gb {
+                            None => {
+                                sink.jacobian(gp, gk, f * dg);
+                                sink.jacobian(gn, gk, -f * dg);
+                            }
+                            Some(gb) => sink.jacobian(gb, gk, -f * dg),
+                        }
+                    }
+                    for (slot, &dg) in u.grad_ddt.iter().enumerate() {
+                        if dg == 0.0 || f == 0.0 {
+                            continue;
+                        }
+                        let gk = self.terminals[slot];
+                        match gb {
+                            None => {
+                                sink.dcharge(gp, gk, f * dg);
+                                sink.dcharge(gn, gk, -f * dg);
+                            }
+                            Some(gb) => sink.dcharge(gb, gk, -f * dg),
+                        }
+                    }
+                    match gb {
+                        None => {
+                            sink.residual(gp, y);
+                            sink.residual(gn, -y);
+                        }
+                        Some(gb) => sink.residual(gb, -y),
+                    }
+                    continue;
+                }
+            }
             let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
             let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
 
@@ -980,6 +1067,187 @@ impl GeneratedModel {
                     }
                     Some(gb) => sink.residual(gb, -re * u.value),
                 }
+            }
+        }
+    }
+
+    /// Whether `ctx`'s analysis integrates a `laplace_*` filter as an ODE on its state unknowns
+    /// (DC and transient) rather than evaluating `H(jω)` (AC) or `H(0)` (noise, a stated
+    /// limitation). DC is included on purpose: it is the same rows with the charge channel
+    /// ignored, so the operating point a `.dc` sweep reports and the point a transient passes
+    /// through come from one formulation, and the Jacobian gates exercise the rows a transient
+    /// will use.
+    fn laplace_is_time_domain(ctx: &Ctx) -> bool {
+        matches!(
+            ctx.analysis.kind,
+            va_abi::AnalysisKind::Dc | va_abi::AnalysisKind::Transient
+        )
+    }
+
+    /// Build a rational filter's scaled state-space coefficients from its evaluated
+    /// coefficient or root lists (see `lower::LaplaceStates` for the realization).
+    ///
+    /// The **time scale** `ω0 = (|d_0|/|d_m|)^(1/m)` is what makes the chain of derivative
+    /// states numerically sane: in raw form `w_i = d^i w_0/dt^i` grows like `ω^i`, so a filter
+    /// with a pole at `1e10 rad/s` and `m = 3` would carry states thirty orders of magnitude
+    /// apart in one dense LU. With `v_i = w_i/ω0^i` and the coefficients rescaled to match
+    /// (`d'_j = d_j·ω0^j`, `n'_i = n_i·ω0^i`), every state is `O(u/d_0)` and every row has a
+    /// unit charge coefficient and `O(ω0)` conductances.
+    ///
+    /// # Errors
+    ///
+    /// A coefficient that does not evaluate; a root list that is not real when expanded; a
+    /// denominator that is identically zero or has `d_0 = 0` (a pole at the origin — the filter
+    /// integrates and has no DC operating point; `idt` is the construct for that); or a
+    /// numerator of higher degree than the denominator (an improper filter differentiates its
+    /// input, which no state-space form expresses).
+    fn laplace_realization(
+        ctx: &Ctx,
+        term: &lower::LaplaceTerm,
+    ) -> Result<LaplaceRealization, CodegenError> {
+        let coeffs = |ids: &[va_ir::ExprId], is_roots: bool| -> Result<Vec<f64>, CodegenError> {
+            let vals = Self::eval_coeffs(ctx, ids).ok_or_else(|| {
+                CodegenError::Unsupported(
+                    "a laplace coefficient does not evaluate to a number".to_string(),
+                )
+            })?;
+            if is_roots {
+                ad::expand_roots(&vals).map_err(CodegenError::Unsupported)
+            } else {
+                Ok(vals)
+            }
+        };
+        let mut num = coeffs(&term.num, term.num_is_roots)?;
+        let mut den = coeffs(&term.den, term.den_is_roots)?;
+        // The effective degree is the highest *non-zero* coefficient; a trailing zero is a
+        // declared-but-absent order, and the state it would own is pinned instead.
+        while den.len() > 1 && den[den.len() - 1] == 0.0 {
+            den.pop();
+        }
+        while num.len() > 1 && num[num.len() - 1] == 0.0 {
+            num.pop();
+        }
+        if den.iter().all(|&d| d == 0.0) {
+            return Err(CodegenError::Unsupported(
+                "a laplace denominator is identically zero".to_string(),
+            ));
+        }
+        if den[0] == 0.0 {
+            return Err(CodegenError::Unsupported(
+                "a laplace denominator has d_0 = 0 (a pole at s = 0): the filter integrates \
+                 its input and has no DC operating point — write the integration with `idt` \
+                 and the remaining factor as the laplace filter"
+                    .to_string(),
+            ));
+        }
+        let m = den.len() - 1;
+        let k = num.len() - 1;
+        if k > m {
+            return Err(CodegenError::Unsupported(format!(
+                "a laplace numerator of degree {k} over a denominator of degree {m} is an \
+                 improper filter: it differentiates its input, which has no state-space \
+                 realization here — write the derivative as `ddt` of a proper filter"
+            )));
+        }
+        if !num.iter().chain(&den).all(|c| c.is_finite()) {
+            return Err(CodegenError::Unsupported(
+                "a laplace coefficient is not finite".to_string(),
+            ));
+        }
+        let omega0 = if m == 0 {
+            1.0
+        } else {
+            (den[0].abs() / den[m].abs()).powf(1.0 / m as f64)
+        };
+        let scale = |c: &[f64]| -> Vec<f64> {
+            c.iter()
+                .enumerate()
+                .map(|(i, &v)| v * omega0.powi(i as i32))
+                .collect()
+        };
+        Ok(LaplaceRealization {
+            num: scale(&num),
+            den: scale(&den),
+            omega0,
+        })
+    }
+
+    /// Stamp every rational `laplace_*` filter's **state rows** (2026-09-11; see
+    /// `lower::LaplaceStates`). Runs after the statement walk, like `stamp_idt_accumulators`
+    /// and for the same reason: the filter's input is an expression in the block's variables,
+    /// read here with the values the walk bound. (So, as for `idt`, the input sees end-of-block
+    /// variable values; a variable reassigned *after* the filter's own contribution reaches it
+    /// with the later value. No corpus model does this.)
+    ///
+    /// With `v_i` the scaled states, `ω0` the time scale, and `d'`/`n'` the scaled
+    /// coefficients of `Self::laplace_realization`:
+    ///
+    /// ```text
+    /// row i < m−1:   v̇_i − ω0·v_{i+1} = 0                        charge v_i, residual −ω0·v_{i+1}
+    /// row m−1:       v̇_{m−1} + ω0·Σ_j (d'_j/d'_m)·v_j − ω0·u/d'_m = 0
+    /// ```
+    ///
+    /// Each row is the *state's own* KCL-shaped row, so its charge is exactly `v_i` and the
+    /// integrator supplies `v̇_i` — no filter-specific time stepping anywhere. In DC the charge
+    /// channel is ignored and the rows give `v_0 = u/d_0`, every other state zero. Under AC and
+    /// noise the filter is evaluated in the frequency domain instead, and every state is pinned
+    /// to zero (`residual = v_i`, `jacobian = 1`) so the unknowns stay determined. A state past
+    /// the effective degree (a trailing zero coefficient) is pinned the same way.
+    fn stamp_laplace_states(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
+        for term in &self.lowered.laplace_terms {
+            let Some(st) = term.states else {
+                continue;
+            };
+            let rows: Vec<usize> = (0..st.order)
+                .map(|i| self.terminals[st.base_slot + i])
+                .collect();
+            let x = |g: usize| ctx.x.get(g).copied().unwrap_or(0.0);
+            let mut live = 0;
+            if Self::laplace_is_time_domain(ctx) {
+                // Post-validation neither of these can fail; if one somehow does, the states
+                // are pinned below rather than left as empty rows.
+                if let (Ok(r), Ok(u)) =
+                    (Self::laplace_realization(ctx, term), eval(ctx, term.input))
+                {
+                    let m = r.den.len() - 1;
+                    let w0 = r.omega0;
+                    let dm = r.den[m];
+                    for i in 0..m {
+                        let g = rows[i];
+                        sink.charge(g, x(g));
+                        sink.dcharge(g, g, 1.0);
+                        if i + 1 < m {
+                            sink.residual(g, -w0 * x(rows[i + 1]));
+                            sink.jacobian(g, rows[i + 1], -w0);
+                        } else {
+                            let mut res = -w0 * u.value / dm;
+                            for (&row_j, &dj) in rows.iter().zip(&r.den).take(m) {
+                                let a = w0 * dj / dm;
+                                res += a * x(row_j);
+                                sink.jacobian(g, row_j, a);
+                            }
+                            sink.residual(g, res);
+                            for (slot, &dg) in u.grad.iter().enumerate() {
+                                if dg != 0.0 {
+                                    sink.jacobian(g, self.terminals[slot], -w0 / dm * dg);
+                                }
+                            }
+                            // An input carrying a time derivative (`laplace_nd(c(x)*ddt(q), …)`)
+                            // has its `c·∂q/∂x` in `grad_ddt`, which belongs to the charge
+                            // Jacobian — the same product-rule split every other channel keeps.
+                            for (slot, &dg) in u.grad_ddt.iter().enumerate() {
+                                if dg != 0.0 {
+                                    sink.dcharge(g, self.terminals[slot], -w0 / dm * dg);
+                                }
+                            }
+                        }
+                    }
+                    live = m;
+                }
+            }
+            for &g in &rows[live..] {
+                sink.residual(g, x(g));
+                sink.jacobian(g, g, 1.0);
             }
         }
     }
@@ -1439,6 +1707,9 @@ impl ModelInstance for GeneratedModel {
         // After `run`, not before: an `idt` accumulator's argument may read a local variable the
         // statement walk just bound (see `Self::stamp_idt_accumulators`'s doc comment).
         self.stamp_idt_accumulators(&ctx, sink);
+        // Likewise after `run`, for the same reason: a filter's input is an expression in the
+        // block's variables (see `Self::stamp_laplace_states`).
+        self.stamp_laplace_states(&ctx, sink);
         // Also after `run`: `ctx.flow_current_totals` only holds a branch's real total once every
         // contribution to it has run (see `Self::stamp_flow_current_accumulators`'s doc comment).
         self.stamp_flow_current_accumulators(&ctx, sink);
@@ -4571,6 +4842,204 @@ mod tests {
     /// Two nodes plus a bias-dependent charge coefficient on branch 0, as
     /// `the_product_rule_jacobian_matches_a_central_finite_difference` builds it — factored out
     /// so the accumulator shapes below can reuse it.
+    /// A two-terminal module contributing `sign * laplace_<form>(input, num, den)` as a flow,
+    /// with `input = V(p,n) * V(p,n) * k` (nonlinear, so the input has a real gradient) and the
+    /// coefficient lists given as literal numbers. `num_is_roots`/`den_is_roots` pick the
+    /// form the same way `lower::LaplaceTerm` records it.
+    fn laplace_module(
+        name: &str,
+        num: &[f64],
+        den: &[f64],
+        num_is_roots: bool,
+        den_is_roots: bool,
+    ) -> Module {
+        let mut m = Module::new(name);
+        m.nodes = vec![
+            NodeDecl {
+                name: "p".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+                access: None,
+                units: None,
+            },
+            NodeDecl {
+                name: "n".into(),
+                discipline: Discipline::Electrical,
+                abstol: None,
+                access: None,
+                units: None,
+            },
+        ];
+        m.ports = vec![vec![NodeId(0)], vec![NodeId(1)]];
+        m.branches = vec![Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        }];
+        let v1 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let v2 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let k = m.push_expr(Expr::Const(3.0));
+        let vv = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v1, v2));
+        let input = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, vv, k));
+        let mut args = vec![input, m.push_expr(Expr::Const(num.len() as f64))];
+        for &c in num.iter().chain(den) {
+            args.push(m.push_expr(Expr::Const(c)));
+        }
+        let builtin = match (num_is_roots, den_is_roots) {
+            (false, false) => Builtin::LaplaceNd,
+            (false, true) => Builtin::LaplaceNp,
+            (true, false) => Builtin::LaplaceZd,
+            (true, true) => Builtin::LaplaceZp,
+        };
+        let value = m.push_expr(Expr::Call(builtin, args));
+        m.analog = vec![Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value,
+        }];
+        m
+    }
+
+    /// The time-domain realization of a `laplace_*` filter (2026-09-11): a second-order
+    /// filter with a feedthrough numerator (`deg N == deg D`) over a *nonlinear* input claims
+    /// two auxiliary state unknowns, and the whole assembled Jacobian — node rows, state rows,
+    /// the input's gradient into the last state row, the states' coefficients into the node
+    /// rows, the feedthrough — matches a central difference of the assembled residual under a
+    /// transient companion coefficient. Checked at a point where every state is non-zero, so a
+    /// dropped or mis-signed entry cannot hide behind a zero.
+    #[test]
+    fn laplace_state_space_jacobian_matches_finite_difference() {
+        // H(s) = (1 + 0.5 s + 0.25 s^2) / (1 + 3e-3 s + 2e-6 s^2): poles at -500 and -1000 rad/s.
+        let m = laplace_module("lap2", &[1.0, 0.5, 0.25], &[1.0, 3e-3, 2e-6], false, false);
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+        assert_eq!(
+            inst.unknowns().len(),
+            4,
+            "two nodes plus two filter states: {:?}",
+            inst.unknowns()
+        );
+        // Both states are auxiliary rows: never gmin-shunted, never junction-limited.
+        assert_eq!(inst.unknown_kind(2), va_abi::UnknownKind::Branch);
+        assert_eq!(inst.unknown_kind(3), va_abi::UnknownKind::Branch);
+        assert!(!inst.unknown_is_junction(3));
+
+        assert_assembled_jacobian_matches_fd(
+            inst.as_ref(),
+            4,
+            &[0.7, -0.2, 0.31, -0.45],
+            1.0 / 1e-6,
+        );
+        // And at DC (coeff 0): the same rows with the charge channel ignored.
+        assert_assembled_jacobian_matches_fd(inst.as_ref(), 4, &[0.7, -0.2, 0.31, -0.45], 0.0);
+    }
+
+    /// A pole-array form goes through `ad::expand_roots`, and a conjugate pair with a pole at
+    /// the origin excluded gives the same Jacobian structure. The root convention is the
+    /// LRM's: `(1 − s/p)` per pole, so the DC gain is the numerator's `n_0`.
+    #[test]
+    fn laplace_pole_array_form_realizes_and_matches_finite_difference() {
+        // Poles at -2000 ± j20000 rad/s, numerator {2}: H(0) = 2.
+        let m = laplace_module("lapnp", &[2.0], &[-2e3, 2e4, -2e3, -2e4], false, true);
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+        assert_eq!(inst.unknowns().len(), 4, "one pole pair is two states");
+        assert_assembled_jacobian_matches_fd(inst.as_ref(), 4, &[0.9, 0.1, -0.2, 0.6], 1.0 / 2e-7);
+
+        // DC: the states settle to v0 = u/d0 = u, v1 = 0, and the output is H(0)*u = 2u.
+        // Solve the state rows by hand at V(p,n) = 0.5: u = 3*0.25 = 0.75.
+        let mut sink = DenseStamp::new(4);
+        inst.load(
+            &[0.5, 0.0, 0.75, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+        // State rows are satisfied (residual zero, charges ignored at DC). The rows carry
+        // terms of order ω0·u ≈ 2e4, so "zero" is machine precision at that scale.
+        assert!(
+            sink.residual[2].abs() < 1e-9,
+            "state row 0: {}",
+            sink.residual[2]
+        );
+        assert!(
+            sink.residual[3].abs() < 1e-9,
+            "state row 1: {}",
+            sink.residual[3]
+        );
+        // ... and the node row carries the DC gain times the input.
+        assert!(
+            (sink.residual[0] - 2.0 * 0.75).abs() < 1e-12,
+            "I(p) = H(0)*u: {}",
+            sink.residual[0]
+        );
+    }
+
+    /// `ad::expand_roots` follows `laplace_at`'s product convention exactly, and refuses a
+    /// root list that is not real when expanded.
+    #[test]
+    fn expand_roots_matches_the_product_convention() {
+        // (1 − s/(−1))(1 − s/(−2)) = (1 + s)(1 + s/2) = 1 + 1.5 s + 0.5 s^2
+        let c = ad::expand_roots(&[-1.0, 0.0, -2.0, 0.0]).expect("real roots");
+        assert!(
+            (c[0] - 1.0).abs() < 1e-15 && (c[1] - 1.5).abs() < 1e-15 && (c[2] - 0.5).abs() < 1e-15,
+            "{c:?}"
+        );
+        // A root at the origin is the factor `s`: s(1 + s) = 0 + s + s^2.
+        let c = ad::expand_roots(&[0.0, 0.0, -1.0, 0.0]).expect("origin root");
+        assert_eq!(c, vec![0.0, 1.0, 1.0]);
+        // A conjugate pair at -a ± jb: |1 − s/p|^2 = 1 + 2a s/(a^2+b^2) + s^2/(a^2+b^2).
+        let (a, b) = (3.0, 4.0);
+        let c = ad::expand_roots(&[-a, b, -a, -b]).expect("conjugate pair");
+        let r2 = a * a + b * b;
+        assert!(
+            (c[0] - 1.0).abs() < 1e-14
+                && (c[1] - 2.0 * a / r2).abs() < 1e-14
+                && (c[2] - 1.0 / r2).abs() < 1e-14,
+            "{c:?}"
+        );
+        // A lone complex root has no real polynomial.
+        assert!(ad::expand_roots(&[-a, b]).is_err());
+    }
+
+    /// The two shapes with no state-space realization are build-time diagnostics that say
+    /// what to write instead, not mid-solve singularities.
+    #[test]
+    fn laplace_filters_without_a_realization_are_refused_at_build() {
+        // d_0 = 0: a pole at the origin, i.e. an integrator.
+        let m = laplace_module("integ", &[1.0], &[0.0, 1e-3], false, false);
+        let Err(err) = build_instance(&m, &[0, 1], &mut 2) else {
+            panic!("a pole at s = 0 must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pole at s = 0") && msg.contains("idt"),
+            "{msg}"
+        );
+        // deg N > deg D: an improper filter.
+        let m = laplace_module("improper", &[1.0, 1e-3, 1e-6], &[1.0, 1e-3], false, false);
+        let Err(err) = build_instance(&m, &[0, 1], &mut 2) else {
+            panic!("an improper filter must be refused");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("improper") && msg.contains("ddt"), "{msg}");
+        // A trailing zero coefficient is a declared-but-absent order: it builds, the surplus
+        // state is pinned, and the effective filter is the lower-order one.
+        let m = laplace_module("trail", &[1.0], &[1.0, 1e-3, 0.0], false, false);
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds with a pinned state");
+        assert_eq!(
+            inst.unknowns().len(),
+            4,
+            "the declared order still claims two slots"
+        );
+        assert_assembled_jacobian_matches_fd(inst.as_ref(), 4, &[0.3, 0.1, 0.2, 0.0], 1e6);
+    }
+
     fn bias_dependent_ddt_module(name: &str) -> (Module, ExprId) {
         let mut m = Module::new(name);
         m.nodes = vec![

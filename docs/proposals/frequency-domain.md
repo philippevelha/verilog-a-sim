@@ -171,7 +171,10 @@ model in the zoo declares frequency dependence, so all take the single-linearize
 ## 7. Explicit non-goals
 
 - **`zi_*`** — needs a clock; zero corpus demand.
-- **Transient Laplace** — a convolution/state-space problem, not a stamping one.
+- **Transient Laplace** — a convolution/state-space problem, not a stamping one. *(Done
+  2026-09-11, v0.9.16, as the state-space half: `va_codegen::lower::LaplaceStates`. It turned
+  out to be a stamping problem after all — `m` auxiliary unknowns each stamping a `ddt`-shaped
+  row — because the integrator already does the convolution.)*
 - **Laplace-shaped noise** — belongs to the noise channel.
 - **`laplace_*` with a null argument** (`,,`) — unchanged; needs an optional-argument grammar
   nothing else uses.

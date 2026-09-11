@@ -1,0 +1,21 @@
+* A `laplace_nd` filter in TRANSIENT — the gate that lifted the transient refusal (v0.9.16).
+*
+* The same `models/laplace_lowpass.va` that `laplace_ac.net` gates in AC, driven by a 1 V step
+* from a cold start. The model carries two filters: the voltage transfer
+* V(out)/V(in) = 1/(1 + s*tau) and the input admittance Y(s) = s*C/(1 + s*tau), so V(out) must
+* be 1 - exp(-t/tau) and I(V1) must be -(C/tau)*exp(-t/tau) — and the second one exercises the
+* feedthrough case (numerator degree equal to denominator degree) of the state-space
+* realization, which the first one does not.
+*
+* QSPICE has no Laplace element to translate to; `xtask gen-golden` replaces M1 with the
+* R = 1 kOhm, C = 1 uF network whose response is the identical pair of functions
+* (tau = R*C = 1 ms), exactly as the AC gate does. The two sides share no arithmetic: a
+* rational function of s integrated as an ODE on two auxiliary unknowns against two physical
+* components — which is what makes this a comparison rather than a restatement.
+*
+* Until v0.9.16 this deck was refused in transient ("folds to its DC gain"); the refusal
+* was the honest half of implement-or-refuse, and this is the other half.
+V1 in  gnd  DC 1
+M1 out in  gnd  laplace_lowpass
+.tran 20u 4m
+.end

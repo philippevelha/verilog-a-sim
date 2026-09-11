@@ -76,6 +76,10 @@ const TRAN_CIRCUITS: &[(&str, Option<&str>)] = &[
     ("circuits/ring_osc.net", None),
     ("circuits/abstime_ramp.net", Some("models/abstime_ramp.va")),
     ("circuits/vsin_load.net", Some("models/vsin.va")),
+    (
+        "circuits/laplace_step.net",
+        Some("models/laplace_lowpass.va"),
+    ),
 ];
 
 /// The `.ac` small-signal circuits `validate`/`gen-golden` know how to drive (T5).
@@ -610,7 +614,12 @@ const QSPICE_TRAN_MODEL_TRANSLATIONS: &[(&str, &str, Option<f64>)] = &[
 /// default operating-point solve lands on the same `t = 0` state our own cold start begins
 /// from. A future behavioral entry that *does* contain a reactive element would have to
 /// reconcile the two, not simply inherit this exemption.
-const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[
+///
+/// The fourth field says whether the translated deck is passed through
+/// [`cold_start_tran_deck`] after all (2026-09-11): a replacement that is a plain `R`/`C`
+/// network reads no `time` and, like every native `.tran` deck, *must* cold-start or QSPICE
+/// solves the operating point first and reports a capacitor already charged at `t = 0`.
+const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str, bool)] = &[
     (
         "circuits/abstime_ramp.net",
         "D1",
@@ -619,6 +628,7 @@ const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[
         // over unchanged — no sign fixup, which is what keeps this a translation rather than a
         // tuning.
         "B1 out 0 I=1*time",
+        false,
     ),
     (
         "circuits/vsin_load.net",
@@ -630,6 +640,18 @@ const QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS: &[(&str, &str, &str)] = &[
         // descriptions share no arithmetic, which is what makes this a comparison rather than a
         // restatement.
         "V1 in 0 SIN(0 1 1k)",
+        false,
+    ),
+    (
+        "circuits/laplace_step.net",
+        "M1",
+        // The same network `laplace_ac.net` translates to, now stepped in time: tau = R*C =
+        // 1k * 1u = 1 ms, matching models/laplace_lowpass.va's default. The filter is
+        // integrated as an ODE on auxiliary unknowns (v0.9.16); the R-C is two physical
+        // components. Nothing is shared between the two descriptions.
+        "R1x in out 1000
+C1x out 0 1e-6",
+        true,
     ),
 ];
 
@@ -1009,7 +1031,7 @@ fn gen_golden() -> Result<()> {
         generated += 1;
     }
 
-    for &(circuit, device, replacement) in QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS {
+    for &(circuit, device, replacement, cold_start) in QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS {
         let circuit_path = root.join(circuit);
         let deck =
             std::fs::read_to_string(&circuit_path).with_context(|| format!("reading {circuit}"))?;
@@ -1019,10 +1041,16 @@ fn gen_golden() -> Result<()> {
             .to_string_lossy()
             .into_owned();
 
-        // Deliberately no `cold_start_tran_deck` here — `UIC` offsets QSPICE's own `time`.
-        // See `QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS`' doc comment for the measurement.
+        // `cold_start_tran_deck` only where the entry asks for it — `UIC` offsets QSPICE's own
+        // `time`, so a replacement reading `time` must not get it, and one made of `R`/`C`
+        // must. See `QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS`' doc comment for both measurements.
         let native_deck = substitute_device_line(&deck, device, replacement)
             .with_context(|| format!("translating {circuit} for QSPICE"))?;
+        let native_deck = if cold_start {
+            cold_start_tran_deck(&native_deck)
+        } else {
+            native_deck
+        };
 
         let raw = run_qspice_sweep(&qspice, &native_deck, &tmp, &stem)
             .with_context(|| format!("running QSPICE on {circuit} (behavioral translation)"))?;

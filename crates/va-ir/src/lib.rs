@@ -932,10 +932,11 @@ pub enum Builtin {
     /// them as parameter expressions, and a filter whose pole moves with a netlist-overridden
     /// parameter is the normal case.
     ///
-    /// Evaluated at `s = j·2π·freq` during AC and at `s = 0` (its DC gain) everywhere else —
-    /// the latter being exactly what this construct used to fold to at elaboration. Transient
-    /// still gets the DC gain: a time-domain Laplace filter is a convolution, which is a
-    /// different problem (see `docs/proposals/frequency-domain.md`).
+    /// Evaluated at `s = j·2π·freq` during AC. In DC and transient (since 2026-09-11) it is
+    /// realized as an ODE on `deg D` auxiliary state unknowns that `va-codegen` claims for it
+    /// (`va_codegen::lower::LaplaceStates`) — at DC that gives `H(0)`, which is what this
+    /// construct used to fold to; in transient it gives the filter. Under noise analysis it is
+    /// still `H(0)`, a stated limitation.
     LaplaceNd,
     /// `laplace_np(value, num, poles)` — numerator coefficients over a **pole array**, the
     /// poles flattened as `(re, im)` pairs. Same layout and rules as [`Builtin::LaplaceNd`].

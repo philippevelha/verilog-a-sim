@@ -309,6 +309,33 @@ pub struct LaplaceTerm {
     /// the same `G = Re(H)`, `C = Im(H)/w` stamping, the same top-level-term restriction, and
     /// the same "this model is frequency-dependent" flag.
     pub delay: Option<ExprId>,
+    /// The auxiliary unknowns that carry this filter's **time-domain** state (2026-09-11), or
+    /// `None` for an `absdelay` term, which has no rational part to realize. Allocated by
+    /// [`allocate_laplace_states`] once the whole analog block is lowered, so that the slot
+    /// numbering of every other auxiliary category is untouched.
+    pub states: Option<LaplaceStates>,
+}
+
+/// Where a `laplace_*` filter's state-space realization lives in the local unknown vector.
+///
+/// A rational filter `H(s) = N(s)/D(s)` of denominator degree `m` is an `m`-th order linear
+/// ODE, and this engine already integrates ODEs exactly: give the filter `m` auxiliary unknowns
+/// `w_0 … w_{m-1}` (the controllable canonical form, `w_{i+1} = ẇ_i`, `D(d/dt) w_0 = u`),
+/// stamp each one's defining equation through the ordinary `charge`/`dcharge` channel, and
+/// the integrator's own companion model, LTE control and order of accuracy apply to the filter
+/// unchanged. The output `y = N(d/dt) w_0` is then a plain linear combination of the states
+/// (plus a feedthrough of `u` when `deg N == deg D`), which is what the contribution stamps.
+/// At DC the charge channel is ignored, so the same rows collapse to `w_0 = u/d_0`,
+/// `y = (n_0/d_0)·u` — the `H(0)` this construct used to fold to. See
+/// `crate::GeneratedModel::stamp_laplace_states`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaplaceStates {
+    /// Local slot of `w_0`; `w_i` is at `base_slot + i`.
+    pub base_slot: usize,
+    /// Number of states: the denominator's *declared* degree — its coefficient count minus
+    /// one, or its pole-pair count. A trailing zero coefficient makes the effective degree
+    /// lower, in which case the surplus states are pinned to zero at stamp time.
+    pub order: usize,
 }
 
 /// If `expr` is a bare `laplace_*` call, unpack its flattened argument layout
@@ -344,6 +371,7 @@ fn laplace_term_shape(
                 num: Vec::new(),
                 den: Vec::new(),
                 delay: Some(delay),
+                states: None,
             }));
         }
         _ => return Ok(None),
@@ -388,7 +416,62 @@ fn laplace_term_shape(
         num: num.to_vec(),
         den: den.to_vec(),
         delay: None,
+        states: None,
     }))
+}
+
+/// Give every rational `laplace_*` term in `stmts` its block of state unknowns, in statement
+/// order, starting at `*next_slot`; returns a copy of each term so
+/// `crate::GeneratedModel::stamp_laplace_states` can stamp the state rows after the statement
+/// walk without re-finding them. An `absdelay` term (`delay: Some`) gets no states.
+fn allocate_laplace_states(
+    stmts: &mut [LoweredStmt],
+    next_slot: &mut usize,
+    out: &mut Vec<LaplaceTerm>,
+) {
+    for s in stmts {
+        match s {
+            LoweredStmt::Contribute(c) => {
+                for term in &mut c.laplace {
+                    if term.delay.is_some() {
+                        continue;
+                    }
+                    let order = if term.den_is_roots {
+                        term.den.len() / 2
+                    } else {
+                        term.den.len() - 1
+                    };
+                    term.states = Some(LaplaceStates {
+                        base_slot: *next_slot,
+                        order,
+                    });
+                    *next_slot += order;
+                    out.push(term.clone());
+                }
+            }
+            LoweredStmt::If { then_, else_, .. } => {
+                allocate_laplace_states(then_, next_slot, out);
+                allocate_laplace_states(else_, next_slot, out);
+            }
+            LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => {
+                allocate_laplace_states(body, next_slot, out);
+            }
+            LoweredStmt::For {
+                init, step, body, ..
+            } => {
+                allocate_laplace_states(init, next_slot, out);
+                allocate_laplace_states(step, next_slot, out);
+                allocate_laplace_states(body, next_slot, out);
+            }
+            LoweredStmt::Case { arms, default, .. } => {
+                for arm in arms.iter_mut() {
+                    allocate_laplace_states(&mut arm.body, next_slot, out);
+                }
+                allocate_laplace_states(default, next_slot, out);
+            }
+            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => {}
+        }
+    }
 }
 
 /// Whether `expr` contains a `laplace_*` call anywhere in its tree — used to reject one buried
@@ -679,7 +762,8 @@ pub struct NodeKclProbe {
 pub struct Lowered {
     /// Total number of local unknowns: one per IR node, plus one per entry in
     /// [`Self::branch_currents`], [`Self::idt_accumulators`], [`Self::flow_current_accumulators`],
-    /// and [`Self::node_kcl_probes`].
+    /// and [`Self::node_kcl_probes`], plus each [`Self::laplace_terms`] entry's
+    /// [`LaplaceStates::order`].
     pub n_unknowns: usize,
     /// Statements in source order (assignments and contributions only — see Limitations).
     pub stmts: Vec<LoweredStmt>,
@@ -704,6 +788,12 @@ pub struct Lowered {
     /// is the module's implicit ground reference (see [`NodeKclProbe`]), in ascending
     /// [`BranchId`] order, past every [`FlowCurrentAccumulator`] slot.
     pub node_kcl_probes: Vec<NodeKclProbe>,
+    /// Every rational `laplace_*` term in the analog block, in statement order, each carrying
+    /// its [`LaplaceStates`] block — allocated past every [`NodeKclProbe`] slot. The state
+    /// rows are stamped from this list after the statement walk
+    /// (`crate::GeneratedModel::stamp_laplace_states`); the term's *output* is stamped where
+    /// its contribution runs.
+    pub laplace_terms: Vec<LaplaceTerm>,
     /// One entry per `transition`/`slew` call site, in ascending [`ExprId`] order — see
     /// [`StatefulCall`]. Maps a call site to its base offset in Interface β's per-instance
     /// state channel (`va_abi::ModelState`).
@@ -1004,6 +1094,8 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     }
     let (stateful_calls, state_len) = collect_stateful_calls(module);
     let has_laplace = stmts_contain_laplace(&stmts);
+    let mut laplace_terms = Vec::new();
+    allocate_laplace_states(&mut stmts, &mut next_slot, &mut laplace_terms);
 
     Ok(Lowered {
         n_unknowns: next_slot,
@@ -1013,6 +1105,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         idt_accumulators,
         flow_current_accumulators,
         node_kcl_probes,
+        laplace_terms,
         stateful_calls,
         state_len,
         has_laplace,

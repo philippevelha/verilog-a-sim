@@ -65,20 +65,15 @@ pub enum Analysis {
 /// produce a *plausible number that is wrong* rather than an error. `transition` and
 /// `slew` are absent because they are genuinely evaluated against Interface beta's state
 /// channel; the Z-domain family is absent because elaboration rejects it outright, which
-/// is already loud.
-const TRANSIENT_APPROXIMATIONS: &[(&str, &str)] = &[
-    (
-        "absdelay",
-        "folds to its undelayed input (a true delay needs an interpolated history buffer)",
-    ),
-    (
-        "laplace_nd",
-        "folds to its DC gain (a time-domain Laplace filter is a convolution)",
-    ),
-    ("laplace_np", "folds to its DC gain"),
-    ("laplace_zd", "folds to its DC gain"),
-    ("laplace_zp", "folds to its DC gain"),
-];
+/// is already loud. The `laplace_*` family left this table on 2026-09-11 (v0.9.16): a
+/// rational filter is now integrated as an ODE on its own state unknowns
+/// (`va_codegen::lower::LaplaceStates`), so a transient run computes the filter rather than
+/// its DC gain. `absdelay` remains: a pure delay is not an ODE, and its time-domain form
+/// (`docs/proposals/absdelay.md` stage 2) is still unimplemented.
+const TRANSIENT_APPROXIMATIONS: &[(&str, &str)] = &[(
+    "absdelay",
+    "folds to its undelayed input (a true delay needs an interpolated history buffer)",
+)];
 
 /// Warn, on stderr, when `src` uses an operator this engine approximates in transient.
 ///
@@ -795,7 +790,7 @@ pub fn check_models(paths: &[String], codegen: bool) -> Result<()> {
     // the same as computing what the source says, and a number that merges the two overstates
     // what the engine actually supports.
     println!(
-        "  of the {} passes, {} use an operator approximated in transient (absdelay, laplace_*)",
+        "  of the {} passes, {} use an operator approximated in transient (absdelay)",
         tally.passed, tally.passed_approximated
     );
     println!("  {total} file(s) scanned in total");
@@ -2702,7 +2697,7 @@ mod tests {
         let folded = write(
             "folded.va",
             "module folded(p, n); electrical p, n; \
-             analog I(p, n) <+ laplace_nd(V(p, n), {1.0}, {1.0, 1e-6}); endmodule",
+             analog I(p, n) <+ absdelay(V(p, n), 1e-6); endmodule",
         );
         let (_, files) = compile_model_library(&dir.display().to_string()).expect("compiles");
         assert_eq!(files.len(), 3);
@@ -2739,7 +2734,7 @@ mod tests {
         assert_eq!(reached2, vec![folded.clone()]);
         let err = refuse_transient_approximations(&sources(&reached2))
             .expect_err("placing the folded model is still refused");
-        assert!(err.to_string().contains("laplace_nd"), "{err}");
+        assert!(err.to_string().contains("absdelay"), "{err}");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3740,16 +3735,13 @@ mod tests {
     /// the whole reason this is analysis-scoped rather than a compile-time rejection.
     #[test]
     fn a_transient_run_refuses_an_approximated_operator() {
-        let model = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../models/laplace_lowpass.va"
-        );
-        let src = std::fs::read_to_string(model).expect("read laplace_lowpass.va");
+        let model = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/delay_line.va");
+        let src = std::fs::read_to_string(model).expect("read delay_line.va");
         let models = vec![(model.to_string(), src)];
 
-        let err = refuse_transient_approximations(&models).expect_err("laplace_nd is folded");
+        let err = refuse_transient_approximations(&models).expect_err("absdelay is folded");
         let msg = format!("{err:#}");
-        assert!(msg.contains("laplace_nd"), "names the operator: {msg}");
+        assert!(msg.contains("absdelay"), "names the operator: {msg}");
         assert!(msg.contains("refused"), "says it refused: {msg}");
         assert!(
             msg.contains("--ac") && msg.contains("unaffected"),
@@ -3762,6 +3754,67 @@ mod tests {
             "module r(p,n); electrical p,n; analog I(p,n) <+ V(p,n); endmodule".to_string(),
         )];
         refuse_transient_approximations(&plain).expect("an ordinary model is fine");
+
+        // Nor, since v0.9.16, is a `laplace_*` filter: it is integrated, not folded. Until then
+        // this very file was the refused example.
+        let lowpass = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/laplace_lowpass.va"
+        );
+        let src = std::fs::read_to_string(lowpass).expect("read laplace_lowpass.va");
+        refuse_transient_approximations(&[(lowpass.to_string(), src)])
+            .expect("laplace_nd runs in transient now");
+    }
+
+    /// A `laplace_np` filter with a complex-conjugate pole pair, in transient, against the
+    /// closed-form step response of the underdamped second-order system it is:
+    /// `y = 1 − e^{−at}(cos bt + (a/b) sin bt)` for poles at `−a ± jb`. Exercises the root
+    /// expansion, two state unknowns, the `ω0` scaling, and the integrator's LTE control on the
+    /// state rows through the real pipeline. The discriminating point is the peak: the folded
+    /// `H(0)` this construct used to give is a flat 1.0, the real response overshoots to
+    /// `1 + e^{−aπ/b} ≈ 1.73`.
+    #[test]
+    fn a_laplace_np_filter_follows_the_underdamped_step_response_in_transient() {
+        let src = "
+`include \"disciplines.vams\"
+module resonant(out, in, ref);
+  inout out, in, ref;
+  electrical out, in, ref;
+  parameter real a = 2e3;
+  parameter real b = 2e4;
+  analog V(out, ref) <+ laplace_np(V(in, ref), {1}, {-a, b, -a, -b});
+endmodule
+";
+        let design = compile_model(src, "resonant");
+        let net = va_netlist::parser::parse(
+            "V1 in gnd DC 1
+M1 out in gnd resonant
+.tran 1u 1.5m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let out = net
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("out node");
+        let (a, b) = (2e3_f64, 2e4_f64);
+        let mut worst = 0.0_f64;
+        let mut peak = 0.0_f64;
+        for (&t, row) in wf.t.iter().zip(&wf.x) {
+            let exact = 1.0 - (-a * t).exp() * ((b * t).cos() + (a / b) * (b * t).sin());
+            worst = worst.max((row[out] - exact).abs());
+            peak = peak.max(row[out]);
+        }
+        assert!(worst < 5e-4, "max deviation from the closed form: {worst}");
+        let expected_peak = 1.0 + (-a * std::f64::consts::PI / b).exp();
+        assert!(
+            (peak - expected_peak).abs() < 5e-3,
+            "overshoot peak {peak} vs {expected_peak} (a fold to H(0) would give 1.0)"
+        );
     }
 
     /// `@(cross(...))`'s body runs, and only when the event fires.
