@@ -19,6 +19,18 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.15+5 - 2026-09-11
+---------------------
+Record only: the third CI run (0.9.15+4, run 34626238979) is **green on ubuntu-latest,
+macos-latest (arm64) and windows-latest (MSVC)** -- fmt, clippy -D warnings, build, `cargo
+test --workspace --no-fail-fast` (768 tests), `cargo xtask validate` 27/27 against the
+committed QSPICE golden, the version/release.txt check, and `cargo deny check`. First time
+this simulator has been shown to build, pass its suite, and reproduce its golden results on
+anything but the Windows development machine; the macOS result is also the first on a
+non-x86 architecture and a different libm, with the golden tolerances met unchanged. Road to
+1.0 items A.2 and A.6 updated to say so. No code touched.
+
+
 0.9.15+4 - 2026-09-11
 ---------------------
 Formatting only: 0.9.15+3's new xtask test was committed before `cargo fmt` had run on it
@@ -776,13 +788,14 @@ Ordered by what to do first.
   [x] CI on the three platforms. .github/workflows/ci.yml runs fmt, clippy -D warnings,
       build, `cargo test --workspace`, `cargo xtask validate` (golden is committed, no QSPICE
       needed) on ubuntu/windows/macos, plus `cargo deny check` and a check that the workspace
-      version has a release.txt entry. Written and YAML-valid; **not yet seen green** -- the
-      first push after 0.9.15+1 is the test, and a red run on any platform is a 1.0 finding to
-      fix, not to exclude. (0.9.15+1)
+      version has a release.txt entry. **Green on all three platforms as of 0.9.15+4** (run
+      34626238979) after two red runs that each found a "true only on the dev machine"
+      assumption -- see the +2 and +3 entries. (0.9.15+1, green at +4)
   [x] Release artefact path. .github/workflows/release.yml builds `va-cli` in release mode
       for x86_64 Linux, x86_64 Windows (MSVC) and arm64 macOS on a `v*` tag, runs the gate,
       and attaches per-platform archives (binary + models/ + circuits/ + docs/workflow.md) to
-      a GitHub release. Same caveat: written, not yet exercised. (0.9.15+1)
+      a GitHub release. Written, not yet exercised: the first `v*` tag is its test.
+      (0.9.15+1)
   [ ] Ship and test the executable across platforms. With the above in place, this is: tag
       a release candidate, download the three archives, run `va-cli sim` on real machines --
       not only CI runners -- and record machine, OS, and `cargo xtask validate` figures in the
@@ -792,8 +805,8 @@ Ordered by what to do first.
       as the developer path.
   [x] cargo-deny's first verdict. deny.toml was written at bootstrap and never run until
       2026-09-11; the first run failed advisories, bans and licenses for reasons unrelated
-      to native linking, all fixed in 0.9.15+1 (see that entry). Green locally on the
-      prebuilt binary; CI runs it on every push from here on.
+      to native linking, all fixed in 0.9.15+1 (see that entry). Green in CI on every run
+      since.
 
   B. Language and numerics
 
