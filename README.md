@@ -36,5 +36,18 @@ cargo xtask gen-golden      # (re)generate golden outputs from QSPICE, if instal
 cargo run -p va-cli -- sim circuits/divider.net --model models/resistor.va
 ```
 
+## Running a simulation
+
+A run takes a Verilog-A model (`models/*.va`, the component), a SPICE-flavoured deck
+(`circuits/*.net`, the testbench: instances, sources, and the analysis card), and one command:
+
+```bash
+cargo run -p va-cli -- sim circuits/rectifier.net --model models/diode.va --tran
+```
+
+There is no separate elaborate step — `sim` lexes, parses, elaborates, differentiates and
+solves in one invocation. `docs/workflow.md` walks through it and says what changes at 1.0,
+when the deliverable becomes a compiled `va-cli` executable tested across platforms.
+
 See `CLAUDE.md` for the project constitution and `docs/` for the frozen interfaces,
 architecture, thesis map, and validation plan.

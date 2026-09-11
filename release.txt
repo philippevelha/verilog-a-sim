@@ -19,6 +19,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.14+1 - 2026-09-11
+---------------------
+Docs only: the user-facing workflow is written down. `docs/workflow.md` says what a simulation
+needs (a `.va` component, a `.net` deck as the testbench, one `va-cli sim` call), walks the
+half-wave rectifier through it with the real output of this version (718 timepoints, V(out)
+peaking at 4.304 V = 5 V crest minus a diode drop, decaying to 2.076 V at t=5 ms), and states
+the thing a newcomer gets wrong: there is no separate elaborate/compile step -- `sim` elaborates
+in memory every run, and `check` is a diagnostic, not a prerequisite. README gained a
+"Running a simulation" section pointing at it.
+
+  The document is explicit that this is the v0.9.x workflow, driven from source via `cargo
+  run` on the development machine. **At 1.0 the deliverable becomes the compiled executable**,
+  and the executable must be tested on several different platforms (different computers,
+  different operating systems) before the version is claimed. That is a new 1.0 blocker,
+  added to "Road to 1.0" below; it was implicit in the pure-Rust/no-native-link rule and is
+  now stated.
+
+  Measured at this version: `cargo run -p va-cli -- sim circuits/rectifier.net --model
+  models/diode.va --tran` completes; `cargo test --workspace` 764 passed / 0 failed;
+  `cargo xtask validate` 27 checked, 0 failed, convergence 27/27 -- no code touched.
+
+
 0.9.14 - 2026-09-10
 -------------------
 Iteration statements now carry the restriction that defines them. `while`/`repeat`/`for` have
@@ -597,6 +619,14 @@ rather than asserted.
 Road to 1.0
 -----------
 Tracked in docs/roadmap.md; listed here so the release log is self-contained.
+
+  [ ] Ship and test the executable across platforms. Today the workflow is `cargo run -p
+      va-cli -- sim ...` from source on the Windows development machine (docs/workflow.md).
+      1.0's deliverable is the compiled `va-cli` binary built from the tagged release, and it
+      must be run and validated (`cargo xtask validate` figures, not "it builds") on several
+      different computers and operating systems -- at least Windows, Linux and macOS -- with
+      the machines and results listed in the 1.0 release entry. docs/workflow.md is then
+      rewritten for the binary. Added 2026-09-11.
 
   [ ] Analog events. `@(initial_step)`, `@(cross(...))`, `@(timer(...))`, `@(above(...))`
       and `@(final_step)` all work as of 0.9.8, and an `or` list of the two step-scoped
