@@ -19,6 +19,21 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.14+2 - 2026-09-11
+---------------------
+Docs only: `va-netlist`'s parser "Limitations" list had two expired premises. It still said
+controlled sources, `X` and `K` "are not parsed" -- all four landed in the 2026-08-31 element
+work and are documented as supported ten lines above the claim -- and it still said a `V`
+source takes `DC` or `SIN` only, though `PULSE` has been parsed since the pulse work. Both
+bullets now say what the code does: every element letter `R C L D M Q V X K E F G H` parses;
+the real gaps are no `I` current source, no `.subckt` (an `X` places a Verilog-A module), no
+`PWL`/`EXP`, and `.model` cards ignored in favour of `name=value` on the device line. Two
+rustdoc link warnings in the same header fixed in passing (`cargo doc -p va-netlist` is now
+warning-free). Found while writing docs/workflow.md's deck summary.
+
+  Measured: `cargo test -p va-netlist` 24 passed; fmt/clippy clean; no code touched.
+
+
 0.9.14+1 - 2026-09-11
 ---------------------
 Docs only: the user-facing workflow is written down. `docs/workflow.md` says what a simulation

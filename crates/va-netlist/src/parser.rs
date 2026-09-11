@@ -25,7 +25,7 @@
 //! is the reference node; every other net gets a dense unknown index in first-seen order.
 //!
 //! A `C` or `L` line may carry SPICE's per-element initial condition, `` IC=<value> ``
-//! ([`va_netlist::Device::ic`]): volts across a capacitor, amps through an inductor — the state
+//! ([`crate::Device::ic`]): volts across a capacitor, amps through an inductor — the state
 //! each element actually carries — at `tstart`, seeding a
 //! **transient** run's initial solution and ignored by every other analysis — SPICE's own `UIC`
 //! semantics, in which no DC operating point is solved first. A capacitor with no `IC=` starts
@@ -33,16 +33,21 @@
 //!
 //! # Limitations
 //!
-//! - Controlled sources, subcircuits (`X`), mutual inductance (`K`), and `.model` cards are
-//!   not parsed.
-//! - A `V` source accepts `DC <value>` or `SIN(off amp freq …)`. The latter's offset becomes
-//!   the DC value (what a DC operating point needs) *and* its full `(offset, amplitude, freq)`
-//!   is retained as [`crate::Device::waveform`] for a transient run to reproduce the actual
-//!   time dependence. A consumer turns that into an ordinary stateless `ModelInstance` reading
-//!   the current time off `va_abi::ModelInstance::load`'s analysis context (§6 change,
-//!   2026-08-06 — `va_cli::WaveformSource`); the two facts stay consistent because the offset
-//!   *is* the waveform's value at `t = 0`, which is what a DC or AC solve reads. SPICE's
-//!   optional trailing `SIN` parameters (delay, damping, phase) are not parsed.
+//! - No independent current source (`I`), and no SPICE `.subckt`/`.ends` definitions — `X`
+//!   places a compiled Verilog-A module, not a deck-defined subcircuit. `.model` cards are
+//!   ignored (`parse_card`): a device's parameters go on its own line as `name=value`. Every
+//!   other element letter listed above (`R C L D M Q V X K E F G H`) is parsed. (Until
+//!   2026-09-11 this bullet still claimed controlled sources, `X` and `K` were unparsed — a
+//!   premise that expired when they landed.)
+//! - A `V` source accepts `DC <value>`, `SIN(off amp freq)`, or `PULSE(v1 v2 …)`; no `PWL`,
+//!   `EXP`, or other SPICE waveforms. A waveform's value at `t = 0` (`SIN`'s offset, `PULSE`'s
+//!   `v1`) becomes the DC value (what a DC operating point needs) *and* the full waveform is
+//!   retained as [`crate::Device::waveform`] for a transient run to reproduce the actual time
+//!   dependence. A consumer turns that into an ordinary stateless `ModelInstance` reading the
+//!   current time off `va_abi::ModelInstance::load`'s analysis context (§6 change, 2026-08-06
+//!   — `va_cli::WaveformSource`); the two facts stay consistent because the DC value *is* the
+//!   waveform's value at `t = 0`, which is what a DC or AC solve reads. SPICE's optional
+//!   trailing `SIN` parameters (delay, damping, phase) are not parsed.
 //! - `.dc <source> <start> <stop> <step>` (§ ladder rung 2) sweeps one voltage source's DC
 //!   value, solving a fresh operating point at each step ([`crate::DcSweep`]) — only a linear
 //!   sweep of a single source, no nested/multi-source sweeps and no `.dc` with no arguments
