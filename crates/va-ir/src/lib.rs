@@ -950,6 +950,34 @@ pub enum Builtin {
     /// with values near `1e71`) and buys nothing. A root at the origin contributes a factor of
     /// `s` rather than `(1 − s/ζ)`, which is what makes the DC gain `0` there.
     LaplaceZp,
+    /// `zi_nd(value, num, den, T [, tt [, t0]])` — a Z-domain (sampled-data) filter, LRM
+    /// §4.5.12 (§6 change, 2026-09-12; `docs/proposals/z-domain-filters.md`):
+    /// `H(z) = Σ n_k z^-k / Σ d_k z^-k`, sampling its input every `T` seconds from `t0`.
+    ///
+    /// Argument layout, flattened: `[value, T, tt, t0, Const(num_len), num…, den…]`, the
+    /// `Const` separator being the [`Builtin::LaplaceNd`] trick. `tt` is the output's
+    /// transition time: elaboration substitutes the module's `` `default_transition `` when it
+    /// is omitted, else `0.0`, which `va-codegen` reads as "negligible" (LRM 4.5.12 — an
+    /// abrupt output is discontinuous, and the engine ramps it over a thousandth of the run's
+    /// step instead). `t0` is `0.0` when omitted.
+    ///
+    /// Evaluated as `H(1)` (its steady-state gain) in DC and noise, `H(e^{jωT})` per point in
+    /// AC, and in transient as the difference equation on Interface β's state channel with a
+    /// breakpoint at every sample instant. Until v0.9.20 it was refused, and before v0.9.17
+    /// folded to `H(1)` everywhere.
+    ZiNd,
+    /// `zi_np(value, num, poles, T [, tt [, t0]])` — numerator coefficients over a pole array
+    /// of `(re, im)` pairs. Same layout and rules as [`Builtin::ZiNd`].
+    ZiNp,
+    /// `zi_zd(value, zeros, den, T [, tt [, t0]])` — a zero array over denominator coefficients.
+    ZiZd,
+    /// `zi_zp(value, zeros, poles, T [, tt [, t0]])` — zero array over pole array.
+    ///
+    /// A root `r` contributes the factor `(1 − r·z^-1)`; a root at the origin contributes `z`
+    /// (LRM §4.5.12) — a numerator root at the origin therefore *advances* the output by one
+    /// sample, which no causal implementation can do and `va-codegen` refuses unless a
+    /// denominator root at the origin cancels it.
+    ZiZp,
     /// `absdelay(value, delay)` — a pure transport delay, LRM §4.5.9 (§6 change, 2026-09-01;
     /// `docs/proposals/absdelay.md`). Arguments are normalized to `[value, delay]`; an
     /// optional `maxdelay` third argument is parsed and dropped, since only a time-domain

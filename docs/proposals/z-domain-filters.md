@@ -1,8 +1,14 @@
 # Proposal: `zi_nd` / `zi_np` / `zi_zd` / `zi_zp` — Z-domain filters, implemented
 
-**Status: proposed 2026-09-12, a 1.0 blocker by supervisor decision** ("the fix of zi_* should
-be done before release" — refusing, which v0.9.17 does, is the honest interim, not the
-answer). Source: Verilog-AMS LRM 2.4 §4.5.12 (read from `references/VAMS-LRM-2-4.pdf`).
+**Status: implemented 2026-09-12, v0.9.20.** (Proposed the same morning as a 1.0 blocker by
+supervisor decision — "the fix of zi_* should be done before release"; refusing, which
+v0.9.17 did, was the honest interim.) Built as designed below, with two deviations worth
+stating: the `tt` sentinel is not needed (elaboration knows the module's `default_transition`
+and substitutes it), and the sample-and-hold takes its `t = 0` sample from the run's cold-start
+seed, where a DC source still reads 0 — the same initial-step semantics `transition` has, so a
+model wanting the first sample after the sources are up sets `t0` inside the first period.
+Gates 1–6 of §4 are in; gate 7 (QSPICE) is not, because QSPICE has no LRM-defined Z-filter
+element to translate to — the closed forms are the oracle, as for `absdelay` in AC. Source: Verilog-AMS LRM 2.4 §4.5.12 (read from `references/VAMS-LRM-2-4.pdf`).
 
 **Affects:** `va-ir` (**Interface α, additive** — four `Builtin` variants; CLAUDE.md §6
 applies, and this document is the written description step 1 requires), `va-frontend`,

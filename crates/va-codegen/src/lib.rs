@@ -557,6 +557,10 @@ impl GeneratedModel {
                             Self::laplace_realization(ctx, term)?;
                         }
                     }
+                    for term in &c.zi {
+                        eval(ctx, term.input)?;
+                        Self::zi_params(ctx, term)?;
+                    }
                     for term in &c.noise {
                         match *term {
                             NoiseTerm::White { pwr } => {
@@ -772,6 +776,9 @@ impl GeneratedModel {
                 if !c.laplace.is_empty() {
                     self.stamp_laplace(ctx, &c.laplace, gp, gn, None, sink);
                 }
+                if !c.zi.is_empty() {
+                    self.stamp_zi(ctx, &c.zi, gp, gn, None, sink);
+                }
             }
             Some(local_slot) => {
                 if self.is_mixed_branch(local_slot) && ctx.mark_potential_used(local_slot) {
@@ -837,7 +844,240 @@ impl GeneratedModel {
                 if !c.laplace.is_empty() {
                     self.stamp_laplace(ctx, &c.laplace, gb, gb, Some(gb), sink);
                 }
+                if !c.zi.is_empty() {
+                    self.stamp_zi(ctx, &c.zi, gb, gb, Some(gb), sink);
+                }
             }
+        }
+    }
+
+    /// A `zi_*` term's sampling parameters and realization, evaluated: `(period, tt, t0,
+    /// realization)`. Checked at build (`validate`) so a bad filter is a diagnostic, not a
+    /// mid-solve surprise.
+    ///
+    /// # Errors
+    ///
+    /// A non-positive period, a negative transition time, or anything
+    /// [`ad::zi_realization`] refuses.
+    fn zi_params(
+        ctx: &Ctx,
+        term: &lower::ZiTerm,
+    ) -> Result<(f64, f64, f64, ad::ZiRealization), CodegenError> {
+        let period = eval(ctx, term.period)?.value;
+        let tt = eval(ctx, term.tt)?.value;
+        let t0 = eval(ctx, term.t0)?.value;
+        if period.is_nan() || period <= 0.0 || !period.is_finite() {
+            return Err(CodegenError::Unsupported(format!(
+                "a zi_* sample period must be positive and finite, got {period}"
+            )));
+        }
+        if tt.is_nan() || tt < 0.0 || !tt.is_finite() {
+            return Err(CodegenError::Unsupported(format!(
+                "a zi_* transition time must be non-negative and finite, got {tt}"
+            )));
+        }
+        let num = Self::eval_coeffs(ctx, &term.num).ok_or_else(|| {
+            CodegenError::Unsupported("a zi_* coefficient does not evaluate to a number".into())
+        })?;
+        let den = Self::eval_coeffs(ctx, &term.den).ok_or_else(|| {
+            CodegenError::Unsupported("a zi_* coefficient does not evaluate to a number".into())
+        })?;
+        let r = ad::zi_realization(&num, term.num_is_roots, &den, term.den_is_roots)
+            .map_err(CodegenError::Unsupported)?;
+        Ok((period, tt, t0, r))
+    }
+
+    /// Stamp a contribution's `zi_*` terms (LRM §4.5.12; `docs/proposals/z-domain-filters.md`).
+    ///
+    /// Three analyses, three answers, none of them a fold:
+    ///
+    /// - **DC and noise:** the steady-state gain `H(1)`, stamped resistively with the input's
+    ///   gradient — exact for a static solve, and the same number the pre-0.9.17 fold gave.
+    /// - **AC:** `H(e^{jωT})` per frequency point through the same `G = Re(H)`, `C = Im(H)/ω`
+    ///   identity `laplace_*` uses. No zero-order-hold factor (see [`ad::zi_at`]).
+    /// - **Transient:** the difference equation on the state channel. The input is read from
+    ///   the current iterate only at a sample instant — `t0 + k·T`, which [`Self::events`]
+    ///   asks the integrator to land on — and the new output sample is *committed* state from
+    ///   then on. The output ramps from the previous sample to the new one over the transition
+    ///   time (`tt`; zero means the same "negligible but non-zero" `tstep/1000` that
+    ///   `transition` uses, since an abrupt branch value is the convergence hazard LRM 4.5.12
+    ///   warns of). At the sampling evaluation the ramp has not started, so the output there
+    ///   is still the previous sample: the value never depends on the current iterate, and
+    ///   the Jacobian contribution is exactly zero — not an approximation.
+    ///
+    /// State layout per call site (`lower::StatefulKind::Zi`): `t_last_sample`, `y_held`,
+    /// `y_prev`, `t_ramp_start`, then the input history `x_{k−1}, x_{k−2}, …` and the output
+    /// history `y_{k−1}, y_{k−2}, …`. Slots are written only at a sample instant, so a rejected
+    /// step (which never commits) simply re-samples on retry.
+    fn stamp_zi(
+        &self,
+        ctx: &Ctx,
+        terms: &[lower::ZiTerm],
+        gp: usize,
+        gn: usize,
+        gb: Option<usize>,
+        sink: &mut dyn StampSink,
+    ) {
+        for term in terms {
+            let Ok(u) = eval(ctx, term.input) else {
+                continue;
+            };
+            let Ok((period, tt, t0, r)) = Self::zi_params(ctx, term) else {
+                continue;
+            };
+            let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
+            let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
+            let transient = ctx.analysis.kind == va_abi::AnalysisKind::Transient;
+
+            if !transient {
+                // Static or small-signal: a (possibly complex) gain on the input.
+                let h = ad::zi_at(if ac { omega } else { 0.0 }, period, &r);
+                if !h.0.is_finite() || !h.1.is_finite() {
+                    continue;
+                }
+                let (re, im) = (term.sign * h.0, term.sign * h.1);
+                for (slot, &dg) in u.grad.iter().enumerate() {
+                    if dg == 0.0 {
+                        continue;
+                    }
+                    let gk = self.terminals[slot];
+                    match gb {
+                        None => {
+                            sink.jacobian(gp, gk, re * dg);
+                            sink.jacobian(gn, gk, -re * dg);
+                            if ac {
+                                sink.dcharge(gp, gk, im / omega * dg);
+                                sink.dcharge(gn, gk, -im / omega * dg);
+                            }
+                        }
+                        Some(gb) => {
+                            sink.jacobian(gb, gk, -re * dg);
+                            if ac {
+                                sink.dcharge(gb, gk, -im / omega * dg);
+                            }
+                        }
+                    }
+                }
+                if !ac {
+                    match gb {
+                        None => {
+                            sink.residual(gp, re * u.value);
+                            sink.residual(gn, -re * u.value);
+                        }
+                        Some(gb) => sink.residual(gb, -re * u.value),
+                    }
+                }
+                continue;
+            }
+
+            // Transient: the sampled difference equation.
+            let Some(&(kind, base)) = ctx.state_slots.get(&term.expr_id) else {
+                continue;
+            };
+            let lower::StatefulKind::Zi { inputs, outputs } = kind else {
+                continue;
+            };
+            let t = ctx.analysis.time;
+            let tt_eff = if tt > 0.0 {
+                tt
+            } else if ctx.analysis.tstep > 0.0 {
+                ctx.analysis.tstep * 1e-3
+            } else {
+                0.0
+            };
+            let xh = |m: usize| ctx.state_get(base, 4 + m); // x_{k-1-m}
+            let yh = |m: usize| ctx.state_get(base, 4 + inputs + m); // y_{k-1-m}
+                                                                     // The new output sample from the fresh input `x_k` and the committed histories:
+                                                                     // d_0·y_k = Σ_i n_i·x_{k−i−delay} − Σ_{j≥1} d_j·y_{k−j}.
+            let sample = |x_k: f64| -> f64 {
+                let xs = |m: usize| if m == 0 { x_k } else { xh(m - 1) };
+                let mut acc = 0.0;
+                for (i, &n) in r.num.iter().enumerate() {
+                    let m = i + r.delay;
+                    if m <= inputs {
+                        acc += n * xs(m);
+                    }
+                }
+                for (j, &d) in r.den.iter().enumerate().skip(1) {
+                    if j - 1 < outputs {
+                        acc -= d * yh(j - 1);
+                    }
+                }
+                acc / r.den[0]
+            };
+            let shift_in = |x_k: f64| {
+                for m in (1..inputs).rev() {
+                    ctx.state_set(base, 4 + m, xh(m - 1));
+                }
+                if inputs > 0 {
+                    ctx.state_set(base, 4, x_k);
+                }
+            };
+            let shift_out = |y_k: f64| {
+                for m in (1..outputs).rev() {
+                    ctx.state_set(base, 4 + inputs + m, yh(m - 1));
+                }
+                if outputs > 0 {
+                    ctx.state_set(base, 4 + inputs, y_k);
+                }
+            };
+            let tol = period * 1e-9;
+
+            let (y_held, y_prev, t_ramp) = if ctx.analysis.is_initial_step {
+                // Seed: histories are zero. Sample now if the first instant has arrived,
+                // otherwise hold zero until it does.
+                if t + tol >= t0 {
+                    let y0 = sample(u.value);
+                    shift_in(u.value);
+                    shift_out(y0);
+                    ctx.state_set(base, 0, t);
+                    ctx.state_set(base, 1, y0);
+                    ctx.state_set(base, 2, y0);
+                    ctx.state_set(base, 3, t - tt_eff);
+                    (y0, y0, t - tt_eff)
+                } else {
+                    ctx.state_set(base, 0, t0 - period);
+                    ctx.state_set(base, 1, 0.0);
+                    ctx.state_set(base, 2, 0.0);
+                    ctx.state_set(base, 3, t - tt_eff);
+                    (0.0, 0.0, t - tt_eff)
+                }
+            } else {
+                let t_last = ctx.state_get(base, 0);
+                let (held, prev, ramp) = (
+                    ctx.state_get(base, 1),
+                    ctx.state_get(base, 2),
+                    ctx.state_get(base, 3),
+                );
+                if t + tol >= t_last + period {
+                    let y_k = sample(u.value);
+                    shift_in(u.value);
+                    shift_out(y_k);
+                    ctx.state_set(base, 0, t_last + period);
+                    ctx.state_set(base, 1, y_k);
+                    ctx.state_set(base, 2, held);
+                    ctx.state_set(base, 3, t);
+                    (y_k, held, t)
+                } else {
+                    (held, prev, ramp)
+                }
+            };
+            let y = if tt_eff > 0.0 && t < t_ramp + tt_eff {
+                let frac = ((t - t_ramp) / tt_eff).clamp(0.0, 1.0);
+                y_prev + (y_held - y_prev) * frac
+            } else {
+                y_held
+            };
+            let y = term.sign * y;
+            match gb {
+                None => {
+                    sink.residual(gp, y);
+                    sink.residual(gn, -y);
+                }
+                Some(gb) => sink.residual(gb, -y),
+            }
+            // No Jacobian: `y` is committed history and a latched sample, never the current
+            // iterate (see the doc comment).
         }
     }
 
@@ -1599,11 +1839,28 @@ impl ModelInstance for GeneratedModel {
     /// No state and no fired-event input: this runs after the timepoint is accepted, and asks
     /// only "where is this site now".
     fn events(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
-        if self.module.event_sites.is_empty() {
+        if self.module.event_sites.is_empty() && self.lowered.zi_terms.is_empty() {
             return;
         }
         let ctx = self.ctx(x, actx, &[], &[], false);
         let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
+        // A `zi_*` filter's next sample instant, `t0 + k·T` — pure arithmetic on `(t0, T,
+        // now)`, the way a periodic `timer` stays stateless about its own schedule — asked for
+        // as a breakpoint so the integrator lands on it and the sample is taken there, not
+        // wherever the step controller happened to stop next.
+        for term in &self.lowered.zi_terms {
+            let (period, t0) = (value_of(term.period), value_of(term.t0));
+            if period.is_nan() || period <= 0.0 || !period.is_finite() {
+                continue;
+            }
+            let now = actx.time;
+            let next = if now < t0 {
+                t0
+            } else {
+                t0 + period * (((now - t0) / period + 1e-9).floor() + 1.0)
+            };
+            sink.breakpoint(next);
+        }
         for (slot, site) in self.module.event_sites.iter().enumerate() {
             // `enable` gates the whole site (LRM §5.10.1/§5.10.3): a disabled event registers
             // nothing, so it cannot fire and its body cannot run. Re-evaluated at every
@@ -1731,6 +1988,9 @@ impl ModelInstance for GeneratedModel {
             if let Some(dt) = self.transition_step_bound(&ctx) {
                 sink.bound_step(dt);
             }
+            if let Some(dt) = self.zi_step_bound(&ctx) {
+                sink.bound_step(dt);
+            }
         }
         // Publish this evaluation's state proposal. Only committed if the consumer decides this
         // was an accepted timepoint (§ `va_abi::state`).
@@ -1760,6 +2020,37 @@ impl GeneratedModel {
     /// linear shape to survive comparison against an analytic reference without forcing tiny
     /// steps through the long flat stretches on either side. A transition that has reached its
     /// target asks for nothing, so the controller is free to grow the step straight back.
+    /// The step a `zi_*` output ramp asks for while it is under way — the same ~8 points per
+    /// ramp `transition` asks for, for the same reason.
+    fn zi_step_bound(&self, ctx: &Ctx) -> Option<f64> {
+        const POINTS_PER_RAMP: f64 = 8.0;
+        let mut bound: Option<f64> = None;
+        for term in &self.lowered.zi_terms {
+            let Some(&(_, base)) = ctx.state_slots.get(&term.expr_id) else {
+                continue;
+            };
+            let tt = eval(ctx, term.tt).map(|d| d.value).unwrap_or(0.0);
+            let tt_eff = if tt > 0.0 {
+                tt
+            } else {
+                ctx.analysis.tstep * 1e-3
+            };
+            let next = ctx.state_next.borrow();
+            let (held, prev, ramp) = (
+                next.get(base + 1).copied().unwrap_or(0.0),
+                next.get(base + 2).copied().unwrap_or(0.0),
+                next.get(base + 3).copied().unwrap_or(0.0),
+            );
+            if tt_eff > 0.0 && held != prev && ctx.analysis.time < ramp + tt_eff {
+                let want = tt_eff / POINTS_PER_RAMP;
+                if want.is_finite() && want > 0.0 {
+                    bound = Some(bound.map_or(want, |b: f64| b.min(want)));
+                }
+            }
+        }
+        bound
+    }
+
     fn transition_step_bound(&self, ctx: &Ctx) -> Option<f64> {
         const POINTS_PER_RAMP: f64 = 8.0;
         let next = ctx.state_next.borrow();
@@ -5038,6 +5329,55 @@ mod tests {
             "the declared order still claims two slots"
         );
         assert_assembled_jacobian_matches_fd(inst.as_ref(), 4, &[0.3, 0.1, 0.2, 0.0], 1e6);
+    }
+
+    /// `ad::zi_realization` follows LRM 4.5.12's root convention — `(1 − r·z^-1)` per root, `z`
+    /// for a root at the origin — and refuses what no causal filter can do.
+    #[test]
+    fn zi_realization_expands_roots_and_refuses_an_advance() {
+        // Coefficient lists pass through.
+        let r = ad::zi_realization(&[0.2], false, &[1.0, -0.8], false).unwrap();
+        assert_eq!(
+            (r.num.clone(), r.den.clone(), r.delay),
+            (vec![0.2], vec![1.0, -0.8], 0)
+        );
+        // A real pole 0.8: (1 − 0.8 z^-1). A conjugate pair 0.5 ± 0.5j: 1 − z^-1 + 0.5 z^-2.
+        let r = ad::zi_realization(&[1.0], false, &[0.8, 0.0], true).unwrap();
+        assert!((r.den[0] - 1.0).abs() < 1e-15 && (r.den[1] + 0.8).abs() < 1e-15);
+        let r = ad::zi_realization(&[1.0], false, &[0.5, 0.5, 0.5, -0.5], true).unwrap();
+        assert!(
+            (r.den[0] - 1.0).abs() < 1e-15
+                && (r.den[1] + 1.0).abs() < 1e-15
+                && (r.den[2] - 0.5).abs() < 1e-15,
+            "{:?}",
+            r.den
+        );
+        // A pole at the origin is a one-sample delay; a zero at the origin an advance.
+        let r = ad::zi_realization(&[1.0], false, &[0.0, 0.0, 0.5, 0.0], true).unwrap();
+        assert_eq!(r.delay, 1);
+        assert!(ad::zi_realization(&[0.0, 0.0], true, &[1.0], false)
+            .unwrap_err()
+            .contains("advance"));
+        // A lone complex root, and d_0 = 0.
+        assert!(ad::zi_realization(&[1.0], false, &[0.5, 0.5], true).is_err());
+        assert!(ad::zi_realization(&[1.0], false, &[0.0, 1.0], false)
+            .unwrap_err()
+            .contains("d_0 = 0"));
+
+        // The gain: H(1) is the steady state; H(e^{jωT}) for the one-pole IIR.
+        let r = ad::zi_realization(&[0.2], false, &[1.0, -0.8], false).unwrap();
+        let h1 = ad::zi_at(0.0, 1e-6, &r);
+        assert!((h1.0 - 1.0).abs() < 1e-15 && h1.1.abs() < 1e-15);
+        let omega = 2.0 * std::f64::consts::PI * 1e5;
+        let h = ad::zi_at(omega, 1e-6, &r);
+        let zinv = ad::Cx((omega * 1e-6).cos(), -(omega * 1e-6).sin());
+        let expect = ad::Cx(0.2, 0.0).div(ad::Cx(1.0 - 0.8 * zinv.0, -0.8 * zinv.1));
+        assert!((h.0 - expect.0).abs() < 1e-12 && (h.1 - expect.1).abs() < 1e-12);
+        // A delay of one sample multiplies by z^-1.
+        let rd = ad::zi_realization(&[0.2], false, &[0.0, 0.0, 0.8, 0.0], true).unwrap();
+        let hd = ad::zi_at(omega, 1e-6, &rd);
+        let expect_d = expect.mul(zinv);
+        assert!((hd.0 - expect_d.0).abs() < 1e-12 && (hd.1 - expect_d.1).abs() < 1e-12);
     }
 
     fn bias_dependent_ddt_module(name: &str) -> (Module, ExprId) {

@@ -610,6 +610,132 @@ pub fn expand_roots(pairs: &[f64]) -> Result<Vec<f64>, String> {
     Ok(poly.into_iter().map(|c| c.0).collect())
 }
 
+/// A Z-domain filter's polynomials in `z^-1`, lowest power first, plus the net power of `z`
+/// its origin roots contribute. See [`zi_realization`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZiRealization {
+    /// Numerator coefficients `n_k` of `Σ n_k z^-k`.
+    pub num: Vec<f64>,
+    /// Denominator coefficients `d_k` of `Σ d_k z^-k`; `d_0 != 0`.
+    pub den: Vec<f64>,
+    /// Extra delay in samples from denominator origin roots not cancelled by numerator ones —
+    /// each is a factor `z`, i.e. `z^-1` on the other side. Never negative: an uncancelled
+    /// numerator origin root would be an advance, which [`zi_realization`] refuses.
+    pub delay: usize,
+}
+
+/// Expand a Z-domain filter's numerator/denominator arguments into real polynomials in `z^-1`
+/// (LRM §4.5.12): a coefficient list is already one; a `(re, im)` root list is the product
+/// `∏(1 − r_k·z^-1)`, real when complex roots come in conjugate pairs, with a root at the
+/// origin contributing the factor `z` instead (the LRM's rule), counted separately.
+///
+/// # Errors
+///
+/// An empty list; a root product that is not real (a lone complex root); `d_0 = 0` (the
+/// difference equation cannot be solved for the current output — a denominator root product
+/// always has `d_0 = 1`, so this is only reachable from a coefficient list); or more origin
+/// roots in the numerator than in the denominator (an advance, which no causal filter can do).
+pub fn zi_realization(
+    num: &[f64],
+    num_is_roots: bool,
+    den: &[f64],
+    den_is_roots: bool,
+) -> Result<ZiRealization, String> {
+    fn poly(vals: &[f64], is_roots: bool, what: &str) -> Result<(Vec<f64>, usize), String> {
+        if vals.is_empty() {
+            return Err(format!("a zi_* {what} list is empty"));
+        }
+        if !is_roots {
+            return Ok((vals.to_vec(), 0));
+        }
+        let mut coeffs = vec![Cx(1.0, 0.0)];
+        let mut origin = 0usize;
+        for pair in vals.chunks_exact(2) {
+            let r = Cx(pair[0], pair[1]);
+            if r == Cx(0.0, 0.0) {
+                origin += 1;
+                continue;
+            }
+            // multiply by (1 − r·z^-1)
+            let mut next = vec![Cx(0.0, 0.0); coeffs.len() + 1];
+            for (i, c) in coeffs.iter().enumerate() {
+                next[i] = Cx(next[i].0 + c.0, next[i].1 + c.1);
+                let m = c.mul(r);
+                next[i + 1] = Cx(next[i + 1].0 - m.0, next[i + 1].1 - m.1);
+            }
+            coeffs = next;
+        }
+        let scale = coeffs
+            .iter()
+            .map(|c| c.0.abs())
+            .fold(0.0_f64, f64::max)
+            .max(f64::MIN_POSITIVE);
+        if coeffs.iter().any(|c| c.1.abs() > 1e-9 * scale) {
+            return Err(format!(
+                "zi_* {what} roots must come in complex-conjugate pairs: their expanded \
+                 polynomial is not real"
+            ));
+        }
+        Ok((coeffs.into_iter().map(|c| c.0).collect(), origin))
+    }
+    let (num, num_origin) = poly(
+        num,
+        num_is_roots,
+        if num_is_roots { "zero" } else { "numerator" },
+    )?;
+    let (den, den_origin) = poly(
+        den,
+        den_is_roots,
+        if den_is_roots { "pole" } else { "denominator" },
+    )?;
+    if den[0] == 0.0 {
+        return Err(
+            "a zi_* denominator has d_0 = 0: the difference equation cannot be solved for the \
+             current output sample"
+                .to_string(),
+        );
+    }
+    if !num.iter().chain(&den).all(|c| c.is_finite()) {
+        return Err("a zi_* coefficient is not finite".to_string());
+    }
+    if num_origin > den_origin {
+        return Err(format!(
+            "a zi_* filter with {} more zero(s) at the origin than poles at the origin is an \
+             advance of {} sample(s), which no causal filter can produce (LRM 4.5.12: a root \
+             at the origin is the factor z)",
+            num_origin - den_origin,
+            num_origin - den_origin
+        ));
+    }
+    Ok(ZiRealization {
+        num,
+        den,
+        delay: den_origin - num_origin,
+    })
+}
+
+/// A Z-domain filter's gain at `z = e^{jωT}` (AC), or at `z = 1` when `omega == 0` (its
+/// steady-state gain, the DC and noise answer). No zero-order-hold `sinc` factor: this is the
+/// discrete filter's own response to a sampled sinusoid, and above the Nyquist frequency
+/// `π/T` it aliases exactly as the mathematics does.
+pub fn zi_at(omega: f64, period: f64, r: &ZiRealization) -> Cx {
+    // z^-1 = e^{-jωT}
+    let zinv = Cx((omega * period).cos(), -(omega * period).sin());
+    fn poly(zinv: Cx, coeffs: &[f64]) -> Cx {
+        let mut acc = Cx(0.0, 0.0);
+        for &c in coeffs.iter().rev() {
+            acc = acc.mul(zinv);
+            acc.0 += c;
+        }
+        acc
+    }
+    let mut h = poly(zinv, &r.num).div(poly(zinv, &r.den));
+    for _ in 0..r.delay {
+        h = h.mul(zinv);
+    }
+    h
+}
+
 /// Evaluate a `laplace_*` transfer function `H(s)` at `s = j·omega`.
 ///
 /// `num`/`den` are already-evaluated real numbers: either polynomial coefficients in `s`
@@ -979,6 +1105,14 @@ fn eval_call(
         Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp => {
             return Err(unsupported(
                 "a laplace_* filter must be a top-level additive term of a contribution (its \
+                 gain is complex, so there is nowhere in an ordinary expression to put it)",
+            ))
+        }
+        // The Z-domain family too: complex gain in AC, and in transient a sampled history
+        // that only the contribution-level stamp (`crate::GeneratedModel::stamp_zi`) carries.
+        Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp => {
+            return Err(unsupported(
+                "a zi_* filter must be a top-level additive term of a contribution (its \
                  gain is complex, so there is nowhere in an ordinary expression to put it)",
             ))
         }

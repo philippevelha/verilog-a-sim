@@ -159,8 +159,9 @@ coverage" backlog lists what is open. The items with a known user: array-variabl
 `last_crossing`, `absdelta`, and compound event triggers mixing step and scheduled events;
 `I(<port>)` inside `case`/loops; vector ports in `I(<port>)`; an empty array literal `{}` as a
 `laplace_zp` zero list (found 2026-09-11 — parses as an error today; check the LRM's grammar
-for whether it is legal before implementing it); the `zi_*` Z-domain family (needs a clock
-concept; zero corpus demand).
+for whether it is legal before implementing it). (The `zi_*` Z-domain family, listed here on
+2026-09-11 as needing a clock, was implemented on 2026-09-12 — v0.9.20 — the clock being the
+filter's own `T` and a breakpoint per sample instant.)
 
 ## 9. Netlist and usability
 

@@ -19,6 +19,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.20 - 2026-09-12
+-------------------
+`zi_nd`/`zi_np`/`zi_zd`/`zi_zp` **implemented** (Road to 1.0 B.4 closed; LRM 4.5.12,
+docs/proposals/z-domain-filters.md). Interface alpha: four additive `Builtin`s, layout
+`[value, T, tt, t0, Const(num_len), num..., den...]` (docs/interfaces.md revision 2026-09-12b);
+Interface beta untouched. Three analyses, none a fold: DC and noise evaluate `H(1)`; AC
+evaluates `H(e^{jωT})` per point on the same complex-gain stamp `laplace_*` uses (no
+zero-order-hold factor, stated); transient runs the difference equation on the state channel
+-- a `StatefulKind::Zi` block per call site holding the sample clock, the held/previous
+outputs and the input/output histories -- sampling the input only at `t0 + k*T`, which the
+instance asks the integrator to land on through `EventSink::breakpoint` (va-transient now
+polls every instance for breakpoints, not only those with event sites). The output ramps from
+the previous sample to the new one over the transition time: omitted means the module's
+`default_transition`, zero means the negligible `tstep/1000` that `transition` uses. At the
+sampling evaluation the ramp has not started, so the output never depends on the current
+Newton iterate and its Jacobian contribution is exactly zero -- not an approximation.
+Roots follow the LRM (`(1 - r z^-1)`, origin = the factor `z`, hence a pole at the origin is
+one sample of delay and an uncancelled zero at the origin is refused as an advance); refused
+at build: a lone complex root, `d_0 = 0`, `T <= 0`, `tt < 0`.
+
+  **Gates, closed-form (QSPICE has no LRM Z-filter element):** a unity filter on a 1 V/us
+  ramp is the staircase `floor(t/T)` exactly, breakpoints landing on every instant; the
+  one-pole IIR `y_k = a y_{k-1} + (1-a) x_k` on a unit step holds `1 - a^(k+1)` after the
+  k-th sample to 1e-9; a conjugate pole pair (`zi_np`) against the recurrence
+  `y_k = x_k + y_{k-1} - 0.5 y_{k-2}` iterated in the test (overshoot to 2.5 where the old
+  fold gave a flat 2.0); AC against `(1-a)/(1 - a e^{-jωT})` across a decade and a half to
+  1e-9 in both parts; DC `H(1)`; the realization's root conventions and refusals. Frontend:
+  the lowered layout, `default_transition` substitution, argument-count and pair errors.
+
+  **Stated:** the run's t=0 point is the cold-start seed, where a DC source reads 0, so a
+  filter with `t0 = 0` samples that; set `t0` inside the first period to sample after the
+  sources are up (the test does). The `,,` null zero-argument is not parsed; write the
+  no-zeros case in `zi_nd`/`zi_np` form.
+
+  Measured: `cargo test --workspace` 786 passed / 0 failed (+3); clippy/fmt clean;
+  `cargo xtask validate` 28/28; corpus 112/132 (94/99) unchanged.
+
+
 0.9.19 - 2026-09-12
 -------------------
 `line`, and every diagnostic with it (Road to 1.0 B.5 closed). The preprocessor now keeps a
@@ -1032,13 +1070,10 @@ Ordered by what to do first.
       ~400 is minutes, ~800 is half an hour, beyond ~1 000 dense LU is impractical; a `.op`
       is fine to 800 nodes. Table and machine in docs/validation.md. Building the sparse path
       is post-1.0 (docs/future_development.md section 1).
-  [ ] Z-domain filters `zi_nd`/`zi_np`/`zi_zd`/`zi_zp` implemented, not refused (supervisor
-      decision 2026-09-12; refused since 0.9.17, silently folded before that). Design:
-      docs/proposals/z-domain-filters.md -- DC `H(1)`, AC `H(e^{jωT})` through the Laplace
-      stamp path, transient as a sampled difference equation on the state channel with
-      breakpoints at every sample instant and the LRM's transition ramp; four additive
-      `va_ir::Builtin`s (Interface α, section 6). About two days. Depends on B.5's
-      `default_transition`.
+  [x] Z-domain filters `zi_nd`/`zi_np`/`zi_zd`/`zi_zp` implemented, not refused -- 0.9.20,
+      as designed in docs/proposals/z-domain-filters.md: DC `H(1)`, AC `H(e^{jωT})`,
+      transient a sampled difference equation on the state channel with a breakpoint at
+      every sample instant. Gated against closed forms (no QSPICE Z-filter to compare to).
   [x] Compiler directives: every one of the LRM's 20 does what Clause 10 says, or says why it
       cannot (supervisor decision 2026-09-12: no "consumed with no effect"). 0.9.18:
       `default_discipline`, `default_transition`, `resetall`, `begin_keywords`/`end_keywords`

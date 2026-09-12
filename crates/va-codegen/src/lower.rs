@@ -338,6 +338,91 @@ pub struct LaplaceStates {
     pub order: usize,
 }
 
+/// One `zi_*` term of a contribution: a Z-domain (sampled-data) filter, LRM §4.5.12
+/// (`docs/proposals/z-domain-filters.md`). Split out of the contribution like a
+/// [`LaplaceTerm`] because its AC gain is complex; unlike one, its transient is a **sampled
+/// difference equation on the state channel**, not an ODE — the history lives in the slots
+/// [`StatefulKind::Zi`] allocates for the call site, and the input is sampled only at the
+/// instants `t0 + k·T` the instance asks the integrator to land on.
+#[derive(Clone, Debug)]
+pub struct ZiTerm {
+    /// `+1.0`/`−1.0` from the enclosing expression's sums and negations.
+    pub sign: f64,
+    /// The call's own `ExprId.0`, for its state slots.
+    pub expr_id: u32,
+    /// The sampled input.
+    pub input: ExprId,
+    /// Sample period `T` (seconds), transition time `tt`, and first-sample time `t0`.
+    pub period: ExprId,
+    pub tt: ExprId,
+    pub t0: ExprId,
+    /// Whether the numerator list is `(re, im)` roots rather than coefficients.
+    pub num_is_roots: bool,
+    /// Whether the denominator list is roots.
+    pub den_is_roots: bool,
+    /// Numerator entries (coefficients, lowest power of `z^-1` first, or flattened roots).
+    pub num: Vec<ExprId>,
+    /// Denominator entries.
+    pub den: Vec<ExprId>,
+}
+
+/// If `expr` is a bare `zi_*` call, unpack its flattened argument layout
+/// (`[value, T, tt, t0, Const(num_len), num…, den…]`) into a [`ZiTerm`].
+fn zi_term_shape(module: &Module, expr: ExprId, sign: f64) -> Result<Option<ZiTerm>, CodegenError> {
+    let (builtin, args) = match module.expr(expr) {
+        Expr::Call(b @ (Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp), args) => {
+            (*b, args)
+        }
+        _ => return Ok(None),
+    };
+    let (Some(&input), Some(&period), Some(&tt), Some(&t0), Some(&len_id)) = (
+        args.first(),
+        args.get(1),
+        args.get(2),
+        args.get(3),
+        args.get(4),
+    ) else {
+        return Err(unsupported("zi_* call is missing its sampling arguments"));
+    };
+    let Expr::Const(num_len) = module.expr(len_id) else {
+        return Err(unsupported(
+            "zi_* call's numerator-length separator must be a constant",
+        ));
+    };
+    let num_len = *num_len as usize;
+    let rest = &args[5..];
+    if num_len > rest.len() {
+        return Err(unsupported(
+            "zi_* numerator length exceeds its argument list",
+        ));
+    }
+    let (num, den) = rest.split_at(num_len);
+    if num.is_empty() || den.is_empty() {
+        return Err(unsupported(
+            "zi_* needs at least one numerator and one denominator entry",
+        ));
+    }
+    let num_is_roots = matches!(builtin, Builtin::ZiZd | Builtin::ZiZp);
+    let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
+    if (num_is_roots && num.len() % 2 != 0) || (den_is_roots && den.len() % 2 != 0) {
+        return Err(unsupported(
+            "a zi_* zero/pole list must be an even number of (re, im) values",
+        ));
+    }
+    Ok(Some(ZiTerm {
+        sign,
+        expr_id: expr.0,
+        input,
+        period,
+        tt,
+        t0,
+        num_is_roots,
+        den_is_roots,
+        num: num.to_vec(),
+        den: den.to_vec(),
+    }))
+}
+
 /// If `expr` is a bare `laplace_*` call, unpack its flattened argument layout
 /// (`[input, Const(num_len), num…, den…]`) into a [`LaplaceTerm`] shape.
 ///
@@ -420,6 +505,36 @@ fn laplace_term_shape(
     }))
 }
 
+/// Every `zi_*` term in `stmts`, in statement order.
+fn collect_zi_terms(stmts: &[LoweredStmt], out: &mut Vec<ZiTerm>) {
+    for s in stmts {
+        match s {
+            LoweredStmt::Contribute(c) => out.extend(c.zi.iter().cloned()),
+            LoweredStmt::If { then_, else_, .. } => {
+                collect_zi_terms(then_, out);
+                collect_zi_terms(else_, out);
+            }
+            LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => {
+                collect_zi_terms(body, out);
+            }
+            LoweredStmt::For {
+                init, step, body, ..
+            } => {
+                collect_zi_terms(init, out);
+                collect_zi_terms(step, out);
+                collect_zi_terms(body, out);
+            }
+            LoweredStmt::Case { arms, default, .. } => {
+                for arm in arms {
+                    collect_zi_terms(&arm.body, out);
+                }
+                collect_zi_terms(default, out);
+            }
+            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => {}
+        }
+    }
+}
+
 /// Give every rational `laplace_*` term in `stmts` its block of state unknowns, in statement
 /// order, starting at `*next_slot`; returns a copy of each term so
 /// `crate::GeneratedModel::stamp_laplace_states` can stamp the state rows after the statement
@@ -483,6 +598,9 @@ pub(crate) fn buried_frequency_domain_call(module: &Module, expr: ExprId) -> Opt
             Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp,
             _,
         ) => Some("a laplace_* filter"),
+        Expr::Call(Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp, _) => {
+            Some("a zi_* filter")
+        }
         // Same restriction, same reason: a complex gain has nowhere to live in a `Dual`. It is
         // named separately rather than folded into the laplace message because the diagnostic is
         // read by someone who wrote `absdelay` and needs to see that word -- being told about
@@ -526,6 +644,8 @@ pub struct Contribution {
     /// `laplace_*` transfer functions applied to their inputs. Empty for the overwhelming
     /// majority of contributions.
     pub laplace: Vec<LaplaceTerm>,
+    /// Z-domain filter terms — see [`ZiTerm`].
+    pub zi: Vec<ZiTerm>,
 }
 
 /// One branch that receives a potential (voltage) contribution somewhere in the module, and
@@ -794,6 +914,10 @@ pub struct Lowered {
     /// (`crate::GeneratedModel::stamp_laplace_states`); the term's *output* is stamped where
     /// its contribution runs.
     pub laplace_terms: Vec<LaplaceTerm>,
+    /// Every `zi_*` term in the analog block, in statement order, for the breakpoint schedule
+    /// (`crate::GeneratedModel::events`) and the ramp step bound; the term's own stamp happens
+    /// where its contribution runs.
+    pub zi_terms: Vec<ZiTerm>,
     /// One entry per `transition`/`slew` call site, in ascending [`ExprId`] order — see
     /// [`StatefulCall`]. Maps a call site to its base offset in Interface β's per-instance
     /// state channel (`va_abi::ModelState`).
@@ -815,6 +939,12 @@ pub enum StatefulKind {
     /// `transition(value, delay, rise, fall)` — 5 slots:
     /// `(t_prev, y_prev, target, rate, t_start)`.
     Transition,
+    /// A `zi_*` filter — `4 + inputs + outputs` slots: `(t_last_sample, y_held, y_prev,
+    /// t_ramp_start, x_{k-1} … x_{k-inputs}, y_{k-1} … y_{k-outputs})`, where `inputs` is the
+    /// numerator's length minus one plus any origin-root delay and `outputs` the denominator's
+    /// length minus one — the history the difference equation needs, sized from the argument
+    /// counts at lowering (`crate::GeneratedModel::stamp_zi`).
+    Zi { inputs: usize, outputs: usize },
     /// `ddt(q)` — 2 slots: `(q_prev, rate_prev)`, the charge and its rate as of the last
     /// accepted timepoint.
     ///
@@ -832,6 +962,7 @@ impl StatefulKind {
         match self {
             StatefulKind::Slew => 2,
             StatefulKind::Transition => 5,
+            StatefulKind::Zi { inputs, outputs } => 4 + inputs + outputs,
             // `(q_prev, rate_prev, q_prev2)`. The third slot exists for Gear/BDF2, whose
             // reconstruction is a three-point difference on the charge rather than a one-step
             // recursion on the rate (§6 change, 2026-09-01 — `AnalysisCtx::ddt_prev2_weight`).
@@ -874,7 +1005,7 @@ pub struct StatefulCall {
 /// Whether any lowered contribution anywhere in `stmts` carries a [`LaplaceTerm`].
 fn stmts_contain_laplace(stmts: &[LoweredStmt]) -> bool {
     stmts.iter().any(|s| match s {
-        LoweredStmt::Contribute(c) => !c.laplace.is_empty(),
+        LoweredStmt::Contribute(c) => !c.laplace.is_empty() || !c.zi.is_empty(),
         LoweredStmt::If { then_, else_, .. } => {
             stmts_contain_laplace(then_) || stmts_contain_laplace(else_)
         }
@@ -903,6 +1034,37 @@ fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
             Expr::Call(Builtin::Slew, _) => StatefulKind::Slew,
             Expr::Call(Builtin::Transition, _) => StatefulKind::Transition,
             Expr::Call(Builtin::Ddt, _) => StatefulKind::Ddt,
+            Expr::Call(
+                b @ (Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp),
+                args,
+            ) => {
+                // History depth from the argument counts (§ `ZiTerm`): a root list of `p`
+                // pairs is a polynomial of degree `p`; a coefficient list of `n` entries has
+                // degree `n − 1`. Origin roots shift the numerator by up to the pair count,
+                // so the input history is sized for the worst case rather than re-derived.
+                let num_is_roots = matches!(b, Builtin::ZiZd | Builtin::ZiZp);
+                let den_is_roots = matches!(b, Builtin::ZiNp | Builtin::ZiZp);
+                let num_len = match args.get(4).map(|&i| module.expr(i)) {
+                    Some(Expr::Const(n)) => *n as usize,
+                    _ => 0,
+                };
+                let den_len = args.len().saturating_sub(5 + num_len);
+                let num_deg = if num_is_roots {
+                    num_len / 2
+                } else {
+                    num_len.saturating_sub(1)
+                };
+                let den_deg = if den_is_roots {
+                    den_len / 2
+                } else {
+                    den_len.saturating_sub(1)
+                };
+                let extra_delay = if den_is_roots { den_len / 2 } else { 0 };
+                StatefulKind::Zi {
+                    inputs: num_deg + extra_delay,
+                    outputs: den_deg,
+                }
+            }
             _ => continue,
         };
         calls.push(StatefulCall {
@@ -1096,6 +1258,8 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let has_laplace = stmts_contain_laplace(&stmts);
     let mut laplace_terms = Vec::new();
     allocate_laplace_states(&mut stmts, &mut next_slot, &mut laplace_terms);
+    let mut zi_terms = Vec::new();
+    collect_zi_terms(&stmts, &mut zi_terms);
 
     Ok(Lowered {
         n_unknowns: next_slot,
@@ -1106,6 +1270,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         flow_current_accumulators,
         node_kcl_probes,
         laplace_terms,
+        zi_terms,
         stateful_calls,
         state_len,
         has_laplace,
@@ -1407,6 +1572,7 @@ fn lower_stmt(
             let mut noise = Vec::new();
             let mut ac_stim = Vec::new();
             let mut laplace = Vec::new();
+            let mut zi = Vec::new();
             for term in terms {
                 // A bare variable read that was last assigned a `ddt` shape substitutes to that
                 // shape here, so `real dqdt; dqdt = ddt(q); I <+ dqdt + …;` folds into the charge
@@ -1471,6 +1637,10 @@ fn lower_stmt(
                     laplace.push(lt);
                     continue;
                 }
+                if let Some(zt) = zi_term_shape(module, shape_expr, term.sign)? {
+                    zi.push(zt);
+                    continue;
+                }
                 match charge_term_shape(module, shape_expr, param_only)? {
                     // One term can yield several charge terms: a scaled parenthesised sum
                     // distributes over its `ddt`s (see `charge_term_shape`). Each shape's own
@@ -1501,6 +1671,7 @@ fn lower_stmt(
                 noise,
                 ac_stim,
                 laplace,
+                zi,
             }));
             Ok(())
         }

@@ -905,3 +905,13 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > a module; it is a property of the run, and the user's own step request is the only honest
 > scale for it. `va-codegen` uses `tstep/1000`. Found while implementing
 > `docs/proposals/directives.md`.
+
+> **Revision (§6 change, 2026-09-12b):** Interface α gained four additive `Builtin` variants,
+> `ZiNd`, `ZiNp`, `ZiZd`, `ZiZp` — the Z-domain filters of LRM §4.5.12
+> (`docs/proposals/z-domain-filters.md`). Argument layout, flattened:
+> `[value, T, tt, t0, Const(num_len), num…, den…]`, the `Const` separator being the
+> `LaplaceNd` trick; an omitted `tt` is the module's `` `default_transition `` or `0.0`, an
+> omitted `t0` is `0.0`. Precedent: `NoiseTable`, `Absdelay`. Interface β is **not** touched:
+> the transient realization rides the existing state channel (one `StatefulKind::Zi` block per
+> call site) and asks for its sample instants through the existing `EventSink::breakpoint`,
+> which `va-transient` now polls for every instance rather than only those with event sites.

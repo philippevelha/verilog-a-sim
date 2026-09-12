@@ -64,9 +64,10 @@ pub enum Analysis {
 /// Deliberately not a list of everything unimplemented: these are the constructs that
 /// produce a *plausible number that is wrong* rather than an error. `transition` and
 /// `slew` are absent because they are genuinely evaluated against Interface beta's state
-/// channel; the Z-domain family is absent because elaboration refuses it outright (a
-/// `Refusal`, since v0.9.16+2 -- before that this comment was wrong: `zi_*` folded to its
-/// z=1 gain and sat in no list at all, found by the pre-1.0 audit of `token-reference.md`). The `laplace_*` family left this table on 2026-09-11 (v0.9.16): a
+/// channel; the Z-domain family is absent because it is **implemented** (v0.9.20: a sampled
+/// difference equation on the state channel -- before that it was refused, and before
+/// v0.9.17 it folded to its z=1 gain and sat in no list at all, which the pre-1.0 audit of
+/// `token-reference.md` found). The `laplace_*` family left this table on 2026-09-11 (v0.9.16): a
 /// rational filter is now integrated as an ODE on its own state unknowns
 /// (`va_codegen::lower::LaplaceStates`), so a transient run computes the filter rather than
 /// its DC gain. `absdelay` remains: a pure delay is not an ODE, and its time-domain form
@@ -3836,6 +3837,113 @@ X1 out in gnd tr
             value_at(&abrupt, 150.5e-9) > 0.99,
             "no directive: an abrupt step, already at 1"
         );
+    }
+
+    /// `zi_*` in transient (LRM 4.5.12; docs/proposals/z-domain-filters.md), through the real
+    /// pipeline, against closed forms:
+    ///
+    /// 1. A unity filter is a sample-and-hold: on a 1 V/µs ramp with `T = 1 µs` the output is
+    ///    the staircase `floor(t/T)` volts, exactly, because the breakpoints land on every
+    ///    sample instant.
+    /// 2. The one-pole IIR `y_k = a·y_{k−1} + (1−a)·x_k` on a unit step, first sample at
+    ///    `t0 = 0.5 µs` (the run's `t = 0` point is the cold-start seed, where a DC source
+    ///    still reads 0): the held value after the k-th sample is `1 − a^(k+1)`.
+    /// 3. A `zi_np` conjugate pole pair on the same step, against the difference equation
+    ///    iterated here — the root expansion and the two-deep output history.
+    ///
+    /// The fold this construct had until v0.9.17 gave a flat `H(1)·x` for all three.
+    #[test]
+    fn zi_filters_follow_their_difference_equations_in_transient() {
+        let run = |model: &str, deck: &str| -> Vec<(f64, f64)> {
+            let design = compile_model(model, "zi");
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let wf =
+                solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+            let out = net.node_order.iter().position(|n| n == "out").unwrap();
+            wf.t.iter()
+                .zip(&wf.x)
+                .map(|(&t, row)| (t, row[out]))
+                .collect()
+        };
+        // The held value just before `t`: the last point at least one negligible ramp
+        // (tstep/1000) after the previous sample instant.
+        let held_before = |pts: &[(f64, f64)], t: f64| -> f64 {
+            pts.iter()
+                .rfind(|(pt, _)| *pt <= t - 1e-12)
+                .map(|(_, v)| *v)
+                .unwrap()
+        };
+
+        // 1. sample-and-hold
+        let pts = run(
+            "`include \"disciplines.vams\"\nmodule sh(out, in, ref); inout out, in, ref; electrical out, in, ref;\n  analog V(out, ref) <+ zi_nd(V(in, ref), {1}, {1}, 1u);\nendmodule\n",
+            "V1 in gnd PULSE(0 10 0 10u 1n 100 200)\nX1 out in gnd sh\n.tran 50n 4.5u\n.end\n",
+        );
+        for k in 1..=4 {
+            let y = held_before(&pts, (k as f64 + 1.0) * 1e-6);
+            assert!((y - k as f64).abs() < 2e-3, "held after sample {k}: {y}");
+        }
+
+        // 2. one-pole IIR, t0 = 0.5 µs
+        let a = 0.8_f64;
+        let pts = run(
+            "`include \"disciplines.vams\"\nmodule iir(out, in, ref); inout out, in, ref; electrical out, in, ref;\n  parameter real a = 0.8;\n  analog V(out, ref) <+ zi_nd(V(in, ref), {1-a}, {1, -a}, 1u, 0, 0.5u);\nendmodule\n",
+            "V1 in gnd DC 1\nX1 out in gnd iir\n.tran 50n 8.5u\n.end\n",
+        );
+        for k in 0..8 {
+            let y = held_before(&pts, 0.5e-6 + (k as f64 + 1.0) * 1e-6);
+            let exact = 1.0 - a.powi(k + 1);
+            assert!((y - exact).abs() < 1e-9, "sample {k}: {y} vs {exact}");
+        }
+
+        // 3. zi_np with poles 0.5 ± 0.5j: H(z) = 1 / (1 − z^-1 + 0.5 z^-2), so
+        //    y_k = x_k + y_{k−1} − 0.5·y_{k−2}.
+        let pts = run(
+            "`include \"disciplines.vams\"\nmodule zp(out, in, ref); inout out, in, ref; electrical out, in, ref;\n  analog V(out, ref) <+ zi_np(V(in, ref), {1}, {0.5, 0.5, 0.5, -0.5}, 1u, 0, 0.5u);\nendmodule\n",
+            "V1 in gnd DC 1\nX1 out in gnd zp\n.tran 50n 8.5u\n.end\n",
+        );
+        let (mut y1, mut y2) = (0.0_f64, 0.0_f64);
+        for k in 0..8 {
+            let yk = 1.0 + y1 - 0.5 * y2;
+            let y = held_before(&pts, 0.5e-6 + (k as f64 + 1.0) * 1e-6);
+            assert!((y - yk).abs() < 1e-9, "sample {k}: {y} vs {yk}");
+            y2 = y1;
+            y1 = yk;
+        }
+        // A fold to H(1) = 2 would have given a flat 2.0; the recurrence overshoots to 2.5.
+        assert!((y1 - 2.0).abs() > 1e-3 || (y2 - 2.0).abs() > 1e-3);
+    }
+
+    /// `zi_*` in AC: `|H(e^{jωT})|` and its phase for the one-pole IIR against the closed
+    /// form `(1−a)/(1 − a·e^{−jωT})` across a decade and a half below the Nyquist frequency —
+    /// the discrete filter's own response, no zero-order-hold factor. And DC: `H(1)`.
+    #[test]
+    fn zi_filter_ac_response_is_h_of_e_to_the_j_omega_t() {
+        let src = "`include \"disciplines.vams\"\nmodule iir(out, in, ref); inout out, in, ref; electrical out, in, ref;\n  parameter real a = 0.8;\n  analog V(out, ref) <+ zi_nd(V(in, ref), {1-a}, {1, -a}, 1u);\nendmodule\n";
+        let design = compile_model(src, "iir");
+        let net = va_netlist::parser::parse(
+            "V1 in gnd DC 0 AC 1\nX1 out in gnd iir\n.ac dec 5 1k 400k\n.end\n",
+        )
+        .unwrap();
+        let resp = solve_ac(&net, &design.modules).expect("solves");
+        let out = net.node_order.iter().position(|n| n == "out").unwrap();
+        let (a, period) = (0.8_f64, 1e-6_f64);
+        for (i, &f) in resp.f.iter().enumerate() {
+            let (re, im) = resp.x[i][out];
+            let wt = 2.0 * std::f64::consts::PI * f * period;
+            // (1−a) / (1 − a e^{−jwT})
+            let (dr, di) = (1.0 - a * wt.cos(), a * wt.sin());
+            let dd = dr * dr + di * di;
+            let (er, ei) = ((1.0 - a) * dr / dd, -(1.0 - a) * di / dd);
+            assert!(
+                (re - er).abs() < 1e-9 && (im - ei).abs() < 1e-9,
+                "f={f}: ({re},{im}) vs ({er},{ei})"
+            );
+        }
+        let net =
+            va_netlist::parser::parse("V1 in gnd DC 1\nX1 out in gnd iir\n.op\n.end\n").unwrap();
+        let op = solve_dc(&net, &design.modules).expect("solves");
+        assert!((op.x[out] - 1.0).abs() < 1e-12, "H(1) = 1: {}", op.x[out]);
     }
 
     /// A `laplace_np` filter with a complex-conjugate pole pair, in transient, against the

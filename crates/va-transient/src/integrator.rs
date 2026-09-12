@@ -318,10 +318,8 @@ fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -
     let mut timers = Vec::new();
     for (i, inst) in instances.iter().enumerate() {
         let n = inst.event_count();
-        if n == 0 {
-            values.push(Vec::new());
-            continue;
-        }
+        // Polled even with no event sites: an instance may still ask for a breakpoint with
+        // no event attached — a `zi_*` filter's next sample instant (2026-09-12).
         let mut sink = va_abi::events::RecordingEventSink::new();
         inst.events(x, ctx, &mut sink);
         // Indexed by slot, so a model that reports out of order (or skips one) still lines up

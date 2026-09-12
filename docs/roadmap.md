@@ -4445,6 +4445,30 @@ vocabulary is unreserved, `analog` and `electrical` included, so a keyword regio
 hold a *structural* module. That is not a limitation of this implementation; it is what the
 directive means, and the LRM's `sin`-as-a-port example is a digital module for that reason.
 
+## `zi_*` implemented: a sampled system is not an ODE (2026-09-12, v0.9.20)
+
+The last of the three "folds to X" families is real. The design difference from `laplace_*`
+(v0.9.16) is the whole point: a Z-domain filter is a *sampled* system, and no set of ODE rows
+expresses "the input is read only at `t0 + kT`". So the transient lives on the state channel —
+the `transition`/`slew` mechanism — with the sample clock, the held and previous outputs and
+the input/output histories in one `StatefulKind::Zi` block per call site, and the instance asks
+the integrator for a breakpoint at its next sample instant (pure arithmetic on `(t0, T, now)`,
+the way `timer` stays stateless about its own schedule). AC evaluates `H(e^{jωT})`; DC and
+noise evaluate `H(1)`. Nothing new in Interface β; four additive builtins in α.
+
+Two things worth recording. The **Jacobian is exactly zero**, not neglected: the output ramps
+from the previous sample to the new one, so at the sampling evaluation — the only moment the
+current iterate is read — the ramp fraction is zero and the output is still the old sample;
+by the next evaluation the new one is committed state. And the **cold-start seed is what a
+`t0 = 0` sample sees**: the run's first point is the zero vector, where even a DC source reads
+0, the same initial-step semantics `transition` latches under. The gate sets `t0` inside the
+first period. That seed convention is old and is now visible in one more place; it is not
+this change's to fix.
+
+**Not gated against QSPICE:** it has no element implementing the LRM's Z-filter definition.
+The closed forms are the oracle — a staircase, `1 − aᵏ`, an iterated recurrence, and
+`H(e^{jωT})` — as for `absdelay` in AC.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

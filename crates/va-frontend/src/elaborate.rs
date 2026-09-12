@@ -2157,36 +2157,70 @@ impl Elaborator<'_> {
                 ids.extend(den_ids);
                 Expr::Call(builtin, ids)
             }
-            // `zi_nd(value, num, den, T[, tol[, t0]])` / `zi_np(value, num, pole, T[, ...])` /
+            // `zi_nd(value, num, den, T[, tt[, t0]])` / `zi_np(value, num, pole, T[, ...])` /
             // `zi_zd(value, zero, den, T[, ...])` / `zi_zp(value, zero, pole, T[, ...])` (LRM
-            // §4.5.12) — the Z-domain (discrete-time) counterparts of the four Laplace forms
-            // above. **Refused** (2026-09-11, v0.9.16+2). Until then this arm folded the filter
-            // to its steady-state (z=1) gain, which is exact at DC and a plausible wrong number
-            // in AC and transient — and it sat in no refusal list, while `va-cli`'s transient
-            // refusal table claimed elaboration rejected it. A Z-domain filter needs a sampling
-            // clock this engine has no notion of; folding it is the silent-approximation shape
-            // CLAUDE.md §5 names. Zero uses in the corpus, so the refusal costs nothing today
-            // and the DC-only fold it replaces bought nothing either.
+            // §4.5.12) — the Z-domain counterparts of the four Laplace forms, lowered to
+            // `Builtin::Zi*` with the layout `[value, T, tt, t0, Const(num_len), num…, den…]`
+            // (2026-09-12, `docs/proposals/z-domain-filters.md`). The coefficient/root lists
+            // are read as array literals exactly as the Laplace forms read theirs. An omitted
+            // transition time is the module's `default_transition`, else `0.0` — which codegen
+            // treats as "negligible but non-zero", the same rule `transition` follows.
             ExprAst::Call { name, args }
                 if matches!(name.as_str(), "zi_nd" | "zi_np" | "zi_zd" | "zi_zp") =>
             {
-                let _ = args;
-                return Err(FrontendError::Refused(
-                    crate::Refusal::new(
-                        format!("`{name}(...)`, a Z-domain (sampled-data) filter"),
-                        "this engine has no sampling clock, so the filter cannot be evaluated \
-                         as written; folding it to its z=1 gain - which is what happened until \
-                         v0.9.16+2 - is exact at DC and a plausible wrong waveform in AC and \
-                         transient, which is worse than an error",
-                    )
-                    .instead(
-                        "a continuous-time filter with the same passband as a `laplace_*` \
-                         form, which is integrated exactly in transient and evaluated exactly \
-                         in AC; a genuinely sampled system has no honest continuous-time \
-                         stand-in here",
-                    )
-                    .tracking("docs/future_development.md section 8 (the `zi_*` family)"),
-                ));
+                let (value, num, den, period) = match (
+                    args.first(),
+                    args.get(1),
+                    args.get(2),
+                    args.get(3),
+                    args.len(),
+                ) {
+                    (Some(&v), Some(&n), Some(&d), Some(&t), 4..=6) => (v, n, d, t),
+                    _ => {
+                        return Err(elab(format!(
+                            "`{name}` takes four to six arguments: value, then a \
+                                 numerator/zero argument, then a denominator/pole argument, the \
+                                 sample period T, and optionally a transition time and start \
+                                 time, e.g. `{name}(sig, {{1}}, {{1, -0.5}}, T)`"
+                        )))
+                    }
+                };
+                let builtin = match name.as_str() {
+                    "zi_nd" => Builtin::ZiNd,
+                    "zi_np" => Builtin::ZiNp,
+                    "zi_zd" => Builtin::ZiZd,
+                    _ => Builtin::ZiZp,
+                };
+                let num_is_roots = matches!(builtin, Builtin::ZiZd | Builtin::ZiZp);
+                let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
+                let value_id = self.lower_expr(value)?;
+                let period_id = self.lower_expr(period)?;
+                let tt_id = match (args.get(4), self.ast.settings.default_transition) {
+                    (Some(&e), _) => self.lower_expr(e)?,
+                    (None, Some(t)) => self.out.push_expr(Expr::Const(t)),
+                    (None, None) => self.out.push_expr(Expr::Const(0.0)),
+                };
+                let t0_id = match args.get(5) {
+                    Some(&e) => self.lower_expr(e)?,
+                    None => self.out.push_expr(Expr::Const(0.0)),
+                };
+                let num_ids =
+                    self.array_lit_exprs(num, if num_is_roots { "zero" } else { "numerator" })?;
+                let den_ids =
+                    self.array_lit_exprs(den, if den_is_roots { "pole" } else { "denominator" })?;
+                if (num_is_roots && num_ids.len() % 2 != 0)
+                    || (den_is_roots && den_ids.len() % 2 != 0)
+                {
+                    return Err(elab(format!(
+                        "`{name}`: a zero/pole array is a list of (re, im) pairs and needs an \
+                         even number of entries"
+                    )));
+                }
+                let mut flat = vec![value_id, period_id, tt_id, t0_id];
+                flat.push(self.out.push_expr(Expr::Const(num_ids.len() as f64)));
+                flat.extend(num_ids);
+                flat.extend(den_ids);
+                Expr::Call(builtin, flat)
             }
             // An array literal reaching here means it appeared somewhere other than a Laplace/
             // Z-domain filter's numerator/zero/denominator/pole argument (those cases read it
@@ -5193,36 +5227,65 @@ mod tests {
         assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
     }
 
-    /// A Z-domain filter is refused, as a `Refusal` naming the construct and what to write
-    /// instead — not folded to its z=1 gain, which is what this arm did until v0.9.16+2 (five
-    /// tests here used to pin the fold's arithmetic; the pre-1.0 audit of token-reference.md
-    /// found the fold sat in no refusal list while `va-cli` believed elaboration rejected it).
+    /// A Z-domain filter lowers to its builtin with the flattened `[value, T, tt, t0,
+    /// Const(num_len), num…, den…]` layout; an omitted transition time takes the module's
+    /// `default_transition`, an omitted start time is 0, and the argument count is checked.
     #[test]
-    fn zi_filters_are_refused_not_folded() {
-        for call in [
-            "zi_nd(V(a, b), {1, 2}, {1, 1}, 1e-9)",
-            "zi_zp(V(a, b), {0.5, 0.0}, {0.25, 0.0}, 1e-9)",
-            "zi_np(V(a, b), {1}, {0.25, 0.0}, 1e-9)",
-            "zi_zd(V(a, b), {0.5, 0.0}, {1}, 1e-9)",
-        ] {
-            let src =
-                format!("module t(a, b); electrical a, b; analog I(a, b) <+ {call}; endmodule");
-            let toks = lex(&src).expect("lex");
-            let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
-            match elaborate(&ast) {
-                Err(FrontendError::Refused(r)) => {
-                    let name = call.split('(').next().unwrap();
-                    assert!(r.what.contains(name), "names the construct: {}", r.what);
-                    assert!(r.why.contains("sampling clock"), "says why: {}", r.why);
-                    assert!(
-                        r.instead.as_deref().unwrap_or("").contains("laplace_"),
-                        "says what to write instead: {:?}",
-                        r.instead
-                    );
-                }
-                other => panic!("expected a Refusal for {call}, got {other:?}"),
-            }
-        }
+    fn zi_filters_lower_with_their_sampling_arguments() {
+        let src = "`default_transition 3n\nmodule t(a, b); electrical a, b; parameter real T = 1e-6; \
+                   analog I(a, b) <+ zi_nd(V(a, b), {0.2}, {1, -0.8}, T) + zi_zp(V(a, b), {0.5, 0.0}, {0.25, 0.0}, T, 1n, 2u); endmodule";
+        // Through the preprocessor, so the `default_transition` directive is honoured.
+        let m = crate::compile(src).expect("compiles").modules.remove(0);
+        let calls: Vec<(Builtin, Vec<f64>)> = m
+            .exprs
+            .iter()
+            .filter_map(|e| match e {
+                Expr::Call(b @ (Builtin::ZiNd | Builtin::ZiZp), args) => Some((
+                    *b,
+                    args.iter()
+                        .skip(1)
+                        .map(|&a| match m.expr(a) {
+                            Expr::Const(v) => *v,
+                            Expr::Param(_) => -1.0, // T is the parameter
+                            Expr::Unary(va_ir::UnOp::Neg, inner) => match m.expr(*inner) {
+                                Expr::Const(v) => -*v,
+                                other => panic!("unexpected {other:?}"),
+                            },
+                            other => panic!("unexpected {other:?}"),
+                        })
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2);
+        let (b, a) = &calls[0];
+        assert_eq!(*b, Builtin::ZiNd);
+        // [T(param), tt = default_transition, t0 = 0, num_len = 1, 0.2, 1, -0.8]
+        assert_eq!(a[0], -1.0);
+        assert!(
+            (a[1] - 3e-9).abs() < 1e-22,
+            "tt = default_transition: {}",
+            a[1]
+        );
+        assert_eq!(&a[2..], &[0.0, 1.0, 0.2, 1.0, -0.8]);
+        let (b, a) = &calls[1];
+        assert_eq!(*b, Builtin::ZiZp);
+        assert!(
+            (a[1] - 1e-9).abs() < 1e-22 && (a[2] - 2e-6).abs() < 1e-18,
+            "{a:?}"
+        );
+        assert_eq!(&a[3..], &[2.0, 0.5, 0.0, 0.25, 0.0]);
+
+        // Argument-count and pair errors are ordinary elaboration errors.
+        let bad = "module t(a, b); electrical a, b; analog I(a, b) <+ zi_nd(V(a, b), {1}, {1}); endmodule";
+        let toks = lex(bad).expect("lex");
+        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
+        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
+        let bad = "module t(a, b); electrical a, b; analog I(a, b) <+ zi_zp(V(a, b), {0.5}, {0.25, 0.0}, 1e-6); endmodule";
+        let toks = lex(bad).expect("lex");
+        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
+        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
     }
 
     #[test]
