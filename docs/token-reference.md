@@ -51,7 +51,8 @@ broke for no benefit (see §1.5's `Vt`/`Temperature` entry). Net effect: 169 + 1
 Other gaps this document surfaced and that have since been fixed: `transition` (§1.5) used to
 parse as an ordinary call expression but fail at elaboration with "unknown function" — confirmed
 live at the time by `va-cli check` on `external/verilogaLib-master/comparator_dynamic.va` — now
-folds to its `value` argument (the only sound answer under v0's DC-only model). Access functions
+folded to its `value` argument (the only sound answer when DC was the only analysis; since
+superseded by the state-channel implementation, §1.5 `Transition`/`Slew`). Access functions
 were limited to `V`/`I`; `Temp`/`Pwr` (the thermal discipline's standard names from
 `disciplines.vams`, §2.17) are now recognized too, fixing a parse failure in a dozen real corpus
 models that contribute to a `thermal` branch. `%` (modulus) was entirely unlexed; it's now
@@ -144,7 +145,9 @@ class of lexemes.
 
 - **Purpose and Static Nature**: A system function/task name with the leading `$` stripped.
   Split roughly evenly between elaboration-time (`$vt`, `$temperature`) and would-be
-  simulation-time (`$strobe`, which is a documented no-op under v0's DC-only model).
+  simulation-time (`$strobe`, `$display`, `$finish`, … — parsed as `Stmt::Task` and lowered to
+  an empty block: they have no effect on a solve in any analysis, which is a stated limitation,
+  not an approximation — nothing numerical depends on them).
 - **Declaration and Assignment**: Never declared — the `$`-prefixed namespace is entirely
   predefined by the LRM (Clause 9, "System tasks and functions").
 - **Expressions and Evaluation**: `$vt`/`$vt(T)`, `$temperature` and — **since 2026-08-06
@@ -167,9 +170,11 @@ class of lexemes.
   (`I(p,n) <+ K*$abstime`) against a QSPICE behavioral source (`B1 out 0 I=1*time`) computing
   the same ramp from an independent description — error `4.382e-17`. It discriminates:
   restoring the old fold moves it to `5.838e-1`. See `docs/validation.md` for the deck's
-  resistive-only design and the `UIC`-shifts-`time` gotcha behind it. `$mfactor` (the instance multiplicity/`m=` factor, implemented v0.9.11: a deck's `m=`/`mult=`, with LRM §6.3.6's automatic scaling applied by `va_abi::Multiplied`)
-  folds to `1.0`, its LRM default, since v0 has no netlist-driven instance parameters to override
-  it; `$param_given(name)` **is answered, not folded** (changed 2026-09-06) — `name` is
+  resistive-only design and the `UIC`-shifts-`time` gotcha behind it. `$mfactor` (the instance
+  multiplicity/`m=` factor) **is answered, not folded** (v0.9.11): a deck's `m=`/`mult=` reaches
+  the instance as `va_abi::Multiplied`, which applies LRM §6.3.6's automatic scaling to the
+  flows and reports the factor through `Builtin::Mfactor`; with no `m=` on the deck line it
+  reads `1.0`, the LRM default; `$param_given(name)` **is answered, not folded** (changed 2026-09-06) — `name` is
   read directly off the AST as a bare parameter-name reference (validated against the module's
   own declarations, never lowered as a value expression), then lowered to `va_ir::Expr::
   ParamGiven`, which the *instantiation boundary* resolves against `Module::given_params`.
@@ -226,8 +231,17 @@ class of lexemes.
 - **Purpose and Static Nature**: A preprocessor directive name (leading `` ` `` stripped),
   purely a text-level, elaboration-time (in fact pre-elaboration) construct — it never survives
   into the IR.
-- **Declaration and Assignment**: `` `include "file" ``, `` `define ``, `` `ifdef ``/`` `else ``/
-  `` `endif ``, `` `default_discipline `` (see `crate::preprocess`).
+- **Declaration and Assignment**: what `crate::preprocess` handles, in three groups (audited
+  2026-09-12 against the `match` in `Preprocessor::process_line`): **expanded** — `` `define ``
+  (object- and function-like), `` `undef ``, `` `include "file" ``; **evaluated** —
+  `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `endif `` (against the defined-macro
+  set, nesting allowed); **recognised and consumed with no effect** — `` `resetall ``,
+  `` `timescale ``, `` `begin_keywords ``/`` `end_keywords ``, `` `default_discipline ``,
+  `` `default_nodeType ``, `` `default_transition ``, `` `line ``, `` `pragma `` (each is
+  digital-side or an instruction to a simulator front end this project does not have; dropping
+  them is the LRM-conformant behaviour for a tool that does not implement the feature, and none
+  changes what a Verilog-A analog block means). Any other backtick-word is a macro usage and
+  goes to expansion; an undefined one is an error.
 - **Expressions and Evaluation**: Not an expression construct at all; handled by a dedicated
   preprocessing pass before lexing "real" tokens (macro objects/functions expand recursively,
   conditionals are evaluated against the defined-macro set). An unresolved `` `include `` is
@@ -673,9 +687,10 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   const-evaluated and interns one `VarId` per index, named `"name[k]"`, exactly mirroring how a
   vector net expands (§2.18). An inline initializer lowers to a `Stmt::Assign`, prepended to the
   analog block (module-level) or emitted in place (block-local) — the LRM requires it to run
-  before the first analog block executes, and this project has no simulation-phase distinction
-  yet, so "prepended/in place, in source order" is the same DC-only approximation `@(initial_
-  step)` already uses (§ event control). `real(x)` casts fold to `x` unchanged (every value here
+  before the first analog block executes; here it runs at *every* evaluation instead, which is
+  identical for the constant initializers the LRM has in mind and differs only for an
+  initializer that reads a probe (a stated limitation — `@(initial_step)` itself is a real
+  first-step event now, § event control, and is the construct to use for a one-time setup). `real(x)` casts fold to `x` unchanged (every value here
   is already `f64` — a complete no-op); `integer(x)` rounds to nearest (`Builtin::Round`),
   matching Verilog's real-to-integer *assignment* conversion rule — not `int()`'s
   truncate-toward-zero.
@@ -1280,63 +1295,69 @@ including the ones with no implemented behavior at all.
 
 ### `Transition` / `Slew`
 
-- **Purpose and Static Nature**: Genuinely time-domain analog operators in full Verilog-AMS —
+- **Purpose and Static Nature**: Genuinely time-domain analog operators (LRM §4.5.9/§4.5.10):
   `transition` smooths a stepped/discontinuous `value` with finite delay/rise/fall times,
-  `slew` rate-limits `value`'s rate of change; both require tracking *when*/*how fast* `value`
-  last changed. v0 is DC-only (no time axis to delay/slew through), and both filters settle to
-  their input in steady state (there is no rate-of-change or delay history at a fixed operating
-  point), so both fold transparently to their `value` argument at elaboration
-  (`Elaborator::lower_expr`'s dedicated arm, checked before the generic call path). `transition`
-  was previously unimplemented: it parsed as an ordinary call but failed at elaboration with
-  "unknown function `transition`" — confirmed live by `va-cli check` on
-  `external/verilogaLib-master/comparator_dynamic.va`, which now passes the frontend end to end.
-  `slew` got the identical fix in the same pass, by inspection rather than by hitting it in the
-  corpus.
+  `slew` rate-limits `value`'s rate of change. **Both are implemented on Interface β's
+  per-instance state channel** (Tier B, 2026-08-07; `va_abi::state`,
+  `docs/proposals/model-state.md`) — a simulation-time construct, evaluated at every accepted
+  timepoint against the value the previous accepted point committed. In a static solve (DC, AC,
+  noise) both settle to their input, which is the exact steady-state answer, not a fold.
 - **Declaration and Assignment**: Called as `transition(value, delay[, rise_time[,
-  fall_time]])` / `slew(value, pos_rate[, neg_rate])` — `value` is required, the rest optional.
-- **Expressions and Evaluation**: Only `value` is lowered and returned as-is (the same `ExprId`
-  it would have produced if written bare, with no wrapper node at all); the remaining arguments
-  are read from the AST only to check `value` is present, never evaluated — an empty argument
-  list is a hard error.
+  fall_time]])` / `slew(value, pos_rate[, neg_rate])` — `value` is required, the rest optional
+  with the LRM defaults.
+- **Expressions and Evaluation**: Lowered to `Builtin::Transition`/`Builtin::Slew` with every
+  argument kept; `va-codegen` gives each call site its own state slots keyed by `ExprId`, so
+  the same function written twice keeps two independent histories. `slew` is exact:
+  `y = clamp(value, y_prev ± rate·Δt)`, with the correct piecewise gradient (the input's while
+  tracking, zero while rate-limited). **`transition` is an approximation and is labelled one**:
+  a conforming simulator schedules exact breakpoints at the ramp's corners, while this advances
+  the ramp over whatever step the LTE controller chose and asks — via `bound_step` — for steps
+  fine enough to resolve it (~8 per ramp). The shape and endpoints are right; the corners are
+  rounded by at most one timestep. Inside a runtime loop (`while`/`repeat`/non-genvar `for`)
+  either is rejected (LRM §4.5.15: one call site would be one state thrashed N times, v0.9.14).
 - **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
   right-hand side or an intermediate variable assignment.
 - **Comparison with Traditional Constructs**: No C/digital-Verilog analogue (a continuous-time
-  slew/delay filter needs a time axis neither has). **Implemented 2026-08-07 (Tier B)** on
-  Interface β's per-instance state channel (`va_abi::state`, `docs/proposals/model-state.md`) —
-  the contract Tier A deliberately declined to smuggle in. Each call site gets its own state
-  slots keyed by `ExprId`, so the same function written twice keeps two independent histories.
-  `slew` is exact: `y = clamp(value, y_prev ± rate·Δt)`, with the correct piecewise gradient
-  (the input's while tracking, zero while rate-limited). **`transition` is an approximation and
-  is labelled one**: a conforming simulator schedules exact breakpoints at the ramp's corners,
-  while this advances the ramp over whatever step the LTE controller chose and asks — via Tier
-  A's `bound_step` — for steps fine enough to resolve it (~8 per ramp). The shape and endpoints
-  are right; the corners are rounded by at most one timestep.
+  slew/delay filter needs a time axis neither has). **History:** both used to fold to `value`
+  at elaboration when DC was the only analysis (`transition` had first failed outright as
+  "unknown function", found by `va-cli check` on
+  `external/verilogaLib-master/comparator_dynamic.va`); the fold was correct then and became
+  a silent error the day `va-transient` landed, which is what the state channel closed.
 
 ### `Absdelay`
 
-- **Purpose and Static Nature**: A genuinely time-domain analog operator in full Verilog-AMS
-  (LRM §4.5.9): `absdelay(value, delay[, max_delay])` delays `value` by a fixed time `delay`,
-  tracking *when* `value` last changed the same way `transition`/`slew` do. v0 is DC-only (no
-  time axis to delay through), and the filter settles to its undelayed input in steady state (no
-  delay history exists at a fixed operating point), so it folds transparently to its `value`
-  argument at elaboration — identical treatment to `Transition`/`Slew` above, in the same
-  `Elaborator::lower_expr` arm family. Previously unimplemented: parsed as an ordinary call but
-  failed at elaboration with "unknown function `absdelay`" — confirmed live by `va-cli check` on
-  `external/fbh_hbt-2_1.va`, which now passes the frontend end to end.
-- **Declaration and Assignment**: Called as `absdelay(value, delay[, max_delay])` — `value` is
-  required, `delay`/`max_delay` optional/parsed but unused.
-- **Expressions and Evaluation**: Only `value` is lowered and returned as-is (no wrapper node);
-  `delay`/`max_delay` are read from the AST only to check `value` is present, never evaluated —
-  an empty argument list is a hard error.
-- **Structural and Analog Usage**: Analog-block only, typically wrapping a `<+` contribution's
-  right-hand side.
-- **Comparison with Traditional Constructs**: No C/digital-Verilog analogue. Real time-delay
-  handling, not a constant fold, is what this needs. **Still wrong in transient after Tier B**,
-  and not for want of a state channel: `absdelay` must produce `value(t − delay)`, and no
+- **Purpose and Static Nature**: A genuinely time-domain analog operator (LRM §4.5.9):
+  `absdelay(value, delay[, max_delay])` delays `value` by a fixed time `delay`. **Implemented
+  in AC as an exact delay** (§6 Interface α change, 2026-09-01, `docs/proposals/absdelay.md`
+  stage 1): lowered to `Builtin::Absdelay` and stamped through the `laplace_*` machinery as
+  `H(jω) = e^{−jωτ}` — `G = cos ωτ`, `C = −sin(ωτ)/ω` — which is the delay, not a rational
+  approximation of one. **At DC it is the identity** (`H(0) = 1`), the correct steady-state
+  answer. **In transient it is refused** (`va_cli::refuse_transient_approximations`, since
+  2026-09-06): the only analog operator still on that list after `laplace_*` left it
+  (v0.9.16). A `.tran` of a model calling it stops with a `refused:` block naming the
+  construct, why (it would fold to its undelayed input — a plausible waveform that is wrong),
+  what to do instead (run DC/AC/noise, which are unaffected) and where it is tracked.
+- **Declaration and Assignment**: Called as `absdelay(value, delay[, max_delay])` — `value`
+  and `delay` are lowered and kept; `max_delay` is parsed and dropped, since only a time-domain
+  implementation needs it to size a history buffer.
+- **Expressions and Evaluation**: `[value, delay]` in the IR. AC evaluates `delay` per point
+  (a parameter expression, as the corpus writes it: `length * groupIndex / \`P_C`, the group
+  delay of a waveguide). The `ω → 0` limit of the `C` term is `−τ`, taken as a limit rather
+  than a division by zero.
+- **Structural and Analog Usage**: Analog-block only, as a top-level additive term of a
+  contribution (the same restriction every frequency-domain term carries: its gain is complex,
+  so there is nowhere in an ordinary expression to put it).
+- **Comparison with Traditional Constructs**: No C/digital-Verilog analogue. **Why transient
+  is still open, and why it is not an ODE:** `absdelay` must produce `value(t − τ)`, and no
   *fixed-size* state vector holds that — the number of samples inside the delay window depends
-  on the steps the LTE controller happens to choose. It needs an interpolated history buffer
-  with its own depth/accuracy story, which is a second design (`docs/proposals/model-state.md`
-  §1.3). The state channel is shaped so as not to preclude it. **Still wrong in transient** — Tier B of `docs/proposals/analysis-context.md`: this construct needs the model to *remember* something between evaluations (a slew accumulator, a delay line), and Interface β is deliberately stateless — `load` takes `&self` and may be re-entered on a rejected timestep. The analysis context Tier A added does not help; a state channel needs its own contract answering who owns the storage and what is committed versus rolled back.
+  on the steps the LTE controller happens to choose. It needs an interpolated, bounded history
+  buffer with its own depth/accuracy story and a `bound_step(τ/k)` request so the integrator
+  cannot step over the delay (proposal §4 stage 2; `docs/future_development.md` §3). That is a
+  different mechanism from the state-space rows that gave `laplace_*` its transient
+  (v0.9.16), which is why the two left the refusal list at different times. **History:** it
+  first failed as "unknown function" (found on `external/fbh_hbt-2_1.va`), then folded to
+  `value` at elaboration while DC was the only analysis — correct then, and the silent wrong
+  answer in AC and transient that stage 1 and the refusal respectively replaced.
 
 ### `$limit` — its value folds; its junction declaration does not (2026-09-09)
 
@@ -1691,7 +1712,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `triand` | Reserved, no grammar production (wired-AND tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `trior` | Reserved, no grammar production (wired-OR tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `trireg` | Reserved, no grammar production (charge-storage net type, paired with `small`/`medium`/`large`) | N/A | N/A | Digital structural only | Closest to a C `static` variable retaining its last value, but modeling analog charge decay |
-| `units` | Parsed into `NatureDecl::units` (§1.5), unused metadata | Nature attribute `units = "V";` | Read as a string literal via `Parser::expect_string`, not yet consulted by anything | N/A (module preamble) | No C analogue |
+| `units` | Parsed into `NatureDecl::units` (§1.5) and **consulted**: it round-trips into `va_ir::NodeDecl::units`, and `va-cli` prints every reported quantity in its own discipline's units (`Temp(th) = 4.5 K`, `Popt(drop) = 7.87e-4 W`) | Nature attribute `units = "V";` | Read as a string literal via `Parser::expect_string`; reaches the report through the node's discipline | N/A (module preamble) | No C analogue |
 | `vectored` | Reserved, no grammar production (net-vector storage-layout hint, pairs with `scalared`) | N/A | N/A | Digital structural only | No C analogue |
 | `wait` | Reserved, no grammar production (digital procedural block-until-condition) | N/A | N/A | Digital procedural only | Closest to a condition-variable `wait()`, but simulation-scheduled |
 | `wand` | Reserved, no grammar production (wired-AND net type) | N/A | N/A | Digital structural only | No C analogue |
@@ -1703,10 +1724,10 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `wor` | Reserved, no grammar production (wired-OR net type) | N/A | N/A | Digital structural only | No C analogue |
 | `xnor` | Reserved, no grammar production (digital gate primitive) | N/A | N/A | Digital gate level only | Loosely C's `!(a ^ b)`, minus gate timing |
 | `xor` | Reserved, no grammar production (digital gate primitive — distinct from any bitwise operator, which this subset doesn't implement at all) | N/A | N/A | Digital gate level only | Loosely C's `^`, but as a timed gate instance |
-| `zi_nd` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Parses as a call (`zi_nd(in, num, den[, ...])`); elaboration has no builtin → `unknown function` | Z-domain (discrete) IIR filter, numerator/denominator form | `H(jω)` per frequency point in AC; an ODE on state unknowns in DC/transient; `H(0)` in noise | Analog-block only, signal-flow filter | Closest: a digital IIR filter's difference equation, expressed declaratively |
-| `zi_np` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family, pole/zero form | Z-domain IIR filter, pole/zero form | `H(jω)` per frequency point in AC; an ODE on state unknowns in DC/transient; `H(0)` in noise | Analog-block only | Same as `zi_nd` |
-| `zi_zd` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family as `laplace_zd`/`zi_nd`, Z-domain-input numerator/denominator form | Z-domain IIR filter variant | `H(jω)` per frequency point in AC; an ODE on state unknowns in DC/transient; `H(0)` in noise | Analog-block only | Same as `zi_nd` |
-| `zi_zp` | Folds to its steady-state (z=1) gain. **Out of Tier C's scope, by corpus evidence: zero uses in all 158 files.** The Z-domain family is sampled-data and needs a sampling interval — a clock this simulator does not have — so implementing it would mean inventing a discrete-time substrate for no demand. Same family, Z-domain-input pole/zero form | Z-domain IIR filter variant | `H(jω)` per frequency point in AC; an ODE on state unknowns in DC/transient; `H(0)` in noise | Analog-block only | Same as `zi_nd` |
+| `zi_nd` | **Refused at elaboration** (v0.9.16+2, 2026-09-12) as a `Refusal` naming the call, why (no sampling clock), and what to write instead (a `laplace_*` form). Until then it **folded to its steady-state (z=1) gain** — exact at DC, a plausible wrong number in AC and transient — and sat in no refusal list while `va-cli`'s transient table claimed elaboration rejected it; the pre-1.0 audit of this document found the gap. Zero uses in the corpus. Parses as a call (`zi_nd(in, num, den, T[, tol[, t0]])`) | Z-domain (discrete) IIR filter, numerator/denominator form | Refused in every analysis | Analog-block only, signal-flow filter | Closest: a digital IIR filter's difference equation, expressed declaratively |
+| `zi_np` | **Refused at elaboration** (v0.9.16+2, 2026-09-12) as a `Refusal` naming the call, why (no sampling clock), and what to write instead (a `laplace_*` form). Until then it **folded to its steady-state (z=1) gain** — exact at DC, a plausible wrong number in AC and transient — and sat in no refusal list while `va-cli`'s transient table claimed elaboration rejected it; the pre-1.0 audit of this document found the gap. Zero uses in the corpus. Parses as a call (`zi_np(in, num, den, T[, tol[, t0]])`) | Z-domain IIR filter, pole/zero form | Refused in every analysis | Analog-block only | Same as `zi_nd` |
+| `zi_zd` | **Refused at elaboration** (v0.9.16+2, 2026-09-12) as a `Refusal` naming the call, why (no sampling clock), and what to write instead (a `laplace_*` form). Until then it **folded to its steady-state (z=1) gain** — exact at DC, a plausible wrong number in AC and transient — and sat in no refusal list while `va-cli`'s transient table claimed elaboration rejected it; the pre-1.0 audit of this document found the gap. Zero uses in the corpus. Parses as a call (`zi_zd(in, num, den, T[, tol[, t0]])`) | Z-domain IIR filter variant | Refused in every analysis | Analog-block only | Same as `zi_nd` |
+| `zi_zp` | **Refused at elaboration** (v0.9.16+2, 2026-09-12) as a `Refusal` naming the call, why (no sampling clock), and what to write instead (a `laplace_*` form). Until then it **folded to its steady-state (z=1) gain** — exact at DC, a plausible wrong number in AC and transient — and sat in no refusal list while `va-cli`'s transient table claimed elaboration rejected it; the pre-1.0 audit of this document found the gap. Zero uses in the corpus. Parses as a call (`zi_zp(in, num, den, T[, tol[, t0]])`) | Z-domain IIR filter variant | Refused in every analysis | Analog-block only | Same as `zi_nd` |
 
 ## 1.7 `floor`/`ceil`/`round`/`int`/`limexp` — formerly non-reserved (fixed)
 

@@ -19,6 +19,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.17 - 2026-09-12
+-------------------
+Pre-1.0 audit of docs/token-reference.md against the code, both directions, by script: the
+lexer's 186 reserved words vs the master table (186/186, no gaps either way), the 64 `Token`
+variants vs Part 1 (all present), the 48 `va_ir::Builtin`s (all present), every `$` system
+function the elaborator matches (all have entries), and the preprocessor's directive `match`
+vs the `Directive` entry -- **9 of 14 handled directives were unlisted** (`ifndef`, `elsif`,
+`undef`, `resetall`, `timescale`, `begin_keywords`/`end_keywords`, `line`, `pragma`); the
+entry now enumerates all of them in three groups (expanded / evaluated / consumed with no
+effect). Then every limitation claim in the document against what the code does.
+
+  **One real gap, fixed (the behaviour change that makes this a patch, not a +N):** the
+  four Z-domain filters `zi_nd`/`zi_np`/`zi_zd`/`zi_zp` were folded to their z=1 gain at
+  elaboration -- exact at DC, a plausible wrong waveform in AC and transient -- and sat in no
+  refusal list, while `va-cli`'s transient-approximation table said "elaboration rejects it
+  outright". They are now **refused at elaboration** as a `Refusal` (what: the call; why: no
+  sampling clock, and the fold was the silent-approximation shape CLAUDE.md section 5 names;
+  instead: a `laplace_*` form; tracking: future_development section 8). Zero corpus uses, so
+  the corpus is unchanged; five frontend tests that pinned the fold's arithmetic are replaced
+  by one that pins the refusal, and the dead `z_root_product_at_one` helper is gone.
+
+  **Stale claims corrected in the document:** section 1.5 `Transition`/`Slew` and `Absdelay`
+  opened with "v0 is DC-only ... folds transparently to its value" (the state-channel
+  implementation and the AC-exact/transient-refused status were appended at the end, and the
+  `Absdelay` entry ended mid-sentence) -- both rewritten with current behaviour first and the
+  history last; `$mfactor`'s entry said "implemented v0.9.11" and "folds to 1.0 since v0 has no
+  netlist-driven instance parameters" in the same sentence; `$strobe` "under v0's DC-only
+  model"; the variable-initializer note called `@(initial_step)` a "DC-only approximation" (it
+  is a real first-step event); the `units` nature attribute was "not yet consulted by
+  anything" (va-cli prints every quantity in its discipline's units); and the `zi_*` rows had
+  inherited the `laplace_*` rows' "an ODE on state unknowns" evaluation text from 0.9.16's
+  edit. Everything else checked holds: `limexp` folds to `exp` (row and code agree), the
+  `noise_table` file form is refused with its own message, genvar instance arrays are stated
+  as unsupported and are.
+
+  Measured: `cargo test --workspace` 769 passed / 0 failed (773 - 5 fold tests + 1 refusal
+  test); clippy/fmt clean; corpus 112/132 (94/99) unchanged; `cargo xtask validate` 28/28.
+
+
 0.9.16+1 - 2026-09-11
 ---------------------
 The dense-LU circuit-size limit, measured and stated (Road to 1.0, B.2). New

@@ -64,8 +64,9 @@ pub enum Analysis {
 /// Deliberately not a list of everything unimplemented: these are the constructs that
 /// produce a *plausible number that is wrong* rather than an error. `transition` and
 /// `slew` are absent because they are genuinely evaluated against Interface beta's state
-/// channel; the Z-domain family is absent because elaboration rejects it outright, which
-/// is already loud. The `laplace_*` family left this table on 2026-09-11 (v0.9.16): a
+/// channel; the Z-domain family is absent because elaboration refuses it outright (a
+/// `Refusal`, since v0.9.16+2 -- before that this comment was wrong: `zi_*` folded to its
+/// z=1 gain and sat in no list at all, found by the pre-1.0 audit of `token-reference.md`). The `laplace_*` family left this table on 2026-09-11 (v0.9.16): a
 /// rational filter is now integrated as an ODE on its own state unknowns
 /// (`va_codegen::lower::LaplaceStates`), so a transient run computes the filter rather than
 /// its DC gain. `absdelay` remains: a pure delay is not an ODE, and its time-domain form

@@ -4394,6 +4394,28 @@ clean regeneration and a 14-file diff.
 **What is still refused in transient:** `absdelay` alone. It is not an ODE, and stage 2 of
 `docs/proposals/absdelay.md` is unchanged by this.
 
+## Pre-1.0 audit of `token-reference.md` (2026-09-12, v0.9.17)
+
+The supervisor asked, before tagging 1.0, that nothing be left out of `docs/token-reference.md`.
+Checked by script in both directions — reserved words (186/186), `Token` variants (64/64),
+`va_ir::Builtin`s (48/48), `$` system functions, preprocessor directives — and then every
+limitation claim against the code. The inventories were complete except the directive list
+(9 of 14 handled directives unlisted; now enumerated). The claims were where the drift was:
+the document's convention of appending each update to the *end* of an entry had left several
+entries opening with behaviour that no longer exists ("v0 is DC-only … folds transparently"),
+one ending mid-sentence, and one (`$mfactor`) asserting "implemented" and "folds to 1.0" in the
+same breath. Rewritten with current behaviour first, history last.
+
+**The one real finding** was a code gap the document had recorded faithfully: `zi_*` "folds to
+its steady-state (z=1) gain". That fold is exact at DC and a silent wrong answer in AC and
+transient, and it was in no refusal list — `va-cli`'s transient table even asserted elaboration
+rejected it. Refused now (`FrontendError::Refused`, full what/why/instead/tracking). The lesson
+for the standing rule: a document that records a limitation honestly is necessary and not
+sufficient; the limitation also has to be *enforced* somewhere the user hits it, and
+`refuse_transient_approximations` should have been cross-checked against every "folds to"
+in this document when it was written. `every_refusal_says_what_was_refused_and_why` still
+holds; what it cannot catch is a fold that was never declared a refusal at all.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

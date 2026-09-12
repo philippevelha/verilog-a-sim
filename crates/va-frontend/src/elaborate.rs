@@ -955,42 +955,6 @@ impl Elaborator<'_> {
         Ok(points)
     }
 
-    /// A `zero`/`pole` array literal's product term at Z-domain z=1 (LRM §4.5.12.1-3) — the
-    /// steady-state point for a discrete-time filter, the same role s=0 plays for a
-    /// continuous-time one. Every root contributes a factor of `(1 - z^-1 * root)`, which at
-    /// z=1 is `1 - root` — genuinely complex-valued for a root with a nonzero imaginary part,
-    /// unlike the Laplace-domain product above (whose `s/root` form instead makes every
-    /// non-origin factor the real constant `1` at s=0). A root exactly at the origin `(0, 0)`
-    /// contributes a factor of `z` instead (again avoiding a `root/0`-shaped singularity in the
-    /// general form), which is `1` at z=1 — not `0`: z=1 is a different point of the z-plane
-    /// than the origin z=0, unlike the Laplace case where s=0 *is* the origin a root-at-origin
-    /// sits on. The LRM requires a complex root's conjugate to also be present, so the running
-    /// product's imaginary part cancels to (near) zero by construction for any well-formed
-    /// filter; only the real part is returned. Errors if the array's length is odd.
-    fn z_root_product_at_one(&self, r: ExprRef, what: &str) -> Result<f64, FrontendError> {
-        let values = self.array_lit_values(r, what)?;
-        if values.len() % 2 != 0 {
-            return Err(elab(format!(
-                "{what} array literal must hold `(re, im)` pairs, one per root — got {} \
-                 elements (odd)",
-                values.len()
-            )));
-        }
-        let (mut re_acc, mut im_acc) = (1.0f64, 0.0f64);
-        for pair in values.chunks(2) {
-            let (root_re, root_im) = (pair[0], pair[1]);
-            let (factor_re, factor_im) = if root_re == 0.0 && root_im == 0.0 {
-                (1.0, 0.0)
-            } else {
-                (1.0 - root_re, -root_im)
-            };
-            let new_re = re_acc * factor_re - im_acc * factor_im;
-            let new_im = re_acc * factor_im + im_acc * factor_re;
-            (re_acc, im_acc) = (new_re, new_im);
-        }
-        Ok(re_acc)
-    }
-
     /// [`Self::const_eval`], then require the result to be (nearly) integral — genvars, vector
     /// net range bounds, and vector indices are all integers per the LRM.
     fn const_eval_int(&self, r: ExprRef, what: &str) -> Result<i64, FrontendError> {
@@ -2150,48 +2114,33 @@ impl Elaborator<'_> {
             // `zi_nd(value, num, den, T[, tol[, t0]])` / `zi_np(value, num, pole, T[, ...])` /
             // `zi_zd(value, zero, den, T[, ...])` / `zi_zp(value, zero, pole, T[, ...])` (LRM
             // §4.5.12) — the Z-domain (discrete-time) counterparts of the four Laplace forms
-            // above, same num/den-vs-zero/pole split, plus a mandatory sample period `T` (and
-            // optional tolerance/start-time) that — like every other time-domain argument this
-            // project folds away — is parsed but never evaluated. Settles to its steady-state
-            // (z=1) gain: a coefficient list sums *all* its terms at z=1 (`z^-k` is 1 for every
-            // k, not just k=0 — unlike the Laplace s=0 case, where every term past the constant
-            // vanishes), and a zero/pole array uses `z_root_product_at_one` (its `(1 - root)`
-            // term is genuinely complex-valued, unlike the Laplace fold's real-only `0`/`1`).
+            // above. **Refused** (2026-09-11, v0.9.16+2). Until then this arm folded the filter
+            // to its steady-state (z=1) gain, which is exact at DC and a plausible wrong number
+            // in AC and transient — and it sat in no refusal list, while `va-cli`'s transient
+            // refusal table claimed elaboration rejected it. A Z-domain filter needs a sampling
+            // clock this engine has no notion of; folding it is the silent-approximation shape
+            // CLAUDE.md §5 names. Zero uses in the corpus, so the refusal costs nothing today
+            // and the DC-only fold it replaces bought nothing either.
             ExprAst::Call { name, args }
                 if matches!(name.as_str(), "zi_nd" | "zi_np" | "zi_zd" | "zi_zp") =>
             {
-                let (value, num, den) = match (args.first(), args.get(1), args.get(2), args.len()) {
-                    (Some(&v), Some(&n), Some(&d), 4..=6) => (v, n, d),
-                    _ => {
-                        return Err(elab(format!(
-                            "`{name}` takes four to six arguments: value, then a numerator/zero \
-                             argument, then a denominator/pole argument, the sample period T, \
-                             and optionally a tolerance and start time, e.g. \
-                             `{name}(sig, {{1}}, {{1, tau}}, T)`"
-                        )))
-                    }
-                };
-                let numer_is_zeros = matches!(name.as_str(), "zi_zd" | "zi_zp");
-                let denom_is_poles = matches!(name.as_str(), "zi_np" | "zi_zp");
-                let numer1 = if numer_is_zeros {
-                    self.z_root_product_at_one(num, "zero")?
-                } else {
-                    self.array_lit_values(num, "numerator")?.iter().sum()
-                };
-                let denom1 = if denom_is_poles {
-                    self.z_root_product_at_one(den, "pole")?
-                } else {
-                    self.array_lit_values(den, "denominator")?.iter().sum()
-                };
-                if denom1 == 0.0 {
-                    return Err(elab(format!(
-                        "`{name}`'s denominator is zero at z=1: the steady-state gain is \
-                         undefined"
-                    )));
-                }
-                let value_id = self.lower_expr(value)?;
-                let gain_id = self.out.push_expr(Expr::Const(numer1 / denom1));
-                Expr::Binary(va_ir::BinOp::Mul, value_id, gain_id)
+                let _ = args;
+                return Err(FrontendError::Refused(
+                    crate::Refusal::new(
+                        format!("`{name}(...)`, a Z-domain (sampled-data) filter"),
+                        "this engine has no sampling clock, so the filter cannot be evaluated \
+                         as written; folding it to its z=1 gain - which is what happened until \
+                         v0.9.16+2 - is exact at DC and a plausible wrong waveform in AC and \
+                         transient, which is worse than an error",
+                    )
+                    .instead(
+                        "a continuous-time filter with the same passband as a `laplace_*` \
+                         form, which is integrated exactly in transient and evaluated exactly \
+                         in AC; a genuinely sampled system has no honest continuous-time \
+                         stand-in here",
+                    )
+                    .tracking("docs/future_development.md section 8 (the `zi_*` family)"),
+                ));
             }
             // An array literal reaching here means it appeared somewhere other than a Laplace/
             // Z-domain filter's numerator/zero/denominator/pole argument (those cases read it
@@ -5198,71 +5147,36 @@ mod tests {
         assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
     }
 
-    /// Elaborate a one-contribution module (`analog I(a, b) <+ <call>;`) and return the
-    /// filter-fold's baked-in gain constant — the shared assertion helper for every
-    /// `laplace_*`/`zi_*` DC/steady-state-gain test below.
-    fn filter_gain(call: &str) -> f64 {
-        let m = elaborate_src(&format!(
-            "module t(a, b); electrical a, b; analog I(a, b) <+ {call}; endmodule"
-        ));
-        match &m.analog[0] {
-            va_ir::Stmt::Contribute { value, .. } => match m.expr(*value) {
-                Expr::Binary(va_ir::BinOp::Mul, l, r) => {
-                    assert!(matches!(m.expr(*l), Expr::Probe(_)));
-                    match m.expr(*r) {
-                        Expr::Const(g) => *g,
-                        other => panic!("expected a Const gain, got {other:?}"),
-                    }
+    /// A Z-domain filter is refused, as a `Refusal` naming the construct and what to write
+    /// instead — not folded to its z=1 gain, which is what this arm did until v0.9.16+2 (five
+    /// tests here used to pin the fold's arithmetic; the pre-1.0 audit of token-reference.md
+    /// found the fold sat in no refusal list while `va-cli` believed elaboration rejected it).
+    #[test]
+    fn zi_filters_are_refused_not_folded() {
+        for call in [
+            "zi_nd(V(a, b), {1, 2}, {1, 1}, 1e-9)",
+            "zi_zp(V(a, b), {0.5, 0.0}, {0.25, 0.0}, 1e-9)",
+            "zi_np(V(a, b), {1}, {0.25, 0.0}, 1e-9)",
+            "zi_zd(V(a, b), {0.5, 0.0}, {1}, 1e-9)",
+        ] {
+            let src =
+                format!("module t(a, b); electrical a, b; analog I(a, b) <+ {call}; endmodule");
+            let toks = lex(&src).expect("lex");
+            let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
+            match elaborate(&ast) {
+                Err(FrontendError::Refused(r)) => {
+                    let name = call.split('(').next().unwrap();
+                    assert!(r.what.contains(name), "names the construct: {}", r.what);
+                    assert!(r.why.contains("sampling clock"), "says why: {}", r.why);
+                    assert!(
+                        r.instead.as_deref().unwrap_or("").contains("laplace_"),
+                        "says what to write instead: {:?}",
+                        r.instead
+                    );
                 }
-                other => panic!("expected a Mul-by-gain fold, got {other:?}"),
-            },
-            other => panic!("expected a contribution, got {other:?}"),
+                other => panic!("expected a Refusal for {call}, got {other:?}"),
+            }
         }
-    }
-
-    #[test]
-    fn zi_nd_sums_every_coefficient_at_z_equals_one() {
-        // Unlike the Laplace s=0 fold (only the constant term survives), every `z^-k` term is
-        // 1 at z=1, so the whole coefficient list is summed: num {1,2} -> 3, den {1,1} -> 2.
-        let g = filter_gain("zi_nd(V(a, b), {1, 2}, {1, 1}, 1e-9)");
-        assert!((g - 1.5).abs() < 1e-12, "got {g}");
-    }
-
-    #[test]
-    fn zi_zp_real_roots_use_one_minus_root_not_one_minus_s_over_root() {
-        // The Z-domain root term at z=1 is `1 - root` (the LRM's `1 - z^-1*root` evaluated at
-        // z=1), structurally different from the Laplace fold's `1` for any non-origin root:
-        // zero=0.5 -> factor 0.5; pole=0.25 -> factor 0.75; gain = 0.5/0.75.
-        let g = filter_gain("zi_zp(V(a, b), {0.5, 0.0}, {0.25, 0.0}, 1e-9)");
-        assert!((g - (0.5 / 0.75)).abs() < 1e-9, "got {g}");
-    }
-
-    #[test]
-    fn zi_zp_complex_conjugate_pair_reduces_to_a_real_gain() {
-        // A complex-conjugate zero pair at 0.5 ± 0.3j: product = (0.5 - 0.3j)(0.5 + 0.3j) =
-        // 0.5^2 + 0.3^2 = 0.34 (the imaginary parts must cancel exactly). Pole at the origin
-        // contributes a factor of 1 (the z=1 special case, not 0 — unlike the Laplace fold).
-        let g = filter_gain("zi_zp(V(a, b), {0.5, 0.3, 0.5, -0.3}, {0.0, 0.0}, 1e-9)");
-        assert!((g - 0.34).abs() < 1e-9, "got {g}");
-    }
-
-    #[test]
-    fn zi_filter_zero_dc_denominator_is_an_error() {
-        let src = "module t(a, b); electrical a, b; \
-                    analog I(a, b) <+ zi_nd(V(a, b), {1}, {1, -1}, 1e-9); endmodule";
-        let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
-        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
-    }
-
-    #[test]
-    fn zi_filter_requires_the_sample_period_argument() {
-        // `zi_nd` needs at least 4 arguments (value, num, den, T) — only 3 given here.
-        let src = "module t(a, b); electrical a, b; \
-                    analog I(a, b) <+ zi_nd(V(a, b), {1}, {1}); endmodule";
-        let toks = lex(src).expect("lex");
-        let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
-        assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
     }
 
     #[test]
