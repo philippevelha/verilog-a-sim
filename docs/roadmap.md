@@ -4416,6 +4416,30 @@ sufficient; the limitation also has to be *enforced* somewhere the user hits it,
 in this document when it was written. `every_refusal_says_what_was_refused_and_why` still
 holds; what it cannot catch is a fold that was never declared a refusal at all.
 
+## Compiler directives, and the transition default the LRM actually specifies (2026-09-12, v0.9.18)
+
+Implemented `docs/proposals/directives.md` except `` `line `` (needs the line map). The
+mechanism: the preprocessor records each text-stream-scoped directive as an event at the
+output offset it applies from; the lexer replays the keyword-set events per token; the parser
+gives each module the `Settings` in force at its `module` keyword; elaboration reads them.
+No-effect directives become one warning per file; `pragma protect` a `Refusal`; the non-LRM
+`default_nodetype` an error.
+
+**The finding was in `transition`, not in a directive.** The control case of the
+`default_transition` test — the same `transition(V(in) > 0.5 ? 1 : 0)` with no directive —
+underflowed the timestep at the crossing. LRM 4.5.8, read for the directive's sake, says why:
+an omitted *or zero* rise time takes `default_transition`, and with no directive "a
+negligible, but non-zero, transition time is used … forcing a zero-duration transition is
+undesirable because it could cause convergence problems". This engine forced one. The fix
+needed a time scale a module does not have, so `AnalysisCtx` gained `tstep` (Interface β,
+additive) and codegen ramps a zero span over `tstep/1000`. The 100 ns case had been the only
+one I ran by hand; the discriminating test is what found the default.
+
+**A language fact learned from the LRM's own example:** under `"1364-2005"` the entire AMS
+vocabulary is unreserved, `analog` and `electrical` included, so a keyword region can only
+hold a *structural* module. That is not a limitation of this implementation; it is what the
+directive means, and the LRM's `sin`-as-a-port example is a digital module for that reason.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

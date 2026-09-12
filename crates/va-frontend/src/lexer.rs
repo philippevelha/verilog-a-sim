@@ -452,7 +452,16 @@ fn kw(lex: &logos::Lexer<Token>) -> Keyword {
 /// (mega, `1e6`) and `m` (milli, `1e-3`) are case-sensitive. Returns `None` (a lex error)
 /// if the digit portion does not parse as a float.
 fn parse_number(lex: &logos::Lexer<Token>) -> Option<f64> {
-    let s = lex.slice();
+    parse_scaled_number(lex.slice())
+}
+
+/// Parse a Verilog-A numeric literal with an optional SI scale suffix into its value — the
+/// lexer's own rule, exposed so the preprocessor can read a `` `default_transition `` argument
+/// the same way (`crate::preprocess`). `None` if `s` is not a number.
+pub fn parse_scaled_number(s: &str) -> Option<f64> {
+    if s.is_empty() {
+        return None;
+    }
     let (digits, scale) = match s.as_bytes()[s.len() - 1] {
         b'T' => (&s[..s.len() - 1], 1e12),
         b'G' => (&s[..s.len() - 1], 1e9),
@@ -543,13 +552,48 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
 ///
 /// As [`lex`].
 pub fn lex_spanned(source: &str) -> Result<(Vec<Token>, Vec<usize>), FrontendError> {
+    lex_spanned_with(source, &[])
+}
+
+/// [`lex_spanned`], honouring the `` `begin_keywords ``/`` `end_keywords `` regions the
+/// preprocessor recorded (`crate::preprocess::Directive::BeginKeywords`, LRM 10.6).
+///
+/// The `logos` grammar always matches the full Verilog-AMS reserved set; a region that selects
+/// a smaller IEEE 1364 set is applied afterwards by turning every reserved-word token that the
+/// region's set does *not* reserve back into an [`Token::Ident`] — the dedicated variants
+/// (`Token::Analog`, `Token::Electrical`, …) included, since under `"1364-2005"` `analog` is
+/// as much an identifier as `sin` is. With no events this is exactly [`lex_spanned`].
+///
+/// # Errors
+///
+/// As [`lex`].
+pub fn lex_spanned_with(
+    source: &str,
+    directives: &[crate::preprocess::DirectiveEvent],
+) -> Result<(Vec<Token>, Vec<usize>), FrontendError> {
     let mut tokens = Vec::new();
     let mut offsets = Vec::new();
     let mut lexer = Token::lexer(source);
+    let regions = directives.iter().any(|d| {
+        matches!(
+            d.directive,
+            crate::preprocess::Directive::BeginKeywords(_)
+                | crate::preprocess::Directive::EndKeywords
+                | crate::preprocess::Directive::ResetAll
+        )
+    });
     while let Some(result) = lexer.next() {
         let span = lexer.span();
         match result {
-            Ok(token) => {
+            Ok(mut token) => {
+                if regions {
+                    let set = crate::preprocess::settings_at(directives, span.start).keywords;
+                    if let Some(word) = reserved_spelling(&token) {
+                        if !crate::keywords::is_reserved_in(word, set) {
+                            token = Token::Ident(word.to_string());
+                        }
+                    }
+                }
                 tokens.push(token);
                 offsets.push(span.start);
             }
@@ -562,6 +606,36 @@ pub fn lex_spanned(source: &str) -> Result<(Vec<Token>, Vec<usize>), FrontendErr
         }
     }
     Ok((tokens, offsets))
+}
+
+/// The reserved word a token stands for, if it is one: a generic [`Token::Keyword`] or one of
+/// the dedicated structural variants. `None` for everything else.
+fn reserved_spelling(token: &Token) -> Option<&'static str> {
+    Some(match token {
+        Token::Keyword(kw) => kw.as_str(),
+        Token::Module => "module",
+        Token::EndModule => "endmodule",
+        Token::Analog => "analog",
+        Token::Begin => "begin",
+        Token::End => "end",
+        Token::Parameter => "parameter",
+        Token::LocalParam => "localparam",
+        Token::Real => "real",
+        Token::Integer => "integer",
+        Token::Genvar => "genvar",
+        Token::Input => "input",
+        Token::Output => "output",
+        Token::Inout => "inout",
+        Token::Electrical => "electrical",
+        Token::Thermal => "thermal",
+        Token::Ground => "ground",
+        Token::If => "if",
+        Token::Else => "else",
+        Token::From => "from",
+        Token::Exclude => "exclude",
+        Token::Inf => "inf",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -840,5 +914,41 @@ mod tests {
             FrontendError::Lex { offset, .. } => assert_eq!(offset, 4),
             other => panic!("expected lex error, got {other:?}"),
         }
+    }
+
+    /// `` `begin_keywords "1364-2005" `` (LRM 10.6): inside the region the Verilog-AMS analog
+    /// vocabulary is not reserved — the LRM's own example uses `sin` as a port name — and
+    /// that includes the words with dedicated token variants (`analog`, `electrical`).
+    /// Outside the region everything is reserved again.
+    #[test]
+    fn keyword_regions_unreserve_the_ams_vocabulary() {
+        let pre = crate::preprocess::preprocess_full(
+            "`begin_keywords \"1364-2005\"\nsin analog electrical module\n`end_keywords\nsin analog module\n",
+            &[],
+        )
+        .0
+        .unwrap();
+        let (tokens, _) = lex_spanned_with(&pre.text, &pre.directives).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("sin".into()),
+                Token::Ident("analog".into()),
+                Token::Ident("electrical".into()),
+                Token::Module, // `module` is a 1364 keyword and stays one
+                Token::Keyword(Keyword::from_ident("sin").unwrap()),
+                Token::Analog,
+                Token::Module,
+            ]
+        );
+        // With no region events the same text lexes as it always has.
+        let (plain, _) = lex_spanned("sin analog").unwrap();
+        assert_eq!(
+            plain,
+            vec![
+                Token::Keyword(Keyword::from_ident("sin").unwrap()),
+                Token::Analog
+            ]
+        );
     }
 }

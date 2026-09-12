@@ -145,6 +145,10 @@ impl std::error::Error for Refusal {}
 pub struct CompiledDesign {
     /// One elaborated module per source `module`, in source order.
     pub modules: Vec<va_ir::Module>,
+    /// Compiler directives the LRM gives no Verilog-A meaning, reported once each
+    /// (`preprocess::Preprocessed::warnings`). Nothing in `modules` depends on them; a caller
+    /// prints them so the user knows the directive was seen and why it changed nothing.
+    pub warnings: Vec<String>,
 }
 
 /// Compile Verilog-A `source` into a [`CompiledDesign`], with no `` `include `` search path
@@ -161,13 +165,16 @@ pub fn compile_with_includes(
     source: &str,
     include_dirs: &[PathBuf],
 ) -> Result<CompiledDesign, FrontendError> {
-    let expanded = preprocess::preprocess(source, include_dirs)?;
+    let pre = preprocess::preprocess_full(source, include_dirs).0?;
+    let expanded = &pre.text;
     // Lex with spans and hand them to the parser, so a parse error reports a line, a column,
     // and the offending line's text rather than a token index. The line number is a line of
-    // `expanded`, not of `source` ''' + M + ''' see `parser::parse_with_disciplines_located`.
-    let (tokens, offsets) = lexer::lex_spanned(&expanded)?;
+    // `expanded`, not of `source` — see `parser::parse_with_disciplines_located`.
+    // Both stages take the directive events: the lexer for `begin_keywords` regions, the
+    // parser for each module's `default_discipline`/`default_transition` settings.
+    let (tokens, offsets) = lexer::lex_spanned_with(expanded, &pre.directives)?;
     let (asts, natures, disciplines) =
-        parser::parse_with_disciplines_located(&tokens, Some((&expanded, &offsets)))?;
+        parser::parse_with_directives(&tokens, Some((expanded, &offsets)), &pre.directives)?;
     let mut modules = Vec::with_capacity(asts.len());
     for ast in &asts {
         modules.push(elaborate::elaborate_with_library_and_disciplines(
@@ -177,7 +184,10 @@ pub fn compile_with_includes(
             &natures,
         )?);
     }
-    Ok(CompiledDesign { modules })
+    Ok(CompiledDesign {
+        modules,
+        warnings: pre.warnings,
+    })
 }
 
 #[cfg(test)]
@@ -207,5 +217,125 @@ mod tests {
             super::compile("`define GMIN 1.0e-12\n`define MAX(a, b) ((a) > (b) ? (a) : (b))")
                 .expect("a macro-only file should compile, just to zero modules");
         assert!(design.modules.is_empty());
+    }
+
+    // ---- compiler directives, end to end (docs/proposals/directives.md) ----------------
+
+    /// `` `default_discipline electrical `` (LRM 10.2): a module whose ports declare no
+    /// discipline elaborates, with the ports as electrical nodes carrying the discipline's
+    /// abstol; without the directive the same module is the "no discipline declaration" error.
+    #[test]
+    fn default_discipline_gives_undeclared_ports_a_discipline() {
+        let body =
+            "module r(p, n);\n  inout p, n;\n  analog I(p, n) <+ V(p, n) / 1000.0;\nendmodule\n";
+        let models = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models"
+        ))];
+        let Err(err) = super::compile_with_includes(body, &models) else {
+            panic!("undeclared ports must fail without the directive");
+        };
+        assert!(
+            err.to_string().contains("no discipline declaration"),
+            "{err}"
+        );
+
+        let src = format!("`include \"disciplines.vams\"\n`default_discipline electrical\n{body}");
+        let design =
+            super::compile_with_includes(&src, &models).expect("default discipline applies");
+        let m = &design.modules[0];
+        assert_eq!(m.ports.len(), 2);
+        assert_eq!(m.nodes[0].discipline, va_ir::Discipline::Electrical);
+        assert_eq!(
+            m.nodes[0].abstol,
+            Some(1e-6),
+            "the discipline's own nature metadata comes along"
+        );
+
+        // The bare form turns it off again for what follows.
+        let src = format!("`default_discipline electrical\n`default_discipline\n{body}");
+        assert!(super::compile_with_includes(&src, &models).is_err());
+    }
+
+    /// `` `default_transition 100n `` (LRM 10.3 / 4.5.8): a `transition()` that omits its rise
+    /// time gets the directive's value; one that states its own gets `rise > 0 ? rise :
+    /// default`, because the LRM says a rise time "equal to zero" also means the default.
+    #[test]
+    fn default_transition_fills_an_omitted_or_zero_rise_time() {
+        let src = "`default_transition 100n
+module t(p, n);
+  electrical p, n;
+  analog V(p, n) <+ transition(1.0, 0) + transition(2.0, 0, 5n);
+endmodule
+";
+        let design = super::compile(src).expect("compiles");
+        let m = &design.modules[0];
+        let rise_args: Vec<&va_ir::Expr> = m
+            .exprs
+            .iter()
+            .filter_map(|e| match e {
+                va_ir::Expr::Call(va_ir::Builtin::Transition, args) => {
+                    Some(&m.exprs[args[2].0 as usize])
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rise_args.len(), 2);
+        // Omitted: the directive's value, as a constant.
+        assert!(
+            matches!(rise_args[0], va_ir::Expr::Const(v) if (v - 1e-7).abs() < 1e-20),
+            "{:?}",
+            rise_args[0]
+        );
+        // Written: `written > 0 ? written : default`.
+        match rise_args[1] {
+            va_ir::Expr::Select(_, written, default) => {
+                assert!(
+                    matches!(m.exprs[written.0 as usize], va_ir::Expr::Const(v) if (v - 5e-9).abs() < 1e-22)
+                );
+                assert!(
+                    matches!(m.exprs[default.0 as usize], va_ir::Expr::Const(v) if (v - 1e-7).abs() < 1e-20)
+                );
+            }
+            other => panic!("expected a select, got {other:?}"),
+        }
+        // No directive: an omitted rise time is 0 here, which `va-codegen` turns into the
+        // LRM's "negligible but non-zero" ramp at load, where the time scale is known.
+        let design = super::compile(
+            "module t(p, n); electrical p, n; analog V(p, n) <+ transition(1.0, 0); endmodule",
+        )
+        .unwrap();
+        let m = &design.modules[0];
+        assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Call(va_ir::Builtin::Transition, args) if matches!(m.exprs[args[2].0 as usize], va_ir::Expr::Const(v) if v == 0.0))));
+    }
+
+    /// A legacy-Verilog structural module under `` `begin_keywords "1364-2005" `` can name a
+    /// port `sin` (the LRM's own example) and wrap an analog module written outside the
+    /// region — with `` `default_discipline `` supplying what `electrical`, itself unreserved
+    /// there, cannot. The one shape a keyword region is useful for in a Verilog-A file.
+    #[test]
+    fn a_1364_keyword_region_wraps_an_analog_module() {
+        let src = "`default_discipline electrical\n`begin_keywords \"1364-2005\"\nmodule top(sin, flow);\n  inout sin, flow;\n  leg l1(sin, flow);\nendmodule\n`end_keywords\nmodule leg(p, n);\n  electrical p, n;\n  analog I(p, n) <+ V(p, n) / 1000.0;\nendmodule\n";
+        let design = super::compile(src).expect("compiles");
+        let top = design
+            .modules
+            .iter()
+            .find(|m| m.name == "top")
+            .expect("top");
+        assert_eq!(top.ports.len(), 2);
+        assert_eq!(top.nodes[0].name, "sin");
+        // Without the region `sin` is a reserved word and the port list does not parse.
+        let plain = src
+            .replace("`begin_keywords \"1364-2005\"\n", "")
+            .replace("`end_keywords\n", "");
+        assert!(super::compile(&plain).is_err());
+    }
+
+    /// The no-effect directives reach the caller as warnings, not as silence.
+    #[test]
+    fn no_effect_directives_surface_as_warnings() {
+        let design = super::compile("`timescale 1ns/1ps\nmodule t(p, n); electrical p, n; analog I(p, n) <+ V(p, n); endmodule\n").unwrap();
+        assert_eq!(design.warnings.len(), 1);
+        assert!(design.warnings[0].starts_with("`timescale has no effect in Verilog-A"));
     }
 }

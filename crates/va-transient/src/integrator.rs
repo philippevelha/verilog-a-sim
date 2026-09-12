@@ -742,6 +742,7 @@ fn assemble(
     x: &[f64],
     t: f64,
     phase: Phase,
+    tstep: f64,
     dim: usize,
     state: &mut StateBuffers,
     fired: &FiredEvents,
@@ -749,6 +750,7 @@ fn assemble(
     sim: va_abi::SimParams,
 ) -> DenseStamp {
     let ctx = AnalysisCtx::transient(t)
+        .with_tstep(tstep)
         .with_initial_step(phase.initial)
         .with_final_step(phase.last)
         .with_sim(sim)
@@ -859,6 +861,7 @@ fn newton_step(
     x_prev: &[f64],
     t: f64,
     phase: Phase,
+    tstep: f64,
     state: &mut StateBuffers,
     fired: &FiredEvents,
     companion: &Companion,
@@ -887,6 +890,7 @@ fn newton_step(
             &x,
             t,
             phase,
+            tstep,
             dim,
             state,
             fired,
@@ -1024,6 +1028,7 @@ pub fn run_with_events(
         &x,
         cfg.tstart,
         Phase::FIRST,
+        cfg.tstep,
         dim,
         &mut state,
         &fired,
@@ -1180,6 +1185,7 @@ pub fn run_with_events(
                 &x,
                 t_next,
                 Phase::MIDDLE,
+                cfg.tstep,
                 &mut state,
                 &fired,
                 &primary,
@@ -1226,6 +1232,7 @@ pub fn run_with_events(
                         &x,
                         t_next,
                         Phase::MIDDLE,
+                        cfg.tstep,
                         &mut state,
                         &fired,
                         &reference_companion,
@@ -1354,6 +1361,7 @@ pub fn run_with_events(
                         &x,
                         t_next,
                         Phase::LAST,
+                        cfg.tstep,
                         dim,
                         &mut state,
                         &fired,
@@ -1365,6 +1373,7 @@ pub fn run_with_events(
                         &x,
                         t_next,
                         Phase::MIDDLE,
+                        cfg.tstep,
                         dim,
                         &mut state,
                         &fired,
@@ -1386,7 +1395,8 @@ pub fn run_with_events(
 
                 if fired.any() || phase.last {
                     let resolved = newton_step(
-                        instances, dim, &x, t_next, phase, &mut state, &fired, &primary, &junction,
+                        instances, dim, &x, t_next, phase, cfg.tstep, &mut state, &fired, &primary,
+                        &junction,
                     )?;
                     x = resolved.x;
                     converged_at = resolved.iterations;
@@ -1405,6 +1415,7 @@ pub fn run_with_events(
                     &x,
                     t_next,
                     phase,
+                    cfg.tstep,
                     dim,
                     &mut state,
                     &fired,

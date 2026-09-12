@@ -126,6 +126,23 @@ pub fn parse_with_disciplines_located(
     tokens: &[Token],
     located: Option<(&str, &[usize])>,
 ) -> Result<ParsedUnit, FrontendError> {
+    parse_with_directives(tokens, located, &[])
+}
+
+/// [`parse_with_disciplines_located`], also honouring the directives the preprocessor
+/// recorded (`crate::preprocess::Preprocessed::directives`): each module's
+/// [`ModuleAst::settings`] is the state in force at its `module` keyword's byte offset, which
+/// needs `located` to be `Some` — with no offsets every module gets the settings at offset 0,
+/// i.e. those of any directive that precedes all text.
+///
+/// # Errors
+///
+/// As [`parse`].
+pub fn parse_with_directives(
+    tokens: &[Token],
+    located: Option<(&str, &[usize])>,
+    directives: &[crate::preprocess::DirectiveEvent],
+) -> Result<ParsedUnit, FrontendError> {
     // The always-on access-function baseline (§ module preamble discipline/nature parsing):
     // recognized regardless of whether any `discipline`/`nature` block is ever parsed, so a
     // file with no preamble at all still recognizes the standard electrical/thermal names.
@@ -145,6 +162,7 @@ pub fn parse_with_disciplines_located(
         pending_items: Vec::new(),
         src: located.map(|(src, _)| src),
         offsets: located.map(|(_, offsets)| offsets),
+        directives,
     };
     let mut modules = Vec::new();
     loop {
@@ -193,6 +211,8 @@ struct Parser<'a> {
     src: Option<&'a str>,
     /// Byte offset of each token in `src`, parallel to `toks`. Present exactly when `src` is.
     offsets: Option<&'a [usize]>,
+    /// Directives with text-stream scope, for [`ModuleAst::settings`].
+    directives: &'a [crate::preprocess::DirectiveEvent],
     pos: usize,
     exprs: Vec<ExprAst>,
     /// Parsed `nature ... endnature` blocks, keyed by name (§ module preamble discipline/nature
@@ -1111,6 +1131,13 @@ impl Parser<'_> {
 
     fn parse_module(&mut self) -> Result<ModuleAst, FrontendError> {
         self.parse_preamble()?;
+        // The directive state this module inherits: whatever is in force at its `module`
+        // keyword (see `parse_with_directives`).
+        let start = self
+            .offsets
+            .and_then(|o| o.get(self.pos).copied())
+            .unwrap_or(0);
+        let settings = crate::preprocess::settings_at(self.directives, start);
         self.eat(&Token::Module)?;
         let name = self.expect_ident()?;
 
@@ -1152,6 +1179,7 @@ impl Parser<'_> {
             ports,
             items,
             exprs: std::mem::take(&mut self.exprs),
+            settings,
         })
     }
 
@@ -3766,6 +3794,7 @@ mod tests {
             pending_items: Vec::new(),
             src: None,
             offsets: None,
+            directives: &[],
         }
     }
 

@@ -27,6 +27,11 @@ pub struct ModuleAst {
     pub items: Vec<Item>,
     /// Expression arena; [`ExprRef`]s index into this `Vec`.
     pub exprs: Vec<ExprAst>,
+    /// The compiler-directive state in force where this module's `module` keyword sits
+    /// (`docs/proposals/directives.md`): the default discipline for an undeclared net and the
+    /// default transition time. Every directive that carries this state is illegal inside a
+    /// module body (LRM 10.3, 10.6), so "at the module's start" is the LRM's own scoping.
+    pub settings: crate::preprocess::Settings,
 }
 
 impl ModuleAst {

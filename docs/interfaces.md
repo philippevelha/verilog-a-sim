@@ -891,3 +891,17 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > behaviour on the iteration number, and committing at a different one writes history from a
 > different model than the one that produced the accepted solution. `va_transient`'s
 > `newton_step` returns `Solved { x, iterations }` for exactly this.
+
+> **Revision (§6 change, 2026-09-12):** added `AnalysisCtx::tstep` — the transient run's
+> requested timestep (the deck's `.tran <tstep>`), `0.0` in every other analysis — with the
+> builder `with_tstep`. Additive: every existing constructor sets it to `0.0`, and no consumer
+> other than `va-transient` sets it.
+>
+> **Why it belongs on the context.** LRM 4.5.8: a `transition()` with no rise/fall time and no
+> `` `default_transition `` in force ramps over "a negligible, but non-zero, transition time",
+> chosen by the simulator so the integrator can resolve the edge — "forcing a zero-duration
+> transition is undesirable because it could cause convergence problems", which is exactly the
+> timestep underflow this engine produced before the change. "Negligible" has no meaning inside
+> a module; it is a property of the run, and the user's own step request is the only honest
+> scale for it. `va-codegen` uses `tstep/1000`. Found while implementing
+> `docs/proposals/directives.md`.

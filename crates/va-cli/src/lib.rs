@@ -370,16 +370,22 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
     for f in &files {
         let name = f.display().to_string();
         let src = std::fs::read_to_string(f).with_context(|| format!("reading model {name}"))?;
-        let expanded = va_frontend::preprocess::preprocess(&src, &include_dirs)
+        let pre = va_frontend::preprocess::preprocess_full(&src, &include_dirs)
+            .0
             .with_context(|| format!("preprocessing {name}"))?;
-        let (tokens, offsets) =
-            va_frontend::lexer::lex_spanned(&expanded).with_context(|| format!("lexing {name}"))?;
-        let (asts, file_natures, file_disciplines) =
-            va_frontend::parser::parse_with_disciplines_located(
-                &tokens,
-                Some((&expanded, &offsets)),
-            )
-            .with_context(|| format!("parsing {name}"))?;
+        // A directive the LRM gives no Verilog-A meaning is accepted and said so, once.
+        for w in &pre.warnings {
+            eprintln!("[va-cli] warning: {name}: {w}");
+        }
+        let expanded = &pre.text;
+        let (tokens, offsets) = va_frontend::lexer::lex_spanned_with(expanded, &pre.directives)
+            .with_context(|| format!("lexing {name}"))?;
+        let (asts, file_natures, file_disciplines) = va_frontend::parser::parse_with_directives(
+            &tokens,
+            Some((expanded, &offsets)),
+            &pre.directives,
+        )
+        .with_context(|| format!("parsing {name}"))?;
         for (k, v) in file_disciplines {
             disciplines.entry(k).or_insert(v);
         }
@@ -964,10 +970,9 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
     if !scan_root.as_os_str().is_empty() && Some(scan_root) != own_dir {
         include_dirs.push(scan_root.to_path_buf());
     }
-    let (result, skipped_includes) =
-        va_frontend::preprocess::preprocess_reporting(&src, &include_dirs);
-    let src = match result {
-        Ok(src) => src,
+    let (result, skipped_includes) = va_frontend::preprocess::preprocess_full(&src, &include_dirs);
+    let pre = match result {
+        Ok(pre) => pre,
         Err(e) => {
             // The clause matters most here: a vendor distribution whose body `` `include ``
             // never shipped usually fails on a macro that same file defined, so the bare error
@@ -980,14 +985,22 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
     // line's text instead of a token index. The line is a line of the *preprocessed* source
     // (unresolved includes have already been dropped), which is why the quoted text matters
     // as much as the number here -- see va_frontend::parser::parse_with_disciplines_located.
-    let (tokens, offsets) = match va_frontend::lexer::lex_spanned(&src) {
+    for w in &pre.warnings {
+        println!("  [warn ] {path}: {w}");
+    }
+    let src = &pre.text;
+    let (tokens, offsets) = match va_frontend::lexer::lex_spanned_with(src, &pre.directives) {
         Ok(t) => t,
         Err(e) => {
             println!("  [lex  ] {path}: {e}{}", skipped_clause(&skipped_includes));
             return Err(skipped_includes);
         }
     };
-    match va_frontend::parser::parse_with_disciplines_located(&tokens, Some((&src, &offsets))) {
+    match va_frontend::parser::parse_with_directives(
+        &tokens,
+        Some((src, &offsets)),
+        &pre.directives,
+    ) {
         Ok((asts, natures, disciplines)) => Ok(ParsedFile {
             asts,
             natures,
@@ -3765,6 +3778,61 @@ mod tests {
         let src = std::fs::read_to_string(lowpass).expect("read laplace_lowpass.va");
         refuse_transient_approximations(&[(lowpass.to_string(), src)])
             .expect("laplace_nd runs in transient now");
+    }
+
+    /// `` `default_transition 100n `` reaches the transient: a `transition()` with no rise time
+    /// of its own ramps over 100 ns after its input steps, at slope 1/100 ns; with no directive
+    /// the same source steps abruptly (the simulator's default of 0). Both halves through the
+    /// real pipeline, so this is the directive's whole path — preprocessor event, per-module
+    /// settings, elaboration default, integrator ramp — in one discriminating number.
+    #[test]
+    fn default_transition_ramps_a_transition_in_transient() {
+        let run = |directive: &str| -> Vec<(f64, f64)> {
+            let src = format!(
+                "{directive}
+module tr(out, in, ref);
+  inout out, in, ref;
+  electrical out, in, ref;
+  analog V(out, ref) <+ transition(V(in, ref) > 0.5 ? 1.0 : 0.0, 0);
+endmodule
+"
+            );
+            let design = va_frontend::compile(&src).expect("compiles");
+            let net = va_netlist::parser::parse(
+                "V1 in gnd PULSE(0 1 100n 1n 1n 1u 2u)
+X1 out in gnd tr
+.tran 2n 400n
+.end
+",
+            )
+            .expect("parses");
+            let wf =
+                solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+            let out = net.node_order.iter().position(|n| n == "out").unwrap();
+            wf.t.iter()
+                .zip(&wf.x)
+                .map(|(&t, row)| (t, row[out]))
+                .collect()
+        };
+        let value_at = |pts: &[(f64, f64)], t: f64| {
+            pts.iter()
+                .rfind(|(pt, _)| *pt <= t)
+                .map(|(_, v)| *v)
+                .unwrap()
+        };
+        let ramped = run("`default_transition 100n");
+        // Halfway through the 100 ns ramp that starts when the input crosses 0.5 V (~100.5 ns).
+        let mid = value_at(&ramped, 150.5e-9);
+        assert!(
+            (mid - 0.5).abs() < 0.03,
+            "mid-ramp value {mid}, expected ~0.5"
+        );
+        assert!(value_at(&ramped, 250e-9) > 0.99, "ramp complete by 200 ns");
+        let abrupt = run("");
+        assert!(
+            value_at(&abrupt, 150.5e-9) > 0.99,
+            "no directive: an abrupt step, already at 1"
+        );
     }
 
     /// A `laplace_np` filter with a complex-conjugate pole pair, in transient, against the

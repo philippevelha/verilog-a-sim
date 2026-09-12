@@ -283,6 +283,159 @@ pub const RESERVED_WORDS: [&str; 186] = [
     "zi_zp",
 ];
 
+/// The IEEE 1364-1995 reserved words (Verilog-95, Annex B of that standard). A
+/// `` `begin_keywords "1364-1995" `` region reserves only these; every other word this lexer
+/// normally reserves — the whole Verilog-AMS analog vocabulary — is an ordinary identifier
+/// there (LRM 10.6, whose own example uses `sin` as a port name under a 1364 set).
+pub const IEEE_1364_1995: &[&str] = &[
+    "always",
+    "and",
+    "assign",
+    "begin",
+    "buf",
+    "bufif0",
+    "bufif1",
+    "case",
+    "casex",
+    "casez",
+    "cmos",
+    "deassign",
+    "default",
+    "defparam",
+    "disable",
+    "edge",
+    "else",
+    "end",
+    "endcase",
+    "endfunction",
+    "endmodule",
+    "endprimitive",
+    "endspecify",
+    "endtable",
+    "endtask",
+    "event",
+    "for",
+    "force",
+    "forever",
+    "fork",
+    "function",
+    "highz0",
+    "highz1",
+    "if",
+    "ifnone",
+    "initial",
+    "inout",
+    "input",
+    "integer",
+    "join",
+    "large",
+    "macromodule",
+    "medium",
+    "module",
+    "nand",
+    "negedge",
+    "nmos",
+    "nor",
+    "not",
+    "notif0",
+    "notif1",
+    "or",
+    "output",
+    "parameter",
+    "pmos",
+    "posedge",
+    "primitive",
+    "pull0",
+    "pull1",
+    "pulldown",
+    "pullup",
+    "rcmos",
+    "real",
+    "realtime",
+    "reg",
+    "release",
+    "repeat",
+    "rnmos",
+    "rpmos",
+    "rtran",
+    "rtranif0",
+    "rtranif1",
+    "scalared",
+    "small",
+    "specify",
+    "specparam",
+    "strong0",
+    "strong1",
+    "supply0",
+    "supply1",
+    "table",
+    "task",
+    "time",
+    "tran",
+    "tranif0",
+    "tranif1",
+    "tri",
+    "tri0",
+    "tri1",
+    "triand",
+    "trior",
+    "trireg",
+    "vectored",
+    "wait",
+    "wand",
+    "weak0",
+    "weak1",
+    "while",
+    "wire",
+    "wor",
+    "xnor",
+    "xor",
+];
+
+/// The words IEEE 1364-2001 added to [`IEEE_1364_1995`].
+pub const IEEE_1364_2001_ADDED: &[&str] = &[
+    "automatic",
+    "cell",
+    "config",
+    "design",
+    "endconfig",
+    "endgenerate",
+    "generate",
+    "genvar",
+    "incdir",
+    "include",
+    "instance",
+    "liblist",
+    "library",
+    "localparam",
+    "noshowcancelled",
+    "pulsestyle_ondetect",
+    "pulsestyle_onevent",
+    "showcancelled",
+    "signed",
+    "unsigned",
+    "use",
+];
+
+/// The word IEEE 1364-2005 added to 1364-2001.
+pub const IEEE_1364_2005_ADDED: &[&str] = &["uwire"];
+
+/// Whether `word` is reserved under `set`. `Vams23` is everything this lexer reserves; the
+/// three IEEE sets are the lists above, cumulatively.
+pub fn is_reserved_in(word: &str, set: crate::preprocess::KeywordSet) -> bool {
+    use crate::preprocess::KeywordSet::*;
+    match set {
+        Vams23 => true,
+        Ieee2005 => {
+            IEEE_1364_1995.contains(&word)
+                || IEEE_1364_2001_ADDED.contains(&word)
+                || IEEE_1364_2005_ADDED.contains(&word)
+        }
+        Ieee2001 => IEEE_1364_1995.contains(&word) || IEEE_1364_2001_ADDED.contains(&word),
+        Ieee1995 => IEEE_1364_1995.contains(&word),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

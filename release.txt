@@ -19,6 +19,52 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.18 - 2026-09-12
+-------------------
+Compiler directives do what the LRM says, or say why they cannot (Road to 1.0 B.5, all but
+`line`). `va-frontend`: `preprocess_full` returns the expanded text plus `DirectiveEvent`s at
+the offsets they apply from and one warning per no-effect directive; each `ModuleAst` carries
+the `Settings` in force at its `module` keyword (LRM scoping: none of these directives may
+appear inside a module). Implemented: `default_discipline` (an undeclared port takes it; bare
+form turns it off; a digital qualifier is an error naming Annex C), `default_transition`
+(omitted or zero rise/fall -> the directive's value, lowered as `rise > 0 ? rise : default`),
+`begin_keywords`/`end_keywords` (the four LRM specifiers; the lexer un-reserves by region,
+dedicated token variants included; nesting; unmatched/unterminated are errors),
+`resetall`. Recognised and reported once per file: `timescale`, `celldefine`/`endcelldefine`,
+`default_nettype`, `unconnected_drive`/`nounconnected_drive` (each warning says why it has no
+Verilog-A meaning). `pragma` ignored per 1364 section 19.9 except `pragma protect`, a
+Refusal. `default_nodetype` (non-LRM) is an error naming `default_discipline`. The five
+directives that failed as "undefined macro" no longer do. `line` is still consumed with no
+effect, pending the line map (proposal section 2.1 item 5) -- stated in token-reference.md.
+
+  **Found on the way, and fixed (behaviour change, hence the patch bump):** LRM 4.5.8 says a
+  `transition()` with no rise/fall time and no directive ramps over "a negligible, but
+  non-zero, transition time", precisely because "forcing a zero-duration transition ... could
+  cause convergence problems". This engine forced one (rise `0.0` -> `rate = inf`), and a
+  `transition` of a threshold comparison underflowed the timestep at the crossing -- found by
+  the directive test's own control case. Now: `AnalysisCtx::tstep` (Interface beta, additive,
+  docs/interfaces.md revision) carries the deck's `.tran` step, and `va-codegen` ramps a zero
+  span over `tstep/1000`, which `bound_step` resolves at any time scale. A model that writes
+  `transition(x, 0, 0)` gets the same negligible ramp, as the LRM says it must.
+
+  **Learned:** under `"1364-2005"` the whole AMS vocabulary is unreserved -- `analog` and
+  `electrical` too -- so a keyword region can hold only a structural module; the LRM's own
+  `sin`-as-a-port example is exactly that. The test wraps an analog module with one, using
+  `default_discipline` for what `electrical` cannot say there. Also removed a literal
+  `''' + M + '''` that an earlier scripted edit had left in a `va-frontend` comment.
+
+  Gates: 12 new tests -- preprocessor events/settings replay/nesting/resetall, literal
+  parsing and its errors, the qualifier error, warnings once each, the protect refusal and
+  the three errors; lexer regions un-reserving `sin`/`analog`/`electrical`; end to end,
+  `default_discipline` making a port-undeclared module elaborate (and fail without it),
+  `default_transition` filling an omitted and a zero rise time, the structural wrapper with
+  `sin` as a port, warnings surfacing in `CompiledDesign`; and in `va-cli` the transient ramp
+  itself: 100 ns under the directive, negligible without it, neither underflowing.
+
+  Measured: `cargo test --workspace` 781 passed / 0 failed (+12); clippy/fmt clean;
+  `cargo xtask validate` 28/28; corpus 112/132 (94/99) and zoo 25/25 unchanged.
+
+
 0.9.17+1 - 2026-09-12
 ---------------------
 Two new 1.0 blockers, planned in writing (process only, no code). The supervisor's review of
@@ -971,16 +1017,15 @@ Ordered by what to do first.
       breakpoints at every sample instant and the LRM's transition ramp; four additive
       `va_ir::Builtin`s (Interface α, section 6). About two days. Depends on B.5's
       `default_transition`.
-  [ ] Compiler directives: every one of the LRM's 20 does what Clause 10 says, or says why it
-      cannot (supervisor decision 2026-09-12: no "consumed with no effect"). Today 9 are
-      swallowed silently and **5 are not recognised at all** (`celldefine`/`endcelldefine`,
-      `default_nettype`, `unconnected_drive`/`nounconnected_drive` fail as "undefined
-      macro"). Plan and per-directive verdicts: docs/proposals/directives.md -- implement
-      `default_discipline`, `default_transition`, `resetall`, `begin_keywords`/`end_keywords`,
-      `line` (with the line map that fixes "preprocessed line N" in every diagnostic);
-      recognise-and-report `timescale`, `celldefine`, `default_nettype`, `unconnected_drive`;
-      refuse `pragma protect` envelopes; reject the non-LRM `default_nodetype`. About two
-      days, `va-frontend` only.
+  [~] Compiler directives: every one of the LRM's 20 does what Clause 10 says, or says why it
+      cannot (supervisor decision 2026-09-12: no "consumed with no effect"). **Done in
+      0.9.18** for 19 of 20: `default_discipline`, `default_transition`, `resetall`,
+      `begin_keywords`/`end_keywords` implemented; `timescale`, `celldefine`,
+      `default_nettype`, `unconnected_drive` recognised and reported; `pragma protect` refused;
+      `default_nodetype` rejected. **Open: `line`** -- honouring it needs the expanded-line ->
+      original file:line map (docs/proposals/directives.md section 2.1 item 5), which also
+      fixes "at preprocessed line N" in every diagnostic. Until then it is consumed, and
+      token-reference.md says so.
   [ ] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
       with a scheduled one (`initial_step or cross(...)`) are refused, with what/why/instead.
       **Ship 1.0 with these refused** -- no corpus file needs them and the refusal is

@@ -1,7 +1,14 @@
 # Proposal: every compiler directive does what the LRM says, or says why it cannot
 
-**Status: proposed 2026-09-12, a 1.0 blocker by supervisor decision** ("I don't want the
-preprocessor to consume with no effect"). Source of truth: Verilog-AMS LRM 2.4 Clause 10 and
+**Status: implemented 2026-09-12 (v0.9.18) except §2.1 item 5, `` `line `` and the line
+map, which stays open.** A 1.0 blocker by supervisor decision ("I don't want the
+preprocessor to consume with no effect"). Two things the implementation taught: under a 1364
+keyword set `analog` and `electrical` are unreserved too, so a keyword region can only hold a
+structural module (the test wraps an analog one, with `` `default_discipline `` supplying what
+`electrical` cannot); and LRM 4.5.8 makes a *zero* rise time mean the default as well, and
+demands a negligible non-zero ramp when no directive is set — which this engine did not do
+(instant jump, timestep underflow at a threshold crossing) and now does, scaled to the deck's
+`.tran` step through a new `AnalysisCtx::tstep` (Interface β, additive). Source of truth: Verilog-AMS LRM 2.4 Clause 10 and
 Annex C.12 ("The compiler directives of Clause 10 are applicable to both Verilog-AMS HDL and
 Verilog-A"), read from `references/VAMS-LRM-2-4.pdf`, not from memory.
 

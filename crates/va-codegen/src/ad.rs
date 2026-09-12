@@ -1107,13 +1107,25 @@ fn eval_call(
             // A changed input starts a new transition: latch the target, the rate implied by
             // this step's full amplitude, and when it may begin.
             if value.value != target {
-                let span = if value.value >= y_prev { rise } else { fall };
+                let mut span = if value.value >= y_prev { rise } else { fall };
+                // LRM 4.5.8: a rise/fall time that is absent *or zero* means the
+                // `default_transition` value (elaboration substitutes that when a directive is
+                // in force), and with no directive "a negligible, but non-zero, transition time
+                // is used" — deliberately, because "forcing a zero-duration transition is
+                // undesirable because it could cause convergence problems". Before 2026-09-12
+                // this was an instant jump (`rate = ∞`), and a `transition` of a threshold
+                // comparison underflowed the timestep at the crossing. "Negligible" is scaled
+                // to the deck's own step request: a thousandth of `.tran`'s tstep, which the
+                // integrator resolves (~8 points per ramp via `bound_step`) at every time scale.
+                if span == 0.0 && ctx.analysis.tstep > 0.0 {
+                    span = ctx.analysis.tstep * 1e-3;
+                }
                 target = value.value;
                 t_start = t + delay;
                 rate = if span > 0.0 {
                     (target - y_prev).abs() / span
                 } else {
-                    f64::INFINITY // a zero rise/fall time is an instant jump, not a divide error
+                    f64::INFINITY // no time axis at all (not transient): an instant jump
                 };
             }
 

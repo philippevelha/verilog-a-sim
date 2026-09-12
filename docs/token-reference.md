@@ -231,24 +231,36 @@ class of lexemes.
 - **Purpose and Static Nature**: A preprocessor directive name (leading `` ` `` stripped),
   purely a text-level, elaboration-time (in fact pre-elaboration) construct — it never survives
   into the IR.
-- **Declaration and Assignment**: what `crate::preprocess` handles, in three groups (audited
-  2026-09-12 against the `match` in `Preprocessor::process_line`): **expanded** — `` `define ``
-  (object- and function-like), `` `undef ``, `` `include "file" ``; **evaluated** —
-  `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `endif `` (against the defined-macro
-  set, nesting allowed); **recognised and consumed with no effect** — `` `resetall ``,
-  `` `timescale ``, `` `begin_keywords ``/`` `end_keywords ``, `` `default_discipline ``,
-  `` `default_nodeType ``, `` `default_transition ``, `` `line ``, `` `pragma ``. **That third
-  group is a stated gap, not conformance** (supervisor, 2026-09-12): `` `default_discipline ``
-  and `` `default_transition `` change what an analog block computes (LRM 10.2/10.3 — a net
-  with no discipline declaration, `transition()`'s default rise/fall), `` `begin_keywords ``
-  changes what lexes as a keyword (10.6), `` `line `` changes what a diagnostic reports, and
-  `` `resetall `` resets all of them; only `` `timescale `` and `` `pragma `` are genuinely
-  meaningless to Verilog-A, and `` `default_nodeType `` is not an LRM directive at all (an
-  obsolete AMS-1.x spelling). **Five LRM directives are not recognised at all** and fail as
-  "undefined macro": `` `celldefine ``/`` `endcelldefine ``, `` `default_nettype ``,
-  `` `unconnected_drive ``/`` `nounconnected_drive ``. The per-directive plan — implement,
-  recognise-and-report, or reject — is `docs/proposals/directives.md`, a 1.0 blocker. Any other
-  backtick-word is a macro usage and goes to expansion; an undefined one is an error.
+- **Declaration and Assignment**: every one of the LRM's 20 directives (Clause 10; Annex
+  C.12 makes them all Verilog-A's) is recognised, and none is dropped silently
+  (`docs/proposals/directives.md`, implemented 2026-09-12, v0.9.18). Four groups:
+  **expanded** — `` `define `` (object- and function-like), `` `undef ``, `` `include ``;
+  **evaluated** — `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `endif `` (against
+  the defined-macro set, nesting allowed); **text-stream scoped, recorded as
+  `preprocess::DirectiveEvent`s and applied downstream** — `` `default_discipline [name] ``
+  (LRM 10.2: a port/net declared without a discipline takes it; the bare form turns it off; a
+  digital qualifier such as `wire`/`reg` is an error naming Annex C), `` `default_transition t ``
+  (10.3: the rise/fall time a `transition()` uses when it omits its own *or writes zero* —
+  LRM 4.5.8's rule; `t` must reduce to a numeric literal, SI suffix allowed, after macro
+  expansion — an expression there is a stated limitation), `` `begin_keywords "spec" ``/
+  `` `end_keywords `` (10.6: `"VAMS-2.3"`, `"1364-2005"`, `"1364-2001"`, `"1364-1995"`;
+  inside a 1364 region the whole analog vocabulary is unreserved — `analog` and
+  `electrical` included, so the only Verilog-A module that can live there is a structural
+  one, which is what the LRM's own `sin`-as-a-port example is — regions nest), `` `resetall ``
+  (1364 §19.6: every directive back to its default, macros untouched); each module inherits
+  the settings in force at its `module` keyword (`ModuleAst::settings`), which is the LRM's
+  own scoping since none of these may appear inside a module body; **recognised and
+  reported** — `` `timescale ``, `` `celldefine ``/`` `endcelldefine ``, `` `default_nettype ``,
+  `` `unconnected_drive ``/`` `nounconnected_drive `` have no Verilog-A meaning by the LRM's
+  own definitions (no delay controls, `$abstime` in seconds, no digital nets or ports) and
+  each produces one warning per file saying so (`Preprocessed::warnings`, printed by
+  `va-cli`); `` `pragma `` is ignored as 1364 §19.9 requires, except `` `pragma protect ``,
+  whose envelope is a `Refusal` (ciphertext; no vendor key here). **Rejected** —
+  `` `default_nodetype `` is not an LRM directive (Annex F: obsolete AMS-1.x) and is an
+  error naming `` `default_discipline ``. **Still consumed with no effect: `` `line ``** —
+  honouring it needs the expanded-line → original-file:line map that would also fix "at
+  preprocessed line N" in every diagnostic (proposal §2.1 item 5), and is the one open item
+  of that proposal. Any other backtick-word is a macro usage; an undefined one is an error.
 - **Expressions and Evaluation**: Not an expression construct at all; handled by a dedicated
   preprocessing pass before lexing "real" tokens (macro objects/functions expand recursively,
   conditionals are evaluated against the defined-macro set). An unresolved `` `include `` is
@@ -1311,7 +1323,14 @@ including the ones with no implemented behavior at all.
   noise) both settle to their input, which is the exact steady-state answer, not a fold.
 - **Declaration and Assignment**: Called as `transition(value, delay[, rise_time[,
   fall_time]])` / `slew(value, pos_rate[, neg_rate])` — `value` is required, the rest optional
-  with the LRM defaults.
+  with the LRM defaults. **`transition`'s default rise/fall (LRM 4.5.8, implemented
+  2026-09-12):** omitted *or zero* means the `` `default_transition `` in force at the module
+  (lowered as `rise > 0 ? rise : default` when one is written under a directive); with no
+  directive, "a negligible, but non-zero, transition time" — `va-codegen` uses a thousandth of
+  the deck's `.tran` step (`AnalysisCtx::tstep`, §6 change 2026-09-12), which the integrator
+  resolves at every time scale. Before that it was an instant jump, and a `transition` of a
+  threshold comparison underflowed the timestep at the crossing — the convergence problem the
+  LRM's rule exists to avoid.
 - **Expressions and Evaluation**: Lowered to `Builtin::Transition`/`Builtin::Slew` with every
   argument kept; `va-codegen` gives each call site its own state slots keyed by `ExprId`, so
   the same function written twice keeps two independent histories. `slew` is exact:

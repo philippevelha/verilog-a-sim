@@ -293,6 +293,16 @@ pub struct AnalysisCtx {
     /// A model must therefore not assume distinct frequencies between evaluations: an AC run
     /// over a circuit with no frequency-dependent instance still evaluates once, at `0.0`.
     pub freq: f64,
+    /// The transient run's **requested** timestep in seconds — the deck's `.tran <tstep>`
+    /// (§6 change, 2026-09-12). `0.0` in every other analysis.
+    ///
+    /// This is the scale a model needs for "negligible": LRM 4.5.8 says a `transition()` with
+    /// no rise/fall time, and no `` `default_transition `` in force, ramps over "a negligible,
+    /// but non-zero, transition time" — precisely so the integrator can resolve it instead of
+    /// facing a discontinuity. Nothing inside a model defines "negligible"; the user's own step
+    /// request does. A consumer that does not integrate leaves it `0.0`, and a model reading it
+    /// there must treat that as "there is no time axis", never as a zero-length ramp.
+    pub tstep: f64,
 }
 
 impl AnalysisCtx {
@@ -311,6 +321,7 @@ impl AnalysisCtx {
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
             ddt_prev2_weight: 0.0,
+            tstep: 0.0,
         }
     }
 
@@ -333,6 +344,7 @@ impl AnalysisCtx {
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
             ddt_prev2_weight: 0.0,
+            tstep: 0.0,
         }
     }
 
@@ -351,6 +363,7 @@ impl AnalysisCtx {
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
             ddt_prev2_weight: 0.0,
+            tstep: 0.0,
         }
     }
 
@@ -367,6 +380,7 @@ impl AnalysisCtx {
             ddt_coeff: 0.0,
             ddt_prev_rate_weight: 0.0,
             ddt_prev2_weight: 0.0,
+            tstep: 0.0,
         }
     }
 
@@ -402,6 +416,12 @@ impl AnalysisCtx {
             ddt_prev2_weight,
             ..self
         }
+    }
+
+    /// This context carrying the transient run's requested timestep — see
+    /// [`AnalysisCtx::tstep`]. Only a transient driver calls this.
+    pub const fn with_tstep(self, tstep: f64) -> Self {
+        AnalysisCtx { tstep, ..self }
     }
 
     /// This context marked as (or as not) the analysis's first evaluation.

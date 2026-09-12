@@ -649,6 +649,30 @@ impl Elaborator<'_> {
                 self.out.ports.push(vec![*id]);
                 continue;
             }
+            // A port with no discipline declaration takes the module's `default_discipline`
+            // (LRM 10.2, `docs/proposals/directives.md`). The LRM phrases 10.2 in terms of
+            // "discrete signals"; applying it to an undeclared analog net is what every
+            // Verilog-A tool does with it, and is the only reading under which the directive
+            // has any meaning in Annex C's language at all.
+            if let Some(disc_name) = self.ast.settings.default_discipline.clone() {
+                let disc = match disc_name.as_str() {
+                    "electrical" => Discipline::Electrical,
+                    "thermal" => Discipline::Thermal,
+                    _ => Discipline::Other,
+                };
+                let abstol =
+                    disciplines::resolve_abstol(&disc_name, self.disciplines, self.natures);
+                let nature = disciplines::resolve_potential_nature(
+                    &disc_name,
+                    self.disciplines,
+                    self.natures,
+                );
+                let access = nature.and_then(|n| n.access.clone());
+                let units = nature.and_then(|n| n.units.clone());
+                let id = self.intern_node(port, disc, abstol, access, units);
+                self.out.ports.push(vec![id]);
+                continue;
+            }
             if let Some(dims) = self.vectors.get(port) {
                 if dims.len() != 1 {
                     return Err(elab(format!(
@@ -2009,7 +2033,29 @@ impl Elaborator<'_> {
                     Expr::Call(Builtin::Slew, vec![value, pos, neg])
                 } else {
                     let delay = arg_or(1, 0.0)?;
-                    let rise = arg_or(2, 0.0)?;
+                    // An omitted rise time is the `default_transition` in force at this
+                    // module (LRM 4.5.8 / 10.3), or 0 when no directive set one — "controlled
+                    // by the simulator", and 0 is this simulator's choice: breakpoints make an
+                    // abrupt step exact, so no smoothing is imposed that the source did not ask
+                    // for.
+                    let rise = match (args.get(2), self.ast.settings.default_transition) {
+                        // Written, with no directive: as written (a zero becomes "negligible"
+                        // at load, where the time scale is known — `va_codegen::ad`).
+                        (Some(&e), None) => self.lower_expr(e)?,
+                        // Written, with a directive: LRM 4.5.8 says a rise time "equal to zero"
+                        // also takes the directive's value, so `rise > 0 ? rise : default`.
+                        (Some(&e), Some(t)) => {
+                            let written = self.lower_expr(e)?;
+                            let zero = self.out.push_expr(Expr::Const(0.0));
+                            let positive =
+                                self.out
+                                    .push_expr(Expr::Binary(va_ir::BinOp::Gt, written, zero));
+                            let default = self.out.push_expr(Expr::Const(t));
+                            self.out.push_expr(Expr::Select(positive, written, default))
+                        }
+                        (None, Some(t)) => self.out.push_expr(Expr::Const(t)),
+                        (None, None) => self.out.push_expr(Expr::Const(0.0)),
+                    };
                     // An omitted `fall_time` equals `rise_time` (LRM §4.5.5) — again the same
                     // `ExprId`, not a duplicate.
                     let fall = match args.get(3) {
