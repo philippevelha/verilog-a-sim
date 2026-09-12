@@ -19,6 +19,41 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.17+1 - 2026-09-12
+---------------------
+Two new 1.0 blockers, planned in writing (process only, no code). The supervisor's review of
+0.9.17's audit: refusing `zi_*` is not the answer before 1.0, and a preprocessor that
+"consumes with no effect" is not acceptable. Both plans were written against the LRM text
+(`pdftotext` on references/VAMS-LRM-2-4.pdf), not from memory.
+
+  * docs/proposals/directives.md. Clause 10 lists 20 directives and Annex C.12 makes all of
+    them Verilog-A's. Verdict per directive: `default_discipline` (10.2) and
+    `default_transition` (10.3) change what an analog block computes and are implemented
+    (`transition()`'s omitted rise/fall is `0.0` today; the LRM says it is the directive's
+    value); `begin_keywords`/`end_keywords` (10.6, "must also be supported") select the
+    reserved-word set; `line` fixes the "preprocessed line N" wart in every diagnostic;
+    `resetall` resets them. `timescale`, `celldefine`, `default_nettype`,
+    `unconnected_drive` have no analog meaning by the LRM's own definitions and are
+    recognised and reported, never dropped; `pragma protect` envelopes become a Refusal
+    (encrypted IP); `default_nodetype` is not an LRM directive (Annex F change table:
+    obsolete AMS-1.x) and becomes an error naming `default_discipline`. **Found while
+    checking: five LRM directives are not recognised at all** and fail as "undefined macro"
+    (`celldefine`/`endcelldefine`, `default_nettype`, `unconnected_drive`/`nounconnected_
+    drive`) -- 0.9.17's audit compared the document against the preprocessor's own list, so
+    it could not see what neither had. Zero corpus uses of any of them; planned against the
+    standard.
+  * docs/proposals/z-domain-filters.md. LRM 4.5.12 semantics stated; DC `H(1)`, AC
+    `H(e^{jωT})` on the existing complex-gain stamp, transient as a sampled difference
+    equation on the state channel (the `transition`/`slew` mechanism, not the `laplace_*`
+    state-space one: a sampled system is not an ODE) with breakpoints at every sample
+    instant, the LRM transition ramp, and a Jacobian that is exact because the sampled input
+    is committed state everywhere but the sampling evaluation itself. Four additive
+    `va_ir::Builtin`s -- an Interface α change, and this document is CLAUDE.md section 6's
+    step 1. Seven gates named, closed-form first. Depends on `default_transition`.
+
+  Road to 1.0 gains B.4 and B.5 with both; token-reference.md's `Directive` entry now calls
+  the "consumed" group a stated gap and names the unrecognised five.
+
 0.9.17 - 2026-09-12
 -------------------
 Pre-1.0 audit of docs/token-reference.md against the code, both directions, by script: the
@@ -929,6 +964,23 @@ Ordered by what to do first.
       ~400 is minutes, ~800 is half an hour, beyond ~1 000 dense LU is impractical; a `.op`
       is fine to 800 nodes. Table and machine in docs/validation.md. Building the sparse path
       is post-1.0 (docs/future_development.md section 1).
+  [ ] Z-domain filters `zi_nd`/`zi_np`/`zi_zd`/`zi_zp` implemented, not refused (supervisor
+      decision 2026-09-12; refused since 0.9.17, silently folded before that). Design:
+      docs/proposals/z-domain-filters.md -- DC `H(1)`, AC `H(e^{jωT})` through the Laplace
+      stamp path, transient as a sampled difference equation on the state channel with
+      breakpoints at every sample instant and the LRM's transition ramp; four additive
+      `va_ir::Builtin`s (Interface α, section 6). About two days. Depends on B.5's
+      `default_transition`.
+  [ ] Compiler directives: every one of the LRM's 20 does what Clause 10 says, or says why it
+      cannot (supervisor decision 2026-09-12: no "consumed with no effect"). Today 9 are
+      swallowed silently and **5 are not recognised at all** (`celldefine`/`endcelldefine`,
+      `default_nettype`, `unconnected_drive`/`nounconnected_drive` fail as "undefined
+      macro"). Plan and per-directive verdicts: docs/proposals/directives.md -- implement
+      `default_discipline`, `default_transition`, `resetall`, `begin_keywords`/`end_keywords`,
+      `line` (with the line map that fixes "preprocessed line N" in every diagnostic);
+      recognise-and-report `timescale`, `celldefine`, `default_nettype`, `unconnected_drive`;
+      refuse `pragma protect` envelopes; reject the non-LRM `default_nodetype`. About two
+      days, `va-frontend` only.
   [ ] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
       with a scheduled one (`initial_step or cross(...)`) are refused, with what/why/instead.
       **Ship 1.0 with these refused** -- no corpus file needs them and the refusal is

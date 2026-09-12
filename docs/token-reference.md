@@ -237,11 +237,18 @@ class of lexemes.
   `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `endif `` (against the defined-macro
   set, nesting allowed); **recognised and consumed with no effect** — `` `resetall ``,
   `` `timescale ``, `` `begin_keywords ``/`` `end_keywords ``, `` `default_discipline ``,
-  `` `default_nodeType ``, `` `default_transition ``, `` `line ``, `` `pragma `` (each is
-  digital-side or an instruction to a simulator front end this project does not have; dropping
-  them is the LRM-conformant behaviour for a tool that does not implement the feature, and none
-  changes what a Verilog-A analog block means). Any other backtick-word is a macro usage and
-  goes to expansion; an undefined one is an error.
+  `` `default_nodeType ``, `` `default_transition ``, `` `line ``, `` `pragma ``. **That third
+  group is a stated gap, not conformance** (supervisor, 2026-09-12): `` `default_discipline ``
+  and `` `default_transition `` change what an analog block computes (LRM 10.2/10.3 — a net
+  with no discipline declaration, `transition()`'s default rise/fall), `` `begin_keywords ``
+  changes what lexes as a keyword (10.6), `` `line `` changes what a diagnostic reports, and
+  `` `resetall `` resets all of them; only `` `timescale `` and `` `pragma `` are genuinely
+  meaningless to Verilog-A, and `` `default_nodeType `` is not an LRM directive at all (an
+  obsolete AMS-1.x spelling). **Five LRM directives are not recognised at all** and fail as
+  "undefined macro": `` `celldefine ``/`` `endcelldefine ``, `` `default_nettype ``,
+  `` `unconnected_drive ``/`` `nounconnected_drive ``. The per-directive plan — implement,
+  recognise-and-report, or reject — is `docs/proposals/directives.md`, a 1.0 blocker. Any other
+  backtick-word is a macro usage and goes to expansion; an undefined one is an error.
 - **Expressions and Evaluation**: Not an expression construct at all; handled by a dedicated
   preprocessing pass before lexing "real" tokens (macro objects/functions expand recursively,
   conditionals are evaluated against the defined-macro set). An unresolved `` `include `` is
