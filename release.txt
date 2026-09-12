@@ -19,6 +19,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.20+1 - 2026-09-12
+---------------------
+**`v1.0.0-rc1` tagged on 0.9.20 (`4cbae93`) and the release workflow ran for the first
+time:** three release-mode builds (x86_64 Linux, x86_64 Windows MSVC, arm64 macOS), each
+running the full gate first, packaged and published to
+https://github.com/philippevelha/verilog-a-sim/releases/tag/v1.0.0-rc1 -- 1.1-1.7 MB per
+archive, each holding `va-cli`, `models/` (29 files), `circuits/` (43), `workflow.md`,
+`README.md`, `LICENSE`, `release.txt`. All four jobs green on the first run.
+
+  **First real-machine record (Windows).** The Windows archive downloaded and unpacked into a
+  scratch directory with nothing from the checkout, on the development machine (11th-gen
+  Intel Core i7-1185G7, Windows 11 Pro 10.0.26200): `rectifier.net` 718 points,
+  `V(out) = 4.304467 V` at `t = 2.536873e-4 s` -- identical to the source build;
+  `microring_thermal.net` 2015 points with the 787 uW drop-port peak; `laplace_step.net`
+  on `1 - e^(-t/tau)`. Linux and macOS archives are built and published but **not yet run on
+  a real machine** -- that is the remaining Road-to-1.0 item, and docs/workflow.md's new
+  "What it works on this machine means" says exactly what to run and what pass looks like.
+
+  **Found:** rc1 was published as a full release, not a pre-release -- release.yml had no
+  `prerelease` flag. Fixed for the next tag (`-rc`/`-beta`/`-alpha` in the tag name); rc1
+  itself should be ticked as a pre-release on GitHub by hand.
+
+  **docs/workflow.md rewritten for the binary** (Road to 1.0 A.5): the archive section
+  comes first with the three test commands and their expected numbers; `cargo run` stays as
+  the developer path. No code touched.
+
+
 0.9.20 - 2026-09-12
 -------------------
 `zi_nd`/`zi_np`/`zi_zd`/`zi_zp` **implemented** (Road to 1.0 B.4 closed; LRM 4.5.12,
@@ -1045,13 +1072,14 @@ Ordered by what to do first.
       and attaches per-platform archives (binary + models/ + circuits/ + docs/workflow.md) to
       a GitHub release. Written, not yet exercised: the first `v*` tag is its test.
       (0.9.15+1)
-  [ ] Ship and test the executable across platforms. With the above in place, this is: tag
-      a release candidate, download the three archives, run `va-cli sim` on real machines --
-      not only CI runners -- and record machine, OS, and `cargo xtask validate` figures in the
-      1.0 entry. "It builds" is not the bar; the deck runs and matches golden is.
-  [ ] Rewrite docs/workflow.md for the binary once the archive exists: install/unpack,
-      invoke, where models/ and circuits/ live in it. The `cargo run` form stays documented
-      as the developer path.
+  [~] Ship and test the executable across platforms. `v1.0.0-rc1` tagged 2026-09-12 and all
+      three archives published (0.9.20+1). **Windows: done** from the archive on the dev
+      machine, results identical to the source build. **Linux and macOS: archives built by
+      CI, not yet run on a real machine** -- the three commands and the pass criteria are in
+      docs/workflow.md; record machine, OS and outcomes here when done. That record is the
+      last thing between rc1 and 1.0.0.
+  [x] Rewrite docs/workflow.md for the binary -- done in 0.9.20+1 against the real rc1
+      archive layout; `cargo run` stays as the developer path.
   [x] cargo-deny's first verdict. deny.toml was written at bootstrap and never run until
       2026-09-11; the first run failed advisories, bans and licenses for reasons unrelated
       to native linking, all fixed in 0.9.15+1 (see that entry). Green in CI on every run

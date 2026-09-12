@@ -85,6 +85,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          # A release candidate (`v1.0.0-rc1`) is a pre-release; the first run (2026-09-12)
+          # published rc1 as a full release because this was missing.
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           # The release notes are the release.txt entry for this version; edit on GitHub if
           # the tag was pushed before the entry was written (it should not be).
           generate_release_notes: false

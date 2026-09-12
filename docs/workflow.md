@@ -1,7 +1,8 @@
 # Workflow — from a Verilog-A model to a simulation result
 
-This is the workflow **as it stands today (v0.9.x)**: the simulator is driven from source, on
-the developer's machine, through `cargo run`. The last section says what changes at 1.0.
+Two ways to run the same program: from a **release archive** (the 1.0 deliverable — see
+"Running the release archive" below) or from source with `cargo run` (the developer path,
+used for the walk-through). The three pieces a simulation needs are the same either way.
 
 ## The three pieces
 
@@ -146,35 +147,60 @@ Validation against QSPICE golden data is a separate command, `cargo xtask valida
 drives the same `va_cli::run_sim` library entry point over every deck in `circuits/` that has
 a committed `golden/` file (`docs/validation.md`).
 
-## What changes at 1.0
+## Running the release archive (the 1.0 workflow)
 
-Everything above runs from source: `cargo run` builds the workspace on the machine it is on
-and executes the fresh binary. That is the right shape while the language front end and the
-analyses are still growing, because the person running a simulation is also the person
-changing the simulator.
+Since `v1.0.0-rc1` (2026-09-12) the deliverable is a compiled executable. Each release on
+https://github.com/philippevelha/verilog-a-sim/releases carries one archive per platform:
 
-At **1.0 the deliverable becomes the executable.** The sources are compiled once from the
-tagged release, and the resulting `va-cli` binary (`va-cli.exe` on Windows) is what users
-run — no Rust toolchain, no checkout:
+| Archive | Platform |
+|---|---|
+| `va-cli-<tag>-x86_64-unknown-linux-gnu.tar.gz` | Linux, x86-64 |
+| `va-cli-<tag>-x86_64-pc-windows-msvc.zip` | Windows, x86-64 |
+| `va-cli-<tag>-aarch64-apple-darwin.tar.gz` | macOS, Apple silicon |
+
+Each unpacks to one directory holding `va-cli` (`va-cli.exe` on Windows), `models/` (the
+model zoo, including `disciplines.vams`, `constants.vams`, `mechanical.vams`, `photonic.vams`),
+`circuits/` (every deck in this repository), `workflow.md` (this file), `README.md`,
+`LICENSE` and `release.txt`. No Rust toolchain, no checkout, nothing to install:
 
 ```bash
-va-cli sim rectifier.net --model diode.va --tran
+tar xzf va-cli-v1.0.0-rc1-x86_64-unknown-linux-gnu.tar.gz     # or unzip the .zip on Windows
+cd va-cli-v1.0.0-rc1-x86_64-unknown-linux-gnu
+./va-cli sim circuits/rectifier.net --model models/diode.va --tran
+./va-cli sim circuits/microring_thermal.net --model models --tran --report drop
+./va-cli sim circuits/laplace_step.net --model models/laplace_lowpass.va --tran --report out
 ```
 
-The workflow's three pieces (model, deck, one command) do not change; what changes is that
-the command is a shipped program rather than `cargo run`. Two things follow, and both are 1.0
-blockers recorded in `release.txt`'s "Road to 1.0":
+(On macOS the first run may need `xattr -d com.apple.quarantine va-cli`, since the binary is
+not notarised. On Windows, `.\va-cli.exe`.) Everything in the sections above applies with
+`./va-cli` in place of `cargo run -p va-cli --`: the same three pieces — a `.va` component, a
+`.net` deck as the testbench, one `sim` call — and the same flags.
 
-- **The executable is tested on several different platforms** — different computers,
-  different operating systems — not only the Windows development machine. The pure-Rust,
-  no-native-link rule (CLAUDE.md §5, `deny.toml`) exists precisely so that this is a build
-  matrix and not a porting effort, but "it should build anywhere" is not evidence; the
-  release entry for 1.0 must list the machines and OSes the binary was actually run and
-  validated on, with `cargo xtask validate`'s figures from each.
-- **This document is rewritten for the binary**: install/unpack, invoke, and where the
-  reference models ship, replacing the `cargo run -p va-cli --` prefix throughout.
+### What "it works on this machine" means
 
-Until then, every command in this file is the `cargo run` form, and that form is correct.
+A release candidate is tested on real machines, not only CI runners, and the result is
+recorded in `release.txt`'s entry for the release. The test is the three commands above, and
+"pass" is:
+
+1. `rectifier.net`: `Transient analysis (718 points, …)`, and the line at
+   `t=2.536873e-4s` reads `V(out)=4.304467 V` — the same numbers the source build produces
+   on the development machine (the adaptive timestep sequence is deterministic, so a
+   different point count means a different floating-point environment, which is itself a
+   finding to report).
+2. `microring_thermal.net`: 2015 points, `Popt(drop)` peaking at `7.87e-4 W` four times.
+3. `laplace_step.net`: `V(out)` at `t ≈ 1.0e-3 s` is `1 − e^{−1} = 0.632…`, matching the
+   QSPICE golden the repository carries to `5e-6`.
+
+Report the machine (CPU, OS and version), the archive name, and the three outcomes. The
+2026-09-12 entry for rc1 has the first such record (Windows 11, the development machine,
+from the archive rather than the checkout).
+
+## Developing: the `cargo run` path
+
+Everything above the archive section runs from source: `cargo run` builds the workspace on
+the machine it is on and executes the fresh binary. That is the right shape when the person
+running a simulation is also the person changing the simulator, and it is how every command
+in this file was validated. The two forms are the same program; only the prefix differs.
 
 ### Toolchain note for developers
 
