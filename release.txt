@@ -19,6 +19,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.19 - 2026-09-12
+-------------------
+`line`, and every diagnostic with it (Road to 1.0 B.5 closed). The preprocessor now keeps a
+**line map**: for each line of expanded text, the file it was read from and its 1-based line
+there, through `include` nesting (each open file counts its own lines; the includer resumes
+where it left off) and `line number "file" level` overrides (IEEE 1364-2005 section 19.7: the
+*next* line is `number` of `file`; `level` accepted and unused). `parse_unit` takes the map and
+a parse error reads `at bad.va:5:30 (...)` -- the original file and line -- instead of
+"at preprocessed line 27", which counted lines of text the user never saw. `va-cli` passes each
+model's own path (`preprocess_named`/`compile_named`), so the file in the message is the one on
+disk. Without a map the old wording is kept, and says which numbering it is.
+
+  Gates: the map through an include and a `line` override (line-by-line, blank lines from a
+  file's trailing newline included since the map must stay parallel to the text); a parse error
+  naming `m.va:4` with three include lines ahead of it in the expanded text, and "preprocessed
+  line 7" for the same error without the map. The directives proposal's "no Interface beta
+  change" line corrected: `AnalysisCtx::tstep` (0.9.18) is one.
+
+  Measured: `cargo test --workspace` 783 passed / 0 failed (+2); clippy/fmt clean;
+  `cargo xtask validate` 28/28.
+
+
 0.9.18 - 2026-09-12
 -------------------
 Compiler directives do what the LRM says, or say why they cannot (Road to 1.0 B.5, all but
@@ -1017,15 +1039,12 @@ Ordered by what to do first.
       breakpoints at every sample instant and the LRM's transition ramp; four additive
       `va_ir::Builtin`s (Interface α, section 6). About two days. Depends on B.5's
       `default_transition`.
-  [~] Compiler directives: every one of the LRM's 20 does what Clause 10 says, or says why it
-      cannot (supervisor decision 2026-09-12: no "consumed with no effect"). **Done in
-      0.9.18** for 19 of 20: `default_discipline`, `default_transition`, `resetall`,
-      `begin_keywords`/`end_keywords` implemented; `timescale`, `celldefine`,
-      `default_nettype`, `unconnected_drive` recognised and reported; `pragma protect` refused;
-      `default_nodetype` rejected. **Open: `line`** -- honouring it needs the expanded-line ->
-      original file:line map (docs/proposals/directives.md section 2.1 item 5), which also
-      fixes "at preprocessed line N" in every diagnostic. Until then it is consumed, and
-      token-reference.md says so.
+  [x] Compiler directives: every one of the LRM's 20 does what Clause 10 says, or says why it
+      cannot (supervisor decision 2026-09-12: no "consumed with no effect"). 0.9.18:
+      `default_discipline`, `default_transition`, `resetall`, `begin_keywords`/`end_keywords`
+      implemented; `timescale`, `celldefine`, `default_nettype`, `unconnected_drive`
+      recognised and reported; `pragma protect` refused; `default_nodetype` rejected. 0.9.19:
+      `line`, with the line map that makes every parse error name the original file:line.
   [ ] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
       with a scheduled one (`initial_step or cross(...)`) are refused, with what/why/instead.
       **Ship 1.0 with these refused** -- no corpus file needs them and the refusal is

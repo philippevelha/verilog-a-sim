@@ -107,6 +107,22 @@ pub struct Preprocessed {
     /// Directives the LRM gives no Verilog-A meaning, reported once each: "`` `timescale `` has
     /// no effect in Verilog-A: …". A caller prints them; nothing downstream depends on them.
     pub warnings: Vec<String>,
+    /// Where each line of `text` came from: `line_map[k]` is the origin of output line `k`
+    /// (0-based) — the file it was read from and its 1-based line number there, with
+    /// `` `include `` nesting and `` `line `` overrides (IEEE 1364-2005 §19.7) applied. This is
+    /// what lets a diagnostic say `diode.va:14:7` instead of "preprocessed line 31"
+    /// (`crate::parser::parse_with_directives`).
+    pub line_map: Vec<SourceLoc>,
+}
+
+/// The origin of one line of preprocessed text. See [`Preprocessed::line_map`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLoc {
+    /// The file the line was read from — the name given to [`preprocess_named`], an
+    /// `` `include ``d file's path, or the string a `` `line `` directive set.
+    pub file: String,
+    /// The 1-based line number in that file (after any `` `line `` override).
+    pub line: usize,
 }
 
 /// One directive with text-stream scope, and where in the expanded text it starts to apply.
@@ -227,6 +243,16 @@ pub fn preprocess_full(
     source: &str,
     include_dirs: &[PathBuf],
 ) -> (Result<Preprocessed, FrontendError>, Vec<String>) {
+    preprocess_named(source, include_dirs, "<input>")
+}
+
+/// [`preprocess_full`] with the name the top-level source should carry in the line map —
+/// the model's own path, so a diagnostic can point at it. `<input>` when there is none.
+pub fn preprocess_named(
+    source: &str,
+    include_dirs: &[PathBuf],
+    name: &str,
+) -> (Result<Preprocessed, FrontendError>, Vec<String>) {
     let mut pp = Preprocessor {
         include_dirs: include_dirs.to_vec(),
         macros: HashMap::new(),
@@ -238,6 +264,12 @@ pub fn preprocess_full(
         warnings: Vec::new(),
         warned: Vec::new(),
         keyword_depth: 0,
+        line_map: Vec::new(),
+        frames: vec![FileFrame {
+            file: name.to_string(),
+            line: 0,
+            override_from: None,
+        }],
     };
     let mut result = pp.process_str(source);
     if result.is_ok() && !pp.cond.is_empty() {
@@ -254,6 +286,7 @@ pub fn preprocess_full(
             text: pp.out,
             directives: pp.directives,
             warnings: pp.warnings,
+            line_map: pp.line_map,
         }),
         skipped,
     )
@@ -293,6 +326,33 @@ struct Preprocessor {
     warned: Vec<&'static str>,
     /// Open `` `begin_keywords `` regions, for the unmatched-`end_keywords` check.
     keyword_depth: usize,
+    /// See [`Preprocessed::line_map`]: one entry per line pushed to `out`.
+    line_map: Vec<SourceLoc>,
+    /// The file being read, innermost last: the top-level source, then each open
+    /// `` `include ``. Each frame counts its own physical lines, so an emitted line knows
+    /// where it came from however deep the include nesting is.
+    frames: Vec<FileFrame>,
+}
+
+/// One file on the preprocessor's read stack.
+struct FileFrame {
+    /// The name diagnostics use for lines read from this frame.
+    file: String,
+    /// The 1-based physical line number of the logical line currently being processed.
+    line: usize,
+    /// A `` `line n "file" level `` in force in this frame: physical line `k` (the directive's
+    /// own line) maps to `n` for the *next* line, so the reported line is `n + (line − k − 1)`.
+    override_from: Option<(usize, usize)>,
+}
+
+impl FileFrame {
+    /// The line number a diagnostic should report for the current physical line.
+    fn reported_line(&self) -> usize {
+        match self.override_from {
+            Some((at, n)) => n + self.line.saturating_sub(at + 1),
+            None => self.line,
+        }
+    }
 }
 
 impl Preprocessor {
@@ -308,6 +368,10 @@ impl Preprocessor {
         let mut i = 0;
         while i < lines.len() {
             let mut line = lines[i].to_string();
+            // The logical line's origin is its *first* physical line, 1-based.
+            if let Some(f) = self.frames.last_mut() {
+                f.line = i + 1;
+            }
             i += 1;
             // Join `\`-continued lines into one logical line.
             while line.trim_end().ends_with('\\') {
@@ -416,11 +480,10 @@ impl Preprocessor {
                     }
                     return Ok(());
                 }
-                // `line` is consumed here for now; honouring it needs the line map of
-                // docs/proposals/directives.md section 2.1 (item 5), which every diagnostic then
-                // benefits from. Until that lands the directive is parsed and dropped, and the
-                // token reference says so.
-                "line" => return Ok(()),
+                // `` `line number "file" level `` (IEEE 1364-2005 §19.7): the *next* line is
+                // reported as `number` of `file`. `level` (0/1/2, entering/leaving an include)
+                // is accepted and unused — this preprocessor tracks include nesting itself.
+                "line" => return self.do_line(after),
                 // Not an LRM directive: the obsolete AMS-1.x spelling the LRM lists only in its
                 // Annex F change history. Accepting it silently would be worse than an error —
                 // a model relying on it expects a default discipline this engine would not apply.
@@ -436,10 +499,26 @@ impl Preprocessor {
         }
         if self.emitting() {
             let expanded = self.expand(line, 0)?;
-            self.out.push_str(&expanded);
-            self.out.push('\n');
+            self.emit_line(&expanded);
         }
         Ok(())
+    }
+
+    /// Push one line of output and record where it came from.
+    fn emit_line(&mut self, text: &str) {
+        self.out.push_str(text);
+        self.out.push('\n');
+        let loc = match self.frames.last() {
+            Some(f) => SourceLoc {
+                file: f.file.clone(),
+                line: f.reported_line(),
+            },
+            None => SourceLoc {
+                file: "<input>".to_string(),
+                line: 0,
+            },
+        };
+        self.line_map.push(loc);
     }
 
     // --- conditionals ---------------------------------------------------------------
@@ -527,7 +606,13 @@ impl Preprocessor {
             self.include_dirs.push(dir.to_path_buf());
         }
         self.include_stack.push(path.clone());
+        self.frames.push(FileFrame {
+            file: path.display().to_string(),
+            line: 0,
+            override_from: None,
+        });
         let result = self.process_str(&content);
+        self.frames.pop();
         self.include_stack.pop();
         if path.parent().is_some() {
             self.include_dirs.pop();
@@ -601,6 +686,28 @@ impl Preprocessor {
         })?;
         self.keyword_depth += 1;
         self.record(Directive::BeginKeywords(set));
+        Ok(())
+    }
+
+    /// `` `line number "filename" level ``: override what the following lines of the current
+    /// frame report as their origin.
+    fn do_line(&mut self, after: &str) -> Result<(), FrontendError> {
+        let after = after.trim_start();
+        let (num, rest) = after.split_at(
+            after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len()),
+        );
+        let number: usize = num
+            .parse()
+            .map_err(|_| pp_err("`line expects a line number, a quoted file name and a level"))?;
+        let file = parse_quoted(rest)
+            .ok_or_else(|| pp_err("`line expects a quoted file name after the line number"))?;
+        let Some(frame) = self.frames.last_mut() else {
+            return Ok(());
+        };
+        frame.file = file;
+        frame.override_from = Some((frame.line, number));
         Ok(())
     }
 
@@ -1176,5 +1283,51 @@ x = `GMIN;
             err.to_string().contains("VAMS-2.3"),
             "names the legal specifiers: {err}"
         );
+    }
+
+    /// The line map: every emitted line knows its original file and line, through an
+    /// `` `include `` (the included file's own numbering while inside it, the includer's
+    /// resumed after) and a `` `line `` override (IEEE 1364-2005 §19.7: the *next* line is
+    /// the given number of the given file).
+    #[test]
+    fn line_map_tracks_includes_and_line_directives() {
+        let dir = std::env::temp_dir().join("va_pp_line_map_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hdr.vams"), "H1\n`define X 1\nH3\n").unwrap();
+        let src = "A\n`include \"hdr.vams\"\nC\n`ifdef NOPE\nskipped\n`endif\n`line 500 \"other.va\" 0\nF\nG\n";
+        let pre = preprocess_named(src, std::slice::from_ref(&dir), "top.va")
+            .0
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // The map is parallel to the text's lines (a file's trailing newline emits an empty
+        // line, which is mapped like any other); check the non-empty ones.
+        assert_eq!(pre.line_map.len(), pre.text.lines().count());
+        let located: Vec<(&str, String, usize)> = pre
+            .text
+            .lines()
+            .zip(&pre.line_map)
+            .filter(|(t, _)| !t.is_empty())
+            .map(|(t, l)| {
+                let file = std::path::Path::new(&l.file)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (t, file, l.line)
+            })
+            .collect();
+        assert_eq!(
+            located,
+            vec![
+                ("A", "top.va".to_string(), 1),
+                ("H1", "hdr.vams".to_string(), 1),
+                ("H3", "hdr.vams".to_string(), 3), // the `define line emitted nothing
+                ("C", "top.va".to_string(), 3),    // the includer resumes its own numbering
+                ("F", "other.va".to_string(), 500), // `line: the next line is 500 of other.va
+                ("G", "other.va".to_string(), 501),
+            ]
+        );
+        assert!(preprocess_full("`line abc \"f\" 0\n", &[]).0.is_err());
     }
 }

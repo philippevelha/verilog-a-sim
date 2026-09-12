@@ -257,10 +257,12 @@ class of lexemes.
   `va-cli`); `` `pragma `` is ignored as 1364 §19.9 requires, except `` `pragma protect ``,
   whose envelope is a `Refusal` (ciphertext; no vendor key here). **Rejected** —
   `` `default_nodetype `` is not an LRM directive (Annex F: obsolete AMS-1.x) and is an
-  error naming `` `default_discipline ``. **Still consumed with no effect: `` `line ``** —
-  honouring it needs the expanded-line → original-file:line map that would also fix "at
-  preprocessed line N" in every diagnostic (proposal §2.1 item 5), and is the one open item
-  of that proposal. Any other backtick-word is a macro usage; an undefined one is an error.
+  error naming `` `default_discipline ``. **`` `line number "file" level ``** (1364 §19.7, v0.9.19): the
+  preprocessor keeps a line map — the original file and line of every emitted line, through
+  `` `include `` nesting — and `` `line `` overrides it for what follows; every parse error now
+  reads `file:line:column` (`diode.va:14:7`) instead of "at preprocessed line N", the `level`
+  argument accepted and unused since include nesting is tracked directly. Any other
+  backtick-word is a macro usage; an undefined one is an error.
 - **Expressions and Evaluation**: Not an expression construct at all; handled by a dedicated
   preprocessing pass before lexing "real" tokens (macro objects/functions expand recursively,
   conditionals are evaluated against the defined-macro set). An unresolved `` `include `` is

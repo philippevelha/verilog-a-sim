@@ -143,6 +143,23 @@ pub fn parse_with_directives(
     located: Option<(&str, &[usize])>,
     directives: &[crate::preprocess::DirectiveEvent],
 ) -> Result<ParsedUnit, FrontendError> {
+    parse_unit(tokens, located, directives, &[])
+}
+
+/// [`parse_with_directives`], with the preprocessor's line map
+/// (`crate::preprocess::Preprocessed::line_map`) so a diagnostic names the original
+/// `file:line:column` instead of a line of the expanded text. An empty map falls back to the
+/// "preprocessed line N" form.
+///
+/// # Errors
+///
+/// As [`parse`].
+pub fn parse_unit(
+    tokens: &[Token],
+    located: Option<(&str, &[usize])>,
+    directives: &[crate::preprocess::DirectiveEvent],
+    line_map: &[crate::preprocess::SourceLoc],
+) -> Result<ParsedUnit, FrontendError> {
     // The always-on access-function baseline (§ module preamble discipline/nature parsing):
     // recognized regardless of whether any `discipline`/`nature` block is ever parsed, so a
     // file with no preamble at all still recognizes the standard electrical/thermal names.
@@ -163,6 +180,7 @@ pub fn parse_with_directives(
         src: located.map(|(src, _)| src),
         offsets: located.map(|(_, offsets)| offsets),
         directives,
+        line_map,
     };
     let mut modules = Vec::new();
     loop {
@@ -213,6 +231,8 @@ struct Parser<'a> {
     offsets: Option<&'a [usize]>,
     /// Directives with text-stream scope, for [`ModuleAst::settings`].
     directives: &'a [crate::preprocess::DirectiveEvent],
+    /// Origin of each expanded line, for [`Self::location`]; empty when unknown.
+    line_map: &'a [crate::preprocess::SourceLoc],
     pos: usize,
     exprs: Vec<ExprAst>,
     /// Parsed `nature ... endnature` blocks, keyed by name (§ module preamble discipline/nature
@@ -520,11 +540,16 @@ impl Parser<'_> {
         } else {
             text.to_string()
         };
-        // "preprocessed line", not "line": the pipeline lexes the *expanded* text, so this
-        // number counts lines of that, which for a file with resolved (or skipped)
-        // includes is not the file's own numbering. Saying which is cheaper than being
-        // quietly wrong, and the quoted text stays greppable in the original either way.
-        format!("at preprocessed line {line_no}, column {col} (`{quoted}`)")
+        // With the preprocessor's line map (2026-09-12), the original file and line — includes
+        // and `` `line `` overrides accounted for. Without it, "preprocessed line", not "line":
+        // the pipeline lexes the *expanded* text, so the number counts lines of that, which for
+        // a file with resolved (or skipped) includes is not the file's own numbering; saying
+        // which is cheaper than being quietly wrong, and the quoted text stays greppable in the
+        // original either way.
+        match self.line_map.get(line_no - 1) {
+            Some(loc) => format!("at {}:{}:{col} (`{quoted}`)", loc.file, loc.line),
+            None => format!("at preprocessed line {line_no}, column {col} (`{quoted}`)"),
+        }
     }
 
     fn expect_ident(&mut self) -> Result<String, FrontendError> {
@@ -3795,6 +3820,7 @@ mod tests {
             src: None,
             offsets: None,
             directives: &[],
+            line_map: &[],
         }
     }
 
@@ -4112,5 +4138,36 @@ mod tests {
             .items
             .iter()
             .any(|it| matches!(it, Item::Ground { names } if names == &vec!["gnd".to_string()])));
+    }
+
+    /// With the preprocessor's line map a parse error names the original file and line —
+    /// here line 4 of `m.va` although an include has put three more lines ahead of it in the
+    /// text the parser sees — and without the map it still says which numbering it is using.
+    #[test]
+    fn a_parse_error_names_the_original_file_and_line_when_the_map_is_known() {
+        let dir = std::env::temp_dir().join("va_parser_line_map_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("h.vams"), "\n\n\n").unwrap();
+        let src = "`include \"h.vams\"\nmodule m(p, n);\n  electrical p, n;\n  analog I(p, n) <+ V(p, n) +;\nendmodule\n";
+        let pre = crate::preprocess::preprocess_named(src, std::slice::from_ref(&dir), "m.va")
+            .0
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (tokens, offsets) = crate::lexer::lex_spanned(&pre.text).unwrap();
+        let Err(err) = parse_unit(
+            &tokens,
+            Some((&pre.text, &offsets)),
+            &pre.directives,
+            &pre.line_map,
+        ) else {
+            panic!("a parse error");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("at m.va:4:"), "{msg}");
+        let Err(err) = parse_with_disciplines_located(&tokens, Some((&pre.text, &offsets))) else {
+            panic!("a parse error");
+        };
+        assert!(err.to_string().contains("preprocessed line 7"), "{err}");
     }
 }

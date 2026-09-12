@@ -370,7 +370,7 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
     for f in &files {
         let name = f.display().to_string();
         let src = std::fs::read_to_string(f).with_context(|| format!("reading model {name}"))?;
-        let pre = va_frontend::preprocess::preprocess_full(&src, &include_dirs)
+        let pre = va_frontend::preprocess::preprocess_named(&src, &include_dirs, &name)
             .0
             .with_context(|| format!("preprocessing {name}"))?;
         // A directive the LRM gives no Verilog-A meaning is accepted and said so, once.
@@ -380,10 +380,11 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
         let expanded = &pre.text;
         let (tokens, offsets) = va_frontend::lexer::lex_spanned_with(expanded, &pre.directives)
             .with_context(|| format!("lexing {name}"))?;
-        let (asts, file_natures, file_disciplines) = va_frontend::parser::parse_with_directives(
+        let (asts, file_natures, file_disciplines) = va_frontend::parser::parse_unit(
             &tokens,
             Some((expanded, &offsets)),
             &pre.directives,
+            &pre.line_map,
         )
         .with_context(|| format!("parsing {name}"))?;
         for (k, v) in file_disciplines {
@@ -970,7 +971,8 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
     if !scan_root.as_os_str().is_empty() && Some(scan_root) != own_dir {
         include_dirs.push(scan_root.to_path_buf());
     }
-    let (result, skipped_includes) = va_frontend::preprocess::preprocess_full(&src, &include_dirs);
+    let (result, skipped_includes) =
+        va_frontend::preprocess::preprocess_named(&src, &include_dirs, path);
     let pre = match result {
         Ok(pre) => pre,
         Err(e) => {
@@ -996,10 +998,11 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
             return Err(skipped_includes);
         }
     };
-    match va_frontend::parser::parse_with_directives(
+    match va_frontend::parser::parse_unit(
         &tokens,
         Some((src, &offsets)),
         &pre.directives,
+        &pre.line_map,
     ) {
         Ok((asts, natures, disciplines)) => Ok(ParsedFile {
             asts,

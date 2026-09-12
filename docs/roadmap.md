@@ -4435,6 +4435,11 @@ needed a time scale a module does not have, so `AnalysisCtx` gained `tstep` (Int
 additive) and codegen ramps a zero span over `tstep/1000`. The 100 ns case had been the only
 one I ran by hand; the discriminating test is what found the default.
 
+**v0.9.19, the same day:** `` `line `` and the line map. Every emitted line now records its
+file and original line through include nesting, and every parse error names them
+(`bad.va:5:30`) instead of a line of the expanded text. Small change, large payoff: the
+"preprocessed line N" wording had been an honest apology for a number nobody could use.
+
 **A language fact learned from the LRM's own example:** under `"1364-2005"` the entire AMS
 vocabulary is unreserved, `analog` and `electrical` included, so a keyword region can only
 hold a *structural* module. That is not a limitation of this implementation; it is what the

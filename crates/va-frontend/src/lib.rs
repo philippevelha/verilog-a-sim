@@ -165,7 +165,21 @@ pub fn compile_with_includes(
     source: &str,
     include_dirs: &[PathBuf],
 ) -> Result<CompiledDesign, FrontendError> {
-    let pre = preprocess::preprocess_full(source, include_dirs).0?;
+    compile_named(source, include_dirs, "<input>")
+}
+
+/// [`compile_with_includes`], with the name the source should carry in diagnostics — the
+/// model's own path, so a parse error reads `diode.va:14:7` rather than `<input>:14:7`.
+///
+/// # Errors
+///
+/// As [`compile_with_includes`].
+pub fn compile_named(
+    source: &str,
+    include_dirs: &[PathBuf],
+    name: &str,
+) -> Result<CompiledDesign, FrontendError> {
+    let pre = preprocess::preprocess_named(source, include_dirs, name).0?;
     let expanded = &pre.text;
     // Lex with spans and hand them to the parser, so a parse error reports a line, a column,
     // and the offending line's text rather than a token index. The line number is a line of
@@ -173,8 +187,12 @@ pub fn compile_with_includes(
     // Both stages take the directive events: the lexer for `begin_keywords` regions, the
     // parser for each module's `default_discipline`/`default_transition` settings.
     let (tokens, offsets) = lexer::lex_spanned_with(expanded, &pre.directives)?;
-    let (asts, natures, disciplines) =
-        parser::parse_with_directives(&tokens, Some((expanded, &offsets)), &pre.directives)?;
+    let (asts, natures, disciplines) = parser::parse_unit(
+        &tokens,
+        Some((expanded, &offsets)),
+        &pre.directives,
+        &pre.line_map,
+    )?;
     let mut modules = Vec::with_capacity(asts.len());
     for ast in &asts {
         modules.push(elaborate::elaborate_with_library_and_disciplines(

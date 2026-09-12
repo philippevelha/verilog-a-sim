@@ -1,7 +1,7 @@
 # Proposal: every compiler directive does what the LRM says, or says why it cannot
 
-**Status: implemented 2026-09-12 (v0.9.18) except §2.1 item 5, `` `line `` and the line
-map, which stays open.** A 1.0 blocker by supervisor decision ("I don't want the
+**Status: implemented in full — v0.9.18, and `` `line `` with the line map in v0.9.19
+(2026-09-12).** A 1.0 blocker by supervisor decision ("I don't want the
 preprocessor to consume with no effect"). Two things the implementation taught: under a 1364
 keyword set `analog` and `electrical` are unreserved too, so a keyword region can only hold a
 structural module (the test wraps an analog one, with `` `default_discipline `` supplying what
@@ -12,9 +12,12 @@ demands a negligible non-zero ramp when no directive is set — which this engin
 Annex C.12 ("The compiler directives of Clause 10 are applicable to both Verilog-AMS HDL and
 Verilog-A"), read from `references/VAMS-LRM-2-4.pdf`, not from memory.
 
-**Affects:** `va-frontend` only (`preprocess.rs`, `lexer.rs`, `parser.rs`, `elaborate.rs`).
-No Interface α or β change: a directive changes how source text is *read*, and everything it
-decides is settled before the IR exists.
+**Affects:** `va-frontend` (`preprocess.rs`, `lexer.rs`, `parser.rs`, `elaborate.rs`), and —
+found during implementation, not planned — one additive Interface β field,
+`AnalysisCtx::tstep`, because LRM 4.5.8's "negligible but non-zero" transition default needs
+the run's time scale (`docs/interfaces.md`, revision 2026-09-12). No Interface α change: a
+directive changes how source text is *read*, and everything it decides is settled before the
+IR exists.
 
 ## 1. Where things stand
 
