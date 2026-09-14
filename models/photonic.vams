@@ -17,23 +17,39 @@
 //
 // # Optical — signal flow, single wavelength, CW
 //
-//   `optical`     potential = Optical_power (W, access `Popt`)
-//   `wavelength`  potential = Wavelength    (m, access `Wl`)
+//   `optical`        potential = Optical_power (W,   access `Popt`)
+//   `wavelength`     potential = Wavelength    (m,   access `Wl`)
+//   `optical_phase`  potential = Optical_phase (rad, access `Phi`)   (added 2026-09-14)
 //
-// Both are **potential-only** (signal-flow) disciplines: a source drives the node, sinks probe
-// it, and nothing is conserved at a junction — fanning one optical net out to two receivers
-// would deliver the full power to both. That is the correct abstraction for a directional
-// waveguide (light does not split at a wire junction, it splits in a coupler you model), and
-// it is what every model here relies on: an output port is an ideal source of the quantity,
-// never a load on the port that feeds it, so there is no back-reflection.
+// All three are **potential-only** (signal-flow) disciplines: a source drives the node, sinks
+// probe it, and nothing is conserved at a junction — fanning one optical net out to two
+// receivers would deliver the full power to both. That is the correct abstraction for a
+// directional waveguide (light does not split at a wire junction, it splits in a coupler you
+// model), and it is what every model here relies on: an output port is an ideal source of the
+// quantity, never a load on the port that feeds it, so there is no back-reflection.
 //
-// The light is described by two real numbers, its power and its wavelength, on two separate
-// nets. That is a deliberately coarse description: no optical phase, no field envelope, no
-// modulation sidebands, no polarisation. It is enough — and only enough — for a CW laser whose
-// wavelength is fixed while something slow (here: a heater with a 12 us time constant, a
-// billion times slower than the ring's photon lifetime) tunes a filter across it. A model that
-// needs the field (an interferometer, a modulator with chirp) needs a field-envelope
-// discipline like the corpus's `microring_modulator.va`, not this one.
+// The light is described by three real numbers on three separate nets: its power, its
+// wavelength, and — for the models that need it — the phase of its carrier. Power and
+// wavelength are enough for a CW laser whose wavelength is fixed while something slow (a heater
+// with a 12 us time constant, a billion times slower than a ring's photon lifetime) tunes a
+// filter across it (`microring.va`). The phase net is what an interferometer runs on: two arms
+// that carry the same power and differ in phase recombine with `cos(Phi(a) - Phi(b))`
+// (`mzi.va`), and a waveguide's *phase noise* — the thermodynamic index fluctuations of
+// Glenn (1989) and Wanser (1992), measured by Bartolo et al. (2012) — is a noise source on the
+// phase net, converted to intensity by the interferometer exactly as the experiment does it
+// (`waveguide.va`, `docs/photonic-noise.md`). A model that does not need the phase (a ring
+// filter read by a photodiode) simply leaves the phase ports unconnected or absent.
+//
+// Still deliberately coarse: no field envelope, no modulation sidebands, no polarisation, and
+// no *transport delay* on the phase net — a phase contribution is instantaneous, so a
+// path-imbalanced interferometer cannot convert a source's phase noise into intensity noise
+// here (it cancels exactly, as it would with zero imbalance). `photonic-noise.md` says what
+// that leaves out.
+//
+// A static phase of order 2*pi*n*L/lambda — 2.8e8 rad for 40 m of fiber — is legitimate on
+// the phase net. f64 resolves it to ~3e-8 rad, which only affects where an interferometer's
+// operating point lands (its `bias` parameter is the control for that, as a PZT would be); the
+// noise channel is linear about that point and unaffected. `abstol` for phase is 1e-9 rad.
 //
 // `abstol` for optical power is 1e-15 W: femtowatt resolution on milliwatt signals, the same
 // nine-decade ratio the electrical `Current` nature gives amps.
@@ -66,6 +82,12 @@ nature Wavelength
     abstol     = 1e-15;
 endnature
 
+nature Optical_phase
+    units      = "rad";
+    access     = Phi;
+    abstol     = 1e-9;
+endnature
+
 // Conservative: a node is a temperature, a branch carries heat.
 discipline thermal
     potential Temperature;
@@ -80,6 +102,11 @@ enddiscipline
 // Signal flow: the wavelength of the (single) CW carrier on that waveguide.
 discipline wavelength
     potential Wavelength;
+enddiscipline
+
+// Signal flow: the optical phase of that carrier (rad), for interferometers and phase noise.
+discipline optical_phase
+    potential Optical_phase;
 enddiscipline
 
 `endif

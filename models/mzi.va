@@ -1,0 +1,59 @@
+// 2x2 interferometric recombiner: the output half of a Mach-Zehnder interferometer, on the
+// photonic signal-flow disciplines (power + phase per arm in, power per port out).
+//
+//   arm a: Popt(pa), Phi(pha) ──┐         Popt(o1) = il * [ (Pa + Pb)/2 + sqrt(Pa*Pb) cos(dphi) ]
+//                               ═╪═ 3 dB
+//   arm b: Popt(pb), Phi(phb) ──┘         Popt(o2) = il * [ (Pa + Pb)/2 - sqrt(Pa*Pb) cos(dphi) ]
+//
+//   dphi = Phi(pha) - Phi(phb) + bias
+//
+// An ideal 50/50 combiner adds the two fields, E1 = (Ea + Eb)/sqrt(2), E2 = (Ea - Eb)/sqrt(2),
+// and the detected powers are the interference terms above: they sum to Pa + Pb (energy is
+// conserved between the two ports) and are anti-correlated in phase. That anti-correlation is
+// what Bartolo et al. (IEEE JQE 48, 2012, Appendix B) exploit: at **quadrature** (dphi = pi/2,
+// the default `bias` with matched arms) a differential amplifier on the two photodiodes
+// cancels the laser's intensity noise, which appears with the same sign on both, and doubles
+// the phase signal, which appears with opposite signs. Their eq. (B2) is the linearization
+// this model's Jacobian carries: d(Popt(o1))/d(Phi(pha)) = -il*sqrt(Pa*Pb)*sin(dphi).
+//
+// # Where the operating point comes from
+//
+// `dphi` is the *full* phase difference, including each arm's 2*pi*n*L/lambda (~1e8 rad for
+// tens of metres of fiber). With two identical `waveguide` arms fed from one `splitter` the
+// two static phases are bit-identical and cancel exactly, so `bias` alone sets the operating
+// point; with unequal arms the residual is the physical fringe position, and `bias` is the
+// PZT/heater you would use to bring it back to quadrature. Nothing here searches for
+// quadrature — a deck states it.
+//
+// # Limitations
+//
+// - Signal flow, so no back-reflection and no phase on the outputs (a detector does not need
+//   one; a further interferometer stage would).
+// - The `sqrt(Pa*Pb)` interference term is taken as zero unless both powers are positive:
+//   Newton starts from the all-zero vector, where the term's derivative is 0/0, and this
+//   guard is what lets the first iteration through. The operating point is unaffected.
+// - Wavelength-independent, lossless apart from the flat `il` excess loss, single
+//   polarisation, and instantaneous (no group-delay difference between the arms — see
+//   `photonic.vams` on the absent transport delay).
+`include "constants.vams"
+`include "photonic.vams"
+
+module mzi(pa, pha, pb, phb, o1, o2);
+    inout pa, pha, pb, phb, o1, o2;
+    optical       pa, pb, o1, o2;
+    optical_phase pha, phb;
+
+    parameter real bias = `M_PI / 2.0;            // added phase difference (rad); pi/2 = quadrature
+    parameter real il   = 1.0 from (0:1];         // excess transmission (1 = lossless)
+
+    real pa_w, pb_w, x, c;
+
+    analog begin
+        pa_w = Popt(pa);
+        pb_w = Popt(pb);
+        x = (pa_w > 0.0 && pb_w > 0.0) ? sqrt(pa_w * pb_w) : 0.0;
+        c = cos(Phi(pha) - Phi(phb) + bias);
+        Popt(o1) <+ il * (0.5 * (pa_w + pb_w) + x * c);
+        Popt(o2) <+ il * (0.5 * (pa_w + pb_w) - x * c);
+    end
+endmodule

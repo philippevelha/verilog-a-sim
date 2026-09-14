@@ -19,6 +19,65 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.21 - 2026-09-14
+-------------------
+**Photonic noise from three papers** (`references/`: Glenn 1989, Bartolo/Tveten/Dandridge
+2012, Scheuer 2016; `docs/photonic-noise.md` maps every equation to its model line). Four new
+models and two changed ones: `waveguide.va` carries Wanser's thermorefractive phase-noise PSD
+as a 73-point `noise_table_log` (8/decade, 1 Hz-1 GHz, each point the closed form from the
+instance's own parameters, log-log interpolation within 0.7 % of the formula) plus Duan's
+thermomechanical `1/f` as a `flicker_noise`, both on a new `optical_phase` signal-flow net in
+`photonic.vams` (nature `Optical_phase`, access `Phi`, rad); `mzi.va` recombines two arms
+(its Jacobian is Bartolo's eq. B2); `splitter.va`; `ring_gyro.va` is an all-pass ring with
+Scheuer's Sagnac phase (eq. 13) driven by a rotation-rate control node; `cw_laser.va` gains a
+`rin` parameter (linear 1/Hz, default 0 = unchanged) and an optional trailing phase port;
+`photodiode.va` gains shot noise `2q(|I_j| + resp*P)`. Two decks, both `.noise` with the paper's
+figure of merit as the **input-referred** column: `fiber_mzi_noise.net` (Bartolo's 40 m + 40 m
+MZI at 1319 nm: -100.6 dB re rad/rtHz at 1 Hz (Duan), -124.9 at 1 kHz against the paper's
+-125.5 flat region, -137.4 at 100 kHz; shot floor -154.5; the laser's RIN **exactly zero** at
+quadrature, cos^2(3 deg) of it 3 deg off) and `ring_gyro_noise.net` (Scheuer's RWOG: eq. 15's
+three terms per device, 69 % shot / 15 % Johnson / 17 % RIN, `Omega_min = sqrt(S_in) = 0.0137
+rad/s/rtHz` for a 1 mm ring). No crate learned anything photonic.
+
+  **Two silent zeros the models exposed, both fixed (docs/interfaces.md, revision 2026-09-14;
+  no signature change).** (1) A noise function in a *potential* contribution was emitted as a
+  current across `(p, n)` -- into a node the contribution pins, adjoint zero -- so it was
+  listed as a contributor and delivered `0.0` (measured: a 1e-12 V^2/Hz series source into a
+  1k/1k divider reported `X1 0.0 (0.0%)` against a true 2.5e-13). It now sits on the branch's
+  constraint row; the divider reads `2.500083e-13 = 0.25e-12 + 4kT*500` exactly. Every
+  signal-flow net only ever receives potential contributions, so this was every photonic noise
+  source. (2) `noise_table` powers were const-folded at elaboration, so a deck's `L=40` -- or
+  `R2 ... 3000` on the tabulated resistor -- silently kept the default's PSD. Powers are now
+  lowered as constant *expressions* (parameters, literals, builtins; a probe or `$temperature`
+  is still refused) and evaluated per instance; frequencies stay folded. `va-codegen`'s
+  `validate` re-checks a power's sign with the overrides applied. `resistor_noise_table.va`
+  note 2 and its deck's header no longer carry the "both resistors must be 1k" warning (the
+  deck keeps 1k/1k so its golden is unchanged; 1k/3k is a va-cli test).
+
+  **Also found, in the model:** a Sagnac phase of 1e-10 rad added to a 2180 rad round-trip
+  phase is below double precision -- a `.dc` sweep of the rotation rate was exactly flat --
+  so `ring_gyro.va` reduces the static phase modulo 2*pi first. `.noise` (linearized) was
+  never affected. And the deck's ring length is written to 12 digits: an 8-digit rounding
+  moved the resonance by 0.08 pm against a 0.53 pm detuning and the noise by 1.5 %.
+
+  **Limitations, stated in the models:** Glenn's acoustic (GHz) density process is not
+  modelled (no Bessel builtin; three decades above the band); no laser phase noise, because
+  the phase net has no transport delay and it would cancel exactly in any interferometer
+  (a silent zero, so it is absent and says so); the PSD's 1/lambda^2 uses `lambda0`, not the
+  live wavelength net (a table power must be constant); Duan's term with Table II's printed
+  values gives -120.6 dB at 100 Hz where the paper quotes -124.4 (not recovered, not hidden).
+
+  **Not gated against QSPICE** (no phase net, interferometer or ring to translate). Both decks
+  are pinned to closed forms in va-cli's tests -- the transcription to the paper's quoted
+  -125.5 dB; the MZI's fiber share to 2*(Wanser + Duan) within 1 % at all 51 frequencies,
+  each detector's shot noise to 1e-6 (after the test's own "expected" learned about the arm's
+  0.008 dB of loss), the RIN to < 1e-40; the gyro's `S_V` to the three-term budget from the
+  solved operating point to 1e-6, `S_in` to `S_V/H^2` with `H` from two extra DC solves.
+  Measured: `cargo test --workspace` 793 passed / 0 failed (+7 over 0.9.20+1's 786); clippy/fmt
+  clean; `cargo xtask validate` 28/28; zoo `check models --codegen` 29/29 (+4); corpus 112/132
+  (94/99) unchanged; docs/examples.md 13 plots (+2).
+
+
 0.9.20+1 - 2026-09-12
 ---------------------
 **`v1.0.0-rc1` tagged on 0.9.20 (`4cbae93`) and the release workflow ran for the first

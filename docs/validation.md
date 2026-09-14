@@ -157,9 +157,14 @@ so a linear grid there would change what the reported total means.
 
 ### Ungated circuits, and why each one is (2026-09-01)
 
-Nine of the decks in `circuits/` are not registered with `cargo xtask validate`. They are not
-one category, and the distinction matters — a deck that looks like coverage but is exercised by
-nothing is the failure mode this file exists to prevent.
+Nine of the decks in `circuits/` were not registered with `cargo xtask validate` when this
+section was written; as of 2026-09-14 it is seventeen of forty-five (the two photonic noise
+decks below, and — added between 2026-09-01 and now without being listed here —
+`actuator_plant`, `delay_ac`, `interferometer_ac`, `lib_tee`, `microring_thermal`,
+`microring_thermal_fast`, each a worked example in `docs/examples.md` or a `va-cli` test
+fixture rather than an oracle comparison). They are not one category, and the distinction
+matters — a deck that looks like coverage but is exercised by nothing is the failure mode this
+file exists to prevent.
 
 **Parked, to be gated later (6).** `nlcap_ramp`, `portprobe_dc`, `portprobe_ac`,
 `portprobe_ramp`, `portprobe_sq`, `selfprobe_ramp` — the displacement-current set built for the
@@ -177,6 +182,19 @@ golden comparison.
 **Deliberately ungated after trying (2).** `rc_pulse` and `transformer`, each documented above
 with the measurement that led to the decision. Both are exercised by tests against closed-form
 physics rather than against QSPICE.
+
+**Ungated because QSPICE cannot express them (2, added 2026-09-14).** `fiber_mzi_noise` and
+`ring_gyro_noise`, the photonic noise decks of `docs/photonic-noise.md`: an optical-phase net,
+an interferometer and a ring resonator have no SPICE primitive, so there is nothing to translate
+for the oracle. Each is pinned by a `va-cli` test to closed forms evaluated independently of the
+simulator — the Wanser/Duan phase-noise PSDs the waveguide tabulates (within the table's stated
+0.7 % interpolation error; the transcription itself is checked against the paper's quoted
+−125.5 dB re rad/√Hz), the detectors' `2q·I·R²`, and for the gyro the full
+`R²(2q i_d + 4kT/R + RIN i_d²)` budget from the solved operating point with the input-referral
+gain measured by two extra DC solves. The photonic *elements* that do have QSPICE analogues
+(a resistor's Johnson noise, a diode's shot noise) are already gated by `resistor_noise_va`,
+`diode_noise` and `diode_flicker`; these decks add no oracle coverage and are not counted as
+such.
 
 ### Gear/BDF2 measured against trapezoidal (2026-09-01)
 

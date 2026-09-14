@@ -1,0 +1,194 @@
+// A length of single-mode fiber or waveguide with its fundamental thermal phase noise.
+//
+//   pin ──►── [ L metres, loss, n ] ──►── pout        Popt(pout) = Popt(pin) * 10^(-loss*L/10)
+//   phin ─►─                        ─►─ phout         Phi(phout) = Phi(phin) + 2*pi*n*L/lambda
+//                                                                 + kphi * V(ctl)
+//                                                                 + thermorefractive noise
+//                                                                 + thermomechanical noise
+//
+// The static part is trivial: power attenuates, phase advances by the optical path length, and
+// an optional electrical control port adds `kphi` rad per volt (a PZT fiber stretcher, or the
+// heater on an integrated phase shifter). The model exists for the two noise terms, which are
+// the *thermodynamic* phase fluctuations of the medium itself — the floor an interferometric
+// sensor reaches once the laser and the detector are quiet enough. Both are declared on the
+// phase net, so they reach an intensity only through whatever interferometer the deck wires
+// (`mzi.va`), exactly as they do in the measurement.
+//
+// # 1. Thermorefractive noise — Glenn (1989), Wanser (1992), Bartolo et al. (2012)
+//
+// Glenn, "Noise in interferometric optical systems: an optical Nyquist theorem", IEEE JQE 25
+// (1989) 1218, derives that the index of a medium above 0 K fluctuates with its temperature
+// (energy) and density, and that a guided wave accumulates a phase noise whose mean square
+// scales with the length L. The *temperature* process is diffusive and sits below ~1 MHz; the
+// *density* process is acoustic and peaks near 500 MHz (his Fig. 4). Wanser (Electron. Lett.
+// 28, 1992, 53) closed the temperature process for a fiber with a finite cladding:
+//
+//   S_phi(f) = (2*pi*kB*T^2*L / (kappa*lambda^2)) * (dn/dT + n*alpha_L)^2 * F(f)      rad^2/Hz
+//   F(f)     = ln( (k_max^4 + (2*pi*f/D)^2) / (k_min^4 + (2*pi*f/D)^2) )
+//   k_max    = 2/w0            (w0: mode-field radius)
+//   k_min    = 2.405/a_f       (a_f: cladding radius)
+//   F(0)     = 4*ln(k_max/k_min)
+//
+// written here as a **one-sided** density in rad^2/Hz. Bartolo, Tveten and Dandridge, "Thermal
+// phase noise measurements in optical fiber interferometers", IEEE JQE 48 (2012) 720, state
+// the same thing as `phi_rms/sqrt(Hz) = sqrt(4*pi*S_phiphi)` with their eq. (2) for S_phiphi;
+// the `4*pi` is folded in above so that what this model declares is directly what a
+// `.noise` run reports. With their Table II parameters for a 40 m + 40 m MZI at 1319 nm the
+// zero-frequency value is 2.82e-13 rad^2/Hz = -125.5 dB re rad/sqrt(Hz), the number they quote
+// (their measurement matched it within 1 dB above 1 kHz). It is flat below the cladding corner
+// f_min = D*k_min^2/(2*pi) = 472 Hz, falls logarithmically to the core corner f_max =
+// D*k_max^2/(2*pi) = 77 kHz, and as 1/f^2 above it. Glenn's infinite-cladding form differs
+// only below f_min (Bartolo's Fig. 2 shows both), so this one form covers both papers.
+//
+// # 2. Thermomechanical noise — Duan (2010), via Bartolo eq. (5)
+//
+// Spontaneous length fluctuations from mechanical dissipation (loss angle `phi0`) give a
+// 1/f phase-noise power,
+//
+//   S_phi(f) = (2*pi*n/lambda)^2 * 2*kB*T*L*phi0 / (3*pi*E0*A*f)       rad^2/Hz
+//
+// with A the fiber's cross-section *including its coating* (Bartolo use a 160 um coated
+// diameter for "80 um" fiber). Bartolo's data are "consistent with" this term between 20 Hz
+// and 1 kHz, no more: the loss angle is unmeasured below 75 kHz, and the formula is only
+// claimed valid for f < sqrt(E0/rho)/(2L) — 45 Hz for 80 m. Their fit uses it to 1 kHz anyway.
+// Two honest numbers: with the Table II values as printed, eq. (5) gives -120.6 dB re
+// rad/sqrt(Hz) at 100 Hz for 80 m at 1319 nm, where the paper quotes -124.4 dB; the factor
+// (3.8 dB) is not recovered from the printed parameters. Set `phi0 = 0` to switch the term off.
+//
+// # How the noise is declared, and what that costs
+//
+// Wanser's F(f) is neither white nor a power law, so it is tabulated: `noise_table_log` over
+// 1 Hz .. 1 GHz at 8 points per decade, each point the closed form above evaluated from the
+// instance's *own* parameters (a table power is a parameter expression, evaluated per
+// instance — an `L=40` on the deck line reaches it). Log-log interpolation between the points
+// tracks the closed form to within **0.7 %** worst case (at the f_max corner; 2.6 % at
+// 4 points/decade, measured against the closed form over 1 Hz - 10 MHz). Below 1 Hz the table
+// clamps to its 1 Hz value, which *is* F(0) (the function is flat there); above 1 GHz it clamps
+// where the truth keeps falling as 1/f^2, so a sweep past 1 GHz over-reports. Duan's term is
+// an exact `flicker_noise(coeff, 1.0)`.
+//
+// # Limitations
+//
+// - The noise PSD's 1/lambda^2 uses the parameter `lambda0`, not the live `Wl(wl)`: a table
+//   power must be a constant expression. The static phase does use the live wavelength. Set
+//   `lambda0` to the laser's wavelength (the effect is 1.4 dB between 1319 and 1550 nm).
+// - Glenn's *density* (acoustic, GHz) process is not modelled: it needs a Bessel function
+//   this language does not have, and it sits three decades above any band these papers
+//   measure in. Its contribution below 1 MHz is negligible (Glenn's Fig. 4, curve (a)).
+// - No transport delay on the phase net: the phase leaves as it arrives, plus the path
+//   length. A laser's own phase noise therefore cancels *exactly* in any interferometer built
+//   from these models, whatever the path imbalance — right for a path-matched MZI (Bartolo's
+//   is matched to < 1 cm for precisely this reason), wrong for an unbalanced one, where the
+//   laser floor scales with the imbalance (their Fig. 4(c)). `cw_laser.va` declares no phase
+//   noise for exactly that reason: a source that cannot reach any output would be a silent
+//   zero.
+// - `T`, `kappa`, `D`, `Cv`-type constants are the medium's; the defaults are Bartolo's
+//   Table II for Fibercore SM1500 [5.3/80] at 1550 nm. For an integrated waveguide set `w0`
+//   to the mode radius and `a_f` to the distance to the thermal boundary (the substrate), and
+//   the thermo-optic and expansion coefficients to the core material's — the formula is the
+//   same physics, but the cylindrical-cladding geometry it assumes is then an approximation.
+// - `D` and `kappa` are independent parameters although physically D = kappa/(rho*Cv):
+//   Table II lists both (and its D is 2.5 % off its own kappa/(rho*Cv)); set them
+//   consistently for another material.
+`include "constants.vams"
+`include "disciplines.vams"
+`include "photonic.vams"
+
+module waveguide(pin, pout, phin, phout, wl, ctl);
+    inout pin, pout, phin, phout, wl, ctl;
+    optical       pin, pout;
+    optical_phase phin, phout;
+    wavelength    wl;
+    electrical    ctl;
+
+    // Geometry and static optics.
+    parameter real L       = 1.0      from (0:inf);   // length (m)
+    parameter real n       = 1.457    from (0:inf);   // effective index
+    parameter real loss    = 2e-4     from [0:inf);   // propagation loss (dB/m); 0.2 dB/km
+    parameter real lambda0 = 1550e-9  from (0:inf);   // wavelength the noise PSD is evaluated at (m)
+    parameter real kphi    = 1.0;                     // control-port phase gain (rad/V)
+    // Thermorefractive noise (Wanser / Bartolo Table II, 1550 nm column).
+    parameter real T       = 295.0    from (0:inf);   // temperature (K)
+    parameter real kappa   = 1.37     from (0:inf);   // thermal conductivity (W/(m K))
+    parameter real D       = 0.82e-6  from (0:inf);   // thermal diffusivity (m^2/s)
+    parameter real w0      = 2.605e-6 from (0:inf);   // mode-field radius (m)
+    parameter real af      = 40e-6    from (0:inf);   // cladding radius (m)
+    parameter real dndT    = 9.488e-6;                // thermo-optic coefficient (1/K)
+    parameter real alphaL  = 5.0e-7;                  // linear expansion coefficient (1/K)
+    // Thermomechanical noise (Duan, via Bartolo eq. 5).
+    parameter real phi0    = 1e-2     from [0:inf);   // mechanical loss angle; 0 disables
+    parameter real E0      = 1.9e10   from (0:inf);   // bulk modulus (Pa)
+    parameter real dcoat   = 160e-6   from (0:inf);   // coated fiber diameter (m), sets A
+
+    real lam;
+
+// The closed forms above, as constant expressions of the parameters so they can sit in a
+// table. `f` in Hz; the result is a one-sided PSD in rad^2/Hz.
+`define KMAX4     pow(2.0 / w0, 4.0)
+`define KMIN4     pow(2.405 / af, 4.0)
+`define WANSER_A  (`M_TWO_PI * `P_K * T * T * L * pow(dndT + n * alphaL, 2.0) / (kappa * lambda0 * lambda0))
+`define SPHI(f)   (`WANSER_A * ln((`KMAX4 + pow(`M_TWO_PI * (f) / D, 2.0)) / (`KMIN4 + pow(`M_TWO_PI * (f) / D, 2.0))))
+`define DUAN      (pow(`M_TWO_PI * n / lambda0, 2.0) * 2.0 * `P_K * T * L * phi0 / (3.0 * `M_PI * E0 * `M_PI * (dcoat / 2.0) * (dcoat / 2.0)))
+
+    analog begin
+        // Newton starts from the zero vector: guard the wavelength net exactly as
+        // `microring.va` does, or the static phase is inf on the first iteration.
+        lam = (Wl(wl) > 0.0) ? Wl(wl) : lambda0;
+
+        Popt(pout) <+ Popt(pin) * pow(10.0, -loss * L / 10.0);
+
+        // Static phase, then the two noise processes as top-level additive terms — the only
+        // spelling this engine accepts for a noise source (a scaled one would be refused).
+        // Eight points per decade, 1 Hz .. 1 GHz: 73 points, error stated in the header.
+        Phi(phout) <+ Phi(phin) + `M_TWO_PI * n * L / lam
+            + noise_table_log({
+                1.0000e0, `SPHI(1.0000e0), 1.3335e0, `SPHI(1.3335e0),
+                1.7783e0, `SPHI(1.7783e0), 2.3714e0, `SPHI(2.3714e0),
+                3.1623e0, `SPHI(3.1623e0), 4.2170e0, `SPHI(4.2170e0),
+                5.6234e0, `SPHI(5.6234e0), 7.4989e0, `SPHI(7.4989e0),
+                1.0000e1, `SPHI(1.0000e1), 1.3335e1, `SPHI(1.3335e1),
+                1.7783e1, `SPHI(1.7783e1), 2.3714e1, `SPHI(2.3714e1),
+                3.1623e1, `SPHI(3.1623e1), 4.2170e1, `SPHI(4.2170e1),
+                5.6234e1, `SPHI(5.6234e1), 7.4989e1, `SPHI(7.4989e1),
+                1.0000e2, `SPHI(1.0000e2), 1.3335e2, `SPHI(1.3335e2),
+                1.7783e2, `SPHI(1.7783e2), 2.3714e2, `SPHI(2.3714e2),
+                3.1623e2, `SPHI(3.1623e2), 4.2170e2, `SPHI(4.2170e2),
+                5.6234e2, `SPHI(5.6234e2), 7.4989e2, `SPHI(7.4989e2),
+                1.0000e3, `SPHI(1.0000e3), 1.3335e3, `SPHI(1.3335e3),
+                1.7783e3, `SPHI(1.7783e3), 2.3714e3, `SPHI(2.3714e3),
+                3.1623e3, `SPHI(3.1623e3), 4.2170e3, `SPHI(4.2170e3),
+                5.6234e3, `SPHI(5.6234e3), 7.4989e3, `SPHI(7.4989e3),
+                1.0000e4, `SPHI(1.0000e4), 1.3335e4, `SPHI(1.3335e4),
+                1.7783e4, `SPHI(1.7783e4), 2.3714e4, `SPHI(2.3714e4),
+                3.1623e4, `SPHI(3.1623e4), 4.2170e4, `SPHI(4.2170e4),
+                5.6234e4, `SPHI(5.6234e4), 7.4989e4, `SPHI(7.4989e4),
+                1.0000e5, `SPHI(1.0000e5), 1.3335e5, `SPHI(1.3335e5),
+                1.7783e5, `SPHI(1.7783e5), 2.3714e5, `SPHI(2.3714e5),
+                3.1623e5, `SPHI(3.1623e5), 4.2170e5, `SPHI(4.2170e5),
+                5.6234e5, `SPHI(5.6234e5), 7.4989e5, `SPHI(7.4989e5),
+                1.0000e6, `SPHI(1.0000e6), 1.3335e6, `SPHI(1.3335e6),
+                1.7783e6, `SPHI(1.7783e6), 2.3714e6, `SPHI(2.3714e6),
+                3.1623e6, `SPHI(3.1623e6), 4.2170e6, `SPHI(4.2170e6),
+                5.6234e6, `SPHI(5.6234e6), 7.4989e6, `SPHI(7.4989e6),
+                1.0000e7, `SPHI(1.0000e7), 1.3335e7, `SPHI(1.3335e7),
+                1.7783e7, `SPHI(1.7783e7), 2.3714e7, `SPHI(2.3714e7),
+                3.1623e7, `SPHI(3.1623e7), 4.2170e7, `SPHI(4.2170e7),
+                5.6234e7, `SPHI(5.6234e7), 7.4989e7, `SPHI(7.4989e7),
+                1.0000e8, `SPHI(1.0000e8), 1.3335e8, `SPHI(1.3335e8),
+                1.7783e8, `SPHI(1.7783e8), 2.3714e8, `SPHI(2.3714e8),
+                3.1623e8, `SPHI(3.1623e8), 4.2170e8, `SPHI(4.2170e8),
+                5.6234e8, `SPHI(5.6234e8), 7.4989e8, `SPHI(7.4989e8),
+                1.0000e9, `SPHI(1.0000e9)
+              }, "thermorefractive")
+            + flicker_noise(`DUAN, 1.0, "thermomechanical");
+
+        // The control port is optional: a deck line may stop short of it. Left off, the port's
+        // node would float with no equation of its own (a singular row), so the model holds it
+        // at 0 V through a 1 S conductance instead — which the connected arm never stamps, so a
+        // wired source sees no load.
+        if ($port_connected(ctl))
+            Phi(phout) <+ kphi * V(ctl);
+        else
+            I(ctl) <+ V(ctl);
+    end
+endmodule

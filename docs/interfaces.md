@@ -906,6 +906,39 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > scale for it. `va-codegen` uses `tstep/1000`. Found while implementing
 > `docs/proposals/directives.md`.
 
+> **Revision (§6 clarification, 2026-09-14 — no signature change to either interface):**
+> two contract *semantics* were sharpened, both found while building the photonic noise
+> models (`docs/photonic-noise.md`).
+>
+> **Interface α — `Builtin::NoiseTable`/`NoiseTableLog` powers are expressions.** The
+> 2026-08-04 revision above says the table travels as "const-folded arguments". It now travels
+> as `Call(NoiseTable, [Const(f1), p1, Const(f2), p2, …])`: frequencies still `Const` (sorted,
+> unique — the checks need numbers), powers the **constant expressions** the author wrote
+> (parameters, literals, builtins; a probe or `$temperature` is still refused at elaboration),
+> lowered rather than folded so a per-instance parameter override reaches them — the same
+> reason `laplace_*` coefficients are lowered. Measured before the change: a `noise_table`
+> resistor overridden to 3 kΩ on the deck reported `4kT/1000` — silently, and a 40 m waveguide's
+> tabulated phase noise would have been the 1 m default's. `va-codegen` already evaluated the
+> arguments through `eval` (its doc said "an IR built by some other producer may legitimately
+> have a parameter reference there"), so no consumer changed shape; its `validate` now also
+> rejects a power that is negative or non-finite *after* the instance's overrides are applied.
+>
+> **Interface β — the noise channel is row-based, and a potential contribution's source sits
+> on its constraint row.** `NoiseSink::white_current(p, n, psd)` and its siblings say "in
+> parallel with the branch from unknown `p` to unknown `n`"; what the analysis actually does
+> with the pair is inject the stochastic term into rows `p` (+) and `n` (−) and read
+> `y_p − y_n` from the adjoint. For a noise function written in a **potential** contribution —
+> a series voltage source per LRM §4.6.4 — the right rows are not the branch's two KCL rows but
+> its own constraint row (`V(p) − V(n) − expr − v_n = 0`), so `va-codegen` now emits such a
+> source as `(constraint_row, GROUND)` and the adjoint reads `y_row`. Until 2026-09-14 it was
+> emitted across `(p, n)`: a current injected into a node the same contribution pins, whose
+> adjoint is identically zero — the source was *listed* as a contributor and delivered exactly
+> `0.0` (measured on `V(p,n) <+ 1 + white_noise(1e-12)` into a 1k/1k divider, against a true
+> `2.5e-13 V²/Hz`). Every signal-flow discipline (optical power, optical phase, temperature)
+> receives only potential contributions, so before this every photonic noise source would
+> have been a silent zero. The PSD's unit is then the potential's squared per hertz (V²/Hz,
+> rad²/Hz, W²/Hz), and `va_abi::noise`'s doc now says so. No trait, type or method changed.
+
 > **Revision (§6 change, 2026-09-12b):** Interface α gained four additive `Builtin` variants,
 > `ZiNd`, `ZiNp`, `ZiZd`, `ZiZp` — the Z-domain filters of LRM §4.5.12
 > (`docs/proposals/z-domain-filters.md`). Argument layout, flattened:

@@ -884,19 +884,6 @@ impl Elaborator<'_> {
         }
     }
 
-    /// Extract and const-evaluate every element of a `{...}` array-literal argument — the
-    /// Laplace/Z-domain filter builtins' (§4.5.11/§4.5.12) shared entry point for reading a
-    /// `num`/`den` coefficient list or a `zero`/`pole` root list. `what` names the argument in
-    /// the error message.
-    fn array_lit_values(&self, r: ExprRef, what: &str) -> Result<Vec<f64>, FrontendError> {
-        match self.ast.expr(r) {
-            ExprAst::ArrayLit(elems) => elems.iter().map(|&e| self.const_eval(e)).collect(),
-            _ => Err(elab(format!(
-                "{what} must be a `{{...}}` array-literal coefficient/root list"
-            ))),
-        }
-    }
-
     /// Lower every element of a `{...}` array literal into the output arena, preserving them as
     /// expressions rather than const-folding.
     ///
@@ -936,37 +923,67 @@ impl Elaborator<'_> {
     ///   the pairs … if required"), which is the invariant `va_abi::noise::table_psd_at` reads
     ///   the table under.
     ///
+    /// **Frequencies are const-folded here; powers are not** (2026-09-14). A frequency has to be
+    /// a number at elaboration — the sort and the uniqueness check need it — but a power is
+    /// returned as the expression the author wrote, to be lowered into the arena and evaluated
+    /// per instance, for the reason [`Self::array_lit_exprs`] gives for a `laplace_*`
+    /// coefficient: folded here, a power that reads a parameter (`4*`P_K*Tnom/R`, a
+    /// waveguide's `L`) would freeze at the declared default and silently ignore the deck's
+    /// `X1 … L=40` — measured before the change on `models/resistor_noise_table.va`, whose own
+    /// header had to warn that the deck's `R` and the model's must agree. The power is still
+    /// required to be a *constant expression* (parameters, literals, builtin functions — what
+    /// [`Self::const_eval`] accepts), which is what "constant data" means for a table per the
+    /// LRM: constant per instance, not per source file. It is evaluated once here at the
+    /// declared defaults to reject a negative or non-finite value where a file can be named.
+    ///
     /// An empty table is allowed through: it is a source with no power at any frequency, which
     /// the noise analysis then drops. Rejecting it would be a stricter rule than the LRM states.
-    fn noise_table_points(&self, r: ExprRef, what: &str) -> Result<Vec<(f64, f64)>, FrontendError> {
+    fn noise_table_points(
+        &self,
+        r: ExprRef,
+        what: &str,
+    ) -> Result<Vec<(f64, ExprRef)>, FrontendError> {
         if let ExprAst::Str(_) = self.ast.expr(r) {
             return Err(elab(format!(
                 "`{what}` with a file-name argument is not supported — give the table \
                  inline as a `{{f1, p1, f2, p2, …}}` array literal"
             )));
         }
-        let values = self.array_lit_values(r, &format!("`{what}`'s table"))?;
-        if values.len() % 2 != 0 {
+        let elems = match self.ast.expr(r) {
+            ExprAst::ArrayLit(elems) => elems.clone(),
+            _ => {
+                return Err(elab(format!(
+                    "`{what}`'s table must be a `{{...}}` array-literal coefficient/root list"
+                )))
+            }
+        };
+        if elems.len() % 2 != 0 {
             return Err(elab(format!(
                 "`{what}`'s table must hold `(frequency, power)` pairs — got {} values (odd)",
-                values.len()
+                elems.len()
             )));
         }
-        let mut points: Vec<(f64, f64)> = Vec::with_capacity(values.len() / 2);
-        for pair in values.chunks(2) {
-            let (f, p) = (pair[0], pair[1]);
+        let mut points: Vec<(f64, ExprRef)> = Vec::with_capacity(elems.len() / 2);
+        for pair in elems.chunks(2) {
+            let f = self.const_eval(pair[0])?;
             if f < 0.0 || !f.is_finite() {
                 return Err(elab(format!(
                     "`{what}` frequency {f} is not a finite, non-negative frequency in Hz"
                 )));
             }
+            let p = self.const_eval(pair[1]).map_err(|e| {
+                elab(format!(
+                    "`{what}` power at {f} Hz must be a constant expression (parameters, \
+                     literals and builtin functions): {e}"
+                ))
+            })?;
             if p < 0.0 || !p.is_finite() {
                 return Err(elab(format!(
                     "`{what}` power {p} at {f} Hz is not a finite, non-negative power \
                      spectral density"
                 )));
             }
-            points.push((f, p));
+            points.push((f, pair[1]));
         }
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         if let Some(w) = points.windows(2).find(|w| w[0].0 == w[1].0) {
@@ -1802,11 +1819,13 @@ impl Elaborator<'_> {
             // lower like the two noise builtins above, with one difference: their `input` is
             // *data*, not an expression to evaluate per bias. The LRM's table is constant by
             // construction (an array parameter or an array assignment pattern), so it is
-            // const-folded, validated, and sorted here — once — and travels as a flat,
-            // alternating `f, p, f, p, …` argument list (`Builtin::NoiseTable`'s own doc
-            // comment explains why that rather than a new `Expr` variant). The two differ only
-            // in which interpolation rule the analysis applies between the points, which is
-            // carried by the builtin they lower to and nothing else.
+            // validated and sorted here — once — and travels as a flat, alternating `f, p, f,
+            // p, …` argument list (`Builtin::NoiseTable`'s own doc comment explains why that
+            // rather than a new `Expr` variant): frequencies as `Const`, powers as the constant
+            // *expressions* the author wrote, so a per-instance parameter override reaches them
+            // (§ `noise_table_points`). The two differ only in which interpolation rule the
+            // analysis applies between the points, which is carried by the builtin they lower
+            // to and nothing else.
             ExprAst::Call { name, args }
                 if matches!(name.as_str(), "noise_table" | "noise_table_log") =>
             {
@@ -1814,11 +1833,13 @@ impl Elaborator<'_> {
                     .first()
                     .ok_or_else(|| elab(format!("`{name}` requires a table argument")))?;
                 let points = self.noise_table_points(input, name)?;
-                let ids = points
-                    .into_iter()
-                    .flat_map(|(f, p)| [f, p])
-                    .map(|v| self.out.push_expr(Expr::Const(v)))
-                    .collect();
+                let mut ids = Vec::with_capacity(points.len() * 2);
+                for (f, p) in points {
+                    ids.push(self.out.push_expr(Expr::Const(f)));
+                    // The power stays an expression so an instance override reaches it
+                    // (§ `noise_table_points`); the frequency is already a number.
+                    ids.push(self.lower_expr(p)?);
+                }
                 let builtin = if name == "noise_table_log" {
                     Builtin::NoiseTableLog
                 } else {
@@ -6060,8 +6081,15 @@ mod tests {
     }
 
     /// The table may be written in terms of parameters and macro constants — it only has to be
-    /// *constant*, which is what const-folding it at elaboration checks. This is the shape
+    /// *constant*, which is what const-evaluating it at elaboration checks. This is the shape
     /// `models/resistor_noise_table.va` uses to write `4kT/R` without hard-coding the number.
+    ///
+    /// Since 2026-09-14 the power is **lowered as the expression**, not folded to its value at
+    /// the declared default: the arena holds a `Param` reference to `R`, so a deck's `R=`
+    /// override reaches the table the way it reaches every other expression. (Folded, the
+    /// table would have frozen at 1 kΩ and silently ignored the override — the limitation
+    /// `resistor_noise_table.va`'s header used to have to state.) The frequency is still a
+    /// `Const`, because the sort and the uniqueness check need a number.
     #[test]
     fn a_noise_table_may_be_built_from_parameter_expressions() {
         let src = "module t(a, b); electrical a, b; parameter real R = 1000.0; \
@@ -6076,12 +6104,37 @@ mod tests {
                 _ => None,
             })
             .expect("a NoiseTable call");
-        let power = match m.expr(args[1]) {
-            va_ir::Expr::Const(v) => *v,
-            _ => panic!("constant"),
-        };
-        let want = 4.0 * 1.380_649e-23 * 300.15 / 1000.0;
-        assert!((power - want).abs() < 1e-30, "got {power}, want {want}");
+        assert!(matches!(m.expr(args[0]), va_ir::Expr::Const(f) if *f == 1.0));
+        assert!(
+            !matches!(m.expr(args[1]), va_ir::Expr::Const(_)),
+            "the power is an expression, not a folded number"
+        );
+        // It reads the parameter — that is what makes an override reach it.
+        fn reads_param(m: &va_ir::Module, e: va_ir::ExprId) -> bool {
+            match m.expr(e) {
+                va_ir::Expr::Param(_) => true,
+                va_ir::Expr::Binary(_, a, b) => reads_param(m, *a) || reads_param(m, *b),
+                va_ir::Expr::Unary(_, a) => reads_param(m, *a),
+                va_ir::Expr::Call(_, args) => args.iter().any(|&a| reads_param(m, a)),
+                _ => false,
+            }
+        }
+        assert!(reads_param(&m, args[1]), "power references `R`");
+    }
+
+    /// A table power that is not a constant expression — one reading a probe — is refused at
+    /// elaboration with a message naming the table, not silently accepted as a bias-dependent
+    /// "constant". The LRM's table is constant data; what changed on 2026-09-14 is *when* the
+    /// constant is evaluated (per instance rather than per file), not whether it is one.
+    #[test]
+    fn a_noise_table_power_that_reads_a_probe_is_refused() {
+        let src = "module t(a, b); electrical a, b; \
+                   analog begin I(a, b) <+ noise_table({1.0, V(a, b) * 1e-20}); end endmodule";
+        let err = elaborate_err(src);
+        assert!(
+            err.contains("noise_table") && err.contains("constant expression"),
+            "got: {err}"
+        );
     }
 
     #[test]

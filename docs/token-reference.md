@@ -468,9 +468,12 @@ class of lexemes.
   for a Laplace filter's DC/transient gain) or a set of lowered, still-dynamic `ExprId`s
   (`array_lit_exprs`, used for the AC per-frequency evaluation — so a coefficient written as a
   parameter expression, e.g. `` {1, `M_TWO_PI*Fgr} ``, tracks a netlist override rather than
-  freezing at its default); `noise_table`/`noise_table_log` instead read it via
-  `array_lit_values` through `noise_table_points`, always as constants (LRM: the table is data,
-  not a per-bias expression).
+  freezing at its default); `noise_table`/`noise_table_log` read it through
+  `noise_table_points`, which const-evaluates the *frequencies* (the sort and the uniqueness
+  check need numbers) and lowers the *powers* as expressions after checking they are constant
+  ones (since 2026-09-14 — before that every element was folded, and a table could not follow
+  an override; LRM: the table is data, not a per-bias expression — constant per instance, which
+  is what "constant" now means here).
 - **Structural and Analog Usage**: Analog-block only, and only as one specific builtin's
   argument — there is no general array/aggregate type anywhere else in this subset.
 - **Comparison with Traditional Constructs**: Superficially resembles a C aggregate initializer
@@ -1264,18 +1267,23 @@ including the ones with no implemented behavior at all.
   required argument is a clear elaboration error, not a silent zero.
 
   `noise_table(input[, "name"])` elaborates to `Expr::Call(Builtin::NoiseTable, args)` where
-  `args` is the table **flattened** into alternating frequency/power constants, sorted ascending
+  `args` is the table **flattened** into alternating frequency/power entries, sorted ascending
   (LRM §4.6.4.3: "the simulator shall internally sort the pairs"). Unlike the other two, its
   argument is *data*, not an expression evaluated per bias: the LRM restricts a table to an array
-  parameter or an array assignment pattern, so it is const-folded once, at elaboration —
-  which also means a tabulated PSD **cannot track `$temperature`** or a netlist-overridden
-  parameter (`models/resistor_noise_table.va`'s header spells out what that costs a model
-  author). Everything the LRM says about the table is checked there, where a source file can be
-  named: an odd number of values, a repeated frequency, a negative frequency or power, and the
-  file-name form (`noise_table("t.tbl")`, unimplemented) each get their own message. Between
-  points the PSD is piecewise-linear **in frequency**, and outside the tabulated range it is
-  clamped to the nearest endpoint's power rather than extrapolated
-  (`va_abi::noise::table_psd_at`).
+  parameter or an array assignment pattern. Frequencies are const-folded at elaboration;
+  powers are lowered as the **constant expressions** written (parameters, literals, builtin
+  functions — anything `const_eval` accepts, so `$temperature` and probes are still refused)
+  and evaluated per instance, which is what lets a deck's `L=40` reach a waveguide's
+  tabulated phase noise (`models/waveguide.va`) and a `R2 … 3000` reach a tabulated resistor's
+  `4kT/R` (2026-09-14; until then every entry was folded and an override was silently
+  ignored — `models/resistor_noise_table.va`'s note 2 records both states). Everything the
+  LRM says about the table is checked at elaboration, where a source file can be named: an
+  odd number of values, a repeated frequency, a negative frequency, a non-constant power, a
+  negative power at the declared defaults, and the file-name form (`noise_table("t.tbl")`,
+  unimplemented) each get their own message; `va-codegen`'s `validate` re-checks each power's
+  sign with the instance's parameters applied. Between points the PSD is piecewise-linear
+  **in frequency**, and outside the tabulated range it is clamped to the nearest endpoint's
+  power rather than extrapolated (`va_abi::noise::table_psd_at`).
 
   `ac_stim([analysis_name[, mag[, phase]]])` (LRM §4.5.2) elaborates to
   `Expr::Call(Builtin::AcStim, [Const(mask), mag, phase])` — **normalized to exactly three

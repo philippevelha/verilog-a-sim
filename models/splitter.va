@@ -1,0 +1,33 @@
+// 1x2 power splitter: the input half of a Mach-Zehnder interferometer.
+//
+//   in, phin ──►──┬──►── o1, ph1     Popt(o1) = ratio * Popt(in)        Phi(ph1) = Phi(phin)
+//                 └──►── o2, ph2     Popt(o2) = (1 - ratio) * Popt(in)  Phi(ph2) = Phi(phin)
+//
+// Power divides; phase is copied to both outputs. This is the one place in the photonic zoo
+// where a net *is* fanned out, and it is done here rather than by wiring one optical net to
+// two receivers because these are signal-flow disciplines: a net wired to two sinks delivers
+// its full value to both (`photonic.vams`), which is the wrong answer for power and the right
+// one for phase — so the split is a model, and the copy is explicit.
+//
+// # Limitations
+//
+// Lossless, wavelength-independent, no phase difference between the two outputs (a real
+// directional coupler puts 90 degrees between them; with `mzi.va`'s `bias` parameter that
+// constant is absorbed into the operating point, so it is left out rather than carried
+// around).
+`include "photonic.vams"
+
+module splitter(in, phin, o1, ph1, o2, ph2);
+    inout in, phin, o1, ph1, o2, ph2;
+    optical       in, o1, o2;
+    optical_phase phin, ph1, ph2;
+
+    parameter real ratio = 0.5 from [0:1];   // power fraction delivered to o1
+
+    analog begin
+        Popt(o1) <+ ratio * Popt(in);
+        Popt(o2) <+ (1.0 - ratio) * Popt(in);
+        Phi(ph1) <+ Phi(phin);
+        Phi(ph2) <+ Phi(phin);
+    end
+endmodule

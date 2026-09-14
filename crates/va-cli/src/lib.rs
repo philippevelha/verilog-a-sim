@@ -3249,6 +3249,304 @@ mod tests {
         .expect("a top-level noise source is the supported spelling");
     }
 
+    /// A `noise_table` power follows a deck's parameter override (2026-09-14). The tabulated
+    /// resistor with `R2 … 3000` must report `4kT/3000`, not the model default's `4kT/1000`:
+    /// before the change the table was const-folded at elaboration and the override was
+    /// silently ignored, which is why `circuits/resistor_noise_table.net` had to use 1k/1k and
+    /// say so. Checked against the same 1k/3k divider `resistor_noise_va.net` uses, whose
+    /// answer is `4kT·(R1‖R2) = 4kT·750`; a frozen table would give `4kT·(1/1000 + 1/1000)·750²`
+    /// instead, 33 % high.
+    #[test]
+    fn a_noise_table_power_follows_a_deck_override() {
+        let src = include_str!("../../../models/resistor_noise_table.va");
+        let design = compile_model(src, "resistor_noise_table.va");
+        let net = va_netlist::parser::parse(
+            "V1 in gnd DC 1
+R1 in a 1000
+R2 a gnd 3000
+.noise V(a) V1 dec 2 1000 10000
+.end
+",
+        )
+        .unwrap();
+        let spectrum = solve_noise(&net, &design.modules).expect("noise solves");
+        let want = 4.0 * va_abi::noise::BOLTZMANN * 300.15 * 750.0;
+        let frozen = 4.0 * va_abi::noise::BOLTZMANN * 300.15 * (2.0 / 1000.0) * 750.0 * 750.0;
+        for &s in &spectrum.psd {
+            assert!(((s - want) / want).abs() < 1e-9, "S = {s}, want {want}");
+            assert!(
+                ((s - frozen) / frozen).abs() > 0.3,
+                "the frozen-table answer"
+            );
+        }
+    }
+
+    /// Wanser's thermorefractive phase-noise PSD (one-sided, rad²/Hz) as `models/waveguide.va`
+    /// states it — the Rust transcription the model's table is checked against.
+    fn wanser_psd(f: f64, l: f64, lambda: f64, w0: f64, dndt: f64) -> f64 {
+        let (t, kappa, d, af, n, alpha_l): (f64, f64, f64, f64, f64, f64) =
+            (295.0, 1.37, 0.82e-6, 40e-6, 1.457, 5.0e-7);
+        let (kmax4, kmin4) = ((2.0 / w0).powi(4), (2.405 / af).powi(4));
+        let w_d = (2.0 * std::f64::consts::PI * f / d).powi(2);
+        let a = 2.0
+            * std::f64::consts::PI
+            * va_abi::noise::BOLTZMANN
+            * t
+            * t
+            * l
+            * (dndt + n * alpha_l).powi(2)
+            / (kappa * lambda * lambda);
+        a * ((kmax4 + w_d) / (kmin4 + w_d)).ln()
+    }
+
+    /// Duan's thermomechanical 1/f phase-noise PSD (rad²/Hz), Bartolo et al. eq. (5), as the
+    /// model states it.
+    fn duan_psd(f: f64, l: f64, lambda: f64) -> f64 {
+        let (n, t, e0, phi0, dcoat): (f64, f64, f64, f64, f64) =
+            (1.457, 295.0, 1.9e10, 1e-2, 160e-6);
+        let area = std::f64::consts::PI * (dcoat / 2.0).powi(2);
+        (2.0 * std::f64::consts::PI * n / lambda).powi(2)
+            * 2.0
+            * va_abi::noise::BOLTZMANN
+            * t
+            * l
+            * phi0
+            / (3.0 * std::f64::consts::PI * e0 * area)
+            / f
+    }
+
+    /// The transcribed Wanser formula reproduces the number Bartolo et al. quote: with their
+    /// Table II parameters (80 m total, 1319 nm, w0 = 2.35 µm, dn/dT = 9.52e-6) the
+    /// zero-frequency phase noise is −125.5 dB re rad/√Hz. This is the paper checking the
+    /// transcription, before any simulator is involved.
+    #[test]
+    fn wanser_formula_reproduces_bartolos_quoted_figure() {
+        let s0 = wanser_psd(1e-3, 80.0, 1319e-9, 2.35e-6, 9.52e-6);
+        let db = 10.0 * s0.log10();
+        assert!(
+            (db - (-125.5)).abs() < 0.05,
+            "F(0): {db} dB, paper says -125.5 dB"
+        );
+        // And the wavelength scaling of their Fig. 3: 1319 nm is louder than 1550 nm by
+        // 20·log10(1550/1319) = 1.40 dB from λ alone, plus ~0.2 dB from the mode radius.
+        let s1550 = wanser_psd(1e-3, 80.0, 1550e-9, 2.605e-6, 9.488e-6);
+        let ratio_db = 10.0 * (s0 / s1550).log10();
+        assert!((ratio_db - 1.6).abs() < 0.1, "1319 vs 1550: {ratio_db} dB");
+    }
+
+    /// `circuits/fiber_mzi_noise.net` — Bartolo et al.'s 40 m + 40 m interferometer — reports
+    /// the fiber's phase noise as the input-referred spectrum, and it equals the closed forms
+    /// the model tabulates: the two waveguides' share of the output, referred to the PZT input
+    /// (1 rad/V), is `2·(Wanser + Duan)` at every frequency to within the table's stated
+    /// interpolation error (0.7 %; 1 % asserted). Also pinned: the photodiodes' shot noise at
+    /// `2q·resp·0.5 mW·R²` each (the paper's shot-noise line), and the laser's RIN at exactly
+    /// zero — common-mode at quadrature, cancelled by the difference amplifier (their
+    /// Appendix B), which is what proves the phase net's noise is *not* being routed through
+    /// the power net.
+    #[test]
+    fn fiber_mzi_noise_matches_wanser_and_duan_through_the_interferometer() {
+        let deck = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/fiber_mzi_noise.net"
+        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
+        let (net, compiled) = load(deck, Some(dir)).expect("loads");
+        let spectrum = solve_noise(&net, &compiled).expect("noise solves");
+        let contributors = noise_contributors(&net, &spectrum);
+        let own = |name: &str| -> &Vec<f64> {
+            &contributors
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} contributes"))
+                .1
+        };
+        let (x3, x4, x6, x7, x1) = (own("X3"), own("X4"), own("X6"), own("X7"), own("X1"));
+        for (k, &f) in spectrum.f.iter().enumerate() {
+            // |H|² from the source's own row to the output: the ratio of the two columns.
+            let h2 = spectrum.psd[k] / spectrum.input_psd[k];
+            let fiber_in = (x3[k] + x4[k]) / h2;
+            let want =
+                2.0 * (wanser_psd(f, 40.0, 1319e-9, 2.35e-6, 9.52e-6) + duan_psd(f, 40.0, 1319e-9));
+            assert!(
+                ((fiber_in - want) / want).abs() < 1e-2,
+                "at {f} Hz: fiber phase noise {fiber_in} rad²/Hz, closed form {want}"
+            );
+            assert!((x3[k] - x4[k]).abs() < 1e-12 * x3[k], "two identical arms");
+            // Each detector: 2q·(0.9 A/W · 0.5 mW · the arm's 0.008 dB of loss + Is) into
+            // 1 kΩ, through E1's unit gain.
+            let p_det = 0.5e-3 * 10f64.powf(-2e-4 * 40.0 / 10.0);
+            let shot = 2.0 * va_abi::noise::ELEMENTARY_CHARGE * (0.9 * p_det + 1e-12) * 1e6;
+            assert!(
+                ((x6[k] - shot) / shot).abs() < 1e-6,
+                "X6 {} vs {shot}",
+                x6[k]
+            );
+            assert!(
+                ((x7[k] - shot) / shot).abs() < 1e-6,
+                "X7 {} vs {shot}",
+                x7[k]
+            );
+            // RIN at quadrature: cos(π/2)² of a −140 dB/Hz source — zero to rounding.
+            assert!(x1[k] < 1e-40, "RIN leaks {} V²/Hz at quadrature", x1[k]);
+        }
+        // Where the paper's Fig. 2 sits: −125 dB-ish at 1 kHz, −137 dB-ish at 100 kHz.
+        let at = |hz: f64| {
+            let k = spectrum
+                .f
+                .iter()
+                .position(|&f| (f - hz).abs() < 1e-6 * hz)
+                .unwrap();
+            10.0 * spectrum.input_psd[k].log10()
+        };
+        assert!((at(1e3) - (-124.9)).abs() < 0.2, "1 kHz: {} dB", at(1e3));
+        assert!((at(1e5) - (-137.4)).abs() < 0.2, "100 kHz: {} dB", at(1e5));
+    }
+
+    /// `circuits/ring_gyro_noise.net` — Scheuer's RWOG budget. The output noise is
+    /// `R²·(2q·i_d + 4kT/R + RIN·i_d²)` with `i_d` read from the solved operating point, each
+    /// term attributed to its device; and the input-referred column is that divided by the
+    /// square of `dV(pa)/dΩ`, measured here by two further DC solves at ±100 rad/s rather than
+    /// taken from the analysis's own linearization — so `sqrt(S_in)` really is the minimum
+    /// detectable rotation rate per √Hz that eq. (15) defines.
+    #[test]
+    fn ring_gyro_noise_is_scheuers_three_term_budget_referred_to_rotation_rate() {
+        let deck = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/ring_gyro_noise.net"
+        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
+        let (net, compiled) = load(deck, Some(dir)).expect("loads");
+        let pa = net.node_order.iter().position(|n| n == "pa").unwrap();
+        let op = solve_dc(&net, &compiled).expect("operating point");
+        let i_d = op.x[pa] / 1000.0;
+        assert!(
+            (i_d - 2.45e-4).abs() < 0.02e-4,
+            "photocurrent {i_d} A, expected ~0.245 mA"
+        );
+
+        let (q, kt) = (
+            va_abi::noise::ELEMENTARY_CHARGE,
+            va_abi::noise::BOLTZMANN * va_abi::noise::TEMP_NOMINAL,
+        );
+        let (shot, johnson, rin) = (
+            2.0 * q * (i_d + 1e-12),
+            4.0 * kt / 1000.0,
+            3.16e-16 * i_d * i_d,
+        );
+        let want = 1e6 * (shot + johnson + rin);
+
+        let spectrum = solve_noise(&net, &compiled).expect("noise solves");
+        let contributors = noise_contributors(&net, &spectrum);
+        let own = |name: &str| -> f64 {
+            contributors
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} contributes"))
+                .1[0]
+        };
+        // The photodiode's reverse conductance shunts the 1 kΩ load by ~4e-8, so 1e-6 is a
+        // real tolerance, not a loose one.
+        assert!(
+            ((spectrum.psd[0] - want) / want).abs() < 1e-6,
+            "S_V {} vs {want}",
+            spectrum.psd[0]
+        );
+        assert!(
+            ((own("X3") - 1e6 * shot) / (1e6 * shot)).abs() < 1e-6,
+            "shot"
+        );
+        assert!(
+            ((own("R1") - 1e6 * johnson) / (1e6 * johnson)).abs() < 1e-6,
+            "Johnson"
+        );
+        assert!(((own("X1") - 1e6 * rin) / (1e6 * rin)).abs() < 1e-6, "RIN");
+        // Flat: nothing in the deck is reactive.
+        assert!(spectrum
+            .psd
+            .iter()
+            .all(|&s| ((s - want) / want).abs() < 1e-6));
+
+        // dV(pa)/dΩ by central difference of two more operating points.
+        let src = std::fs::read_to_string(deck).unwrap();
+        let v_at = |omega: f64| -> f64 {
+            let d = src.replace(
+                "Vrot rot  gnd       DC 0",
+                &format!("Vrot rot gnd DC {omega}"),
+            );
+            assert!(d != src, "the deck's Vrot line is what this test edits");
+            let n = va_netlist::parser::parse(&d).unwrap();
+            solve_dc(&n, &compiled).expect("solves").x[pa]
+        };
+        let h = (v_at(100.0) - v_at(-100.0)) / 200.0;
+        assert!((h - (-7.8e-7)).abs() < 0.05e-7, "dV/dΩ = {h} V per rad/s");
+        let s_in = spectrum.input_psd[0];
+        assert!(
+            ((s_in - want / (h * h)) / s_in).abs() < 1e-3,
+            "S_in {s_in} vs S_V/H² {}",
+            want / (h * h)
+        );
+        // Scheuer's number for this device: 0.0137 rad/s/√Hz, shot-noise limited (69 %).
+        let omega_min = s_in.sqrt();
+        assert!(
+            (omega_min - 0.0137).abs() < 0.0002,
+            "Ω_min = {omega_min} rad/s/√Hz"
+        );
+        assert!(1e6 * shot / want > 0.65 && 1e6 * shot / want < 0.72);
+    }
+
+    /// A noise source declared in a **potential** contribution reaches the output. Before
+    /// 2026-09-14 it was emitted as a current across the branch's own nodes — nodes that the
+    /// same contribution pins — and so contributed exactly zero while still being listed as a
+    /// contributor (this deck measured `X1 0.0 (0.0%)`). Now it is a series voltage source on
+    /// the branch's constraint row: a 1e-12 V²/Hz source into a 1k/1k divider shows
+    /// `(1/2)² · 1e-12` at the tap, plus the resistors' own `4kT·(R1‖R2)`.
+    #[test]
+    fn noise_in_a_potential_contribution_reaches_the_output() {
+        let design = compile_model(
+            "`include \"disciplines.vams\"
+             module vnoise(p, n);
+             inout p, n;
+             electrical p, n;
+             parameter real vdc = 1.0;
+             parameter real psd = 1e-12;
+             analog V(p, n) <+ vdc + white_noise(psd, \"vn\");
+             endmodule
+",
+            "vnoise",
+        );
+        let net = va_netlist::parser::parse(
+            "V0 ref gnd DC 0
+X1 in ref vnoise
+R1 in out 1000
+R2 out gnd 1000
+.noise V(out) V0 dec 2 10 1000
+.end
+",
+        )
+        .unwrap();
+        let spectrum = solve_noise(&net, &design.modules).expect("noise solves");
+        let want =
+            0.25 * 1e-12 + 4.0 * va_abi::noise::BOLTZMANN * va_abi::noise::TEMP_NOMINAL * 500.0;
+        for (&f, &s) in spectrum.f.iter().zip(&spectrum.psd) {
+            assert!(
+                ((s - want) / want).abs() < 1e-9,
+                "at {f} Hz: S = {s}, expected {want}"
+            );
+        }
+        // Referred to `V0` (unit gain from the source's own row to `in`, then the divider's
+        // 1/2): the source's full 1e-12 comes back, plus the resistors' noise through 1/4.
+        let want_in = want / 0.25;
+        assert!(((spectrum.input_psd[0] - want_in) / want_in).abs() < 1e-9);
+        // And the compiled source is the dominant, non-zero contributor.
+        let (idx, own) = &spectrum.per_instance[0];
+        assert_eq!(*idx, 1, "X1 is the second instance built (after V0)");
+        assert!(
+            ((own[0] - 0.25e-12) / 0.25e-12).abs() < 1e-9,
+            "X1 = {}",
+            own[0]
+        );
+    }
+
     /// Same hole, `ac_stim` family: its value is zero in every analysis and only the split-out
     /// excitation channel carries it, so a nested one contributes nothing.
     #[test]

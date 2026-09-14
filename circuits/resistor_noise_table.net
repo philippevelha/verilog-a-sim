@@ -6,10 +6,12 @@
 * rather than as white_noise(). Before noise_table() was lowered this deck measured an
 * identically-zero spectrum, the same way circuits/resistor_noise_va.net did before T5.3.
 *
-* Why both resistors are 1k, and not 1k/3k like resistor_noise_va.net: a table is constant data
-* the frontend const-folds at elaboration, so it cannot follow the per-device resistance va-cli
-* overrides onto the model's first parameter afterwards. Both devices must therefore use the
-* model's own default R -- see models/resistor_noise_table.va's note 2.
+* Why both resistors are 1k, and not 1k/3k like resistor_noise_va.net: when this deck was
+* written a table was const-folded at elaboration and could not follow a per-device resistance
+* override, so both devices had to use the model's default R. Since 2026-09-14 a table power is
+* a per-instance parameter expression and the override is honoured (models/
+* resistor_noise_table.va, note 2; the 1k/3k case is a va-cli unit test) -- the deck keeps 1k/1k
+* so its committed QSPICE golden stays exactly what it was.
 *
 * The two sources add in power and reach the output through the same R1||R2 = 500 ohm, so the
 * answer is the textbook 4kT*(R1||R2), flat (nothing here is reactive):

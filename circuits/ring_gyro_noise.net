@@ -1,0 +1,41 @@
+* Scheuer's resonant waveguide optical gyroscope (JOSA B 33, 2016, Fig. 1(a)) with the three
+* noise sources of his eq. (15): detector shot noise, load ("thermal") Johnson noise, laser RIN.
+*
+*   cw_laser (1 mW, RIN -155 dB/Hz) --> ring_gyro (R = 1 mm, 5 % coupler, 0.5 dB/cm) --> photodiode --> R1 (1k) = V(pa)
+*                                                ^ Omega = V(rot)  [rad/s per volt]
+*
+* The laser sits 0.53 pm above the ring's 1550.000 nm resonance, on the flank where the
+* through-port transmission is steepest in rotation rate (T = 0.272; the resonance is 1.8 pm
+* wide). 0.245 mA of photocurrent flows into the 1k load. `.noise V(pa) Vrot` then reports:
+*
+*   output column  S_V   = 1.14e-16 V^2/Hz, flat: R^2 * ( 2q*i_d  +  4kT/R  +  RIN*i_d^2 )
+*                                                    X3 7.84e-23  R1 1.66e-23  X1 1.89e-23 A^2/Hz
+*   input column   S_in  = S_V / |dV(pa)/dOmega|^2 = 1.87e-4 (rad/s)^2/Hz   (dV/dOmega = -7.8e-7 V per rad/s,
+*                  sqrt  = 0.0137 rad/s/sqrt(Hz) = 2820 deg/h/sqrt(Hz)        also visible in a `.dc Vrot` sweep)
+*
+* That square root *is* the minimum detectable rotation rate per root-hertz — Scheuer's eq.
+* (15) evaluated from the deck's actual noise sources and actual linearized gain rather than
+* from the formula: with his S = (1/P_in) dP_out/dOmega and i_d = resp*T_D*P_in it reads
+* Omega_min = (T_D/S) * sqrt( (2e/i_d + 4kT/(R_L i_d^2) + RIN) * df ), the T_D/S prefactor
+* being what "1/S" means once i_d is written out. The per-device lines are the three terms
+* of his budget, which is the point of the deck: which one dominates decides whether the ring
+* should be optimized for S/sqrt(T_D) (shot-limited) or for S alone (thermal-limited) — his
+* Figs. 9-11. Here shot noise is 2/3 of the total, so this device is shot-limited.
+*
+* Numbers are measured from this deck at v0.9.21 and checked in va-cli's tests against the
+* closed form above from the operating point; there is no QSPICE golden (the ring has no
+* SPICE primitive) — docs/validation.md. A 30 um ring (ring_gyro.va's default geometry) gives
+* 17 rad/s/sqrt(Hz): the Sagnac phase scales as R^2, which is why gyro rings are millimetres.
+*
+* `L` is written to 12 digits because the resonance moves by lambda*dL/L: an 8-digit rounding
+* of it shifted the resonance by 0.08 pm against a 0.53 pm detuning and the output noise by
+* 1.5 %. To see the transfer P_thru(Omega) itself, copy the deck and replace the `.noise` card
+* with `.dc Vrot -1000 1000 100` (one analysis card per deck): the slope at 0 is the H above.
+X1   lin  wl        cw_laser   power=1e-3 lambda=1550.00053e-9 rin=3.16e-16
+X2   lin  thru wl rot ring_gyro  L=6.28266666667e-3 loss=0.5
+X3   thru pa   k    photodiode resp=0.9
+Vb   k    gnd       DC 5
+R1   pa   gnd       1000
+Vrot rot  gnd       DC 0
+.noise V(pa) Vrot dec 10 1 1meg
+.end

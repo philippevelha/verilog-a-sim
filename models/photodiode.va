@@ -18,13 +18,26 @@
 // receiver that sees it is measuring its bias supply, not its light. The `microring_thermal`
 // deck runs into exactly this at 1 mW / 200 kOhm / 5 V; see its header.
 //
+// # Shot noise (added 2026-09-14)
+//
+// Photodetection is a Poisson process, so the photocurrent carries shot noise `2*q*I_ph`
+// A^2/Hz, and the junction's own current `2*q*|I_j|` adds to it as an independent process —
+// the two are summed, not `2*q*|I_j - I_ph|`, which would let a forward-biased junction
+// *cancel* the photocurrent's shot noise. Reverse biased (`I_j = -Is`) the sum is
+// `2*q*(resp*Popt + Is)`: the shot-noise floor every optical receiver has, the `2e/i_d` term
+// of Scheuer's rotation-sensor budget (JOSA B 33, 2016, eq. 15) and the gold curve in
+// Bartolo et al.'s Fig. 2 (IEEE JQE 48, 2012: -148.9 dB re rad/sqrt(Hz) for 0.5 mW on the
+// detector, 20 dB below the fiber's own thermal noise). A `.noise` run reports it per device.
+//
 // # Limitations
 //
 // No junction capacitance and no transit-time limit, so the response is instantaneous — fine
 // for microsecond thermal tuning, wrong for a gigahertz data signal. Responsivity is
 // wavelength-independent (InGaAs is flat to within ~10 % across the C band, which is the
 // justification). No dark-current temperature dependence beyond `$vt`, no avalanche, no
-// series resistance.
+// series resistance, no 1/f noise (a real InGaAs PIN has some below ~1 kHz; SPICE's `KF`
+// form in `diode_flicker.va` is the spelling if it is needed).
+`include "constants.vams"
 `include "disciplines.vams"
 `include "photonic.vams"
 
@@ -37,7 +50,11 @@ module photodiode(in, a, c);
     parameter real Is   = 1e-12 from (0:inf);   // dark saturation current (A)
     parameter real N    = 1.0   from (0:inf);   // ideality factor
 
+    real ij;
+
     analog begin
-        I(a, c) <+ Is * (exp(V(a, c) / (N * $vt)) - 1.0) - resp * Popt(in);
+        ij = Is * (exp(V(a, c) / (N * $vt)) - 1.0);
+        I(a, c) <+ ij - resp * Popt(in);
+        I(a, c) <+ white_noise(2.0 * `P_Q * (abs(ij) + resp * Popt(in)), "shot");
     end
 endmodule

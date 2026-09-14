@@ -19,6 +19,18 @@
 //! shot noise in the devices this crate models, and stated here because it is an assumption a
 //! correlated-source model (e.g. a full BSIM's induced gate noise) would violate.
 //!
+//! Mechanically the channel is **row-based** (clarified 2026-09-14, `docs/interfaces.md`): the
+//! `(p, n)` pair says which two rows of the linearized system receive the stochastic
+//! injection (`+` at `p`, `−` at `n`, an index at or past the system dimension folding away),
+//! and the adjoint analysis reads `y_p − y_n`. A parallel current source across a branch is
+//! the `(p, n)` = (KCL row of `p`, KCL row of `n`) case. A **series voltage** source — what a
+//! noise function in a *potential* contribution is (LRM §4.6.4) — is the `(constraint row,
+//! GROUND)` case: an additive term on the branch's own `V(p) − V(n) − expr = 0` row, with the
+//! PSD then in the potential's unit squared per hertz (V²/Hz, or rad²/Hz on an optical-phase
+//! net). `va-codegen` emits that shape for every potential contribution's noise terms, which
+//! is what lets a signal-flow discipline — one that only ever receives potential contributions
+//! — carry noise at all.
+//!
 //! # Three source kinds
 //!
 //! [`NoiseSink::white_current`] is frequency-flat; [`NoiseSink::flicker_current`] is

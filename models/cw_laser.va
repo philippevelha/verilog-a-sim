@@ -1,30 +1,57 @@
-// Continuous-wave laser: a fixed optical power at a fixed wavelength.
+// Continuous-wave laser: a fixed optical power at a fixed wavelength, with relative intensity
+// noise.
 //
 // The simplest possible optical source, and deliberately so. It drives two signal-flow nets —
-// the power on `out` and the carrier wavelength on `wl` — and nothing feeds back into it: no
-// reflection sensitivity, no relative intensity noise, no linewidth, no turn-on transient. A
-// model downstream reads `Popt(out)` and `Wl(wl)`; nothing it does changes either.
+// the power on `out` and the carrier wavelength on `wl` — plus, when a deck connects it, a
+// reference phase of zero on `ph`. Nothing feeds back into it: no reflection sensitivity, no
+// linewidth, no turn-on transient. A model downstream reads `Popt(out)`, `Wl(wl)`, `Phi(ph)`;
+// nothing it does changes any of them.
 //
 // The wavelength travels on its own net rather than being a parameter of every receiver so
 // that a deck states it once, on the source, and the ring's detuning is computed from the
 // light it actually sees. Change `lambda` here and every filter in the path retunes.
 //
+// # Relative intensity noise (added 2026-09-14)
+//
+// `rin` is the laser's RIN as a *linear* one-sided density in 1/Hz: the power noise PSD is
+// `rin * power^2` W^2/Hz, declared as a white source on the power net. A data-sheet
+// "-155 dB/Hz" is `rin = 10^(-15.5) = 3.16e-16`. The default `0` declares no source, so every
+// existing deck is unchanged (a zero-power source is dropped by the analysis, and a noise term
+// never touches the DC/transient stamps). White because that is the one shape a single number
+// describes; a real RIN spectrum has a 1/f^alpha rise at low frequency (Bartolo et al. 2012
+// see alpha > 1 below 1 kHz on a Nd:YAG) and a relaxation-oscillation peak in the GHz — a
+// `noise_table_log` in place of the `white_noise` is the spelling for that, and the
+// `rin`-in-dB convention is why it is not the default.
+//
+// In Scheuer's rotation-sensor noise budget (JOSA B 33, 2016, eq. 15) this is the `RIN` term,
+// the third of shot, Johnson and RIN — `circuits/ring_gyro_noise.net`.
+//
 // # Limitations
 //
-// Two real numbers describe the light (see `photonic.vams`). No phase, no modulation, no
-// polarisation. Power is exactly constant; there is no way to modulate it from this model.
+// Three real numbers describe the light (see `photonic.vams`). No phase noise: the phase net
+// carries no transport delay, so a source's phase noise cancels exactly in any interferometer
+// built from these models and could never reach an output — declaring it would be a silent
+// zero, which is worse than an absence stated here (Bartolo's Fig. 4(c) is the floor it sets
+// for a 1 cm path imbalance; a DFB's is 100 dB above the thermal noise at 1 Hz). No
+// modulation, no polarisation. Power is exactly constant apart from the declared noise.
 `include "photonic.vams"
 
-module cw_laser(out, wl);
-    output out, wl;
-    optical    out;
-    wavelength wl;
+module cw_laser(out, wl, ph);
+    output out, wl, ph;
+    optical       out;
+    wavelength    wl;
+    optical_phase ph;
 
-    parameter real power  = 1e-3     from [0:inf);   // emitted optical power (W)
-    parameter real lambda = 1550.5e-9 from (0:inf);  // carrier wavelength (m)
+    parameter real power  = 1e-3      from [0:inf);   // emitted optical power (W)
+    parameter real lambda = 1550.5e-9 from (0:inf);   // carrier wavelength (m)
+    parameter real rin    = 0.0       from [0:inf);   // relative intensity noise (1/Hz, linear)
 
     analog begin
-        Popt(out) <+ power;
+        Popt(out) <+ power + white_noise(rin * power * power, "rin");
         Wl(wl)    <+ lambda;
+        // The phase reference is optional: a deck that wires only `out` and `wl` (every deck
+        // written before the phase net existed) leaves it off, and nothing is contributed.
+        if ($port_connected(ph))
+            Phi(ph) <+ 0.0;
     end
 endmodule

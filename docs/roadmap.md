@@ -4469,6 +4469,46 @@ this change's to fix.
 The closed forms are the oracle — a staircase, `1 − aᵏ`, an iterated recurrence, and
 `H(e^{jωT})` — as for `absdelay` in AC.
 
+## Photonic noise from three papers — and the two silent zeros it found (2026-09-14, v0.9.21)
+
+The noise models of Glenn (1989), Bartolo/Tveten/Dandridge (2012) and Scheuer (2016) are in
+the zoo: a `waveguide` with Wanser's thermorefractive phase-noise PSD (a 73-point
+`noise_table_log` evaluated from the instance's own parameters) and Duan's thermomechanical
+`1/f` (`flicker_noise`) on a new `optical_phase` net; an `mzi` whose Jacobian is Bartolo's
+eq. (B2); a `splitter`; a `ring_gyro` with the Sagnac phase of Scheuer's eq. (13) driven by a
+rotation-rate control node; RIN on the laser and shot noise on the photodiode. Two decks:
+Bartolo's 40 m + 40 m MZI reports its phase noise as the input-referred column (−124.9 dB re
+rad/√Hz at 1 kHz against the paper's −125.5 flat region; the laser's RIN at exactly zero at
+quadrature), and Scheuer's RWOG reports eq. (15)'s three terms per device and `Ω_min = 0.0137
+rad/s/√Hz` as `√S_in`. `docs/photonic-noise.md` maps every equation to its line, gives the
+measured numbers, and lists what is left out (Glenn's acoustic process, laser phase noise —
+the phase net has no delay, so it would be a silent zero). No crate learned anything photonic;
+nothing new in either interface's signatures.
+
+What the models found is the record worth keeping. **Noise in a potential contribution was
+emitted across `(p, n)`** — a current into a node the same contribution pins, adjoint zero —
+so it was listed as a contributor and delivered `0.0`; every signal-flow net only ever receives
+potential contributions, so every photonic noise source would have been zero. It now sits on
+the branch's constraint row (T5.2's channel is row-based; `docs/interfaces.md` says so now).
+**`noise_table` powers were const-folded**, so a deck's `L=40` — or `R2 … 3000` on the
+tabulated resistor — silently kept the default's PSD; powers are now lowered as constant
+expressions and evaluated per instance, frequencies stay folded, and T5.6's "all table
+validation happens at elaboration" is now "frequencies, pairing, sorting, constant-ness and the
+sign at defaults at elaboration; the sign with overrides applied in `va-codegen`'s `validate`".
+Both were of the kind this project says it refuses to produce, and both had been green under
+every gate for six weeks because no gate had a noisy potential contribution or an overridden
+table. The gates that would have caught them are the ones that exist now.
+
+Also found, in the model rather than the simulator: a Sagnac phase of 1e-10 rad added to a
+static round-trip phase of 2180 rad is below double precision, and a `.dc` sweep of the
+rotation rate read as exactly flat until the static phase was reduced modulo 2π first.
+`.noise`, which linearizes, was never affected — the derivative through `floor` is zero.
+
+**Not gated against QSPICE** (no phase net, interferometer or ring to translate); both decks
+are pinned to closed forms in `va-cli`'s tests, the transcription itself to the paper's quoted
+−125.5 dB. Measured: `cargo test --workspace` 793 passed (+7); `cargo xtask validate` 28/28;
+zoo `check models --codegen` 29/29 (+4); corpus 112/132 (94/99) unchanged.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

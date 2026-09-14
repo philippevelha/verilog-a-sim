@@ -1,0 +1,58 @@
+* Bartolo, Tveten and Dandridge's thermal-noise interferometer (IEEE JQE 48, 2012, Fig. 1):
+* a 40 m + 40 m fiber Mach-Zehnder at 1319 nm, held at quadrature, read out differentially.
+*
+*   cw_laser (1 mW) --> splitter --> waveguide X3 (40 m, + PZT on `pzt`) --> mzi --> photodiode X6 --> R1 (1k) --\
+*                                --> waveguide X4 (40 m)               -->     --> photodiode X7 --> R2 (1k) --> E1 = V(a1) - V(a2) = V(out)
+*
+* Each waveguide declares the fundamental thermal phase noise of its 40 m (Wanser's
+* thermorefractive term and Duan's thermomechanical 1/f term, models/waveguide.va) on the
+* phase net; the MZI at quadrature turns phase into anti-correlated intensity on its two
+* outputs; the two photodiodes turn that into current, the 1k loads into 0.45 V each, and the
+* difference amplifier E1 subtracts them (the paper's Appendix B): the laser's intensity noise
+* is common-mode and cancels, the phase noise is differential and doubles. 0.5 mW lands on each
+* detector at quadrature, which is exactly the paper's operating point.
+*
+* `.noise V(out) Vpzt`: Vpzt drives X3's control port at 1 rad/V, so the **input-referred**
+* column is the interferometer's phase noise in rad^2/Hz — the paper's ordinate, dB re
+* rad/sqrt(Hz), is 10*log10(Sin). Measured figures from this deck at v0.9.21 (the per-device
+* lines say where each comes from):
+*
+*   f = 1 Hz     Sin = 8.75e-11 rad^2/Hz  (-100.6 dB)  Duan 1/f dominates (see waveguide.va on
+*                                                       the 3.8 dB gap to the paper's own figure)
+*   f = 1 kHz    Sin = 3.24e-13            (-124.9 dB)  crossover; Wanser's flat region is -125.5
+*   f = 10 kHz   Sin = 1.29e-13            (-128.9 dB)  Wanser's roll-off between the two corners
+*   f = 100 kHz  Sin = 1.83e-14            (-137.4 dB)  Wanser ~1/f^2 above f_max = 77 kHz
+*   detector shot noise (X6 + X7, 0.5 mW each): 3.6e-16 rad^2/Hz (-154.5 dB), flat, 17-54 dB
+*   below the fiber over the band — visible only as the last 2 % at 100 kHz.
+*   laser RIN (X1, -140 dB/Hz, deliberately large): **0.0** — common-mode at quadrature, so
+*   the difference amplifier cancels it exactly, the paper's Appendix B point. Set the MZI's
+*   `bias=1.5184` (3 degrees off quadrature, their "phi ~ 87 degrees") and X1 leaks 1.5 uV rms
+*   over the band, cos(3 deg)^2 of the single-ended figure, as their eq. (B2) says it must.
+*
+* Compare the paper's Fig. 2: -125.5 dB re rad/sqrt(Hz) flat below ~1 kHz, rolling off to
+* about -140 dB at 100 kHz, and a 1/f rise below 1 kHz that their Fig. 4 attributes to the Duan
+* term plus uncancelled intensity noise. Their shot-noise line is -148.9 dB for 0.5 mW on the
+* detector; two 0.9 A/W detectors at 0.5 mW each in this differential readout give -154.5 dB
+* (q/(resp*P) referred to phase), and no responsivity <= 1 A/W reproduces their figure from
+* 0.5 mW, so the paper's number is quoted here rather than matched. The Wanser table tracks its
+* closed form to 0.7 %, so the fiber's part of this deck is validated against the formula, not
+* against QSPICE — no `golden/` entry (docs/validation.md).
+*
+* Fiber parameters are the paper's Table II for Fibercore SM1500 [5.3/80] at 1319 nm; the
+* 1550 nm column is the model's default (w0 = 2.605 um, dn/dT = 9.488e-6), which is why the
+* two waveguide lines override w0, dndT and lambda0 — the 1.4 dB wavelength scaling of their
+* Fig. 3 is a matter of changing those three numbers and the laser's `lambda`.
+X1  lin  wl  lph                   cw_laser   power=1e-3 lambda=1319e-9 rin=1e-14
+X2  lin  lph pa pha pb phb         splitter
+X3  pa   pao pha phao wl pzt       waveguide  L=40 lambda0=1319e-9 w0=2.35e-6 dndT=9.52e-6
+X4  pb   pbo phb phbo wl           waveguide  L=40 lambda0=1319e-9 w0=2.35e-6 dndT=9.52e-6
+X5  pao  phao pbo phbo o1 o2       mzi
+X6  o1   a1  k                     photodiode resp=0.9
+X7  o2   a2  k                     photodiode resp=0.9
+Vb  k    gnd                       DC 5
+R1  a1   gnd                       1000
+R2  a2   gnd                       1000
+E1  out  gnd  a1 a2                1
+Vpzt pzt gnd                       DC 0
+.noise V(out) Vpzt dec 10 1 100k
+.end

@@ -10,15 +10,17 @@
 // Three things about tables are worth knowing before copying this model:
 //
 //   1. A table is *constant data*, per the LRM (an array parameter or an array assignment
-//      pattern), so it is const-folded at elaboration. It therefore cannot track `$temperature`
-//      the way models/resistor.va's `white_noise` argument does — the nominal temperature is
-//      written as a parameter here and the model is only correct at that temperature. A
-//      temperature-dependent PSD wants `white_noise`, not a table.
-//   2. For the same reason it cannot track a netlist-overridden resistance. va-cli maps an
-//      `R` line's value onto a compiled model's *first* parameter at instance-build time, which
-//      is after the table was folded — so `R` below and the deck's resistor value have to
-//      agree. circuits/resistor_noise_table.net uses 1 kohm for both resistors for this reason,
-//      and says so.
+//      pattern): every power must be a constant expression of parameters and literals. It
+//      therefore cannot track `$temperature` the way models/resistor.va's `white_noise`
+//      argument does — the nominal temperature is written as a parameter here and the model is
+//      only correct at that temperature. A temperature-dependent PSD wants `white_noise`, not
+//      a table.
+//   2. It *does* track a netlist-overridden resistance (since 2026-09-14): a power is kept as
+//      the parameter expression written here and evaluated per instance, so `R2 a gnd 3000`
+//      gives that device `4kT/3000`. Before that date the table was folded to a number at
+//      elaboration and an override was silently ignored, which is why
+//      circuits/resistor_noise_table.net uses 1 kohm for both resistors — it still does, so its
+//      committed golden stays exactly what it was; the 1k/3k case is a unit test in va-cli.
 //   3. The tabulated band is deliberately *narrower* than the deck's 10 Hz - 10 MHz sweep, so
 //      the LRM's clamping rule ("for frequencies lower than the lowest frequency ... returns
 //      the power specified for the lowest frequency", and likewise above the highest) is

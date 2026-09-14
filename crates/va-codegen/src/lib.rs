@@ -572,14 +572,28 @@ impl GeneratedModel {
                             }
                             NoiseTerm::Table { call, .. } => {
                                 // Every table entry, so an unevaluable one fails the build rather
-                                // than silently truncating the table at emit time.
+                                // than silently truncating the table at emit time. A power is a
+                                // parameter expression evaluated per instance (since 2026-09-14
+                                // — `va_frontend` no longer folds it), so the frontend's
+                                // non-negativity check at the declared defaults does not cover a
+                                // deck override; it is re-checked here, where the override has
+                                // been applied and a negative PSD would otherwise be summed in.
                                 if let Expr::Call(
                                     Builtin::NoiseTable | Builtin::NoiseTableLog,
                                     args,
                                 ) = ctx.module.expr(call)
                                 {
-                                    for &arg in args {
-                                        eval(ctx, arg)?;
+                                    for pair in args.chunks(2) {
+                                        let f = eval(ctx, pair[0])?.value;
+                                        let Some(&p) = pair.get(1) else { continue };
+                                        let p = eval(ctx, p)?.value;
+                                        if p < 0.0 || !p.is_finite() {
+                                            return Err(CodegenError::Unsupported(format!(
+                                                "noise_table power {p} at {f} Hz is not a \
+                                                 finite, non-negative power spectral density \
+                                                 with this instance's parameters"
+                                            )));
+                                        }
                                     }
                                 }
                             }
@@ -1711,12 +1725,13 @@ impl GeneratedModel {
     /// Read a `Builtin::NoiseTable` call's flattened arguments back into `(frequency, power)`
     /// pairs for Interface β's noise channel.
     ///
-    /// The arguments are constants by construction (`va-frontend` const-folds, validates and
-    /// sorts the table at elaboration — § `va_ir::Builtin::NoiseTable`), but they are evaluated
-    /// through the ordinary `eval` path anyway rather than pattern-matched as `Expr::Const`: an
-    /// IR built by some other producer may legitimately have a parameter reference there, and
-    /// evaluating it costs one arena read. `None` if any entry fails to evaluate, so a broken
-    /// table declares no source at all rather than a half-read one.
+    /// The frequencies are `Const` by construction (`va-frontend` validates and sorts the table
+    /// at elaboration — § `va_ir::Builtin::NoiseTable`); the powers are constant *expressions*
+    /// (parameters, literals, builtins — since 2026-09-14, so an instance override reaches
+    /// them), and both go through the ordinary `eval` path, which reads this instance's
+    /// parameter values. `None` if any entry fails to evaluate, so a broken table declares no
+    /// source at all rather than a half-read one — which `validate` rules out at build time by
+    /// evaluating every entry first.
     fn noise_table_points(&self, ctx: &Ctx<'_>, call: ExprId) -> Option<Vec<(f64, f64)>> {
         let Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, args) = self.module.expr(call)
         else {
@@ -1802,15 +1817,32 @@ impl ModelInstance for GeneratedModel {
     /// Emit this model's own noise sources (T5.2) — Interface β's noise channel, fed from the
     /// `white_noise`/`flicker_noise`/`noise_table` calls `lower` split out of each contribution.
     ///
-    /// Each source is placed across the branch its containing `<+` targets, which is exactly the
-    /// LRM's rule: a noise function written in a branch contribution *is* a source in parallel
-    /// with that branch. Its argument expressions are evaluated at the operating point `x`, so a
-    /// bias-dependent PSD (SPICE's `KF·I^AF`, a diode's `2q·Id`) comes out right; only the value
-    /// is used, never the gradient, since a noise source is an independent stochastic quantity
-    /// rather than a function of the solution vector.
+    /// Each source is placed on the branch its containing `<+` targets, which is exactly the
+    /// LRM's rule (§4.6.4): a noise function written in a **flow** contribution is a current
+    /// source in parallel with that branch, and one written in a **potential** contribution is
+    /// a voltage source in series with it. The two land on different rows. A parallel current
+    /// source injects into the branch's two KCL rows `(p, n)`; a series voltage source is an
+    /// additive term on the branch's own *constraint* row (`V(p) − V(n) − expr − v_noise = 0`,
+    /// see [`Self::stamp_branch_current_structural`]), so it is emitted as `(constraint_row,
+    /// GROUND)` — Interface β's noise channel is row-based and reads the pair only as "which
+    /// rows receive this stochastic injection" (`va_abi::noise`). Until 2026-09-14 both kinds
+    /// were emitted across `(p, n)`, which for a potential contribution is a current injected
+    /// into a node the same contribution pins: the source was listed as a contributor and
+    /// delivered exactly zero (measured: a `V(p,n) <+ 1 + white_noise(1e-12)` source into a
+    /// 1k/1k divider reported `0.0` for itself against a true `2.5e-13 V²/Hz`) — the silent
+    /// drop every signal-flow discipline (optical power, phase, temperature) would hit, since
+    /// every contribution to such a net is a potential contribution.
+    ///
+    /// Its argument expressions are evaluated at the operating point `x`, so a bias-dependent
+    /// PSD (SPICE's `KF·I^AF`, a diode's `2q·Id`) comes out right; only the value is used,
+    /// never the gradient, since a noise source is an independent stochastic quantity rather
+    /// than a function of the solution vector.
     ///
     /// Walks the same control flow `load` does ([`Self::walk`]), so a source declared inside an
-    /// `if` arm is emitted only when that arm is the one taken at this operating point.
+    /// `if` arm is emitted only when that arm is the one taken at this operating point. A
+    /// **mixed** branch (`lower::BranchCurrent::mixed`) follows the same rule per contribution:
+    /// the potential arm's noise goes to the constraint row that arm claims, the flow arm's to
+    /// `(p, n)`.
     ///
     /// `ctx.temp` is ignored: a Verilog-A model writes its own temperature dependence into the
     /// PSD expression (typically via `$temperature`/`$vt`, which read the temperature this model
@@ -1925,7 +1957,12 @@ impl ModelInstance for GeneratedModel {
             if c.noise.is_empty() {
                 return;
             }
-            let (gp, gn) = (me.terminals[c.p_slot], me.terminals[c.n_slot]);
+            // A potential contribution's source sits on its constraint row (see the doc
+            // comment above); a flow contribution's across the branch's KCL rows.
+            let (gp, gn) = match c.branch_slot {
+                Some(slot) => (me.terminals[slot], va_abi::reference::GROUND),
+                None => (me.terminals[c.p_slot], me.terminals[c.n_slot]),
+            };
             for term in &c.noise {
                 match *term {
                     NoiseTerm::White { pwr } => {
@@ -6593,6 +6630,58 @@ mod tests {
             "source sits across the contributed branch"
         );
         assert_eq!(*source, va_abi::noise::NoiseSource::White { psd: 4.2e-23 });
+    }
+
+    /// A noise source written in a **potential** contribution is a series voltage source, and
+    /// it lands on the branch's constraint row — not across `(p, n)`. Emitted across `(p, n)`
+    /// it is a current injected into a node the contribution itself pins to a voltage, whose
+    /// adjoint is identically zero: the source is reported and contributes nothing (measured
+    /// 2026-09-14 on a 1k/1k divider driven by `V(p,n) <+ 1 + white_noise(1e-12)`: the source
+    /// listed at `0.0` against a true `2.5e-13 V²/Hz`). Every signal-flow discipline — optical
+    /// power, optical phase, temperature — only ever receives potential contributions, so this
+    /// is the row every photonic noise model depends on.
+    #[test]
+    fn noise_in_a_potential_contribution_sits_on_the_constraint_row() {
+        // `V(p, n) <+ R + white_noise(1e-12)` — the parameter doubles as a DC value.
+        let mut m = resistor_ir();
+        let vdc = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let pwr = m.push_expr(Expr::Const(1e-12));
+        let noise = m.push_expr(Expr::Call(Builtin::WhiteNoise, vec![pwr]));
+        let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, vdc, noise));
+        *m.analog.last_mut().unwrap() = Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            },
+            value: sum,
+        };
+        // Terminals 0/1 are the nodes; the branch-current unknown is claimed at global 7.
+        let mut next = 7usize;
+        let inst = build_instance(&m, &[0, 1], &mut next).expect("builds");
+        assert_eq!(next, 8, "one auxiliary unknown for the potential branch");
+        assert_eq!(inst.unknowns(), &[0, 1, 7]);
+
+        let mut sink = va_abi::noise::CollectedNoise::default();
+        inst.noise(&[1000.0, 0.0, 0.0], &ANALYSIS_DC, &mut sink);
+        assert_eq!(sink.sources.len(), 1);
+        let (row, other, source) = &sink.sources[0];
+        assert_eq!(
+            (*row, *other),
+            (7, va_abi::reference::GROUND),
+            "a series voltage-noise source injects into the constraint row alone"
+        );
+        assert_eq!(*source, va_abi::noise::NoiseSource::White { psd: 1e-12 });
+
+        // And the flow-contribution rule is untouched by the change: the same source in a
+        // flow contribution still sits across `(p, n)`.
+        let flow = module_with_noise(|m| {
+            let pwr = m.push_expr(Expr::Const(1e-12));
+            m.push_expr(Expr::Call(Builtin::WhiteNoise, vec![pwr]))
+        });
+        let inst = build_instance(&flow, &[0, 1], &mut 2).expect("builds");
+        let mut sink = va_abi::noise::CollectedNoise::default();
+        inst.noise(&[1.0, 0.0], &ANALYSIS_DC, &mut sink);
+        assert_eq!((sink.sources[0].0, sink.sources[0].1), (0, 1));
     }
 
     /// A `flicker_noise` term carries both its numerator and its exponent through, and the
