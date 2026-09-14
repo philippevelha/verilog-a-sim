@@ -59,5 +59,7 @@ solves in one invocation. `docs/workflow.md` walks through it and says what chan
 when the deliverable becomes a compiled `va-cli` executable tested across platforms.
 
 See `CLAUDE.md` for the project constitution and `docs/` for the frozen interfaces,
-architecture, thesis map, and validation plan; `release.txt` carries the release log and the
-road to 1.0, and `docs/future_development.md` what comes after it.
+architecture, thesis map, and validation plan; `validation.md` is the registry of every model
+and circuit that reproduces a reference paper or reference result, by domain; `release.txt`
+carries the release log and the road to 1.0, and `docs/future_development.md` what comes after
+it.

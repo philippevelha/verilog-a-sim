@@ -19,6 +19,17 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.21+1 - 2026-09-14
+---------------------
+Docs only: `validation.md` at the repository root is the **reference validation registry** —
+every contribution that reproduces a reference paper, textbook circuit or QSPICE result, by
+domain (photonics, optics, thermal, mechanical, electrical, and the multi-domain couplings),
+each row naming the reference, the equation, the model/deck, and what it was measured against
+(QSPICE golden / closed form / paper figure) with the residual. Seeded with the three-paper
+photonic table from 0.9.21 and the existing zoo; `docs/validation.md` keeps the mechanics
+(metrics, tolerances, the golden set) and links to it, as does the README. No code touched.
+
+
 0.9.21 - 2026-09-14
 -------------------
 **Photonic noise from three papers** (`references/`: Glenn 1989, Bartolo/Tveten/Dandridge

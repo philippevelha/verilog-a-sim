@@ -4,6 +4,11 @@ Reference simulator: **QSPICE** (originally ngspice; switched 2026-07-13 to matc
 dev environment) — an oracle only; we are not building on it. `va-harness` runs the pipeline
 and compares to committed `golden/` outputs.
 
+> **Registry of what matches a reference:** the repository-root `validation.md` lists every
+> contribution that reproduces a reference paper, textbook circuit or QSPICE result, by domain,
+> with what it was measured against. This file is the *mechanics* — metrics, tolerances, the
+> golden set and how it is gated.
+
 ## Metrics & default tolerances
 
 | Analysis     | Metric                                              | Default tolerance |
