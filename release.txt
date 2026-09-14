@@ -19,6 +19,17 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+0.9.21+2 - 2026-09-14
+---------------------
+Docs only: the paper's Fig. 3 reproduced. `docs/examples/fiber_mzi_wavelengths.py` runs
+`fiber_mzi_noise.net` through va-cli at 633, 1310 and 1550 nm (dn/dT from Bartolo's eq. A1,
+w0 from Table II; 633 nm flagged as multimode in this fiber, LP01 Marcuse estimate used) and
+plots the input-referred phase noise with the closed forms overlaid (within 1 % everywhere)
+and the wavelength differences against the 1/lambda^2 scaling: 1310 - 1550 nm = +1.6 dB at
+low frequency (paper: 1.4 + ~0.2 dB), growing above 10 kHz as the smaller mode radius moves
+the k_max corner. Figure in docs/examples.md (#12b), docs/photonic-noise.md, validation.md.
+
+
 0.9.21+1 - 2026-09-14
 ---------------------
 Docs only: `validation.md` at the repository root is the **reference validation registry** —

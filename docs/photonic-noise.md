@@ -153,6 +153,23 @@ from 0.5 mW — quoted, not matched.
 (The plot's axis says V²/Hz; the input-referred curve is rad²/Hz here because the input is a
 1 rad/V source.)
 
+**The paper's Fig. 3 — three wavelengths.** `docs/examples/fiber_mzi_wavelengths.py` runs the
+deck at 633, 1310 and 1550 nm with `dn/dT` from the paper's eq. (A1) and `w0` from its Table II
+(633 nm: the fiber is multimode there, V = 7.1, so the LP01 Marcuse estimate 1.95 µm is used
+and the curve is the formula, not a possible measurement):
+
+![Fiber MZI phase noise vs wavelength](examples/fiber_mzi_wavelengths.svg)
+
+| | 1 Hz | 1 kHz | 100 kHz | vs 1550 nm at low f (λ-only `20 log(1550/λ)`) |
+|---|---|---|---|---|
+| 633 nm | −94.2 dB | −118.0 | −128.6 | +7.8 dB (7.78) |
+| 1310 nm | −100.5 | −124.8 | −137.3 | +1.6 dB (1.46; paper: 1.4 + ~0.2 from `w0`) |
+| 1550 nm | −102.0 | −126.5 | −140.0 | — |
+
+The difference grows above 10 kHz because a smaller mode radius moves the `k_max` corner up —
+the `w0` correction the paper calls "much smaller" at zero frequency is not small on the
+`1/f²` tail. Closed forms overlay every curve within 1 %.
+
 ### 3.2 `circuits/ring_gyro_noise.net` — Scheuer's Fig. 1(a)
 
 ```bash
