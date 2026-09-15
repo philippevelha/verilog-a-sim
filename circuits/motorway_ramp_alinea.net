@@ -1,0 +1,24 @@
+* The same motorway with ALINEA feedback ramp metering (models/alinea.va) on the on-ramp:
+* the meter measures the density of the merge section (c3) and integrates the error to the
+* critical density, with a soft override that raises the rate when the ramp queue passes 100
+* vehicles — the constraint the paper's MPC imposes (Section 5). The paper's controller is
+* model-predictive; this deck runs the classic local feedback law the MPC literature
+* benchmarks against, because the simulator runs controllers and does not synthesise them —
+* docs/traffic.md, where the paper's MPC is handled by replay.
+*
+* Compare with circuits/motorway_ramp.net (no control): same road, same demand, `V(rate)`
+* instead of a constant 1 on the ramp's metering input.
+Vm   dm  gnd  DC 3400
+Vr   dr  gnd  PULSE(500 1500 900 900 900 540 1e6)
+Vone one gnd  DC 1
+X0   dm  one  wm  c1  qm0   origin   qcap=4038
+X1   c1  c2   v1  v1        section
+X2   c2  c3   v1  v2        section
+Xr   dr  rate wr  c3  qr    origin   qcap=2000
+Xc   c3  wr   rate          alinea
+X3   c3  c4   v2  v3  qr    section
+X4   c4  cb   v3  v4        section
+Xb   cb                     boundary dens=38
+X9   c1  c2   c3  c4  wm wr tts   tts_monitor
+.tran 1 12600
+.end

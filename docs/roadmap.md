@@ -4509,6 +4509,38 @@ are pinned to closed forms in `va-cli`'s tests, the transcription itself to the 
 −125.5 dB. Measured: `cargo test --workspace` 793 passed (+7); `cargo xtask validate` 28/28;
 zoo `check models --codegen` 29/29 (+4); corpus 112/132 (94/99) unchanged.
 
+## Traffic: a fourth conservative domain, and what ramp metering depends on (2026-09-15, v0.9.22)
+
+Bellemans, De Schutter and De Moor's "Models for traffic control" (2002) as models: vehicle
+conservation is KCL, a section a node with a capacitor, Payne's speed an ODE state on a
+bookkeeping node, queues unit stores, the world a `boundary`. The paper's §5 example runs as
+`circuits/motorway_ramp.net` and reproduces its Fig. 12's shape (plateau 48 vs 47, ~37 km/h,
+queue drains 3.1 vs 2.5 h), and the continuous plant agrees with the paper's own 10 s
+explicit-Euler form to 0.6 % on TTS. `docs/traffic.md`.
+
+Two `va-transient` fixes came out of it, both proven no-ops on the 28 golden gates by diffing
+their error figures: the transient Newton's update test now honours per-nature `abstol` (it
+was a flat 1e-12 for every unknown, and stalled at a 1e-9 residual on flows of thousands of
+veh/h), and a step Newton cannot converge on is halved and retried instead of ending the run.
+`va-netlist` gained `PWL`. Built and removed: a DC-operating-point start and a gmin fallback —
+the road's Jacobian at the zero vector is structurally singular and even gmin stepping with
+damping diverged, so nothing shipped that no deck could show working.
+
+**MPC, evaluated carefully** (the user's brief): the optimiser lives outside the simulator,
+on the paper's discrete model; the schedule replays through `PWL`; the plant is the plant.
+Measured: with the road at capacity the total time spent is invariant to any control (every
+schedule within 0.1 % under the Godunov coupling); the lever is the capacity drop at
+breakdown; with the paper's bare coupling the best window gives −10 % on both the discrete
+model and the plant, at a 227-vehicle ramp queue; under the paper's 100-vehicle limit nothing
+pays here; its 8-minute receding horizon never closes the meter (payback is an hour away); and
+the size of the gain is set by τ and ν, which the paper does not print — from 0 to −85 %. The
+deck ships the pair that reproduces the figure's shape, and the document says the paper's
+−6.6 % would be a fit.
+
+Measured: `cargo test --workspace` 797 passed (+4); clippy/fmt clean; `cargo xtask validate`
+28/28 with every gate's error identical to before; zoo `check models --codegen` 35/35 (+6);
+corpus unchanged.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

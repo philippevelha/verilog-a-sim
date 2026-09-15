@@ -1738,18 +1738,45 @@ impl ModelInstance for WaveformSource {
         sink: &mut dyn va_abi::StampSink,
     ) {
         let [p, n, b] = self.terminals;
-        VSource::new(p, n, b, waveform_value(self.waveform, ctx.time)).load(x, ctx, state, sink)
+        VSource::new(p, n, b, waveform_value(&self.waveform, ctx.time)).load(x, ctx, state, sink)
     }
 }
 
 /// Evaluate a parsed source waveform at time `t`.
-fn waveform_value(waveform: va_netlist::Waveform, t: f64) -> f64 {
-    match waveform {
+fn waveform_value(waveform: &va_netlist::Waveform, t: f64) -> f64 {
+    match *waveform {
         va_netlist::Waveform::Sin {
             offset,
             amplitude,
             freq,
         } => offset + amplitude * (2.0 * PI * freq * t).sin(),
+        va_netlist::Waveform::Pwl { ref points } => {
+            // Held at the ends, linear between: the first segment whose end time is at or past
+            // `t` is the one `t` falls in. A repeated time (a vertical step) makes a zero-width
+            // segment that is never divided by: at the repeated instant itself the earlier
+            // value is returned (the segment ending there wins), and any later time reads the
+            // new one — a step, closed on its left.
+            let (Some(&(t0, v0)), Some(&(tn, vn))) = (points.first(), points.last()) else {
+                return 0.0;
+            };
+            if t <= t0 {
+                return v0;
+            }
+            if t >= tn {
+                return vn;
+            }
+            for w in points.windows(2) {
+                let ((ta, va), (tb, vb)) = (w[0], w[1]);
+                if t <= tb {
+                    return if tb > ta {
+                        va + (vb - va) * (t - ta) / (tb - ta)
+                    } else {
+                        vb
+                    };
+                }
+            }
+            vn
+        }
         va_netlist::Waveform::Pulse {
             v1,
             v2,
@@ -2164,7 +2191,7 @@ fn build_instance(
         // A `SIN(...)` source becomes a time-reading instance; every other source is constant.
         // Both claim exactly one branch-current unknown, so the index assignment — and hence
         // `dim` and every downstream device's indices — is the same either way.
-        let inst: Box<dyn ModelInstance> = match dev.waveform {
+        let inst: Box<dyn ModelInstance> = match dev.waveform.clone() {
             Some(waveform) => Box::new(WaveformSource {
                 terminals: [p, n, branch],
                 waveform,
@@ -3492,6 +3519,191 @@ R2 a gnd 3000
             "Ω_min = {omega_min} rad/s/√Hz"
         );
         assert!(1e6 * shot / want > 0.65 && 1e6 * shot / want < 0.72);
+    }
+
+    /// The traffic domain's static law: `circuits/fundamental_diagram.net` sweeps the density
+    /// and the flow `C·V(C)·n` peaks at the critical density the paper states (33.5), at the
+    /// two-lane capacity `2·33.5·V(33.5)`, with `V(0) = v_f` and both zero at the jam density.
+    /// Closed form: eq. (5) of Bellemans et al. with `alpha = 1.86`, `beta = 11.72`.
+    #[test]
+    fn fundamental_diagram_peaks_at_the_stated_critical_density() {
+        let deck = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/fundamental_diagram.net"
+        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
+        let (net, compiled) = load(deck, Some(dir)).expect("loads");
+        let sweep = net.dc.clone().expect("`.dc` card");
+        let points = solve_dc_sweep(&net, &compiled, &sweep).expect("sweeps");
+        let q = net.node_order.iter().position(|n| n == "q").unwrap();
+        let v = net.node_order.iter().position(|n| n == "v").unwrap();
+        let veq = |c: f64| -> f64 {
+            102.0
+                * (1.0 - (c.max(1e-9) / 180.0).powf(1.86))
+                    .max(1e-9)
+                    .powf(11.72)
+        };
+        let (mut best_c, mut best_q) = (0.0, 0.0);
+        for (c, x) in &points {
+            let flow = x.x[q];
+            assert!(
+                ((flow - c * veq(*c) * 2.0).abs()) < 1e-6 * (flow.abs() + 1.0),
+                "flow at {c}"
+            );
+            assert!(
+                ((x.x[v] - veq(*c)).abs()) < 1e-6 * (x.x[v].abs() + 1.0),
+                "speed at {c}"
+            );
+            if flow > best_q {
+                best_q = flow;
+                best_c = *c;
+            }
+        }
+        assert!(
+            (best_c - 34.0).abs() <= 2.0,
+            "peak at C = {best_c}, expected 33.5 (2-step grid)"
+        );
+        assert!(
+            (best_q - 4038.0).abs() < 5.0,
+            "capacity {best_q}, expected 4038 veh/h"
+        );
+        assert!(
+            (points[0].1.x[v] - 102.0).abs() < 1e-9,
+            "v_f at zero density"
+        );
+        let last = points.last().unwrap();
+        assert!(
+            last.1.x[q] < 1e-6 && last.1.x[v] < 1e-6,
+            "zero at the jam density"
+        );
+    }
+
+    /// `circuits/motorway_ramp.net`, the paper's §5 example without control, reproduces its
+    /// Fig. 12 mechanism by mechanism — breakdown at the ramp surge, a congested plateau at
+    /// the paper's density, a mainline queue that drains, an empty ramp queue, recovery — and
+    /// its TTS agrees with the same model at the paper's own 10 s explicit-Euler step
+    /// (`docs/examples/traffic_mpc.py`: 923.0) to 0.6 %. The figures the header states.
+    #[test]
+    fn motorway_without_control_reproduces_the_papers_breakdown_and_recovery() {
+        let deck = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/motorway_ramp.net"
+        );
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
+        let (net, compiled) = load(deck, Some(dir)).expect("loads");
+        let wf =
+            solve_transient(&net, &compiled, Integration::Trapezoidal).expect("3.5 h transient");
+        let idx = |n: &str| net.node_order.iter().position(|x| x == n).unwrap();
+        let (c3, wm, wr, tts) = (idx("c3"), idx("wm"), idx("wr"), idx("tts"));
+        let at = |k: usize, i: usize| wf.x[k][i];
+        let n = wf.t.len();
+        // Plateau at the paper's ~47 veh/km/lane, read at 2.0 h.
+        let k2h = wf.t.iter().position(|&t| t >= 7200.0).unwrap();
+        assert!(
+            (at(k2h, c3) - 47.5).abs() < 1.5,
+            "plateau C3 = {}",
+            at(k2h, c3)
+        );
+        // Mainline queue: peaks near 206 vehicles around 1.0 h, empty again by ~3.1 h.
+        let (kpk, pk) =
+            (0..n)
+                .map(|k| (k, at(k, wm)))
+                .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+        assert!((pk - 206.0).abs() < 8.0, "queue peak {pk}");
+        assert!(
+            (wf.t[kpk] / 3600.0 - 0.97).abs() < 0.1,
+            "peak at {} h",
+            wf.t[kpk] / 3600.0
+        );
+        let drained =
+            wf.t.iter()
+                .zip(&wf.x)
+                .find(|(&t, x)| t > 4000.0 && x[wm] < 1.0)
+                .map(|(&t, _)| t / 3600.0)
+                .unwrap();
+        assert!((drained - 3.07).abs() < 0.15, "drained at {drained} h");
+        // The on-ramp queue never forms without a meter (the paper's dashed line at zero).
+        assert!((0..n).all(|k| at(k, wr) < 1.0), "ramp queue");
+        // Free flow again at the end, and the cost criterion.
+        assert!(
+            (at(n - 1, c3) - 37.8).abs() < 2.0,
+            "C3 at the end {}",
+            at(n - 1, c3)
+        );
+        let total = at(n - 1, tts);
+        assert!(
+            (total - 917.6).abs() < 9.2,
+            "TTS = {total} veh·h (discrete model: 923.0)"
+        );
+    }
+
+    /// The two control decks against the no-control one. ALINEA (a feedback law the
+    /// simulator *runs*) shifts most of the queue onto the ramp and shaves ~1 %; the
+    /// full-horizon optimum found on the paper's discrete model and replayed through a `PWL`
+    /// source (`circuits/motorway_ramp_mpc.net`, generated by `docs/examples/traffic_mpc.py`)
+    /// cuts TTS by 10 % — 824.8 against the discrete model's own 830.3 for the same schedule,
+    /// the plant and its prediction model agreeing to 0.7 % on the *effect* of control.
+    #[test]
+    fn ramp_metering_decks_run_and_the_replayed_optimum_cuts_tts_by_ten_percent() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models");
+        let tts_of = |deck: &str| -> (f64, f64) {
+            let path = format!("{}/../../circuits/{deck}", env!("CARGO_MANIFEST_DIR"));
+            let (net, compiled) = load(&path, Some(dir)).expect("loads");
+            let wf = solve_transient(&net, &compiled, Integration::Trapezoidal).expect("transient");
+            let idx = |n: &str| net.node_order.iter().position(|x| x == n).unwrap();
+            let last = wf.x.last().unwrap();
+            let wr_peak = wf.x.iter().map(|x| x[idx("wr")]).fold(0.0, f64::max);
+            (last[idx("tts")], wr_peak)
+        };
+        let (nc, _) = tts_of("motorway_ramp.net");
+        let (al, al_wr) = tts_of("motorway_ramp_alinea.net");
+        let (mp, mp_wr) = tts_of("motorway_ramp_mpc.net");
+        assert!(al < nc && al > 0.98 * nc, "ALINEA TTS {al} vs {nc}");
+        assert!(
+            (al_wr - 130.0).abs() < 15.0,
+            "ALINEA's soft queue limit: peak {al_wr}"
+        );
+        assert!((mp - 824.8).abs() < 8.3, "replayed optimum TTS {mp}");
+        assert!(
+            mp < 0.905 * nc,
+            "the replayed window cuts TTS by ~10 %: {mp} vs {nc}"
+        );
+        assert!((mp_wr - 227.0).abs() < 10.0, "its ramp queue peak {mp_wr}");
+    }
+
+    /// `PWL(t1 v1 t2 v2 …)` (added 2026-09-15 for the metering replay): held at the ends,
+    /// linear between, and a repeated time is a step (closed on its left).
+    #[test]
+    fn pwl_waveform_holds_its_ends_interpolates_and_steps_on_a_repeated_time() {
+        let w = va_netlist::Waveform::Pwl {
+            points: vec![(1.0, 0.0), (3.0, 2.0), (3.0, 5.0), (5.0, 5.0)],
+        };
+        let at = |t: f64| waveform_value(&w, t);
+        assert_eq!(at(-1.0), 0.0);
+        assert_eq!(at(1.0), 0.0);
+        assert!(
+            (at(2.0) - 1.0).abs() < 1e-12,
+            "midpoint of the first segment"
+        );
+        assert!((at(2.999) - 1.999).abs() < 1e-9);
+        assert_eq!(
+            at(3.0),
+            2.0,
+            "at the repeated instant itself, the earlier value"
+        );
+        assert_eq!(at(3.0 + 1e-9), 5.0, "and the later one immediately after");
+        assert_eq!(at(4.0), 5.0);
+        assert_eq!(at(9.0), 5.0, "held past the last point");
+        // The parser rejects a decreasing time list and an odd count (falls back to DC).
+        let ok = va_netlist::parser::parse("V1 a gnd PWL(0 1 2 3)\n.op\n.end\n").unwrap();
+        assert!(matches!(
+            ok.devices[0].waveform,
+            Some(va_netlist::Waveform::Pwl { .. })
+        ));
+        let bad = va_netlist::parser::parse("V1 a gnd PWL(2 1 0 3)\n.op\n.end\n").unwrap();
+        assert!(bad.devices[0].waveform.is_none());
+        let odd = va_netlist::parser::parse("V1 a gnd PWL(0 1 2)\n.op\n.end\n").unwrap();
+        assert!(odd.devices[0].waveform.is_none());
     }
 
     /// A noise source declared in a **potential** contribution reaches the output. Before
@@ -6420,7 +6632,7 @@ X1 a gnd resistor
             pw: 8.0,
             per: 100.0,
         };
-        let at = |t: f64| waveform_value(w, t);
+        let at = |t: f64| waveform_value(&w, t);
 
         assert_eq!(at(0.0), 1.0, "before the delay");
         assert_eq!(at(9.999), 1.0, "still v1 right up to td");
@@ -6464,7 +6676,7 @@ X1 a gnd resistor
             pw: 5.0,
             per: 0.0,
         };
-        let at = |t: f64| waveform_value(one_shot, t);
+        let at = |t: f64| waveform_value(&one_shot, t);
         assert_eq!(at(4.9), 0.0);
         assert_eq!(at(5.0), 2.0, "a zero rise time is an ideal step at td");
         assert_eq!(at(9.9), 2.0);

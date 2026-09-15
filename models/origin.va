@@ -1,0 +1,97 @@
+// A motorway origin — the mainline entrance or an on-ramp — with its queue and, optionally, a
+// ramp meter: the boundary the paper's §5 example needs but does not write out, built from
+// the "supply and demand" coupling its §4.1 describes and the METANET origin model
+// (Papageorgiou 1990).
+//
+//   V(d)  demand (veh/h) ──►  [ queue w ] ──►  Q into section node c, reported on V(qrep)
+//   V(r)  metering rate, 0..1 (1 = unmetered)
+//
+//   q = min( d + w/tq ,  r·qcap ,  room(C) )        (smoothed)
+//   dw/dt = d − q
+//
+// The first term is what wants to enter: the arriving demand plus the queue, which discharges
+// with time constant `tq` (the paper's Δt = 10 s, where it writes `w/Δt`). The second is the
+// origin's own capacity scaled by the metering rate — the traffic light's green fraction, the
+// paper's control variable (Fig. 14). The third is what the receiving section can take, in one
+// of two forms chosen by `godunov`:
+//
+//   godunov = 1   room = qcap                      for C <= ccr      (free flow: full capacity)
+//                 room = qcap · C·V(C)·n / qmax    for C >  ccr      (congested: what the
+//                                                                     section itself carries)
+//   godunov = 0   room = qcap · min(1, (cjam − C)/(cjam − ccr))     (METANET's linear taper)
+//
+// The first is the supply function of the Godunov scheme (Lebacque 1996, which the paper cites
+// for the LWR coupling): a congested section admits no more than the flow on the congested
+// branch of its own fundamental diagram. The second is METANET's, and the default: it is the
+// paper's formulation, and with a downstream `boundary` on the last section it reproduces the
+// paper's Fig. 12 (`circuits/motorway_ramp.net`). The Godunov form was needed only while the
+// road had a *free* exit, where the taper let the entrance keep admitting 3276 veh/h into a
+// section carrying 2400 and the continuous model ran away into a full jam (measured: C = 180
+// by 2500 s); `section.va`'s header records what that rule costs. Whichever is smallest sets
+// the flow. The demand and the rate are *voltages* on
+// electrical nodes (veh/h and dimensionless per volt), the same control-signal convention
+// `ring_gyro.va` uses for a rotation rate, so a deck's `PULSE` source is the paper's Fig. 11
+// demand profile and a `.dc` sweep or a controller model can drive the rate.
+//
+// # The smooth minimum
+//
+// `min` is a kink, and Newton on a kink chatters; each `min` above is replaced by
+// `smin(a, b) = (a + b − sqrt((a − b)² + eps²))/2`, which is within `eps/2` of the true minimum
+// and always *below* it — so the flow never exceeds `d + w/tq` and the queue can never go
+// negative, and never exceeds the capacity or the room either. `eps = 20 veh/h` is 1 % of a
+// ramp's capacity and far below the resolution of any of the paper's plots. The Godunov
+// switch at `ccr` is left as the kink it is (a first-derivative jump, with `qcap = qmax`
+// making the room continuous there).
+//
+// # Limitations
+//
+// One queue, first-in-first-out, no maximum length (the paper's 100-vehicle limit is a
+// *controller* constraint, enforced by the controller — `alinea.va` — not by the road). No
+// merge-priority model beyond the taper. `qrep` is a signal, not a flow: `section.va` reads
+// it for the merging term and nothing loads it. `vf`/`cjam`/`alpha`/`beta`/`n` must match the
+// receiving section's, since the supply is computed from its law.
+`include "disciplines.vams"
+`include "traffic.vams"
+
+module origin(d, r, w, c, qrep);
+    inout d, r, w, c, qrep;
+    electrical d, r, qrep;
+    queue      w;
+    traffic    c;
+
+    parameter real qcap    = 2000.0 from (0:inf);   // origin capacity (veh/h)
+    parameter real tq      = 10.0   from (0:inf);   // queue discharge time constant (s)
+    parameter real godunov = 0      from [0:1];     // 1: Godunov supply; 0: METANET taper
+    parameter real eps     = 20.0   from (0:inf);   // smooth-minimum width (veh/h)
+    // The receiving section's fundamental diagram (defaults: the paper's §5 road).
+    parameter real n     = 2.0    from (0:inf);
+    parameter real vf    = 102.0  from (0:inf);
+    parameter real cjam  = 180.0  from (0:inf);
+    parameter real ccr   = 33.5   from (0:inf);
+    parameter real alpha = 1.86   from (0:inf);
+    parameter real beta  = 11.72  from (0:inf);
+
+    real dmd, cd, qmax, supply, room, cap, q;
+
+`define SMIN(a, b) (0.5 * ((a) + (b) - sqrt(((a) - (b)) * ((a) - (b)) + eps * eps)))
+
+    analog begin
+        dmd    = V(d);
+        cd     = Dens(c);
+        supply = dmd + 3600.0 * Qlen(w) / tq;
+        qmax   = ccr * `V_EQ(ccr) * n;
+        if (godunov > 0.5)
+            room = (cd > ccr) ? qcap * cd * `V_EQ(cd) * n / qmax : qcap;
+        else
+            room = qcap * max((cjam - cd) / (cjam - ccr), 0.0);
+        cap    = `SMIN(V(r) * qcap, room);
+        q      = `SMIN(supply, cap);
+
+        // The queue: a unit store; KCL at `w` reads 3600·dw/dt + q − d = 0.
+        Q(w) <+ 3600.0 * ddt(Qlen(w));
+        Q(w) <+ q - dmd;
+        // What leaves the queue enters the section.
+        Q(c) <+ -q;
+        V(qrep) <+ q;
+    end
+endmodule

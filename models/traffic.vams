@@ -1,0 +1,114 @@
+// Natures and disciplines for macroscopic motorway traffic — Bellemans, De Schutter and De Moor,
+// "Models for traffic control", Journal A 43 (2002) 13 (TU Delft report bds:01-11, in
+// `references/`), and the METANET tradition it draws on (Payne 1971, Papageorgiou 1990).
+//
+// # Why traffic is a conservative discipline
+//
+// The first equation of every macroscopic model is vehicle conservation, the paper's eq. (1):
+// `n·dC/dt + dq/dx = 0`. Discretised into motorway sections (their eq. 4) it reads "the change
+// in a section's vehicle count is inflow minus outflow" — which is Kirchhoff's current law with
+// a capacitor on the node. So:
+//
+//   `traffic`   potential = Traffic_density  (veh/km/lane, access `Dens`)
+//               flow      = Traffic_flow     (veh/h,       access `Q`)
+//
+// A motorway section is a node whose density is its potential, whose storage `l·n` (km·lanes)
+// is a capacitance, and whose outflow `q = C·v·n` (eq. 6) is a nonlinear controlled source to
+// the next section's node. A queue is the same thing with vehicles instead of density:
+//
+//   `queue`     potential = Queue_length     (veh,   access `Qlen`)
+//               flow      = Traffic_flow     (veh/h, access `Q`)
+//
+// so a queue node with a unit "capacitance" integrates demand minus discharge. The global
+// ground is the outside world: flow to ground leaves the network, flow from ground enters it.
+//
+// Payne's second state, the section's average speed, obeys an ODE that is *not* a conservation
+// law (eq. 7: convection, relaxation, anticipation). It is carried on a conservative node all
+// the same, with a bookkeeping flow, because that is how this solver integrates an ODE state:
+// `Acc(v) <+ ddt(Spd(v)) − rhs` is a unit capacitor driven by a current — exactly the shape
+// `spring_load.va` uses for a mass's velocity in the mobility analogy.
+//
+//   `speed`     potential = Speed            (km/h,     access `Spd`)
+//               flow      = Speed_rate       ((km/h)/h, access `Acc`)
+//
+// # Units and time
+//
+// The paper's units are kept in every parameter and every net: km, km/h, veh/h, veh/km/lane.
+// The solver's time is seconds, so each `ddt` in the models carries the factor 3600 that turns
+// a per-hour rate into a per-second one (`3600·l·n·ddt(Dens(c))` is a veh/h flow). Nothing
+// else about time appears anywhere; a `.tran 10 12600` is 3.5 hours at a 10 s step request.
+//
+// # The speed–density law, shared
+//
+// Eq. (5), May's empirical relation `v = v_f·(1 − (C/C_jam)^α)^β`, is the fundamental diagram's
+// shape and Payne's equilibrium speed both, so it is one macro used by `section.va`,
+// `fundamental_diagram.va` and `origin.va`. Every module that uses it declares `vf`, `cjam`,
+// `alpha`, `beta` under those names. The `max` guards are what keep Newton alive: a trial
+// density past `C_jam` (or below 0) would otherwise raise a negative number to a real power,
+// and the floors of 1e-9 keep the bases off *exactly* zero — `pow(0, y)` is fine as a value
+// but its derivative with respect to the exponent is `0·ln(0)`, and a NaN there poisons the
+// Jacobian even though the exponent is a constant (found on the first `.dc` point, C = 0).
+//
+// # abstol
+//
+// Densities are tens of veh/km/lane, flows thousands of veh/h, speeds tens of km/h, queues
+// tens to hundreds of vehicles; each tolerance is ~1e-5 to 1e-6 of its scale. Tighter (1e-5
+// on density, 1e-4 on a queue) stalled Newton at a residual of 1e-9 veh/h on a nearly empty
+// queue, where the smooth minimum's curvature makes the last digits of the step wander.
+
+`ifdef TRAFFIC_VAMS
+`else
+`define TRAFFIC_VAMS 1
+
+nature Traffic_density
+    units      = "veh/km/lane";
+    access     = Dens;
+    abstol     = 1e-4;
+endnature
+
+nature Traffic_flow
+    units      = "veh/h";
+    access     = Q;
+    abstol     = 1e-2;
+endnature
+
+nature Speed
+    units      = "km/h";
+    access     = Spd;
+    abstol     = 1e-4;
+endnature
+
+nature Speed_rate
+    units      = "(km/h)/h";
+    access     = Acc;
+    abstol     = 1e-2;
+endnature
+
+nature Queue_length
+    units      = "veh";
+    access     = Qlen;
+    abstol     = 1e-3;
+endnature
+
+// Conservative: a node is a section's density, a branch carries vehicles.
+discipline traffic
+    potential Traffic_density;
+    flow      Traffic_flow;
+enddiscipline
+
+// Conservative: a node is a queue's length, a branch carries vehicles.
+discipline queue
+    potential Queue_length;
+    flow      Traffic_flow;
+enddiscipline
+
+// Conservative for bookkeeping only: a node is a section's average speed.
+discipline speed
+    potential Speed;
+    flow      Speed_rate;
+enddiscipline
+
+// Eq. (5): equilibrium speed at density `C`, in the units above.
+`define V_EQ(C) (vf * pow(max(1.0 - pow(max((C), 1e-9) / cjam, alpha), 1e-9), beta))
+
+`endif

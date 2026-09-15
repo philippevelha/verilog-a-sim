@@ -220,7 +220,7 @@ pub struct Device {
 }
 
 /// A time-domain source waveform beyond a bare DC value.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Waveform {
     /// `SIN(offset amplitude freq)`: `v(t) = offset + amplitude·sin(2π·freq·t)`. Delay/damping/
     /// phase (SPICE's optional trailing `SIN` parameters) are not parsed in v0.
@@ -258,6 +258,19 @@ pub enum Waveform {
         pw: f64,
         /// Repeat period (s). Non-positive means a single, non-repeating pulse.
         per: f64,
+    },
+    /// `PWL(t1 v1 t2 v2 …)`: SPICE's piecewise-linear source (added 2026-09-15). Linear
+    /// between consecutive `(time, value)` points, held at the first value before `t1` and at
+    /// the last value after the final time. Times must be non-decreasing; the parser rejects a
+    /// list that is not, or that has an odd count, and the source then falls back to DC.
+    ///
+    /// The value at `t = 0` is the first point's (or, if `t1 > 0`, still the first point's —
+    /// the hold rule), which is what contributes to a DC operating point and an AC
+    /// linearization, as for the other two shapes. Not `Copy`, unlike them: it owns its
+    /// points, which is why the enum stopped being `Copy` when it was added.
+    Pwl {
+        /// The `(time s, value V)` breakpoints, in non-decreasing time order.
+        points: Vec<(f64, f64)>,
     },
 }
 
@@ -312,7 +325,7 @@ mod tests {
         // `V1 in gnd SIN(0 5 1k)`.
         let v1 = net.devices.iter().find(|d| d.name == "V1").unwrap();
         assert_eq!(v1.value, Some(0.0));
-        match v1.waveform {
+        match &v1.waveform {
             Some(Waveform::Sin {
                 offset,
                 amplitude,

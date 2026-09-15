@@ -1,0 +1,14 @@
+* The fundamental diagram of the paper's Section 5 road (Bellemans, De Schutter, De Moor 2002,
+* Fig. 5 in shape): flow and speed against density, from the speed-density law of eq. (5) with
+* v_f = 102 km/h, C_jam = 180 veh/km/lane, and alpha/beta fitted so the flow peaks at the stated
+* C_cr = 33.5 (models/section.va's header derives beta = 11.72 from alpha = 1.86).
+*
+* V(c) is the density in veh/km/lane; V(q) the two-lane flow in veh/h; V(v) the speed in km/h.
+* What to check: V(v) = 102 at C = 0; V(q) peaks at C = 33.5 with 4038 veh/h (2019 per lane);
+* both are zero at C = 180. The mainline demand of the motorway example, 3400 veh/h, sits at
+* C = 20.3 on the rising branch (v = 83.6 km/h); adding the on-ramp's 1500 veh/h asks for more
+* than the peak, which is why that example breaks down.
+Vc c gnd DC 0
+X1 c q v fundamental_diagram
+.dc Vc 0 180 2
+.end

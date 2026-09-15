@@ -1,0 +1,30 @@
+// The fundamental diagram (paper §3, Figs. 5 and 7): flow and speed against density, from the
+// same speed–density law every section uses (eq. 5, `traffic.vams`).
+//
+//   V(c)  density (veh/km/lane) as a voltage   ──►   V(q) = C·V(C)·n   (veh/h)
+//                                                    V(v) = V(C)       (km/h)
+//
+// A `.dc` sweep of the density source draws the diagram: flow zero at zero density, a maximum
+// at the critical density C_cr, zero again at the jam density; speed falling monotonically
+// from v_f to zero. Defaults are the §5 example's road; Fig. 7's own curve is `vf=85 cjam=140`
+// with `alpha`/`beta` re-fitted (the figure shows a C_cr near 40 for those, which `alpha=2
+// beta=5.5` reproduces). The density is a control voltage for the same reason `ring_gyro.va`'s
+// rotation rate is: this netlist format sweeps sources.
+`include "disciplines.vams"
+`include "traffic.vams"
+
+module fundamental_diagram(c, q, v);
+    inout c, q, v;
+    electrical c, q, v;
+
+    parameter real n     = 2.0    from (0:inf);   // lanes
+    parameter real vf    = 102.0  from (0:inf);   // free-flow speed (km/h)
+    parameter real cjam  = 180.0  from (0:inf);   // jam density (veh/km/lane)
+    parameter real alpha = 1.86   from (0:inf);
+    parameter real beta  = 11.72  from (0:inf);   // C_cr = 33.5 with alpha = 1.86
+
+    analog begin
+        V(v) <+ `V_EQ(V(c));
+        V(q) <+ V(c) * `V_EQ(V(c)) * n;
+    end
+endmodule

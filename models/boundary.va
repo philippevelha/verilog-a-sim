@@ -1,0 +1,32 @@
+// A downstream density boundary: holds a traffic node at a fixed density and absorbs whatever
+// flows into it — METANET's downstream boundary condition, the density "just beyond" the last
+// modelled section.
+//
+//   [ last section ] ──►── cb   Dens(cb) = dens   (the flow into cb leaves the network)
+//
+// A potential source on a conservative node, so the branch current — here the vehicle flow —
+// is whatever the upstream section sends, exactly as a voltage source absorbs current. It is
+// what the paper's Section 5 example runs against: its Fig. 12 shows the last section at a
+// constant ~38 veh/km/lane for all 3.5 hours, whatever the sections upstream do — a boundary,
+// not a state — and 38 is on the congested branch, so the road beyond accepts less than the
+// capacity (`S(38) = 38·V(38)·2 = 3830 veh/h` for the road of `section.va`, against a
+// 4038 veh/h peak). That deficit is the capacity drop ramp metering can recover, and without
+// it (a free exit, `cn` wired to `gnd`) no controller can change the total time spent:
+// `docs/traffic.md` records both runs.
+`include "traffic.vams"
+
+module boundary(cb);
+    inout cb;
+    traffic cb;
+
+    parameter real dens  = 38.0  from [0:inf);   // boundary density (veh/km/lane)
+    parameter real tramp = 600.0 from [0:inf);   // ramp-in time from an empty road (s)
+
+    // Ramped in from zero over `tramp`: every run here starts from an empty road (UIC
+    // semantics), and an empty last section facing a dense boundary is a near-discontinuity
+    // at t = 0 that the step controller cannot resolve (measured: timestep underflow at t = 0
+    // for any `dens` above ~15). Ramping the boundary in with the road's own fill-in (which
+    // takes ~800 s) keeps the start smooth; the paper's Fig. 12 shows the state before its
+    // ramp surge at 0.25 h as stationary, which is what the run has reached by then.
+    analog Dens(cb) <+ dens * ((tramp > 0.0 && $abstime < tramp) ? $abstime / tramp : 1.0);
+endmodule

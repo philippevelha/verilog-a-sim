@@ -1,0 +1,27 @@
+// Total time spent (TTS): the paper's cost criterion, integrated in the model.
+//
+//   V(out) = ∫ ( Σ_j C_j·l·n  +  w_main + w_ramp ) dt / 3600      [veh·h]
+//
+// "The total time spent by all the vehicles in the network — this includes the vehicles in the
+// queues as well as the vehicles on the motorway" (§5): at every instant the vehicle count is
+// the sum of each section's density times its storage plus the two queue lengths; its time
+// integral is vehicle-hours. The paper's example reads 1267 veh·h without control and 1183
+// with MPC over 3.5 h. Written as an `idt` with a zero initial condition so the DC operating
+// point is the start of the count, and reported in volts (1 V = 1 veh·h) on `out`.
+//
+// Four sections of equal `l`/`n`, as in the example — not a general network monitor.
+`include "disciplines.vams"
+`include "traffic.vams"
+
+module tts_monitor(c1, c2, c3, c4, w1, w2, out);
+    inout c1, c2, c3, c4, w1, w2, out;
+    traffic    c1, c2, c3, c4;
+    queue      w1, w2;
+    electrical out;
+
+    parameter real l = 0.5 from (0:inf);   // section length (km)
+    parameter real n = 2.0 from (0:inf);   // lanes per section
+
+    analog V(out) <+ idt(((Dens(c1) + Dens(c2) + Dens(c3) + Dens(c4)) * l * n
+                          + Qlen(w1) + Qlen(w2)) / 3600.0, 0.0);
+endmodule

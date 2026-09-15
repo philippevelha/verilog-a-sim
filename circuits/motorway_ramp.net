@@ -1,0 +1,45 @@
+* The paper's Section 5 example without control (Bellemans, De Schutter, De Moor 2002, Fig. 12):
+* a two-lane motorway of four 500 m sections with an on-ramp into the third, Payne's model.
+*
+*   mainline demand 3400 veh/h  -> [origin X0, queue wm] -> c1 -> c2 -> c3 -> c4 -> gnd (exit)
+*   on-ramp demand 500->1500->500 -> [origin Xr, queue wr] ----------^  (merging into section 3)
+*
+* Demand is the paper's Fig. 11: mainline constant, on-ramp rising from 500 to 1500 veh/h
+* between 0.25 h and 0.5 h, holding to 0.65 h, back to 500 by 0.9 h. The metering rate is
+* held at 1 (no control). 3.5 hours at a 1 s step request (a 10 s request stalled the first
+* step from the empty road); the model is the continuous-time form of the paper's discrete
+* equations (models/section.va, docs/traffic.md).
+*
+* Measured at v0.9.22 (the va-cli test pins these; the paper's Fig. 12 in brackets):
+*   0.25 h   stationary before the surge: C = 22/25/30/34 veh/km/lane in sections 1-4 (~20-38),
+*            the mainline at 3400 veh/h and section 4 at 3900 on the congested side of its
+*            diagram, as the paper's constant ~38 shows it
+*   0.65 h   breakdown: densities peak at 83/71/63 (their peak ~70), section-1 speed falls to
+*            16 km/h (~20), the merge flow dips to ~2600 veh/h (~2000)
+*   0.9-3.1 h congested plateau at 53/48/48/41 with speeds 33-49 km/h (47 and ~37); the
+*            mainline queue peaks at 206 vehicles at 1.0 h (140 at 0.9 h) and drains to zero
+*            at 3.07 h (2.5 h); the on-ramp queue stays empty (empty)
+*   3.5 h    free flow again; TTS = 917.6 veh.h (1267 for their discrete model; the same
+*            model discretised at their 10 s step gives 923.0 here, docs/examples/traffic_mpc.py)
+*
+* The road is the paper's Section 5 parameterisation where it prints one (500 m, two lanes,
+* v_f = 102, C_cr = 33.5, C_jam = 180) and METANET's usual values where it does not (tau = 18 s,
+* nu = 60, kappa = 40, delta = 0.0122; alpha = 1.86 and beta = 11.72 fitted to C_cr). The
+* downstream boundary density of 38 is read off their Fig. 12. docs/traffic.md says what each
+* choice changes; the sensitivity to tau/nu is large, and stated there.
+*
+* Sections 1 and 2 have no on-ramp: their optional `qm` port is left off. The boundary is
+* ramped in over the first 600 s because every run here starts from an empty road.
+Vm   dm  gnd  DC 3400
+Vr   dr  gnd  PULSE(500 1500 900 900 900 540 1e6)
+Vone one gnd  DC 1
+X0   dm  one  wm  c1  qm0   origin   qcap=4038
+X1   c1  c2   v1  v1        section
+X2   c2  c3   v1  v2        section
+Xr   dr  one  wr  c3  qr    origin   qcap=2000
+X3   c3  c4   v2  v3  qr    section
+X4   c4  cb   v3  v4        section
+Xb   cb                     boundary dens=38
+X9   c1  c2   c3  c4  wm wr tts   tts_monitor
+.tran 1 12600
+.end

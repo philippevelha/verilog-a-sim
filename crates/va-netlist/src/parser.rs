@@ -639,6 +639,19 @@ fn parse_source_waveform(rest: &[&str]) -> Option<Waveform> {
         };
     }
 
+    if first.starts_with("PWL") {
+        // `PWL(t1 v1 t2 v2 …)`: pairs, times non-decreasing — anything else is not a
+        // waveform, and the source falls back to its DC value like a malformed `SIN`.
+        if nums.len() < 2 || !nums.len().is_multiple_of(2) {
+            return None;
+        }
+        let points: Vec<(f64, f64)> = nums.chunks(2).map(|c| (c[0], c[1])).collect();
+        if points.windows(2).any(|w| w[1].0 < w[0].0) {
+            return None;
+        }
+        return Some(Waveform::Pwl { points });
+    }
+
     if first.starts_with("PULSE") {
         // A placeholder: `resolve_pulse_defaults` overwrites this once the deck's `.tran`
         // timing is known. Recorded here anyway so the device is marked time-varying from the

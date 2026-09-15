@@ -864,6 +864,7 @@ fn newton_step(
     fired: &FiredEvents,
     companion: &Companion,
     junction: &[bool],
+    per_abstol: &[f64],
 ) -> Result<Solved, TransientError> {
     const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
@@ -931,7 +932,14 @@ fn newton_step(
             };
             x[i] = vnew;
             let applied = vnew - vold;
-            if applied.abs() > RELTOL * vnew.abs() + ABSTOL {
+            // Per-unknown absolute tolerance — the nature's `abstol` where the instance
+            // declares one, `ABSTOL` otherwise — exactly as `va-core::newton::solve_from`
+            // tests the DC solve (since 2026-09-15; it was a flat 1e-12 for every unknown
+            // before, which is a voltage-shaped number: on a net whose quantity is thousands
+            // of vehicles per hour the last representable digits of the step are ~1e-9, and
+            // Newton stalled at a residual of 1e-9 with the answer in hand — measured on
+            // `circuits/motorway_ramp.net`).
+            if applied.abs() > RELTOL * vnew.abs() + per_abstol[i] {
                 update_small = false;
             }
         }
@@ -1082,6 +1090,8 @@ pub fn run_with_events(
     // Computed once per run, exactly as `va-core::newton::solve` does for the DC solve: which
     // unknowns are junction potentials is a property of the instances, not of the timepoint.
     let junction = va_core::mna::classify_junctions(instances, dim);
+    // Likewise once per run: each unknown's absolute convergence tolerance, from its nature.
+    let per_abstol = va_core::mna::classify_abstol(instances, dim, 1e-12);
     let mut q_prev = initial.charge;
     let mut r_prev = initial.residual;
     // BDF2 needs the charge from *two* accepted steps back and the previous step size. Seeded
@@ -1177,7 +1187,7 @@ pub fn run_with_events(
             // LTE controller is measuring this step's *discretization* error, and an
             // end-of-analysis body is not part of the trajectory whose error is being bounded.
             // The final-step solve happens once, after the step is accepted.
-            let primary_solved = newton_step(
+            let primary_solved = match newton_step(
                 instances,
                 dim,
                 &x,
@@ -1188,7 +1198,27 @@ pub fn run_with_events(
                 &fired,
                 &primary,
                 &junction,
-            )?;
+                &per_abstol,
+            ) {
+                Ok(solved) => solved,
+                // A step Newton cannot converge on is a step that was too long, the same
+                // way one the LTE controller rejects was: halve it and try again, down to the
+                // minimum step, where the failure is finally reported as the integrator's
+                // (since 2026-09-15 — before, the first non-converged step ended the run,
+                // which for a stiff nonlinearity meeting a 1 s step meant a whole 3.5-hour
+                // traffic run lost to one moment the ramp meter closed). Only the primary
+                // solve retries: the LTE reference and the event re-solve are seeded from a
+                // solution that already converged at this step size.
+                Err(TransientError::Core(va_core::CoreError::NoConvergence { .. })) => {
+                    let shrunk = h * 0.5;
+                    if shrunk < cfg.tstep_min {
+                        return Err(TransientError::TimestepUnderflow { t });
+                    }
+                    h = shrunk;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let x_primary = primary_solved.x;
             // Carried to the post-accept evaluations below, so they are made at the iteration
             // this step actually converged at -- see `Solved`.
@@ -1235,6 +1265,7 @@ pub fn run_with_events(
                         &fired,
                         &reference_companion,
                         &junction,
+                        &per_abstol,
                     )?
                     .x;
                     lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol)
@@ -1393,8 +1424,17 @@ pub fn run_with_events(
 
                 if fired.any() || phase.last {
                     let resolved = newton_step(
-                        instances, dim, &x, t_next, phase, cfg.tstep, &mut state, &fired, &primary,
+                        instances,
+                        dim,
+                        &x,
+                        t_next,
+                        phase,
+                        cfg.tstep,
+                        &mut state,
+                        &fired,
+                        &primary,
                         &junction,
+                        &per_abstol,
                     )?;
                     x = resolved.x;
                     converged_at = resolved.iterations;

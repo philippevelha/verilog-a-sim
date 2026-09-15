@@ -163,7 +163,7 @@ so a linear grid there would change what the reported total means.
 ### Ungated circuits, and why each one is (2026-09-01)
 
 Nine of the decks in `circuits/` were not registered with `cargo xtask validate` when this
-section was written; as of 2026-09-14 it is seventeen of forty-five (the two photonic noise
+section was written; as of 2026-09-15 it is twenty-one of forty-nine (the two photonic noise
 decks below, and — added between 2026-09-01 and now without being listed here —
 `actuator_plant`, `delay_ac`, `interferometer_ac`, `lib_tee`, `microring_thermal`,
 `microring_thermal_fast`, each a worked example in `docs/examples.md` or a `va-cli` test
@@ -188,7 +188,10 @@ golden comparison.
 with the measurement that led to the decision. Both are exercised by tests against closed-form
 physics rather than against QSPICE.
 
-**Ungated because QSPICE cannot express them (2, added 2026-09-14).** `fiber_mzi_noise` and
+**Ungated because QSPICE cannot express them (6 as of 2026-09-15: the two photonic noise
+decks below, and the four traffic decks `fundamental_diagram`, `motorway_ramp`,
+`motorway_ramp_alinea`, `motorway_ramp_mpc` — SPICE has no vehicles; each is pinned by a
+`va-cli` test to a closed form or to the paper's own discretisation, `docs/traffic.md` §6).** `fiber_mzi_noise` and
 `ring_gyro_noise`, the photonic noise decks of `docs/photonic-noise.md`: an optical-phase net,
 an interferometer and a ring resonator have no SPICE primitive, so there is nothing to translate
 for the oracle. Each is pinned by a `va-cli` test to closed forms evaluated independently of the

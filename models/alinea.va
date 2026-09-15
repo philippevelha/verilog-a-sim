@@ -1,0 +1,52 @@
+// ALINEA-style feedback ramp metering (Papageorgiou et al. 1991) — the classic local
+// controller the paper's MPC is benchmarked against in the literature, written as a model so
+// the simulator can *run* a controller; it cannot synthesise one (MPC is an optimisation over
+// a prediction horizon — `docs/traffic.md` says how it is handled instead).
+//
+//   ALINEA:  r(k+1) = r(k) + K_R·(C_set − C_out)          (integral action on the density
+//                                                           just downstream of the ramp)
+//   here:    du/dt  = kr·(cset − Dens(c)) + kq·max(Qlen(w) − wmax, 0) − (u/tw)·(u/us)²
+//            V(r)   = rmin + (1 − rmin) / (1 + exp(−(u + u0)))
+//
+// The integrator has a *cubic leak*: negligible while |u| < us, strong beyond, so it cannot
+// wind up during the half hour before congestion (when the density sits far below the
+// set-point a pure integrator would saturate and then take as long to unwind) yet still acts
+// as an integrator inside the working range — a linear leak turned it into a proportional
+// law that settled at a rate of 0.45 with the mainline stuck at 46 veh/km/lane and could not
+// dissolve the congestion it had failed to prevent (measured). The `kq` term is the paper's
+// queue constraint (≤ 100 vehicles on the ramp, §5)
+// as a soft override that raises the rate when the queue overflows; the logistic squashes
+// the rate into `[rmin, 1]` smoothly, with `u0` placing the uncongested operating point near
+// `r = 1` (metering off). The set-point is the critical density, where the section's flow is
+// maximal — the whole idea of ramp metering.
+//
+// # Limitations
+//
+// Gains are hand-set for the §5 example, not tuned; the queue override is soft, so the
+// 100-vehicle limit is approached, not enforced. No hysteresis, no activation threshold.
+`include "disciplines.vams"
+`include "traffic.vams"
+
+module alinea(c, w, r);
+    inout c, w, r;
+    traffic    c;
+    queue      w;
+    electrical r;
+
+    parameter real cset = 33.5  from (0:inf);   // density set-point (veh/km/lane)
+    parameter real kr   = 3e-3  from (0:inf);   // integral gain (1/s per veh/km/lane)
+    parameter real kq   = 2e-3  from [0:inf);   // queue-override gain (1/s per vehicle)
+    parameter real wmax = 100.0 from (0:inf);   // ramp queue limit (veh)
+    parameter real tw   = 120.0 from (0:inf);   // integrator leak time at |u| = us (s)
+    parameter real us   = 6.0   from (0:inf);   // leak is cubic: negligible inside +-us
+    parameter real rmin = 0.15  from [0:1);     // minimum metering rate
+    parameter real u0   = 4.0;                  // logistic offset: r ~ 1 when u = 0
+
+    electrical un;   // the integrator state, a unit capacitor with a leak
+
+    analog begin
+        I(un) <+ ddt(V(un)) + (V(un) / tw) * (V(un) / us) * (V(un) / us)
+               - kr * (cset - Dens(c)) - kq * max(Qlen(w) - wmax, 0.0);
+        V(r) <+ rmin + (1.0 - rmin) / (1.0 + exp(-(V(un) + u0)));
+    end
+endmodule

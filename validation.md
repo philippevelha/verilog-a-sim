@@ -19,8 +19,8 @@ Three kinds of oracle appear, and the "Validated against" column always says whi
   the residual, never silently.
 
 A row is added when the match is *measured*, not when the model is written. Domains are added
-as they are encountered; the ones met so far are photonics, optics, thermal, mechanical and
-electrical, plus the multi-domain couplings between them.
+as they are encountered; the ones met so far are traffic, photonics, optics, thermal,
+mechanical and electrical, plus the multi-domain couplings between them.
 
 ---
 
@@ -42,6 +42,17 @@ The three papers in `references/` (`docs/photonic-noise.md` maps every equation 
 | same | Closed form: each detector's shot noise `2q(resp·P_det + I_s)·R²`; laser RIN at quadrature | shot to 1e-6; RIN < 1e-40 (exactly cancelled), `cos²(3°)` of itself 3° off | paper's −148.9 dB shot line not reproducible from 0.5 mW at any resp ≤ 1 (ours −154.5) |
 | same, at 633 / 1310 / 1550 nm (`docs/examples/fiber_mzi_wavelengths.py`) | Paper figure: Fig. 3(b)'s wavelength scaling, 1319 vs 1550 nm | 1310 − 1550 nm = +1.6 dB at low frequency (paper: 1.4 dB from λ + ~0.2 from `w0`); closed forms overlay each run within 1 % | 633 nm is outside this fiber's single-mode range (V = 7.1): formula for the LP01 mode, not a possible measurement |
 | `circuits/ring_gyro_noise.net` (Scheuer's RWOG, 1 mm ring) | Closed form: `S_V = R²(2q i_d + 4kT/R + RIN i_d²)` from the solved operating point, attributed per device; `S_in = S_V/H²` with `H` from two extra DC solves (test `ring_gyro_noise_is_scheuers_three_term_budget_referred_to_rotation_rate`) | `S_V` to 1e-6; `S_in` to 1e-3; `Ω_min = √S_in = 0.0137 rad/s/√Hz`, 69/15/17 % shot/Johnson/RIN | no QSPICE primitive for a ring; eq. (15) read with the `T_D/S` prefactor made explicit |
+
+## Traffic — macroscopic motorway flow (2026-09-15, v0.9.22)
+
+A fourth conservative domain (`models/traffic.vams`: density ↔ potential, vehicle flow ↔
+flow, section storage ↔ capacitance; `docs/traffic.md`).
+
+| Reference | Physics | Model(s) | Deck(s) | Validated against |
+|---|---|---|---|---|
+| **Bellemans, De Schutter, De Moor**, "Models for traffic control", Journal A 43 (2002), §3, eq. 5 (May 1990) | Fundamental diagram `q = C·V(C)·n`, `V = v_f(1 − (C/C_jam)^α)^β`; β fitted to the stated `C_cr` | `fundamental_diagram.va`, the `V_EQ` macro | `circuits/fundamental_diagram.net` | Closed form at every swept point (1e-6); peak at 33.5 with 4038 veh/h |
+| same, §4.1–4.3, eqs. 1, 4–9 (Payne 1971; Papageorgiou 1990) | Conservation, Payne's speed ODE (convection, relaxation, anticipation), merging term, METANET origin queues, downstream boundary | `section.va`, `origin.va`, `boundary.va`, `tts_monitor.va` | `circuits/motorway_ramp.net` | Paper figure (Fig. 12): plateau 48 vs 47 veh/km/lane, ~37 km/h both, ramp queue empty both, queue drains 3.07 vs 2.5 h; **and** the same equations at the paper's 10 s explicit-Euler step (`docs/examples/traffic_mpc.py`): TTS 917.6 vs 923.0 (0.6 %) |
+| same, §5 (MPC ramp metering, 1267 → 1183 veh·h) | Optimised metering replayed into the plant; ALINEA (Papageorgiou 1991) as a run controller | `alinea.va`; `PWL` source | `circuits/motorway_ramp_alinea.net`, `motorway_ramp_mpc.net` | Plant vs prediction model on the effect of control: −10.1 % vs −10.0 % (0.7 %). Caveats: under the paper's 100-vehicle ramp limit no schedule pays here; the 8-minute receding horizon never closes the meter; the gain depends on unprinted τ/ν (0 to −85 % across plausible values) — `docs/traffic.md` §5 |
 
 ## Optics — passive components (2026-09-11, v0.9.15)
 
@@ -89,6 +100,7 @@ All QSPICE-golden unless stated; tolerances and the full gate list are in `docs/
 | Electrical ↔ thermal ↔ optical ↔ wavelength | heater → ring → photodiode → load | `circuits/microring_thermal.net` | Optics and Thermal rows above; `docs/examples.md` §8–11 |
 | Electrical ↔ mechanical (gyrator) | actuator ↔ sprung mass | `circuits/actuator_plant.net` | Mechanical row; `docs/examples.md` §5–7 |
 | Optical power ↔ optical phase ↔ electrical | laser → splitter → waveguides → MZI → photodiodes → difference amplifier | `circuits/fiber_mzi_noise.net` | Photonics rows; `docs/photonic-noise.md` §3.1 |
+| Traffic (density/flow) ↔ speed ↔ queue ↔ electrical (demand, metering rate, TTS) | origins → sections → boundary, a controller reading density and queue | `circuits/motorway_ramp*.net` | Traffic rows; `docs/traffic.md` |
 | Electrical (rotation-rate control) ↔ optical → electrical | `Vrot` → ring → photodiode → load | `circuits/ring_gyro_noise.net` | Photonics rows; `docs/photonic-noise.md` §3.2 |
 
 ## How to add a row

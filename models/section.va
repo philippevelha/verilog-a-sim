@@ -1,0 +1,138 @@
+// One motorway section of Payne's second-order macroscopic traffic model — Bellemans,
+// De Schutter and De Moor, "Models for traffic control" (2002), eqs. (4)–(8), in continuous
+// time (their discretisation is in *time* as well as space; here only space is discretised,
+// the solver integrates the resulting ODEs — see `docs/traffic.md` on what that changes).
+//
+//   c ──►── [ section: length l, n lanes ] ──►── cn         Q(c, cn) = C·v·n                 (eq. 6)
+//                                                             3600·l·n·dC/dt = q_in − q_out   (eq. 4)
+//   vp ─►─ (upstream speed)     v (own speed, a state)
+//
+//   dv/dt = v·(v_up − v)/l                convection      ┐
+//         + (V(C) − v)/tau                relaxation      │  eq. (7)/(8), per hour
+//         − (nu/tau)·(C_down − C)/(l·(C + kappa))   anticipation │
+//         − delta·q_ramp·v/(l·n·(C + kappa))        merging, eq. (9), only with `qm` wired
+//
+// with `V(C) = vf·(1 − (C/cjam)^alpha)^beta` the equilibrium speed (eq. 5, the macro in
+// `traffic.vams`). The three mechanisms are the paper's §4.2: drivers carry their upstream
+// speed into the section (convection), relax toward the speed the local density allows
+// (relaxation), and slow down when they see a denser section ahead (anticipation — note it
+// reads the *downstream* node, so information travels against the traffic). Papageorgiou's
+// merging term (§4.3) is applied when an on-ramp's flow is reported on `qm`.
+//
+// # The coupling between sections — two rules, and what each one costs
+//
+// Eq. (6) is what a section *sends*, `C·v·n`, and the paper writes the Payne flows with nothing
+// else (`godunov=0`, the default — its formulation, and what `circuits/motorway_ramp.net`
+// runs). The alternative (`godunov=1`) bounds it by what the next section can *receive*, its
+// supply `S(C) = q_max` in free flow and `C·V(C)·n` past the critical density — the Godunov
+// rule the paper states for the LWR model ("the minimum of the outflow of section j−1 and the
+// maximal possible inflow of section j", §4.1, after Lebacque 1996), smoothed as in
+// `origin.va`. Both were run, and the difference is the most useful thing this model found
+// (`docs/traffic.md`): under the bare coupling a breakdown *loses throughput* while it forms —
+// the speed relaxes below the equilibrium of the density it is at, so the merge discharges
+// less than the road could carry for a while — and that transient loss is the whole margin a
+// ramp meter can recover (measured: TTS 923 → 854 veh·h with a fixed 0.4 rate, −7.5 %, the
+// paper's −6.6 %). Under the Godunov coupling every section is fed exactly what it can carry,
+// the loss never happens, the network stays at capacity throughout the congested phase, and
+// the total time spent is then a conserved quantity no controller can move (measured: 1548 →
+// 1539 with the same metering). The Godunov rule is the more robust discretisation — it also
+// keeps a *free* exit from running away into a full jam in continuous time — but it is not
+// the paper's model, and it deletes the physics its control experiment is about.
+//
+// # Wiring
+//
+// `c` is this section's density node; its outflow goes into `cn`, the next section's node (or
+// `gnd` for the last section, where the flow leaves the network). `vp` is the upstream
+// section's speed node — wire the first section's `vp` to its own `v` (no convection; the
+// METANET convention v_0 = v_1). `v` is this section's speed, an ODE state the section owns.
+// `qm` is optional: an on-ramp's `qrep` output, in veh/h. The last section's `cn` should be a
+// `boundary` node holding the downstream density — the density its anticipation term looks
+// at, and (with `godunov=1`) the supply that bounds its discharge. Wiring it to `gnd`
+// (density 0) makes the exit "free": the anticipation toward an empty road pulls the speed
+// above `V(C)` and the section discharges whatever arrives — with the bare coupling the
+// continuous model then never breaks down at all, or, if it does, runs away into a full jam
+// (both measured); the paper's example has a boundary, its Fig. 12's last section sitting at
+// ~38 veh/km/lane throughout.
+//
+// # Parameters
+//
+// The example in the paper's §5: 500 m sections, two lanes, v_f = 102 km/h, C_cr = 33.5 and
+// C_jam = 180 veh/km/lane. It does not print alpha, beta, tau, nu, kappa or delta. `alpha =
+// 1.86` is May's textbook value (the paper's reference for eq. 5); `beta` is then fixed by the
+// stated critical density — for `q = C·V(C)` the maximum is at `(C_cr/C_jam)^alpha =
+// 1/(1 + alpha·beta)`, so `beta = ((C_jam/C_cr)^alpha − 1)/alpha = 11.72`. That gives a lane
+// capacity of 2019 veh/h (4038 for the two lanes), which is why 3400 veh/h of mainline demand
+// plus 1500 veh/h from the on-ramp breaks the road down — the paper's scenario — and a
+// free-flow speed of 83.6 km/h at the 3400 veh/h operating point (C = 20.3), the ~80 km/h its
+// Fig. 12 starts from. `tau = 18 s`, `nu = 60 km²/h`, `kappa = 40 veh/km/lane` and
+// `delta = 0.0122` are METANET's usual values (Papageorgiou 1990).
+//
+// # Limitations
+//
+// Continuous-time: the paper's difference equations with Δt = 10 s are an explicit-Euler
+// discretisation of these ODEs, and their numbers (TTS = 1267 veh·h) are the discrete model's;
+// this one converges to the ODE's answer instead, which differs by the discretisation error
+// and by the unprinted parameters above. No lane drops (eq. 10), no off-ramps, no speed limits
+// or variable message signs. `alpha`/`beta` are one of many fits of eq. (5); the paper says the
+// fit "needs to be calibrated" and gives none. The two `max` guards in `V_EQ` make the law
+// flat past the jam density rather than undefined.
+`include "disciplines.vams"
+`include "traffic.vams"
+
+module section(c, cn, vp, v, qm);
+    inout c, cn, vp, v, qm;
+    traffic    c, cn;
+    speed      vp, v;
+    electrical qm;
+
+    parameter real l     = 0.5    from (0:inf);   // section length (km)
+    parameter real n     = 2.0    from (0:inf);   // number of lanes
+    parameter real vf    = 102.0  from (0:inf);   // free-flow speed (km/h)
+    parameter real cjam  = 180.0  from (0:inf);   // jam density (veh/km/lane)
+    parameter real alpha = 1.86   from (0:inf);   // eq. (5) exponent (May 1990)
+    parameter real beta  = 11.72  from (0:inf);   // eq. (5) exponent; 11.72 puts C_cr at 33.5
+    parameter real tau   = 18.0   from (0:inf);   // relaxation time (s)
+    parameter real nu    = 60.0   from [0:inf);   // anticipation constant (km^2/h); 0 = none
+    parameter real kappa = 40.0   from (0:inf);   // anticipation/merging offset (veh/km/lane)
+    parameter real delta = 0.0122 from [0:inf);   // merging coefficient, eq. (9)
+    parameter real ccr   = 33.5   from (0:inf);   // critical density (veh/km/lane), for S(C)
+    parameter real godunov = 0    from [0:1];     // 1: outflow limited by downstream supply
+    parameter real eps   = 20.0   from (0:inf);   // smooth-minimum width (veh/h)
+
+    real cj, vj, cd, qsend, qmax, supply, rhs;
+
+`define SMIN(a, b) (0.5 * ((a) + (b) - sqrt(((a) - (b)) * ((a) - (b)) + eps * eps)))
+
+    analog begin
+        cj = Dens(c);
+        vj = Spd(v);
+        cd = Dens(cn);
+
+        // Eq. (4): the section stores l·n·C vehicles; its rate of change balances the flows.
+        Q(c) <+ 3600.0 * l * n * ddt(Dens(c));
+        // Eq. (6), what this section sends, bounded by what the next one can receive.
+        // `max(v, 0)`: the run starts from an empty road (UIC semantics, no operating point
+        // first), and an empty section next to a dense boundary is driven backwards by the
+        // anticipation term for a few seconds; a negative speed must not send vehicles
+        // upstream. The clamp is inactive at any physical operating point.
+        qsend  = cj * max(vj, 0.0) * n;
+        qmax   = ccr * `V_EQ(ccr) * n;
+        supply = (cd > ccr) ? cd * `V_EQ(cd) * n : qmax;
+        if (godunov > 0.5)
+            Q(c, cn) <+ `SMIN(qsend, supply);
+        else
+            Q(c, cn) <+ qsend;
+
+        // Eq. (7), per hour: convection, relaxation, anticipation.
+        rhs = vj * (Spd(vp) - vj) / l
+            + (`V_EQ(cj) - vj) / (tau / 3600.0)
+            - (nu / (tau / 3600.0)) * (Dens(cn) - cj) / (l * (cj + kappa));
+        // Eq. (9): merging traffic from an on-ramp slows the section down.
+        if ($port_connected(qm))
+            rhs = rhs - delta * V(qm) * vj / (l * n * (cj + kappa));
+        else
+            I(qm) <+ V(qm);   // unconnected: hold the node at 0 rather than leave it floating
+        // The speed state: a unit "capacitor" on the speed node driven by the rate above.
+        Acc(v) <+ 3600.0 * ddt(Spd(v)) - rhs;
+    end
+endmodule
