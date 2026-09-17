@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.0.1 - 2026-09-17
+------------------
+README rewritten around the executable. It described only the `cargo` path, which after 1.0 is
+the *developer's* path: a user's first command should be `./va-cli`, and the download it comes
+from should be the first section. Now: what the project is and what 1.0 means, the per-platform
+archive table with unpack-and-run for Linux/Windows/macOS (and the macOS quarantine note), the
+rectifier as the install check with the numbers to expect, a real `sim` transcript, every
+analysis one line each in binary form, the flags (`--report`, `--plot`, `--integration`,
+`--model <dir>`), `check`, and what a `refused:` block means and how it differs from a parse
+error or a convergence failure.
+
+  Added, because none of it was in the README before: what ships (35 models, 5 discipline
+  headers, 49 decks, 29 golden files), the five physical domains with examples, the validation
+  section (28/28, the four tolerance rows, the three tiers of oracle, the bring-up ladder, the
+  finite-difference gate on AD), a **Limitations, stated** section (dense-LU size limit, every
+  refused construct, the `I(<port>)` narrowings, cross-domain plot units, the 112/132 corpus
+  figure with the note that the corpus is not shipped, and what Annex C puts out of scope), the
+  crate table, a documentation map and the licence. Every command in it was run before it was
+  written; the transcript is real output, not reconstructed.
+
+  No code changed. Measured at this version: `cargo test --workspace` 797 passed / 0 failed;
+  fmt and `clippy -D warnings` clean; `cargo xtask validate` 28/28, convergence 28/28. The
+  1.0.0 archives on GitHub carry the old README, since they were cut from that tag.
+
 1.0.0 - 2026-09-17
 ------------------
 **1.0.** The deliverable is the compiled `va-cli` executable, and the last thing between
