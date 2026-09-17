@@ -20,6 +20,68 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.1.0 - 2026-09-17
+------------------
+**Every `sim` says what it is about to solve, and roughly what that costs**, before solving
+(`va_cli::estimate`, `va_cli::sizing`; the user's request, and `docs/validation.md` now carries
+the designer-side reading of the dense-LU limit it is calibrated from):
+
+```
+[va-cli] circuit: 11 device(s) (8 compiled), 28 unknown(s) (17 net(s) + 11 auxiliary row(s)), ~12601 points (adaptive, 12601 is the card's floor)
+[va-cli] estimate: 0.8-39.1 s of solve, 18.8 kB of matrix -- rough, dense LU scaled from bench-scale on an i7-1185G7
+```
+
+  The first line is exact: devices (and how many are compiled Verilog-A instances), the matrix
+  dimension split into the deck's nets and the auxiliary rows nothing in the deck names -- a
+  branch current per voltage source and inductor, a compiled model's internal nodes *per
+  instance*, an `idt` accumulator, one row per denominator degree of a `laplace_*` -- and the
+  point count: the exact frequency grid for `.ac`/`.noise`, the swept values for `.dc`, one for
+  `.op`, and for `.tran` the card's own `tstop/tstep`, labelled as the floor it is (the step
+  controller only adds; 1.0-1.5x on this project's decks).
+
+  The second is a **bracket, and the width is the honest part**. Inside the measured range its
+  ends are the neighbouring rows of `bench-scale` -- a statement of fact, not a fit -- and beyond
+  the last row they are the exponent-2 and exponent-3 scalings dense LU sits between, which is
+  what the user asked for. On top of the solve sits a per-instance model-evaluation term
+  (0.006-0.2 ms per compiled instance, 0.002-0.04 ms per non-linear reference primitive), because
+  the calibration ladder is linear primitives and cannot speak for a compiled model's cost: at
+  3 unknowns the first draft of this estimate was **200x low** on `rectifier.net` for exactly
+  that reason. The bracket reaches 30x wide on a small circuit, where Newton iteration counts and
+  expression size dominate and no matrix dimension predicts them, and it is gated against the
+  five measured decks (`the_bracket_contains_every_measured_deck`) so it cannot silently stop
+  covering reality. It covers the solve, not the ~77 ms of start-up and model compilation.
+
+  **`xtask bench-scale` now times `.ac` and `.noise` too**, so the frequency-sweep half of the
+  estimate is measured rather than assumed to be some ratio of the transient column. One deck
+  serves all four analyses (`AC 1` on the source costs the other three nothing). Measured: an AC
+  point costs 1.2-1.5x a transient point despite running no Newton loop, because its arithmetic
+  is complex; a noise point is that plus the adjoint.
+
+**The dense-LU limit is 2.8x further out than it was on 2026-09-11, on the same machine.** Two
+runs agree, so it is not noise: `tran_ms/pt` at 802 unknowns fell 147.3 -> 52.3, at 402
+24.9 -> 14.2, while the 12- and 22-unknown rows are unchanged. A speed-up that grows with `dim`
+and vanishes at small `dim` is what **fewer Newton iterations per timepoint** looks like (a big
+circuit pays a whole O(dim^3) factorization per iteration; a small one is dominated by fixed
+overhead), and the plausible cause is 0.9.22's per-nature `abstol` in the transient update test.
+**Not bisected -- stated as likely, not verified.** The stated limit moves with it: a
+10 000-point transient is interactive to ~400 unknowns, 8.7 minutes at 800, impractical beyond
+~1 600 (was ~200 / half an hour / ~1 000). README and `docs/future_development.md` §1 updated
+to match; the old table is kept beside the new one in `docs/validation.md` rather than
+overwritten.
+
+**`docs/validation.md` gained the designer-side reading** the estimate is the tool for: what a
+row in the matrix actually comes from (and what costs none), how many timepoints fit in a
+minute / ten minutes / an hour at each size, where this repository's own decks sit (all two
+orders of magnitude below the limit -- `motorway_ramp` is the slowest at 5.3 s because of 12 646
+timepoints, not because of 28 unknowns), seven design rules, and what sparse would buy (99.5% of
+the factorization at 800 unknowns multiplies zeros).
+
+  Measured at this version: `cargo test --workspace` 810 passed / 0 failed
+  (+13, all in `va_cli::estimate`); fmt and `clippy -D warnings` clean; `cargo xtask validate`
+  28/28, convergence 28/28; zoo `check models --codegen` 35/35; corpus 112/132 (94/99). The new
+  stderr lines change no gate: `xtask validate` and `va-harness` read the library entry point and
+  stdout, not the banner.
+
 1.0.1 - 2026-09-17
 ------------------
 README rewritten around the executable. It described only the `cargo` path, which after 1.0 is

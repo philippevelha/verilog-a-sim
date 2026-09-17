@@ -86,6 +86,8 @@ card), and one `sim` call.
 ```
 [va-cli] sim netlist=circuits/rectifier.net model=models/diode.va analysis=Transient
 [va-cli] compiled 1 Verilog-A module(s) from models/diode.va
+[va-cli] circuit: 4 device(s) (1 compiled), 3 unknown(s) (2 net(s) + 1 auxiliary row(s)), ~502 points (adaptive, 502 is the card's floor)
+[va-cli] estimate: 3.1-151.1 ms of solve, 216 B of matrix — rough, dense LU scaled from bench-scale on an i7-1185G7
 Transient analysis (718 points, t=0 to t=5e-3s):
   t=0.000000e0s  V(in)=0.000000 V  V(out)=0.000000 V  I(V1)=0.000000e0 A
   t=1.000000e-5s  V(in)=0.313953 V  V(out)=1.850106e-8 V  I(V1)=-1.868607e-9 A
@@ -179,9 +181,11 @@ Jacobian destroys Newton convergence silently.
 
 Shipped this way on purpose, with the reasoning in `release.txt`'s 1.0.0 entry:
 
-- **Dense LU** is the linear solve. For a 10 000-point transient, ~200 unknowns is interactive,
-  ~800 is about half an hour, beyond ~1 000 it is impractical (measured, `docs/validation.md`).
-  A sparse path is the first item of `docs/future_development.md`.
+- **Dense LU** is the linear solve. For a 10 000-point transient, ~400 unknowns is interactive,
+  ~800 is a 9-minute coffee break, beyond ~1 600 it is impractical (measured 2026-09-17,
+  `docs/validation.md` — and 2.8× faster at 800 unknowns than the same measurement a week
+  earlier, which that section explains). Every `sim` prints its own size and a rough cost
+  bracket before it starts. A sparse path is the first item of `docs/future_development.md`.
 - **Refused, not approximated:** `absdelay` in a transient run (a pure delay is not an ODE),
   the analog events `absdelta` and `last_crossing`, compound triggers mixing a step event with
   a scheduled one, and `$rdist_*` (this engine has no RNG). Each raises the standard refusal

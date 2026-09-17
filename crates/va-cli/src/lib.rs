@@ -29,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod estimate;
 pub mod plot;
 
 use anyhow::{bail, Context, Result};
@@ -619,6 +620,16 @@ pub fn run_sim(
     };
 
     gate_analysis(&net, analysis)?;
+    // Before the solve, not after: a user cannot discover from a finished run whether it was
+    // the size they thought it was, and cannot decide whether to wait for one that has already
+    // finished. Failing to *size* the circuit is not a reason to refuse to run it -- the solve
+    // raises the same error a moment later, with its own context -- so a sizing error is
+    // swallowed here rather than short-circuiting the run.
+    if let Ok(sizing) = sizing(&net, &compiled, analysis) {
+        for line in sizing.lines() {
+            eprintln!("{line}");
+        }
+    }
     // Plottable analyses are the ones that produce a *curve*: a transient waveform, or a `.dc`
     // sweep. A bare DC operating point is a single point — plotting one would be an empty
     // image, so asking is still a clear error rather than a misleading file.
@@ -2028,6 +2039,88 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
         },
     };
     va_acnoise::ac::run(&refs, &op.x, dim, sweep, &excitation).context("AC sweep failed")
+}
+
+/// What `analysis` is about to solve on `net`: the device and unknown counts, and how many
+/// points the deck's own card implies.
+///
+/// Built by instantiating the circuit, because the unknown count is not knowable any earlier —
+/// a compiled Verilog-A model claims internal nodes, branch rows, `idt` accumulators and
+/// `laplace_*` states from the same counter the deck's nets draw from, so only the instances
+/// themselves know how wide the matrix is (§ `build_instances`). Instantiation is cheap next to
+/// any solve; the analysis re-instantiates rather than threading the built system through, which
+/// keeps this a pure query.
+///
+/// A transient point count is [`estimate::Points::Adaptive`]: the deck's `tstop/tstep` is a
+/// floor the step controller adds to, never a prediction. An analysis whose card did not parse
+/// reports one point rather than guessing a grid — the solve itself will report the missing
+/// card.
+///
+/// # Errors
+///
+/// If the circuit cannot be instantiated (an unknown model, a bad terminal count, a parameter a
+/// deck may not set) — the same errors the solve would raise, raised before it starts.
+pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<estimate::Sizing> {
+    let (_instances, dim, _currents, _quantities) = build_instances(net, compiled)?;
+    let points = match analysis {
+        Analysis::Transient => {
+            // `tstop / tstep`, the count a fixed-step integrator would take. Rounded up and
+            // including `t = 0`.
+            let nominal = net
+                .tran
+                .filter(|&(tstep, _)| tstep > 0.0)
+                .map_or(1, |(tstep, tstop)| (tstop / tstep).ceil() as usize + 1);
+            estimate::Points::Adaptive(nominal)
+        }
+        Analysis::Ac | Analysis::Noise => {
+            // The grid the sweep will actually visit, from the same generator the solve uses,
+            // so the count is the real one rather than a re-derivation that could drift.
+            let sweep = match analysis {
+                Analysis::Ac => net.ac.map(|c| va_acnoise::ac::AcSweep {
+                    fstart: c.fstart,
+                    fstop: c.fstop,
+                    points: c.points,
+                    kind: match c.kind {
+                        va_netlist::AcSweepKindCard::Dec => va_acnoise::ac::AcSweepKind::Dec,
+                        va_netlist::AcSweepKindCard::Oct => va_acnoise::ac::AcSweepKind::Oct,
+                        va_netlist::AcSweepKindCard::Lin => va_acnoise::ac::AcSweepKind::Lin,
+                    },
+                }),
+                _ => net.noise.as_ref().map(|c| va_acnoise::ac::AcSweep {
+                    fstart: c.fstart,
+                    fstop: c.fstop,
+                    points: c.points_per_decade,
+                    kind: va_acnoise::ac::AcSweepKind::Dec,
+                }),
+            };
+            estimate::Points::Exact(sweep.map_or(1, |s| s.frequencies().len()))
+        }
+        Analysis::Dc => estimate::Points::Exact(
+            net.dc
+                .as_ref()
+                .map_or(1, |s| sweep_points(s.start, s.stop, s.step).len()),
+        ),
+    };
+    // What a device costs to *evaluate* splits three ways, and only the deck and the compiled
+    // library together can say which: an instance of a compiled Verilog-A module (automatically
+    // differentiated code, the expensive case), a non-linear reference primitive (hand-written,
+    // but several Newton iterations), or a linear primitive, whose cost the calibration ladder
+    // already contains (§ `estimate`).
+    let compiled_names: Vec<&str> = compiled.iter().map(|m| m.name.as_str()).collect();
+    let is_compiled = |dev: &Device| compiled_names.contains(&dev.model.as_str());
+    Ok(estimate::Sizing {
+        analysis,
+        devices: net.devices.len(),
+        compiled: net.devices.iter().filter(|d| is_compiled(d)).count(),
+        nonlinear_primitives: net
+            .devices
+            .iter()
+            .filter(|d| !is_compiled(d) && matches!(d.model.as_str(), "diode" | "bjt"))
+            .count(),
+        nodes: net.node_order.len(),
+        unknowns: dim,
+        points,
+    })
 }
 
 /// Build every device instance, solve the DC operating point, and sweep the small-signal output

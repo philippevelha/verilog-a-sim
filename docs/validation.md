@@ -644,56 +644,178 @@ column is the admittance filter `sC/(1 + sτ)`, whose numerator degree equals it
 so the feedthrough path of the realization is on the gate as well. **Not covered:** noise, where
 a Laplace filter still evaluates to `H(0)` — a stated limitation at the construct.
 
-## The dense-LU circuit-size limit (measured 2026-09-11, v0.9.16+1)
+## The dense-LU circuit-size limit (re-measured 2026-09-17, v1.1.0)
 
 The production linear solve is dense LU (`va_core::linsolve::solve_dense`); the sparse solver
 beside it is a benchmark subject, not the shipped path (roadmap, 2026-08-31: "stay dense, the
 trigger is circuit size"). This is the trigger, measured — `cargo run --release -p xtask --
-bench-scale`, a whole `.op` and a whole `.tran` through `va_cli` on an RC ladder of `n`
-sections (`R = 1 kΩ`, `C = 1 nF`, `dim = n + 1` unknowns; reference primitives, so the
-compiler is not in the timing), 5 µs window with a 50 ns step hint, trapezoidal, LTE
-`1e-3`. **Machine:** 11th-gen Intel Core i7-1185G7 @ 3.0 GHz, 16 GB, Windows 11, release
-profile, single-threaded.
+bench-scale`, a whole `.op`, `.tran`, `.ac` and `.noise` through `va_cli` on an RC ladder of `n`
+sections (`R = 1 kΩ`, `C = 1 nF`, `dim = n + 1` unknowns; reference primitives, so the compiler
+is not in the timing). The `.tran` window is 5 µs with a 50 ns step hint, trapezoidal, LTE
+`1e-3`; the `.ac`/`.noise` grid is three decades at 10 points/decade (31 points). **Machine:**
+11th-gen Intel Core i7-1185G7 @ 3.0 GHz, 16 GB, Windows 11, release profile, single-threaded.
 
 ```
-  n_nodes    dim      op_ms     tran_ms  points   tran_ms/pt
-       10     12       0.02         1.4     120        0.011
-       20     22       0.06         2.1     120        0.017
-       50     52       2.61       115.9     120        0.966
-      100    102       1.20       252.6     120        2.105
-      200    202       3.05       745.8     120        6.215
-      400    402      17.48      2989.5     120       24.912
-      800    802      97.46     17675.5     120      147.296
+  n_nodes    dim     op_ms    tran_ms  points  tran_ms/pt  ac_ms/pt  noi_ms/pt  ac_pts
+       10     12      0.02        1.2     120       0.010     0.006      0.006      31
+       20     22      0.03        2.1     120       0.017     0.408      0.361      31
+       50     52      0.38       56.0     120       0.466     0.544      0.474      31
+      100    102      0.85      166.8     120       1.390     1.463      1.464      31
+      200    202      2.24      398.3     120       3.319     4.735      6.093      31
+      400    402      8.08     1709.0     120      14.242    21.494     22.297      31
+      800    802     63.46     6280.2     120      52.335    78.766    120.293      31
 ```
 
-The accepted-point count is the same at every size (the input edge at `t = 0` is the same
-event), so the `tran_ms/pt` column isolates the solve's growth with `dim`: from 200 to 400
-nodes it grows 4.0×, from 400 to 800 5.9× — the O(dim³) of a dense factorization, with
-assembly's O(dim²) underneath it. A `.op` is one Newton solve and stays under 0.1 s even at
-800 nodes; the wall is in transient, where the factorization is paid at every accepted point
-and every rejected one.
+Each cell is the **slower of two runs** taken back to back; run-to-run spread is ~30% at the
+middle sizes and ~2× on the single-solve `op_ms` column, which is one Newton loop and too short
+to time stably. The accepted-point count is the same at every size (the input edge at `t = 0` is
+the same event), so the per-point columns isolate growth with `dim`.
 
-**The limit, stated for a 10 000-point transient** (a typical `.tran` of this project's decks
-runs 1 000–3 000 accepted points; 10 000 is a long one):
+**Read the columns for what each analysis pays per point:** `op_ms` is one whole Newton loop;
+`tran_ms/pt` is per *accepted* timepoint, with the rejected ones' cost folded into it; `ac_ms/pt`
+is one complex factorization and no Newton loop; `noi_ms/pt` is that plus the adjoint solve
+behind the input-referred and per-device spectra. An AC point costs 1.2–1.5× a transient point
+here despite doing no Newton iterations, because its arithmetic is complex.
+
+### It got 2.8× faster since 2026-09-11, and that is a finding
+
+The table this section carried before (v0.9.16+1, same machine, same profile) read:
+
+| dim | `tran_ms/pt` 2026-09-11 | 2026-09-17 | ratio |
+|---:|---:|---:|---:|
+| 12 | 0.011 | 0.010 | 1.1 |
+| 22 | 0.017 | 0.017 | 1.0 |
+| 52 | 0.785 | 0.466 | 1.7 |
+| 102 | 2.105 | 1.390 | 1.5 |
+| 202 | 6.215 | 3.319 | 1.9 |
+| 402 | 24.912 | 14.242 | 1.7 |
+| 802 | 147.296 | 52.335 | **2.8** |
+
+Two runs on 2026-09-17 agree with each other, so this is not measurement noise. The shape of the
+change is the interesting part: the two smallest rows are unchanged and the speed-up grows with
+`dim`. That is what a **drop in Newton iterations per timepoint** looks like — a small circuit's
+per-point cost is dominated by fixed overhead that no iteration count touches, while a large one
+pays a full O(dim³) factorization per iteration and gains the whole ratio. The plausible cause is
+0.9.22's per-nature `abstol` in the transient Newton update test (it was a flat 1e-12, so the
+loop kept iterating past the point where the answer had stopped moving). **Not bisected** —
+stated as the likely explanation, not a verified one. The consequence is stated plainly because
+it changes the advice: the limit below is roughly twice as far out as this document said a week
+ago.
+
+### The limit, for a 10 000-point transient
+
+A typical `.tran` of this project's decks runs 1 000–3 000 accepted points; 10 000 is a long one.
 
 | unknowns | per point | 10 000 points |
 |---:|---:|---:|
-| 100 | 2 ms | 20 s |
-| 200 | 6 ms | 1 min |
-| 400 | 25 ms | 4 min |
-| 800 | 150 ms | 25 min |
-| ~1 600 (extrapolated at 6×/doubling) | ~0.9 s | ~2.5 h |
+| 100 | 1.4 ms | 14 s |
+| 200 | 3.3 ms | 33 s |
+| 400 | 14 ms | 2.4 min |
+| 800 | 52 ms | 8.7 min |
+| ~1 600 (extrapolated, exponent 2–3) | 0.21–0.42 s | 35–70 min |
 
-So: **up to ~200 unknowns a transient is interactive; ~400 is a coffee break; ~800 is a
-batch job; beyond ~1 000 unknowns dense LU is impractical and this simulator should not be
-chosen for the circuit until the sparse path ships** (`docs/future_development.md` §1).
-"Unknowns" counts every auxiliary row too — a branch current per voltage source and inductor,
-an `idt` accumulator, a `laplace_*` filter's state per denominator degree — so a 100-node
-circuit with many such elements sits higher in the table than its node count suggests. The
-debug profile (`cargo xtask bench-scale` without `--release`) is 10–60× slower again and is not
-the number to plan with; the release binary is what 1.0 ships.
+So: **up to ~400 unknowns a transient is interactive; ~800 is a coffee break; beyond ~1 600
+dense LU is impractical and this simulator should not be chosen for the circuit until the sparse
+path ships** (`docs/future_development.md` §1). A `.op` stays under 0.1 s even at 800 unknowns —
+operating points and DC sweeps are not where the wall is.
 
-Rerun `bench-scale` on the machine at hand before quoting these figures for it.
+### What "unknowns" counts, from a designer's side
+
+The matrix dimension is not the component count. Every row comes from one of these:
+
+| Contributes a row | Contributes no row of its own |
+|---|---|
+| each non-ground net in the deck | each resistor, capacitor, diode, VCCS — they only stamp into existing rows |
+| each independent voltage source, inductor, and controlled source carrying a current unknown | `ddt`, which goes on the charge channel |
+| each **internal node** of a Verilog-A module, **per instance** (hierarchy is flattened) | `zi_*` filters, sampled on the state channel |
+| each branch-current unknown a potential contribution or a flow probe needs | parameters, variables, `analog function` locals |
+| each `idt` call site (an accumulator) | |
+| each `laplace_*` call site, **one row per denominator degree** | |
+
+So modelling complexity inflates `dim` faster than schematic size does. A behavioural block with
+three internal nodes and a 4th-order `laplace_vp` costs seven rows *per instance*; ten of them is
+70 rows before any wiring. Two-terminal passives are nearly free.
+
+### The budget: how many timepoints fit in a wait
+
+| unknowns | ms/point | 1 minute | 10 minutes | 1 hour |
+|---:|---:|---:|---:|---:|
+| 100 | 1.4 | 43 000 pts | 430 000 | 2.6 M |
+| 200 | 3.3 | 18 000 | 180 000 | 1.1 M |
+| 400 | 14 | 4 200 | 42 000 | 250 000 |
+| 800 | 52 | 1 100 | 11 000 | 69 000 |
+| ~1 600 | ~210–420 | 140–290 | 1 400–2 900 | 8 600–17 000 |
+
+A 2 500-point transient — the size of this repository's ring oscillator — is therefore about 8 s
+at 200 unknowns, 35 s at 400, 2 minutes at 800, and 9–18 minutes at 1 600.
+
+### Where this repository's own decks sit (measured 2026-09-17, release binary)
+
+| Deck | unknowns | devices | points | wall time |
+|---|---:|---:|---:|---:|
+| `rectifier.net` | 3 | 4 | 718 | 0.19 s |
+| `actuator_plant.net` | 5 | 2 | 1 023 | 0.20 s |
+| `ring_osc.net` | 8 | 13 | 2 243 | 0.27 s |
+| `microring_thermal.net` | 18 | 8 | 2 013 | 0.52 s |
+| `motorway_ramp.net` | 28 | 11 | 12 646 | 5.3 s |
+
+Every validated deck is two orders of magnitude below the solver limit. At `dim < 50` the
+factorization is irrelevant and the cost is **model evaluation × Newton iterations × points**:
+`motorway_ramp` is the slowest deck here because of 12 646 timepoints, not because of 28
+unknowns. Below ~50 unknowns the lever is the timestep; above ~400 it is the matrix. About 77 ms
+of each wall time above is process start-up and model compilation, independent of circuit size.
+
+### Constraints, as design rules
+
+1. **Budget rows, not devices.** Count nets + sources + inductors + (internal nodes + `idt`
+   sites + Laplace order) × instances before running.
+2. **~400 unknowns is the interactive ceiling**, ~800 a coffee break, beyond ~1 600 the wrong
+   tool until sparse ships.
+3. **Do not buy internal nodes you do not need.** Collapsing a parasitic node, or writing one
+   low-order `laplace_vp` instead of a cascade, removes a row from every timepoint permanently.
+4. **Stiffness costs more than size at small `dim`.** Events, fast switching and
+   near-discontinuities multiply accepted *and rejected* steps; no solver change helps there.
+5. **Pick the cheapest analysis that answers the question.** `.op` is one solve; `.ac` is one
+   factorization per frequency with no Newton loop; `.noise` adds the adjoint. A 100-point AC
+   sweep at 800 unknowns is ~8 s where the same circuit in transient is minutes.
+6. **Memory is not the binding constraint.** Peak dense storage is three `dim × dim` matrices
+   (the assembled Jacobian, the copy `faer` factorizes, and the factors), doubled for the complex
+   matrix an AC or noise sweep solves: 15 MB at 800 unknowns, 2.4 GB at 10 000. The time wall
+   arrives an order of magnitude earlier.
+7. **Re-measure on the machine at hand.** `cargo run --release -p xtask -- bench-scale`; the
+   debug profile is 10–60× slower and is not a number to plan with.
+
+### What sparse would change
+
+A circuit matrix has ~3–5 nonzeros per row. At 800 unknowns that is ~3 200 entries in a
+640 000-entry matrix: **99.5% of the dense factorization multiplies zeros.** Sparse LU with a
+reasonable ordering runs at roughly O(dim^1.2…1.5) on circuit topologies, which moves the ceiling
+from ~10³ unknowns to ~10⁵ and makes the per-point cost near-linear. That is why it is item 1 of
+`docs/future_development.md`, and why measuring the dense limit mattered: the trigger for the
+work is a circuit someone actually wants to run that sits above ~1 600 rows.
+
+### The pre-flight estimate `va-cli` prints
+
+Since v1.1.0 every `sim` run prints, before solving, what it is about to solve and roughly what
+that costs (`va_cli::estimate`):
+
+```
+[va-cli] circuit: 11 device(s) (8 compiled), 28 unknown(s) (17 net(s) + 11 auxiliary row(s)), ~12601 points (adaptive, 12601 is the card's floor)
+[va-cli] estimate: 0.8-39.1 s of solve, 18.8 kB of matrix — rough, dense LU scaled from bench-scale on an i7-1185G7
+```
+
+The size half is exact. The cost half is a bracket, calibrated against the table above: **inside
+the measured range its two ends are the neighbouring measured rows** — a statement of fact, not a
+fit — and **beyond the last row they are the exponent-2 and exponent-3 scalings** of it, the
+bounds dense LU sits between (measured growth per doubling at the top of the table is 3.67×, i.e.
+exponent 1.88, so the extrapolation errs slow). On top of the solve it adds a per-point term for
+model evaluation, which the ladder cannot speak for because the ladder is linear primitives:
+0.006–0.2 ms per compiled Verilog-A instance and 0.002–0.04 ms per non-linear reference
+primitive, calibrated against the five decks above. The bracket is wide — up to 30× on a small
+circuit, where iteration counts and model size dominate and nothing in a matrix dimension can
+predict them — and it is checked against every deck in the table by
+`estimate::tests::the_bracket_contains_every_measured_deck`, so it cannot silently stop covering
+reality.
 
 ## Bring-up ladder
 

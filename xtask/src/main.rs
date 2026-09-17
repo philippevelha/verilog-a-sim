@@ -2014,6 +2014,11 @@ fn run_bench_row(n_nodes: usize) -> Result<BenchRow> {
 /// where a `.tran` is no longer interactive on the development machine; `--max-nodes` caps it.
 const SCALE_NODE_COUNTS: &[usize] = &[10, 20, 50, 100, 200, 400, 800];
 
+/// Points per decade for the `.ac`/`.noise` columns: three decades at 10/decade is 31 points,
+/// enough that a per-point figure is not swamped by the one operating-point solve each sweep
+/// does first, and few enough that the 800-node row still finishes.
+const SCALE_AC_PPD: usize = 10;
+
 /// An RC ladder of `n` sections: `V1 in gnd DC 1`, then `R_k` from node `k-1` to node `k` and
 /// `C_k` from node `k` to ground, `R = 1 kΩ`, `C = 1 nF` (a 1 µs section time constant). The
 /// unknowns are `n` node potentials plus the source's branch current: `dim = n + 1`.
@@ -2023,14 +2028,23 @@ const SCALE_NODE_COUNTS: &[usize] = &[10, 20, 50, 100, 200, 400, 800];
 /// `n` is: the input edge at `t = 0` is the same event at every size, so the accepted-point
 /// count stays comparable and the per-point cost isolates the solve's growth with `dim`.
 fn rc_ladder_deck(n: usize) -> String {
-    let mut deck = String::from("* RC ladder for bench-scale\nV1 in gnd DC 1\n");
+    // `AC 1` on the source costs a DC or transient run nothing -- it is read only by the AC
+    // linearization -- so one deck serves all four analyses and every column times the same
+    // circuit.
+    let mut deck = String::from("* RC ladder for bench-scale\nV1 in gnd DC 1 AC 1\n");
     let mut prev = "in".to_string();
     for k in 1..=n {
         let node = format!("n{k}");
         deck.push_str(&format!("R{k} {prev} {node} 1000\nC{k} {node} gnd 1e-9\n"));
         prev = node;
     }
-    deck.push_str(".tran 50n 5u\n.end\n");
+    deck.push_str(".tran 50n 5u\n");
+    // A decade-spaced sweep across the ladder's own corner (a 1 us section constant is 159 kHz),
+    // and the same grid for `.noise` so the two columns are comparable per frequency point.
+    // Every resistor is a thermal-noise source, so the noise run has something to sum.
+    deck.push_str(&format!(".ac dec {SCALE_AC_PPD} 1e3 1e6\n"));
+    deck.push_str(&format!(".noise V(n{n}) V1 dec {SCALE_AC_PPD} 1e3 1e6\n"));
+    deck.push_str(".end\n");
     deck
 }
 
@@ -2041,6 +2055,9 @@ struct ScaleRow {
     op: Duration,
     tran: Duration,
     points: usize,
+    ac: Duration,
+    ac_points: usize,
+    noise: Duration,
 }
 
 fn run_scale_row(n_nodes: usize) -> Result<ScaleRow> {
@@ -2062,12 +2079,27 @@ fn run_scale_row(n_nodes: usize) -> Result<ScaleRow> {
         .context("ladder .tran")?;
     let tran_time = t0.elapsed();
 
+    // An AC point is one *complex* factorization and no Newton loop; a noise point is that plus
+    // an adjoint solve. Timing both on the same circuit is what lets `va-cli`'s pre-flight
+    // estimate quote a frequency sweep from measurement rather than from an assumed ratio to
+    // the transient column.
+    let t0 = Instant::now();
+    let resp = va_cli::solve_ac(&net, &[]).context("ladder .ac")?;
+    let ac_time = t0.elapsed();
+
+    let t0 = Instant::now();
+    let _ = va_cli::solve_noise(&net, &[]).context("ladder .noise")?;
+    let noise_time = t0.elapsed();
+
     Ok(ScaleRow {
         n_nodes,
         dim,
         op: op_time,
         tran: tran_time,
         points: wf.t.len(),
+        ac: ac_time,
+        ac_points: resp.f.len(),
+        noise: noise_time,
     })
 }
 
@@ -2090,32 +2122,45 @@ fn bench_scale(args: &[String]) -> Result<()> {
         .unwrap_or(usize::MAX);
 
     eprintln!(
-        "[xtask] bench-scale: whole-pipeline .op and .tran wall time on an RC ladder \
+        "[xtask] bench-scale: whole-pipeline .op, .tran, .ac and .noise wall time on a ladder \
          (va_abi::reference primitives, dense LU) …"
     );
     // Warm-up, for the same reason `bench-linsolve` does one.
     let _ = run_scale_row(5);
     eprintln!(
-        "[xtask]   {:>7} {:>6} {:>10} {:>11} {:>7} {:>12}",
-        "n_nodes", "dim", "op_ms", "tran_ms", "points", "tran_ms/pt"
+        "[xtask]   {:>7} {:>6} {:>9} {:>10} {:>7} {:>11} {:>9} {:>10} {:>7}",
+        "n_nodes",
+        "dim",
+        "op_ms",
+        "tran_ms",
+        "points",
+        "tran_ms/pt",
+        "ac_ms/pt",
+        "noi_ms/pt",
+        "ac_pts"
     );
     for &n in SCALE_NODE_COUNTS.iter().filter(|&&n| n <= max_nodes) {
         let row = run_scale_row(n)?;
         let tran_ms = row.tran.as_secs_f64() * 1e3;
+        let per = |d: Duration, pts: usize| d.as_secs_f64() * 1e3 / pts.max(1) as f64;
         eprintln!(
-            "[xtask]   {:>7} {:>6} {:>10.2} {:>11.1} {:>7} {:>12.3}",
+            "[xtask]   {:>7} {:>6} {:>9.2} {:>10.1} {:>7} {:>11.3} {:>9.3} {:>10.3} {:>7}",
             row.n_nodes,
             row.dim,
             row.op.as_secs_f64() * 1e3,
             tran_ms,
             row.points,
-            tran_ms / row.points.max(1) as f64
+            tran_ms / row.points.max(1) as f64,
+            per(row.ac, row.ac_points),
+            per(row.noise, row.ac_points),
+            row.ac_points,
         );
     }
     eprintln!(
-        "[xtask] bench-scale: done. Dense LU is O(dim^3) per Newton solve; the per-point column \
-         is the number to watch. See release.txt for the stated limit and the machine it was \
-         measured on."
+        "[xtask] bench-scale: done. Dense LU is O(dim^3) per Newton solve; the per-point columns \
+         are the numbers to watch, and they are what `va-cli`'s pre-flight estimate is \
+         calibrated against (va_cli::estimate). See docs/validation.md for the stated limits \
+         and the machine they were measured on."
     );
     Ok(())
 }

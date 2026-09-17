@@ -92,6 +92,31 @@ cargo run -p va-cli -- sim circuits/rectifier.net --model models/diode.va --tran
 
 `docs/examples.md` has one worked, plotted example per analysis.
 
+### What the run tells you before it starts
+
+Every `sim` prints two lines before solving:
+
+```
+[va-cli] circuit: 4 device(s) (1 compiled), 3 unknown(s) (2 net(s) + 1 auxiliary row(s)), ~502 points (adaptive, 502 is the card's floor)
+[va-cli] estimate: 3.1-151.1 ms of solve, 216 B of matrix — rough, dense LU scaled from bench-scale on an i7-1185G7
+```
+
+The first line is exact and is the one to read when a circuit behaves unexpectedly: **unknowns**
+is the matrix dimension, which is the deck's nets *plus* every auxiliary row — a branch current
+per voltage source and inductor, a compiled model's internal nodes, an `idt` accumulator, one row
+per denominator degree of a `laplace_*` filter. A model that costs more rows than you expected
+shows up here rather than as an unexplained slowdown. For a transient the point count is the
+deck's own `tstop/tstep`, which the adaptive step controller only ever adds to (1.0–1.5× on this
+project's decks); for `.ac`/`.noise` it is the exact frequency grid; for `.op` it is one point.
+
+The second line is a **rough bracket**, and the width is the honest part: inside the measured
+range its ends are neighbouring rows of `cargo run --release -p xtask -- bench-scale`, beyond it
+they are the exponent-2 and exponent-3 scalings dense LU sits between, and on top of that sits a
+per-instance model-evaluation term that no matrix dimension can predict. It covers the solve, not
+process start-up or model compilation (~77 ms, independent of circuit size). `docs/validation.md`
+§"The dense-LU circuit-size limit" has the calibration table, what to do when the estimate says
+minutes, and the size at which this simulator stops being the right tool.
+
 ## What one `sim` call does inside
 
 ```
