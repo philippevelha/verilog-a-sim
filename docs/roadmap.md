@@ -4541,6 +4541,32 @@ Measured: `cargo test --workspace` 797 passed (+4); clippy/fmt clean; `cargo xta
 28/28 with every gate's error identical to before; zoo `check models --codegen` 35/35 (+6);
 corpus unchanged.
 
+## 1.0.0 — the executable, run on three operating systems (2026-09-17)
+
+The 1.0 deliverable was never "the source tree builds": it was the compiled `va-cli`,
+tested on machines that are not CI runners. `v1.0.0-rc1` (2026-09-12) published the three
+archives and Windows was verified the same day; the Linux and macOS records arrived
+2026-09-17, closing the last item on `release.txt`'s "Road to 1.0" list. On all three,
+`circuits/rectifier.net` gives 718 points and `V(out) = 4.304467 V` at `t = 2.536873e-4 s` —
+the same digits the source build gives here, which is what an equal point count is for.
+
+Stated rather than rounded up: only the rectifier was run on Linux and macOS, so
+`microring_thermal.net` and `laplace_step.net` have a Windows-only record, and the Linux and
+macOS machines' CPU/OS versions were not captured.
+
+Re-checking the workflow document's numbers at 1.0.0 found one worth keeping: the microring
+deck gives 2013 points from a source build, not the 2015 read off the Windows archive at rc1
+— same at rc1's own commit, in both profiles, peak unmoved, so it is the binary
+(`x86_64-pc-windows-msvc` vs the `-gnu` this machine builds), not the version. Two steps out
+of ~2000 land on the other side of an LTE accept/reject threshold. The criterion now leads
+with the physical quantity for that deck; a check that fails for a reason unrelated to
+correctness teaches people to ignore failures.
+
+Measured at 1.0.0: `cargo test --workspace` 797 passed / 0 failed; clippy and fmt clean;
+`cargo xtask validate` 28/28, convergence 28/28; zoo `check models --codegen` 35/35; corpus
+112/132 (94/99 self-contained) — all unchanged from 0.9.22. What comes after 1.0 is
+[`future_development.md`](future_development.md), sparse solve first.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

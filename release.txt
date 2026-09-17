@@ -10,14 +10,92 @@ Versioning, from 0.9.0 onward:
     are semver and a fourth numeric component is rejected outright (verified: `cargo
     metadata` refuses 0.9.7.1 and accepts 0.9.7+1).
   * Each bump gets a dated entry below with a sentence or two saying what changed.
-  * 1.0.0 is reached when the remaining 1.0 blockers (see the "Road to 1.0" list at
-    the bottom) are closed. Until then the version stays in the 0.9.x range.
+  * 1.0.0 was reached on 2026-09-17, when the last "Road to 1.0" item (the list at the
+    bottom, kept as the record of what it took) closed. From 1.0 on the same shape applies
+    one level up: a feature bumps the minor, a fix the patch.
   * The version lives in the workspace Cargo.toml (`[workspace.package] version`);
     every crate inherits it with `version.workspace = true`. Bump both together —
     the number in this file and the one in Cargo.toml must always agree.
 
 Newest first.
 
+
+1.0.0 - 2026-09-17
+------------------
+**1.0.** The deliverable is the compiled `va-cli` executable, and the last thing between
+`v1.0.0-rc1` and this number was running it on machines that are not CI runners. Done, on
+three: Windows, Linux and macOS, each from its own published rc1 archive.
+
+  **The cross-platform record.** `circuits/rectifier.net` with `models/diode.va` under
+  `--tran`, from the unpacked archive with nothing from a checkout: **718 points and
+  `V(out) = 4.304467 V` at `t = 2.536873e-4 s` on all three platforms** -- digit for digit
+  what the source build gives on the development machine, which is the point of the
+  criterion (the adaptive timestep sequence is deterministic, so an equal point count means
+  the same floating-point environment, not merely a plausible-looking waveform). Machines:
+  Windows on the development machine (i7-1185G7, Windows 11 Pro 10.0.26200, the record first
+  taken at 0.9.20+1), plus a Linux x86-64 machine and an Apple-silicon macOS machine -- the
+  latter two named by their archive's target, `x86_64-unknown-linux-gnu` and
+  `aarch64-apple-darwin` -- whose CPU and OS versions were not captured. docs/workflow.md
+  asks for the full spec; next time it should be kept.
+
+  **What the record does not cover, said rather than rounded up:** docs/workflow.md's test is
+  three decks and only the rectifier was run on Linux and macOS, so `microring_thermal.net`
+  and `laplace_step.net` remain verified on Windows only. The rectifier is the load-bearing
+  one -- lexer, parser, elaboration, AD lowering, MNA assembly, Newton, the transient
+  integrator with LTE control, and the diode model, end to end from a deck -- but two of the
+  three numbers in the workflow document have a one-platform record.
+
+  **Found while re-checking those numbers at 1.0.0, and it is about the criterion itself:**
+  `microring_thermal.net` gives **2013** points here, not the 2015 docs/workflow.md recorded
+  at rc1. Not a regression and not a version drift -- measured, not assumed: the same deck at
+  rc1's own commit (`d80414e`, a worktree build) gives 2013 too, in both debug and release
+  profiles, and the `Popt(drop)` peak is unmoved at 7.871e-4 W. What differs is the binary:
+  the 2015 was read off the **published Windows archive**, which CI builds for
+  `x86_64-pc-windows-msvc`, while every build on this machine targets
+  `x86_64-pc-windows-gnu` (an MSYS `link` shadows MSVC's linker here, which is also why the
+  MSVC side cannot be rebuilt locally to close the loop). Two accepted steps out of ~2000
+  land differently -- an LTE accept/reject decision sitting on a threshold, which different
+  code generation flips.
+
+  So the point-count criterion is sharp on `rectifier.net` -- 718 from four separately
+  compiled binaries (the three CI archives, MSVC/Linux-GNU/Darwin, plus the local GNU source
+  build), which is real evidence -- and brittle on `microring_thermal.net`,
+  whose step sequence sits near a threshold. docs/workflow.md now says so and puts the
+  physical quantity -- the four 787 uW peaks -- first for that deck. A criterion that fails
+  for a reason unrelated to correctness teaches whoever runs it to ignore failures.
+
+  **What 1.0 is.** DC operating point and `.dc` sweep, transient with adaptive timestep and
+  LTE control, small-signal AC, and noise (output, input-referred and per-device
+  attribution), each driven through the real frontend -> codegen -> core pipeline from a
+  SPICE-style deck and each gated against committed QSPICE golden: 28/28, convergence 28/28.
+  All six bring-up-ladder rungs pass. The full Verilog-A grammar is the target and most of it
+  is in -- hierarchy and instantiation, the discipline/nature system including user-defined
+  disciplines and derived natures, contributions, `ddt`/`idt`, the analog control-flow set,
+  analog functions, `genvar`/`generate`, vector nets and ports, array variables, `ddx`, the
+  Laplace and Z filter families, the three noise builtins, analog events (`initial_step`,
+  `final_step`, `cross`, `above`, `timer`) and all 20 compiler directives;
+  `docs/token-reference.md` is the token-by-token record and `docs/validation.md` the
+  registry of every model and deck that reproduces a reference paper or result. Five
+  disciplines carry real physics, not just electrical: thermal, mechanical, optical
+  (photonic models validated against three papers) and traffic (Bellemans 2002).
+
+  **Known at 1.0, and shipped that way on purpose.** `absdelta`, `last_crossing` and compound
+  triggers mixing a step event with a scheduled one are **refused**, with what/why/instead --
+  no corpus model needs them. `absdelay` in transient is refused for the same reason (a pure
+  delay is not an ODE; it needs a history buffer). `$rdist_*` is refused -- this engine has no
+  RNG. `I(<port>)` inside case/loops, and vector ports in `I(<port>)`, are narrower than the
+  LRM. The linear solve is dense LU: ~200 unknowns is interactive for a 10 000-point
+  transient, ~800 is half an hour, beyond ~1 000 it is impractical (docs/validation.md has
+  the table). A cross-domain plot puts W and A on the zero line -- `--report` one unit at a
+  time is the answer. There is no `.gitattributes`, so line endings are whatever each
+  checkout's `autocrlf` makes them. What comes after 1.0 is `docs/future_development.md`,
+  sparse solve first.
+
+  Measured at this version, on the development machine: `cargo test --workspace` 797 passed /
+  0 failed / 0 ignored; `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D
+  warnings` clean; `cargo xtask validate` 28/28 golden, convergence 28/28; zoo `check models
+  --codegen` 35/35; corpus `check external --codegen` 112/132 module-declaring files, 94/99
+  self-contained; 21 Quarto tutorials; 40 zoo models, 49 decks, 29 committed golden files.
 
 0.9.22 - 2026-09-15
 -------------------
@@ -1174,12 +1252,12 @@ rather than asserted.
   record.
 
 
-Road to 1.0
------------
-Tracked in docs/roadmap.md; listed here so the release log is self-contained. Re-derived
-2026-09-11 from the repository as it stands, after the user set the 1.0 deliverable: the
-compiled `va-cli` executable, tested on several different computers and operating systems.
-Ordered by what to do first.
+Road to 1.0 -- closed at 1.0.0 (2026-09-17)
+------------------------------------------
+Kept as the record of what the number took. Re-derived 2026-09-11 from the repository as it
+stood, after the user set the 1.0 deliverable: the compiled `va-cli` executable, tested on
+several different computers and operating systems. Every item below is closed or was closed
+deliberately as "ship 1.0 this way"; what comes next is docs/future_development.md.
 
   A. Make the 1.0 claim checkable (release plumbing)
 
@@ -1198,12 +1276,12 @@ Ordered by what to do first.
       and attaches per-platform archives (binary + models/ + circuits/ + docs/workflow.md) to
       a GitHub release. Written, not yet exercised: the first `v*` tag is its test.
       (0.9.15+1)
-  [~] Ship and test the executable across platforms. `v1.0.0-rc1` tagged 2026-09-12 and all
-      three archives published (0.9.20+1). **Windows: done** from the archive on the dev
-      machine, results identical to the source build. **Linux and macOS: archives built by
-      CI, not yet run on a real machine** -- the three commands and the pass criteria are in
-      docs/workflow.md; record machine, OS and outcomes here when done. That record is the
-      last thing between rc1 and 1.0.0.
+  [x] Ship and test the executable across platforms. `v1.0.0-rc1` tagged 2026-09-12 and all
+      three archives published (0.9.20+1); Windows verified from the archive that day.
+      **Closed 2026-09-17**: the rc1 archives run on a Windows, a Linux and a macOS machine,
+      `circuits/rectifier.net` giving the same 718 points and `V(out) = 4.304467 V` at
+      `t = 2.536873e-4 s` on all three. The record, and the two decks it does not cover, are
+      in the 1.0.0 entry. (1.0.0)
   [x] Rewrite docs/workflow.md for the binary -- done in 0.9.20+1 against the real rc1
       archive layout; `cargo run` stays as the developer path.
   [x] cargo-deny's first verdict. deny.toml was written at bootstrap and never run until
@@ -1234,7 +1312,7 @@ Ordered by what to do first.
       implemented; `timescale`, `celldefine`, `default_nettype`, `unconnected_drive`
       recognised and reported; `pragma protect` refused; `default_nodetype` rejected. 0.9.19:
       `line`, with the line map that makes every parse error name the original file:line.
-  [ ] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
+  [x] Analog events: `absdelta`, `last_crossing`, and compound triggers mixing a step event
       with a scheduled one (`initial_step or cross(...)`) are refused, with what/why/instead.
       **Ship 1.0 with these refused** -- no corpus file needs them and the refusal is
       logged in the standard shape. Listed so the 1.0 entry states them as known.

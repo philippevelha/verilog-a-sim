@@ -12,7 +12,7 @@ and `docs/token-reference.md` records construct by construct how far the impleme
 from it — to automatically differentiated model instances and solves them with an MNA / Newton
 core: DC operating point and sweep, transient, AC and noise, validated against QSPICE to stated
 tolerances. Multi-physics comes from Verilog-A disciplines: the model zoo has electrical,
-thermal, mechanical and optical examples solved in one system.
+thermal, mechanical, optical and traffic examples solved in one system.
 
 ```
  Verilog-A source                         circuit netlist
@@ -32,6 +32,21 @@ thermal, mechanical and optical examples solved in one system.
                                                                     │
                                                               [va-harness] ─► vs QSPICE
 ```
+
+## Install
+
+Since 1.0 the deliverable is a compiled executable — no Rust toolchain, no checkout. Download
+the archive for your platform from
+[releases](https://github.com/philippevelha/verilog-a-sim/releases), unpack it, and run from
+inside the unpacked directory:
+
+```bash
+./va-cli sim circuits/rectifier.net --model models/diode.va --tran     # use .\va-cli.exe on Windows
+```
+
+Each archive carries `va-cli`, the model zoo (`models/`), every example deck (`circuits/`) and
+`workflow.md`. x86-64 Linux, x86-64 Windows and Apple-silicon macOS; `docs/workflow.md` says
+what a good run looks like on each.
 
 ## Build & test
 
@@ -55,11 +70,11 @@ cargo run -p va-cli -- sim circuits/rectifier.net --model models/diode.va --tran
 ```
 
 There is no separate elaborate step — `sim` lexes, parses, elaborates, differentiates and
-solves in one invocation. `docs/workflow.md` walks through it and says what changes at 1.0,
-when the deliverable becomes a compiled `va-cli` executable tested across platforms.
+solves in one invocation. `docs/workflow.md` walks through it, from either the release
+archive or the source tree.
 
 See `CLAUDE.md` for the project constitution and `docs/` for the frozen interfaces,
 architecture, thesis map, and validation plan; `validation.md` is the registry of every model
 and circuit that reproduces a reference paper or reference result, by domain; `release.txt`
-carries the release log and the road to 1.0, and `docs/future_development.md` what comes after
-it.
+carries the release log and the road to 1.0 that closed with it, and
+`docs/future_development.md` what comes after.

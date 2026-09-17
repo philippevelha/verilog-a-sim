@@ -187,13 +187,21 @@ recorded in `release.txt`'s entry for the release. The test is the three command
    on the development machine (the adaptive timestep sequence is deterministic, so a
    different point count means a different floating-point environment, which is itself a
    finding to report).
-2. `microring_thermal.net`: 2015 points, `Popt(drop)` peaking at `7.87e-4 W` four times.
+2. `microring_thermal.net`: `Popt(drop)` peaks at `7.87e-4 W` four times — that is the check.
+   The point count is **2013** from a source build on the development machine and **2015**
+   from the rc1 Windows archive; both are right. This deck's step sequence sits on an LTE
+   accept/reject threshold that the two builds land on opposite sides of: measured at 1.0.0,
+   rc1's own commit gives 2013 in both debug and release under this machine's GNU toolchain,
+   peak unmoved, so it is the binary and not the version — the MSVC side cannot be rebuilt
+   here to confirm which instruction differs. Read the peak, and treat a count within a
+   couple of points as a pass.
 3. `laplace_step.net`: `V(out)` at `t ≈ 1.0e-3 s` is `1 − e^{−1} = 0.632…`, matching the
    QSPICE golden the repository carries to `5e-6`.
 
 Report the machine (CPU, OS and version), the archive name, and the three outcomes. The
 2026-09-12 entry for rc1 has the first such record (Windows 11, the development machine,
-from the archive rather than the checkout).
+from the archive rather than the checkout); the 1.0.0 entry has the cross-platform one —
+criterion 1 on Windows, Linux and macOS, criteria 2 and 3 on Windows only.
 
 ## Developing: the `cargo run` path
 
