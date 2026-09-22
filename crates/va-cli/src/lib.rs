@@ -413,11 +413,14 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
     // Pass 2: elaborate each module against every module in the library.
     let mut modules = Vec::with_capacity(library.len());
     for ast in &library {
-        let m = va_frontend::elaborate::elaborate_with_library_and_disciplines(
+        // The include path goes to elaboration too, not just to the preprocessor: a
+        // `$table_model` data file is found the same way a `` `include `` is.
+        let m = va_frontend::elaborate::elaborate_unit(
             ast,
             &library,
             &disciplines,
             &natures,
+            &include_dirs,
         )
         .with_context(|| format!("elaborating module `{}`", ast.name))?;
         modules.push(m);
@@ -1095,6 +1098,22 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
     // Each successfully-parsed file's own modules, as a `library` index range — avoids cloning
     // every `ModuleAst` a second time just to report per-file status.
     let mut file_ranges: Vec<(&str, std::ops::Range<usize>, Vec<String>)> = Vec::new();
+    // Where a `$table_model` data file is looked for: every directory this group's files live
+    // in, plus their scan roots — the same set `parse_file` hands the preprocessor, merged
+    // because a group is elaborated as one library and any of its files may name the table.
+    let mut include_dirs: Vec<std::path::PathBuf> = Vec::new();
+    for (file, root) in group {
+        for d in std::path::Path::new(file.as_str())
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .into_iter()
+            .chain(std::iter::once(root.clone()))
+        {
+            if !d.as_os_str().is_empty() && !include_dirs.contains(&d) {
+                include_dirs.push(d);
+            }
+        }
+    }
     for (file, root) in group {
         // Settle "is this a checkable model at all?" *before* preprocessing or parsing it.
         // Whether an include fragment's body happens to preprocess says nothing about this
@@ -1142,11 +1161,12 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         }
         let mut all_ok = true;
         for ast in &library[range] {
-            match va_frontend::elaborate::elaborate_with_library_and_disciplines(
+            match va_frontend::elaborate::elaborate_unit(
                 ast,
                 &library,
                 &disciplines,
                 &natures,
+                &include_dirs,
             ) {
                 Ok(m) => {
                     // Scanning a model library is the case where a double-scaling `$mfactor` is

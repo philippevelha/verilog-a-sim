@@ -2776,7 +2776,11 @@ fn builtin_is_bias_free(builtin: Builtin) -> bool {
         | Builtin::Atan
         | Builtin::Asinh
         | Builtin::Acosh
-        | Builtin::Atanh => true,
+        | Builtin::Atanh
+        // A `$table_model` lookup is a pure function of its argument: the table itself was read
+        // at elaboration and folded into the arguments as constants, so nothing about it can
+        // change between evaluations.
+        | Builtin::TableModel => true,
         // Fixed for the life of the instance: `$temperature`/`$vt` read the temperature the
         // model was built at, and `$mfactor` the module's multiplicity. See
         // `static_prefix_len`'s caveat about what happens if `$temperature` is ever re-sourced

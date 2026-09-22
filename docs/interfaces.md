@@ -314,6 +314,46 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > revision) and already had the right shape. This change only gives `va-codegen` a truthful
 > answer to give it.
 
+> ### 2026-09-22 — `Builtin::TableModel`, and why its table rides in the argument list
+>
+> `$table_model(x, "file" [, "control"])` (LRM §9.21) adds one `Builtin` variant and **no new
+> `Expr` shape**. The table is carried flattened into the call's own arguments:
+>
+> ```text
+> [ x , control , x0 , y0 , x1 , y1 , … ]
+> ```
+>
+> — the lookup expression, a packed control code, then the `(x, y)` pairs sorted by ascending
+> `x`. That is the same trade `Builtin::NoiseTable` made on 2026-08-04 and for the same reason:
+> an `Expr` variant carrying a `Vec<(f64, f64)>` would have to be taught to every arena walk,
+> clone, const-folder and pretty-printer in the frontend and the codegen, while `Const`
+> arguments to an ordinary `Call` are already handled by all of them. The cost is that the
+> layout is a convention rather than a type, which is why it is spelled out on the variant.
+>
+> **The control code is packed into one `Const`, not three.** `interp*100 + lo*10 + hi`, with
+> interpolation 1 = linear / 2 = discrete and each extrapolation 1 = constant / 2 = linear. The
+> LRM's own defaults — linear interpolation, linear extrapolation both ends — are `122`. A
+> single value because the table that follows is variadic: anything not at a fixed index *ahead*
+> of it would have to be found by counting backwards from the end.
+>
+> **What crossed the boundary, and what deliberately did not.** The file is read during
+> elaboration and only its numbers reach the IR; no path, no file handle, no reader. That is
+> what the LRM describes (§9.21.1: the data source's state "is captured on the first call") and
+> it is what keeps Interface β's contract intact — `ModelInstance::load` stays a pure function
+> of `(x, ctx, committed state)`, so Newton may re-enter it, the LTE controller may throw a step
+> away, and §5's finite-difference checks may perturb `x`, all without a lookup re-reading a
+> file underneath them.
+>
+> **Interface β is unchanged.** A table lookup stamps through the existing residual/Jacobian
+> channel like any other expression; its derivative is the segment slope, and it is
+> finite-difference gated per §5. The one thing a consumer must know is that the slope at a knot
+> is one-sided (the right-hand segment), which is the same subgradient convention `abs` uses at
+> zero — a piecewise-linear function has no derivative there and something has to be chosen.
+>
+> **What elaboration gained.** `elaborate_unit` takes the compilation unit's include path, so a
+> data file is resolved exactly as an `` `include `` is. The older entry points still exist and
+> pass an empty path, which resolves a relative name against the working directory alone.
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models

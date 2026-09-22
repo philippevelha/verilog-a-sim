@@ -303,6 +303,12 @@ impl Dual {
         Dual::from_parts(value, self.grad.map(scale), self.grad_ddt.map(scale))
     }
 
+    /// [`Self::chain`] for a caller outside this impl: a value and its derivative w.r.t.
+    /// `self`, combined by the chain rule with the zero-channel guard `chain` documents.
+    pub fn chain_public(&self, value: f64, dvalue: f64) -> Dual {
+        self.chain(value, dvalue)
+    }
+
     /// `exp`.
     pub fn exp(&self) -> Dual {
         let e = self.value.exp();
@@ -1315,6 +1321,82 @@ fn eval_call(
         // `$mfactor` (LRM 6.3.6), read from the module clone this instance was built from. A
         // number the instantiation fixed, so no gradient and no state -- and deliberately not
         // folded at elaboration, where the instance is not yet known.
+        // `$table_model(x, "file" [, "control"])` — LRM §9.21, one dimension, table folded into
+        // the arguments at elaboration (`va_ir::Builtin::TableModel` documents the layout).
+        //
+        // The derivative is the segment's own slope, which is what makes this safe to put in a
+        // circuit equation at all: a lookup whose Jacobian did not match its value would not
+        // error, it would converge Newton to the wrong answer. At a knot the function has a
+        // kink and the slope is one-sided; the right-hand segment is taken, the same
+        // subgradient convention `abs` uses at zero.
+        Builtin::TableModel => {
+            let x = arg(0)?;
+            let code = arg(1)?.value as u32;
+            let (interp, lo_extrap, hi_extrap) = (code / 100, (code / 10) % 10, code % 10);
+            // Pairs start after the lookup expression and the control code.
+            let pairs = &args[2..];
+            if pairs.len() < 4 || !pairs.len().is_multiple_of(2) {
+                return Err(unsupported(
+                    "table_model needs at least two (x, y) pairs after its control code",
+                ));
+            }
+            let n = pairs.len() / 2;
+            let px = |i: usize| -> Result<f64, CodegenError> { Ok(eval(ctx, pairs[2 * i])?.value) };
+            let py =
+                |i: usize| -> Result<f64, CodegenError> { Ok(eval(ctx, pairs[2 * i + 1])?.value) };
+
+            let xv = x.value;
+            let (x0, xn) = (px(0)?, px(n - 1)?);
+            // Which segment, and whether this is an extrapolation off either end. Linear scan
+            // rather than a binary search: the tables this is for are tens of points, and the
+            // arena reads are the cost here rather than the comparisons.
+            let seg = if xv <= x0 {
+                None // below
+            } else if xv >= xn {
+                Some(n - 1) // at or above the top point
+            } else {
+                let mut k = 0;
+                while k + 1 < n && px(k + 1)? <= xv {
+                    k += 1;
+                }
+                Some(k)
+            };
+
+            let (value, slope) = match seg {
+                // Below the first point: extrapolate by the control's lower rule.
+                None => {
+                    if lo_extrap == 1 {
+                        (py(0)?, 0.0) // constant: the endpoint value
+                    } else {
+                        let m = (py(1)? - py(0)?) / (px(1)? - px(0)?);
+                        (py(0)? + (xv - x0) * m, m)
+                    }
+                }
+                Some(k) if k == n - 1 && xv >= xn => {
+                    if hi_extrap == 1 {
+                        (py(n - 1)?, 0.0)
+                    } else {
+                        let m = (py(n - 1)? - py(n - 2)?) / (px(n - 1)? - px(n - 2)?);
+                        (py(n - 1)? + (xv - xn) * m, m)
+                    }
+                }
+                Some(k) => {
+                    let (xa, xb, ya, yb) = (px(k)?, px(k + 1)?, py(k)?, py(k + 1)?);
+                    if interp == 2 {
+                        // `D`: closest point. A step function — flat between knots, so the
+                        // derivative is zero everywhere it is defined. Newton sees a locally
+                        // constant contribution, which is the honest linearization of a lookup
+                        // that genuinely does not move.
+                        let nearer = if (xv - xa) <= (xb - xv) { ya } else { yb };
+                        (nearer, 0.0)
+                    } else {
+                        let m = (yb - ya) / (xb - xa);
+                        (ya + (xv - xa) * m, m)
+                    }
+                }
+            };
+            x.chain_public(value, slope)
+        }
         Builtin::Mfactor => Dual::constant(ctx.module.multiplicity()),
         // `@(final_step)`'s, likewise. `true` in every static analysis, and in transient only at
         // the last accepted timepoint — which the driver has to solve twice to know.
@@ -1932,6 +2014,155 @@ mod tests {
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - crate::VT).abs() < 1e-12);
         assert!(!d.depends_on_unknowns());
+    }
+
+    /// Build a one-node module whose only expression is `$table_model(V(n0), …)` over the
+    /// given `(x, y)` pairs and control code, and evaluate it at `xv`.
+    ///
+    /// Mirrors what elaboration produces: the lookup expression, the packed control code, then
+    /// the sorted table flattened into `Const` arguments (`va_ir::Builtin::TableModel`).
+    #[cfg(test)]
+    fn eval_table(pairs: &[(f64, f64)], code: f64, xv: f64) -> Dual {
+        use va_ir::{Access, AccessKind, Branch, Builtin, Expr, Module, NodeDecl, NodeId};
+
+        let mut m = Module::new("tbl");
+        for name in ["n0", "gnd"] {
+            m.nodes.push(NodeDecl {
+                name: name.into(),
+                discipline: va_ir::Discipline::Electrical,
+                abstol: None,
+                access: None,
+                units: None,
+            });
+        }
+        m.branches.push(Branch {
+            p: NodeId(0),
+            n: NodeId(1),
+        });
+        let probe = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: va_ir::BranchId(0),
+        }));
+        let mut args = vec![probe, m.push_expr(Expr::Const(code))];
+        for &(px, py) in pairs {
+            args.push(m.push_expr(Expr::Const(px)));
+            args.push(m.push_expr(Expr::Const(py)));
+        }
+        let call = m.push_expr(Expr::Call(Builtin::TableModel, args));
+
+        let x = [xv];
+        let terminals = [0usize, usize::MAX];
+        let ctx = Ctx {
+            module: &m,
+            params: &[],
+            x: &x,
+            terminals: &terminals,
+            vt: crate::VT,
+            temp: crate::TEMP,
+            analysis: va_abi::ANALYSIS_DC,
+            events_fired: &[],
+            state_prev: &[],
+            state_next: RefCell::new(Vec::new()),
+            state_slots: HashMap::new(),
+            bound_step: Cell::new(None),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
+            branch_current_slots: HashMap::new(),
+            idt_slots: HashMap::new(),
+            mixed_branch_potential_used: RefCell::new(HashSet::new()),
+            flow_current_totals: RefCell::new(HashMap::new()),
+            validating: false,
+        };
+        eval(&ctx, call).expect("table_model evaluates")
+    }
+
+    /// The table's own points come back exactly, and between them the value is the straight
+    /// line joining its neighbours.
+    #[test]
+    fn table_model_interpolates_linearly_between_its_points() {
+        let t = [(0.0, 10.0), (1.0, 20.0), (3.0, 0.0)];
+        for &(x, y) in &t {
+            let got = eval_table(&t, 122.0, x).value;
+            assert!((got - y).abs() < 1e-12, "at knot x={x}: {got} != {y}");
+        }
+        // Midpoint of each segment.
+        assert!((eval_table(&t, 122.0, 0.5).value - 15.0).abs() < 1e-12);
+        assert!((eval_table(&t, 122.0, 2.0).value - 10.0).abs() < 1e-12);
+    }
+
+    /// §5: the lookup's derivative must agree with a central finite difference.
+    ///
+    /// This is the rule that makes a table safe to put in a circuit equation. A lookup whose
+    /// Jacobian did not match its value would not error — it would converge Newton to the wrong
+    /// answer, the failure mode three separate bugs took this week.
+    ///
+    /// Knots are avoided on purpose: the function has a kink there, so no derivative exists and
+    /// a finite difference straddling one is meaningless. That is a property of piecewise-linear
+    /// interpolation, not of this implementation, and it is why the one-sided convention is
+    /// written down in the evaluator.
+    #[test]
+    fn table_model_derivative_matches_finite_difference() {
+        let t = [(0.0, 10.0), (1.0, 20.0), (3.0, 0.0), (4.0, -5.0)];
+        let h = 1e-6;
+        for &x in &[0.3, 0.75, 1.5, 2.6, 3.4] {
+            let d = eval_table(&t, 122.0, x);
+            let fd = (eval_table(&t, 122.0, x + h).value - eval_table(&t, 122.0, x - h).value)
+                / (2.0 * h);
+            let scale = fd.abs().max(d.grad_at(0).abs()).max(1e-9);
+            assert!(
+                (d.grad_at(0) - fd).abs() / scale < 1e-6,
+                "at x={x}: analytic {} vs FD {fd}",
+                d.grad_at(0)
+            );
+        }
+    }
+
+    /// Extrapolation follows the control string at each end independently, which is the whole
+    /// reason the LRM lets you give two characters.
+    #[test]
+    fn table_model_extrapolates_per_end_as_the_control_says() {
+        let t = [(0.0, 10.0), (1.0, 20.0)]; // slope +10
+                                            // `"1CL"` -> constant below, linear above: 111 would be C/C, 122 L/L, 112 C/L.
+        let cl = 112.0;
+        assert!(
+            (eval_table(&t, cl, -5.0).value - 10.0).abs() < 1e-12,
+            "C below"
+        );
+        assert!(
+            (eval_table(&t, cl, -5.0).grad_at(0)).abs() < 1e-12,
+            "C is flat"
+        );
+        assert!(
+            (eval_table(&t, cl, 3.0).value - 40.0).abs() < 1e-12,
+            "L above"
+        );
+        assert!(
+            (eval_table(&t, cl, 3.0).grad_at(0) - 10.0).abs() < 1e-12,
+            "L keeps the slope"
+        );
+        // And the mirror image, `"1LC"` = 121.
+        let lc = 121.0;
+        assert!(
+            (eval_table(&t, lc, -5.0).value - (-40.0)).abs() < 1e-12,
+            "L below"
+        );
+        assert!(
+            (eval_table(&t, lc, 3.0).value - 20.0).abs() < 1e-12,
+            "C above"
+        );
+    }
+
+    /// `D` is closest-point lookup: a step function, flat between knots, so its derivative is
+    /// zero wherever one exists. Newton sees a locally constant contribution, which is the
+    /// honest linearization of a lookup that genuinely does not move.
+    #[test]
+    fn table_model_discrete_lookup_is_a_step_with_no_slope() {
+        let t = [(0.0, 10.0), (1.0, 20.0)];
+        let d = 222.0; // interp 2 = discrete, linear extrapolation both ends
+        assert_eq!(eval_table(&t, d, 0.2).value, 10.0, "nearer the low point");
+        assert_eq!(eval_table(&t, d, 0.8).value, 20.0, "nearer the high point");
+        assert_eq!(eval_table(&t, d, 0.2).grad_at(0), 0.0);
+        assert_eq!(eval_table(&t, d, 0.8).grad_at(0), 0.0);
     }
 
     #[test]

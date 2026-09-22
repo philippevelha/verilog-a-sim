@@ -1,0 +1,39 @@
+// An NTC thermistor whose resistance comes from a measured table, not a formula.
+//
+// The point of the example: `$table_model` (LRM §9.21) is how a user brings their own data
+// into a model without needing the simulator to grow a function for it. The lookup is an
+// ordinary expression -- it can be differentiated, it can appear in a contribution, and here
+// it is driven by a *node voltage*, so the table participates in the circuit equations rather
+// than being read once at setup.
+//
+// The thermal port `t` carries a temperature in kelvin as its potential, so the resistance is
+// looked up against whatever the rest of the circuit imposes there. Drive it with a voltage
+// source and sweep it and you get the R(T) curve straight back out.
+//
+//   cargo run -p va-cli -- sim circuits/thermistor_rt.net --model models/thermistor.va
+//
+// Control string `"1CL"`: linear interpolation, **constant** extrapolation below the table
+// (the resistance stops climbing below 233 K rather than running off to infinity) and
+// **linear** above it.
+//
+// Both halves of that are a judgement, which is what a control string is for. The LRM's own
+// default is linear at both ends; here that would keep extrapolating the steep low-temperature
+// slope downwards without limit. And the `L` chosen for the top end is not free either -- the
+// last segment's slope is -16.35 ohm/K, so a linear extrapolation reaches **zero resistance at
+// about 398 K** and goes negative beyond it. That is 25 K past the end of the data, which is
+// the honest answer to "what does this device do at 400 K": the table does not say, and `C`
+// would have been the safer lie. Widen the table if you need to go there.
+`include "disciplines.vams"
+
+module thermistor(p, n, t);
+    inout p, n;
+    electrical p, n;
+    inout t;
+    electrical t;
+
+    // Self-heating is out of scope here: `t` is read, never driven, so the table is a pure
+    // function of an externally imposed temperature.
+    analog begin
+        I(p, n) <+ V(p, n) / $table_model(V(t), "thermistor.tbl", "1CL");
+    end
+endmodule

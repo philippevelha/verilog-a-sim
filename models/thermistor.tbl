@@ -1,0 +1,16 @@
+* Resistance of an NTC thermistor against temperature.
+*
+* A `$table_model` data file: one `x y` pair per line, whitespace or comma separated.
+* Blank lines and `*`, `#` or `//` comments are skipped. The rows need not be sorted --
+* elaboration sorts them, and rejects two rows that give one x two different y values.
+*
+*  T (K)    R (ohm)
+   233.15   96300
+   253.15   35300
+   273.15   14100
+   293.15    6050
+   298.15    5000
+   313.15    2810
+   333.15    1400
+   353.15     740
+   373.15     413

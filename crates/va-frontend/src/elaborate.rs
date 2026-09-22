@@ -152,9 +152,49 @@ pub fn elaborate_with_library_and_disciplines(
         &HashSet::new(),
         disciplines,
         natures,
+        &[],
     )
 }
 
+/// [`elaborate_with_library_and_disciplines`], plus the directories a data file named by
+/// `$table_model` is resolved against — the same include path the preprocessor used.
+///
+/// Elaboration reads that file, which is where the LRM puts it: §9.21.1 says the data source's
+/// state "is captured on the first call", so reading once and folding the table into the IR is
+/// what the standard describes, and it is what keeps `ModelInstance::load` a pure function of
+/// `(x, ctx, committed state)` — a lookup that touched the filesystem per evaluation would
+/// break Newton's re-evaluation of the same point.
+///
+/// # Errors
+///
+/// As [`elaborate_with_library_and_disciplines`], plus any failure to find, read or parse a
+/// `$table_model` data file.
+pub fn elaborate_unit(
+    ast: &ModuleAst,
+    library: &[ModuleAst],
+    disciplines: &HashMap<String, DisciplineDecl>,
+    natures: &HashMap<String, NatureDecl>,
+    include_dirs: &[std::path::PathBuf],
+) -> Result<Module, FrontendError> {
+    elaborate_inner(
+        ast,
+        library,
+        &[],
+        &HashMap::new(),
+        &HashSet::new(),
+        disciplines,
+        natures,
+        include_dirs,
+    )
+}
+
+// Eight parameters, one over the lint's limit, and every one of them is a distinct piece of
+// context an elaboration needs: the module, its library, the instantiation stack, the parent's
+// overrides, the ports it left unconnected, the file's disciplines and natures, and the include
+// path a `$table_model` resolves against. Bundling them into a struct would move the same eight
+// values one indirection away without making any of them optional. The same judgement the other
+// three sites in this workspace made.
+#[allow(clippy::too_many_arguments)]
 fn elaborate_inner(
     ast: &ModuleAst,
     library: &[ModuleAst],
@@ -163,6 +203,7 @@ fn elaborate_inner(
     unconnected_ports: &HashSet<String>,
     disciplines: &HashMap<String, DisciplineDecl>,
     natures: &HashMap<String, NatureDecl>,
+    include_dirs: &[std::path::PathBuf],
 ) -> Result<Module, FrontendError> {
     let mut e = Elaborator {
         ast,
@@ -172,6 +213,7 @@ fn elaborate_inner(
         unconnected_ports,
         disciplines,
         natures,
+        include_dirs,
         out: Module::new(&ast.name),
         nodes: HashMap::new(),
         params: HashMap::new(),
@@ -288,6 +330,10 @@ struct Elaborator<'a> {
     /// empty when elaborated via [`elaborate`]/[`elaborate_with_library`] (no preamble
     /// available). File-scoped, shared unchanged across every submodule this elaboration
     /// recursively inlines (§ module instantiation).
+    /// Directories a `$table_model` data file is resolved against — the compilation unit's
+    /// include path. Empty when elaborated through an entry point that has none, in which case
+    /// a relative data-file name is resolved against the process's working directory alone.
+    include_dirs: &'a [std::path::PathBuf],
     disciplines: &'a HashMap<String, DisciplineDecl>,
     /// Parsed `nature...endnature` blocks, keyed by name — the `disciplines`'s bound
     /// `potential`/`flow` names are looked up here to resolve a net's `abstol`.
@@ -1536,6 +1582,108 @@ impl Elaborator<'_> {
             // genvar indices resolve directly; a runtime index (§ dynamic vector-net/array-
             // variable indexing) expands into a `Select` chain — see `lower_indexed_var_read`.
             ExprAst::IndexedIdent(name, index) => return self.lower_indexed_var_read(name, index),
+            // `$table_model(x, "file" [, "control"])` — piecewise lookup of user data, LRM
+            // §9.21. The table is read **here**, at elaboration, and folded into the arena as
+            // ordinary `Const` arguments (see `va_ir::Builtin::TableModel` for the layout).
+            //
+            // Reading it once is not a shortcut: §9.21.1 says the data source's state "is
+            // captured on the first call to the table model function", and doing it at
+            // elaboration is what keeps `ModelInstance::load` a pure function of
+            // `(x, ctx, committed state)`. A lookup that touched the filesystem per evaluation
+            // would be re-run by every Newton iteration and by every rejected timestep, and
+            // would break both.
+            ExprAst::SysFunc { name, args } if name == "table_model" => {
+                let mut rest = args.as_slice();
+                let Some((&input, tail)) = rest.split_first() else {
+                    return Err(elab(
+                        "$table_model needs at least a lookup expression and a data source, as \
+                         `$table_model(x, \"file.tbl\")`"
+                            .to_string(),
+                    ));
+                };
+                rest = tail;
+
+                // The data source is the first *string* argument. Anything between it and the
+                // lookup expression is a further independent variable, i.e. a second dimension.
+                let source_at = rest
+                    .iter()
+                    .position(|&r| matches!(self.ast.expr(r), ExprAst::Str(_)));
+                let Some(source_at) = source_at else {
+                    return Err(FrontendError::Refused(
+                        crate::Refusal::new(
+                            "`$table_model` with an array data source",
+                            "the LRM (§9.21) lets the table come from arrays as well as a file, \
+                             and only the file form is implemented. Reading the arrays would \
+                             mean folding a run-time array into a compile-time table, which is \
+                             a different feature from the one this implements",
+                        )
+                        .instead(
+                            "write the points to a file, one `x y` pair per line, and name it: \
+                             `$table_model(x, \"data.tbl\")`. For a noise PSD, `noise_table` \
+                             already takes an inline list",
+                        )
+                        .tracking("docs/token-reference.md, `$table_model`"),
+                    ));
+                };
+                if source_at > 0 {
+                    return Err(FrontendError::Refused(
+                        crate::Refusal::new(
+                            format!(
+                                "`$table_model` with {} lookup expressions, i.e. a \
+                                 {}-dimensional table",
+                                source_at + 1,
+                                source_at + 1
+                            ),
+                            "only one dimension is implemented. The LRM's recursive isoline \
+                             scheme (§9.21) would return a number for any lookup point, and a \
+                             wrong number here is indistinguishable from a right one — the \
+                             model would simply converge to the wrong answer",
+                        )
+                        .instead(
+                            "reduce the data to one independent variable, or interpolate the \
+                             other dimensions in Verilog-A and pass the result as the single \
+                             lookup expression",
+                        )
+                        .tracking("docs/token-reference.md, `$table_model`"),
+                    ));
+                }
+
+                let ExprAst::Str(file) = self.ast.expr(rest[source_at]) else {
+                    unreachable!("position() matched Str");
+                };
+                let control =
+                    match rest.get(source_at + 1) {
+                        None => None,
+                        Some(&r) => match self.ast.expr(r) {
+                            ExprAst::Str(c) => Some(c.clone()),
+                            _ => return Err(elab(
+                                "$table_model's third argument is the control string and must be \
+                                 a string literal, as `\"1CC\"`"
+                                    .to_string(),
+                            )),
+                        },
+                    };
+                if rest.len() > source_at + 2 {
+                    return Err(elab(
+                        "$table_model takes at most three arguments in one dimension: the lookup \
+                         expression, the data file, and the control string"
+                            .to_string(),
+                    ));
+                }
+
+                let code = table_control_code(control.as_deref())?;
+                let table = read_table_file(file, self.include_dirs)?;
+
+                let x = self.lower_expr(input)?;
+                let mut call_args = Vec::with_capacity(2 + table.len() * 2);
+                call_args.push(x);
+                call_args.push(self.out.push_expr(Expr::Const(f64::from(code))));
+                for (xi, yi) in table {
+                    call_args.push(self.out.push_expr(Expr::Const(xi)));
+                    call_args.push(self.out.push_expr(Expr::Const(yi)));
+                }
+                Expr::Call(Builtin::TableModel, call_args)
+            }
             ExprAst::SysFunc { name, args } if name == "simparam" => {
                 // `$simparam(param_name [, default])` (LRM §9.18). Three outcomes, and which one
                 // applies is decided **here**, by whether this simulator knows the name:
@@ -3748,6 +3896,9 @@ impl Elaborator<'_> {
             &unconnected,
             self.disciplines,
             self.natures,
+            // An instantiated submodule resolves its own `$table_model` files against the same
+            // include path as its parent: they came from one compilation unit.
+            self.include_dirs,
         )?;
 
         if connections.len() != sub.ports.len() {
@@ -4523,6 +4674,217 @@ fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
         "idt" => Builtin::Idt,
         other => return Err(elab(format!("unknown function `{other}`"))),
     })
+}
+
+/// Pack `$table_model`'s control string into the integer `va_ir::Builtin::TableModel` carries.
+///
+/// LRM §9.21.2. A sub-string is `[interp][extrap [higher_extrap]]`: interpolation from Table
+/// 9-30, then one extrapolation character for both ends or two for the lower and higher end
+/// separately. **The LRM's defaults are linear interpolation and linear extrapolation**, which
+/// is `122` here — not the constant extrapolation a reader might assume, and the reason an
+/// omitted control string is spelled out rather than left to a local convention.
+///
+/// # Errors
+///
+/// Refuses, rather than approximating, everything in the tables this does not implement:
+/// `I` (ignore column), `2`/`3` (quadratic and cubic splines), `E` (error on extrapolation),
+/// the `;selector` for a multi-column file, and a comma-separated list, which is a second
+/// dimension.
+fn table_control_code(control: Option<&str>) -> Result<u32, FrontendError> {
+    let Some(raw) = control else {
+        // LRM defaults: linear interpolation, linear extrapolation at both ends.
+        return Ok(122);
+    };
+    let raw = raw.trim();
+    if raw.contains(';') {
+        return Err(FrontendError::Refused(
+            crate::Refusal::new(
+                format!("`$table_model` control string `{raw}`, which selects a dependent column"),
+                "the `;N` selector picks one of several dependent columns in a file, and this                  reads exactly one `x y` pair per line. Ignoring it would silently return the                  wrong column",
+            )
+            .instead("give the file a single dependent column and drop the `;N`")
+            .tracking("docs/token-reference.md, `$table_model`"),
+        ));
+    }
+    if raw.contains(',') {
+        return Err(FrontendError::Refused(
+            crate::Refusal::new(
+                format!(
+                    "`$table_model` control string `{raw}`, which describes more than one                      dimension"
+                ),
+                "a comma-separated control string gives one sub-string per independent                  variable, and only one dimension is implemented",
+            )
+            .instead("give a single sub-string, as `\"1CL\"`")
+            .tracking("docs/token-reference.md, `$table_model`"),
+        ));
+    }
+    let mut chars = raw.chars();
+    let mut next = chars.next();
+
+    let interp = match next {
+        Some('1') => {
+            next = chars.next();
+            1
+        }
+        Some('D') | Some('d') => {
+            next = chars.next();
+            2
+        }
+        Some(c @ ('2' | '3')) => {
+            return Err(FrontendError::Refused(
+                crate::Refusal::new(
+                    format!(
+                        "`$table_model` interpolation `{c}` ({} spline)",
+                        if c == '2' { "quadratic" } else { "cubic" }
+                    ),
+                    "only linear (`1`) and closest-point (`D`) are implemented. Substituting                      linear would not be a rounder answer but a different function — a spline                      and a chord agree only at the knots, and the derivative the Jacobian needs                      differs everywhere between them",
+                )
+                .instead("write `1` for linear or `D` for closest-point, or supply a finer table")
+                .tracking("docs/token-reference.md, `$table_model`"),
+            ));
+        }
+        Some(c @ ('I' | 'i')) => {
+            return Err(FrontendError::Refused(
+                crate::Refusal::new(
+                    format!("`$table_model` interpolation `{c}` (ignore this column)"),
+                    "marking a column ignored only means something for the multi-column source                      this does not read",
+                )
+                .instead("give the file one independent and one dependent column")
+                .tracking("docs/token-reference.md, `$table_model`"),
+            ));
+        }
+        // No interpolation character: the LRM's default is linear, and what follows is the
+        // extrapolation.
+        _ => 1,
+    };
+
+    let extrap = |c: Option<char>| -> Result<u32, FrontendError> {
+        match c {
+            Some('C') | Some('c') => Ok(1),
+            Some('L') | Some('l') => Ok(2),
+            Some('E') | Some('e') => Err(FrontendError::Refused(
+                crate::Refusal::new(
+                    "`$table_model` extrapolation `E`",
+                    "`E` makes a lookup outside the table a fatal error, and this engine has no                      channel to raise one from inside a model evaluation — `load` may not fail.                      Treating it as `C` would turn the diagnostic the model asked for into                      silence at exactly the point it wanted to be told",
+                )
+                .instead(
+                    "write `C` to clamp at the endpoint or `L` to continue the end slope, or                      widen the table to cover the range",
+                )
+                .tracking("docs/token-reference.md, `$table_model`"),
+            )),
+            Some(other) => Err(elab(format!(
+                "`{other}` is not a $table_model extrapolation character; the LRM's Table 9-31 \
+                 has `C` (constant), `L` (linear) and `E` (error)"
+            ))),
+            None => Ok(2), // LRM default
+        }
+    };
+
+    let lo = extrap(next)?;
+    let hi = match chars.next() {
+        // One character: it applies to both ends.
+        None => lo,
+        c => extrap(c)?,
+    };
+    if chars.next().is_some() {
+        return Err(elab(format!(
+            "$table_model control string `{raw}` has more than the three characters LRM §9.21.2 \
+             allows in one dimension"
+        )));
+    }
+    Ok(interp * 100 + lo * 10 + hi)
+}
+
+/// Read a `$table_model` data file into `(x, y)` pairs, sorted by ascending `x`.
+///
+/// One pair per line, whitespace- or comma-separated; blank lines and `*`/`//`/`#` comments are
+/// skipped. The file is looked for relative to each include directory in turn, then as given.
+///
+/// The LRM's own rules on duplicates are enforced here (§9.21.1): two points with the same `x`
+/// *and* the same `y` are a duplicate and are dropped, while two with the same `x` and a
+/// different `y` are an error — the function would otherwise have two values at one point.
+///
+/// # Errors
+///
+/// If the file cannot be found or read, if a line is not two numbers, if fewer than two
+/// distinct points survive (the LRM's minimum), or on a contradictory duplicate.
+fn read_table_file(
+    name: &str,
+    include_dirs: &[std::path::PathBuf],
+) -> Result<Vec<(f64, f64)>, FrontendError> {
+    let mut tried = Vec::new();
+    let text = include_dirs
+        .iter()
+        .map(|d| d.join(name))
+        .chain(std::iter::once(std::path::PathBuf::from(name)))
+        .find_map(|p| {
+            let r = std::fs::read_to_string(&p).ok();
+            if r.is_none() {
+                tried.push(p.display().to_string());
+            }
+            r
+        });
+    let Some(text) = text else {
+        return Err(elab(format!(
+            "$table_model cannot read `{name}`; looked in {}",
+            tried.join(", ")
+        )));
+    };
+
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(['*', '#']) || line.starts_with("//") {
+            continue;
+        }
+        let cols: Vec<&str> = line
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|t| !t.is_empty())
+            .collect();
+        let (Some(x), Some(y)) = (cols.first(), cols.get(1)) else {
+            return Err(elab(format!(
+                "{name}:{}: `{line}` is not an `x y` pair",
+                i + 1
+            )));
+        };
+        if cols.len() > 2 {
+            return Err(elab(format!(
+                "{name}:{}: {} columns, but only a single dependent column is implemented — the \
+                 LRM's `;N` selector that would choose among them is refused",
+                i + 1,
+                cols.len()
+            )));
+        }
+        let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.parse::<f64>()) else {
+            return Err(elab(format!(
+                "{name}:{}: `{line}` is not two numbers",
+                i + 1
+            )));
+        };
+        pts.push((x, y));
+    }
+
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(pts.len());
+    for (x, y) in pts {
+        match out.last() {
+            Some(&(px, py)) if px == x && py == y => continue, // LRM: drop the duplicate
+            Some(&(px, py)) if px == x => {
+                return Err(elab(format!(
+                    "{name}: two points at x = {x} with different values ({py} and {y}); a table \
+                     cannot have two answers at one point (LRM §9.21.1)"
+                )))
+            }
+            _ => out.push((x, y)),
+        }
+    }
+    if out.len() < 2 {
+        return Err(elab(format!(
+            "{name}: a $table_model table needs at least two distinct points, found {}",
+            out.len()
+        )));
+    }
+    Ok(out)
 }
 
 /// Map a system-function name (no leading `$`) to a [`Builtin`].

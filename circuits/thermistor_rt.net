@@ -1,0 +1,16 @@
+* NTC thermistor resistance against temperature, read from a table.
+*
+* VT imposes a temperature (in kelvin) on the thermistor's thermal port; V1 puts 1 V across
+* the device, so I(V1) is exactly the conductance and 1/|I(V1)| is the resistance. Sweeping VT
+* walks the table, interpolating between its rows.
+*
+*   cargo run -p va-cli -- sim circuits/thermistor_rt.net --model models/thermistor.va \
+*       --report V1 --plot docs/examples/thermistor_rt.svg
+*
+* Expected, straight off the table: 5000 ohm at 298.15 K and 1400 ohm at 333.15 K, with the
+* rows in between interpolated linearly.
+V1 a   gnd DC 1
+VT tmp gnd DC 298.15
+X1 a   gnd tmp thermistor
+.dc VT 233.15 373.15 1.0
+.end

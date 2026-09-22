@@ -830,6 +830,35 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.2.6) — `$table_model`: the LRM's own answer to "let users bring
+> their own function".** One dimension, file data source, LRM §9.21. It arrived as the first
+> concrete step of a design question — whether this simulator could support user-defined `$`
+> functions at all — and it is the step that needs no new contract: a table is *data*, so it
+> cannot break the AD invariant the way a black-box callback would.
+>
+> Three decisions worth keeping. **The file is read at elaboration**, which is what §9.21.1
+> describes and what keeps `ModelInstance::load` pure — Newton re-enters it, the LTE controller
+> discards steps, and §5's finite-difference checks perturb `x`, none of which survive a lookup
+> that re-reads a file. **The table rides flattened into the call's arguments**, the trade
+> `noise_table` established, so no arena walk, clone or const-folder had to learn a new `Expr`
+> shape (Interface α change, in `docs/interfaces.md`). **The derivative is the segment slope and
+> is FD-gated**, because a lookup whose Jacobian disagreed with its value would not error — it
+> would converge Newton to the wrong answer, which is the shape of three separate bugs this week.
+>
+> Refused rather than approximated, each naming an alternative: N-D, the array source, `2`/`3`
+> splines, `I`, `E`, and the `;N` column selector. `E` is the interesting one — it makes an
+> out-of-range lookup a fatal error and `load` may not fail, so it cannot be honoured at all
+> rather than merely being unimplemented.
+>
+> **Evidence.** 836 tests (4 new, including the FD gate). `xtask validate` 28/28. Example:
+> `models/thermistor.va` + `.tbl` + `circuits/thermistor_rt.net`, checked against the table's own
+> rows — exact at every knot, 5630.0000 Ω interpolated at 295.15 K against a hand-computed
+> 5630.0000, both extrapolation rules verified.
+>
+> **Still open in this family:** the array data source and N-D, and — separately — the Rust
+> registry sketched alongside this, which is what a *bias-dependent* user function would need
+> (value plus partials, or the chain rule breaks).
+>
 > **Now closed (2026-09-22, v1.2.5) — the LTE controller could not integrate a capacitor pinned
 > by a fast-slewing source.** The open item v1.2.4's entry left, and what stopped a PSP103 CMOS
 > inverter from switching. A transient starts from the operating point, which carries no

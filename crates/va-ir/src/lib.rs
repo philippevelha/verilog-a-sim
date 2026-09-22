@@ -1035,6 +1035,34 @@ pub enum Builtin {
     /// and because a flag would have to be encoded as a magic `Const` among real data
     /// (Interface α change, 2026-08-05 — see `docs/interfaces.md`).
     NoiseTableLog,
+    /// `$table_model(x, "file" [, "control"])` — piecewise lookup of user data (LRM §9.21).
+    ///
+    /// **One dimension, file source.** Everything else the LRM allows is refused at elaboration
+    /// rather than approximated: a second input expression (N-D), the array data source, the
+    /// `I` ignore-column and `2`/`3` spline interpolations, `E` error-extrapolation, and the
+    /// `;selector` for a file with several dependent columns. Each refusal names what to write
+    /// instead.
+    ///
+    /// Carries its table **flattened into ordinary `Const` arguments**, the same trade
+    /// [`Builtin::NoiseTable`] makes and for the same reason: every existing arena walk, clone
+    /// and pretty-print keeps working with no change at all. The layout is
+    ///
+    /// ```text
+    /// [ x , control , x0 , y0 , x1 , y1 , … ]
+    /// ```
+    ///
+    /// — the lookup expression, then a folded control code, then the `(x, y)` pairs **sorted by
+    /// ascending x** and duplicate-checked at elaboration (the LRM makes the sort the
+    /// simulator's job, and doing it once here keeps every consumer a straight read).
+    ///
+    /// `control` packs the three LRM control characters as `interp*100 + lo*10 + hi`, with
+    /// `interp` 1 = linear / 2 = discrete and each extrapolation 1 = constant / 2 = linear.
+    /// So the LRM's own defaults — linear interpolation, linear extrapolation at both ends —
+    /// are `122`, and `"1CC"` is `111`. A packed integer rather than three arguments because
+    /// the table that follows is variadic, so anything not at a fixed index ahead of it would
+    /// have to be found by counting backwards (Interface α change, 2026-09-22 — see
+    /// `docs/interfaces.md`).
+    TableModel,
 }
 
 // ---------------------------------------------------------------------------------------

@@ -195,11 +195,12 @@ pub fn compile_named(
     )?;
     let mut modules = Vec::with_capacity(asts.len());
     for ast in &asts {
-        modules.push(elaborate::elaborate_with_library_and_disciplines(
+        modules.push(elaborate::elaborate_unit(
             ast,
             &asts,
             &disciplines,
             &natures,
+            include_dirs,
         )?);
     }
     Ok(CompiledDesign {
