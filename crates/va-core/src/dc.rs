@@ -296,13 +296,27 @@ mod tests {
 
         // The bare solver still fails — which is what makes this test discriminating rather
         // than merely green.
-        assert!(
-            matches!(
-                crate::newton::solve(&insts, dim, NewtonConfig::default()),
-                Err(CoreError::Singular)
+        //
+        // Asserted as "fails with something the rescue would retry", not as one named variant.
+        // *Which* way a 20-diode chain at 20 V comes apart is a property of the platform's
+        // floating point, not of this code: at a generous iteration budget it overflows the
+        // factorization (`Singular`, what `newton.rs`'s sibling test sees at `max_iters: 2000`),
+        // but at the default budget of 100 it can equally run out of iterations first
+        // (`NoConvergence`) or report a non-finite row on the way. This test pinned `Singular`
+        // and went red on macOS for exactly that reason while Linux and Windows stayed green —
+        // a real portability bug in the assertion, not in the solver. The precondition the
+        // rescue actually needs is `worth_a_gmin_retry`, so that is what is checked.
+        let bare = crate::newton::solve(&insts, dim, NewtonConfig::default());
+        match &bare {
+            Err(e) => assert!(
+                worth_a_gmin_retry(e),
+                "the fixture fails with `{e}`, which the rescue would not retry — this test \
+                 would then prove nothing about `gmin`"
             ),
-            "the fixture must still defeat plain Newton, or the rescue below proves nothing"
-        );
+            Ok(_) => panic!(
+                "the fixture must still defeat plain Newton, or the rescue below proves nothing"
+            ),
+        }
 
         let op = operating_point(&insts, dim, NewtonConfig::default())
             .expect("the gmin rescue should carry this");

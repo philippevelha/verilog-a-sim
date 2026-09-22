@@ -772,9 +772,15 @@ mod tests {
             max_iters: 2000,
             ..NewtonConfig::default()
         };
+        // The claim is the one in this test's name — plain Newton *cannot* — so that is what is
+        // asserted. On this machine it comes apart as `Singular` (the comment above records why,
+        // and that it was re-verified when `NonFinite` was added), but which of the three ways a
+        // 20-diode chain at 20 V overflows is a property of the platform's floating point, not
+        // of this solver: its sibling in `dc.rs` pinned `Singular` and went red on macOS while
+        // Linux and Windows stayed green.
         assert!(
-            matches!(solve(&insts, dim, cfg_no_gmin), Err(CoreError::Singular)),
-            "expected plain Newton to hit overflow regardless of iteration budget"
+            solve(&insts, dim, cfg_no_gmin).is_err(),
+            "expected plain Newton to fail regardless of iteration budget"
         );
 
         let cfg_with_gmin = NewtonConfig {
