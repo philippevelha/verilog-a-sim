@@ -2053,8 +2053,33 @@ pub fn solve_transient(
         quantities,
         ..
     } = build_instances(net, compiled)?;
-    let x0 = initial_solution(net, dim, &currents);
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
+    // Where the integration starts, and it is not a detail. SPICE solves the DC operating
+    // point first and integrates from there unless the deck says `UIC`; this project did the
+    // opposite unconditionally until v1.3.0, and `xtask gen-golden` carried a matching
+    // workaround that forced `UIC` onto every deck it handed QSPICE.
+    //
+    // The cold start is not merely different, it is unusable for a compact model. At `x = 0` a
+    // MOSFET's charge is not consistent with any solution, so the first step has to move all of
+    // it — and halving the timestep makes the required current *larger*, so the step controller
+    // can only shrink until it underflows. Every CMC MOSFET in `external/code` failed at
+    // `t = 0` this way, and none of them could ever have run.
+    let x0 = if net.tran_uic {
+        initial_solution(net, dim, &currents)
+    } else {
+        // The sources read their own `t = 0` value here (a waveform's DC value *is* its value
+        // at zero — see `va_netlist::parser`), so this is the operating point the run actually
+        // starts from rather than some other bias.
+        let (op, _) =
+            va_core::dc::operating_point_with_events(&refs, dim, NewtonConfig::default(), None)
+                .map_err(|e| name_non_finite_row(e.into(), &quantities))
+                .context(
+                    "the operating-point solve that precedes a transient run failed; add `UIC` \
+                     to the `.tran` card to start from the zero vector and each element's `IC=` \
+                     instead",
+                )?;
+        op.x
+    };
 
     va_transient::integrator::run(&refs, dim, x0, cfg)
         .map_err(|e| name_non_finite_row(e.into(), &quantities))
@@ -4545,6 +4570,113 @@ R2 out gnd 1000
         }
     }
 
+    /// Where a transient starts, stated as the difference it makes.
+    ///
+    /// The same RC driven by a *constant* 5 V source: from the operating point the capacitor is
+    /// already charged and the run is a flat line, and from rest (`UIC`) it climbs the charging
+    /// curve. Both are correct answers to different questions, which is exactly why the deck has
+    /// to say which one it is asking — and why this project's old behaviour, always starting
+    /// from rest with no way to say otherwise, was a trap rather than a simplification.
+    ///
+    /// The two readings differ by the whole 5 V swing, so nothing here turns on a tolerance.
+    #[test]
+    fn a_transient_starts_from_the_operating_point_unless_the_deck_says_uic() {
+        let deck = |uic: &str| {
+            format!("V1 in  gnd DC 5\nR1 in  out 1000\nC1 out gnd 1e-6\n.tran 20u 5m{uic}\n.end\n")
+        };
+        let settle = |uic: &str| -> (f64, f64) {
+            let net = va_netlist::parser::parse(&deck(uic)).expect("parses");
+            let w = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+            let out = net
+                .node_order
+                .iter()
+                .position(|n| n == "out")
+                .expect("`out` is a net");
+            let first = w.x.first().expect("at least one point")[out];
+            let last = w.x.last().expect("at least one point")[out];
+            (first, last)
+        };
+
+        let (op_first, op_last) = settle("");
+        assert!(
+            (op_first - 5.0).abs() < 1e-6,
+            "from the operating point the capacitor starts charged: V(out) = {op_first}"
+        );
+        assert!(
+            (op_last - 5.0).abs() < 1e-6,
+            "…and stays there: V(out) = {op_last}"
+        );
+
+        let (uic_first, uic_last) = settle(" UIC");
+        assert!(
+            uic_first.abs() < 1e-9,
+            "with UIC the capacitor starts at rest: V(out) = {uic_first}"
+        );
+        // 5 ms is exactly 5τ (R = 1 kΩ, C = 1 µF), so the closed form is 5·(1 − e⁻⁵) =
+        // 4.96631…, not 5 — checking against the RC law rather than against the rail is what
+        // makes this an assertion about the physics instead of about a tolerance.
+        let expected = 5.0 * (1.0 - (-5.0_f64).exp());
+        assert!(
+            (uic_last - expected).abs() < 1e-3,
+            "…and charges along the RC curve over 5τ: V(out) = {uic_last}, want {expected}"
+        );
+    }
+
+    /// A compact MOSFET cannot be integrated from the zero vector at all, which is the failure
+    /// that forced this change.
+    ///
+    /// At `x = 0` the model's charge is not consistent with any solution, so the first step has
+    /// to move all of it — and **halving the timestep makes the required current larger, not
+    /// smaller**, so the step controller can only shrink until it underflows. Every CMC MOSFET
+    /// in `external/code` failed this way at `t = 0`, on every release before v1.3.0.
+    ///
+    /// The fixture is a hand-written stand-in rather than one of those files, because
+    /// `external/` is gitignored and a test may not depend on it. What it reproduces is the
+    /// property that matters: charge on a node that is *not* zero at `x = 0`.
+    #[test]
+    fn a_model_whose_charge_is_nonzero_at_the_origin_needs_the_operating_point() {
+        const SRC: &str = "
+module offsetcap(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real c = 1e-9;
+  parameter real q0 = 1e-6;
+  parameter real g = 1e-3;
+  analog begin
+    // Charge that does not vanish at V = 0 — a compact model's flatband and overlap terms
+    // behave this way, and it is what makes the origin an inconsistent starting state.
+    I(p, n) <+ ddt(c * V(p, n) + q0);
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let deck = |uic: &str| {
+            format!(
+                "V1 in gnd DC 1\nR1 in out 100\nX1 out gnd offsetcap\n.tran 1u 100u{uic}\n.end\n"
+            )
+        };
+
+        let net = va_netlist::parser::parse(&deck("")).expect("parses");
+        let from_op = solve_transient(&net, &design.modules, Integration::Trapezoidal);
+        assert!(
+            from_op.is_ok(),
+            "from the operating point this must integrate: {from_op:?}"
+        );
+
+        // And the old behaviour, still reachable through `UIC`, is the one that could not.
+        // Kept as an assertion rather than a comment so that if the integrator ever learns to
+        // start from rest here, this test says so instead of quietly passing.
+        let net_uic = va_netlist::parser::parse(&deck(" UIC")).expect("parses");
+        let from_rest = solve_transient(&net_uic, &design.modules, Integration::Trapezoidal);
+        assert!(
+            from_rest.is_err(),
+            "starting from rest was expected to fail on a charge that is non-zero at the \
+             origin; if that stopped being true, this test no longer shows why the default \
+             had to change"
+        );
+    }
+
     /// End-to-end DC sweep (ladder rung 2): compile `models/diode.va` and sweep
     /// `circuits/diode_iv.net`'s `V1` from 0 to 0.6 V, checking every point against the
     /// closed-form Shockley diode law the model itself implements — `Id(V) =
@@ -4812,7 +4944,7 @@ endmodule
         let net = va_netlist::parser::parse(
             "V1 in gnd DC 1
 M1 out in gnd resonant
-.tran 1u 1.5m
+.tran 1u 1.5m UIC
 .end
 ",
         )
@@ -5609,7 +5741,7 @@ endmodule
         let net = va_netlist::parser::parse(
             "V1 a gnd DC 4
 X1 a gnd abt
-.tran 10u 1m
+.tran 10u 1m UIC
 .end
 ",
         )
@@ -5655,7 +5787,7 @@ endmodule
         let net = va_netlist::parser::parse(
             "V1 a gnd DC 4
 X1 a gnd fst
-.tran 10u 1m
+.tran 10u 1m UIC
 .end
 ",
         )
@@ -5764,7 +5896,7 @@ endmodule
             "V1 a gnd DC 1
 X1 a mid itr
 C1 mid gnd 1u
-.tran 10u 1m
+.tran 10u 1m UIC
 .end
 ",
         )
@@ -6121,7 +6253,7 @@ endmodule
         let net = va_netlist::parser::parse(
             "V1 a gnd DC 4
 X1 a gnd bts
-.tran 10u 1m
+.tran 10u 1m UIC
 .end
 ",
         )

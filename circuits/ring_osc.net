@@ -21,5 +21,5 @@ R3a vcc b3 3.5Meg
 R3b vcc c3 21k
 Q3  c3  b3 gnd bjt
 C3  c3  b1 10n
-.tran 100u 0.2
+.tran 100u 0.2 UIC
 .end

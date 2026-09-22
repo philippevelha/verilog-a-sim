@@ -5,5 +5,5 @@
 * amps through it, seeded on its own branch-current row rather than across its terminals.
 R1 out gnd 10
 L1 out gnd 1e-3 IC=1e-3
-.tran 1e-6 5e-4
+.tran 1e-6 5e-4 UIC
 .end

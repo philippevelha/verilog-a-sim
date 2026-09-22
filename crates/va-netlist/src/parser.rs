@@ -48,6 +48,14 @@
 //!   — `va_cli::WaveformSource`); the two facts stay consistent because the DC value *is* the
 //!   waveform's value at `t = 0`, which is what a DC or AC solve reads. SPICE's optional
 //!   trailing `SIN` parameters (delay, damping, phase) are not parsed.
+//! - `.tran <tstep> <tstop> [UIC]` requests a transient run. **`UIC` decides where the
+//!   integration starts**: with it, from the zero vector plus each reactive element's `IC=`
+//!   (SPICE's "use initial conditions"); without it, from the DC operating point, which is
+//!   SPICE's default and this project's since v1.3.0. The distinction is not cosmetic — an RC
+//!   step driven by a constant source is a flat line from the operating point and a charging
+//!   curve from rest, and a compact MOSFET cannot integrate at all from the zero vector,
+//!   because its charge there is not consistent with any solution and shrinking the timestep
+//!   makes the first step's current larger rather than smaller.
 //! - `.dc <source> <start> <stop> <step>` (§ ladder rung 2) sweeps one voltage source's DC
 //!   value, solving a fresh operating point at each step ([`crate::DcSweep`]) — only a linear
 //!   sweep of a single source, no nested/multi-source sweeps and no `.dc` with no arguments
@@ -212,9 +220,16 @@ fn parse_card(net: &mut Netlist, body: &str) {
     if net.analysis == AnalysisCard::Unspecified {
         net.analysis = card;
     }
-    // `.tran <tstep> <tstop>` — the two SPICE-standard positional values transient needs.
-    // Anything past them (a start time, `UIC`, …) isn't parsed in v0.
+    // `.tran <tstep> <tstop> [UIC]` — the two SPICE-standard positional values transient
+    // needs, plus the flag that decides where the integration starts. A start time or `tmax`
+    // between them is still not parsed.
     if card == AnalysisCard::Tran {
+        // `UIC` may sit anywhere after the positional values, which is where every SPICE
+        // dialect puts it; it is matched case-insensitively as a whole token, so a node or
+        // model happening to contain the letters cannot trip it.
+        if toks.iter().skip(1).any(|t| t.eq_ignore_ascii_case("uic")) {
+            net.tran_uic = true;
+        }
         if let (Some(tstep), Some(tstop)) = (
             toks.get(1).and_then(|v| parse_value(v)),
             toks.get(2).and_then(|v| parse_value(v)),
@@ -738,6 +753,51 @@ fn parse_value(tok: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `UIC` on the `.tran` card is what decides where a transient starts, so the parser has to
+    /// see it — anywhere after the positional values, in any case, and only as a whole token.
+    #[test]
+    fn tran_uic_is_recognised_as_a_whole_token_in_any_case() {
+        for deck in [
+            "V1 a 0 DC 1
+.tran 1u 1m UIC
+.end
+",
+            "V1 a 0 DC 1
+.tran 1u 1m uic
+.end
+",
+            "V1 a 0 DC 1
+.tran 1u 1m 0 2u Uic
+.end
+",
+        ] {
+            let net = parse(deck).expect("parses");
+            assert_eq!(net.tran, Some((1e-6, 1e-3)));
+            assert!(net.tran_uic, "UIC not seen in: {deck}");
+        }
+        // Absent means absent — the default is the operating-point start.
+        let net = parse(
+            "V1 a 0 DC 1
+.tran 1u 1m
+.end
+",
+        )
+        .expect("parses");
+        assert!(!net.tran_uic);
+        // …and a node or model whose name merely contains the letters must not trip it.
+        let net = parse(
+            "Vuic a 0 DC 1
+.tran 1u 1m
+.end
+",
+        )
+        .expect("parses");
+        assert!(
+            !net.tran_uic,
+            "a device name containing `uic` is not the flag"
+        );
+    }
 
     #[test]
     fn value_suffixes() {

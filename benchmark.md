@@ -249,11 +249,22 @@ Worth knowing before wiring up a real card.
    `branch_currents()`, `sizing()` and the solve. Fixed cost, not per-point, but it is most of a
    single `.op`'s time on a large model.
 4. **Nested `.dc`** (`dc VC 0 2 0.01 VB 0.65 0.9 0.05`) is unsupported; `DcSweep` names one source.
-5. **The sweep's cold-start fallback is untested.** Continuation retries a failed point from the
+5. **A capacitor pinned by a fast-slewing source underflows the timestep controller.**
+   `divided_difference_error_ratio` error-controls every unknown, including a voltage source's
+   branch-current row — and that row is discontinuous across the first step, because the
+   operating point carries no reactive current while the first transient point carries
+   `C·dV/dt`. A discontinuity's divided difference does not shrink with `h`, so every step is
+   rejected. Threshold matches `lte_abstol` exactly. This is what still blocks a PSP103 CMOS
+   inverter transient; the fix is to error-control the reactive states rather than every row.
+6. **The sweep's cold-start fallback is untested.** Continuation retries a failed point from the
    origin, so convergence can only improve — but constructing a circuit where a warm start fails and
    a cold one succeeds is a research question, not a fixture, and no test exercises that path.
 
-*Closed since this file was written:* `@(above)` in a swept deck fired on "already positive" at
+*Closed since this file was written:* a transient started from the zero vector unconditionally,
+which made every CMC MOSFET unrunnable — at `x = 0` a compact model's charge is inconsistent and
+shrinking the timestep makes the first step's current *larger*. Fixed in v1.3.0 by taking SPICE's
+default (operating point first, `UIC` to opt out); BSIM4, BSIM-BULK 107, BSIM-SOI, PSP103 and
+EKV2.6 all integrate now, and no golden needed regenerating. Also `@(above)` in a swept deck fired on "already positive" at
 every point rather than on a crossing from the point before, because `solve_dc_sweep` passed `None`
 where `dc::operating_point_with_events` wanted the previous point's site values. Fixed in v1.2.3;
 it is the only change in this series that moves results, and the only one `xtask validate` could

@@ -7,5 +7,5 @@
 V1 in  gnd  DC 5
 R1 in  out  1000
 C1 out gnd  1e-6
-.tran 20u 5m
+.tran 20u 5m UIC
 .end

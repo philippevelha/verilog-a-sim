@@ -10,5 +10,5 @@ V1 in  gnd  DC 5
 R1 in  a    10
 L1 a   out  1e-3
 C1 out gnd  1e-6
-.tran 1e-6 1e-3
+.tran 1e-6 1e-3 UIC
 .end

@@ -20,5 +20,5 @@ X3   c3  c4   v2  v3  qr    section
 X4   c4  cb   v3  v4        section
 Xb   cb                     boundary dens=38
 X9   c1  c2   c3  c4  wm wr tts   tts_monitor
-.tran 1 12600
+.tran 1 12600 UIC
 .end

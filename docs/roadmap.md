@@ -830,6 +830,39 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.3.0) — a transient starts from the operating point, and the CMC
+> MOSFETs can run at all.** `.tran` started from the zero vector unconditionally, with no way to
+> ask for anything else, where SPICE solves the DC operating point first unless the deck says
+> `UIC`. That is not a stylistic difference: at `x = 0` a compact model's charge is not
+> consistent with any solution, so the first step must move all of it, and **halving the
+> timestep makes the required current larger rather than smaller** — the step controller can only
+> shrink to underflow. BSIM4, BSIM-BULK 107, BSIM-SOI, PSP103 and EKV2.6 all failed at `t = 0`
+> on every release before this one. All five integrate now; checked against v1.1.1 that this is
+> pre-existing and not a regression.
+>
+> Nothing caught it because the zoo's transient gates are RC/RLC/diode circuits whose zero start
+> *is* consistent (a capacitor at 0 V holds no charge), and the zoo's own MOSFET carries no
+> charge at all.
+>
+> **No goldens were regenerated, and none needed to be.** The flip broke exactly six gates —
+> `rc_step`, `rc_discharge`, `rlc_ring`, `rl_decay`, `ring_osc`, `laplace_step` — and those six
+> are precisely the decks whose physics is a from-rest response, flat from an operating point.
+> They meant `UIC` all along; saying so restores their committed goldens *identically*, because
+> `gen-golden` had been generating them with QSPICE's `UIC` forced on. That workaround is now
+> gone too: it mirrors the deck instead of overriding it.
+>
+> **Evidence.** 830 tests (3 new). `xtask validate` 28/28 with every figure identical to
+> v1.2.3's — for a change to where every transient begins, that is the claim worth making.
+>
+> **Found while testing it, still open, and not a codegen problem:** a capacitor pinned by a
+> source slewing fast at `t = 0` underflows, because the operating point has no reactive current
+> and the first transient point has `C·dV/dt`, so the source's branch-current row is
+> discontinuous across the first step — and `divided_difference_error_ratio` error-controls
+> *every* unknown including that row, where a discontinuity's divided difference does not shrink
+> with `h`. Confirmed LTE and not Newton by instrumenting both paths; the threshold matches
+> `lte_abstol` exactly (at 6e9 V/s, `C = 1e-16` passes, `C = 2e-16` fails). Minimal repro has no
+> Verilog-A in it. The fix belongs in T4: error-control the reactive states, not every row.
+>
 > **Now closed (2026-09-22, v1.2.3) — `@(above)` in a `.dc` sweep fired at every point past its
 > threshold, not once on the crossing.** The open item v1.2.2's entry left, and the only change
 > in this series that moves a result. LRM §5.10.2 has `above(expr)` trigger when `expr`

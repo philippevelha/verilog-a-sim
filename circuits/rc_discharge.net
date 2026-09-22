@@ -5,5 +5,5 @@
 * semantics — no DC operating point is solved first), exactly as QSPICE treats it.
 R1 out gnd 1000
 C1 out gnd 1e-6 IC=5
-.tran 5e-6 5e-3
+.tran 5e-6 5e-3 UIC
 .end

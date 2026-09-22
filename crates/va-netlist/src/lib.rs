@@ -62,6 +62,16 @@ pub struct Netlist {
     /// transient run then has nothing to go on and `va-cli` reports that clearly rather than
     /// guessing a default.
     pub tran: Option<(f64, f64)>,
+    /// Whether the `.tran` card carried SPICE's `UIC` flag: **use initial conditions**, i.e.
+    /// skip the DC operating-point solve and start the integration from the zero vector plus
+    /// each reactive element's own `IC=`.
+    ///
+    /// Without it the transient starts from the operating point, which is SPICE's default and
+    /// this project's since v1.3.0. A deck that wants to watch something charge *from rest* —
+    /// an RC step out of a constant source, a capacitor discharging from its `IC=`, an
+    /// oscillator that would otherwise sit at its unstable DC equilibrium — has to say `UIC`,
+    /// because from the operating point those runs are flat lines.
+    pub tran_uic: bool,
     /// `.dc <source> <start> <stop> <step>` sweep spec, if a DC-sweep card was present and every
     /// value parsed (§ ladder rung 2). `None` for a deck with no `.dc` card, one whose tokens
     /// didn't parse, or a plain `.op` card — those solve a single operating point instead.

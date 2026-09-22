@@ -20,5 +20,5 @@ L1  p    gnd  1e-3
 L2  s    gnd  4e-3
 R2  s    gnd  1000
 K1  L1   L2   0.9
-.tran 1e-7 2e-4
+.tran 1e-7 2e-4 UIC
 .end

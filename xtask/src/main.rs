@@ -869,18 +869,34 @@ fn strip_instance_params(line: &str) -> String {
         .join(" ")
 }
 
-/// Force a `.tran` deck to cold-start from the zero vector, matching this project's own
-/// `va-transient` convention (`va-cli::solve_transient`'s doc comment: no `.ic`/`UIC` support,
-/// so a transient run always starts from `x=0`). QSPICE, like standard SPICE, otherwise computes
-/// the DC operating point first and starts the transient integration from *there* instead —
-/// confirmed empirically, not assumed: an unmodified `circuits/rc_step.net` run through QSPICE
-/// reported `V(out)` already at its settled ~5 V for the *entire* 5 ms window, not climbing the
-/// RC charging curve from 0, and `cargo xtask validate` genuinely failed against it (caught the
-/// same way the earlier title-line bug was, by sanity-checking the regenerated golden against
-/// the netlist's own hand-derived expectation rather than trusting a clean `gen-golden` exit).
-/// Seeds every reactive (`C`/`L`) element's own `IC=0` device parameter and appends `UIC` to the
-/// `.tran` card — SPICE's standard mechanism for skipping the initial operating-point solve.
+/// Give QSPICE the same starting point this project's own run will use.
+///
+/// **This used to force a cold start onto every deck**, because `va-transient` had no `UIC`
+/// support and always started from `x = 0`, where QSPICE — like standard SPICE — solves the DC
+/// operating point first. The mismatch was real and was caught empirically rather than assumed:
+/// an unmodified `circuits/rc_step.net` run through QSPICE reported `V(out)` already at its
+/// settled ~5 V for the *entire* 5 ms window, not climbing the RC charging curve from 0.
+///
+/// Since v1.3.0 the deck says which it wants, so this no longer decides anything: it mirrors
+/// the deck's own `.tran … UIC` onto QSPICE and otherwise leaves the deck alone, letting both
+/// simulators start from the operating point. A deck *with* `UIC` additionally gets `IC=0` on
+/// every reactive element that does not name its own initial condition, because that is what
+/// `va_cli::initial_solution` supplies and QSPICE will not infer it.
+///
+/// The reason this has to follow the deck rather than be forced either way: `UIC` shifts
+/// QSPICE's own `time` variable by ~1e-7 s (see `QSPICE_TRAN_BEHAVIORAL_TRANSLATIONS`), so a
+/// deck whose model reads `$abstime` must not be given it — and those are exactly the decks
+/// that do not ask for it.
 fn cold_start_tran_deck(deck: &str) -> String {
+    // The deck's own `.tran` card decides. Anything else would reintroduce the mismatch this
+    // function exists to remove, in the opposite direction.
+    let wants_uic = deck.lines().any(|line| {
+        let l = line.trim_start().to_ascii_lowercase();
+        l.starts_with(".tran") && l.split_whitespace().any(|t| t == "uic")
+    });
+    if !wants_uic {
+        return deck.to_string();
+    }
     let mut out = String::new();
     for line in deck.lines() {
         let toks: Vec<&str> = line.split_whitespace().collect();

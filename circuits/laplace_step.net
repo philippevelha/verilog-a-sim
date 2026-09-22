@@ -17,5 +17,5 @@
 * was the honest half of implement-or-refuse, and this is the other half.
 V1 in  gnd  DC 1
 M1 out in  gnd  laplace_lowpass
-.tran 20u 4m
+.tran 20u 4m UIC
 .end

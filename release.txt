@@ -20,6 +20,67 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.3.0 - 2026-09-22
+------------------
+**A transient now starts from the DC operating point, as SPICE does, unless the deck says
+`UIC`.** It used to start from the zero vector plus each element's `IC=`, unconditionally, with
+no way to ask for anything else — and `cargo xtask gen-golden` carried a matching workaround
+that forced `UIC` onto every deck it handed QSPICE, because the two had to be made to agree
+somehow.
+
+  **This was not a stylistic difference. It made every CMC MOSFET unrunnable in transient.** At
+  `x = 0` a compact model's charge is not consistent with any solution, so the first step has to
+  move all of it — and halving the timestep makes the required current *larger*, not smaller, so
+  the step controller can only shrink until it underflows. BSIM4, BSIM-BULK 107, BSIM-SOI,
+  PSP103 and EKV2.6 all failed at `t = 0` on every release before this one, and none of them
+  could ever have run. All five integrate now. Verified against v1.1.1 that this is pre-existing
+  and not a regression from this week's work.
+
+  Why nothing caught it: the zoo's transient gates are RC, RLC and diode circuits whose zero
+  start *is* physically consistent (a capacitor at 0 V holds no charge), and the zoo's own
+  MOSFET model carries no charge at all.
+
+  `.tran <tstep> <tstop> [UIC]` is parsed by `va-netlist`; `Netlist::tran_uic` carries it.
+
+  **No goldens were regenerated, and none needed to be.** Flipping the default broke six gates —
+  `rc_step`, `rc_discharge`, `rlc_ring`, `rl_decay`, `ring_osc`, `laplace_step` — and those six
+  are exactly the decks whose physics is a from-rest or initial-condition response, which from
+  an operating point are flat lines. They meant `UIC` all along; their `.tran` cards now say so,
+  and they reproduce their committed goldens **identically**, because `gen-golden` had been
+  generating those goldens with QSPICE's `UIC` forced on. `rc_step_hv`, `rectifier`,
+  `abstime_ramp` and `vsin_load` were unaffected either way: their operating point at `t = 0`
+  coincides with the cold start. The same rule applied to four more decks used by unit tests
+  (`transformer`, the three `motorway_ramp*`) and two inline test decks.
+
+  `gen-golden`'s workaround is gone with it: `cold_start_tran_deck` now mirrors the deck's own
+  `UIC` onto QSPICE instead of forcing it, so the two simulators start from the same place
+  because the deck says where, not because a translator patched it.
+
+  Measured at this version. `cargo test --workspace` 830 passed / 0 failed (3 new). `cargo xtask
+  validate` 28 checked, 0 failed golden, convergence 28/28 — **every figure identical to
+  v1.2.3's run**, which for a change to where every transient begins is the claim worth making.
+  Corpus `va-cli check external --codegen` 200/224, 182/191 self-contained.
+
+  **What this does not fix, found while testing it.** A PSP103 CMOS inverter from an OpenVAF
+  deck still fails, and the cause is a separate, pre-existing bug in the LTE controller with
+  nothing to do with compact models. Minimal reproduction, no Verilog-A at all:
+
+      V1 in gnd PULSE(0 1.2 0p 200p 100p 1n 2n)
+      C1 in gnd 1.7f
+      R1 in out 10k
+      .tran 10p 1n          -> timestep underflow at t=0
+
+  A capacitor whose voltage is pinned by a source slewing fast at `t = 0` gives the source's
+  branch current a step discontinuity across the first step — the operating point has no
+  reactive current by construction, the first transient point has `C·dV/dt`.
+  `divided_difference_error_ratio` estimates the error over **every** unknown, including that
+  branch-current row, and a discontinuity's divided difference does not shrink with `h`, so
+  every step is rejected down to underflow. Confirmed to be the LTE path and not Newton by
+  instrumenting both. The threshold is quantitative and matches exactly: failure begins when
+  `C·dV/dt` crosses `lte_abstol` (1e-6 A) — at 6e9 V/s, `C = 1e-16` passes and `C = 2e-16`
+  fails. The fix belongs in `va-transient`: error-control the reactive states rather than every
+  row, and do not LTE-control a step across a known discontinuity.
+
 1.2.3 - 2026-09-22
 ------------------
 **`@(above(...))` in a `.dc` sweep fired at every point past its threshold instead of once, on
