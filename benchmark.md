@@ -312,7 +312,11 @@ Worth knowing before wiring up a real card.
    origin, so convergence can only improve — but constructing a circuit where a warm start fails and
    a cold one succeeds is a research question, not a fixture, and no test exercises that path.
 
-*Closed since this file was written:* a capacitor pinned by a fast-slewing source underflowed the
+*Closed since this file was written:* `gmin` stepping was implemented but never ran
+(`NewtonConfig::gmin_steps` defaulted to 0), so a node with no DC path — the ordinary shape of a
+series stack — was fatal; six of the twelve NAND decks could not be solved. Wired in v1.3.1 as a
+**rescue** rather than a default path, taking them to 11 of 12 solving while leaving every
+already-converging circuit bit-identical. Also, a capacitor pinned by a fast-slewing source underflowed the
 timestep controller, which is what blocked the PSP103 inverter transient — fixed in v1.2.5 by
 letting a row with no integrated state lose its veto at the floor, and only there. Its
 reproduction is `circuits/benchmark/cap_fast_edge.net`, which contains no Verilog-A. Also, a

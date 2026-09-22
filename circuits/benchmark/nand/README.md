@@ -34,31 +34,39 @@ the model elaborates, differentiates and solves a two-high stack at all.
 | `psp102.net` | PSP102 | 1.199999 V | 1.09e−6 V | works |
 | `psp103.net` | PSP103 | 1.200000 V | 8.96e−7 V | works |
 | `psp104.net` | PSP104 | 1.200000 V | 8.31e−8 V | works |
+| `bsimcmg.net` | BSIM-CMG | 1.200000 V | 3.70e−8 V | works (needs the `gmin` rescue) |
+| `lutsoi.net` | L-UTSOI | 1.200000 V | 1.41e−10 V | works (needs the `gmin` rescue) |
+| `bsimsoi.net` | BSIM-SOI | 1.200000 V | 0.437124 V | solves, weak pull-down — **device, not solver** |
+| `ekv26.net` | EKV2.6 | 1.200000 V | 1.098795 V | solves, barely pulls down — **device, not solver** |
 | `bsimimg.net` | BSIM-IMG | 1.157092 V | 0.370723 V | degraded — **deck, not solver** |
-| `bsimcmg.net` | BSIM-CMG | — | — | singular matrix |
-| `bsimsoi.net` | BSIM-SOI | — | — | singular matrix |
-| `lutsoi.net` | L-UTSOI | — | — | singular matrix |
-| `ekv26.net` | EKV2.6 | — | — | non-finite at `V(n001)` |
 | `hisim2.net` | HiSIM2 | — | — | non-finite at `V(XM3.dp)` |
 | `zoo_nmos.net` | `models/mosfet.va` | 5 V | 0.115 V | works, with a caveat in its header |
 
-Six work as shipped. The rest is not one problem but four, and they are worth separating.
+**Eleven of twelve solve; eight are clean NANDs.** What remains is not one problem but three,
+and they are worth separating.
 
-### 1. `gmin` is implemented but never runs
+### 1. `gmin` — wired in v1.3.1, as a rescue
 
-`va_core::convergence` has gmin stepping and `NewtonConfig` has `gmin_steps` — which
-`Default` sets to **0**, so the homotopy never happens. That is the whole of why a floating
-`N001` is fatal here: nothing gives the node a DC path.
+`va_core::convergence` had gmin stepping and `NewtonConfig::gmin_steps` defaulted to **0**, so
+the homotopy never ran and a floating `N001` was simply fatal: only six of these decks solved.
 
-Measured by temporarily setting `gmin_steps: 10`: `bsimcmg`, `bsimsoi`, `lutsoi` and `ekv26`
-all stop failing, taking the count from 6 to 10 of 12. `lutsoi` becomes a clean NAND
-(1.200000 V → 1.41e−10 V); `bsimsoi` and `ekv26` solve but pull down only to 0.437 V and
-1.099 V, which at default parameters is plausibly the device rather than the solver.
+It is now a **fallback**, not a default path (`va_core::dc::with_gmin_rescue`): the plain solve
+is tried first, and only a failure it can plausibly rescue — singular, non-convergent, or
+non-finite — earns a second attempt with the ladder. That ordering is the whole design. The
+ladder is `gmin_steps + 1` full Newton solves, so running it unconditionally would multiply the
+cost of every DC point in every circuit, including the large majority that converge first try.
+As a fallback those circuits pay nothing and their answers stay bit-identical — which is why
+`xtask validate` is unchanged, digit for digit, across the change.
 
-`zoo_nmos.net` is the same failure in eight lines with no external model at all, and its header
-says so. Wiring gmin on is `CLAUDE.md` §3's own backlog item for `va-core`.
+That took the decks from 6 to **11 of 12 solving**. `bsimcmg` and `lutsoi` became clean NANDs;
+`bsimsoi` and `ekv26` now solve but pull down only to 0.437 V and 1.099 V, which at default
+parameters is the device rather than the solver.
 
-### 2. Two instances sharing a thermal node give a singular matrix — a bug
+`zoo_nmos.net` still carries an explicit 1 GΩ leak on `N001` rather than leaning on the rescue,
+and its header says why: it is the eight-line reproduction of what a floating node does, and it
+is more useful demonstrating the problem than hiding it.
+
+### 2. Two instances sharing a thermal node give a singular matrix — a bug, still open
 
 Reproduced minimally, and it is not about the NAND:
 

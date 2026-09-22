@@ -20,6 +20,56 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.3.1 - 2026-09-22
+------------------
+**`gmin` stepping is wired in — as a rescue, not as a routine.** `va_core::convergence` has had
+the homotopy since T3.3 and `NewtonConfig::gmin_steps` defaulted to **0**, so it never ran. A
+node with no DC path was therefore simply fatal, and that is the ordinary shape of a series
+stack: in a CMOS NAND the node between the two pull-down devices floats whenever the lower one
+is off. Six of the twelve decks in `circuits/benchmark/nand/` could not be solved at all.
+
+  **Eleven of twelve now solve; eight are clean NANDs.** BSIM-CMG and L-UTSOI became clean
+  (1.200000 V -> 3.70e-8 V and 1.41e-10 V); BSIM-SOI and EKV2.6 now solve but pull down only to
+  0.437 V and 1.099 V, which at default parameters is the device rather than the solver. HiSIM2
+  still fails for its own reasons, and BSIM-IMG's deck is wrong rather than its solve.
+
+  **The plain solve is tried first, always.** Only a failure the homotopy can plausibly rescue
+  — `Singular`, `NoConvergence` or `NonFinite`, each observed on a real deck — earns a second
+  attempt with the ladder, and a caller that already asked for stepping is left alone. That
+  ordering is the design, not an optimisation: the ladder is `gmin_steps + 1` full Newton
+  solves, so running it unconditionally would multiply the cost of every DC point in every
+  circuit, including the large majority that converge on the first try and need none of it.
+  As a fallback those circuits pay **nothing** and their answers stay bit-identical.
+
+  The evidence for that last claim is the gate: `cargo xtask validate` is 28/28 with all 28
+  error figures **identical digit for digit** to the run before the change. A test states it
+  directly too, comparing a converging circuit's solution through `dc::operating_point` against
+  `newton::solve` with `==` rather than a tolerance.
+
+  **Both DC entry points share one rescue.** `dc::operating_point` gets it as well as
+  `operating_point_continued`, because `.ac` and `.noise` linearize around the former — without
+  that, a circuit with a floating node would solve under `.op`/`.dc` and fail under `.ac`, the
+  same circuit with a different verdict.
+
+  **The ladder's size was measured, not chosen.** 30 stages at >=150 iterations each: 10, 20, 30
+  and 40 stages all still failed the 20-diode chain at the default 100-iteration budget, so the
+  binding constraint was the per-stage budget rather than the ramp. The final unshunted stage
+  has to walk from the last shunted solution to the real answer, and on a long series chain that
+  is more than 100 steps. Only failed solves ever pay for it.
+
+  **If the rescue also fails, the *original* error surfaces.** It describes the real circuit and
+  names the row that went singular or non-finite; the laddered one describes a shunted variant
+  the user never wrote.
+
+  Measured at this version. `cargo test --workspace` 838 passed / 0 failed (2 new). `cargo xtask
+  validate` 28 checked, 0 failed golden, convergence 28/28, every figure identical. Corpus
+  `va-cli check external --codegen` 200/224.
+
+  **Not fixed, and still the next thing in that folder:** two instances of a five-port model
+  sharing one thermal node give a singular matrix, reproduced in four lines in
+  `circuits/benchmark/nand/README.md` §2. `gmin` does not rescue it — it shunts `Node` rows, and
+  whatever is degenerate there is not one. Root cause still not established.
+
 1.3.0 - 2026-09-22
 ------------------
 **`$table_model` — a user can bring their own data.** LRM §9.21, one dimension, file source.

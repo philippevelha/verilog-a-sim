@@ -830,6 +830,29 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.3.1) — `gmin` stepping is wired in, as a rescue.** T3.3's own
+> backlog item, and the one the NAND decks turned from a note into a number. The homotopy has
+> existed in `va_core::convergence` since T3.3; `NewtonConfig::gmin_steps` defaulted to 0, so it
+> never ran, and a node with no DC path was fatal. That is the ordinary shape of a series stack:
+> six of the twelve decks in `circuits/benchmark/nand/` could not be solved at all.
+>
+> **It is a fallback, not a default path** (`dc::with_gmin_rescue`). The plain solve is tried
+> first and only a failure the ladder can plausibly rescue earns a second attempt. The ladder is
+> `gmin_steps + 1` full Newton solves, so running it unconditionally would multiply the cost of
+> every DC point in every circuit; as a fallback the circuits that already converge pay nothing
+> and stay **bit-identical**. Both DC entry points share it, because `.ac`/`.noise` linearize
+> around `operating_point` and the same circuit must not get a different verdict there.
+>
+> **Evidence.** 11 of 12 NAND decks now solve (was 6), 8 of them clean. 838 tests (2 new, one of
+> which compares a converging circuit's answer with `==` to pin the no-op claim). `xtask
+> validate` 28/28 with every figure identical digit for digit. The ladder's 30 stages at >=150
+> iterations were measured: 10/20/30/40 stages all failed the 20-diode chain at the default
+> budget, so the constraint was iterations per stage, not ramp length.
+>
+> **Still open in that folder:** two instances of a five-port model sharing one thermal node give
+> a singular matrix. `gmin` does not rescue it, since it shunts `Node` rows and whatever is
+> degenerate there is not one.
+>
 > **Now closed (2026-09-22, v1.3.0) — `$table_model`: the LRM's own answer to "let users bring
 > their own function".** One dimension, file data source, LRM §9.21. It arrived as the first
 > concrete step of a design question — whether this simulator could support user-defined `$`
