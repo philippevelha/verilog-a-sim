@@ -508,6 +508,31 @@ fn classify_dynamic_rows(dcharge: &[f64], charge: &[f64], dim: usize) -> Vec<boo
         .collect()
 }
 
+/// Which rows may still veto a step once shrinking it has stopped helping.
+///
+/// Everything except a **constraint row that carries no state**: a row that
+/// [`va_core::mna::classify_unknowns`] calls `Branch` and [`classify_dynamic_rows`] does not
+/// mark dynamic — in practice the branch current of a voltage source or a controlled voltage
+/// source. An inductor's branch row is also `Branch`, and it stays: it carries flux, so it is
+/// dynamic, and its current is continuous precisely because it is integrated.
+///
+/// This mask does **not** decide ordinary steps. Every row judges those, because a row without
+/// integrated state still says something useful about how fast the circuit is moving — the
+/// traffic decks in `circuits/` rely on exactly that to keep Newton on a stiff nonlinearity,
+/// and excluding those rows outright made `motorway_ramp_mpc` underflow where it had run. The
+/// mask applies only at the floor, where the question is no longer "is this step accurate
+/// enough" but "is there any step that would be". See the floor rule at the accept/reject
+/// decision for the discontinuity that makes the answer no.
+fn lte_controllable_rows(kinds: &[va_abi::UnknownKind], is_dynamic: &[bool]) -> Vec<bool> {
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            *kind != va_abi::UnknownKind::Branch || is_dynamic.get(i).copied().unwrap_or(true)
+        })
+        .collect()
+}
+
 /// The other implemented method, used purely as this step's LTE reference solution (never
 /// reported as the accepted point) — see this module's doc comment on the embedded-pair
 /// estimate. Only ever called with an implemented method (`run` rejects `Gear` up front).
@@ -604,6 +629,7 @@ fn divided_difference_error_ratio(
     h: f64,
     reltol: f64,
     abstol: f64,
+    is_dynamic: &[bool],
 ) -> Option<f64> {
     let needed = divided_difference_history(method);
     if history.len() < needed {
@@ -623,6 +649,11 @@ fn divided_difference_error_ratio(
     let mut values = Vec::with_capacity(needed + 1);
     let mut worst = 0.0_f64;
     for (i, xi) in x_candidate.iter().enumerate() {
+        // Only rows carrying integrated state are error-controlled. See
+        // `lte_controls_only_dynamic_rows` for why, and for what goes wrong otherwise.
+        if !is_dynamic.get(i).copied().unwrap_or(true) {
+            continue;
+        }
         values.clear();
         values.push(*xi);
         values.extend(history[..needed].iter().map(|(_, x)| x[i]));
@@ -634,12 +665,43 @@ fn divided_difference_error_ratio(
 }
 
 /// How far outside tolerance the embedded pair's disagreement is, as a multiple of the allowed
-/// budget: `max_i |x_a[i] − x_b[i]| / (lte_reltol·|x_a[i]| + lte_abstol)`. `<= 1.0` means accept.
-fn lte_error_ratio(x_primary: &[f64], x_reference: &[f64], reltol: f64, abstol: f64) -> f64 {
+/// budget: `max_i |x_a[i] − x_b[i]| / (lte_reltol·|x_a[i]| + lte_abstol)`, over the rows
+/// [`classify_dynamic_rows`] marks. `<= 1.0` means accept.
+///
+/// # Why only the dynamic rows
+///
+/// Local truncation error is a property of the *integration*, and only rows carrying charge or
+/// flux are integrated — everything else is solved algebraically at each timepoint and is
+/// therefore exact there, with no truncation to bound. An inductor's branch row carries its
+/// flux and stays controlled; a voltage source's branch row carries nothing and does not.
+///
+/// This is not a refinement, it is a correctness fix. A source's branch current is whatever the
+/// rest of the circuit demands of it, and it can step **discontinuously**: put a capacitor
+/// across a source that is already slewing at `t = 0` and the current jumps from zero (the
+/// operating point carries no reactive current, by definition) to `C·dV/dt` on the first step.
+/// A discontinuity's divided difference does not shrink with `h`, so error-controlling that row
+/// rejected every step down to [`TransientError::TimestepUnderflow`], with the threshold
+/// landing exactly where `C·dV/dt` crossed `lte_abstol`. A 1.7 fF capacitor on a 6e9 V/s edge
+/// was enough — which is an ordinary CMOS gate input, and is why a PSP103 inverter could not be
+/// integrated at all.
+///
+/// The mask is [`classify_dynamic_rows`]'s, computed once from the initial assembly, and the
+/// companion model has always used it for exactly the same reason ([`Companion::trapezoidal`]).
+/// Its one known limitation is inherited rather than introduced: a capacitance that happens to
+/// be zero at the starting point leaves its row unmarked for the whole run.
+fn lte_error_ratio(
+    x_primary: &[f64],
+    x_reference: &[f64],
+    reltol: f64,
+    abstol: f64,
+    is_dynamic: &[bool],
+) -> f64 {
     x_primary
         .iter()
         .zip(x_reference)
-        .fold(0.0_f64, |worst, (a, b)| {
+        .enumerate()
+        .filter(|(i, _)| is_dynamic.get(*i).copied().unwrap_or(true))
+        .fold(0.0_f64, |worst, (_, (a, b))| {
             let scale = reltol * a.abs() + abstol;
             worst.max((a - b).abs() / scale)
         })
@@ -1087,6 +1149,21 @@ pub fn run_with_events(
             .filter(|&t| t > cfg.tstart),
     );
     let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
+    // Which rows the step controller may still judge once shrinking has stopped helping.
+    // See the floor rule at the accept/reject decision, and `lte_controllable_rows`.
+    let lte_controlled = lte_controllable_rows(
+        &va_core::mna::classify_unknowns(instances, dim),
+        &is_dynamic,
+    );
+    // Ordinary steps are judged over everything. `lte_relaxed` latches once the run has
+    // *proved* that some stateless constraint row cannot be satisfied at any step size; from
+    // then on those rows no longer veto. It has to latch: relaxing for one step only, the
+    // controller accepts at the floor, grows the step, meets the same discontinuity, shrinks
+    // back to the floor and accepts again — progressing at `tstep_min` per step forever. That
+    // is a hang where the old behaviour was at least an error, and it is what the first
+    // version of this fix actually did (~1e8 steps for a 1 ns window).
+    let control_all = vec![true; dim];
+    let mut lte_relaxed = false;
     // Computed once per run, exactly as `va-core::newton::solve` does for the DC solve: which
     // unknowns are junction potentials is a property of the instances, not of the timepoint.
     let junction = va_core::mna::classify_junctions(instances, dim);
@@ -1228,8 +1305,16 @@ pub fn run_with_events(
             // embedded pair below is only ever paid for when the history is too short to say
             // anything yet (the opening steps of a run, and any step whose method just
             // changed order — the first step is always backward Euler).
+            // Two readings of the same step: over every row, and over only the rows that
+            // carry integrated state. The first is the verdict; the second is consulted only
+            // at the floor — see `stateful_ratio`'s use below.
+            let primary_mask: &[bool] = if lte_relaxed {
+                &lte_controlled
+            } else {
+                &control_all
+            };
             let dd_ratio = if cfg.lte_estimator == LteEstimator::DividedDifference {
-                divided_difference_error_ratio(
+                let all = divided_difference_error_ratio(
                     step_method,
                     t_next,
                     &x_primary,
@@ -1237,13 +1322,30 @@ pub fn run_with_events(
                     step_h,
                     cfg.lte_reltol,
                     cfg.lte_abstol,
-                )
+                    primary_mask,
+                );
+                all.map(|ratio| {
+                    (
+                        ratio,
+                        divided_difference_error_ratio(
+                            step_method,
+                            t_next,
+                            &x_primary,
+                            &history,
+                            step_h,
+                            cfg.lte_reltol,
+                            cfg.lte_abstol,
+                            &lte_controlled,
+                        )
+                        .unwrap_or(ratio),
+                    )
+                })
             } else {
                 None
             };
 
-            let err_ratio = match dd_ratio {
-                Some(ratio) => ratio,
+            let (err_ratio, stateful_ratio) = match dd_ratio {
+                Some(pair) => pair,
                 None => {
                     let reference_companion = Companion::for_method(
                         reference_method(step_method),
@@ -1268,8 +1370,55 @@ pub fn run_with_events(
                         &per_abstol,
                     )?
                     .x;
-                    lte_error_ratio(&x_primary, &x_reference, cfg.lte_reltol, cfg.lte_abstol)
+                    (
+                        lte_error_ratio(
+                            &x_primary,
+                            &x_reference,
+                            cfg.lte_reltol,
+                            cfg.lte_abstol,
+                            primary_mask,
+                        ),
+                        lte_error_ratio(
+                            &x_primary,
+                            &x_reference,
+                            cfg.lte_reltol,
+                            cfg.lte_abstol,
+                            &lte_controlled,
+                        ),
+                    )
                 }
+            };
+
+            // **The floor rule.** A step is normally judged over every unknown, and that stays
+            // true: rows without integrated state routinely carry useful information about how
+            // fast the circuit is moving, and the traffic decks in `circuits/` depend on them
+            // to keep Newton on a stiff nonlinearity.
+            //
+            // But some of those rows cannot be satisfied at *any* step size. A voltage source's
+            // branch current is whatever the rest of the circuit demands and can step
+            // discontinuously: put a capacitor across a source already slewing at `t = 0` and
+            // it jumps from zero — the operating point carries no reactive current, by
+            // definition — to `C·dV/dt` on the first step. A discontinuity's divided difference
+            // does not shrink with `h`, so shrinking is not a remedy, it is a loop that ends in
+            // `TimestepUnderflow`. A 1.7 fF capacitor on a 6e9 V/s edge was enough to trigger
+            // it, which is an ordinary CMOS gate input, and is why a PSP103 inverter could not
+            // be integrated at all.
+            //
+            // So the veto is overruled only where it is provably futile: at the last step size
+            // the controller is allowed to try, a row with no state to integrate no longer gets
+            // to reject the step. Anything that converges at a larger step is untouched by this,
+            // which is what keeps every existing run identical — the branch only runs on steps
+            // that were previously about to be abandoned.
+            let at_floor =
+                err_ratio > 1.0 && h * step_factor(err_ratio, step_method, false) < cfg.tstep_min;
+            let err_ratio = if at_floor && stateful_ratio <= 1.0 {
+                // Proven: shrinking is not a remedy here, and what is complaining has no
+                // truncation error to complain about. Latch, so the rest of the run does not
+                // rediscover the same discontinuity one floor-sized step at a time.
+                lte_relaxed = true;
+                stateful_ratio
+            } else {
+                err_ratio
             };
 
             if err_ratio <= 1.0 {
@@ -1631,7 +1780,8 @@ mod tests {
             &history,
             1.0,
             1e-3,
-            1e-6
+            1e-6,
+            &[true]
         )
         .is_none());
         // Backward Euler needs 2, which it has.
@@ -1642,7 +1792,8 @@ mod tests {
             &history,
             1.0,
             1e-3,
-            1e-6
+            1e-6,
+            &[true]
         )
         .is_some());
     }
@@ -1670,6 +1821,7 @@ mod tests {
             h,
             0.0,
             1.0,
+            &[true],
         )
         .expect("enough history");
 
@@ -2063,6 +2215,30 @@ mod tests {
             trap_err < be_err,
             "trapezoidal ({trap_err}) should beat backward Euler ({be_err}) at the same LTE \
              tolerance"
+        );
+    }
+
+    /// A constraint row that carries no state is not error-controlled; everything else is.
+    ///
+    /// The three cases that matter, in one place: a voltage source's branch current (`Branch`,
+    /// no charge) is excluded because it can step discontinuously; an inductor's branch current
+    /// (`Branch`, carries flux) is kept, because being integrated is exactly what makes it
+    /// continuous; and a node row is kept whether or not it carries charge, because a voltage
+    /// cannot step where there is capacitance to hold it and the controller's resolution of it
+    /// is worth having.
+    #[test]
+    fn lte_controls_every_row_except_a_stateless_constraint_row() {
+        use va_abi::UnknownKind::{Branch, Node};
+        let kinds = [Node, Node, Branch, Branch];
+        let dynamic = [true, false, true, false];
+        assert_eq!(
+            lte_controllable_rows(&kinds, &dynamic),
+            vec![
+                true,  // node with charge — a capacitor's node
+                true,  // node without — still continuous, still worth resolving
+                true,  // branch with flux — an inductor's current
+                false, // branch without — a voltage source's current, which can step
+            ]
         );
     }
 

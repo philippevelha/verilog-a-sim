@@ -249,18 +249,15 @@ Worth knowing before wiring up a real card.
    `branch_currents()`, `sizing()` and the solve. Fixed cost, not per-point, but it is most of a
    single `.op`'s time on a large model.
 4. **Nested `.dc`** (`dc VC 0 2 0.01 VB 0.65 0.9 0.05`) is unsupported; `DcSweep` names one source.
-5. **A capacitor pinned by a fast-slewing source underflows the timestep controller.**
-   `divided_difference_error_ratio` error-controls every unknown, including a voltage source's
-   branch-current row — and that row is discontinuous across the first step, because the
-   operating point carries no reactive current while the first transient point carries
-   `C·dV/dt`. A discontinuity's divided difference does not shrink with `h`, so every step is
-   rejected. Threshold matches `lte_abstol` exactly. This is what still blocks a PSP103 CMOS
-   inverter transient; the fix is to error-control the reactive states rather than every row.
-6. **The sweep's cold-start fallback is untested.** Continuation retries a failed point from the
+5. **The sweep's cold-start fallback is untested.** Continuation retries a failed point from the
    origin, so convergence can only improve — but constructing a circuit where a warm start fails and
    a cold one succeeds is a research question, not a fixture, and no test exercises that path.
 
-*Closed since this file was written:* a transient started from the zero vector unconditionally,
+*Closed since this file was written:* a capacitor pinned by a fast-slewing source underflowed the
+timestep controller, which is what blocked the PSP103 inverter transient — fixed in v1.2.5 by
+letting a row with no integrated state lose its veto at the floor, and only there. Its
+reproduction is `circuits/benchmark/cap_fast_edge.net`, which contains no Verilog-A. Also, a
+transient started from the zero vector unconditionally,
 which made every CMC MOSFET unrunnable — at `x = 0` a compact model's charge is inconsistent and
 shrinking the timestep makes the first step's current *larger*. Fixed in v1.3.0 by taking SPICE's
 default (operating point first, `UIC` to opt out); BSIM4, BSIM-BULK 107, BSIM-SOI, PSP103 and

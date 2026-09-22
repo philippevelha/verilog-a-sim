@@ -1,0 +1,27 @@
+* Minimal reproduction of the LTE timestep-underflow bug fixed in 1.2.5.
+*
+* A capacitor whose voltage is pinned directly by a source slewing fast at t = 0. The
+* operating point carries no reactive current by definition, so on the first step the
+* source's branch current jumps from zero to C*dV/dt -- a step discontinuity in a row the
+* step controller was judging with a formula that assumes smoothness. A discontinuity's
+* divided difference does not shrink with h, so every step was rejected down to the floor:
+*   Error: transient integration failed
+*   Caused by: timestep underflow at t=0e0
+*
+* No Verilog-A: this is `va-abi`'s reference capacitor, resistor and waveform source, which
+* is what makes it the right reproduction -- the bug was never about compact models, it only
+* looked that way because a CMOS gate input is exactly this circuit.
+*
+* The threshold was quantitative and matched `lte_abstol` (1e-6 A) exactly: at this 6e9 V/s
+* edge, C = 1e-16 passed and C = 2e-16 failed. 1.7 fF is an ordinary gate input.
+*
+*   cargo run -p va-cli -- sim circuits/benchmark/cap_fast_edge.net --tran
+*
+* Past the edge the circuit is a plain divider, so the answer is checkable by hand:
+* V(in) = 1.2 V on the plateau and V(out) = 0.6 V.
+V1 in  gnd PULSE(0 1.2 0p 200p 100p 1n 2n)
+C1 in  gnd 1.7f
+R1 in  out 10k
+R2 out gnd 10k
+.tran 10p 1n
+.end

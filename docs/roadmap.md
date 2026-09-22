@@ -830,6 +830,33 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.2.5) — the LTE controller could not integrate a capacitor pinned
+> by a fast-slewing source.** The open item v1.3.0's entry left, and what stopped a PSP103 CMOS
+> inverter from switching. A transient starts from the operating point, which carries no
+> reactive current by definition, so on the first step the source's branch current jumps from
+> zero to `C·dV/dt` — and `divided_difference_error_ratio` error-controlled *every* unknown
+> including that row, with a formula that assumes smoothness. A discontinuity's divided
+> difference does not shrink with `h`: shrinking is a remedy for truncation error, not for a
+> discontinuity. Threshold matched `lte_abstol` exactly (6e9 V/s: `C = 1e-16` passes,
+> `C = 2e-16` fails); confirmed LTE and not Newton by instrumenting both paths.
+>
+> **Two wrong fixes came first, and they are why the third looks as it does.** Excluding
+> stateless constraint rows outright broke `motorway_ramp_mpc` (underflow at t = 3600 s, the step
+> grew past what Newton could take across the metering change) and cost `rectifier` 23% of its
+> timepoints and 19% of its accuracy — those rows carry no state but still say how fast a circuit
+> is moving, and no structural rule separates "discontinuous" from "merely sharp". Relaxing for a
+> single step instead *hung*: accept at the floor, grow, meet the same edge, shrink back, ~1e8
+> steps for a 1 ns window. So the relaxation applies only at the floor **and latches**.
+>
+> **Evidence.** 832 tests (3 new). `xtask validate` 28/28, every figure identical digit for digit
+> to the run before the change — the only path that changes is the one that used to return
+> `TimestepUnderflow`. The minimal repro reaches tstop in 120 points with `V(out)` exactly half
+> of `V(in)`; the inverter runs five cycles in 1861 points.
+>
+> **New: `circuits/benchmark/`**, outside the gate on purpose — most of its decks need a `.va`
+> from the gitignored `external/`, and every bug in this series survived a green 28/28 because
+> nothing in the zoo looked like it.
+>
 > **Now closed (2026-09-22, v1.3.0) — a transient starts from the operating point, and the CMC
 > MOSFETs can run at all.** `.tran` started from the zero vector unconditionally, with no way to
 > ask for anything else, where SPICE solves the DC operating point first unless the deck says

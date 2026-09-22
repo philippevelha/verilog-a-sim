@@ -1,0 +1,23 @@
+* HICUM/L2 v3.0 output family -- one inner sweep of a nested `.dc`.
+*
+* The reference deck (ngspice + OSDI) asks for `dc VC 0 2 0.01 VB 0.65 0.9 0.05`. Nested
+* `.dc` is unsupported here -- `DcSweep` names one source -- so the outer sweep is run as six
+* decks like this one, with VB set to each of 0.65 … 0.90. Together they are the same 1206
+* points, in six process launches instead of one.
+*
+*   cargo run -p va-cli -- sim circuits/benchmark/hicum_output_family.net \
+*       --model external/code/hicum2/vacode/hicumL2V3p0p0.va --report VC
+*
+* Two further differences from the reference deck. There is no `model.l`, so these are the
+* `.va` defaults and the currents are not the reference's. And `tnode` is terminated to
+* ground: the original connects four nodes where the module declares five, and this project's
+* `X` element requires every port. That termination costs nothing with the default card --
+* `flsh=0`, `rth=0`, so nothing drives the thermal node and 1 mOhm to 10 Ohm give an
+* identical answer -- but with `flsh=1` the resistor becomes a thermal resistance to ambient
+* in parallel with the model's own `rth`. See `benchmark.md` § 5.
+VB  b   gnd DC 0.9
+VC  c   gnd DC 0
+X1  c b gnd gnd tn hicumL2va
+RT  tn  gnd 1e-3
+.dc VC 0 2 0.01
+.end

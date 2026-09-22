@@ -20,6 +20,74 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.5 - 2026-09-22
+------------------
+**A capacitor pinned by a fast-slewing source could not be integrated at all.** The step
+controller rejected every step down to the floor and gave up:
+
+    V1 in gnd PULSE(0 1.2 0p 200p 100p 1n 2n)
+    C1 in gnd 1.7f
+    R1 in out 10k
+    .tran 10p 1n          ->  timestep underflow at t=0
+
+That deck is now `circuits/benchmark/cap_fast_edge.net`, and it contains **no Verilog-A** —
+reference capacitor, resistor and waveform source. The bug was never about compact models; it
+only looked that way, because a CMOS gate input is exactly this circuit, and it is what stopped
+a PSP103 inverter from switching.
+
+  **Cause.** A transient starts from the operating point, which carries no reactive current by
+  definition, so on the first step the source's branch current jumps from zero to `C·dV/dt`.
+  `divided_difference_error_ratio` error-controls *every* unknown including that row, with a
+  formula that assumes smoothness — and a discontinuity's divided difference does not shrink
+  with `h`. Shrinking is a remedy for truncation error, not for a discontinuity. Confirmed to be
+  the LTE path and not Newton by instrumenting both, and the threshold matched `lte_abstol`
+  (1e-6 A) exactly: at 6e9 V/s, `C = 1e-16` passed and `C = 2e-16` failed.
+
+  **Fix.** A row that carries no integrated state — `Branch` by
+  `va_core::mna::classify_unknowns`, not dynamic by `classify_dynamic_rows`, in practice a
+  voltage source's branch current — loses its veto **at the floor**, the last step size the
+  controller would try. An inductor's branch row is also `Branch` and keeps its veto: it carries
+  flux, so it is dynamic, and its current is continuous precisely because it is integrated.
+
+  **Two wrong versions came first, and both are the reason the final one looks the way it
+  does.** Recording them because the shape of this fix is not guessable from the bug:
+
+  * *Excluding those rows outright* fixed the capacitor and broke other things. Rows without
+    integrated state still say something useful about how fast a circuit is moving:
+    `motorway_ramp_mpc` underflowed at t = 3600 s where it had run, because the step grew past
+    what Newton could take across the metering step change, and `circuits/rectifier.net` lost
+    23% of its timepoints (718 -> 551) and 19% of its accuracy against golden (8.269e-4 ->
+    1.027e-3, past its own 1e-3 tolerance). A structural rule cannot tell "discontinuous" from
+    "merely sharp", and both look identical in the estimate.
+  * *Relaxing for one step only* hung. The controller accepts at the floor, grows the step,
+    meets the same discontinuity, shrinks back and accepts again — about 1e8 steps for a 1 ns
+    window. A hang is worse than the error it replaced. The relaxation therefore **latches**:
+    once a run has proved that shrinking is futile, those rows stay out for the rest of it.
+
+  So the only code path that changes is the one that previously returned `TimestepUnderflow`.
+  Anything converging at a larger step is untouched, which is what makes the claim below
+  possible.
+
+  Measured at this version. `cargo test --workspace` 832 passed / 0 failed (3 new). `cargo xtask
+  validate` 28 checked, 0 failed golden, convergence 28/28 — **every figure identical, digit for
+  digit**, to the run before this change. Corpus `va-cli check external --codegen` 200/224.
+  `circuits/benchmark/cap_fast_edge.net` reaches tstop in 120 timepoints with `V(out)` exactly
+  half of `V(in)` on the plateau; the PSP103 inverter runs its five cycles in 1861 timepoints
+  and 5.4 s.
+
+  **New: `circuits/benchmark/`** — decks that exercise real vendor compact models, and the decks
+  that reproduce what those models found. Deliberately outside `xtask validate`, since most need
+  a `.va` from the gitignored `external/`. That is the point of them: every bug in this series
+  survived a green 28/28 gate because nothing in the zoo looked like it. Each header says how to
+  run it, what it should produce, and exactly how it differs from the external deck it came
+  from — `.subckt`, `.param`/`'expr'`, `+` continuation lines and nested `.dc` are all
+  unsupported, and no model cards were available, so every one runs on `.va` defaults.
+
+  **A note on the number.** The release published earlier today as `1.3.0` is the transient
+  operating-point start, and belongs in this 1.2 line — read it as 1.2.4. It is already pushed,
+  so the sequence in this file goes 1.3.0 then 1.2.5 rather than being renumbered under it; say
+  the word and it can be relabelled properly.
+
 1.3.0 - 2026-09-22
 ------------------
 **A transient now starts from the DC operating point, as SPICE does, unless the deck says

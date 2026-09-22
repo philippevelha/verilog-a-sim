@@ -4570,6 +4570,72 @@ R2 out gnd 1000
         }
     }
 
+    /// A capacitor pinned by a fast-slewing source must integrate.
+    ///
+    /// This is a CMOS gate input reduced to its bones, and before v1.3.1 it was impossible:
+    /// `timestep underflow at t=0`. The operating point carries no reactive current by
+    /// definition, so on the first step the source's branch current jumps from zero to
+    /// `C·dV/dt` — a step discontinuity in a row the LTE controller was judging with a formula
+    /// that assumes smoothness. A discontinuity's divided difference does not shrink with `h`,
+    /// so every step was rejected down to the floor. It is what stopped a PSP103 CMOS inverter
+    /// from running at all.
+    ///
+    /// The numbers sit well past the old threshold, which landed exactly where `C·dV/dt`
+    /// crossed `lte_abstol` (1e-6 A): 1.7 fF on a 6e9 V/s edge is 10 µA.
+    #[test]
+    fn a_capacitor_on_a_fast_slewing_source_integrates() {
+        let deck = "V1 in  gnd PULSE(0 1.2 0p 200p 100p 1n 2n)
+C1 in  gnd 1.7f
+R1 in  out 10k
+R2 out gnd 10k
+.tran 10p 1n
+.end
+";
+        let net = va_netlist::parser::parse(deck).expect("parses");
+        let w = solve_transient(&net, &[], Integration::Trapezoidal).expect("integrates");
+        assert!(
+            w.t.len() > 50,
+            "expected the run to walk the 1 ns window, got {} points",
+            w.t.len()
+        );
+        // The upper bound is the one that guards the *latch*. Relaxing the controller for a
+        // single step instead of for the rest of the run makes it accept at the floor, grow,
+        // meet the same discontinuity, shrink back and accept again — roughly 1e8 steps for
+        // this window, which is a hang rather than a failure. **A regression here will hang
+        // the suite before it trips this assertion**; the bound is what names the cause when
+        // it does not.
+        assert!(
+            w.t.len() < 10_000,
+            "{} points for a 1 ns window means the step controller is crawling at its floor              instead of recovering from the edge",
+            w.t.len()
+        );
+        assert!(
+            w.t.last().is_some_and(|t| (*t - 1e-9).abs() < 1e-12),
+            "the run must reach tstop, ended at {:?}",
+            w.t.last()
+        );
+        // Once the edge has passed the divider is resistive, so the answer is checkable:
+        // V(in) is at its 1.2 V plateau by 200 ps and V(out) is half of it.
+        let (i_in, i_out) = (
+            net.node_order.iter().position(|n| n == "in").unwrap(),
+            net.node_order.iter().position(|n| n == "out").unwrap(),
+        );
+        let k =
+            w.t.iter()
+                .position(|t| *t > 4e-10)
+                .expect("a point past the edge");
+        assert!(
+            (w.x[k][i_in] - 1.2).abs() < 1e-9,
+            "V(in) = {} at the plateau",
+            w.x[k][i_in]
+        );
+        assert!(
+            (w.x[k][i_out] - 0.6).abs() < 1e-6,
+            "V(out) = {}, want half of V(in)",
+            w.x[k][i_out]
+        );
+    }
+
     /// Where a transient starts, stated as the difference it makes.
     ///
     /// The same RC driven by a *constant* 5 V source: from the operating point the capacitor is

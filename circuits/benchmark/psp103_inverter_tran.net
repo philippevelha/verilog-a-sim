@@ -1,0 +1,22 @@
+* PSP103 CMOS inverter -- transient, five input cycles.
+*
+* The same flattened inverter as `psp103_inverter_vtc.net`; see that file for the list of
+* differences from the OpenVAF deck it came from.
+*
+*   cargo run -p va-cli -- sim circuits/benchmark/psp103_inverter_tran.net \
+*       --model external/code/psp103/vacode/psp103.va --tran --report in,out
+*
+* This deck could not be integrated at all before 1.2.5, for two independent reasons that had
+* to be fixed in turn: `.tran` always cold-started from the zero vector, where a compact
+* model's charge is inconsistent with any solution (1.3.0 -- read as 1.2.4), and the step
+* controller error-controlled a row that steps discontinuously (1.2.5, see
+* `cap_fast_edge.net`). No `UIC` here: it wants the operating point, which is the point.
+Vdd   vdd gnd DC 1.2
+Vmeas vss gnd DC 0
+V1    in  gnd PULSE(0 1.2 0p 200p 100p 1n 2n)
+XMP   out in  vdd vdd PSP103VA TYPE=-1 L=0.1u W=1u
+XMN   out in  vss vss PSP103VA TYPE=1  L=0.1u W=1u
+C3    in  vss 0.384f
+C2    out vss 0.576f
+.tran 10p 10n
+.end
