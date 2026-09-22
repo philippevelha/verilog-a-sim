@@ -20,6 +20,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.4.0 - 2026-09-22  (tagged v1.4.0)
+-----------------------------------
+**A release, and a correction to how the last two were numbered.** Nothing in the code changes
+here. 1.3.1 (`gmin` stepping wired in) and 1.3.2 (the elaborated IR shared across instances)
+are both features, and the rule at the top of this file says a feature after 1.0 bumps the
+*minor*, not the patch. They bumped the patch. Rather than rewrite two published entries, this
+entry is where the minor moves, and the tag is cut here.
+
+What `v1.4.0` carries over `v1.0.0`, the previous tag, newest first:
+
+  * **The elaborated IR is shared across instances of one model** (1.3.2). An 80-device PSP103
+    inverter chain went 413 MB / 14.1 s -> 78 MB / 9.1 s; the per-device memory slope fell
+    5.1 MB -> 0.78 MB, and what is left is the dense Jacobian rather than the models.
+  * **`gmin` stepping, as a rescue** (1.3.1): tried only after a plain solve fails, so
+    converging circuits stay bit-identical. The NAND decks went 6 -> 11 of 12 solving.
+  * **`$table_model`** (1.3.0): a user can bring their own measured data, one `x y` pair per
+    line, with per-end extrapolation control. Array data sources and dimensions beyond the
+    first are structured refusals, not silent approximations.
+  * **A transient starts from the operating point unless the deck says UIC** (1.3.0 as
+    originally numbered, see 1.2.5+1), matching SPICE.
+  * **DC sweeps build their instances once and continue from the previous point** (1.2.1,
+    1.2.2): a 1001-point BSIM4 sweep went 30.0 s -> 0.63 s.
+  * **The evaluator stops paying for work it does not do** (1.2.0): a sparse-constant gradient
+    representation plus a hoisted bias-independent setup, 3.4-9.3x on the CMC standard models.
+  * **Two `0*inf` NaNs in the AD rules** (1.1.1), found by the CMC standard models and fixed —
+    BSIM4, PSP103 and BSIM-BULK could not solve before it.
+  * **Every `sim` says its size and a rough cost before it solves** (1.1.0).
+
+Known open, and not fixed by this release: two instances of a model that clamps a shared node
+to zero (`Temp(t) <+ 0.0`, what a compact model writes when self-heating is off) give a
+singular matrix, because each instance contributes its own identical constraint row for the
+same ideal short. Diagnosed this version and reproducible in twelve lines; the five-port decks
+in `circuits/benchmark/nand/` work around it by giving each instance its own thermal node.
+See that directory's README §2.
+
+Measured at 1.4.0: `cargo test --workspace` 839 passed / 0 failed; `cargo xtask validate`
+28 checked, 0 failed, convergence 28/28; `cargo fmt` and `cargo clippy --workspace
+--all-targets -- -D warnings` clean.
+
 1.3.2+1 - 2026-09-22
 --------------------
 **Two `va-core` tests pinned the *variant* a deliberately-unsolvable fixture fails with, and

@@ -189,8 +189,8 @@ model zoo, including `disciplines.vams`, `constants.vams`, `mechanical.vams`, `p
 `LICENSE` and `release.txt`. No Rust toolchain, no checkout, nothing to install:
 
 ```bash
-tar xzf va-cli-v1.0.0-rc1-x86_64-unknown-linux-gnu.tar.gz     # or unzip the .zip on Windows
-cd va-cli-v1.0.0-rc1-x86_64-unknown-linux-gnu
+tar xzf va-cli-v1.4.0-x86_64-unknown-linux-gnu.tar.gz     # or unzip the .zip on Windows
+cd va-cli-v1.4.0-x86_64-unknown-linux-gnu
 ./va-cli sim circuits/rectifier.net --model models/diode.va --tran
 ./va-cli sim circuits/microring_thermal.net --model models --tran --report drop
 ./va-cli sim circuits/laplace_step.net --model models/laplace_lowpass.va --tran --report out

@@ -14,7 +14,7 @@ core: DC operating point and sweep, transient, AC and noise, validated against Q
 tolerances. Multi-physics comes from Verilog-A disciplines: the model zoo has electrical,
 thermal, mechanical, optical and traffic examples solved in one system.
 
-**Version 1.0.0** (2026-09-17). The deliverable is the compiled `va-cli` executable, run on
+**Version 1.4.0** (2026-09-22). The deliverable is the compiled `va-cli` executable, run on
 Windows, Linux and macOS. No `cgo`, no BLAS/LAPACK/KLU — every dependency is pure Rust, so a
 build is reproducible and a binary has nothing to install alongside it.
 
@@ -47,13 +47,13 @@ from inside the unpacked directory. Nothing to install, no Rust toolchain, no ch
 
 | Platform | Archive |
 |---|---|
-| Linux, x86-64 | `va-cli-v1.0.0-x86_64-unknown-linux-gnu.tar.gz` |
-| Windows, x86-64 | `va-cli-v1.0.0-x86_64-pc-windows-msvc.zip` |
-| macOS, Apple silicon | `va-cli-v1.0.0-aarch64-apple-darwin.tar.gz` |
+| Linux, x86-64 | `va-cli-v1.4.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows, x86-64 | `va-cli-v1.4.0-x86_64-pc-windows-msvc.zip` |
+| macOS, Apple silicon | `va-cli-v1.4.0-aarch64-apple-darwin.tar.gz` |
 
 ```bash
-tar xzf va-cli-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
-cd va-cli-v1.0.0-x86_64-unknown-linux-gnu
+tar xzf va-cli-v1.4.0-x86_64-unknown-linux-gnu.tar.gz
+cd va-cli-v1.4.0-x86_64-unknown-linux-gnu
 ./va-cli sim circuits/rectifier.net --model models/diode.va --tran
 ```
 
@@ -159,7 +159,7 @@ against; `docs/examples.md` walks the worked examples with plots.
 ## Validation
 
 No analysis result is trusted until `va-harness` checks it against committed reference output.
-At 1.0.0: **`cargo xtask validate` is 28/28, convergence 28/28.**
+At 1.4.0: **`cargo xtask validate` is 28/28, convergence 28/28.**
 
 | Analysis | Metric | Tolerance |
 |---|---|---|
