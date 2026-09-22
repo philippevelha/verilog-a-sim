@@ -159,6 +159,7 @@ pub fn build_instance(
         vt: VT,
         temp: TEMP,
         node_is_junction,
+        setup: RefCell::new(None),
     };
 
     // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -194,6 +195,36 @@ struct GeneratedModel {
     /// [`ModelInstance::unknown_is_junction`] gives for this model's node-kind unknowns, decided
     /// once by [`classify_nodes`] because it is a property of the source text.
     node_is_junction: Vec<bool>,
+    /// The model's **setup**: the variable bindings produced by the bias-independent prefix of
+    /// its statements (`lower::Lowered::static_prefix`), evaluated on the first [`Self::load`]
+    /// and reused by every later one.
+    ///
+    /// `RefCell` because `load` takes `&self` — the ABI's shape, since `va-core` holds
+    /// instances immutably and evaluates them from a shared reference. `None` until the first
+    /// `load`; filled lazily rather than in `build_instance` so that constructing an instance
+    /// stays cheap for a caller that never evaluates it (`unknowns()`, `state_len()`,
+    /// `unknown_is_junction()` all answer without it).
+    ///
+    /// **What makes one snapshot valid forever:** the prefix reads only parameters,
+    /// `$param_given`/`$port_connected`, `$mfactor`, and `$temperature`/`$vt` — and all of
+    /// those are fixed when the instance is built. See `lower::static_prefix_len`'s closing
+    /// caveat for the one future change that would invalidate this and require a key.
+    setup: RefCell<Option<Setup>>,
+}
+
+/// The result of evaluating a model's setup once — see [`GeneratedModel::setup`].
+struct Setup {
+    /// Variable bindings the prefix produced, indexed by `VarId.0`.
+    vars: Vec<Option<crate::ad::Dual>>,
+    /// Whether the prefix ran to completion.
+    ///
+    /// It can fail the same ways any statement walk can — a `while` whose condition never goes
+    /// false hits the iteration cap. Before the setup was split out, such a failure aborted the
+    /// walk and *everything after it was skipped*, which is the behaviour a caller depends on:
+    /// a contribution downstream of a runaway loop must not stamp a value computed from a
+    /// half-finished environment. Recording the outcome is what lets [`GeneratedModel::load`]
+    /// preserve that, instead of the failure vanishing into a phase nobody checks.
+    completed: bool,
 }
 
 /// Which of `module`'s nodes are junction potentials, for
@@ -242,6 +273,7 @@ impl GeneratedModel {
         state_prev: &'a [f64],
         events_fired: &'a [bool],
         validating: bool,
+        static_vars: &'a [Option<crate::ad::Dual>],
     ) -> Ctx<'a> {
         // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
         // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't (and
@@ -291,7 +323,10 @@ impl GeneratedModel {
                 .map(|c| (c.expr_id, (c.kind, c.base)))
                 .collect(),
             bound_step: std::cell::Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
+            // but doing it once here keeps a 1400-variable model from reallocating its way up.
+            vars: RefCell::new(vec![None; self.module.vars.len()]),
+            static_vars,
             branch_current_slots,
             idt_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
@@ -336,6 +371,31 @@ impl GeneratedModel {
     /// [`MAX_LOOP_ITERATIONS`] — see its doc comment) would otherwise leave later statements
     /// reading a stale or missing variable binding, which is worse than stopping early and
     /// leaving whatever was already stamped as-is.
+    /// Evaluate the model's setup once, if it has not been already — see [`Self::setup`] and
+    /// `lower::static_prefix_len`.
+    ///
+    /// The prefix contains no contribution by construction, so the walk is given a callback
+    /// that cannot be reached and a solution vector that is never read. A failure is swallowed
+    /// for the same reason [`Self::load`] swallows one: `validate` already proved every
+    /// statement evaluable at `build_instance` time, and whatever bindings did get made are
+    /// still the right ones for the statements that follow.
+    fn ensure_setup(&self) {
+        if self.lowered.static_prefix == 0 || self.setup.borrow().is_some() {
+            return;
+        }
+        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], false, &[]);
+        let outcome = self.walk(
+            &ctx,
+            &self.lowered.stmts[..self.lowered.static_prefix],
+            &mut |_, _, _| {},
+        );
+        let vars = ctx.vars.borrow().clone();
+        *self.setup.borrow_mut() = Some(Setup {
+            vars,
+            completed: outcome.is_ok(),
+        });
+    }
+
     fn run(
         &self,
         ctx: &Ctx,
@@ -454,7 +514,7 @@ impl GeneratedModel {
         // regardless of which analysis eventually runs. Nothing here depends on the answer —
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
-        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], true);
+        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], true, &[]);
         Self::validate_stmts(&ctx, &self.lowered.taint, &self.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
@@ -661,7 +721,7 @@ impl GeneratedModel {
 
     /// Sum a list of signed terms into a single dual.
     fn sum_terms(ctx: &Ctx, terms: &[lower::Term]) -> Result<Dual, CodegenError> {
-        let mut acc = Dual::constant(0.0, ctx.count());
+        let mut acc = Dual::constant(0.0);
         for term in terms {
             let d = eval(ctx, term.expr)?;
             acc = acc.add(&d.scale(term.sign));
@@ -676,7 +736,7 @@ impl GeneratedModel {
     /// *exact* derivative, not an approximation: `d(coeff*q)/dx = coeff*dq/dx` whenever
     /// `dcoeff/dx = 0`, and this still holds applying several such coefficients in sequence.
     fn sum_charge_terms(ctx: &Ctx, terms: &[lower::ChargeTerm]) -> Result<Dual, CodegenError> {
-        let mut acc = Dual::constant(0.0, ctx.count());
+        let mut acc = Dual::constant(0.0);
         for term in terms {
             let mut d = eval(ctx, term.expr)?;
             for &(coeff_expr, is_divisor) in &term.coeffs {
@@ -726,12 +786,10 @@ impl GeneratedModel {
                     }
                     sink.residual(gp, i.value);
                     sink.residual(gn, -i.value);
-                    for (slot, &dg) in i.grad.iter().enumerate() {
-                        if dg != 0.0 {
-                            let gk = self.terminals[slot];
-                            sink.jacobian(gp, gk, dg);
-                            sink.jacobian(gn, gk, -dg);
-                        }
+                    for (slot, dg) in i.grad() {
+                        let gk = self.terminals[slot];
+                        sink.jacobian(gp, gk, dg);
+                        sink.jacobian(gn, gk, -dg);
                     }
                     // The other half of the product rule for a bias-dependent charge
                     // coefficient, `c(x)·ddt(q(x))` (§ `Integration`). The term's *value* is
@@ -742,12 +800,10 @@ impl GeneratedModel {
                     // multiplies it, giving exactly `(dq/dt)·∂c/∂x + c·coeff·∂q/∂x`. Non-zero
                     // only downstream of a nested `ddt`, so this loop is a no-op for every
                     // ordinary resistive term.
-                    for (slot, &dg) in i.grad_ddt.iter().enumerate() {
-                        if dg != 0.0 {
-                            let gk = self.terminals[slot];
-                            sink.dcharge(gp, gk, dg);
-                            sink.dcharge(gn, gk, -dg);
-                        }
+                    for (slot, dg) in i.grad_ddt() {
+                        let gk = self.terminals[slot];
+                        sink.dcharge(gp, gk, dg);
+                        sink.dcharge(gn, gk, -dg);
                     }
                 }
 
@@ -771,12 +827,10 @@ impl GeneratedModel {
                     );
                     sink.charge(gp, q.value);
                     sink.charge(gn, -q.value);
-                    for (slot, &dg) in q.grad.iter().enumerate() {
-                        if dg != 0.0 {
-                            let gk = self.terminals[slot];
-                            sink.dcharge(gp, gk, dg);
-                            sink.dcharge(gn, gk, -dg);
-                        }
+                    for (slot, dg) in q.grad() {
+                        let gk = self.terminals[slot];
+                        sink.dcharge(gp, gk, dg);
+                        sink.dcharge(gn, gk, -dg);
                     }
                 }
 
@@ -811,18 +865,14 @@ impl GeneratedModel {
                         return;
                     };
                     sink.residual(gb, -i.value);
-                    for (slot, &dg) in i.grad.iter().enumerate() {
-                        if dg != 0.0 {
-                            let gk = self.terminals[slot];
-                            sink.jacobian(gb, gk, -dg);
-                        }
+                    for (slot, dg) in i.grad() {
+                        let gk = self.terminals[slot];
+                        sink.jacobian(gb, gk, -dg);
                     }
                     // Product-rule charge sensitivity, same as the two-terminal path above.
-                    for (slot, &dg) in i.grad_ddt.iter().enumerate() {
-                        if dg != 0.0 {
-                            let gk = self.terminals[slot];
-                            sink.dcharge(gb, gk, -dg);
-                        }
+                    for (slot, dg) in i.grad_ddt() {
+                        let gk = self.terminals[slot];
+                        sink.dcharge(gb, gk, -dg);
                     }
                 }
 
@@ -840,11 +890,9 @@ impl GeneratedModel {
                         "ddt of a ddt reached a potential contribution's charge channel; validate() should have rejected this module"
                     );
                     sink.charge(gb, -q.value);
-                    for (slot, &dg) in q.grad.iter().enumerate() {
-                        if dg != 0.0 {
-                            let gk = self.terminals[slot];
-                            sink.dcharge(gb, gk, -dg);
-                        }
+                    for (slot, dg) in q.grad() {
+                        let gk = self.terminals[slot];
+                        sink.dcharge(gb, gk, -dg);
                     }
                 }
 
@@ -950,10 +998,7 @@ impl GeneratedModel {
                     continue;
                 }
                 let (re, im) = (term.sign * h.0, term.sign * h.1);
-                for (slot, &dg) in u.grad.iter().enumerate() {
-                    if dg == 0.0 {
-                        continue;
-                    }
+                for (slot, dg) in u.grad() {
                     let gk = self.terminals[slot];
                     match gb {
                         None => {
@@ -1161,8 +1206,8 @@ impl GeneratedModel {
                         }
                     }
                     let f = term.sign * feed;
-                    for (slot, &dg) in u.grad.iter().enumerate() {
-                        if dg == 0.0 || f == 0.0 {
+                    for (slot, dg) in u.grad() {
+                        if f == 0.0 {
                             continue;
                         }
                         let gk = self.terminals[slot];
@@ -1174,8 +1219,8 @@ impl GeneratedModel {
                             Some(gb) => sink.jacobian(gb, gk, -f * dg),
                         }
                     }
-                    for (slot, &dg) in u.grad_ddt.iter().enumerate() {
-                        if dg == 0.0 || f == 0.0 {
+                    for (slot, dg) in u.grad_ddt() {
+                        if f == 0.0 {
                             continue;
                         }
                         let gk = self.terminals[slot];
@@ -1237,10 +1282,7 @@ impl GeneratedModel {
             }
 
             let (re, im) = (term.sign * h.0, term.sign * h.1);
-            for (slot, &dg) in u.grad.iter().enumerate() {
-                if dg == 0.0 {
-                    continue;
-                }
+            for (slot, dg) in u.grad() {
                 let gk = self.terminals[slot];
                 match gb {
                     None => {
@@ -1290,10 +1332,7 @@ impl GeneratedModel {
             // so every `laplace_*` collapses to `H(0)` and this term degenerates to a plain
             // capacitor. That is pre-existing — the `grad` half above behaves the same way — not
             // something this term introduced.
-            for (slot, &dg) in u.grad_ddt.iter().enumerate() {
-                if dg == 0.0 {
-                    continue;
-                }
+            for (slot, dg) in u.grad_ddt() {
                 let gk = self.terminals[slot];
                 match gb {
                     None => {
@@ -1481,18 +1520,14 @@ impl GeneratedModel {
                                 sink.jacobian(g, row_j, a);
                             }
                             sink.residual(g, res);
-                            for (slot, &dg) in u.grad.iter().enumerate() {
-                                if dg != 0.0 {
-                                    sink.jacobian(g, self.terminals[slot], -w0 / dm * dg);
-                                }
+                            for (slot, dg) in u.grad() {
+                                sink.jacobian(g, self.terminals[slot], -w0 / dm * dg);
                             }
                             // An input carrying a time derivative (`laplace_nd(c(x)*ddt(q), …)`)
                             // has its `c·∂q/∂x` in `grad_ddt`, which belongs to the charge
                             // Jacobian — the same product-rule split every other channel keeps.
-                            for (slot, &dg) in u.grad_ddt.iter().enumerate() {
-                                if dg != 0.0 {
-                                    sink.dcharge(g, self.terminals[slot], -w0 / dm * dg);
-                                }
+                            for (slot, dg) in u.grad_ddt() {
+                                sink.dcharge(g, self.terminals[slot], -w0 / dm * dg);
                             }
                         }
                     }
@@ -1635,21 +1670,17 @@ impl GeneratedModel {
                 continue;
             };
             sink.residual(g, -d.value);
-            for (slot, &dg) in d.grad.iter().enumerate() {
-                if dg != 0.0 {
-                    let gk = self.terminals[slot];
-                    sink.jacobian(g, gk, -dg);
-                }
+            for (slot, dg) in d.grad() {
+                let gk = self.terminals[slot];
+                sink.jacobian(g, gk, -dg);
             }
             // `idt`'s integrand may itself carry a bias-dependent charge coefficient
             // (`idt(c(x)*ddt(q))`), whose `c·∂q/∂x` lives only in `grad_ddt` — see the
             // accumulator path above and § `Integration`. Stamped alongside this row's own
             // `dcharge(g, g, 1.0)`, which is the accumulator's *own* state, not the integrand's.
-            for (slot, &dg) in d.grad_ddt.iter().enumerate() {
-                if dg != 0.0 {
-                    let gk = self.terminals[slot];
-                    sink.dcharge(g, gk, -dg);
-                }
+            for (slot, dg) in d.grad_ddt() {
+                let gk = self.terminals[slot];
+                sink.dcharge(g, gk, -dg);
             }
             sink.charge(g, ctx.x.get(g).copied().unwrap_or(0.0));
             sink.dcharge(g, g, 1.0);
@@ -1675,14 +1706,12 @@ impl GeneratedModel {
                 .borrow()
                 .get(&acc.branch.0)
                 .cloned()
-                .unwrap_or_else(|| Dual::constant(0.0, ctx.count()));
+                .unwrap_or_else(|| Dual::constant(0.0));
             sink.residual(g, ctx.x.get(g).copied().unwrap_or(0.0) - total.value);
             sink.jacobian(g, g, 1.0);
-            for (slot, &dg) in total.grad.iter().enumerate() {
-                if dg != 0.0 {
-                    let gk = self.terminals[slot];
-                    sink.jacobian(g, gk, -dg);
-                }
+            for (slot, dg) in total.grad() {
+                let gk = self.terminals[slot];
+                sink.jacobian(g, gk, -dg);
             }
             // The product-rule half, exactly as the ordinary resistive path stamps it
             // (§ `Integration`): a contribution folded into this accumulator can carry a
@@ -1690,11 +1719,9 @@ impl GeneratedModel {
             // Dropping it here would leave this row's Jacobian zero where the truth is not —
             // the same silent-Newton-degradation this crate refuses elsewhere. Non-zero only
             // downstream of a nested `ddt`, so a no-op for every ordinary accumulator.
-            for (slot, &dg) in total.grad_ddt.iter().enumerate() {
-                if dg != 0.0 {
-                    let gk = self.terminals[slot];
-                    sink.dcharge(g, gk, -dg);
-                }
+            for (slot, dg) in total.grad_ddt() {
+                let gk = self.terminals[slot];
+                sink.dcharge(g, gk, -dg);
             }
         }
     }
@@ -1874,7 +1901,7 @@ impl ModelInstance for GeneratedModel {
         if self.module.event_sites.is_empty() && self.lowered.zi_terms.is_empty() {
             return;
         }
-        let ctx = self.ctx(x, actx, &[], &[], false);
+        let ctx = self.ctx(x, actx, &[], &[], false, &[]);
         let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
         // A `zi_*` filter's next sample instant, `t0 + k·T` — pure arithmetic on `(t0, T,
         // now)`, the way a periodic `timer` stays stateless about its own schedule — asked for
@@ -1950,7 +1977,7 @@ impl ModelInstance for GeneratedModel {
         // No state: a noise analysis linearizes about a fixed operating point and has no
         // accepted-timepoint sequence, so a `transition`/`slew` inside a PSD expression sees
         // `is_initial_step` and settles to its input — the same steady-state reading DC gets.
-        let ctx = self.ctx(x, actx, &[], &[], false);
+        let ctx = self.ctx(x, actx, &[], &[], false, &[]);
         // Post-validation the evaluations below cannot fail; a failure mid-walk simply stops
         // emitting further sources, exactly as `load` stops stamping.
         let _ = self.walk(&ctx, &self.lowered.stmts, &mut |me, ctx, c| {
@@ -1992,11 +2019,38 @@ impl ModelInstance for GeneratedModel {
         state: &mut va_abi::ModelState,
         sink: &mut dyn StampSink,
     ) {
-        let ctx = self.ctx(x, actx, state.committed(), state.fired_slots(), false);
+        self.ensure_setup();
+        let setup = self.setup.borrow();
+        let static_vars: &[Option<crate::ad::Dual>] = setup.as_ref().map_or(&[], |s| &s.vars);
+        let setup_completed = setup.as_ref().is_none_or(|s| s.completed);
+        let ctx = self.ctx(
+            x,
+            actx,
+            state.committed(),
+            state.fired_slots(),
+            false,
+            static_vars,
+        );
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
-        let _ = self.run(&ctx, &self.lowered.stmts, sink);
+        //
+        // The walk starts at `static_prefix`, not at 0: everything before it is the model's
+        // setup, already evaluated into `static_vars` by `ensure_setup` and in scope through
+        // `Ctx::static_vars`. That is the whole of this optimisation at the call site.
+        //
+        // Guarded on the setup having completed, because a walk that aborts skips every
+        // statement after the failure — and the statements after the failure are now in a
+        // different slice. Without the guard, a contribution downstream of a runaway loop would
+        // start stamping values it never used to (`a_runaway_while_loop_is_bounded_by_the_
+        // iteration_cap_not_a_hang`).
+        if setup_completed {
+            let _ = self.run(
+                &ctx,
+                &self.lowered.stmts[self.lowered.static_prefix..],
+                sink,
+            );
+        }
         self.finalize_mixed_branch_currents(&ctx, sink);
         // After `run`, not before: an `idt` accumulator's argument may read a local variable the
         // statement walk just bound (see `Self::stamp_idt_accumulators`'s doc comment).
@@ -2123,6 +2177,263 @@ mod tests {
         Access, AccessKind, Branch, BranchId, Builtin, Discipline, Expr, ExprId, FuncId, Function,
         Module, NodeDecl, NodeId, Param, Stmt, VarDecl, VarId,
     };
+
+    // -----------------------------------------------------------------------------------
+    // The setup / eval split (`lower::static_prefix`)
+    // -----------------------------------------------------------------------------------
+
+    /// A conductor whose conductance is built up by `n_setup` parameter-only statements, then
+    /// one statement reading `V(p,n)`, then the contribution — the shape of every compact
+    /// model: a long bias-independent preamble, then the bias-dependent core.
+    ///
+    /// `tail` builds one extra statement, spliced in between the preamble and the probe read,
+    /// so a test can put a statement there and see which side of the split it lands on. It is
+    /// a closure rather than a ready-made `Stmt` because an `ExprId` only means anything in the
+    /// arena it was pushed into — the statement has to be built against *this* module.
+    fn setup_split_ir(n_setup: usize, tail: Option<&dyn Fn(&mut Module) -> Stmt>) -> Module {
+        let mut m = resistor_ir();
+        m.analog.clear();
+        m.vars = (0..n_setup + 3)
+            .map(|i| VarDecl {
+                name: format!("v{i}"),
+            })
+            .collect();
+
+        let mut stmts = Vec::new();
+        // v0 = R; v1 = v0 + 1; v2 = v1 + 1; … — each reads the one before, so a wrong
+        // "known variables" rule truncates the prefix and the test sees it.
+        let r = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        stmts.push(Stmt::Assign {
+            lhs: VarId(0),
+            rhs: r,
+        });
+        for i in 1..n_setup {
+            let prev = m.push_expr(Expr::Var(VarId(i as u32 - 1)));
+            let one = m.push_expr(Expr::Const(1.0));
+            let sum = m.push_expr(Expr::Binary(va_ir::BinOp::Add, prev, one));
+            stmts.push(Stmt::Assign {
+                lhs: VarId(i as u32),
+                rhs: sum,
+            });
+        }
+        if let Some(build) = tail {
+            stmts.push(build(&mut m));
+        }
+        // The bias-dependent core: g = V(p,n) / v_{n_setup-1}; I(p,n) <+ g.
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let last = m.push_expr(Expr::Var(VarId(n_setup as u32 - 1)));
+        let quot = m.push_expr(Expr::Binary(va_ir::BinOp::Div, v, last));
+        let core = VarId(n_setup as u32 + 1);
+        stmts.push(Stmt::Assign {
+            lhs: core,
+            rhs: quot,
+        });
+        let read = m.push_expr(Expr::Var(core));
+        stmts.push(Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: read,
+        });
+        m.analog = stmts;
+        m
+    }
+
+    /// The preamble is hoisted and the bias-dependent core is not — the split lands exactly
+    /// where the first probe read is, not one statement either side of it.
+    #[test]
+    fn the_setup_prefix_stops_at_the_first_probe() {
+        let m = setup_split_ir(5, None);
+        let lowered = lower::lower(&m).expect("lowers");
+        assert_eq!(
+            lowered.static_prefix,
+            5,
+            "five parameter-only assignments are setup; the probe read and the contribution \
+             are not (of {} statements)",
+            lowered.stmts.len()
+        );
+    }
+
+    /// A contribution is never setup, however bias-independent its value: it has to stamp on
+    /// every call.
+    #[test]
+    fn a_contribution_is_never_setup() {
+        let mut m = resistor_ir();
+        m.analog.clear();
+        m.vars = vec![VarDecl { name: "k".into() }];
+        let one = m.push_expr(Expr::Const(1.0));
+        let constant_current = m.push_expr(Expr::Const(1e-3));
+        let stmts = vec![
+            Stmt::Assign {
+                lhs: VarId(0),
+                rhs: one,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: constant_current,
+            },
+        ];
+        m.analog = stmts;
+        let lowered = lower::lower(&m).expect("lowers");
+        assert_eq!(
+            lowered.static_prefix, 1,
+            "the assignment is setup; the constant contribution still is not"
+        );
+    }
+
+    /// `$abstime` must not be hoisted. This is the mistake that would be invisible: the model
+    /// would compile, converge, and report the first timepoint's value at every timepoint.
+    #[test]
+    fn a_statement_reading_abstime_is_not_setup() {
+        let tail = |m: &mut Module| {
+            let t = m.push_expr(Expr::Call(Builtin::Abstime, vec![]));
+            Stmt::Assign {
+                lhs: VarId(3),
+                rhs: t,
+            }
+        };
+        let m = setup_split_ir(3, Some(&tail));
+        let lowered = lower::lower(&m).expect("lowers");
+        assert_eq!(
+            lowered.static_prefix, 3,
+            "the prefix stops at `$abstime`, which is different at every timepoint"
+        );
+    }
+
+    /// The prefix is a *prefix*: a bias-independent statement placed after a bias-dependent one
+    /// stays in the eval phase, because hoisting it would reorder it past a write it may read.
+    #[test]
+    fn a_bias_free_statement_after_a_probe_is_not_hoisted() {
+        let mut m = resistor_ir();
+        m.analog.clear();
+        m.vars = vec![VarDecl { name: "a".into() }, VarDecl { name: "b".into() }];
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let two = m.push_expr(Expr::Const(2.0));
+        let read_a = m.push_expr(Expr::Var(VarId(0)));
+        m.analog = vec![
+            // a = V(p,n) — bias-dependent, so the prefix is empty from here on.
+            Stmt::Assign {
+                lhs: VarId(0),
+                rhs: v,
+            },
+            // b = 2.0 — bias-independent, but it comes after, so it is not hoisted.
+            Stmt::Assign {
+                lhs: VarId(1),
+                rhs: two,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: read_a,
+            },
+        ];
+        let lowered = lower::lower(&m).expect("lowers");
+        assert_eq!(lowered.static_prefix, 0);
+    }
+
+    /// The split must not change a single number, and the instance must stay correct across
+    /// repeated `load`s at *different* operating points — the failure mode being a cached
+    /// setup that somehow froze a bias-dependent value at the first call's `x`.
+    #[test]
+    fn a_split_model_gives_the_same_stamps_as_an_unsplit_one() {
+        let m = setup_split_ir(6, None);
+        let lowered = lower::lower(&m).expect("lowers");
+        assert!(
+            lowered.static_prefix > 0,
+            "this fixture must actually split"
+        );
+
+        // v5 = R + 5 = 1005, so I(p,n) = V(p,n)/1005 and dI/dV = 1/1005.
+        let g = 1.0 / 1005.0;
+        let instance = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+        for v in [0.25_f64, -3.0, 7.5, 0.25] {
+            let mut sink = DenseStamp::new(2);
+            instance.load(
+                &[v, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sink,
+            );
+            assert!(
+                (sink.residual[0] - v * g).abs() < 1e-15,
+                "V={v}: residual {} != {}",
+                sink.residual[0],
+                v * g
+            );
+            assert!(
+                (sink.jacobian[0] - g).abs() < 1e-18,
+                "V={v}: dI/dV {} != {g}",
+                sink.jacobian[0]
+            );
+        }
+    }
+
+    /// A variable the setup bound and the eval phase then *reassigns*: the reassignment wins.
+    ///
+    /// This is the one place the two-layer variable lookup could go wrong — a read that falls
+    /// through to the cached setup after a later statement has already overwritten the binding
+    /// would silently use the stale value.
+    #[test]
+    fn an_eval_phase_assignment_shadows_the_setup_binding() {
+        let mut m = resistor_ir();
+        m.analog.clear();
+        m.vars = vec![VarDecl { name: "k".into() }];
+        let hundred = m.push_expr(Expr::Const(100.0));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let read_k = m.push_expr(Expr::Var(VarId(0)));
+        m.analog = vec![
+            // Setup: k = 100.0 …
+            Stmt::Assign {
+                lhs: VarId(0),
+                rhs: hundred,
+            },
+            // … eval: k = V(p,n), overwriting it …
+            Stmt::Assign {
+                lhs: VarId(0),
+                rhs: v,
+            },
+            // … so the contribution must see V(p,n), not 100.
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: read_k,
+            },
+        ];
+        let lowered = lower::lower(&m).expect("lowers");
+        assert_eq!(lowered.static_prefix, 1, "the first assignment is setup");
+
+        let instance = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+        let mut sink = DenseStamp::new(2);
+        instance.load(
+            &[0.5, 0.0],
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+        assert!(
+            (sink.residual[0] - 0.5).abs() < 1e-15,
+            "the eval-phase binding must shadow the setup's: got {}, expected 0.5 (100.0 would \
+             mean the stale setup value was read)",
+            sink.residual[0]
+        );
+    }
 
     /// Build the resistor IR: `I(p,n) <+ V(p,n) / R`, R defaulting to 1 kΩ.
     fn resistor_ir() -> Module {

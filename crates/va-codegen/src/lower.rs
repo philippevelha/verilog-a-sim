@@ -929,6 +929,12 @@ pub struct Lowered {
     /// Total `f64` slots this model needs on the state channel — the sum of every
     /// [`StatefulCall`]'s width, and what `crate::GeneratedModel::state_len` reports.
     pub state_len: usize,
+    /// How many leading [`Self::stmts`] are the model's **setup** rather than its per-iteration
+    /// **eval** — see [`static_prefix_len`], which computes it and explains the rule.
+    ///
+    /// `crate::GeneratedModel` evaluates them once, on the first `load`, and starts every later
+    /// `load` at `stmts[static_prefix..]` with those bindings already in scope.
+    pub static_prefix: usize,
 }
 
 /// Which time-domain construct a [`StatefulCall`] is, and how many state slots it needs.
@@ -1261,6 +1267,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let mut zi_terms = Vec::new();
     collect_zi_terms(&stmts, &mut zi_terms);
 
+    let static_prefix = static_prefix_len(module, &stmts);
     Ok(Lowered {
         n_unknowns: next_slot,
         taint: Taint::of(module, &module.analog),
@@ -1274,6 +1281,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         stateful_calls,
         state_len,
         has_laplace,
+        static_prefix,
     })
 }
 
@@ -2532,4 +2540,274 @@ fn collect_assigns_one(stmt: &Stmt, out: &mut Vec<(u32, ExprId)>) {
 
 fn unsupported(msg: &str) -> CodegenError {
     CodegenError::Unsupported(msg.to_string())
+}
+
+// ---------------------------------------------------------------------------------------
+// The bias-independent prefix
+// ---------------------------------------------------------------------------------------
+
+/// How many leading statements of [`Lowered::stmts`] compute the same thing on every
+/// evaluation of this instance — the model's **setup**, as opposed to its per-iteration
+/// **eval**.
+///
+/// # Why a compact model has one at all
+///
+/// Most of a CMC standard model is not about bias. It is parameter range checking, temperature
+/// scaling, geometry and binning arithmetic, corner interpolation: hundreds of statements that
+/// read only parameters and constants, and therefore produce the same numbers on Newton
+/// iteration 300 as on iteration 1. Measured over one `load()` (2026-09-22): 87% of BSIM4's
+/// expression evaluations, 84% of BSIM-SOI's, 80% of PSP103's. Re-running that work every
+/// iteration of every timepoint is the single largest avoidable cost in the evaluator.
+///
+/// # What counts, and why the rule is a whitelist
+///
+/// A statement is bias-independent when everything it evaluates is: constants, parameters,
+/// `$param_given`/`$port_connected`, `$temperature`/`$vt`/`$mfactor` (all three fixed for an
+/// instance's whole life — see the caveat below), arithmetic, the pure maths built-ins, and
+/// reads of variables an earlier bias-independent statement already bound. Everything else —
+/// any probe, any analog operator, anything reading the analysis context or the state channel,
+/// and any contribution, which must stamp on every call — makes the statement and the prefix
+/// stop there.
+///
+/// The classification is written as an **exhaustive match with no wildcard**, so a new
+/// `Expr` variant or `Builtin` cannot be silently inherited into the safe set: adding one
+/// fails to compile until someone decides which side it is on. Getting that wrong in the
+/// permissive direction would freeze a value at its first evaluation and be invisible — the
+/// solve would simply converge to the wrong answer.
+///
+/// # Prefix, not "every bias-independent statement"
+///
+/// Only a leading run is taken, and nothing is reordered. A bias-independent statement that
+/// sits *after* a bias-dependent one may read a variable that statement wrote, so hoisting it
+/// would need dependence analysis this does not do. The prefix is where the setup actually
+/// lives in every compact model examined, so the simple rule collects nearly all of the win.
+///
+/// # The caveat that outlives this function
+///
+/// `$temperature` and `$vt` read [`crate::GeneratedModel::temp`], the temperature the instance
+/// was *built* at, not `AnalysisCtx::temp` (see `crate::ad::Ctx::temp`, which says why). That
+/// is what makes the cached prefix valid for an instance's whole life with no key on it. **If
+/// `$temperature` is ever re-sourced from the analysis context, this cache has to be keyed on
+/// temperature or it will serve one sweep point's numbers to the next.**
+fn static_prefix_len(module: &Module, stmts: &[LoweredStmt]) -> usize {
+    let mut known = vec![false; module.vars.len()];
+    let mut memo = HashMap::new();
+    let mut n = 0;
+    for stmt in stmts {
+        let Some(defines) = stmt_is_bias_free(module, stmt, &known, &mut memo) else {
+            break;
+        };
+        for v in defines {
+            if let Some(slot) = known.get_mut(v as usize) {
+                *slot = true;
+            }
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Whether `stmt` is bias-independent under the bindings in `known`; on success, the variables
+/// it binds. See [`static_prefix_len`].
+fn stmt_is_bias_free(
+    module: &Module,
+    stmt: &LoweredStmt,
+    known: &[bool],
+    memo: &mut HashMap<u32, bool>,
+) -> Option<Vec<u32>> {
+    match stmt {
+        LoweredStmt::Assign { lhs, rhs } => {
+            expr_is_bias_free(module, *rhs, known, memo).then(|| vec![lhs.0])
+        }
+        // A contribution stamps into the sink, so it has to run on every call whatever its
+        // value does; `bound_step` likewise reports into the sink's step channel.
+        LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) => None,
+        LoweredStmt::If { cond, then_, else_ } => {
+            expr_is_bias_free(module, *cond, known, memo).then_some(())?;
+            let mut defines = block_is_bias_free(module, then_, known, memo)?;
+            defines.extend(block_is_bias_free(module, else_, known, memo)?);
+            Some(defines)
+        }
+        LoweredStmt::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            expr_is_bias_free(module, *selector, known, memo).then_some(())?;
+            let mut defines = block_is_bias_free(module, default, known, memo)?;
+            for arm in arms {
+                for label in &arm.labels {
+                    expr_is_bias_free(module, *label, known, memo).then_some(())?;
+                }
+                defines.extend(block_is_bias_free(module, &arm.body, known, memo)?);
+            }
+            Some(defines)
+        }
+        // A loop whose condition and body are both bias-independent runs the same number of
+        // iterations, over the same values, every time — so the whole loop is.
+        LoweredStmt::While { cond, body } => {
+            expr_is_bias_free(module, *cond, known, memo).then_some(())?;
+            block_is_bias_free(module, body, known, memo)
+        }
+        LoweredStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            // `init` runs before the first `cond` check, so what it binds is in scope for the
+            // rest of the loop — hence the local view rather than the caller's `known`.
+            let mut local = known.to_vec();
+            let mut defines = block_is_bias_free(module, init, known, memo)?;
+            for v in &defines {
+                if let Some(slot) = local.get_mut(*v as usize) {
+                    *slot = true;
+                }
+            }
+            expr_is_bias_free(module, *cond, &local, memo).then_some(())?;
+            defines.extend(block_is_bias_free(module, step, &local, memo)?);
+            defines.extend(block_is_bias_free(module, body, &local, memo)?);
+            Some(defines)
+        }
+        LoweredStmt::Repeat { count, body } => {
+            expr_is_bias_free(module, *count, known, memo).then_some(())?;
+            block_is_bias_free(module, body, known, memo)
+        }
+    }
+}
+
+/// [`stmt_is_bias_free`] over a block, threading each statement's bindings into the next.
+fn block_is_bias_free(
+    module: &Module,
+    stmts: &[LoweredStmt],
+    known: &[bool],
+    memo: &mut HashMap<u32, bool>,
+) -> Option<Vec<u32>> {
+    let mut local = known.to_vec();
+    let mut defines = Vec::new();
+    for stmt in stmts {
+        let d = stmt_is_bias_free(module, stmt, &local, memo)?;
+        for v in d {
+            if let Some(slot) = local.get_mut(v as usize) {
+                *slot = true;
+            }
+            defines.push(v);
+        }
+    }
+    Some(defines)
+}
+
+/// Whether evaluating `expr` gives the same number on every evaluation of this instance.
+///
+/// `memo` is scoped to one statement's check, because the answer depends on `known`, which
+/// grows as the scan advances — a shared arena node is asked about once per statement, not once
+/// in total, and that is what keeps this linear overall rather than exponential on a
+/// heavily-shared expression DAG.
+fn expr_is_bias_free(
+    module: &Module,
+    expr: ExprId,
+    known: &[bool],
+    memo: &mut HashMap<u32, bool>,
+) -> bool {
+    if let Some(hit) = memo.get(&expr.0) {
+        return *hit;
+    }
+    let all = |ids: &[ExprId], memo: &mut HashMap<u32, bool>| {
+        ids.iter()
+            .all(|e| expr_is_bias_free(module, *e, known, memo))
+    };
+    let answer = match module.expr(expr) {
+        Expr::Const(_) | Expr::Param(_) | Expr::ParamGiven(_) | Expr::PortConnected(_) => true,
+        Expr::Var(v) => known.get(v.0 as usize).copied().unwrap_or(false),
+        Expr::Unary(_, a) => expr_is_bias_free(module, *a, known, memo),
+        Expr::Binary(_, a, b) => {
+            expr_is_bias_free(module, *a, known, memo) && expr_is_bias_free(module, *b, known, memo)
+        }
+        Expr::Select(c, a, b) => {
+            expr_is_bias_free(module, *c, known, memo)
+                && expr_is_bias_free(module, *a, known, memo)
+                && expr_is_bias_free(module, *b, known, memo)
+        }
+        Expr::Call(builtin, args) => builtin_is_bias_free(*builtin) && all(args, memo),
+        // A probe is the definition of bias-dependent.
+        Expr::Probe(_) => false,
+        // `ddx` differentiates w.r.t. an unknown, so its answer moves with the operating point.
+        Expr::Ddx(..) => false,
+        // An event's having fired is a property of the timepoint, not of the instance.
+        Expr::EventFired(_) => false,
+        // A user-defined analog function is pure by the LRM, but its *body* is not checked
+        // here, so it is refused rather than assumed. Models whose setup arithmetic lives in
+        // analog functions therefore hoist less; widening this means walking the function body
+        // with the same rules, which is a separate change with its own tests.
+        Expr::CallUser(..) => false,
+    };
+    memo.insert(expr.0, answer);
+    answer
+}
+
+/// Whether a built-in's value is fixed for an instance's whole life given fixed arguments.
+///
+/// Exhaustive on purpose — see [`static_prefix_len`] on why there is no wildcard arm.
+fn builtin_is_bias_free(builtin: Builtin) -> bool {
+    match builtin {
+        // Pure functions of their arguments.
+        Builtin::Exp
+        | Builtin::Ln
+        | Builtin::Log
+        | Builtin::Sqrt
+        | Builtin::Abs
+        | Builtin::Floor
+        | Builtin::Ceil
+        | Builtin::Round
+        | Builtin::Int
+        | Builtin::Pow
+        | Builtin::Hypot
+        | Builtin::Atan2
+        | Builtin::Min
+        | Builtin::Max
+        | Builtin::Sin
+        | Builtin::Cos
+        | Builtin::Tan
+        | Builtin::Sinh
+        | Builtin::Cosh
+        | Builtin::Tanh
+        | Builtin::Asin
+        | Builtin::Acos
+        | Builtin::Atan
+        | Builtin::Asinh
+        | Builtin::Acosh
+        | Builtin::Atanh => true,
+        // Fixed for the life of the instance: `$temperature`/`$vt` read the temperature the
+        // model was built at, and `$mfactor` the module's multiplicity. See
+        // `static_prefix_len`'s caveat about what happens if `$temperature` is ever re-sourced
+        // from the analysis context.
+        Builtin::Vt | Builtin::Temperature | Builtin::Mfactor => true,
+        // Analog operators: they carry state across evaluations, or define one.
+        Builtin::Ddt
+        | Builtin::Idt
+        | Builtin::Transition
+        | Builtin::Slew
+        | Builtin::Absdelay
+        | Builtin::LaplaceNd
+        | Builtin::LaplaceNp
+        | Builtin::LaplaceZd
+        | Builtin::LaplaceZp
+        | Builtin::ZiNd
+        | Builtin::ZiNp
+        | Builtin::ZiZd
+        | Builtin::ZiZp => false,
+        // Read the analysis context, which is exactly what differs between two evaluations.
+        Builtin::Abstime
+        | Builtin::Analysis
+        | Builtin::AcStim
+        | Builtin::InitialStep
+        | Builtin::FinalStep => false,
+        // `$simparam` is not constant across a run: `gmin` changes under gmin stepping.
+        Builtin::SimParam => false,
+        // Noise sources are stamped into the noise channel, not evaluated for a value.
+        Builtin::WhiteNoise
+        | Builtin::FlickerNoise
+        | Builtin::NoiseTable
+        | Builtin::NoiseTableLog => false,
+    }
 }

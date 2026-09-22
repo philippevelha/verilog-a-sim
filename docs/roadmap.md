@@ -830,6 +830,59 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.2.0) — the evaluator, 3.4-9.3x.** The question that opened this
+> was the OpenVAF paper's compile-time table: preparing a CMC model costs us 5-50 ms against
+> OpenVAF's 0.23-6.7 s, which looks like a rout until you ask what we traded for it. We build a
+> tree-walking AD evaluator where OpenVAF emits machine code, and the bill arrives per
+> evaluation. A 1001-point BSIM4 Id-Vg sweep cost 30 s.
+>
+> Profiling first, which redirected the work. One `load()` of BSIM4 was 1215 us over 19109 arena
+> nodes — and **86.7% of the `Dual`s it built depended on no unknown at all** (7816 of 9020;
+> 84% for BSIM-SOI, 80% for PSP103). A compact model is mostly parameter checking, temperature
+> scaling, geometry and binning. Every one of those values was allocating two `Vec<f64>` of
+> length `n_unknowns` to carry a gradient that was identically zero. The bottleneck was never
+> the tree walk.
+>
+> Three changes, each measured on its own with the new `cargo xtask bench-model`:
+>
+> 1. **`Grad::Zero`** — a gradient channel is now "nothing" or a dense vector, and "nothing"
+>    holds no allocation and needs no length. Exact rather than heuristic: a value is
+>    independent of the unknowns precisely when both its operands were, so the representation
+>    discovers it rather than being told. BSIM4 1215 -> 334 us.
+> 2. **`Ctx::vars` indexed rather than hashed** — `HashMap<u32, Dual>` to `Vec<Option<Dual>>`.
+>    BSIM4 declares 1446 locals and reads them thousands of times per `load`. 334 -> 206 us.
+> 3. **The setup/eval split** — `lower` computes how many leading statements are
+>    bias-independent (`Lowered::static_prefix`), `load` evaluates them once per instance and
+>    starts every later call past them. 1556 of BSIM4's 1949 statements, 757 of PSP103's 1220,
+>    **1 of HICUM/L2v3's 191**. 206 -> 131 us.
+>
+> That last row is the honest limit of the current rule: it takes a *prefix* and reorders
+> nothing, because a bias-independent statement after a bias-dependent one may read what that
+> statement wrote. HICUM/L2v3's setup is not a prefix, so it gains nothing from step 3. Widening
+> this to real dependence analysis is the obvious next step and is not done.
+>
+> **Evidence.** 821 tests pass (was 814). `cargo xtask validate` 28/28 — and diffed line by line
+> against a run of the pristine tree, **all 28 error figures bit-identical**, which is what makes
+> "no answer moved" a measurement rather than a hope. Corpus `va-cli check external --codegen`
+> 199 -> **200/224**, and that one file is a correctness fix, not a loosening: `L_UTSOI_102_nqs`
+> was refused for a second time derivative it does not contain, because `carries_charge` asked
+> "is any partial non-zero" of a dense vector of zeros, and zeros times an infinite coefficient
+> are NaN, and `NaN != 0.0`. Confirmed by excluding NaN from that one predicate on the pristine
+> code and watching the file pass. The structural `ddt(ddt(x))` rule in `lower` is untouched and
+> still fires. Third member of the `0 * inf` family after v1.1.1's two.
+>
+> **One behaviour changed and a test caught it**: a setup that hits the loop-iteration cap used
+> to abort the walk and skip everything after it; split into its own phase, the failure was
+> being swallowed. `Setup::completed` restores it.
+>
+> **Still open.** Nothing is compiled to machine code — a flat SSA tape would remove the
+> recursive-`eval` dispatch and `Result` plumbing that remain, and a Cranelift JIT (pure Rust,
+> so §5's no-native-link rule is fine, but `unsafe` to call what it emits, so §5 sign-off)
+> would go further. Bigger, and cheaper to fix: **`va_cli::solve_dc_sweep` rebuilds every model
+> instance at every sweep point** — `build_instance` is 7.3 ms for BSIM4 against 10.7 ms per
+> point — so most of a DC sweep is now rebuilding an unchanged model and discarding its cached
+> setup. That one is T6's, not T2's.
+
 - Walk the IR arena and evaluate expressions; implement forward-mode AD (`Dual`) over the
   unknowns.
 - **Every differentiated operator has a finite-difference test** (analytic vs central

@@ -45,20 +45,101 @@ pub struct Dual {
     /// The primal value.
     pub value: f64,
     /// Partial derivatives w.r.t. each local unknown (node slot order) — the **instantaneous**
-    /// channel, stamped as Jacobian entries.
-    pub grad: Vec<f64>,
+    /// channel, stamped as Jacobian entries. Read with [`Dual::grad`].
+    grad: Grad,
     /// Partial derivatives w.r.t. each local unknown's **time derivative** — the charge channel,
-    /// stamped as `dcharge` entries. Non-zero only downstream of a `ddt`.
-    pub grad_ddt: Vec<f64>,
+    /// stamped as `dcharge` entries. Non-zero only downstream of a `ddt`. Read with
+    /// [`Dual::grad_ddt`].
+    grad_ddt: Grad,
+}
+
+/// One channel of a [`Dual`]'s gradient.
+///
+/// # Why this is not just a `Vec<f64>`
+///
+/// Most of a compact model is **bias-independent**: parameter range checks, temperature
+/// scaling, geometry binning, corner interpolation. Measured on the CMC standard models
+/// (2026-09-22), 78–87% of the `Dual`s a single `load()` builds depend on no unknown
+/// whatsoever — 7816 of BSIM4's 9020. As a dense `Vec<f64>` every one of those cost two heap
+/// allocations and `2n` multiply-adds to carry a gradient that was identically zero, on every
+/// Newton iteration, for the whole of a simulation.
+///
+/// [`Grad::Zero`] makes that case free, and it is exact rather than heuristic: a value is
+/// structurally independent of the unknowns precisely when both its operands were. Nothing has
+/// to prove in advance which statements are bias-independent — the representation finds out as
+/// it evaluates, which is also why it needs no invalidation rule when `$temperature` or a
+/// parameter override changes.
+///
+/// A second, smaller benefit falls out: `Zero ⊗ Zero → Zero` never multiplies a zero partial by
+/// an infinite coefficient, so the `0 · inf` NaNs that v1.1.1 fixed one rule at a time cannot
+/// re-enter through a rule nobody thought about.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Grad {
+    /// Structurally zero: this value depends on no unknown at all. Holds no allocation, and
+    /// carries no length — a `Zero` is the zero gradient over *whatever* the ambient unknown
+    /// count is, which is what lets a constant be built without being told it.
+    #[default]
+    Zero,
+    /// One entry per local unknown, in slot order. Every `Dense` within one evaluation has the
+    /// same length, since the only thing that introduces one is [`Dual::variable`].
+    Dense(Vec<f64>),
+}
+
+impl Grad {
+    /// A dense view over `n` slots, for tests that want to compare a whole channel at once.
+    #[cfg(test)]
+    fn to_vec(&self, n: usize) -> Vec<f64> {
+        (0..n).map(|i| self.at(i)).collect()
+    }
+
+    /// The **non-zero** partials, as `(slot, value)`.
+    fn iter(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        let dense: &[f64] = match self {
+            Grad::Zero => &[],
+            Grad::Dense(v) => v,
+        };
+        dense
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| **g != 0.0)
+            .map(|(i, g)| (i, *g))
+    }
+
+    /// The partial w.r.t. `slot`, or `0.0` if this channel is zero or `slot` is out of range.
+    fn at(&self, slot: usize) -> f64 {
+        match self {
+            Grad::Zero => 0.0,
+            Grad::Dense(v) => v.get(slot).copied().unwrap_or(0.0),
+        }
+    }
+
+    /// Whether any partial is non-zero. `Zero` answers without looking at anything.
+    fn any_nonzero(&self) -> bool {
+        match self {
+            Grad::Zero => false,
+            Grad::Dense(v) => v.iter().any(|&g| g != 0.0),
+        }
+    }
+
+    /// Apply `f` elementwise. **`f(0.0)` must be `0.0`**, which every caller guarantees by
+    /// mapping a zero partial to zero explicitly — see [`Dual::chain`] for why that matters at
+    /// a singularity. `Zero` is therefore left alone rather than materialized.
+    fn map(&self, f: impl Fn(f64) -> f64) -> Grad {
+        match self {
+            Grad::Zero => Grad::Zero,
+            Grad::Dense(v) => Grad::Dense(v.iter().map(|g| f(*g)).collect()),
+        }
+    }
 }
 
 impl Dual {
-    /// A constant with zero gradient over `n` unknowns.
-    pub fn constant(value: f64, n: usize) -> Self {
+    /// A constant: no dependence on any unknown, and no allocation. The ambient unknown count
+    /// is not needed — see [`Grad::Zero`].
+    pub fn constant(value: f64) -> Self {
         Self {
             value,
-            grad: vec![0.0; n],
-            grad_ddt: vec![0.0; n],
+            grad: Grad::Zero,
+            grad_ddt: Grad::Zero,
         }
     }
 
@@ -68,18 +149,49 @@ impl Dual {
         grad[i] = 1.0;
         Self {
             value,
-            grad,
-            grad_ddt: vec![0.0; n],
+            grad: Grad::Dense(grad),
+            grad_ddt: Grad::Zero,
         }
     }
 
+    /// The **non-zero** instantaneous partials, as `(slot, value)` — the Jacobian channel.
+    ///
+    /// Only non-zero entries are yielded, which is what every consumer wants: a stamp of `0.0`
+    /// is a stamp not worth making, and every call site used to open with `if dg != 0.0`. A
+    /// [`Grad::Zero`] channel yields nothing at all.
+    pub fn grad(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.grad.iter()
+    }
+
+    /// The **non-zero** time-derivative partials, as `(slot, value)` — the charge channel.
+    pub fn grad_ddt(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.grad_ddt.iter()
+    }
+
+    /// The instantaneous partial w.r.t. local unknown `slot`, or `0.0` if there is none.
+    pub fn grad_at(&self, slot: usize) -> f64 {
+        self.grad.at(slot)
+    }
+
+    /// The time-derivative partial w.r.t. local unknown `slot`, or `0.0` if there is none.
+    pub fn grad_ddt_at(&self, slot: usize) -> f64 {
+        self.grad_ddt.at(slot)
+    }
+
+    /// The instantaneous channel as a dense `n`-slot vector — tests only. Production code
+    /// iterates [`Dual::grad`] instead, which is what makes a [`Grad::Zero`] free.
+    #[cfg(test)]
+    fn grad_vec(&self, n: usize) -> Vec<f64> {
+        self.grad.to_vec(n)
+    }
+
+    /// Whether this value depends on any unknown at all.
+    pub fn depends_on_unknowns(&self) -> bool {
+        self.grad.any_nonzero() || self.grad_ddt.any_nonzero()
+    }
+
     /// Assemble from both channels explicitly — used where a rule builds its gradients by hand.
-    fn from_parts(value: f64, grad: Vec<f64>, grad_ddt: Vec<f64>) -> Dual {
-        debug_assert_eq!(
-            grad.len(),
-            grad_ddt.len(),
-            "both channels span the same unknowns"
-        );
+    fn from_parts(value: f64, grad: Grad, grad_ddt: Grad) -> Dual {
         Dual {
             value,
             grad,
@@ -87,15 +199,10 @@ impl Dual {
         }
     }
 
-    /// Number of unknowns this dual carries a gradient over.
-    fn n(&self) -> usize {
-        self.grad.len()
-    }
-
     /// Whether this value depends on any unknown's *time derivative* — i.e. whether it carries
     /// charge.
     pub fn carries_charge(&self) -> bool {
-        self.grad_ddt.iter().any(|&c| c != 0.0)
+        self.grad_ddt.any_nonzero()
     }
 
     /// Move the instantaneous channel into the time-derivative channel — the effect of `ddt(·)`
@@ -113,17 +220,16 @@ impl Dual {
                  derivative, which this project's single charge channel cannot express",
             ));
         }
-        let n = self.n();
-        Ok(Dual::from_parts(value, vec![0.0; n], self.grad))
+        Ok(Dual::from_parts(value, Grad::Zero, self.grad))
     }
 
     /// Scale value and gradient by a constant `s`.
     pub fn scale(&self, s: f64) -> Dual {
-        Dual::from_parts(
-            self.value * s,
-            self.grad.iter().map(|g| g * s).collect(),
-            self.grad_ddt.iter().map(|g| g * s).collect(),
-        )
+        // A zero partial maps to zero explicitly rather than being multiplied: for an
+        // infinite `s` it must still contribute nothing rather than a NaN, exactly as in
+        // `chain`.
+        let f = |g: f64| if g == 0.0 { 0.0 } else { g * s };
+        Dual::from_parts(self.value * s, self.grad.map(f), self.grad_ddt.map(f))
     }
 
     /// Sum: `(a + b)' = a' + b'`.
@@ -193,12 +299,8 @@ impl Dual {
         // that found this: both operands are *parameters*, so every channel is 0 and the
         // statement cannot affect the Jacobian at all — yet `sqrt(0.0)` gave it an all-NaN
         // gradient that reached the drain node's row and ended the solve on iteration 1.
-        let scale = |g: &f64| if *g == 0.0 { 0.0 } else { g * dvalue };
-        Dual::from_parts(
-            value,
-            self.grad.iter().map(scale).collect(),
-            self.grad_ddt.iter().map(scale).collect(),
-        )
+        let scale = |g: f64| if g == 0.0 { 0.0 } else { g * dvalue };
+        Dual::from_parts(value, self.grad.map(scale), self.grad_ddt.map(scale))
     }
 
     /// `exp`.
@@ -257,11 +359,7 @@ impl Dual {
         let (u, v) = (self.value, exp.value);
         let value = u.powf(v);
         let d_du = v * u.powf(v - 1.0);
-        let exp_varies = exp
-            .grad
-            .iter()
-            .chain(exp.grad_ddt.iter())
-            .any(|g| *g != 0.0);
+        let exp_varies = exp.grad.any_nonzero() || exp.grad_ddt.any_nonzero();
         let d_dv = if exp_varies { value * u.ln() } else { 0.0 };
         // A zero derivative contributes nothing, and is skipped rather than multiplied: at a
         // singular `u` the partial is `inf`, and `inf · 0.0` is NaN rather than the 0 that a
@@ -273,12 +371,8 @@ impl Dual {
         };
         Dual::from_parts(
             value,
-            (0..self.n())
-                .map(|i| rule(self.grad[i], exp.grad[i]))
-                .collect(),
-            (0..self.n())
-                .map(|i| rule(self.grad_ddt[i], exp.grad_ddt[i]))
-                .collect(),
+            zip_with(&self.grad, &exp.grad, rule),
+            zip_with(&self.grad_ddt, &exp.grad_ddt, rule),
         )
     }
 
@@ -363,10 +457,8 @@ impl Dual {
         let rule = |yg: f64, xg: f64| (x.value * yg - y.value * xg) / denom;
         Dual::from_parts(
             y.value.atan2(x.value),
-            (0..self.n()).map(|i| rule(y.grad[i], x.grad[i])).collect(),
-            (0..self.n())
-                .map(|i| rule(y.grad_ddt[i], x.grad_ddt[i]))
-                .collect(),
+            zip_with(&y.grad, &x.grad, rule),
+            zip_with(&y.grad_ddt, &x.grad_ddt, rule),
         )
     }
 
@@ -377,12 +469,8 @@ impl Dual {
         let rule = |sg: f64, og: f64| (self.value * sg + o.value * og) / value;
         Dual::from_parts(
             value,
-            (0..self.n())
-                .map(|i| rule(self.grad[i], o.grad[i]))
-                .collect(),
-            (0..self.n())
-                .map(|i| rule(self.grad_ddt[i], o.grad_ddt[i]))
-                .collect(),
+            zip_with(&self.grad, &o.grad, rule),
+            zip_with(&self.grad_ddt, &o.grad_ddt, rule),
         )
     }
 
@@ -405,8 +493,22 @@ impl Dual {
     }
 }
 
-fn zip_with(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
-    a.iter().zip(b).map(|(x, y)| f(*x, *y)).collect()
+/// Combine two gradient channels elementwise.
+///
+/// **`f(0.0, 0.0)` must be `0.0`** — true of every rule that uses this, each of which is linear
+/// in the two partials — and that is what makes the `Zero`/`Zero` case answerable without
+/// materializing anything. That case is the common one: it is every constant folded against
+/// every other constant, 78–87% of the work in a CMC compact model (see [`Grad`]).
+fn zip_with(a: &Grad, b: &Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
+    match (a, b) {
+        (Grad::Zero, Grad::Zero) => Grad::Zero,
+        (Grad::Dense(x), Grad::Zero) => Grad::Dense(x.iter().map(|&g| f(g, 0.0)).collect()),
+        (Grad::Zero, Grad::Dense(y)) => Grad::Dense(y.iter().map(|&g| f(0.0, g)).collect()),
+        (Grad::Dense(x), Grad::Dense(y)) => {
+            debug_assert_eq!(x.len(), y.len(), "both duals span the same unknowns");
+            Grad::Dense(x.iter().zip(y).map(|(&p, &q)| f(p, q)).collect())
+        }
+    }
 }
 
 /// Evaluation context: everything `eval` needs beyond the expression itself.
@@ -468,7 +570,21 @@ pub struct Ctx<'a> {
     /// call already takes `&Ctx`, and only ever *reads* a binding via [`Self::get_var`] — writes
     /// happen exactly once per `Stmt::Assign`, from the outer statement walk via
     /// [`Self::set_var`], never from within expression evaluation itself.
-    pub vars: RefCell<HashMap<u32, Dual>>,
+    /// Indexed by `VarId.0`, not hashed by it: a compact model reads its locals constantly —
+    /// BSIM4 declares 1446 and touches them thousands of times per `load()` — and a `HashMap`
+    /// charged a SipHash for every one of those reads to look up a slot a plain index finds.
+    /// Grown on demand by [`Self::set_var`] rather than pre-sized, so a caller constructing a
+    /// `Ctx` by hand does not have to know the module's variable count.
+    pub vars: RefCell<Vec<Option<Dual>>>,
+    /// Bindings produced by the module's **setup** — the bias-independent prefix of its
+    /// statements, evaluated once per instance and reused by every later `load`
+    /// (`crate::lower::Lowered::static_prefix`). Indexed by `VarId.0`, like [`Self::vars`],
+    /// and read only as a fallback: a variable the current walk has assigned shadows the
+    /// setup's value, which is what keeps an ordinary reassignment behaving as it always did.
+    ///
+    /// Empty for a context that is walking the setup itself, and for `validate`/`noise`/
+    /// `events`, which still walk every statement from the top.
+    pub static_vars: &'a [Option<Dual>],
     /// Maps a branch (by `BranchId.0`) to the local terminal slot of its own auxiliary current
     /// unknown — populated from both `crate::lower::Lowered::branch_currents` (a branch with a
     /// potential contribution) and `crate::lower::Lowered::flow_current_accumulators` (a purely
@@ -571,7 +687,12 @@ impl Ctx<'_> {
     /// Bind local variable `id` to `value`, overwriting any previous binding — ordinary
     /// imperative reassignment, exactly what a second `Stmt::Assign` to the same variable does.
     pub fn set_var(&self, id: VarId, value: Dual) {
-        self.vars.borrow_mut().insert(id.0, value);
+        let mut vars = self.vars.borrow_mut();
+        let i = id.0 as usize;
+        if i >= vars.len() {
+            vars.resize(i + 1, None);
+        }
+        vars[i] = Some(value);
     }
 
     /// Read local variable `id`'s current binding.
@@ -583,10 +704,14 @@ impl Ctx<'_> {
     /// today, an assignment that lives inside a still-unsupported `if`/`case` arm this
     /// straight-line statement walk never executes.
     fn get_var(&self, id: VarId) -> Result<Dual, CodegenError> {
-        self.vars
-            .borrow()
-            .get(&id.0)
+        let i = id.0 as usize;
+        if let Some(bound) = self.vars.borrow().get(i).cloned().flatten() {
+            return Ok(bound);
+        }
+        self.static_vars
+            .get(i)
             .cloned()
+            .flatten()
             .ok_or_else(|| unsupported(&format!("variable #{} read before assignment", id.0)))
     }
 }
@@ -869,25 +994,22 @@ pub fn phase_mask_active(analysis: &va_abi::AnalysisCtx, mask: u32) -> bool {
 pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
     let count = ctx.count();
     match ctx.module.expr(expr) {
-        Expr::Const(c) => Ok(Dual::constant(*c, count)),
+        Expr::Const(c) => Ok(Dual::constant(*c)),
         Expr::Param(p) => {
             let v = ctx
                 .params
                 .get(p.0 as usize)
                 .copied()
                 .ok_or_else(|| unsupported("parameter index out of range"))?;
-            Ok(Dual::constant(v, count))
+            Ok(Dual::constant(v))
         }
         // `$param_given(p)`: resolved at the instantiation boundary, read here. Constant per
         // instance (the override set cannot change during a solve), hence zero-gradient.
-        Expr::ParamGiven(p) => Ok(Dual::constant(
-            if ctx.module.param_is_given(*p) {
-                1.0
-            } else {
-                0.0
-            },
-            count,
-        )),
+        Expr::ParamGiven(p) => Ok(Dual::constant(if ctx.module.param_is_given(*p) {
+            1.0
+        } else {
+            0.0
+        })),
         // `$port_connected(i)`: resolved at the instantiation boundary, read here. Constant
         // per instance, hence zero-gradient.
         Expr::PortConnected(i) => Ok(Dual::constant(
@@ -896,7 +1018,6 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             } else {
                 0.0
             },
-            count,
         )),
         // `@(cross(...))`'s guard: whether the consumer determined this site fired at the
         // timepoint being evaluated. Held fixed across the Newton iterations of one timepoint
@@ -912,7 +1033,6 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             } else {
                 0.0
             },
-            count,
         )),
         Expr::Var(id) => ctx.get_var(*id),
         Expr::Probe(access) => match access.kind {
@@ -927,7 +1047,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 if n < count {
                     grad[n] -= 1.0;
                 }
-                Ok(Dual::from_parts(value, grad, vec![0.0; count]))
+                Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
             }
             va_ir::AccessKind::Flow => {
                 let slot = *ctx
@@ -946,17 +1066,17 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 if slot < count {
                     grad[slot] = 1.0;
                 }
-                Ok(Dual::from_parts(value, grad, vec![0.0; count]))
+                Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
             }
         },
         Expr::Unary(op, e) => {
             let d = eval(ctx, *e)?;
             Ok(match op {
                 UnOp::Neg => d.neg(),
-                UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0), count),
+                UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0)),
                 // Bitwise NOT, like the comparison/logical operators above, is an integer
                 // operation with no continuous derivative — zero-gradient.
-                UnOp::BitNot => Dual::constant(!to_i64(d.value) as f64, count),
+                UnOp::BitNot => Dual::constant(!to_i64(d.value) as f64),
             })
         }
         Expr::Binary(op, l, r) => {
@@ -970,31 +1090,27 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 // Modulus is genuinely discontinuous (it jumps at every multiple of `b`), so —
                 // like the bitwise/comparison operators below — it's zero-gradient in AD rather
                 // than attempting an analytic derivative.
-                BinOp::Mod => Dual::constant(a.value % b.value, count),
+                BinOp::Mod => Dual::constant(a.value % b.value),
                 BinOp::Pow => a.powf(&b),
-                BinOp::Lt => Dual::constant(bool_to_f64(a.value < b.value), count),
-                BinOp::Le => Dual::constant(bool_to_f64(a.value <= b.value), count),
-                BinOp::Gt => Dual::constant(bool_to_f64(a.value > b.value), count),
-                BinOp::Ge => Dual::constant(bool_to_f64(a.value >= b.value), count),
-                BinOp::Eq => Dual::constant(bool_to_f64(a.value == b.value), count),
-                BinOp::Ne => Dual::constant(bool_to_f64(a.value != b.value), count),
-                BinOp::And => Dual::constant(bool_to_f64(a.value != 0.0 && b.value != 0.0), count),
-                BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0), count),
+                BinOp::Lt => Dual::constant(bool_to_f64(a.value < b.value)),
+                BinOp::Le => Dual::constant(bool_to_f64(a.value <= b.value)),
+                BinOp::Gt => Dual::constant(bool_to_f64(a.value > b.value)),
+                BinOp::Ge => Dual::constant(bool_to_f64(a.value >= b.value)),
+                BinOp::Eq => Dual::constant(bool_to_f64(a.value == b.value)),
+                BinOp::Ne => Dual::constant(bool_to_f64(a.value != b.value)),
+                BinOp::And => Dual::constant(bool_to_f64(a.value != 0.0 && b.value != 0.0)),
+                BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0)),
                 // Bitwise/shift operators are integer operations with no continuous derivative,
                 // same treatment as the comparison operators above: zero-gradient.
-                BinOp::BitAnd => Dual::constant((to_i64(a.value) & to_i64(b.value)) as f64, count),
-                BinOp::BitOr => Dual::constant((to_i64(a.value) | to_i64(b.value)) as f64, count),
-                BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64, count),
-                BinOp::BitXnor => {
-                    Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64, count)
+                BinOp::BitAnd => Dual::constant((to_i64(a.value) & to_i64(b.value)) as f64),
+                BinOp::BitOr => Dual::constant((to_i64(a.value) | to_i64(b.value)) as f64),
+                BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64),
+                BinOp::BitXnor => Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64),
+                BinOp::Shl => {
+                    Dual::constant(to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64)
                 }
-                BinOp::Shl => Dual::constant(
-                    to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64,
-                    count,
-                ),
                 BinOp::Shr => Dual::constant(
                     (to_i64(a.value) as u64).wrapping_shr(to_i64(b.value) as u32) as f64,
-                    count,
                 ),
             })
         }
@@ -1015,7 +1131,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             if slot < count {
                 grad[slot] = 1.0;
             }
-            Ok(Dual::from_parts(value, grad, vec![0.0; count]))
+            Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
         }
         Expr::Call(builtin, args) => eval_call(ctx, expr, *builtin, args),
         Expr::CallUser(fid, args) => {
@@ -1045,7 +1161,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             let d = eval(ctx, *inner)?;
             let br = ctx.module.branches[access.branch.0 as usize];
             let p = br.p.0 as usize;
-            Ok(Dual::constant(d.grad.get(p).copied().unwrap_or(0.0), count))
+            Ok(Dual::constant(d.grad_at(p)))
         }
     }
 }
@@ -1060,7 +1176,6 @@ fn eval_call(
     args: &[ExprId],
 ) -> Result<Dual, CodegenError> {
     let expr_id = site.0;
-    let count = ctx.count();
     let arg = |i: usize| -> Result<Dual, CodegenError> {
         let id = args
             .get(i)
@@ -1074,10 +1189,10 @@ fn eval_call(
         Builtin::Sqrt => arg(0)?.sqrt(),
         Builtin::Abs => arg(0)?.abs(),
         // Rounding functions are piecewise constant: value is the rounded primal, gradient 0.
-        Builtin::Floor => Dual::constant(arg(0)?.value.floor(), count),
-        Builtin::Ceil => Dual::constant(arg(0)?.value.ceil(), count),
-        Builtin::Round => Dual::constant(arg(0)?.value.round(), count),
-        Builtin::Int => Dual::constant(arg(0)?.value.trunc(), count),
+        Builtin::Floor => Dual::constant(arg(0)?.value.floor()),
+        Builtin::Ceil => Dual::constant(arg(0)?.value.ceil()),
+        Builtin::Round => Dual::constant(arg(0)?.value.round()),
+        Builtin::Int => Dual::constant(arg(0)?.value.trunc()),
         Builtin::Pow => arg(0)?.powf(&arg(1)?),
         Builtin::Hypot => arg(0)?.hypot(&arg(1)?),
         Builtin::Atan2 => arg(0)?.atan2(&arg(1)?),
@@ -1102,16 +1217,16 @@ fn eval_call(
         // through via `scale`.
         Builtin::Vt => match args.first() {
             Some(_) => arg(0)?.scale(ctx.vt / ctx.temp),
-            None => Dual::constant(ctx.vt, count),
+            None => Dual::constant(ctx.vt),
         },
-        Builtin::Temperature => Dual::constant(ctx.temp, count),
+        Builtin::Temperature => Dual::constant(ctx.temp),
         // The three analysis-context builtins. All are constants with respect to `x` — none is
         // a function of the solution vector — so all carry a zero gradient, and `va-codegen`'s
         // finite-difference tests confirm that rather than assuming it.
         //
         // `$abstime` is the absolute simulation time, `0.0` outside transient (the LRM-correct
         // answer for a static solve, not a placeholder).
-        Builtin::Abstime => Dual::constant(ctx.analysis.time, count),
+        Builtin::Abstime => Dual::constant(ctx.analysis.time),
         // `analysis(...)`'s string arguments were folded to a bitmask over
         // `va_ir::ANALYSIS_PHASES` at elaboration; this is where that mask meets the analysis
         // actually running. An any-of query, so any set bit naming the current analysis wins.
@@ -1125,21 +1240,18 @@ fn eval_call(
                     ))
                 }
             };
-            Dual::constant(
-                if phase_mask_active(&ctx.analysis, mask) {
-                    1.0
-                } else {
-                    0.0
-                },
-                count,
-            )
+            Dual::constant(if phase_mask_active(&ctx.analysis, mask) {
+                1.0
+            } else {
+                0.0
+            })
         }
         // `ac_stim`'s *value* is zero in every analysis including AC — it is a right-hand-side
         // excitation, not a term in `G`. `crate::lower` splits a recognized one out of its
         // contribution into `va_abi::StampSink`'s excitation channel; reaching this arm at all
         // means the call sits somewhere that split could not pull it out of, and
         // `crate::GeneratedModel::validate` rejects that rather than letting it vanish.
-        Builtin::AcStim => Dual::constant(0.0, count),
+        Builtin::AcStim => Dual::constant(0.0),
         // A `laplace_*` reaching expression evaluation means `crate::lower` could not pull it
         // out of its contribution — it was scaled, nested, or otherwise not a bare top-level
         // term. There is no real-valued answer to give: `H(jω)` is complex, and a `Dual` carries
@@ -1168,14 +1280,11 @@ fn eval_call(
             ))
         }
         // `@(initial_step)`'s desugared condition. Pure solver knowledge, no state, no gradient.
-        Builtin::InitialStep => Dual::constant(
-            if ctx.analysis.is_initial_step {
-                1.0
-            } else {
-                0.0
-            },
-            count,
-        ),
+        Builtin::InitialStep => Dual::constant(if ctx.analysis.is_initial_step {
+            1.0
+        } else {
+            0.0
+        }),
         // `$simparam("name")` (LRM 9.18), read from the analysis context. The argument is the
         // resolved selector, not a value to evaluate -- elaboration already decided that this
         // name is one this simulator knows, so there is no fallback to consider here.
@@ -1201,17 +1310,15 @@ fn eval_call(
                 va_ir::SimParam::Abstol => sim.abstol,
                 va_ir::SimParam::Reltol => sim.reltol,
             };
-            Dual::constant(value, count)
+            Dual::constant(value)
         }
         // `$mfactor` (LRM 6.3.6), read from the module clone this instance was built from. A
         // number the instantiation fixed, so no gradient and no state -- and deliberately not
         // folded at elaboration, where the instance is not yet known.
-        Builtin::Mfactor => Dual::constant(ctx.module.multiplicity(), count),
+        Builtin::Mfactor => Dual::constant(ctx.module.multiplicity()),
         // `@(final_step)`'s, likewise. `true` in every static analysis, and in transient only at
         // the last accepted timepoint — which the driver has to solve twice to know.
-        Builtin::FinalStep => {
-            Dual::constant(if ctx.analysis.is_final_step { 1.0 } else { 0.0 }, count)
-        }
+        Builtin::FinalStep => Dual::constant(if ctx.analysis.is_final_step { 1.0 } else { 0.0 }),
         // `slew(value, pos_rate, neg_rate)` (LRM §4.5.6) — a rate limiter over the *committed*
         // history. `y = clamp(value, y_prev − |neg|·Δt, y_prev + pos·Δt)`.
         //
@@ -1235,9 +1342,9 @@ fn eval_call(
                 let y_prev = ctx.state_get(base, 1);
                 let (lo, hi) = (y_prev - neg * dt, y_prev + pos * dt);
                 if value.value > hi {
-                    Dual::constant(hi, count)
+                    Dual::constant(hi)
                 } else if value.value < lo {
-                    Dual::constant(lo, count)
+                    Dual::constant(lo)
                 } else {
                     value.clone()
                 }
@@ -1323,7 +1430,7 @@ fn eval_call(
             // Zero gradient: the output is pinned to history and a latched target, not to `x`
             // at this instant. Once it reaches the target it stays there until the input
             // changes again, at which point the *next* evaluation re-latches.
-            Dual::constant(y, count)
+            Dual::constant(y)
         }
         // `ddt` evaluated as an ordinary sub-expression, rather than pulled out as a top-level
         // contribution term by `crate::lower`.
@@ -1401,7 +1508,7 @@ fn eval_call(
         Builtin::WhiteNoise
         | Builtin::FlickerNoise
         | Builtin::NoiseTable
-        | Builtin::NoiseTableLog => Dual::constant(0.0, count),
+        | Builtin::NoiseTableLog => Dual::constant(0.0),
     })
 }
 
@@ -1630,7 +1737,7 @@ mod tests {
         let b = Dual::variable(5.0, 1, 2);
         let f = a.mul(&b);
         assert_eq!(f.value, 15.0);
-        assert_eq!(f.grad, vec![5.0, 3.0]);
+        assert_eq!(f.grad_vec(2), vec![5.0, 3.0]);
     }
 
     /// `pow` with a constant exponent must use `v·u^(v-1)`, which is finite at `u = 0` for
@@ -1644,18 +1751,22 @@ mod tests {
     fn pow_with_a_constant_exponent_is_differentiable_at_zero() {
         for (v, expect) in [(2.0, 0.0), (1.5, 0.0), (3.0, 0.0)] {
             let u = Dual::variable(0.0, 0, 1);
-            let f = u.powf(&Dual::constant(v, 1));
+            let f = u.powf(&Dual::constant(v));
             assert_eq!(f.value, 0.0, "value of 0^{v}");
-            assert!(f.grad[0].is_finite(), "d/du u^{v} at 0 is {}", f.grad[0]);
-            assert_eq!(f.grad[0], expect, "d/du u^{v} at 0");
+            assert!(
+                f.grad_at(0).is_finite(),
+                "d/du u^{v} at 0 is {}",
+                f.grad_at(0)
+            );
+            assert_eq!(f.grad_at(0), expect, "d/du u^{v} at 0");
         }
         // v < 1 keeps the genuine singularity: d/du √u really is unbounded at 0. The rule must
         // report that rather than hide it behind a NaN.
-        let f = Dual::variable(0.0, 0, 1).powf(&Dual::constant(0.5, 1));
+        let f = Dual::variable(0.0, 0, 1).powf(&Dual::constant(0.5));
         assert!(
-            f.grad[0].is_infinite(),
+            f.grad_at(0).is_infinite(),
             "d/du √u at 0 must be ±inf, got {}",
-            f.grad[0]
+            f.grad_at(0)
         );
     }
 
@@ -1665,13 +1776,17 @@ mod tests {
     #[test]
     fn pow_with_an_integer_exponent_differentiates_a_negative_base() {
         let x = -0.5_f64;
-        let f = Dual::variable(x, 0, 1).powf(&Dual::constant(2.0, 1));
+        let f = Dual::variable(x, 0, 1).powf(&Dual::constant(2.0));
         assert!((f.value - 0.25).abs() < 1e-15, "value {}", f.value);
-        assert!((f.grad[0] - 2.0 * x).abs() < 1e-12, "grad {}", f.grad[0]);
+        assert!(
+            (f.grad_at(0) - 2.0 * x).abs() < 1e-12,
+            "grad {}",
+            f.grad_at(0)
+        );
         // And it agrees with writing the same thing as `x*x`, which is the invariant that
         // makes the two spellings interchangeable in a model.
         let g = Dual::variable(x, 0, 1).mul(&Dual::variable(x, 0, 1));
-        assert_eq!(f.grad[0], g.grad[0]);
+        assert_eq!(f.grad_at(0), g.grad_at(0));
     }
 
     /// A variable exponent still differentiates by the logarithmic rule — the closed form
@@ -1683,9 +1798,35 @@ mod tests {
         let v = Dual::variable(3.0, 1, 2);
         let f = u.powf(&v);
         assert!((f.value - 8.0).abs() < 1e-12);
-        assert!((f.grad[0] - 12.0).abs() < 1e-10, "d/du {}", f.grad[0]);
+        assert!((f.grad_at(0) - 12.0).abs() < 1e-10, "d/du {}", f.grad_at(0));
         let expect = 8.0 * 2.0_f64.ln();
-        assert!((f.grad[1] - expect).abs() < 1e-10, "d/dv {}", f.grad[1]);
+        assert!(
+            (f.grad_at(1) - expect).abs() < 1e-10,
+            "d/dv {}",
+            f.grad_at(1)
+        );
+    }
+
+    /// A zero charge channel must not become NaN and be mistaken for a *second* time
+    /// derivative.
+    ///
+    /// `Dual::carries_charge` is what refuses `ddt` of something that already carries charge,
+    /// and it asked "is any partial non-zero" — of a channel that was a dense vector of zeros.
+    /// Multiply that by an infinite coefficient and every entry becomes NaN, and `NaN != 0.0`
+    /// is `true`, so a value carrying no charge at all reported that it did. That is how
+    /// L-UTSOI 102's NQS variant was told it had written a second time derivative it had not
+    /// written (corpus 199 -> 200/224 when `Grad::Zero` removed the NaN). The structural rule
+    /// that refuses a genuine `ddt(ddt(x))` is in `lower`, and is unaffected.
+    #[test]
+    fn an_infinite_coefficient_does_not_fake_a_charge_channel() {
+        let carries_none = Dual::constant(0.0);
+        assert!(!carries_none.carries_charge());
+        assert!(!carries_none.scale(f64::INFINITY).carries_charge());
+        assert!(!carries_none.scale(f64::NEG_INFINITY).carries_charge());
+        // …and a value that genuinely carries charge still says so.
+        let q = Dual::variable(1.0, 0, 2).into_ddt(0.0).expect("first ddt");
+        assert!(q.carries_charge());
+        assert!(q.into_ddt(0.0).is_err(), "a second ddt is still refused");
     }
 
     /// A singular unary derivative must not reach a channel the operand does not depend on.
@@ -1698,30 +1839,34 @@ mod tests {
     #[test]
     fn a_singular_slope_does_not_poison_an_independent_channel() {
         // sqrt(0) where the operand is a constant: two channels, both structurally zero.
-        let f = Dual::constant(0.0, 2).sqrt();
+        let f = Dual::constant(0.0).sqrt();
         assert_eq!(f.value, 0.0);
-        assert_eq!(f.grad, vec![0.0, 0.0], "a constant's gradient stays zero");
+        assert_eq!(
+            f.grad_vec(2),
+            vec![0.0, 0.0],
+            "a constant's gradient stays zero"
+        );
 
         // ln(0) likewise: value is -inf, but a channel the operand ignores contributes 0.
-        let g = Dual::constant(0.0, 2).ln();
+        let g = Dual::constant(0.0).ln();
         assert!(g.value.is_infinite());
-        assert_eq!(g.grad, vec![0.0, 0.0]);
+        assert_eq!(g.grad_vec(2), vec![0.0, 0.0]);
 
         // The channel the operand *does* depend on still reports the true singularity.
         let h = Dual::variable(0.0, 0, 2).sqrt();
-        assert!(h.grad[0].is_infinite(), "d/dx √x at 0 is unbounded");
-        assert_eq!(h.grad[1], 0.0, "the untouched channel stays zero");
+        assert!(h.grad_at(0).is_infinite(), "d/dx √x at 0 is unbounded");
+        assert_eq!(h.grad_at(1), 0.0, "the untouched channel stays zero");
     }
 
     #[test]
     fn exp_chain_rule() {
         // f = exp(2*x) at x=0.5: value e, grad 2e.
         let x = Dual::variable(0.5, 0, 1);
-        let two = Dual::constant(2.0, 1);
+        let two = Dual::constant(2.0);
         let f = two.mul(&x).exp();
         let e = 1.0_f64.exp();
         assert!((f.value - e).abs() < 1e-12);
-        assert!((f.grad[0] - 2.0 * e).abs() < 1e-12);
+        assert!((f.grad_at(0) - 2.0 * e).abs() < 1e-12);
     }
 
     /// A unary-function FD test case: name, the [`Dual`] method, the scalar `f64` function,
@@ -1747,7 +1892,7 @@ mod tests {
             ("atanh", Dual::atanh, f64::atanh, 0.4),
         ];
         for (name, dfn, ffn, x0) in cases {
-            let analytic = dfn(&Dual::variable(*x0, 0, 1)).grad[0];
+            let analytic = dfn(&Dual::variable(*x0, 0, 1)).grad_at(0);
             let fd = (ffn(*x0 + h) - ffn(*x0 - h)) / (2.0 * h);
             assert!(
                 (analytic - fd).abs() < 1e-5,
@@ -1776,7 +1921,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -1785,7 +1931,7 @@ mod tests {
         };
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - crate::VT).abs() < 1e-12);
-        assert!(d.grad.is_empty());
+        assert!(!d.depends_on_unknowns());
     }
 
     #[test]
@@ -1837,7 +1983,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -1847,13 +1994,13 @@ mod tests {
         let d = eval(&ctx, vt).unwrap();
         assert!((d.value - k_over_q * 350.0).abs() < 1e-12);
         // d($vt(T))/dV(t) = k/q; the ground slot is out of range so contributes no gradient.
-        assert!((d.grad[0] - k_over_q).abs() < 1e-12);
+        assert!((d.grad_at(0) - k_over_q).abs() < 1e-12);
 
         // Cross-check against a central finite difference (§5).
         let h = 1e-3;
         let f = |t: f64| k_over_q * t;
         let fd = (f(350.0 + h) - f(350.0 - h)) / (2.0 * h);
-        assert!((d.grad[0] - fd).abs() < 1e-9);
+        assert!((d.grad_at(0) - fd).abs() < 1e-9);
 
         // `$vt($temperature)` must agree with the no-arg `$vt` at the ambient temperature.
         assert!((k_over_q * temp_ref - vt_ref).abs() < 1e-12);
@@ -1926,7 +2073,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -1939,7 +2087,7 @@ mod tests {
         assert_eq!(eval(&ctx, minusone).unwrap().value, -1.0);
         assert_eq!(eval(&ctx, zero).unwrap().value, 0.0);
         // ddx's result is a constant as far as further differentiation is concerned.
-        assert!(eval(&ctx, one).unwrap().grad.iter().all(|&g| g == 0.0));
+        assert!(!eval(&ctx, one).unwrap().depends_on_unknowns());
     }
 
     #[test]
@@ -2012,7 +2160,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2053,7 +2202,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2081,7 +2231,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
-            vars: RefCell::new(HashMap::new()),
+            vars: RefCell::new(Vec::new()),
+            static_vars: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2098,31 +2249,36 @@ mod tests {
         let y = Dual::variable(4.0, 1, 2);
         let hp = x.hypot(&y);
         assert!((hp.value - 5.0).abs() < 1e-12);
-        assert!((hp.grad[0] - 0.6).abs() < 1e-12);
-        assert!((hp.grad[1] - 0.8).abs() < 1e-12);
+        assert!((hp.grad_at(0) - 0.6).abs() < 1e-12);
+        assert!((hp.grad_at(1) - 0.8).abs() < 1e-12);
 
         // atan2(y, x): d/dy = x/(x²+y²), d/dx = -y/(x²+y²).
         let denom = 3.0_f64 * 3.0 + 4.0 * 4.0;
         let at = y.atan2(&x);
-        assert!((at.grad[1] - 3.0 / denom).abs() < 1e-12);
-        assert!((at.grad[0] + 4.0 / denom).abs() < 1e-12);
+        assert!((at.grad_at(1) - 3.0 / denom).abs() < 1e-12);
+        assert!((at.grad_at(0) + 4.0 / denom).abs() < 1e-12);
 
         // min/max select the active argument's value and gradient.
         let mn = x.min(&y);
-        assert_eq!((mn.value, mn.grad[0], mn.grad[1]), (3.0, 1.0, 0.0));
+        assert_eq!((mn.value, mn.grad_at(0), mn.grad_at(1)), (3.0, 1.0, 0.0));
         let mx = x.max(&y);
-        assert_eq!((mx.value, mx.grad[0], mx.grad[1]), (4.0, 0.0, 1.0));
+        assert_eq!((mx.value, mx.grad_at(0), mx.grad_at(1)), (4.0, 0.0, 1.0));
     }
 
     #[test]
     fn div_matches_finite_difference() {
         // f = 1 / x at x=4: analytic -1/16.
         let x = Dual::variable(4.0, 0, 1);
-        let one = Dual::constant(1.0, 1);
+        let one = Dual::constant(1.0);
         let f = one.div(&x);
         let h = 1e-6;
         let fd = (1.0 / (4.0 + h) - 1.0 / (4.0 - h)) / (2.0 * h);
-        assert!((f.grad[0] - fd).abs() < 1e-7, "{} vs {}", f.grad[0], fd);
+        assert!(
+            (f.grad_at(0) - fd).abs() < 1e-7,
+            "{} vs {}",
+            f.grad_at(0),
+            fd
+        );
     }
 }
 

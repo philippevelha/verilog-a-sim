@@ -5,6 +5,7 @@
 //! - `gen-golden`     — (re)generate golden outputs from QSPICE, if installed.
 //! - `tutorials`      — render the Quarto developer-tutorial book (`--preview` to live-edit).
 //! - `bench-linsolve` — dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog).
+//! - `bench-model`    — per-`load()` cost of a compiled Verilog-A model (the evaluation half).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,6 +25,7 @@ fn main() -> Result<()> {
         Some("tutorials") => tutorials(&rest),
         Some("bench-linsolve") => bench_linsolve(),
         Some("bench-scale") => bench_scale(&rest),
+        Some("bench-model") => bench_model(&rest),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -44,7 +46,9 @@ fn print_usage() {
          tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)\n    \
          bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)\n    \
          bench-scale [--max-nodes N]  Whole-pipeline .op/.tran wall time vs circuit size on\n                                 \
-                                 an RC ladder: the dense-LU size limit, measured"
+                                 an RC ladder: the dense-LU size limit, measured
+    \n         bench-model [<model.va>...]  One ModelInstance::load() per model: the cost every
+                                 \n                                 Newton iteration of every timepoint pays"
     );
 }
 
@@ -2226,6 +2230,190 @@ fn bench_linsolve() -> Result<()> {
          for the write-up (crossover, recommendation)"
     );
     Ok(())
+}
+
+/// The models `bench-model` runs when given no paths: the seven the OpenVAF paper benchmarks,
+/// under `external/code`. `external/` is gitignored, so each is skipped with a note if absent
+/// rather than failing the subcommand — the point of the default list is convenience, not a gate.
+const BENCH_MODELS: &[(&str, &str)] = &[
+    ("BSIM4", "external/code/bsim4/vacode/bsim4.va"),
+    ("PSP103", "external/code/psp103/vacode/psp103.va"),
+    (
+        "BSIM-BULK107",
+        "external/code/bsimbulk/vacode/bsimbulk107.va",
+    ),
+    ("BSIM-SOI", "external/code/bsimsoi/vacode/bsimsoi.va"),
+    ("HICUM/L2v3", "external/code/hicum2/vacode/hicumL2V3p0p0.va"),
+    ("EKV2.6", "external/code/ekv/vacode/ekv26.va"),
+    ("JUNCAP200", "external/code/psp103/vacode/juncap200.va"),
+];
+
+/// `cargo xtask bench-model [<model.va> …]` — where the time in a simulation actually goes.
+///
+/// `bench-scale` measures the *solver*: matrix size against wall time on an RC ladder of
+/// `va-abi` reference primitives, which carry no Verilog-A at all. This measures the other half,
+/// the part that dominates on a real compact model: how long one `ModelInstance::load` takes —
+/// one residual + Jacobian evaluation, which is what every Newton iteration of every timepoint
+/// pays for. A 19k-expression BSIM4 costs three orders of magnitude more per evaluation than the
+/// solve of the 19×19 matrix it stamps into.
+///
+/// Reported per model: the arena size, the local unknown count, one-off frontend and
+/// `build_instance` times, and the steady-state cost of `load` (best of several batches, after a
+/// warm-up, since the first calls pay for cache misses the rest do not).
+fn bench_model(args: &[String]) -> Result<()> {
+    let paths: Vec<(String, PathBuf)> = if args.is_empty() {
+        BENCH_MODELS
+            .iter()
+            .map(|(n, p)| ((*n).to_string(), repo_root().join(p)))
+            .filter(|(name, p)| {
+                let ok = p.is_file();
+                if !ok {
+                    eprintln!("[xtask]   skipping {name}: {} not present", p.display());
+                }
+                ok
+            })
+            .collect()
+    } else {
+        args.iter()
+            .map(|a| {
+                let p = PathBuf::from(a);
+                let name = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| a.clone());
+                (name, p)
+            })
+            .collect()
+    };
+    if paths.is_empty() {
+        bail!("no model files to benchmark (pass paths, or populate external/code)");
+    }
+
+    eprintln!(
+        "[xtask] bench-model: one ModelInstance::load() — the cost every Newton iteration pays …"
+    );
+    eprintln!(
+        "[xtask]   {:>14} {:>8} {:>6} {:>7} {:>7} {:>10} {:>10} {:>12}",
+        "model", "exprs", "unkns", "stmts", "setup", "front_ms", "build_ms", "load_us"
+    );
+    for (name, path) in &paths {
+        let row = bench_one_model(path)
+            .with_context(|| format!("benchmarking {name} ({})", path.display()))?;
+        eprintln!(
+            "[xtask]   {:>14} {:>8} {:>6} {:>7} {:>7} {:>10.1} {:>10.1} {:>12.1}",
+            name,
+            row.exprs,
+            row.unknowns,
+            row.stmts,
+            row.setup,
+            row.frontend.as_secs_f64() * 1e3,
+            row.build.as_secs_f64() * 1e3,
+            row.load.as_secs_f64() * 1e6,
+        );
+    }
+    Ok(())
+}
+
+/// One `bench-model` row.
+struct ModelBenchRow {
+    /// Expression-arena nodes in the elaborated module — the size of what `load` walks.
+    exprs: usize,
+    /// Local unknowns the instance differentiates against (nodes plus auxiliary rows).
+    unknowns: usize,
+    /// Top-level lowered statements.
+    stmts: usize,
+    /// How many of them are the bias-independent setup, run once (`Lowered::static_prefix`).
+    setup: usize,
+    /// Lex + preprocess + parse + elaborate, once.
+    frontend: Duration,
+    /// IR → `ModelInstance`, once.
+    build: Duration,
+    /// One `load()`, steady state.
+    load: Duration,
+}
+
+/// Compile one model file and time a single `load()` against it.
+///
+/// The probe vector is a uniform 0.1 V rather than zeros: at the origin a compact model takes
+/// every "device is off" early-out, which is not the branch mix a converging solve actually
+/// walks, and would flatter the numbers.
+fn bench_one_model(path: &Path) -> Result<ModelBenchRow> {
+    let src =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let t0 = Instant::now();
+    let design = va_frontend::compile_with_includes(&src, &[dir])
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("frontend")?;
+    let frontend = t0.elapsed();
+    let module = design
+        .modules
+        .first()
+        .cloned()
+        .context("file declares no module")?;
+    let exprs = module.exprs.len();
+
+    let mut next_unknown = module.nodes.len();
+    let terminals: Vec<usize> = (0..module.nodes.len()).collect();
+    let t1 = Instant::now();
+    let instance = va_codegen::build_instance(&module, &terminals, &mut next_unknown)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("codegen")?;
+    let build = t1.elapsed();
+    let unknowns = instance.unknowns().len();
+    // Lowered a second time purely to report the split; `build_instance` keeps its own copy.
+    let lowered = va_codegen::lower::lower(&module)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("lowering")?;
+
+    let dim = instance.unknowns().iter().max().map_or(1, |m| m + 1);
+    let x = vec![0.1_f64; dim];
+    let actx = va_abi::AnalysisCtx::dc();
+    let mut state = va_abi::ModelState::stateless();
+    let mut sink = va_abi::stamps::DenseStamp::new(dim);
+
+    for _ in 0..MODEL_BENCH_WARMUP {
+        instance.load(&x, &actx, &mut state, &mut sink);
+    }
+    // Best of several batches rather than one long average: a batch that happened to share the
+    // machine with something else should not become the published number.
+    let mut best = Duration::MAX;
+    for _ in 0..MODEL_BENCH_BATCHES {
+        let t = Instant::now();
+        for _ in 0..MODEL_BENCH_REPS {
+            instance.load(&x, &actx, &mut state, &mut sink);
+        }
+        best = best.min(t.elapsed() / MODEL_BENCH_REPS);
+    }
+
+    Ok(ModelBenchRow {
+        exprs,
+        unknowns,
+        stmts: lowered.stmts.len(),
+        setup: lowered.static_prefix,
+        frontend,
+        build,
+        load: best,
+    })
+}
+
+/// Untimed `load`s before measuring, so the first call's cold caches are not in the number.
+const MODEL_BENCH_WARMUP: u32 = 20;
+/// Timed batches; the best one is reported (see `bench_one_model`).
+const MODEL_BENCH_BATCHES: u32 = 5;
+/// `load`s per timed batch.
+const MODEL_BENCH_REPS: u32 = 50;
+
+/// The repository root, from this crate's manifest directory (`<root>/xtask`).
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(test)]

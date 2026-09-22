@@ -9,6 +9,11 @@ description = "Dev automation: cargo xtask validate / gen-golden."
 [dependencies]
 anyhow = { workspace = true }
 va-abi = { workspace = true }
+# `bench-model` times one `ModelInstance::load()`, so it needs the two halves of the model
+# pipeline directly rather than through a netlist: the frontend to elaborate a `.va` file and
+# the codegen to turn it into an instance. Dev-only, like the rest of `xtask`.
+va-codegen = { workspace = true }
+va-frontend = { workspace = true }
 va-cli = { workspace = true }
 va-core = { workspace = true }
 va-harness = { workspace = true }

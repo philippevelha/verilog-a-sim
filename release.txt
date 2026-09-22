@@ -20,6 +20,101 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.0 - 2026-09-22
+------------------
+**The evaluator stops paying for work it does not do.** One `ModelInstance::load()` — the
+residual + Jacobian evaluation every Newton iteration of every timepoint pays for — is 3.4x to
+9.3x cheaper on the CMC standard models, with every golden number bit-identical. Measured
+before and after with the same new tool, `cargo xtask bench-model`:
+
+      model            exprs  unkns   stmts   setup    before     after   speedup
+      BSIM4            19109     18    1949    1556   1215 us    131 us      9.3x
+      PSP103           40807     21    1220     757    987 us    161 us      6.1x
+      BSIM-SOI         16301     23    1216     700   1045 us    159 us      6.6x
+      BSIM-BULK107     19070     24     932     282   1067 us    212 us      5.0x
+      HICUM/L2v3        7408     22     191       1    271 us     61 us      4.4x
+      JUNCAP200        12932      3     215     194    200 us     49 us      4.1x
+      EKV2.6            2490      4     268      47    278 us     81 us      3.4x
+
+End to end, a 1001-point BSIM4 Id-Vg sweep went from 30.0 s to 10.7 s, output unchanged to the
+last digit.
+
+Three changes, in descending order of what they bought:
+
+  * **`Dual`'s gradient knows how to be nothing.** It was two `Vec<f64>` of length `n_unknowns`,
+    allocated for every intermediate value — including the 78-87% of them that depend on no
+    unknown at all (7816 of BSIM4's 9020 per `load`, measured). A gradient channel is now
+    `Grad::Zero` or `Grad::Dense`, and `Zero` holds no allocation and needs no length. Exact,
+    not heuristic: a value is independent of the unknowns precisely when both its operands
+    were. ~3.1x on its own.
+  * **Local variables are indexed, not hashed.** `Ctx::vars` was a `HashMap<u32, Dual>`; BSIM4
+    declares 1446 locals and reads them thousands of times per `load`, paying a SipHash for
+    each. Now a `Vec<Option<Dual>>` indexed by `VarId`. A further ~1.6x on BSIM4.
+  * **A model is split into setup and eval, and the setup runs once.** Most of a compact model
+    is parameter checking, temperature scaling, geometry and binning — bias-independent
+    statements that produce the same numbers on iteration 300 as on iteration 1. `lower` now
+    computes how many leading statements those are (`Lowered::static_prefix`: 1556 of BSIM4's
+    1949, 757 of PSP103's 1220); `load` evaluates them once per instance and starts every later
+    call past them. A further ~1.6x on BSIM4, ~1.2x on PSP103, and nothing at all on
+    HICUM/L2v3, whose setup is not a prefix (1 statement of 191).
+
+  **Why it is a prefix and not "every bias-independent statement":** nothing is reordered. A
+  bias-independent statement sitting after a bias-dependent one may read what that statement
+  wrote, so hoisting it needs dependence analysis this does not do. That is the whole of why
+  HICUM/L2v3 gains nothing here, and it is the obvious next thing to widen.
+
+  **The classification is a whitelist with no wildcard arm**, so a new `Expr` variant or
+  `Builtin` fails to compile until someone decides which side of the split it is on. Getting
+  that wrong in the permissive direction would freeze a value at its first evaluation, and the
+  solve would simply converge to the wrong answer with nothing to see. `$abstime`, `$simparam`
+  (gmin moves under gmin stepping), the analysis-context builtins, every analog operator and
+  every noise source are all outside it. `$temperature`/`$vt`/`$mfactor` are inside it because
+  they read the temperature the *instance* was built at — **if `$temperature` is ever re-sourced
+  from `AnalysisCtx`, the cached setup must be keyed on temperature or it will serve one sweep
+  point's numbers to the next.** That caveat is written at `lower::static_prefix_len` too.
+
+  **One behaviour did change, and a test caught it.** A setup that *fails* — a `while` whose
+  condition never goes false, hitting the iteration cap — used to abort the walk and skip every
+  statement after it. Split into a phase of its own, the failure was being swallowed and the
+  contribution downstream of the runaway loop started stamping. The setup now records whether
+  it completed and `load` skips the eval phase if it did not, restoring the old behaviour
+  (`a_runaway_while_loop_is_bounded_by_the_iteration_cap_not_a_hang`).
+
+  **Corpus 199 -> 200/224, and it is a correctness fix rather than a loosening.**
+  `L_UTSOI_102_nqs.va` was being refused for "ddt of a value that already depends on a time
+  derivative". It does not contain one. `carries_charge` asked "is any partial non-zero" of a
+  dense vector of zeros — and multiplying zeros by an infinite coefficient makes them NaN, with
+  `NaN != 0.0` true, so a value carrying no charge reported that it did. Verified on the
+  pristine code: excluding NaN from that one predicate alone is enough to make the file pass.
+  `Grad::Zero` removes the NaN at the source. The *structural* rule that refuses a genuine
+  `ddt(ddt(x))` lives in `lower` and still fires, checked with a minimal model and now with
+  `an_infinite_coefficient_does_not_fake_a_charge_channel`. This is the same `0 * inf` family as
+  v1.1.1 — the third instance, and the reason the new representation is worth more than its
+  speed.
+
+  **New: `cargo xtask bench-model [<model.va>...]`.** `bench-scale` measures the solver on an RC
+  ladder of reference primitives, which carry no Verilog-A at all; this measures the other half,
+  and on a real compact model the other half is three orders of magnitude larger than the solve
+  it stamps into. Defaults to the seven models under `external/code`, skipping any that are
+  absent (`external/` is gitignored).
+
+  Measured at this version. `cargo test --workspace` 821 passed / 0 failed (7 new: 5 for the
+  setup/eval split, 1 for the charge-channel NaN, plus the discrimination check). `cargo xtask
+  validate` 28 checked, 0 failed golden, convergence 28/28 — and **diffed line by line against a
+  run of the pristine tree: all 28 error figures are bit-identical**, which is the evidence that
+  a 9x change to how the evaluator works moved no answer. Corpus `va-cli check external
+  --codegen` 200/224, 182/191 self-contained.
+
+  **What this does not do, and what is next.** It is still a tree-walking interpreter; nothing
+  is compiled to machine code. The remaining per-`load` cost is recursive `eval` dispatch,
+  `Result` plumbing and arena indirection on the bias-dependent core, which a flat SSA tape
+  would remove and a Cranelift JIT (pure Rust, so it clears §5's no-native-link rule, but it
+  needs `unsafe` to call what it emits and so needs sign-off under §5) would remove further.
+  And the larger fish: **`solve_dc_sweep` rebuilds every model instance at every sweep point**.
+  `build_instance` is 7.3 ms for BSIM4 against 10.7 ms per sweep point, so most of a DC sweep is
+  now rebuilding a model that did not change — and it throws away the cached setup each time.
+  That is a `va-cli` change, not a codegen one, and it is the next thing worth doing.
+
 1.1.1 - 2026-09-21
 ------------------
 **Two AD rules returned NaN where the derivative is finite, and it cost us the big CMC
