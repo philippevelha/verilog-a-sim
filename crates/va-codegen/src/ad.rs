@@ -184,10 +184,20 @@ impl Dual {
     /// came from `δx` or from `dδx/dt`. This one line is why no nonlinear operator needed
     /// changing.
     fn chain(&self, value: f64, dvalue: f64) -> Dual {
+        // A channel whose incoming gradient is exactly `0.0` stays `0.0` rather than being
+        // multiplied: the value does not depend on that unknown at all, so its contribution is
+        // zero whatever `dvalue` is. Multiplying anyway is wrong at a function's *own*
+        // singularity, where `dvalue` is `±inf` and `inf · 0.0` is NaN. That NaN then
+        // propagates through every later expression and poisons Jacobian rows the singular
+        // subexpression never reached. BSIM4's `T11 = sqrt(jtweff / weffCJ) + 1.0` is the case
+        // that found this: both operands are *parameters*, so every channel is 0 and the
+        // statement cannot affect the Jacobian at all — yet `sqrt(0.0)` gave it an all-NaN
+        // gradient that reached the drain node's row and ended the solve on iteration 1.
+        let scale = |g: &f64| if *g == 0.0 { 0.0 } else { g * dvalue };
         Dual::from_parts(
             value,
-            self.grad.iter().map(|g| g * dvalue).collect(),
-            self.grad_ddt.iter().map(|g| g * dvalue).collect(),
+            self.grad.iter().map(scale).collect(),
+            self.grad_ddt.iter().map(scale).collect(),
         )
     }
 
@@ -221,13 +231,46 @@ impl Dual {
         self.chain(self.value.abs(), self.value.signum())
     }
 
-    /// Power `self ** exp` with a (possibly variable) exponent:
-    /// `d/dx u^v = u^v (v' ln u + v u'/u)`.
+    /// Power `self ** exp`.
+    ///
+    /// The base's partial is the closed form `v·u^(v-1)`, **not** the logarithmic form
+    /// `u^v·(v·u'/u + v'·ln u)` that a general two-operand rule would use. The two agree
+    /// wherever both are defined, but the logarithmic one is NaN in two places where the true
+    /// derivative is finite:
+    ///
+    /// - `u = 0` with `v > 1`: `u^v` is `0` and `v·u'/u` is `±inf`, so their product is NaN,
+    ///   where `d/du u^1.5 = 1.5·√u = 0`. Newton's first iterate reads every probe as `0.0`,
+    ///   so this is not an edge case — it is where every DC solve starts. A compact model
+    ///   raising a bias-dependent quantity to a power (BSIM4, BSIM-BULK, PSP103 all do)
+    ///   produced a NaN Jacobian entry on iteration 1 and the solve was abandoned before it
+    ///   had moved.
+    /// - `u < 0` with integer `v`: `ln u` is NaN, where `d/du u² = 2u` is finite. Any
+    ///   `pow(x, 2)` over a probe that can go negative was unusable.
+    ///
+    /// `v·u^(v-1)` is still `±inf` at `u = 0` for `v < 1` (`d/du √u` really is unbounded
+    /// there) — that is the function's own singularity, not an artefact of the rule.
+    ///
+    /// The exponent's partial `u^v·ln u` is formed **only when the exponent actually varies**.
+    /// `ln u` is `-inf`/NaN for `u ≤ 0`, and multiplying it by a zero derivative it is not a
+    /// term of would poison the result with the same `0·inf` NaN.
     pub fn powf(&self, exp: &Dual) -> Dual {
-        let value = self.value.powf(exp.value);
-        let lnu = self.value.ln();
-        // Linear in both operands' derivatives, so the same coefficients apply to each channel.
-        let rule = |sg: f64, eg: f64| value * (eg * lnu + exp.value * sg / self.value);
+        let (u, v) = (self.value, exp.value);
+        let value = u.powf(v);
+        let d_du = v * u.powf(v - 1.0);
+        let exp_varies = exp
+            .grad
+            .iter()
+            .chain(exp.grad_ddt.iter())
+            .any(|g| *g != 0.0);
+        let d_dv = if exp_varies { value * u.ln() } else { 0.0 };
+        // A zero derivative contributes nothing, and is skipped rather than multiplied: at a
+        // singular `u` the partial is `inf`, and `inf · 0.0` is NaN rather than the 0 that a
+        // channel the operand does not depend on must contribute.
+        let rule = |sg: f64, eg: f64| {
+            let base = if sg == 0.0 { 0.0 } else { d_du * sg };
+            let expo = if eg == 0.0 { 0.0 } else { d_dv * eg };
+            base + expo
+        };
         Dual::from_parts(
             value,
             (0..self.n())
@@ -1588,6 +1631,86 @@ mod tests {
         let f = a.mul(&b);
         assert_eq!(f.value, 15.0);
         assert_eq!(f.grad, vec![5.0, 3.0]);
+    }
+
+    /// `pow` with a constant exponent must use `v·u^(v-1)`, which is finite at `u = 0` for
+    /// `v > 1`, rather than the logarithmic form `u^v·v·u'/u`, which is `0·∞` there.
+    ///
+    /// Newton's first iterate reads every probe as `0.0`, so `u = 0` is not an edge case — it
+    /// is where every DC solve starts. With the logarithmic rule, BSIM-BULK 107 and PSP103
+    /// both produced a NaN Jacobian entry on iteration 1 and the solve was abandoned before
+    /// the unknowns had moved at all.
+    #[test]
+    fn pow_with_a_constant_exponent_is_differentiable_at_zero() {
+        for (v, expect) in [(2.0, 0.0), (1.5, 0.0), (3.0, 0.0)] {
+            let u = Dual::variable(0.0, 0, 1);
+            let f = u.powf(&Dual::constant(v, 1));
+            assert_eq!(f.value, 0.0, "value of 0^{v}");
+            assert!(f.grad[0].is_finite(), "d/du u^{v} at 0 is {}", f.grad[0]);
+            assert_eq!(f.grad[0], expect, "d/du u^{v} at 0");
+        }
+        // v < 1 keeps the genuine singularity: d/du √u really is unbounded at 0. The rule must
+        // report that rather than hide it behind a NaN.
+        let f = Dual::variable(0.0, 0, 1).powf(&Dual::constant(0.5, 1));
+        assert!(
+            f.grad[0].is_infinite(),
+            "d/du √u at 0 must be ±inf, got {}",
+            f.grad[0]
+        );
+    }
+
+    /// `pow(x, k)` over a base that has gone negative must differentiate like the product it
+    /// is: `d/dx x² = 2x` is finite at `x = -0.5`, but the logarithmic rule routes through
+    /// `ln(-0.5)` and returns NaN.
+    #[test]
+    fn pow_with_an_integer_exponent_differentiates_a_negative_base() {
+        let x = -0.5_f64;
+        let f = Dual::variable(x, 0, 1).powf(&Dual::constant(2.0, 1));
+        assert!((f.value - 0.25).abs() < 1e-15, "value {}", f.value);
+        assert!((f.grad[0] - 2.0 * x).abs() < 1e-12, "grad {}", f.grad[0]);
+        // And it agrees with writing the same thing as `x*x`, which is the invariant that
+        // makes the two spellings interchangeable in a model.
+        let g = Dual::variable(x, 0, 1).mul(&Dual::variable(x, 0, 1));
+        assert_eq!(f.grad[0], g.grad[0]);
+    }
+
+    /// A variable exponent still differentiates by the logarithmic rule — the closed form
+    /// alone would drop the `u^v·ln u` term and silently return a wrong derivative.
+    #[test]
+    fn pow_with_a_variable_exponent_keeps_the_logarithmic_term() {
+        // f = u^v at (2, 3), both variable: ∂f/∂u = 3·2² = 12, ∂f/∂v = 8·ln 2.
+        let u = Dual::variable(2.0, 0, 2);
+        let v = Dual::variable(3.0, 1, 2);
+        let f = u.powf(&v);
+        assert!((f.value - 8.0).abs() < 1e-12);
+        assert!((f.grad[0] - 12.0).abs() < 1e-10, "d/du {}", f.grad[0]);
+        let expect = 8.0 * 2.0_f64.ln();
+        assert!((f.grad[1] - expect).abs() < 1e-10, "d/dv {}", f.grad[1]);
+    }
+
+    /// A singular unary derivative must not reach a channel the operand does not depend on.
+    ///
+    /// The BSIM4 case: `T11 = sqrt(jtweff / weffCJ) + 1.0` is built entirely from *parameters*,
+    /// so every gradient channel of its operand is exactly `0.0` and the statement cannot
+    /// affect the Jacobian at all. With `0.0` multiplied by `sqrt`'s `+inf` slope at zero, it
+    /// acquired an all-NaN gradient that propagated into the drain node's row and ended the
+    /// operating-point solve on the first iteration.
+    #[test]
+    fn a_singular_slope_does_not_poison_an_independent_channel() {
+        // sqrt(0) where the operand is a constant: two channels, both structurally zero.
+        let f = Dual::constant(0.0, 2).sqrt();
+        assert_eq!(f.value, 0.0);
+        assert_eq!(f.grad, vec![0.0, 0.0], "a constant's gradient stays zero");
+
+        // ln(0) likewise: value is -inf, but a channel the operand ignores contributes 0.
+        let g = Dual::constant(0.0, 2).ln();
+        assert!(g.value.is_infinite());
+        assert_eq!(g.grad, vec![0.0, 0.0]);
+
+        // The channel the operand *does* depend on still reports the true singularity.
+        let h = Dual::variable(0.0, 0, 2).sqrt();
+        assert!(h.grad[0].is_infinite(), "d/dx √x at 0 is unbounded");
+        assert_eq!(h.grad[1], 0.0, "the untouched channel stays zero");
     }
 
     #[test]

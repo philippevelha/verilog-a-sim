@@ -20,6 +20,51 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.1.1 - 2026-09-21
+------------------
+**Two AD rules returned NaN where the derivative is finite, and it cost us the big CMC
+MOSFETs.** Both are `0 * inf` in `va-codegen`'s dual numbers, and both fire at *x = 0* --
+which is not an edge case, it is where every Newton solve starts.
+
+  * `Dual::powf` differentiated the base by the logarithmic rule `u^v * (v*u'/u + v'*ln u)`.
+    At `u = 0` that is `0 * inf` = NaN, where `d/du u^1.5 = 1.5*sqrt(u) = 0`; at `u < 0` with
+    an integer `v` it routes through `ln(u)` = NaN, where `d/du u^2 = 2u` is finite. It now
+    uses the closed form `v*u^(v-1)` for the base and forms the `u^v*ln u` term only when the
+    exponent actually varies. `pow(x, k)` and `x*x` now give the same derivative, which is the
+    invariant that makes the two spellings interchangeable in a model.
+  * `Dual::chain` scaled *every* gradient channel by the outer slope, including channels whose
+    incoming gradient is exactly `0.0`. At a function's own singularity the slope is `±inf`,
+    so a subexpression built only from parameters -- which cannot affect the Jacobian at all --
+    came back with an all-NaN gradient that then propagated into rows it never reached. A zero
+    channel now stays zero. A channel the operand *does* depend on still reports the true
+    singularity: `d/dx sqrt(x)` at 0 is still `+inf`, because it is.
+
+  Why it took this long to surface: the zoo's own models never raise a bias-dependent quantity
+  to a power near zero, and `va-abi`'s reference models are hand-written. `cargo xtask
+  validate` was 28/28 before the fix and is 28/28 after it -- the gate could not see this. What
+  saw it was `external/code`, the CMC standard-model distributions (BSIM, PSP, HICUM, MEXTRAM,
+  EKV, ...), added this release as corpus.
+
+  Measured at this version. `cargo test --workspace` 814 passed / 0 failed (4 new AD tests).
+  `cargo xtask validate` 28 checked, 0 failed golden, convergence 28/28. Corpus
+  `va-cli check external --codegen` 199/224 files declaring a module, 181/191 self-contained --
+  up from 113/132 because `external/code` adds 92 module-declaring files, of which 85 pass
+  frontend + codegen.
+
+  What the fix bought, on the seven models the OpenVAF paper benchmarks (each a bare `.op`, no
+  model card, so the numbers are the defaults' operating point and not a validated I-V):
+  BSIM4, PSP103 and BSIM-BULK 107 went from "NaN Jacobian on iteration 1" to a converged
+  operating point. EKV2.6, JUNCAP200 and BSIM-SOI already solved. HICUM/L2 v3.0 solves to
+  Vb = 0.7 V and fails above it (Newton, 100 iterations, residual 3.6e11) -- that one is the
+  unwired convergence aids (junction limiting), not the compiler, and stays open.
+
+  Limitations this does not touch. `pow` with `v < 1` at `u = 0` still returns `±inf`, as it
+  must. Model *preparation* is 5-50 ms for these models against OpenVAF's 0.23-6.7 s, but that
+  is not a like-for-like win: OpenVAF emits optimised machine code and we build a tree-walking
+  AD evaluator, and the bill arrives at evaluation time -- a 1001-point BSIM4 Id-Vg sweep takes
+  30 s here, about 30 ms per DC point. Closing that is a separate piece of work.
+
+
 1.1.0 - 2026-09-17
 ------------------
 **Every `sim` says what it is about to solve, and roughly what that costs**, before solving

@@ -788,6 +788,48 @@ matches the code verbatim.
 > Each operator is FD-checked (`div_matches_finite_difference`, `exp_chain_rule`).
 > `t2-codegen/01-ad-core.qmd` written 2026-07-18.
 
+
+> **Now closed (2026-09-21, v1.1.1) — two `0 · inf` NaNs in the AD rules, found by the CMC
+> standard-model distributions.** `external/code` was added this day: the vendor `vacode/`
+> trees for BSIM4/6/BULK/CMG/IMG/SOI, PSP102/103/104, HICUM L0/L2, MEXTRAM 504/505, EKV2.6/3,
+> ASMHEMT, MVSG, VBIC, JUNCAP200 and the rest — 92 module-declaring files, of which **86 pass
+> the frontend and 85 pass frontend + codegen**. Compiling them was never the problem. *Solving*
+> them was: BSIM4, PSP103 and BSIM-BULK 107 each died on Newton's first iteration with "a model
+> produced a non-finite Jacobian entry", and the diagnosis took two passes because the NaN was
+> not in any one contribution — it was in a shared intermediate, so disabling contributions one
+> at a time never moved the verdict.
+>
+> Both causes are the same shape, `0 · inf`, and both fire at `x = 0`, which is where every
+> Newton solve starts:
+>
+> 1. `Dual::powf` used the logarithmic rule `u^v·(v·u'/u + v'·ln u)` for the base. At `u = 0`
+>    that is `0 · inf` where `d/du u^1.5` is a perfectly finite `0`; at `u < 0` with an integer
+>    `v` it is `ln(u)` = NaN where `d/du u² = 2u` is finite. Now the base uses the closed form
+>    `v·u^(v-1)`, and `u^v·ln u` is formed only when the exponent actually varies. Invariant
+>    worth stating: `pow(x, k)` and `x*x` now produce the same derivative.
+> 2. `Dual::chain` scaled every channel by the outer slope, including channels whose gradient
+>    is exactly `0.0`. BSIM4's `T11 = sqrt(jtweff / weffCJ) + 1.0` is built only from
+>    *parameters* — it cannot affect the Jacobian at all — yet `sqrt(0)`'s `+inf` slope times a
+>    zero channel gave it an all-NaN gradient that reached the drain node's row. A zero channel
+>    now stays zero; a channel the operand does depend on still reports the true singularity.
+>
+> **Evidence.** 814 tests pass (was 810; four new FD/limit tests in `ad.rs`, each of which fails
+> against the old rules). `cargo xtask validate` is **28/28, unchanged, both before and after** —
+> and that is the point worth recording: the gate could not see this bug, because no zoo model
+> raises a bias-dependent quantity to a power near zero and `va-abi`'s reference models are
+> hand-written. Corpus `va-cli check external --codegen` **199/224** module-declaring files,
+> 181/191 self-contained (was 113/132 before `external/code` was added). On bare `.op` runs with
+> no model card: BSIM4 (95.8 µA), PSP103 (71.6 µA) and BSIM-BULK 107 went from NaN to converged;
+> EKV2.6, JUNCAP200 and BSIM-SOI already solved.
+>
+> **Still open, and not this fix's business.** HICUM/L2 v3.0 converges up to Vb = 0.7 V and
+> fails above it (100 iterations, residual 3.6e11) — that is the unwired junction limiting in
+> T3.3's convergence aids, not a codegen gap. And the performance trade this architecture makes
+> is now measurable against a published baseline: preparing these models takes 5–50 ms here
+> against OpenVAF's 0.23–6.7 s, but OpenVAF emits optimised machine code and we build a
+> tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
+> point**. The compile-time lead is real and so is the bill for it.
+
 - Walk the IR arena and evaluate expressions; implement forward-mode AD (`Dual`) over the
   unknowns.
 - **Every differentiated operator has a finite-difference test** (analytic vs central
