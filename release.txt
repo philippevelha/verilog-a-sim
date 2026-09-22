@@ -20,6 +20,56 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.1 - 2026-09-22
+------------------
+**A `.dc` sweep builds its instances once instead of once per point.** `solve_dc_sweep` cloned
+the deck at every swept value and called `solve_dc`, which rebuilt every device in it —
+including each compiled Verilog-A model. `va_codegen::build_instance` is 7.3 ms for BSIM4
+against 10.7 ms for a whole sweep point, so roughly two thirds of a sweep was reconstructing
+models that had not changed, and it threw away each model's cached setup (v1.2.0's
+`Lowered::static_prefix`) every point, turning once-per-instance work into once-per-point work.
+
+Now the deck is built once and only the swept source is rebuilt in place — through the same
+`build_instance` call the original construction used, not a copy of it, with the global unknown
+counter rewound to what it held before that device first claimed anything, so the replacement
+occupies exactly the rows the original did. `BuiltInstances` gained a `slots: Vec<DeviceSlot>`
+recording each phase-1 device's index and its before/after counter values; it is now a named
+struct rather than a four-tuple, which is what makes that fifth field readable at its seven
+call sites.
+
+  A rebuild that claimed a different number of unknowns would push every later device's rows
+  out of alignment and the solver would quietly solve a different circuit. It cannot happen for
+  a source — a voltage source's row count does not depend on its value — so the code says so
+  with a real error rather than a `debug_assert`, and the message names the device.
+
+  **Measured, 1001-point BSIM4 Id-Vg sweep: 10.7 s -> 3.17 s**, and every one of the 1001 output
+  lines is identical to the run taken before any of v1.2.0's work. End to end against where this
+  started, the same sweep was **30.0 s** at v1.1.1: 9.5x, output unchanged throughout.
+
+  Nothing is carried between points. The solve starts from the same initial guess it always did,
+  and the only mutable state an instance holds is the cached setup, which is bias-independent by
+  construction. Two new tests state that rather than trusting it:
+  `a_reused_instance_set_sweeps_exactly_as_per_point_rebuilds_would` compares the whole solution
+  vector with `==`, not a tolerance, against a per-point rebuild at every point of the diode
+  sweep — a sweep that reused a stale operating point would still converge and still look
+  plausible, so an approximate comparison is the wrong instrument. It was confirmed to
+  discriminate by dropping the in-place replacement and watching it fail at the second point.
+  `re_pointing_the_swept_source_does_not_claim_new_unknowns` checks the solution vector never
+  widens and that the source is still actually driving its node.
+
+  Measured at this version. `cargo test --workspace` 823 passed / 0 failed (2 new).
+  `cargo xtask validate` 28 checked, 0 failed golden, convergence 28/28 — diffed line by line
+  against v1.2.0's run, all 28 error figures identical, and that gate contains three `.dc`
+  sweeps (`diode_iv`, `diode_clamp`, `diode_iv_params`), which is the part of it this change can
+  reach. Corpus `va-cli check external --codegen` 200/224, 182/191 self-contained.
+
+  **Not fixed here, same shape.** `quantities()`, `branch_currents()` and `sizing()` each call
+  `build_instances` on their own, so a single `va-cli sim` run still builds the deck three or
+  four times before it solves anything — a fixed cost, not a per-point one, but it is three
+  wasted `build_instance` calls per compiled model and it is why a one-point `.op` on BSIM4
+  still costs ~48 ms of which ~16 ms is the frontend. And `.tran`/`.ac`/`.noise` build once
+  already, so they were never affected by this.
+
 1.2.0 - 2026-09-22
 ------------------
 **The evaluator stops paying for work it does not do.** One `ModelInstance::load()` — the

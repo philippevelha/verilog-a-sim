@@ -830,6 +830,29 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.2.1) — a `.dc` sweep no longer rebuilds the deck at every point.**
+> The open item v1.2.0's entry left at the bottom. `solve_dc_sweep` cloned the netlist per swept
+> value and called `solve_dc`, rebuilding every device including each compiled Verilog-A model:
+> `build_instance` is 7.3 ms for BSIM4 against 10.7 ms for a whole point, and it also discarded
+> the model's cached setup every point, so v1.2.0's once-per-instance work had become
+> once-per-point. Now the deck is built once and only the swept source is replaced in place —
+> through the *same* `build_instance` call, with the unknown counter rewound so the replacement
+> claims exactly the original's rows, and a hard error (not a `debug_assert`) if it claims a
+> different number.
+>
+> **Evidence.** 1001-point BSIM4 Id-Vg sweep **10.7 s -> 3.17 s**, every one of the 1001 output
+> lines identical; against where the day started, **30.0 s -> 3.17 s, 9.5x**. 823 tests (2 new),
+> `xtask validate` 28/28 with all 28 figures identical to v1.2.0's run — and that gate holds
+> three `.dc` sweeps, which is the part of it this change can reach. The equivalence test
+> compares whole solution vectors with `==` rather than a tolerance, because a sweep reusing a
+> stale operating point would still converge and still look plausible; confirmed to discriminate
+> by dropping the in-place replacement and watching it fail at the second point.
+>
+> **Still open, same shape, smaller.** `quantities()`, `branch_currents()` and `sizing()` each
+> call `build_instances` independently, so one `va-cli sim` still builds the deck three or four
+> times before solving. Fixed cost rather than per-point, but it is why a single `.op` on BSIM4
+> costs ~48 ms. `.tran`/`.ac`/`.noise` already build once and were never affected.
+>
 > **Now closed (2026-09-22, v1.2.0) — the evaluator, 3.4-9.3x.** The question that opened this
 > was the OpenVAF paper's compile-time table: preparing a CMC model costs us 5-50 ms against
 > OpenVAF's 0.23-6.7 s, which looks like a rout until you ask what we traded for it. We build a

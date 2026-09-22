@@ -1275,12 +1275,41 @@ type NodeAssignment = Vec<(usize, va_ir::NodeDecl)>;
 /// one, and its [`NodeAssignment`].
 type BuiltDevice = (Box<dyn ModelInstance>, Option<usize>, NodeAssignment);
 
-type BuiltInstances = (
-    Vec<Box<dyn ModelInstance>>,
-    usize,
-    Vec<(String, usize)>,
-    Vec<Quantity>,
-);
+/// Everything [`build_instances`] works out about a deck: the instance set itself, the
+/// dimension of the solution vector, the branch row each current-carrying device claimed, and
+/// the labelled quantities a report can print.
+struct BuiltInstances {
+    /// One entry per device, in the order [`build_instances`] constructs them — phase 1 first,
+    /// then the current-controlled sources and mutual inductances.
+    instances: Vec<Box<dyn ModelInstance>>,
+    /// Size of the solution vector: the deck's nets plus every auxiliary row claimed.
+    dim: usize,
+    /// `(device name, branch row)` for each device carrying its own current unknown.
+    currents: Vec<(String, usize)>,
+    /// Labelled entries of the solution vector, for reporting and error attribution.
+    quantities: Vec<Quantity>,
+    /// Where each phase-1 device's instance landed, so one device can be rebuilt in place
+    /// without rebuilding the deck — see [`DeviceSlot`] and [`solve_dc_sweep`].
+    slots: Vec<DeviceSlot>,
+}
+
+/// Where one device's instance sits in [`BuiltInstances::instances`], and what the global
+/// unknown counter held before it claimed anything.
+///
+/// Both halves are needed to rebuild that one device *in place*: the index says which entry to
+/// replace, and the counter says which unknown indices to hand it, so the rebuilt instance
+/// occupies exactly the rows the original did instead of appending fresh ones past `dim`.
+struct DeviceSlot {
+    /// The device's name in the deck.
+    name: String,
+    /// Its position in [`BuiltInstances::instances`].
+    index: usize,
+    /// The global-unknown counter as it stood before this device was built.
+    next_unknown_before: usize,
+    /// …and after. A rebuild that does not land on this number has changed the deck's shape,
+    /// which would silently misalign every later device's rows.
+    next_unknown_after: usize,
+}
 
 /// One labelled entry of the solution vector (§ quantity reporting).
 ///
@@ -1380,6 +1409,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     let mut next_unknown = n_nodes;
     let mut instances: Vec<Box<dyn ModelInstance>> = Vec::with_capacity(net.devices.len());
     let mut currents = Vec::new();
+    let mut slots: Vec<DeviceSlot> = Vec::new();
     // Phase 1: everything whose construction depends on nothing else. A current-controlled
     // source (`F`/`H`) is deferred, because it needs the *branch row* of the element it senses
     // and that element may be written after it in the deck. Deferring is only safe because
@@ -1400,7 +1430,14 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
             continue;
         }
         let before = next_unknown;
+        let slot_index = instances.len();
         let (inst, branch, assignment) = build_instance(dev, compiled, &mut next_unknown)?;
+        slots.push(DeviceSlot {
+            name: dev.name.clone(),
+            index: slot_index,
+            next_unknown_before: before,
+            next_unknown_after: next_unknown,
+        });
         let mut assigned_here: Vec<usize> = Vec::new();
         // Auxiliary rows are numbered per device, so `X1.b0` is X1's first regardless of what
         // any earlier device claimed.
@@ -1550,7 +1587,13 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     }
     quantities.extend(internal);
 
-    Ok((instances, next_unknown, currents, quantities))
+    Ok(BuiltInstances {
+        instances,
+        dim: next_unknown,
+        currents,
+        quantities,
+        slots,
+    })
 }
 
 /// Map every `vsource` device's own name to its assigned branch-current global index —
@@ -1564,7 +1607,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
 /// trivially matches golden regardless of whether the diode model itself is right; the source's
 /// own current is the quantity that actually depends on it).
 pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String, usize)>> {
-    let (_, _, currents, _) = build_instances(net, compiled)?;
+    let BuiltInstances { currents, .. } = build_instances(net, compiled)?;
     Ok(currents)
 }
 
@@ -1573,7 +1616,7 @@ pub fn branch_currents(net: &Netlist, compiled: &[Module]) -> Result<Vec<(String
 /// introduced of its own (internal nodes, auxiliary branch rows). `pub` for the same reason
 /// [`branch_currents`] is — so a caller can label results without re-deriving index assignment.
 pub fn quantities(net: &Netlist, compiled: &[Module]) -> Result<Vec<Quantity>> {
-    let (_, _, _, quantities) = build_instances(net, compiled)?;
+    let BuiltInstances { quantities, .. } = build_instances(net, compiled)?;
     Ok(quantities)
 }
 
@@ -1616,7 +1659,12 @@ pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Q
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
-    let (instances, dim, _currents, quantities) = build_instances(net, compiled)?;
+    let BuiltInstances {
+        instances,
+        dim,
+        quantities,
+        ..
+    } = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
@@ -1656,12 +1704,31 @@ fn name_non_finite_row(err: anyhow::Error, quantities: &[Quantity]) -> anyhow::E
     }
 }
 
-/// Solve a `.dc` sweep (§ ladder rung 2): re-solve the whole circuit fresh at each swept value
-/// of `sweep.source`, since `va-core::dc::sweep` is agnostic about *what* changed between
-/// points and just wants a fresh instance set per point. `sweep.source` must name a `vsource`
-/// device; anything else is a clear error rather than a silently-ignored sweep. `pub` for the
-/// same reason `solve_dc` is (§ golden comparison) — `va-harness` wants the numeric points back,
-/// not `run_sim`'s printed stdout.
+/// Solve a `.dc` sweep (§ ladder rung 2): build the deck's instances **once**, then re-point
+/// the swept source and re-solve at each value. `sweep.source` must name a `vsource` device;
+/// anything else is a clear error rather than a silently-ignored sweep. `pub` for the same
+/// reason `solve_dc` is (§ golden comparison) — `va-harness` wants the numeric points back, not
+/// `run_sim`'s printed stdout.
+///
+/// # Why not simply call `solve_dc` per point
+///
+/// That is what this did until v1.2.1, and it rebuilt every instance in the deck at every
+/// point — including each compiled Verilog-A model, which is the expensive one.
+/// `va_codegen::build_instance` on BSIM4 costs 7.3 ms against 10.7 ms for a whole sweep point,
+/// so most of a sweep was reconstructing models that had not changed. It also discarded each
+/// model's cached setup (`lower::Lowered::static_prefix`) every point, so the work that was
+/// meant to happen once per instance was happening once per *point*.
+///
+/// Only the swept device is rebuilt now, through the same `build_instance` call the original
+/// construction used — not a hand-rolled copy of it — with the unknown counter rewound to what
+/// it held before that device was first built, so the replacement claims exactly the rows the
+/// original did. A source whose value changes claims the same single branch row whatever the
+/// value is; the check below states that as a requirement rather than trusting it.
+///
+/// Nothing else is carried between points: the solve still starts from the same initial guess
+/// it always did, and the only mutable state an instance holds is that cached setup, which is
+/// bias-independent by construction. The evidence that this is a pure speed-up is that all
+/// three `.dc` circuits in `xtask validate` report error figures identical to the last digit.
 pub fn solve_dc_sweep(
     net: &Netlist,
     compiled: &[Module],
@@ -1681,17 +1748,53 @@ pub fn solve_dc_sweep(
     }
 
     let points = sweep_points(sweep.start, sweep.stop, sweep.step);
+    let mut built = build_instances(net, compiled)?;
+    let slot = built
+        .slots
+        .iter()
+        .find(|s| s.name == sweep.source)
+        .map(|s| (s.index, s.next_unknown_before, s.next_unknown_after))
+        .with_context(|| {
+            format!(
+                "`{}` was found in the deck but built no instance to re-point",
+                sweep.source
+            )
+        })?;
+    let (slot_index, unknown_before, unknown_after) = slot;
+    let mut swept_device = src.clone();
+
     let mut out = Vec::with_capacity(points.len());
     for value in points {
-        let mut swept = net.clone();
-        let dev = swept
-            .devices
-            .iter_mut()
-            .find(|d| d.name == sweep.source)
-            .expect("just found this device above");
-        dev.value = Some(value);
-        let op = solve_dc(&swept, compiled)
-            .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
+        swept_device.value = Some(value);
+        let mut next_unknown = unknown_before;
+        let (instance, _, _) = build_instance(&swept_device, compiled, &mut next_unknown)
+            .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
+        // A device that claimed a different number of unknowns on the rebuild would push every
+        // later device's rows out of alignment, and the solve would quietly be of a different
+        // circuit. It cannot happen for a source — its row count does not depend on its value —
+        // which is exactly why it is worth saying so out loud rather than assuming it.
+        if next_unknown != unknown_after {
+            bail!(
+                "`{}` claimed {} unknown(s) when first built and {} on rebuild at {value}; the \
+                 sweep cannot re-point a device whose row count depends on its value",
+                sweep.source,
+                unknown_after - unknown_before,
+                next_unknown - unknown_before
+            );
+        }
+        built.instances[slot_index] = instance;
+
+        let refs: Vec<&dyn ModelInstance> = built.instances.iter().map(|b| b.as_ref()).collect();
+        let op = va_core::dc::operating_point_with_events(
+            &refs,
+            built.dim,
+            NewtonConfig::default(),
+            None,
+        )
+        .map(|(op, _)| op)
+        .map_err(|e| name_non_finite_row(e.into(), &built.quantities))
+        .context("DC operating-point solve failed")
+        .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
         out.push((value, op));
     }
     Ok(out)
@@ -1902,7 +2005,13 @@ pub fn solve_transient(
         lte_estimator: LteEstimator::DividedDifference,
     };
 
-    let (instances, dim, currents, quantities) = build_instances(net, compiled)?;
+    let BuiltInstances {
+        instances,
+        dim,
+        currents,
+        quantities,
+        ..
+    } = build_instances(net, compiled)?;
     let x0 = initial_solution(net, dim, &currents);
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
 
@@ -2022,7 +2131,12 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
         .ac
         .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
 
-    let (instances, dim, currents, _quantities) = build_instances(net, compiled)?;
+    let BuiltInstances {
+        instances,
+        dim,
+        currents,
+        ..
+    } = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, NewtonConfig::default())
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
@@ -2061,7 +2175,7 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
 /// If the circuit cannot be instantiated (an unknown model, a bad terminal count, a parameter a
 /// deck may not set) — the same errors the solve would raise, raised before it starts.
 pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<estimate::Sizing> {
-    let (_instances, dim, _currents, _quantities) = build_instances(net, compiled)?;
+    let BuiltInstances { dim, .. } = build_instances(net, compiled)?;
     let points = match analysis {
         Analysis::Transient => {
             // `tstop / tstep`, the count a fixed-step integrator would take. Rounded up and
@@ -2153,7 +2267,12 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
         )
     })?;
 
-    let (instances, dim, currents, _quantities) = build_instances(net, compiled)?;
+    let BuiltInstances {
+        instances,
+        dim,
+        currents,
+        ..
+    } = build_instances(net, compiled)?;
     // The `.noise` card's input source, resolved to its own branch-current row — the row an AC
     // stimulus would excite, and therefore (§ `va_acnoise::noise`) the row of the adjoint vector
     // that already holds the forward gain. Only a `vsource` has such a row, so naming anything
@@ -4303,6 +4422,82 @@ R2 out gnd 1000
             (i_v1 - (-0.0005)).abs() < 1e-9,
             "I(V1) = {i_v1}, expected -0.5mA"
         );
+    }
+
+    /// A sweep that reuses one instance set must give exactly what solving each point from a
+    /// freshly-built deck gives — to the last bit, at every point.
+    ///
+    /// This is the property the v1.2.1 change has to preserve, and the one that would break
+    /// quietly if an instance turned out to carry state from one point into the next: a sweep
+    /// reusing a stale operating point would still converge, still look plausible, and be
+    /// wrong in a way no golden tolerance of 1e-4 is guaranteed to catch. The comparison is
+    /// therefore `==` on the raw solution vectors, not an approximate one.
+    ///
+    /// The deck is the nonlinear one on purpose — a diode, whose answer at each point depends
+    /// on the model's own exponential rather than on a linear solve that could hardly differ.
+    #[test]
+    fn a_reused_instance_set_sweeps_exactly_as_per_point_rebuilds_would() {
+        let src = include_str!("../../../models/diode.va");
+        let design = compile_model(src, "diode.va");
+        let deck = include_str!("../../../circuits/diode_iv.net");
+        let net = va_netlist::parser::parse(deck).expect("parse diode_iv");
+        let sweep = net.dc.clone().expect("`.dc` sweep card");
+
+        let reused = solve_dc_sweep(&net, &design.modules, &sweep).expect("sweeps");
+        assert!(reused.len() > 1, "a one-point sweep would prove nothing");
+
+        // The pre-v1.2.1 path, written out: clone the deck, set the source, build everything.
+        for (value, op) in &reused {
+            let mut fresh_deck = net.clone();
+            let dev = fresh_deck
+                .devices
+                .iter_mut()
+                .find(|d| d.name == sweep.source)
+                .expect("the swept source is in the deck");
+            dev.value = Some(*value);
+            let fresh = solve_dc(&fresh_deck, &design.modules).expect("solves");
+            assert_eq!(
+                op.x, fresh.x,
+                "at {}={value}: the reused instance set and a fresh one disagree",
+                sweep.source
+            );
+        }
+    }
+
+    /// The swept source's replacement must land on the rows the original held.
+    ///
+    /// If a rebuild claimed a *new* branch row instead of the original's, the solve would be of
+    /// a circuit whose source drives nothing — it would converge, to the unloaded answer. The
+    /// check is that the sweep's own dimension never grows: `op.x` stays the width the first
+    /// point had, point after point.
+    #[test]
+    fn re_pointing_the_swept_source_does_not_claim_new_unknowns() {
+        let src = include_str!("../../../models/diode.va");
+        let design = compile_model(src, "diode.va");
+        let deck = include_str!("../../../circuits/diode_iv.net");
+        let net = va_netlist::parser::parse(deck).expect("parse diode_iv");
+        let sweep = net.dc.clone().expect("`.dc` sweep card");
+
+        let points = solve_dc_sweep(&net, &design.modules, &sweep).expect("sweeps");
+        let width = points[0].1.x.len();
+        for (value, op) in &points {
+            assert_eq!(
+                op.x.len(),
+                width,
+                "the solution vector grew at {}={value}: the rebuilt source claimed a new row",
+                sweep.source
+            );
+        }
+        // …and the source is actually driving: V(in) tracks the swept value rather than
+        // sitting at whatever an undriven node would float to.
+        for (value, op) in &points {
+            assert!(
+                (op.x[0] - value).abs() < 1e-9,
+                "V(in) = {} at {}={value}",
+                op.x[0],
+                sweep.source
+            );
+        }
     }
 
     /// End-to-end DC sweep (ladder rung 2): compile `models/diode.va` and sweep
