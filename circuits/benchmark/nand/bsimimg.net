@@ -1,0 +1,43 @@
+* CMOS NAND2 -- bsimimg
+*
+* Out = NOT(A AND B): a series NMOS stack pulling down, a parallel PMOS pair pulling up.
+* The topology is the LTspice deck it came from, terminal for terminal:
+*
+*     M1 Out  A    N001 Vss NMOS      M3 Vdd  B  Out Vdd PMOS
+*     M2 N001 B    Vss  Vss NMOS      M4 Vdd  A  Out Vdd PMOS
+*
+* `M<name> d g s b` there becomes `X<name> d g s b <module>` here, because `M` in this netlist
+* parser is the three-terminal form; `X` is the general one and takes any port count.
+*
+* Note the PMOS pair keeps the source/drain ordering of the original (`d` at Vdd, `s` at Out),
+* which is the reverse of the usual pull-up convention. A MOSFET model decides for itself which
+* terminal is the source from the applied bias, so this is the same circuit either way -- it is
+* kept as written so the deck can be diffed against its origin.
+*
+* There is no model card: every parameter is the `.va` file's default, so these are not
+* calibrated devices and the numbers are not anyone's silicon. What the deck establishes is
+* that the model elaborates, differentiates, and solves a series stack with a floating internal
+* node -- which is the part a single transistor never exercises.
+*
+*   cargo run -p va-cli -- sim circuits/benchmark/nand/bsimimg.net \
+*       --model external/code/bsimimg/vacode/bsimimg.va --report out
+*
+* The sweep holds B high and walks A, which drives the NAND through its worst case: the
+* pull-down is two devices in series and N001 floats between them.
+VDD  vdd  gnd DC 1.2
+VA   a    gnd DC 0
+VB   b    gnd DC 1.2
+XM1  out  a    n001 gnd  tn1  bsimimg TYPE=1
+XM2  n001 b    gnd  gnd  tn2  bsimimg TYPE=1
+XM3  vdd  b    out  vdd  tn3  bsimimg TYPE=-1
+XM4  vdd  a    out  vdd  tn4  bsimimg TYPE=-1
+* The thermal port needs terminating; 1 mOhm to ground is isothermal, which is what a deck
+* with no `rth` in its card would be anyway. **Each instance gets its own node**: two
+* instances sharing one thermal node currently give a singular matrix, which is a bug in this
+* simulator rather than anything about the circuit -- see `nand/README.md`.
+RT1  tn1  gnd 1e-3
+RT2  tn2  gnd 1e-3
+RT3  tn3  gnd 1e-3
+RT4  tn4  gnd 1e-3
+.dc VA 0 1.2 0.012
+.end

@@ -1,0 +1,30 @@
+* NMOS NAND2 with a resistor pull-up -- this project's own `models/mosfet.va`.
+*
+* The one deck in this folder that needs nothing from `external/`. The zoo model is a
+* three-terminal square-law NMOS with no PMOS mode, so this is the pre-CMOS form of the gate:
+* a series NMOS stack pulling down against a resistor pulling up. Out is low only when both
+* inputs are high, which is still a NAND -- with an asymmetric low level, as the ratioed logic
+* it is.
+*
+*   cargo run -p va-cli -- sim circuits/benchmark/nand/zoo_nmos.net \
+*       --model models/mosfet.va --report out
+*
+* **RLK is not part of the circuit.** With M1 off, `n001` -- between the two series devices --
+* has no DC path to anything, and the matrix is singular: `models/mosfet.va` is an ideal
+* square-law device with no junction leakage, so nothing else gives that node a path. A real
+* simulator supplies one through `gmin`, which this project implements in
+* `va_core::convergence` but does not switch on (`NewtonConfig::gmin_steps` is 0). The 1 GOhm
+* resistor stands in for it. Delete it and this deck fails with "singular matrix during linear
+* solve" -- which is the point of documenting it here rather than quietly shipping the
+* workaround.
+*
+* Expected: V(out) = 5 V at A = 0, ~0.115 V at A = 5 V.
+VDD vdd  gnd DC 5
+VA  a    gnd DC 0
+VB  b    gnd DC 5
+RL  vdd  out 10k
+M1  out  a n001 mosfet
+M2  n001 b gnd  mosfet
+RLK n001 gnd 1e9
+.dc VA 0 5 0.05
+.end

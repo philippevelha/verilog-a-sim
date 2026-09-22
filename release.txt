@@ -20,6 +20,48 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.5+3 - 2026-09-22
+--------------------
+**A NAND2 per MOSFET model**, in `circuits/benchmark/nand/`: thirteen decks, twelve of them the
+same CMOS gate built from a different vendor model, plus one using this project's own
+`models/mosfet.va` that needs nothing from `external/`.
+
+  The point of a NAND rather than another inverter is the series stack. Its internal node
+  `N001` floats whenever the lower device is off, which a single transistor never exercises, and
+  that is where nearly every result came from.
+
+  **Six work as shipped** — BSIM4, BSIM6, BSIM-BULK 107, PSP102, PSP103, PSP104 — all with a
+  clean rail-to-rail swing at Vdd = 1.2 V on default parameters. The other six split into four
+  distinct causes, listed in `nand/README.md` with the numbers:
+
+  * **`gmin` is implemented and never runs.** `va_core::convergence` has gmin stepping and
+    `NewtonConfig::default()` sets `gmin_steps: 0`, so the homotopy never happens and a floating
+    node is simply fatal. Measured by temporarily setting it to 10: BSIM-CMG, BSIM-SOI, L-UTSOI
+    and EKV2.6 all stop failing — **6 of 12 becomes 10 of 12**. L-UTSOI becomes a clean NAND
+    (1.200000 V -> 1.41e-10 V); BSIM-SOI and EKV2.6 solve but pull down only to 0.437 V and
+    1.099 V, which at default parameters is plausibly the device rather than the solver. This is
+    `CLAUDE.md` §3's own backlog item for `va-core`, and it is now costing real circuits.
+  * **Two instances sharing a thermal node give a singular matrix — a bug**, reproduced in four
+    lines and not about the NAND at all. One instance on that node solves; two on *separate*
+    nodes solve; two sharing one node does not. Four-port models sharing a node are fine
+    (`psp103.net` has M3 and M4 sharing `vdd` as their bulk), so it is specific to the extra
+    port. Root cause not established. The five-port decks work around it with a node per
+    instance, marked as a workaround in each header.
+  * **BSIM-IMG's deck is wrong, not the simulator.** It is an independent-double-gate device —
+    ports `(d, fg, s, bg, t)`, front and *back* gate — and mapping the NAND's bulk onto `bg`
+    drives the back gate as if it were a body contact. The degraded 0.79 V swing is that mistake
+    faithfully simulated. Fixing it means choosing a back-gate bias, which is a device decision.
+  * **HiSIM2 fails for its own reasons**, non-finite at an internal node of a PMOS with gmin on
+    or off. Not diagnosed.
+
+  `zoo_nmos.net` reproduces the floating-node failure in eight lines with no external model, and
+  carries a 1 GOhm resistor standing in for the gmin that is not there — with its header saying
+  so, rather than shipping the workaround quietly.
+
+  Decks and docs only, hence a build digit: **no code changed**, and the `gmin_steps: 10` used to
+  measure the second bullet was reverted before anything was written. v1.2.5's gate figures
+  stand: 832 tests, `cargo xtask validate` 28/28.
+
 1.2.5+2 - 2026-09-22
 --------------------
 **Plots for the PSP103 inverter**, in `docs/examples/` beside the rest: `psp103_inverter_vtc.svg`

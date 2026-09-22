@@ -1,0 +1,35 @@
+* CMOS NAND2 -- bsim6
+*
+* Out = NOT(A AND B): a series NMOS stack pulling down, a parallel PMOS pair pulling up.
+* The topology is the LTspice deck it came from, terminal for terminal:
+*
+*     M1 Out  A    N001 Vss NMOS      M3 Vdd  B  Out Vdd PMOS
+*     M2 N001 B    Vss  Vss NMOS      M4 Vdd  A  Out Vdd PMOS
+*
+* `M<name> d g s b` there becomes `X<name> d g s b <module>` here, because `M` in this netlist
+* parser is the three-terminal form; `X` is the general one and takes any port count.
+*
+* Note the PMOS pair keeps the source/drain ordering of the original (`d` at Vdd, `s` at Out),
+* which is the reverse of the usual pull-up convention. A MOSFET model decides for itself which
+* terminal is the source from the applied bias, so this is the same circuit either way -- it is
+* kept as written so the deck can be diffed against its origin.
+*
+* There is no model card: every parameter is the `.va` file's default, so these are not
+* calibrated devices and the numbers are not anyone's silicon. What the deck establishes is
+* that the model elaborates, differentiates, and solves a series stack with a floating internal
+* node -- which is the part a single transistor never exercises.
+*
+*   cargo run -p va-cli -- sim circuits/benchmark/nand/bsim6.net \
+*       --model external/code/bsim6/vacode/bsim6.0.va --report out
+*
+* The sweep holds B high and walks A, which drives the NAND through its worst case: the
+* pull-down is two devices in series and N001 floats between them.
+VDD  vdd  gnd DC 1.2
+VA   a    gnd DC 0
+VB   b    gnd DC 1.2
+XM1  out  a    n001 gnd  bsim6 TYPE=1
+XM2  n001 b    gnd  gnd  bsim6 TYPE=1
+XM3  vdd  b    out  vdd  bsim6 TYPE=-1
+XM4  vdd  a    out  vdd  bsim6 TYPE=-1
+.dc VA 0 1.2 0.012
+.end
