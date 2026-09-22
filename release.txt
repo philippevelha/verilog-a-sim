@@ -20,6 +20,22 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.2+1 - 2026-09-22
+--------------------
+**`LICENSE` names a copyright holder.** The Apache-2.0 text shipped with the placeholder line
+from its own appendix, `Copyright [yyyy] [name of copyright owner]`; it now reads
+`Copyright [2026] [Philippe Velha]`. Author's edit, committed as written.
+
+  No code, no behaviour, hence a build digit rather than a patch. Nothing was re-measured for
+  this entry: the figures that stand are v1.2.2's — 825 tests, `cargo xtask validate` 28/28,
+  corpus 200/224.
+
+  One thing left as the author wrote it, worth a look rather than a silent fix: the line sits
+  inside the licence's **APPENDIX**, which is the boilerplate template you copy into source
+  files, and which says three lines above it to replace the bracketed fields *including the
+  brackets*. So the conventional form is `Copyright 2026 Philippe Velha`, and the conventional
+  place is a `NOTICE` file or a per-file header, with the appendix left as the template it is.
+
 1.2.2 - 2026-09-22
 ------------------
 **A `.dc` sweep continues from the previous point instead of restarting Newton at the origin.**
