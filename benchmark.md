@@ -124,6 +124,35 @@ per-*run* fixed cost is that `quantities()`, `branch_currents()` and `sizing()` 
 anything — which is why a single-point `.op` on BSIM4 still costs ~48 ms (of which ~16 ms is the
 frontend).
 
+### PSP103 CMOS inverter
+
+`circuits/benchmark/psp103_inverter_*.net`, adapted from an OpenVAF/ngspice deck (see those
+files' headers for the seven ways they differ from it). Best of three.
+
+| | this simulator | OpenVAF |
+|---|---|---|
+| `.tran 10p 10n`, 1861 accepted points | **4.78 s** | |
+| `.dc V1 0 1.2 0.012`, 101 points | **0.41 s** | |
+| both, as the original card runs them | **5.19 s** | **20.1 s** |
+
+**Not like-for-like, and the gap is not the interesting part.** The OpenVAF figure was supplied,
+not measured here, and on unknown hardware. More importantly *they have the model card* —
+`Modelcards/psp103_*.mod` was not provided, so everything here runs on the `.va` file's
+defaults. Different parameters are a different device: different stiffness, different accepted
+timepoints, different work. This is the same deck, not the same computation.
+
+What is worth recording is that the deck runs at all. Before 1.2.4 it could not be integrated
+from `t = 0` (the cold start, §7's closed list), and before 1.2.5 it underflowed on the first
+clock edge (`cap_fast_edge.net`). Both bugs were invisible to a green 28/28 gate.
+
+Output, for a reader checking the plots against the physics: rails at 1.200000 V and 7.49e−9 V,
+steepest transfer slope 69.1 V/V near Vin = 0.576 V, supply current peaking at 98.9 µA at
+Vin = 0.588 V and falling to 20.7 pA at both rails — 4.7 decades. The transient shows Miller
+undershoot through C_gd on the falling input (V(out) = −2.6 mV at t = 3.20 ns).
+
+Plots: `docs/examples/psp103_inverter_vtc.svg`, `psp103_inverter_crowbar.svg`,
+`psp103_inverter_tran.svg`.
+
 ---
 
 ## 4. The HICUM/L2 v3.0 output-family card
