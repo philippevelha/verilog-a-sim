@@ -135,11 +135,41 @@ files' headers for the seven ways they differ from it). Best of three.
 | `.dc V1 0 1.2 0.012`, 101 points | **0.41 s** | |
 | both, as the original card runs them | **5.19 s** | **20.1 s** |
 
-**Not like-for-like, and the gap is not the interesting part.** The OpenVAF figure was supplied,
-not measured here, and on unknown hardware. More importantly *they have the model card* —
-`Modelcards/psp103_*.mod` was not provided, so everything here runs on the `.va` file's
-defaults. Different parameters are a different device: different stiffness, different accepted
-timepoints, different work. This is the same deck, not the same computation.
+**Superseded below: the model card arrived.** The figures above are on the `.va` file's
+defaults, which was the caveat that mattered.
+
+#### With the reference model card
+
+`external/benchmarkExt/psp_inverter/` supplied `Modelcards/psp103_{nmos,pmos}.mod` — 283 lines
+each, of which **269 parameters per device map onto PSP103VA** and nothing fails to match
+(`level` is the simulator's dispatch, not a parameter). `circuits/benchmark/psp103_inverter_card_*.net`
+carry them. Best of three:
+
+| | this simulator | OpenVAF |
+|---|---|---|
+| `.tran 10p 10n`, 1810 accepted points | **3.99 s** | |
+| `.dc V1 0 1.2 0.012`, 101 points | **0.45 s** | |
+| both, as the original card runs them | **4.44 s** | **20.1 s** |
+
+**The caveat that mattered is now closed.** The worry was that defaults made an easier device
+and the timing gap was really a step-count gap — it was not: **1810 accepted timepoints with the
+reference card against 1861 with the defaults**, so both runs are doing the same amount of
+integration. The circuit, the parameters and the work are now the same; what is still not the
+same is the hardware, since the OpenVAF figure was supplied rather than measured here, and its
+20.1 s includes whatever ngspice spends around the solve.
+
+The card also moves the device where it should: the transfer curve now switches at Vin ≈ 0.59 V
+against a 0.6 V rail-splitting ideal, peak supply current rises from 98.9 µA to **190.4 µA**,
+leakage from 20.7 pA to **10.3 nA**, and the small-signal gain drops from 69 V/V to **10.3 V/V** —
+a real 0.1 µm device rather than a default one. Rails 1.199991 V and 4.42e−6 V.
+
+Plots: `docs/examples/psp103_inverter_card_{vtc,crowbar,tran}.svg`, beside the default-parameter
+ones.
+
+**Still out of reach:** `external/benchmarkExt/iscas85_benchmark_circuit/` is the other deck in
+that drop — 89,240 lines, 7,119 subcircuit instances. It needs `.subckt`, which this netlist
+parser does not have, and it would put tens of thousands of unknowns through a dense LU, which
+§7's first two open items are about.
 
 What is worth recording is that the deck runs at all. Before 1.2.4 it could not be integrated
 from `t = 0` (the cold start, §7's closed list), and before 1.2.5 it underflowed on the first
