@@ -877,7 +877,7 @@ fn strip_instance_params(line: &str) -> String {
 /// an unmodified `circuits/rc_step.net` run through QSPICE reported `V(out)` already at its
 /// settled ~5 V for the *entire* 5 ms window, not climbing the RC charging curve from 0.
 ///
-/// Since v1.3.0 the deck says which it wants, so this no longer decides anything: it mirrors
+/// Since v1.2.4 the deck says which it wants, so this no longer decides anything: it mirrors
 /// the deck's own `.tran … UIC` onto QSPICE and otherwise leaves the deck alone, letting both
 /// simulators start from the operating point. A deck *with* `UIC` additionally gets `IC=0` on
 /// every reactive element that does not name its own initial condition, because that is what

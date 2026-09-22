@@ -259,7 +259,7 @@ letting a row with no integrated state lose its veto at the floor, and only ther
 reproduction is `circuits/benchmark/cap_fast_edge.net`, which contains no Verilog-A. Also, a
 transient started from the zero vector unconditionally,
 which made every CMC MOSFET unrunnable — at `x = 0` a compact model's charge is inconsistent and
-shrinking the timestep makes the first step's current *larger*. Fixed in v1.3.0 by taking SPICE's
+shrinking the timestep makes the first step's current *larger*. Fixed in v1.2.4 by taking SPICE's
 default (operating point first, `UIC` to opt out); BSIM4, BSIM-BULK 107, BSIM-SOI, PSP103 and
 EKV2.6 all integrate now, and no golden needed regenerating. Also `@(above)` in a swept deck fired on "already positive" at
 every point rather than on a crossing from the point before, because `solve_dc_sweep` passed `None`

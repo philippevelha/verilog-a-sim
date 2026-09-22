@@ -67,7 +67,7 @@ pub struct Netlist {
     /// each reactive element's own `IC=`.
     ///
     /// Without it the transient starts from the operating point, which is SPICE's default and
-    /// this project's since v1.3.0. A deck that wants to watch something charge *from rest* —
+    /// this project's since v1.2.4. A deck that wants to watch something charge *from rest* —
     /// an RC step out of a constant source, a capacitor discharging from its `IC=`, an
     /// oscillator that would otherwise sit at its unstable DC equilibrium — has to say `UIC`,
     /// because from the operating point those runs are flat lines.

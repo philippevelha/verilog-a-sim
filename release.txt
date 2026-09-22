@@ -20,6 +20,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.5+1 - 2026-09-22
+--------------------
+**`1.3.0` is relabelled `1.2.4`.** It was published earlier today as a minor bump, but the
+transient operating-point start belongs in the 1.2 line with the rest of this week's fixes, and
+leaving it as published made this file read 1.2.5 above 1.3.0 above 1.2.3 — a sequence that goes
+backwards in the middle.
+
+  The label moved everywhere it appears: the entry heading here, two `docs/roadmap.md` entries,
+  `benchmark.md`'s closed list, `circuits/benchmark/psp103_inverter_tran.net`'s header, and six
+  doc comments across `va-netlist`, `va-cli` and `xtask` that dated the behaviour change. A
+  seventh, in `va-cli`'s LTE regression test, said `v1.3.1` for a fix that actually shipped as
+  1.2.5, and is corrected with them.
+
+  **What could not move: the commit subject of 58f1388 still reads `1.3.0`.** Changing it means
+  rewriting a pushed commit and force-pushing over it, which is not worth doing to a shared
+  branch for a label. So `git log` says 1.3.0 for that commit and every file says 1.2.4; this
+  paragraph is the reconciliation.
+
+  No code changed, hence a build digit. Nothing was re-measured for this entry and nothing
+  needed to be — v1.2.5's figures stand: 832 tests, `cargo xtask validate` 28/28, corpus
+  200/224.
+
 1.2.5 - 2026-09-22
 ------------------
 **A capacitor pinned by a fast-slewing source could not be integrated at all.** The step
@@ -83,12 +105,13 @@ a PSP103 inverter from switching.
   from — `.subckt`, `.param`/`'expr'`, `+` continuation lines and nested `.dc` are all
   unsupported, and no model cards were available, so every one runs on `.va` defaults.
 
-  **A note on the number.** The release published earlier today as `1.3.0` is the transient
-  operating-point start, and belongs in this 1.2 line — read it as 1.2.4. It is already pushed,
-  so the sequence in this file goes 1.3.0 then 1.2.5 rather than being renumbered under it; say
-  the word and it can be relabelled properly.
+  **A note on the number.** The entry below was published earlier today as `1.3.0` and is
+  relabelled **1.2.4** as of 1.2.5+1: the transient operating-point start belongs in this 1.2
+  line. Every reference in the source, the docs and `benchmark.md` moved with it. What cannot
+  move is the commit subject of 58f1388, which still reads `1.3.0` — rewriting a pushed commit
+  would mean a force-push, so the history says 1.3.0 and everything else says 1.2.4.
 
-1.3.0 - 2026-09-22
+1.2.4 - 2026-09-22
 ------------------
 **A transient now starts from the DC operating point, as SPICE does, unless the deck says
 `UIC`.** It used to start from the zero vector plus each element's `IC=`, unconditionally, with

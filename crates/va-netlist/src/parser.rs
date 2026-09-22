@@ -51,7 +51,7 @@
 //! - `.tran <tstep> <tstop> [UIC]` requests a transient run. **`UIC` decides where the
 //!   integration starts**: with it, from the zero vector plus each reactive element's `IC=`
 //!   (SPICE's "use initial conditions"); without it, from the DC operating point, which is
-//!   SPICE's default and this project's since v1.3.0. The distinction is not cosmetic — an RC
+//!   SPICE's default and this project's since v1.2.4. The distinction is not cosmetic — an RC
 //!   step driven by a constant source is a flat line from the operating point and a charging
 //!   curve from rest, and a compact MOSFET cannot integrate at all from the zero vector,
 //!   because its charge there is not consistent with any solution and shrinking the timestep

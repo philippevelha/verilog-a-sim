@@ -831,7 +831,7 @@ matches the code verbatim.
 > point**. The compile-time lead is real and so is the bill for it.
 
 > **Now closed (2026-09-22, v1.2.5) — the LTE controller could not integrate a capacitor pinned
-> by a fast-slewing source.** The open item v1.3.0's entry left, and what stopped a PSP103 CMOS
+> by a fast-slewing source.** The open item v1.2.4's entry left, and what stopped a PSP103 CMOS
 > inverter from switching. A transient starts from the operating point, which carries no
 > reactive current by definition, so on the first step the source's branch current jumps from
 > zero to `C·dV/dt` — and `divided_difference_error_ratio` error-controlled *every* unknown
@@ -857,7 +857,7 @@ matches the code verbatim.
 > from the gitignored `external/`, and every bug in this series survived a green 28/28 because
 > nothing in the zoo looked like it.
 >
-> **Now closed (2026-09-22, v1.3.0) — a transient starts from the operating point, and the CMC
+> **Now closed (2026-09-22, v1.2.4) — a transient starts from the operating point, and the CMC
 > MOSFETs can run at all.** `.tran` started from the zero vector unconditionally, with no way to
 > ask for anything else, where SPICE solves the DC operating point first unless the deck says
 > `UIC`. That is not a stylistic difference: at `x = 0` a compact model's charge is not

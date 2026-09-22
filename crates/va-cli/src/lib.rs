@@ -2056,7 +2056,7 @@ pub fn solve_transient(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Where the integration starts, and it is not a detail. SPICE solves the DC operating
     // point first and integrates from there unless the deck says `UIC`; this project did the
-    // opposite unconditionally until v1.3.0, and `xtask gen-golden` carried a matching
+    // opposite unconditionally until v1.2.4, and `xtask gen-golden` carried a matching
     // workaround that forced `UIC` onto every deck it handed QSPICE.
     //
     // The cold start is not merely different, it is unusable for a compact model. At `x = 0` a
@@ -4572,7 +4572,7 @@ R2 out gnd 1000
 
     /// A capacitor pinned by a fast-slewing source must integrate.
     ///
-    /// This is a CMOS gate input reduced to its bones, and before v1.3.1 it was impossible:
+    /// This is a CMOS gate input reduced to its bones, and before v1.2.5 it was impossible:
     /// `timestep underflow at t=0`. The operating point carries no reactive current by
     /// definition, so on the first step the source's branch current jumps from zero to
     /// `C·dV/dt` — a step discontinuity in a row the LTE controller was judging with a formula
@@ -4694,7 +4694,7 @@ R2 out gnd 10k
     /// At `x = 0` the model's charge is not consistent with any solution, so the first step has
     /// to move all of it — and **halving the timestep makes the required current larger, not
     /// smaller**, so the step controller can only shrink until it underflows. Every CMC MOSFET
-    /// in `external/code` failed this way at `t = 0`, on every release before v1.3.0.
+    /// in `external/code` failed this way at `t = 0`, on every release before v1.2.4.
     ///
     /// The fixture is a hand-written stand-in rather than one of those files, because
     /// `external/` is gitignored and a test may not depend on it. What it reproduces is the
