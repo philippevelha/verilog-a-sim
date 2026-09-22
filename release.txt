@@ -20,6 +20,74 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.2 - 2026-09-22
+------------------
+**A `.dc` sweep continues from the previous point instead of restarting Newton at the origin.**
+Adjacent points of a sweep are the same circuit at a slightly different source value, so the
+answer at one point is an excellent guess for the next — a couple of iterations instead of a
+dozen from zero. Every point had been solved cold, which is the one thing every other SPICE
+does not do.
+
+    circuit                          v1.2.1    v1.2.2
+    BSIM4 Id-Vg, 1001 points          3434 ms    626 ms    5.5x
+    HICUM/L2v3 output family,         2811 ms   1050 ms    2.7x
+      6 x 201 = 1206 points                                (4.1x net of six process launches)
+
+Both best of three: this machine's run-to-run spread on these is 20-40%, and a single
+measurement of either would have been worth little.
+
+  New in `va-core`, both additive — the old entry points are one-line delegations and behave
+  exactly as before: `newton::solve_with_events_from` and `dc::operating_point_continued` take
+  an optional starting point. A `start` whose width is not `dim` is refused rather than padded
+  or truncated, since either would silently solve a different problem.
+
+  **On failure the point is retried cold.** Continuation is an accelerator, not a change of
+  contract: a guess can in principle be worse than the origin, and a sweep that used to produce
+  an answer must not stop producing one because the solver was handed a hint. With the retry the
+  set of points that converge can only grow. Stated plainly: **that fallback is not exercised by
+  a test**, because constructing a circuit where a warm start fails and a cold start succeeds is
+  a research question rather than a fixture. What is tested is that it cannot make things worse
+  by construction.
+
+  **It moves no answers.** All 1001 BSIM4 sweep points are identical to the run taken before any
+  of this week's work, digit for digit; so are all 1206 HICUM points and all 28 figures in
+  `cargo xtask validate`, three of which are `.dc` sweeps. Stronger than the printed digits:
+  `a_reused_instance_set_sweeps_exactly_as_per_point_rebuilds_would` compares raw solution
+  vectors with `==` against a cold, per-point-rebuilt solve and passes, so on that circuit
+  continuation moves not a single bit. That test now covers both sweep optimisations at once.
+
+  `a_starting_point_changes_the_path_not_the_answer` checks a nonlinear circuit from four
+  starting points including the origin — and, because that would pass just as well if `start`
+  were quietly ignored, also checks that with a **one-iteration budget** a solve starting at the
+  answer converges while one starting at the origin fails. That second half is what makes it
+  discriminating.
+
+  Measured at this version. `cargo test --workspace` 825 passed / 0 failed (4 new: 2 in
+  `va-core`, and the widened `va-cli` pair from v1.2.1). `cargo xtask validate` 28 checked,
+  0 failed golden, convergence 28/28, all figures identical to v1.2.1's run. Corpus `va-cli
+  check external --codegen` 200/224, 182/191 self-contained.
+
+  **Not done, deliberately.** `solve_dc_sweep` still passes `None` for `AboveValues` at every
+  point, so an `@(above)` in a swept deck fires on "already positive" at each point rather than
+  on a crossing from the point before — `dc::operating_point_with_events` has the parameter for
+  exactly this and it is threaded nowhere. That is an event-semantics change, not a speed one,
+  and it deserves its own decision rather than being folded into a performance release. Nested
+  `.dc` (two sources, `dc VC 0 2 0.01 VB 0.65 0.9 0.05`) is still unsupported; `DcSweep` names
+  one source, and the six inner sweeps have to be run separately.
+
+  Where the sweep time now goes, for whoever picks this up: ~0.6 ms per BSIM4 point, of which
+  the model evaluation is ~0.13 ms per Newton iteration. The remaining fixed cost per run is
+  that `quantities()`, `branch_currents()` and `sizing()` each call `build_instances`
+  independently.
+
+  **New: `benchmark.md`** at the repo root — every figure this week produced, with the
+  methodology that makes them checkable and the ways each comparison is *not* like-for-like:
+  the per-`load()` table and what each of the three evaluator changes bought on its own, model
+  preparation against the published OpenVAF/Xyce/ADS/Spectre compile times (and why that row is
+  not a win to quote), the sweep timings version by version, the HICUM output-family card with
+  the five ways this run differs from the ngspice deck it came from, and the thermal-node
+  termination study. It also carries the open list, worst first.
+
 1.2.1 - 2026-09-22
 ------------------
 **A `.dc` sweep builds its instances once instead of once per point.** `solve_dc_sweep` cloned

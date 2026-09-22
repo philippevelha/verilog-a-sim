@@ -112,8 +112,47 @@ pub fn solve_with_events(
     cfg: NewtonConfig,
     fired: &va_abi::FiredEvents,
 ) -> Result<Vec<f64>, CoreError> {
+    solve_with_events_from(instances, dim, cfg, fired, None)
+}
+
+/// [`solve_with_events`], started from `start` instead of the zero vector.
+///
+/// # What a starting point is for
+///
+/// Newton converges from wherever it is put, but how *fast*, and whether at all, depends
+/// entirely on where that is. A `.dc` sweep solves the same circuit at a sequence of nearby
+/// source values, and the answer at one point is an excellent guess for the next — usually
+/// within a couple of iterations rather than a dozen from zero. Nothing else about the solve
+/// changes: the fixed point of the equations is a property of the equations, not of the path
+/// taken to it, so a converged answer is the same answer whichever starting point found it,
+/// to within `cfg`'s tolerances.
+///
+/// `start` shorter or longer than `dim` is a caller error rather than something to paper over,
+/// and is rejected. `None` is the zero vector, which is exactly [`solve_with_events`].
+///
+/// # Errors
+///
+/// As [`solve`], plus [`CoreError::Singular`]-style rejection of a mis-sized `start` reported
+/// as [`CoreError::NoConvergence`] — see the check below.
+pub fn solve_with_events_from(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    fired: &va_abi::FiredEvents,
+    start: Option<&[f64]>,
+) -> Result<Vec<f64>, CoreError> {
     if dim == 0 {
         return Ok(Vec::new());
+    }
+    // A starting point of the wrong width would silently solve a different problem — padded
+    // with zeros it is a guess for a circuit with fewer unknowns, truncated it drops rows.
+    if let Some(x0) = start {
+        if x0.len() != dim {
+            return Err(CoreError::NoConvergence {
+                iters: 0,
+                residual: f64::NAN,
+            });
+        }
     }
 
     // Only classify unknowns when gmin stepping is actually in play — `shunt_gmin` is a no-op
@@ -135,7 +174,10 @@ pub fn solve_with_events(
         vec![false; dim]
     };
 
-    let mut x = vec![0.0; dim];
+    let mut x = match start {
+        Some(x0) => x0.to_vec(),
+        None => vec![0.0; dim],
+    };
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
@@ -404,6 +446,108 @@ mod tests {
     /// That was a real bug, not a hypothetical: before `unknown_is_junction` existed this
     /// divider failed to converge above roughly 20 V, and every golden circuit happened to run
     /// at 5 V or less, so nothing caught it.
+    /// A starting point changes the *path* Newton takes, never where it lands.
+    ///
+    /// This is the property a `.dc` sweep's continuation rests on (`va_cli::solve_dc_sweep`):
+    /// handing each point the previous point's answer is only legitimate if the fixed point is
+    /// a property of the equations rather than of the guess. The circuit is nonlinear on
+    /// purpose — a diode in series with a resistor, where a linear one would land in one step
+    /// from anywhere and prove nothing — and the guesses span from the cold start the solver
+    /// used to be limited to, through a near-miss, to one deliberately on the far side of the
+    /// answer.
+    #[test]
+    fn a_starting_point_changes_the_path_not_the_answer() {
+        let dim = 3;
+        let src = VSource::new(0, GROUND, 2, 1.0);
+        let r = Resistor::new(0, 1, 1_000.0);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
+        let instances: Vec<&dyn ModelInstance> = vec![&src, &r, &d];
+
+        let cold = solve(&instances, dim, NewtonConfig::default()).expect("cold start solves");
+
+        for start in [
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 0.6, -1e-4],
+            vec![1.0, 0.55, -5e-4],
+            vec![0.9, 0.7, 1e-3],
+        ] {
+            let warm = solve_with_events_from(
+                &instances,
+                dim,
+                NewtonConfig::default(),
+                &va_abi::FiredEvents::default(),
+                Some(&start),
+            )
+            .unwrap_or_else(|e| panic!("start {start:?} failed to converge: {e}"));
+            for (k, (c, w)) in cold.iter().zip(&warm).enumerate() {
+                let scale = c.abs().max(w.abs()).max(1e-12);
+                assert!(
+                    (c - w).abs() / scale < 1e-9,
+                    "unknown {k}: cold {c} vs warm {w} from start {start:?}"
+                );
+            }
+        }
+
+        // The above would pass just as well if `start` were quietly ignored, so this is what
+        // makes the test discriminating: with a one-iteration budget, only a solve that really
+        // begins at the answer can reach it. From the origin the same budget must fail.
+        let stingy = NewtonConfig {
+            max_iters: 1,
+            ..NewtonConfig::default()
+        };
+        let from_answer = solve_with_events_from(
+            &instances,
+            dim,
+            stingy,
+            &va_abi::FiredEvents::default(),
+            Some(&cold),
+        );
+        assert!(
+            from_answer.is_ok(),
+            "starting at the answer must converge within one iteration; it did not, so `start`              is not reaching the iteration: {from_answer:?}"
+        );
+        assert!(
+            solve(&instances, dim, stingy).is_err(),
+            "one iteration from the origin was expected to fail on this diode; if it stopped              failing, the check above no longer shows that `start` is used"
+        );
+    }
+
+    /// A starting point of the wrong width is refused rather than padded or truncated.
+    ///
+    /// Silently zero-padding it would hand the solver a guess for a circuit with fewer
+    /// unknowns; silently truncating would drop rows. Both converge to *something*, which is
+    /// the worst outcome — it is the caller's bug and it has to surface as one.
+    #[test]
+    fn a_mis_sized_starting_point_is_refused() {
+        let src = VSource::new(0, GROUND, 1, 1.0);
+        let r = Resistor::new(0, GROUND, 1_000.0);
+        let instances: Vec<&dyn ModelInstance> = vec![&src, &r];
+        for bad in [vec![0.0], vec![0.0; 5]] {
+            assert!(
+                solve_with_events_from(
+                    &instances,
+                    2,
+                    NewtonConfig::default(),
+                    &va_abi::FiredEvents::default(),
+                    Some(&bad),
+                )
+                .is_err(),
+                "a {}-wide start for a 2-unknown circuit must be refused",
+                bad.len()
+            );
+        }
+        // …and the right width is accepted, so the check is about the width and not about
+        // rejecting every `Some`.
+        assert!(solve_with_events_from(
+            &instances,
+            2,
+            NewtonConfig::default(),
+            &va_abi::FiredEvents::default(),
+            Some(&[0.0, 0.0]),
+        )
+        .is_ok());
+    }
+
     #[test]
     fn junction_limiting_no_longer_throttles_a_linear_circuit() {
         let vs = VSource::new(0, GROUND, 2, 100.0);

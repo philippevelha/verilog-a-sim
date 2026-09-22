@@ -830,6 +830,29 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.2.2) — a `.dc` sweep continues from the previous point.** The
+> open item v1.2.1's entry left: every sweep point was a cold Newton start from the origin,
+> which is the one thing every other SPICE does not do. `va-core` gained two additive entry
+> points taking an optional starting vector (`newton::solve_with_events_from`,
+> `dc::operating_point_continued`; the old ones delegate with `None`), and `solve_dc_sweep`
+> hands each point the previous point's answer — **retrying cold if that fails**, so the set of
+> points that converge can only grow.
+>
+> **Evidence.** Best of three, because this machine's spread on these runs is 20-40%: BSIM4
+> Id-Vg 1001 points **3434 -> 626 ms (5.5x)**; the HICUM/L2v3 output family a user brought in
+> from an ngspice/OSDI deck (`dc VC 0 2 0.01 VB 0.65 0.9 0.05`, 1206 points) **2811 -> 1050 ms**,
+> or 4.1x net of six process launches, against ~10 s quoted for other simulators on the same
+> card. 825 tests, `xtask validate` 28/28 with every figure identical. All 1001 BSIM4 points and
+> all 1206 HICUM points are identical to the pre-optimisation run digit for digit, and the
+> `==`-on-solution-vectors test passes, so on that circuit continuation moves not one bit.
+>
+> **Honest gaps.** The cold-start fallback is not exercised by a test — constructing a circuit
+> where a warm start fails and a cold one succeeds is a research question, not a fixture. And
+> `solve_dc_sweep` still passes `None` for `AboveValues`, so `@(above)` in a swept deck fires on
+> "already positive" at every point rather than on a crossing from the point before;
+> `operating_point_with_events` has the parameter for exactly that and nothing threads it. That
+> is an event-semantics decision, not a performance one.
+>
 > **Now closed (2026-09-22, v1.2.1) — a `.dc` sweep no longer rebuilds the deck at every point.**
 > The open item v1.2.0's entry left at the bottom. `solve_dc_sweep` cloned the netlist per swept
 > value and called `solve_dc`, rebuilding every device including each compiled Verilog-A model:

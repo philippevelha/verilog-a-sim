@@ -1764,6 +1764,9 @@ pub fn solve_dc_sweep(
     let mut swept_device = src.clone();
 
     let mut out = Vec::with_capacity(points.len());
+    // The previous point's solution, handed to the next as its starting guess (§ continuation
+    // below). `None` for the first point, which has nothing to continue from.
+    let mut previous: Option<Vec<f64>> = None;
     for value in points {
         swept_device.value = Some(value);
         let mut next_unknown = unknown_before;
@@ -1785,16 +1788,36 @@ pub fn solve_dc_sweep(
         built.instances[slot_index] = instance;
 
         let refs: Vec<&dyn ModelInstance> = built.instances.iter().map(|b| b.as_ref()).collect();
-        let op = va_core::dc::operating_point_with_events(
-            &refs,
-            built.dim,
-            NewtonConfig::default(),
-            None,
-        )
-        .map(|(op, _)| op)
-        .map_err(|e| name_non_finite_row(e.into(), &built.quantities))
-        .context("DC operating-point solve failed")
-        .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
+        // Continuation: start Newton at the previous point's answer rather than at the origin.
+        // Adjacent points of a sweep are the same circuit at a slightly different source value,
+        // so the previous solution is usually within a couple of iterations of this one, where
+        // the origin is a dozen or more — and for a strongly nonlinear device it is the
+        // difference between converging and not.
+        //
+        // **On failure the point is retried cold.** Continuation is an accelerator, not a
+        // change of contract: a guess can in principle be worse than the origin (a fold in the
+        // I-V curve, a point the sweep steps across too coarsely), and a sweep that used to
+        // produce an answer must not stop producing one because the solver was handed a hint.
+        // With the retry, the set of points that converge can only grow.
+        let solve = |start: Option<&[f64]>| {
+            va_core::dc::operating_point_continued(
+                &refs,
+                built.dim,
+                NewtonConfig::default(),
+                None,
+                start,
+            )
+            .map(|(op, _)| op)
+        };
+        let solved = match previous.as_deref() {
+            Some(warm) => solve(Some(warm)).or_else(|_| solve(None)),
+            None => solve(None),
+        };
+        let op = solved
+            .map_err(|e| name_non_finite_row(e.into(), &built.quantities))
+            .context("DC operating-point solve failed")
+            .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
+        previous = Some(op.x.clone());
         out.push((value, op));
     }
     Ok(out)
@@ -4424,14 +4447,18 @@ R2 out gnd 1000
         );
     }
 
-    /// A sweep that reuses one instance set must give exactly what solving each point from a
-    /// freshly-built deck gives — to the last bit, at every point.
+    /// A sweep that reuses one instance set **and continues from the previous point** must give
+    /// exactly what solving each point cold from a freshly-built deck gives — to the last bit,
+    /// at every point.
     ///
-    /// This is the property the v1.2.1 change has to preserve, and the one that would break
-    /// quietly if an instance turned out to carry state from one point into the next: a sweep
-    /// reusing a stale operating point would still converge, still look plausible, and be
-    /// wrong in a way no golden tolerance of 1e-4 is guaranteed to catch. The comparison is
-    /// therefore `==` on the raw solution vectors, not an approximate one.
+    /// This covers both of the sweep's optimisations at once, which is the right shape for it:
+    /// v1.2.1 stopped rebuilding the deck per point, v1.2.2 stopped starting Newton at the
+    /// origin, and either could break quietly in the same way — an instance carrying state
+    /// from one point into the next, or a warm start landing somewhere that is *nearly* the
+    /// answer. Both would still converge, still look plausible, and be wrong in a way no golden
+    /// tolerance of 1e-4 is guaranteed to catch. The comparison is therefore `==` on the raw
+    /// solution vectors, not an approximate one — and it passes, so continuation moves not a
+    /// single bit on this circuit.
     ///
     /// The deck is the nonlinear one on purpose — a diode, whose answer at each point depends
     /// on the model's own exponential rather than on a linear solve that could hardly differ.

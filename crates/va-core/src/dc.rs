@@ -46,8 +46,29 @@ pub fn operating_point_with_events(
     cfg: NewtonConfig,
     previous: Option<&AboveValues>,
 ) -> Result<(OperatingPoint, AboveValues), CoreError> {
+    operating_point_continued(instances, dim, cfg, previous, None)
+}
+
+/// [`operating_point_with_events`], started from `start` rather than the zero vector — what a
+/// `.dc` sweep uses to continue from the point before (see
+/// [`newton::solve_with_events_from`]).
+///
+/// The event re-solves inside the loop start from `start` too, not from zero: an `above` that
+/// fires changes the equations slightly, and the pre-firing solution is a far better guess for
+/// the post-firing one than the origin is.
+///
+/// # Errors
+///
+/// As [`operating_point_with_events`].
+pub fn operating_point_continued(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    previous: Option<&AboveValues>,
+    start: Option<&[f64]>,
+) -> Result<(OperatingPoint, AboveValues), CoreError> {
     let mut fired = va_abi::FiredEvents::new(instances);
-    let mut x = newton::solve_with_events(instances, dim, cfg, &fired)?;
+    let mut x = newton::solve_with_events_from(instances, dim, cfg, &fired, start)?;
     let mut values = poll_above(instances, &x);
 
     if !fired.is_empty() {
@@ -72,7 +93,7 @@ pub fn operating_point_with_events(
             if !changed {
                 break;
             }
-            x = newton::solve_with_events(instances, dim, cfg, &fired)?;
+            x = newton::solve_with_events_from(instances, dim, cfg, &fired, start)?;
             values = poll_above(instances, &x);
         }
     }
