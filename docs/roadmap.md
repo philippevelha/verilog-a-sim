@@ -830,7 +830,7 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
-> **Now closed (2026-09-22, v1.2.6) — `$table_model`: the LRM's own answer to "let users bring
+> **Now closed (2026-09-22, v1.3.0) — `$table_model`: the LRM's own answer to "let users bring
 > their own function".** One dimension, file data source, LRM §9.21. It arrived as the first
 > concrete step of a design question — whether this simulator could support user-defined `$`
 > functions at all — and it is the step that needs no new contract: a table is *data*, so it
