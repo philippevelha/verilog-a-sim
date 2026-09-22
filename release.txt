@@ -20,6 +20,49 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.2.3 - 2026-09-22
+------------------
+**`@(above(...))` in a `.dc` sweep fired at every point past its threshold instead of once, on
+the crossing.** LRM §5.10.2: `above(expr)` triggers when `expr` *becomes* positive. A standalone
+operating point has no earlier point to have been non-positive at, so there "already positive"
+is the trigger — and `va_core::dc::operating_point_with_events` has taken the previous point's
+site values as a `previous` argument since the event channel was built, for exactly the sweep
+case. `solve_dc_sweep` never threaded them and passed `None` at every point, so a signal that
+went past its threshold at the third point re-fired at the fourth, fifth and every point after.
+A latch that never latched.
+
+  Sweeping `V1` 0 -> 1 V through `@(above(V(p,n) - 0.5)) g = 1.0;` over a `g = 1e-3` default:
+
+      V1        before        after
+      0.0-0.5   1 mS          1 mS
+      0.6       1 S           1 S      <- the crossing
+      0.7-1.0   1 S           1 mS     <- did not *become* positive here
+
+  The history is not reset when a warm start fails and the point is retried cold (v1.2.2's
+  fallback): which sites crossed is a property of the two operating points, not of the path
+  Newton took to the second one.
+
+  **This changes results**, which is the point of it — it is the first change in this series
+  that does. Any deck with an `above` in a swept analysis gets different numbers, and they are
+  the LRM's numbers. `cargo xtask validate` is 28/28 with all figures unchanged, because no zoo
+  deck puts an `above` in a `.dc` sweep — which is also why nothing caught this.
+
+  Two tests, both confirmed to fail against the un-threaded code.
+  `above_fires_once_on_the_crossing_of_a_dc_sweep_not_at_every_point_after` is the bug itself;
+  the fixture makes the two readings differ by 1000x so nothing turns on a tolerance.
+  `above_fires_at_the_first_point_of_a_sweep_that_starts_past_the_threshold` is its companion
+  and guards the opposite mistake: the first point of a sweep has no predecessor, so it *is* the
+  initialization case and must still fire. Implementing this as "never fire without a previous
+  point" would have passed the first test and silently lost the first point's event.
+
+  Measured at this version. `cargo test --workspace` 827 passed / 0 failed (2 new). `cargo xtask
+  validate` 28 checked, 0 failed golden, convergence 28/28, every figure identical to v1.2.2's
+  run. Corpus `va-cli check external --codegen` 200/224, 182/191 self-contained.
+
+  `benchmark.md`'s open list loses this item. What is still open there: no machine code, the
+  prefix-only setup hoist, `build_instances` called three or four times per run, nested `.dc`,
+  and the untested cold-start fallback.
+
 1.2.2+1 - 2026-09-22
 --------------------
 **`LICENSE` names a copyright holder.** The Apache-2.0 text shipped with the placeholder line

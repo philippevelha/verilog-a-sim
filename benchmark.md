@@ -249,10 +249,12 @@ Worth knowing before wiring up a real card.
    `branch_currents()`, `sizing()` and the solve. Fixed cost, not per-point, but it is most of a
    single `.op`'s time on a large model.
 4. **Nested `.dc`** (`dc VC 0 2 0.01 VB 0.65 0.9 0.05`) is unsupported; `DcSweep` names one source.
-5. **`@(above)` in a swept deck** fires on "already positive" at every point rather than on a
-   crossing from the point before: `dc::operating_point_with_events` takes an `AboveValues` for
-   exactly this and `solve_dc_sweep` passes `None`. That is an event-semantics bug, not a
-   performance one.
-6. **The sweep's cold-start fallback is untested.** Continuation retries a failed point from the
+5. **The sweep's cold-start fallback is untested.** Continuation retries a failed point from the
    origin, so convergence can only improve — but constructing a circuit where a warm start fails and
    a cold one succeeds is a research question, not a fixture, and no test exercises that path.
+
+*Closed since this file was written:* `@(above)` in a swept deck fired on "already positive" at
+every point rather than on a crossing from the point before, because `solve_dc_sweep` passed `None`
+where `dc::operating_point_with_events` wanted the previous point's site values. Fixed in v1.2.3;
+it is the only change in this series that moves results, and the only one `xtask validate` could
+not have caught, since no zoo deck puts an `above` in a `.dc` sweep.

@@ -830,6 +830,26 @@ matches the code verbatim.
 > tree-walking AD evaluator — a 1001-point BSIM4 Id–Vg sweep costs **30 s, ≈30 ms per DC
 > point**. The compile-time lead is real and so is the bill for it.
 
+> **Now closed (2026-09-22, v1.2.3) — `@(above)` in a `.dc` sweep fired at every point past its
+> threshold, not once on the crossing.** The open item v1.2.2's entry left, and the only change
+> in this series that moves a result. LRM §5.10.2 has `above(expr)` trigger when `expr`
+> *becomes* positive; `va_core::dc::operating_point_with_events` has taken the previous point's
+> site values as `previous` since the event channel was built, for exactly the sweep case — and
+> `solve_dc_sweep` passed `None` at every point. A signal that went past its threshold at the
+> third point re-fired at the fourth, fifth and every point after. A latch that never latched.
+>
+> Sweeping `V1` 0→1 V through `@(above(V(p,n) - 0.5)) g = 1.0;` over a `g = 1e-3` default: before,
+> every point from 0.6 V up read 1 S; after, only 0.6 V does. The first point of a sweep has no
+> predecessor, so it remains the initialization case and still fires on "already positive" — the
+> opposite mistake, and its own test.
+>
+> **Evidence.** 827 tests (2 new, both confirmed to fail against the un-threaded code; the fixture
+> separates the two readings by 1000× so nothing turns on a tolerance). `xtask validate` 28/28 with
+> every figure unchanged — **and that is the finding, not the reassurance**: no zoo deck puts an
+> `above` in a `.dc` sweep, which is exactly why the gate never caught this. The history is not
+> reset when v1.2.2's cold-start fallback retries a point, since which sites crossed is a property
+> of the two operating points rather than of the path Newton took to the second.
+>
 > **Now closed (2026-09-22, v1.2.2) — a `.dc` sweep continues from the previous point.** The
 > open item v1.2.1's entry left: every sweep point was a cold Newton start from the origin,
 > which is the one thing every other SPICE does not do. `va-core` gained two additive entry

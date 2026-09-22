@@ -1767,6 +1767,10 @@ pub fn solve_dc_sweep(
     // The previous point's solution, handed to the next as its starting guess (§ continuation
     // below). `None` for the first point, which has nothing to continue from.
     let mut previous: Option<Vec<f64>> = None;
+    // The previous point's `above`-site values, so each point can ask whether its sites crossed
+    // *since the last point* rather than whether they are merely positive now (§ events below).
+    // `None` for the first point, which is the initialization case the LRM describes.
+    let mut previous_above: Option<va_core::dc::AboveValues> = None;
     for value in points {
         swept_device.value = Some(value);
         let mut next_unknown = unknown_before;
@@ -1799,25 +1803,39 @@ pub fn solve_dc_sweep(
         // I-V curve, a point the sweep steps across too coarsely), and a sweep that used to
         // produce an answer must not stop producing one because the solver was handed a hint.
         // With the retry, the set of points that converge can only grow.
+        //
+        // `previous_above` is what makes `@(above(...))` mean what the LRM says it means across
+        // a sweep. An `above` fires on its expression going from non-positive to positive; with
+        // no history to compare against, every point can only ask "is it positive *now*", so a
+        // signal that went past its threshold at the third point re-fired at the fourth, fifth
+        // and every point after — a latch that never latches. `va-core` has taken the previous
+        // point's site values for exactly this since the event channel was built
+        // (`dc::operating_point_with_events`'s `previous`); the sweep simply never threaded
+        // them, and passed `None` every time.
+        //
+        // It is *not* reset when a warm start fails and the point is retried cold: which sites
+        // crossed is a property of the two operating points, not of the path Newton took to the
+        // second one.
+        let prev_above = previous_above.take();
         let solve = |start: Option<&[f64]>| {
             va_core::dc::operating_point_continued(
                 &refs,
                 built.dim,
                 NewtonConfig::default(),
-                None,
+                prev_above.as_ref(),
                 start,
             )
-            .map(|(op, _)| op)
         };
         let solved = match previous.as_deref() {
             Some(warm) => solve(Some(warm)).or_else(|_| solve(None)),
             None => solve(None),
         };
-        let op = solved
+        let (op, above) = solved
             .map_err(|e| name_non_finite_row(e.into(), &built.quantities))
             .context("DC operating-point solve failed")
             .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
         previous = Some(op.x.clone());
+        previous_above = Some(above);
         out.push((value, op));
     }
     Ok(out)
@@ -5450,6 +5468,125 @@ X1 a gnd ab
             (with_cross - 1e-3).abs() < 1e-12,
             "`cross` must not fire in a static solve: g = {with_cross}"
         );
+    }
+
+    /// Across a `.dc` sweep, `above` fires **on the crossing**, not at every point where its
+    /// expression happens to be positive.
+    ///
+    /// LRM §5.10.2: `above(expr)` triggers when `expr` becomes positive. In a standalone
+    /// operating point there is no earlier point to have been non-positive at, so
+    /// "already positive" is the trigger — that is the initialization case
+    /// `above_fires_on_a_signal_that_never_crosses_where_cross_cannot` pins. A *sweep* is a
+    /// sequence of operating points, and `va_core::dc::operating_point_with_events` has taken
+    /// the previous point's site values for exactly this reason since the event channel was
+    /// built. `solve_dc_sweep` passed `None` at every point, so an `above` re-fired for the
+    /// whole of the rest of the sweep once its expression went past the threshold.
+    ///
+    /// The fixture makes the two readings differ by a factor of a thousand, so nothing here
+    /// turns on a tolerance: the guarded body replaces a 1 mS conductance with 1 S, and the
+    /// source current reports which one the solve used.
+    ///
+    /// Sweeping V1 from 0 to 1 V with `above(V(p,n) - 0.5)`:
+    ///
+    /// * V = 0.0 … 0.5  — expression non-positive, never fired, g = 1 mS.
+    /// * V = 0.6        — the crossing. Fires. g = 1 S.
+    /// * V = 0.7 … 1.0  — still positive, but it did not *become* positive here. g = 1 mS.
+    ///
+    /// The last line is the whole test. Before the fix every point from 0.6 up read 1 S.
+    #[test]
+    fn above_fires_once_on_the_crossing_of_a_dc_sweep_not_at_every_point_after() {
+        const SRC: &str = "
+module absweep(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(above(V(p, n) - 0.5)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 0
+X1 a gnd absweep
+.dc V1 0 1 0.1
+.end
+",
+        )
+        .expect("parses");
+        let sweep = net.dc.clone().expect("`.dc` card");
+        let points = solve_dc_sweep(&net, &design.modules, &sweep).expect("sweeps");
+        assert_eq!(points.len(), 11, "0.0, 0.1, … 1.0");
+
+        let branch = net.node_order.len(); // V1's own branch-current unknown
+        for (value, op) in &points {
+            // I(V1) = -g*V, so g is recoverable everywhere the source is not at 0 V.
+            if *value == 0.0 {
+                continue;
+            }
+            let g = op.x[branch].abs() / value;
+            let fired = g > 0.5;
+            let expect_fired = (*value - 0.6).abs() < 1e-9;
+            assert_eq!(
+                fired, expect_fired,
+                "at V1={value}: g = {g} S. `above` must fire only at the point its expression \
+                 becomes positive (0.6 V), not at every later point where it merely is positive"
+            );
+        }
+    }
+
+    /// The companion to the above: a sweep that *starts* past the threshold fires at its first
+    /// point and nowhere after.
+    ///
+    /// The first point of a sweep has no predecessor, so it is the initialization case and
+    /// "already positive" is the right trigger there — the same rule a standalone `.op` uses.
+    /// Without this, threading the history could just as easily have been implemented as
+    /// "never fire unless there is a previous point", which would silently lose the first
+    /// point's event.
+    #[test]
+    fn above_fires_at_the_first_point_of_a_sweep_that_starts_past_the_threshold() {
+        const SRC: &str = "
+module absweep2(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(above(V(p, n) - 0.5)) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 0
+X1 a gnd absweep2
+.dc V1 1 2 0.5
+.end
+",
+        )
+        .expect("parses");
+        let sweep = net.dc.clone().expect("`.dc` card");
+        let points = solve_dc_sweep(&net, &design.modules, &sweep).expect("sweeps");
+        assert_eq!(points.len(), 3, "1.0, 1.5, 2.0");
+
+        let branch = net.node_order.len();
+        let g_at = |i: usize| points[i].1.x[branch].abs() / points[i].0;
+        assert!(
+            g_at(0) > 0.5,
+            "the first point is its own initialization: g = {} S at V1=1.0",
+            g_at(0)
+        );
+        for i in [1usize, 2] {
+            assert!(
+                g_at(i) < 0.5,
+                "at V1={}: g = {} S — it did not *become* positive here",
+                points[i].0,
+                g_at(i)
+            );
+        }
     }
 
     /// `above` fires in transient too, at the first solved timepoint, when its expression starts
