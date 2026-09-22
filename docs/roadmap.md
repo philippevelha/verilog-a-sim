@@ -4840,6 +4840,63 @@ Measured at 1.0.0: `cargo test --workspace` 797 passed / 0 failed; clippy and fm
 112/132 (94/99 self-contained) — all unchanged from 0.9.22. What comes after 1.0 is
 [`future_development.md`](future_development.md), sparse solve first.
 
+## One compiled model, many instances (2026-09-22, v1.3.2)
+
+Placing a device cloned the entire elaborated `va_ir::Module` and lowered it again. For the
+small zoo models that is invisible; for a real compact model it is not. Measured per instance:
+**6.0-7.7 MB for PSP103** against **0.28 MB for EKV2.6** — a ratio that tracks the two models'
+arena sizes and nothing else, which is what identified the clone as the cause rather than any
+per-instance state. At ISCAS85's c7552 (~14,000 instances) that is ~85 GB for the instances
+alone, before the dense matrix.
+
+`GeneratedModel` is now `Rc<SharedModel>` + a per-instance terminal map. Everything expensive
+— the arena, the lowered plan, the junction classification, the evaluated setup — depends on
+the module and its parameter values and never on where the instance was placed, so it lives on
+the shared half. `CompiledModel::{new, instantiate}` is the public shape of that split;
+`build_instance` keeps its signature and is now the two calls in sequence.
+
+Measured on a chain of 40 CMOS inverters built from two PSP103 cards:
+
+| devices | peak RSS before | after | wall before | after |
+|--------:|----------------:|------:|------------:|------:|
+| 10 | 56.5 MB | 23.3 MB | 1.36 s | 1.40 s |
+| 20 | 103.4 MB | 25.5 MB | 3.05 s | 2.02 s |
+| 40 | 199.4 MB | 36.4 MB | 5.06 s | 3.05 s |
+| 80 | 413.2 MB | 78.1 MB | 14.12 s | 9.11 s |
+
+The per-device memory slope drops 5.1 MB -> 0.78 MB, and the residual grows superlinearly,
+which is the dense Jacobian rather than the IR — so this moves the ceiling that
+[`future_development.md`](future_development.md)'s sparse-solve item addresses next, it does
+not remove it.
+
+### What the cache is keyed on
+
+`va-cli` keys compiled models on `(module, positional value, named overrides, unconnected
+ports)`. The first three follow from parameter values being baked in. The fourth is the one
+worth writing down: `mark_port_unconnected` *mutates* the module and `$port_connected` changes
+what the elaborated code does, so two devices that differ only in whether they wire an optional
+terminal are two different compiled models. The port-connectivity analysis therefore had to
+move ahead of the compile, where it had been sitting after it.
+
+Each property was confirmed load-bearing by removing it and watching a gate go red, in the
+spirit of the discrimination rule this document has applied since 2026-08-30:
+
+- drop the named-override half -> `two_devices_from_one_model_keep_their_own_parameters`
+  reports `V(xmid) = 0.5` where the circuit says 0.75;
+- drop the positional-value half -> the same test reports `V(mid) = 0.5`;
+- drop the unconnected-port half ->
+  `fiber_mzi_noise_matches_wanser_and_duan_through_the_interferometer` fails, because
+  `circuits/fiber_mzi_noise.net` places two waveguides with *identical* overrides, one with its
+  PZT control port wired and one without.
+
+The first two are a new test; the third was already there and turned out to be exactly the
+gate this needed, which is the argument for having written it against a real interferometer
+rather than a synthetic deck.
+
+**Not shared:** devices with different parameters, correctly. A deck of N individually-tuned
+devices sees none of this. The DC sweep's rebuild path keeps a per-point cache, since the swept
+value is part of the key by construction.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.

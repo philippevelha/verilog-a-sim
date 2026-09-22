@@ -32,6 +32,12 @@ interactive to ~400 unknowns, 2.4 minutes at 400, 8.7 minutes at 800, impractica
 the per-timepoint cost at 800 unknowns fell 2.8×, most plausibly because 0.9.22's per-nature
 `abstol` cut Newton iterations per point, so the trigger for this work moved with it.
 
+Memory now says the same thing time does. Since v1.3.2 shared the elaborated IR across
+instances of one model, the per-device memory slope on a PSP103 inverter chain is 0.78 MB and
+grows *superlinearly* with device count — that residual is the dense `dim²` Jacobian, not the
+models. A chain of 80 PSP103 devices (~1 100 unknowns) peaks at 78 MB; the same circuit at ten
+times the size would not fit the matrix in RAM, and no amount of further sharing changes that.
+
 **Cost and dependencies.** The solver exists and is tested for singular-matrix behaviour
 (`sparse_singular_matrix_is_rejected`). What is missing: (a) the Jacobian is assembled dense
 (`mna::System` is a `Vec<f64>` of `dim²`) — the sparse solve currently *re-derives* the

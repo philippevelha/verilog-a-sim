@@ -46,6 +46,7 @@ use ad::{eval, Ctx, Dual};
 use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use thiserror::Error;
 use va_abi::{ModelInstance, StampSink, UnknownKind};
 use va_ir::{Builtin, Expr, ExprId, Module};
@@ -130,43 +131,106 @@ pub fn build_instance(
     terminals: &[usize],
     next_unknown: &mut usize,
 ) -> Result<Box<dyn ModelInstance>, CodegenError> {
-    if terminals.len() != module.nodes.len() {
-        return Err(CodegenError::TerminalCount {
-            expected: module.nodes.len(),
-            got: terminals.len(),
+    CompiledModel::new(module)?.instantiate(terminals, next_unknown)
+}
+
+/// A Verilog-A module compiled once, ready to be placed any number of times.
+///
+/// [`build_instance`] is this in one call, and stays the right thing for a single device. Use
+/// this instead when a deck places the *same* model more than once: the lowering, the junction
+/// classification, the structural validation and the arena itself are done once and shared,
+/// where `build_instance` repeats all four per device.
+///
+/// **What "the same model" means here.** Parameter values are baked into the compiled model, so
+/// two devices with different overrides need two `CompiledModel`s. That is not a limitation to
+/// route around — an override changes the numbers everything derived was computed from — and it
+/// still collapses the common case, where one NMOS card and one PMOS card serve a whole netlist.
+#[derive(Clone)]
+pub struct CompiledModel {
+    shared: Rc<SharedModel>,
+}
+
+impl CompiledModel {
+    /// Lower, classify and validate `module` once.
+    ///
+    /// # Errors
+    ///
+    /// [`CodegenError`] if the module contains a construct `va-codegen` recognises but cannot
+    /// lower, or one whose evaluation `validate` can already prove will fail. Doing it here
+    /// means a model that cannot be built says so once rather than once per placement.
+    pub fn new(module: &Module) -> Result<Self, CodegenError> {
+        let lowered = lower::lower(module)?;
+        let params: Vec<f64> = module.params.iter().map(|p| p.default).collect();
+        // Scanned once rather than per Newton iteration: `unknown_is_junction` is consulted for
+        // every unknown on every solve, and the answer is a property of the source text.
+        let node_is_junction = classify_nodes(module);
+        let shared = Rc::new(SharedModel {
+            module: module.clone(),
+            params,
+            lowered,
+            vt: VT,
+            temp: TEMP,
+            node_is_junction,
+            setup: RefCell::new(None),
         });
+
+        // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
+        // checks are structural — independent of `x` *and* of where the instance is wired — so a
+        // prototype mapping each local slot to itself is as good as any real placement, and it
+        // is what lets this happen once instead of per instance.
+        let prototype = GeneratedModel {
+            terminals: (0..shared.lowered.n_unknowns).collect(),
+            shared: Rc::clone(&shared),
+        };
+        prototype.validate()?;
+
+        Ok(Self { shared })
     }
 
-    let lowered = lower::lower(module)?;
-    let mut full = terminals.to_vec();
-    // One further global unknown per entry in `branch_currents`, then one more per entry in
-    // `idt_accumulators` — `lowered.n_unknowns` is the authoritative total (see `lower::lower`),
-    // so this stays correct regardless of how many categories of auxiliary unknown exist.
-    while full.len() < lowered.n_unknowns {
-        full.push(*next_unknown);
-        *next_unknown += 1;
+    /// The elaborated module this was compiled from.
+    ///
+    /// Lent rather than cloned, which is the point of the type: a caller that needs the module's
+    /// ports, node names or parameter list to check a device line against reads them from here
+    /// instead of keeping its own copy.
+    pub fn module(&self) -> &Module {
+        &self.shared.module
     }
-    let params: Vec<f64> = module.params.iter().map(|p| p.default).collect();
 
-    // Scanned once here rather than per Newton iteration: `unknown_is_junction` is consulted
-    // for every unknown on every solve, and the answer is a property of the source text.
-    let node_is_junction = classify_nodes(module);
-    let model = GeneratedModel {
-        module: module.clone(),
-        terminals: full,
-        params,
-        lowered,
-        vt: VT,
-        temp: TEMP,
-        node_is_junction,
-        setup: RefCell::new(None),
-    };
-
-    // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
-    // checks are structural (independent of `x`), so an empty solution vector suffices.
-    model.validate()?;
-
-    Ok(Box::new(model))
+    /// Place an instance of this model, wiring its ports to `terminals` and claiming a global
+    /// unknown from `next_unknown` for each auxiliary row the model needs.
+    ///
+    /// Cheap: it allocates one `Vec<usize>` and bumps a reference count. Nothing is lowered,
+    /// classified or validated again.
+    ///
+    /// # Errors
+    ///
+    /// [`CodegenError::TerminalCount`] if `terminals` does not match the module's port count.
+    pub fn instantiate(
+        &self,
+        terminals: &[usize],
+        next_unknown: &mut usize,
+    ) -> Result<Box<dyn ModelInstance>, CodegenError> {
+        let nodes = self.shared.module.nodes.len();
+        if terminals.len() != nodes {
+            return Err(CodegenError::TerminalCount {
+                expected: nodes,
+                got: terminals.len(),
+            });
+        }
+        let mut full = terminals.to_vec();
+        // One further global unknown per entry in `branch_currents`, then one more per entry in
+        // `idt_accumulators` — `lowered.n_unknowns` is the authoritative total (see
+        // `lower::lower`), so this stays correct regardless of how many categories of auxiliary
+        // unknown exist.
+        while full.len() < self.shared.lowered.n_unknowns {
+            full.push(*next_unknown);
+            *next_unknown += 1;
+        }
+        Ok(Box::new(GeneratedModel {
+            shared: Rc::clone(&self.shared),
+            terminals: full,
+        }))
+    }
 }
 
 /// A rational `laplace_*` filter's scaled state-space coefficients, ready to stamp — see
@@ -182,11 +246,34 @@ struct LaplaceRealization {
     omega0: f64,
 }
 
-/// A model instance generated from IR. Holds the module (for its arena), the resolved
-/// parameter values, the lowered contribution plan, and the global terminal map.
+/// A model instance generated from IR: a **shared** compiled model plus this instance's own
+/// map from local slots to global unknowns.
+///
+/// The split is the whole point. Everything expensive — the elaborated arena, the lowered
+/// contribution plan, the junction classification, the evaluated setup — depends only on the
+/// module and its parameter values, never on where the instance was placed. Before this was
+/// separated, `build_instance` cloned the entire IR per instance: **6.0–7.7 MB for each PSP103**
+/// (measured 2026-09-22 against 0.28 MB for EKV2.6, tracking the models' 16x arena ratio, so it
+/// was the clone and nothing else). A circuit the size of ISCAS85's c7552, ~14,000 instances,
+/// would have needed ~85 GB for the instances alone.
 struct GeneratedModel {
-    module: Module,
+    /// The compiled model, shared by every instance placed from it.
+    shared: Rc<SharedModel>,
+    /// This instance's local-slot → global-unknown map. The only genuinely per-instance thing:
+    /// two instances of one model differ in where they are wired and in nothing else.
     terminals: Vec<usize>,
+}
+
+/// A model compiled once: the arena, the lowered plan, the resolved parameters, and everything
+/// derived from them. Shared by `Rc` across every instance placed from it.
+///
+/// Parameter values live here rather than per instance, which means two devices with *different*
+/// overrides are two `SharedModel`s — correctly so, since an override changes the numbers every
+/// derived thing was computed from. What it does not mean is two copies of the arena for two
+/// devices that agree, which is the common case in a real deck: one NMOS card and one PMOS card
+/// serve thousands of gates.
+struct SharedModel {
+    module: Module,
     params: Vec<f64>,
     lowered: Lowered,
     vt: f64,
@@ -196,8 +283,11 @@ struct GeneratedModel {
     /// once by [`classify_nodes`] because it is a property of the source text.
     node_is_junction: Vec<bool>,
     /// The model's **setup**: the variable bindings produced by the bias-independent prefix of
-    /// its statements (`lower::Lowered::static_prefix`), evaluated on the first [`Self::load`]
-    /// and reused by every later one.
+    /// its statements (`lower::Lowered::static_prefix`), evaluated on the first `load` and
+    /// reused by every later one — and, since this lives on the shared model, by every *other
+    /// instance* of it too. That is sound for the same reason the split is: the prefix reads
+    /// only parameters, `$param_given`/`$port_connected`, `$mfactor` and `$temperature`/`$vt`,
+    /// all of which are properties of the compiled model rather than of the placement.
     ///
     /// `RefCell` because `load` takes `&self` — the ABI's shape, since `va-core` holds
     /// instances immutably and evaluates them from a shared reference. `None` until the first
@@ -279,36 +369,40 @@ impl GeneratedModel {
         // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't (and
         // shouldn't) need to know which of the two reasons gave this branch a slot.
         let branch_current_slots = self
+            .shared
             .lowered
             .branch_currents
             .iter()
             .map(|bc| (bc.branch.0, bc.local_slot))
             .chain(
-                self.lowered
+                self.shared
+                    .lowered
                     .flow_current_accumulators
                     .iter()
                     .map(|acc| (acc.branch.0, acc.local_slot)),
             )
             .chain(
-                self.lowered
+                self.shared
+                    .lowered
                     .node_kcl_probes
                     .iter()
                     .map(|p| (p.branch.0, p.local_slot)),
             )
             .collect();
         let idt_slots = self
+            .shared
             .lowered
             .idt_accumulators
             .iter()
             .map(|acc| (acc.expr_id, acc.local_slot))
             .collect();
         Ctx {
-            module: &self.module,
-            params: &self.params,
+            module: &self.shared.module,
+            params: &self.shared.params,
             x,
             terminals: &self.terminals,
-            vt: self.vt,
-            temp: self.temp,
+            vt: self.shared.vt,
+            temp: self.shared.temp,
             analysis: *analysis,
             events_fired,
             state_prev,
@@ -317,6 +411,7 @@ impl GeneratedModel {
             // resetting it (the same rule `va_abi::state`'s consumer contract states).
             state_next: RefCell::new(state_prev.to_vec()),
             state_slots: self
+                .shared
                 .lowered
                 .stateful_calls
                 .iter()
@@ -325,7 +420,7 @@ impl GeneratedModel {
             bound_step: std::cell::Cell::new(None),
             // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
             // but doing it once here keeps a 1400-variable model from reallocating its way up.
-            vars: RefCell::new(vec![None; self.module.vars.len()]),
+            vars: RefCell::new(vec![None; self.shared.module.vars.len()]),
             static_vars,
             branch_current_slots,
             idt_slots,
@@ -338,7 +433,8 @@ impl GeneratedModel {
     /// Whether the branch whose auxiliary current unknown lives at local slot `local_slot` also
     /// receives a flow contribution somewhere in the module (see [`lower::BranchCurrent::mixed`]).
     fn is_mixed_branch(&self, local_slot: usize) -> bool {
-        self.lowered
+        self.shared
+            .lowered
             .branch_currents
             .iter()
             .find(|bc| bc.local_slot == local_slot)
@@ -348,7 +444,8 @@ impl GeneratedModel {
     /// Whether `branch_id` (a `BranchId.0`) is a purely flow-defined branch that's also read via
     /// a bare `I(...)` probe somewhere in the module (see [`lower::FlowCurrentAccumulator`]).
     fn is_self_probed_flow_branch(&self, branch_id: u32) -> bool {
-        self.lowered
+        self.shared
+            .lowered
             .flow_current_accumulators
             .iter()
             .any(|acc| acc.branch.0 == branch_id)
@@ -380,17 +477,17 @@ impl GeneratedModel {
     /// statement evaluable at `build_instance` time, and whatever bindings did get made are
     /// still the right ones for the statements that follow.
     fn ensure_setup(&self) {
-        if self.lowered.static_prefix == 0 || self.setup.borrow().is_some() {
+        if self.shared.lowered.static_prefix == 0 || self.shared.setup.borrow().is_some() {
             return;
         }
         let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], false, &[]);
         let outcome = self.walk(
             &ctx,
-            &self.lowered.stmts[..self.lowered.static_prefix],
+            &self.shared.lowered.stmts[..self.shared.lowered.static_prefix],
             &mut |_, _, _| {},
         );
         let vars = ctx.vars.borrow().clone();
-        *self.setup.borrow_mut() = Some(Setup {
+        *self.shared.setup.borrow_mut() = Some(Setup {
             vars,
             completed: outcome.is_ok(),
         });
@@ -515,13 +612,13 @@ impl GeneratedModel {
         // `analysis()` and `$abstime` evaluate to *some* constant either way, and validation
         // only cares that they evaluate at all.
         let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], true, &[]);
-        Self::validate_stmts(&ctx, &self.lowered.taint, &self.lowered.stmts)?;
+        Self::validate_stmts(&ctx, &self.shared.lowered.taint, &self.shared.lowered.stmts)?;
         // An `idt` accumulator's argument only ever gets evaluated by
         // `Self::stamp_idt_accumulators` at real `load()` time, never as part of the ordinary
         // statement walk above (the call site that *reads* the accumulator's value never
         // evaluates its argument at all — see `lower::IdtAccumulator`'s doc comment) — so it
         // needs its own explicit validation pass here.
-        for acc in &self.lowered.idt_accumulators {
+        for acc in &self.shared.lowered.idt_accumulators {
             eval(&ctx, acc.arg)?;
         }
         Ok(())
@@ -1487,7 +1584,7 @@ impl GeneratedModel {
     /// to zero (`residual = v_i`, `jacobian = 1`) so the unknowns stay determined. A state past
     /// the effective degree (a trailing zero coefficient) is pinned the same way.
     fn stamp_laplace_states(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
-        for term in &self.lowered.laplace_terms {
+        for term in &self.shared.lowered.laplace_terms {
             let Some(st) = term.states else {
                 continue;
             };
@@ -1614,7 +1711,7 @@ impl GeneratedModel {
     /// itself, only if a potential contribution actually runs for it this call — see
     /// [`Self::finalize_mixed_branch_currents`] for what happens when one doesn't.
     fn stamp_branch_currents(&self, x: &[f64], sink: &mut dyn StampSink) {
-        for bc in &self.lowered.branch_currents {
+        for bc in &self.shared.lowered.branch_currents {
             if !bc.mixed {
                 Self::stamp_branch_current_structural(
                     self.terminals[bc.p_slot],
@@ -1636,7 +1733,7 @@ impl GeneratedModel {
     /// real current directly into `p`/`n` itself, with no need for this auxiliary unknown to
     /// carry anything.
     fn finalize_mixed_branch_currents(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
-        for bc in &self.lowered.branch_currents {
+        for bc in &self.shared.lowered.branch_currents {
             if bc.mixed
                 && !ctx
                     .mixed_branch_potential_used
@@ -1662,7 +1759,7 @@ impl GeneratedModel {
     /// `idt` argument from variables assigned earlier in the same analog block, e.g. PSP102's
     /// NQS `Tnorm`/`fk1`).
     fn stamp_idt_accumulators(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
-        for acc in &self.lowered.idt_accumulators {
+        for acc in &self.shared.lowered.idt_accumulators {
             let g = self.terminals[acc.local_slot];
             // Post-validation this cannot fail; skip stamping if it somehow does, matching
             // `Self::stamp`'s own "cannot fail, bail without stamping if it somehow does" pattern.
@@ -1699,7 +1796,7 @@ impl GeneratedModel {
     /// (e.g. they all sit in an untaken `if`/`case` arm) has no entry, treated as a total of zero,
     /// same as the branch's own node injection would produce.
     fn stamp_flow_current_accumulators(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
-        for acc in &self.lowered.flow_current_accumulators {
+        for acc in &self.shared.lowered.flow_current_accumulators {
             let g = self.terminals[acc.local_slot];
             let total = ctx
                 .flow_current_totals
@@ -1736,7 +1833,7 @@ impl GeneratedModel {
     /// [`Self::stamp_flow_current_accumulators`]'s post-`run` resolution — so it only ever reads
     /// `x` directly, the same as [`Self::stamp_branch_currents`].
     fn stamp_node_kcl_probes(&self, x: &[f64], sink: &mut dyn StampSink) {
-        for probe in &self.lowered.node_kcl_probes {
+        for probe in &self.shared.lowered.node_kcl_probes {
             let g = self.terminals[probe.local_slot];
             let mut residual = x.get(g).copied().unwrap_or(0.0);
             sink.jacobian(g, g, 1.0);
@@ -1760,7 +1857,8 @@ impl GeneratedModel {
     /// source at all rather than a half-read one — which `validate` rules out at build time by
     /// evaluating every entry first.
     fn noise_table_points(&self, ctx: &Ctx<'_>, call: ExprId) -> Option<Vec<(f64, f64)>> {
-        let Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, args) = self.module.expr(call)
+        let Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, args) =
+            self.shared.module.expr(call)
         else {
             return None;
         };
@@ -1814,7 +1912,7 @@ impl ModelInstance for GeneratedModel {
     /// A branch's own auxiliary current unknown is a constraint row (`V(p)-V(n) = expr`), never
     /// safe for `va-core`'s `gmin` homotopy to shunt — everything else is an ordinary KCL row.
     fn unknown_kind(&self, i: usize) -> UnknownKind {
-        if i >= self.module.nodes.len() {
+        if i >= self.shared.module.nodes.len() {
             UnknownKind::Branch
         } else {
             UnknownKind::Node
@@ -1826,7 +1924,7 @@ impl ModelInstance for GeneratedModel {
     /// `module.nodes.len()` has no `NodeDecl` to read one from and reports `None`, exactly
     /// mirroring `unknown_kind`'s `Node`/`Branch` split above.
     fn unknown_abstol(&self, i: usize) -> Option<f64> {
-        self.module.nodes.get(i).and_then(|n| n.abstol)
+        self.shared.module.nodes.get(i).and_then(|n| n.abstol)
     }
 
     /// A node-kind unknown is a junction potential exactly when [`classify_nodes`] says so —
@@ -1838,7 +1936,11 @@ impl ModelInstance for GeneratedModel {
     /// excluded by the bounds check `get` performs: those carry flows, not junction potentials,
     /// and clamping a current with a voltage-shaped rule is meaningless.
     fn unknown_is_junction(&self, i: usize) -> bool {
-        self.node_is_junction.get(i).copied().unwrap_or(false)
+        self.shared
+            .node_is_junction
+            .get(i)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Emit this model's own noise sources (T5.2) — Interface β's noise channel, fed from the
@@ -1879,7 +1981,7 @@ impl ModelInstance for GeneratedModel {
     /// One event slot per `@(...)` site the source declared (`va_ir::Module::event_sites`),
     /// across both kinds — the slot numbering the consumer's fired-flag buffer is indexed by.
     fn event_count(&self) -> usize {
-        self.module.event_sites.len()
+        self.shared.module.event_sites.len()
     }
 
     /// Register each event site at this accepted timepoint — Interface β's event-registration
@@ -1898,7 +2000,7 @@ impl ModelInstance for GeneratedModel {
     /// No state and no fired-event input: this runs after the timepoint is accepted, and asks
     /// only "where is this site now".
     fn events(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
-        if self.module.event_sites.is_empty() && self.lowered.zi_terms.is_empty() {
+        if self.shared.module.event_sites.is_empty() && self.shared.lowered.zi_terms.is_empty() {
             return;
         }
         let ctx = self.ctx(x, actx, &[], &[], false, &[]);
@@ -1907,7 +2009,7 @@ impl ModelInstance for GeneratedModel {
         // now)`, the way a periodic `timer` stays stateless about its own schedule — asked for
         // as a breakpoint so the integrator lands on it and the sample is taken there, not
         // wherever the step controller happened to stop next.
-        for term in &self.lowered.zi_terms {
+        for term in &self.shared.lowered.zi_terms {
             let (period, t0) = (value_of(term.period), value_of(term.t0));
             if period.is_nan() || period <= 0.0 || !period.is_finite() {
                 continue;
@@ -1920,7 +2022,7 @@ impl ModelInstance for GeneratedModel {
             };
             sink.breakpoint(next);
         }
-        for (slot, site) in self.module.event_sites.iter().enumerate() {
+        for (slot, site) in self.shared.module.event_sites.iter().enumerate() {
             // `enable` gates the whole site (LRM §5.10.1/§5.10.3): a disabled event registers
             // nothing, so it cannot fire and its body cannot run. Re-evaluated at every
             // accepted timepoint rather than once, because it is an ordinary analog expression
@@ -1980,7 +2082,7 @@ impl ModelInstance for GeneratedModel {
         let ctx = self.ctx(x, actx, &[], &[], false, &[]);
         // Post-validation the evaluations below cannot fail; a failure mid-walk simply stops
         // emitting further sources, exactly as `load` stops stamping.
-        let _ = self.walk(&ctx, &self.lowered.stmts, &mut |me, ctx, c| {
+        let _ = self.walk(&ctx, &self.shared.lowered.stmts, &mut |me, ctx, c| {
             if c.noise.is_empty() {
                 return;
             }
@@ -2020,7 +2122,7 @@ impl ModelInstance for GeneratedModel {
         sink: &mut dyn StampSink,
     ) {
         self.ensure_setup();
-        let setup = self.setup.borrow();
+        let setup = self.shared.setup.borrow();
         let static_vars: &[Option<crate::ad::Dual>] = setup.as_ref().map_or(&[], |s| &s.vars);
         let setup_completed = setup.as_ref().is_none_or(|s| s.completed);
         let ctx = self.ctx(
@@ -2047,7 +2149,7 @@ impl ModelInstance for GeneratedModel {
         if setup_completed {
             let _ = self.run(
                 &ctx,
-                &self.lowered.stmts[self.lowered.static_prefix..],
+                &self.shared.lowered.stmts[self.shared.lowered.static_prefix..],
                 sink,
             );
         }
@@ -2091,7 +2193,7 @@ impl ModelInstance for GeneratedModel {
     }
 
     fn state_len(&self) -> usize {
-        self.lowered.state_len
+        self.shared.lowered.state_len
     }
 
     /// A compiled model is frequency-dependent exactly when its source contains a `laplace_*`
@@ -2099,7 +2201,7 @@ impl ModelInstance for GeneratedModel {
     /// is what makes `va_acnoise::ac::run` re-linearize per point — a cost no ordinary model
     /// should pay, which is why this is opt-in rather than assumed.
     fn is_frequency_dependent(&self) -> bool {
-        self.lowered.has_laplace
+        self.shared.lowered.has_laplace
     }
 }
 
@@ -2116,7 +2218,7 @@ impl GeneratedModel {
     fn zi_step_bound(&self, ctx: &Ctx) -> Option<f64> {
         const POINTS_PER_RAMP: f64 = 8.0;
         let mut bound: Option<f64> = None;
-        for term in &self.lowered.zi_terms {
+        for term in &self.shared.lowered.zi_terms {
             let Some(&(_, base)) = ctx.state_slots.get(&term.expr_id) else {
                 continue;
             };
@@ -2146,7 +2248,7 @@ impl GeneratedModel {
         const POINTS_PER_RAMP: f64 = 8.0;
         let next = ctx.state_next.borrow();
         let mut bound: Option<f64> = None;
-        for call in &self.lowered.stateful_calls {
+        for call in &self.shared.lowered.stateful_calls {
             if call.kind != lower::StatefulKind::Transition {
                 continue;
             }

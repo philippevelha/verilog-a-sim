@@ -1445,13 +1445,18 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     // (non-port) nodes, and the auxiliary branch rows `va-codegen` allocates for a potential
     // contribution. Recorded per device so they can be named `<device>.<node>`.
     let mut internal: Vec<Quantity> = Vec::new();
+    // Lives across the whole device loop, which is the point: a deck's thousands of gates are
+    // placed from a handful of model cards, and this is what makes the arena be cloned and
+    // lowered once per *card* rather than once per device.
+    let mut cache = CompiledCache::new();
     for dev in &net.devices {
         if matches!(dev.model.as_str(), "cccs" | "ccvs" | "mutual") {
             continue;
         }
         let before = next_unknown;
         let slot_index = instances.len();
-        let (inst, branch, assignment) = build_instance(dev, compiled, &mut next_unknown)?;
+        let (inst, branch, assignment) =
+            build_instance(dev, compiled, &mut next_unknown, &mut cache)?;
         slots.push(DeviceSlot {
             name: dev.name.clone(),
             index: slot_index,
@@ -1794,8 +1799,15 @@ pub fn solve_dc_sweep(
     for value in points {
         swept_device.value = Some(value);
         let mut next_unknown = unknown_before;
-        let (instance, _, _) = build_instance(&swept_device, compiled, &mut next_unknown)
-            .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
+        // Per point, deliberately. The swept value is part of the cache key — it has to be,
+        // since it is a parameter the compiled model bakes in — so nothing could be shared
+        // across points anyway, and a cache hoisted out of this loop would only accumulate one
+        // dead entry per point. A source's module is small; the sweep's real cost saving is
+        // that the *other* devices are not rebuilt at all.
+        let mut cache = CompiledCache::new();
+        let (instance, _, _) =
+            build_instance(&swept_device, compiled, &mut next_unknown, &mut cache)
+                .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
         // A device that claimed a different number of unknowns on the rebuild would push every
         // later device's rows out of alignment, and the solve would quietly be of a different
         // circuit. It cannot happen for a source — its row count does not depend on its value —
@@ -2465,6 +2477,7 @@ fn build_instance(
     dev: &Device,
     compiled: &[Module],
     next_unknown: &mut usize,
+    cache: &mut CompiledCache,
 ) -> Result<BuiltDevice> {
     // Read lazily rather than up front: every *letter* device has at least two terminals, but
     // an `X` line places a model with whatever port count that model declares, and a
@@ -2546,8 +2559,14 @@ fn build_instance(
 
     // Use the compiled Verilog-A model when its name matches the device's model.
     if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
-        let (inst, assignment) =
-            build_from_model(module, dev.value, &dev.params, &dev.terminals, next_unknown)?;
+        let (inst, assignment) = build_from_model(
+            module,
+            dev.value,
+            &dev.params,
+            &dev.terminals,
+            next_unknown,
+            cache,
+        )?;
         return Ok((inst, None, assignment));
     }
 
@@ -2622,18 +2641,63 @@ fn split_multiplicity(module: &Module, overrides: &[(String, f64)]) -> Result<Sp
     Ok((multiplicity, rest))
 }
 
-fn build_from_model(
+/// Models already compiled for this deck, keyed by the module they came from and the parameter
+/// overrides applied to it.
+///
+/// **Why keyed on the overrides and not just the module.** Parameter values are baked into a
+/// `va_codegen::CompiledModel`, so two devices that override differently genuinely need two of
+/// them — a PMOS written `TYPE=-1` is not the NMOS written `TYPE=1`. What a real deck does have
+/// is many devices sharing *each* card: one NMOS and one PMOS serving every gate. Keying on the
+/// overrides collapses exactly that, and nothing else.
+///
+/// The key's module half is the address of the `Module` in the caller's `compiled` slice, stable
+/// for the whole build and cheaper than comparing names. The override half is canonicalized by
+/// sorting, so two device lines setting the same parameters in a different order still share.
+type CompiledCache = std::collections::HashMap<(usize, String), va_codegen::CompiledModel>;
+
+/// The cache key for one device's `(module, overrides, unconnected ports)` triple.
+fn compiled_key(
     module: &Module,
     value: Option<f64>,
     overrides: &[(String, f64)],
-    terminals: &[usize],
-    next_unknown: &mut usize,
-) -> Result<(Box<dyn ModelInstance>, NodeAssignment)> {
+    unconnected: &[usize],
+) -> (usize, String) {
+    let mut sorted: Vec<&(String, f64)> = overrides.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut canon = String::new();
+    if let Some(v) = value {
+        canon.push_str(&format!("={v:?};"));
+    }
+    for (name, v) in sorted {
+        canon.push_str(&format!("{name}={v:?};"));
+    }
+    // Part of the key, not an afterthought: a model asked `$port_connected(dt)` answers
+    // differently for a device that wires `dt` and one that does not, and the answer is baked
+    // into the compiled model. Sharing across that difference would silently give one of the
+    // two devices the other's self-heating branch.
+    for i in unconnected {
+        canon.push_str(&format!("!{i};"));
+    }
+    (std::ptr::from_ref(module) as usize, canon)
+}
+
+/// Apply a device line's overrides to `module` and compile the result.
+///
+/// This is the expensive half of placing a device — it clones the arena, lowers it, classifies
+/// its junctions and validates it — and it is why [`CompiledCache`] exists: run once per
+/// distinct parameter set rather than once per device.
+fn compile_with_overrides(
+    module: &Module,
+    value: Option<f64>,
+    overrides: &[(String, f64)],
+    multiplicity: Option<f64>,
+    unconnected: &[usize],
+) -> Result<va_codegen::CompiledModel> {
     let mut m = module.clone();
-    // § instance multiplicity. Split out of the override list *before* anything is applied, so
-    // the rest of this function keeps seeing only real model parameters.
-    let (multiplicity, overrides) = split_multiplicity(module, overrides)?;
     m.mfactor = multiplicity;
+    for &i in unconnected {
+        m.mark_port_unconnected(i);
+    }
     // § `$param_given`: setting a parameter *is* giving it, so every override recorded below
     // also marks givenness on the clone. A deck that writes `Is=1e-15` and a model that asks
     // `$param_given(Is)` must agree, which they did not while the query folded to `false` at
@@ -2646,7 +2710,7 @@ fn build_from_model(
     // both has the explicit name win over the implicit position. An unknown name is an error:
     // dropping it silently would leave a deck looking like it set something it did not, and
     // the whole reason to write `Is=1e-12` rather than rely on parameter order is to be sure.
-    for (name, v) in &overrides {
+    for (name, v) in overrides {
         match m
             .params
             .iter_mut()
@@ -2680,11 +2744,32 @@ fn build_from_model(
         }
     }
 
-    let port_nodes: Vec<NodeId> = m.ports.iter().flatten().copied().collect();
+    va_codegen::CompiledModel::new(&m)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("compiling model `{}`", module.name))
+}
+
+/// Which of `module`'s declared ports this device line leaves unconnected.
+///
+/// Split out of [`build_from_model`] so it can run *before* the model is compiled: marking a
+/// port unconnected mutates the module, and the compiled model owns the only copy of it. That
+/// also makes the answer part of the cache key — two devices that differ in which optional
+/// terminals they wire genuinely need two compiled models, because `$port_connected` changes
+/// what the elaborated code does.
+///
+/// Reads the pre-override `module`, which is sound because an override changes parameter
+/// *values* and never the port list.
+///
+/// # Errors
+///
+/// If the device connects more terminals than the model has ports, stops part-way through a
+/// vector port, or omits a port the model never asks `$port_connected` about.
+fn unconnected_ports(module: &Module, terminals: &[usize]) -> Result<Vec<usize>> {
+    let port_nodes: Vec<NodeId> = module.ports.iter().flatten().copied().collect();
     if terminals.len() > port_nodes.len() {
         bail!(
             "model `{}` declares {} port node(s), device connects {}",
-            m.name,
+            module.name,
             port_nodes.len(),
             terminals.len()
         );
@@ -2705,7 +2790,7 @@ fn build_from_model(
     // half-connected bus.
     let mut covered = 0usize;
     let mut unconnected: Vec<usize> = Vec::new();
-    for (i, port) in m.ports.iter().enumerate() {
+    for (i, port) in module.ports.iter().enumerate() {
         let end = covered + port.len();
         if terminals.len() >= end {
             covered = end;
@@ -2714,30 +2799,55 @@ fn build_from_model(
         if terminals.len() > covered {
             bail!(
                 "model `{}`: device connects {} terminal(s), which ends part-way through                  {}-wide port #{} — a port is connected as a whole or not at all",
-                m.name,
+                module.name,
                 terminals.len(),
                 port.len(),
                 i + 1
             );
         }
-        if !m.queries_port_connected(i) {
+        if !module.queries_port_connected(i) {
             bail!(
                 "model `{}` declares {} port node(s), device connects {} — and port #{}                  (`{}`) is not optional: the model never asks `$port_connected` about it",
-                m.name,
+                module.name,
                 port_nodes.len(),
                 terminals.len(),
                 i + 1,
                 port
                     .first()
-                    .map(|n| m.nodes[n.0 as usize].name.as_str())
+                    .map(|n| module.nodes[n.0 as usize].name.as_str())
                     .unwrap_or("?")
             );
         }
         unconnected.push(i);
     }
-    for i in unconnected {
-        m.mark_port_unconnected(i);
+    Ok(unconnected)
+}
+
+fn build_from_model(
+    module: &Module,
+    value: Option<f64>,
+    overrides: &[(String, f64)],
+    terminals: &[usize],
+    next_unknown: &mut usize,
+    cache: &mut CompiledCache,
+) -> Result<(Box<dyn ModelInstance>, NodeAssignment)> {
+    // § instance multiplicity. Split out of the override list *before* anything is applied, so
+    // the rest of this function keeps seeing only real model parameters.
+    let (multiplicity, plain_overrides) = split_multiplicity(module, overrides)?;
+    let unconnected = unconnected_ports(module, terminals)?;
+    let key = compiled_key(module, value, overrides, &unconnected);
+    if !cache.contains_key(&key) {
+        let compiled =
+            compile_with_overrides(module, value, &plain_overrides, multiplicity, &unconnected)?;
+        cache.insert(key.clone(), compiled);
     }
+    // Everything below reads the module and never writes it — the one thing that did write it,
+    // `$port_connected` marking, moved above the compile and into the key — so the compiled
+    // model's own copy serves, and placing a device no longer clones a 40,000-node arena.
+    let compiled = cache[&key].clone();
+    let m = compiled.module();
+
+    let port_nodes: Vec<NodeId> = module.ports.iter().flatten().copied().collect();
     let mut assigned: Vec<Option<usize>> = vec![None; m.nodes.len()];
     for (nid, &g) in port_nodes.iter().zip(terminals) {
         assigned[nid.0 as usize] = Some(g);
@@ -2777,7 +2887,9 @@ fn build_from_model(
         .map(|(&g, decl)| (g, decl.clone()))
         .collect();
 
-    let inst = va_codegen::build_instance(&m, &full, next_unknown)
+    let inst = compiled
+        .instantiate(&full, next_unknown)
+        .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
     // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
     // than inside the generated model, which is what makes it one rule for every model and keeps
@@ -8203,6 +8315,51 @@ endmodule
     /// really are electrical — so the fallback must stay `V`/volts rather than going blank.
     /// Branch currents are reported alongside the nodes, which is what makes `I(V1)` available
     /// to a transient run.
+    /// Two devices placed from **one** module with **different** parameters must stay two
+    /// different devices, both when the value is positional (`R2 mid gnd 3000`) and when it is
+    /// named (`X2 ... resistor R=3000`).
+    ///
+    /// This is the gate on the compiled-model cache introduced in 1.3.2. Sharing the lowered IR
+    /// across instances is only sound because parameter values are part of the key; a key that
+    /// dropped either half would hand the second resistor of each pair the first one's 1 k, and
+    /// the failure would be *silent* — the deck still parses, still converges, and reports
+    /// 0.5 V where the circuit says 0.75 V. So the assertion is on the divider ratio, which is
+    /// the one number that distinguishes the two.
+    ///
+    /// Both ladders hang off the same 1 V source, so one solve checks both halves of the key,
+    /// and they are wired to separate mid-nodes so neither can mask the other.
+    #[test]
+    fn two_devices_from_one_model_keep_their_own_parameters() {
+        let deck = "V1 in gnd DC 1.0
+R1 in  mid  1000
+R2 mid gnd  3000
+X1 in  xmid resistor R=1000
+X2 xmid gnd resistor R=3000
+.op
+.end
+";
+        let net = va_netlist::parser::parse(deck).expect("parse two-ladder deck");
+        let src = include_str!("../../../models/resistor.va");
+        let design = compile_model(src, "resistor.va");
+        let qs = quantities(&net, &design.modules).expect("quantities");
+        let op = solve_dc(&net, &design.modules).expect("solve two-ladder deck");
+        let at = |label: &str| -> f64 {
+            let q = qs
+                .iter()
+                .find(|q| q.label == label)
+                .unwrap_or_else(|| panic!("no `{label}` among {:?}", qs));
+            op.x[q.index]
+        };
+        // 1 V across 1 k + 3 k: the midpoint sits at 3/4 of the supply.
+        for label in ["V(mid)", "V(xmid)"] {
+            let v = at(label);
+            assert!(
+                (v - 0.75).abs() < 1e-9,
+                "{label} = {v}, expected 0.75 V — a 0.5 V here means both resistors were                  built from the same compiled model"
+            );
+        }
+    }
+
     #[test]
     fn quantities_cover_nodes_and_branch_currents_of_a_primitive_deck() {
         let net = va_netlist::parser::parse(include_str!("../../../circuits/divider.net"))

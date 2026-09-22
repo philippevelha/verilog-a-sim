@@ -20,6 +20,51 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.3.2 - 2026-09-22
+------------------
+**The elaborated IR is shared across instances of the same model.** `build_instance` cloned the
+whole `va_ir::Module` per device and lowered it again, so a deck paid for the arena once per
+*device* rather than once per *model card*. For PSP103 that arena is large: a chain of 40
+CMOS inverters (80 devices, two cards) peaked at **413 MB** and took **14.1 s**; the same deck
+now peaks at **78 MB** in **9.1 s**. Per device the memory slope falls from 5.1 MB to 0.78 MB,
+and what is left is the dense Jacobian, not the IR:
+
+    devices     10      20      40      80
+    before    56.5   103.4   199.4   413.2  MB
+    after     23.3    25.5    36.4    78.1  MB
+
+`va_codegen::GeneratedModel` is now an `Rc<SharedModel>` (module, resolved parameters, lowered
+plan, junction classification, evaluated setup) plus the one thing that is genuinely per
+instance: the local-slot -> global-unknown map. The new `CompiledModel::{new, instantiate}`
+exposes the split; `build_instance` is unchanged and now calls both, so nothing outside
+`va-cli` had to move. `va-ir` and `va-abi` are untouched — this is not an Interface alpha/beta
+change.
+
+**What the sharing is keyed on, and why that is the whole correctness question.** `va-cli`
+caches compiled models per `(module, positional value, named overrides, unconnected ports)`.
+The first three are obvious in hindsight — parameter values are baked into the compiled model,
+so a PMOS written `TYPE=-1` is not the NMOS written `TYPE=1`. The fourth was not: marking a
+port unconnected *mutates* the module, and `$port_connected` changes what the elaborated code
+does, so two devices differing only in whether they wire an optional terminal need two
+compiled models. That analysis therefore had to move ahead of the compile.
+
+Each of the three keyed properties was checked by deliberately dropping it and confirming a
+gate turns red, not by assuming: `two_devices_from_one_model_keep_their_own_parameters` (new)
+reports 0.5 V instead of 0.75 V when either parameter half is dropped, and the existing
+`fiber_mzi_noise_matches_wanser_and_duan_through_the_interferometer` fails when port
+connectivity is dropped — `circuits/fiber_mzi_noise.net` places two waveguides with identical
+overrides, one with its PZT control port wired and one without.
+
+The cost, stated: models with *different* parameters still compile separately, which is
+correct rather than optimised away, so a deck of N individually-tuned devices sees none of
+this. The sweep rebuild path also keeps a per-point cache, since the swept value is part of
+the key and nothing could be shared across points anyway.
+
+Measured at this version: `cargo test --workspace` **839 passed / 0 failed** (838 + the new
+key test); `cargo xtask validate` **28 checked, 0 failed, convergence 28/28**; corpus
+`check external --recursive` 69/73 self-contained, 86 passes — all unchanged. `cargo fmt` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean.
+
 1.3.1 - 2026-09-22
 ------------------
 **`gmin` stepping is wired in — as a rescue, not as a routine.** `va_core::convergence` has had
