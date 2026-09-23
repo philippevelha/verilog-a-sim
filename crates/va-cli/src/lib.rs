@@ -41,6 +41,17 @@ use va_abi::reference::{
 use va_abi::ModelInstance;
 use va_core::dc::operating_point;
 use va_core::newton::NewtonConfig;
+/// Dense or sparse linear algebra, re-exported so a caller of the `*_with` solvers (and
+/// `va-harness`) can choose without depending on `va-core` itself.
+pub use va_core::sparse::Solver;
+
+/// The Newton configuration every analysis's DC solve uses: the defaults, with `solver`.
+fn newton_cfg(solver: Solver) -> NewtonConfig {
+    NewtonConfig {
+        solver,
+        ..NewtonConfig::default()
+    }
+}
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
 use va_transient::integrator::{LteEstimator, Method, TranConfig, Waveform};
@@ -613,6 +624,7 @@ pub fn run_sim(
     plot: Option<&str>,
     integration: Integration,
     report_only: &[String],
+    solver: Solver,
 ) -> Result<()> {
     let deck =
         std::fs::read_to_string(netlist).with_context(|| format!("reading netlist {netlist}"))?;
@@ -632,6 +644,10 @@ pub fn run_sim(
         for line in sizing.lines() {
             eprintln!("{line}");
         }
+        eprintln!(
+            "{}",
+            estimate::solver_line(solver, sizing.unknowns, analysis)
+        );
     }
     // Plottable analyses are the ones that produce a *curve*: a transient waveform, or a `.dc`
     // sweep. A bare DC operating point is a single point — plotting one would be an empty
@@ -661,7 +677,7 @@ pub fn run_sim(
             .filter(|(path, _)| reached.contains(path))
             .collect();
         refuse_transient_approximations(&sources)?;
-        let wf = solve_transient(&net, &compiled, integration)?;
+        let wf = solve_transient_with(&net, &compiled, integration, solver)?;
         // Said only when a request actually went unmet, rather than whenever a tolerance is
         // written: the bracketing step control (§ `cross`) normally honours it, and a blanket
         // warning would cry wolf on every model that asks for one.
@@ -683,7 +699,7 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote transient plot to {path}");
         }
     } else if analysis == Analysis::Ac {
-        let response = solve_ac(&net, &compiled)?;
+        let response = solve_ac_with(&net, &compiled, solver)?;
         let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
         report_ac(&shown, &response);
         if let Some(path) = plot {
@@ -692,7 +708,7 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote AC plot to {path}");
         }
     } else if analysis == Analysis::Noise {
-        let spectrum = solve_noise(&net, &compiled)?;
+        let spectrum = solve_noise_with(&net, &compiled, solver)?;
         // Not `select_quantities`: a `.noise` run reports one output the card itself names,
         // so the table is consulted for that output's *units*, not to choose columns.
         report_noise(&net, &quantities(&net, &compiled)?, &spectrum);
@@ -701,7 +717,7 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote noise plot to {path}");
         }
     } else if let Some(sweep) = &net.dc {
-        let points = solve_dc_sweep(&net, &compiled, sweep)?;
+        let points = solve_dc_sweep_with(&net, &compiled, sweep, solver)?;
         let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
         report_sweep(&shown, sweep, &points);
         if let Some(path) = plot {
@@ -710,7 +726,7 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote sweep plot to {path}");
         }
     } else {
-        let op = solve_dc(&net, &compiled)?;
+        let op = solve_dc_with(&net, &compiled, solver)?;
         report(
             &select_quantities(&quantities(&net, &compiled)?, report_only)?,
             &op.x,
@@ -1687,6 +1703,19 @@ pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Q
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.
 pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::OperatingPoint> {
+    solve_dc_with(net, compiled, Solver::Auto)
+}
+
+/// [`solve_dc`] with an explicit [`Solver`].
+///
+/// # Errors
+///
+/// As [`solve_dc`].
+pub fn solve_dc_with(
+    net: &Netlist,
+    compiled: &[Module],
+    solver: Solver,
+) -> Result<va_core::dc::OperatingPoint> {
     let BuiltInstances {
         instances,
         dim,
@@ -1696,7 +1725,7 @@ pub fn solve_dc(net: &Netlist, compiled: &[Module]) -> Result<va_core::dc::Opera
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
-    va_core::dc::operating_point_with_events(&refs, dim, NewtonConfig::default(), None)
+    va_core::dc::operating_point_with_events(&refs, dim, newton_cfg(solver), None)
         .map(|(op, _)| op)
         .map_err(|e| name_non_finite_row(e.into(), &quantities))
         .context("DC operating-point solve failed")
@@ -1761,6 +1790,20 @@ pub fn solve_dc_sweep(
     net: &Netlist,
     compiled: &[Module],
     sweep: &va_netlist::DcSweep,
+) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
+    solve_dc_sweep_with(net, compiled, sweep, Solver::Auto)
+}
+
+/// [`solve_dc_sweep`] with an explicit [`Solver`].
+///
+/// # Errors
+///
+/// As [`solve_dc_sweep`].
+pub fn solve_dc_sweep_with(
+    net: &Netlist,
+    compiled: &[Module],
+    sweep: &va_netlist::DcSweep,
+    solver: Solver,
 ) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
     let src = net
         .devices
@@ -1864,7 +1907,7 @@ pub fn solve_dc_sweep(
             va_core::dc::operating_point_continued(
                 &refs,
                 built.dim,
-                NewtonConfig::default(),
+                newton_cfg(solver),
                 prev_above.as_ref(),
                 start,
             )
@@ -2062,6 +2105,22 @@ pub fn solve_transient(
     compiled: &[Module],
     integration: Integration,
 ) -> Result<Waveform> {
+    solve_transient_with(net, compiled, integration, Solver::Auto)
+}
+
+/// [`solve_transient`] with an explicit [`Solver`] — which, until Step 3 of
+/// `docs/proposals/sparse-solve.md`, governs only the operating point the run starts from. The
+/// timestep loop itself is dense.
+///
+/// # Errors
+///
+/// As [`solve_transient`].
+pub fn solve_transient_with(
+    net: &Netlist,
+    compiled: &[Module],
+    integration: Integration,
+    solver: Solver,
+) -> Result<Waveform> {
     let (tstep, tstop) = net
         .tran
         .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
@@ -2114,7 +2173,7 @@ pub fn solve_transient(
         // at zero — see `va_netlist::parser`), so this is the operating point the run actually
         // starts from rather than some other bias.
         let (op, _) =
-            va_core::dc::operating_point_with_events(&refs, dim, NewtonConfig::default(), None)
+            va_core::dc::operating_point_with_events(&refs, dim, newton_cfg(solver), None)
                 .map_err(|e| name_non_finite_row(e.into(), &quantities))
                 .context(
                     "the operating-point solve that precedes a transient run failed; add `UIC` \
@@ -2236,6 +2295,21 @@ fn ac_excitation(
 /// If the deck has no parseable `.ac` card, no AC-excited source ([`ac_excitation`]), the DC
 /// operating-point solve diverges, or the complex solve is singular at some frequency.
 pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::AcResponse> {
+    solve_ac_with(net, compiled, Solver::Auto)
+}
+
+/// [`solve_ac`] with an explicit [`Solver`] — which, until Step 4 of
+/// `docs/proposals/sparse-solve.md`, governs only the operating point the sweep linearizes
+/// about. The per-frequency solve is dense.
+///
+/// # Errors
+///
+/// As [`solve_ac`].
+pub fn solve_ac_with(
+    net: &Netlist,
+    compiled: &[Module],
+    solver: Solver,
+) -> Result<va_acnoise::ac::AcResponse> {
     let card = net
         .ac
         .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
@@ -2247,7 +2321,7 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
         ..
     } = build_instances(net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
-    let op = operating_point(&refs, dim, NewtonConfig::default())
+    let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
     let excitation = ac_excitation(net, &currents, dim)?;
 
@@ -2365,6 +2439,21 @@ pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<
 /// operating-point solve diverges, no device in the circuit contributes any noise, or an adjoint
 /// solve is singular at some frequency.
 pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noise::NoiseSpectrum> {
+    solve_noise_with(net, compiled, Solver::Auto)
+}
+
+/// [`solve_noise`] with an explicit [`Solver`] — which, until Step 4 of
+/// `docs/proposals/sparse-solve.md`, governs only the operating point the spectrum linearizes
+/// about. The per-frequency adjoint solve is dense.
+///
+/// # Errors
+///
+/// As [`solve_noise`].
+pub fn solve_noise_with(
+    net: &Netlist,
+    compiled: &[Module],
+    solver: Solver,
+) -> Result<va_acnoise::noise::NoiseSpectrum> {
     let card = net.noise.as_ref().context(
         "noise analysis requires a `.noise V(<out>) <source> dec <ppd> <fstart> <fstop>` card",
     )?;
@@ -2408,7 +2497,7 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
     }
 
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
-    let op = operating_point(&refs, dim, NewtonConfig::default())
+    let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
 
     if !has_noise_sources(&refs, &op.x) {
@@ -8643,5 +8732,27 @@ endmodule
             1,
             "non-mixed under a bias condition: the row is zero on every path anyway"
         );
+    }
+
+    /// `--solver sparse` on a deck far below the threshold: the same operating point as dense,
+    /// to rounding. Each redundant-short variant from 1.4.1 is included, because a pinned row
+    /// (`ib = 0`, a unit diagonal and nothing else) is exactly the kind of structure a sparse
+    /// pattern could mishandle.
+    #[test]
+    fn solver_sparse_reaches_the_dense_operating_point() {
+        let design = compile_model(CLAMP_VA, "clamp");
+        for deck in [
+            "V1 in gnd DC 1.0\nR1 in mid 1000\nR2 mid gnd 1000\n.op\n.end\n",
+            "V1 n gnd DC 1.0\nR1 n m 1000\nX1 m gnd clamp\nX2 m gnd clamp\n.op\n.end\n",
+            "V1 n gnd DC 1.0\nR1 n a 1000\nX1 a b clamp\nX2 b gnd clamp\nX3 a gnd clamp\n.op\n.end\n",
+            "V1 a gnd DC 0.7\nR1 a k 100\nD1 k gnd diode\n.op\n.end\n",
+        ] {
+            let net = va_netlist::parser::parse(deck).expect("parses");
+            let dense = solve_dc_with(&net, &design.modules, Solver::Dense).expect("dense");
+            let sparse = solve_dc_with(&net, &design.modules, Solver::Sparse).expect("sparse");
+            for (d, s) in dense.x.iter().zip(&sparse.x) {
+                assert!((d - s).abs() <= 1e-12 * d.abs().max(1e-3), "{deck}: {d} vs {s}");
+            }
+        }
     }
 }

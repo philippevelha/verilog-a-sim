@@ -20,6 +20,38 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.6.0 - 2026-09-23
+------------------
+**Sparse solve, Step 2: DC uses it from 500 unknowns.** `NewtonConfig` gains `solver`
+(`Solver::Auto` by default: dense below 500 unknowns, sparse from 500). The Newton loop keeps one
+`SparseSystem` and one `SparseLu` for the whole solve, every `gmin` stage included, so the
+pattern is found once and the symbolic factorization done once. Damping's trial points go into
+a scratch sparse system. Below 500 unknowns the dense branch runs the same statements as before.
+
+`va-cli sim --solver auto|dense|sparse` (default auto). `va-cli` gains `solve_dc_with`,
+`solve_dc_sweep_with`, `solve_transient_with`, `solve_ac_with` and `solve_noise_with`, and
+`va-harness` the matching `run_*_with`; the old names delegate with `Auto`, so no caller changes.
+A third pre-flight line names the solver, why it was chosen, and what it covers. For `.tran`,
+`.ac` and `.noise` that is only the starting operating point: their own loops stay dense until
+Steps 3–4, and the line says so. `cargo xtask validate --solver sparse` runs every golden gate on
+the sparse path; it also runs as a test, so CI keeps checking it.
+
+Found while writing the tests: a ladder with a diode at every node driven at 2 V fails with
+`Singular` on both paths alike (plain Newton overflows the junctions), so it says nothing about
+the solver; the test drives it at 0.5 V.
+
+Measured at 1.6.0: `cargo test --workspace` **862 passed / 0 failed** (+7: four Newton tests
+comparing the paths through `gmin` stepping, damping, `Auto` above the threshold, and a floating
+node with the rescue; the pre-flight line; `--solver sparse` on four decks including the 1.4.1
+redundant-short decks; `validate` with the sparse solver forced). fmt + clippy clean.
+`cargo xtask validate`: **28/28**, output identical line for line to 1.4.1.
+`cargo xtask validate --solver sparse`: **28/28**, every printed error figure the same as the
+dense run's. `bench-scale`, two runs: a whole `.op` at 802 unknowns (now sparse under `Auto`)
+**2.0–2.3 ms**, against 63.46 ms dense on 2026-09-17; the dense 402-unknown row took 9.0–9.8 ms
+in the same runs. The dense-calibrated cost estimate still prints for sparse runs and overstates
+them; recalibrating it is Step 5.
+
+
 1.5.0 - 2026-09-23
 ------------------
 **Sparse solve, Step 1: built and tested, not used by any analysis yet.** New module

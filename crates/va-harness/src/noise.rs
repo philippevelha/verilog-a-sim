@@ -20,14 +20,28 @@ use crate::{metrics, tol, HarnessError, Verdict};
 /// [`HarnessError::Run`] if the netlist/model can't be read or parsed, the deck has no `.noise`
 /// card, its output probe names an unknown net, no device contributes noise, or a solve fails.
 pub fn run_noise(circuit: &str, model: Option<&str>) -> Result<GoldenNoise, HarnessError> {
+    run_noise_with(circuit, model, va_cli::Solver::Auto)
+}
+
+/// [`run_noise`] with an explicit linear solver — how `xtask validate --solver sparse` runs
+/// every golden gate on the sparse path although each is far below the threshold.
+///
+/// # Errors
+///
+/// As [`run_noise`].
+pub fn run_noise_with(
+    circuit: &str,
+    model: Option<&str>,
+    solver: va_cli::Solver,
+) -> Result<GoldenNoise, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let card = net
         .noise
         .clone()
         .ok_or_else(|| HarnessError::Run(format!("{circuit}: no `.noise` card")))?;
-    let spectrum =
-        va_cli::solve_noise(&net, &compiled).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    let spectrum = va_cli::solve_noise_with(&net, &compiled, solver)
+        .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let contributors = va_cli::noise_contributors(&net, &spectrum);
     Ok(GoldenNoise::from_spectrum(
         &card.output,

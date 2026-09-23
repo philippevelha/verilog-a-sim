@@ -10,7 +10,7 @@
 //! itself lives in the library so `va-harness` can drive it directly.
 
 use anyhow::{bail, Context, Result};
-use va_cli::{check_models, run_sim, Analysis};
+use va_cli::{check_models, run_sim, Analysis, Solver};
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -62,7 +62,11 @@ fn print_usage() {
     
          --report <a,b,...>      Report only these quantities (default: all of them).
                                  Names a net (`mid`), a device current (`V1`), or a full
-                                 label (`V(mid)`); an unknown name is an error."
+                                 label (`V(mid)`); an unknown name is an error.
+         --solver auto|dense|sparse  Linear algebra. Default auto: dense below 500
+                                 unknowns, sparse from 500. Sparse covers the DC
+                                 operating point and .dc sweeps; .tran/.ac/.noise
+                                 loops are still dense."
     );
 }
 
@@ -125,6 +129,15 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         })
         .unwrap_or_default();
 
+    // `--solver` chooses the linear algebra (docs/proposals/sparse-solve.md). `auto`, the
+    // default, is dense below 500 unknowns and sparse from there.
+    let solver = match parse_flag(args, "--solver").as_deref() {
+        None | Some("auto") => Solver::Auto,
+        Some("dense") => Solver::Dense,
+        Some("sparse") => Solver::Sparse,
+        Some(v) => bail!("unknown --solver `{v}` (expected `auto`, `dense`, or `sparse`)"),
+    };
+
     run_sim(
         netlist,
         model.as_deref(),
@@ -132,6 +145,7 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         plot.as_deref(),
         integration,
         &report_only,
+        solver,
     )
 }
 

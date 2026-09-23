@@ -20,7 +20,16 @@
 //! adding a decreasing conductance ([`crate::convergence::gmin_for_step`]) to every
 //! [`va_abi::UnknownKind::Node`] row, warm-starting from the previous stage's solution, ending
 //! on an unshunted (`gmin = 0`) solve of the real circuit.
+//!
+//! **Dense or sparse** (`NewtonConfig::solver`, `docs/proposals/sparse-solve.md` Step 2). Below
+//! [`crate::sparse::SPARSE_THRESHOLD`] unknowns — or always, with [`Solver::Dense`] — each
+//! iteration assembles into a dense [`mna::System`] and calls [`linsolve::solve_dense`], exactly
+//! as before the sparse path existed. Otherwise it assembles into one [`SparseSystem`] kept for
+//! the whole solve, every `gmin` stage included, so the pattern is found once and the symbolic
+//! factorization done once. The iteration logic around the solve — limiting, damping,
+//! convergence tests — is the same code on both paths.
 
+use crate::sparse::{self, Solver, SparseLu, SparseSystem};
 use crate::{convergence, linsolve, mna, CoreError};
 use va_abi::{ModelInstance, UnknownKind};
 
@@ -63,6 +72,11 @@ pub struct NewtonConfig {
     /// actually produced. It cannot rescue a genuinely singular Jacobian, and it costs one
     /// extra assemble per halving, which is why it is off unless asked for.
     pub max_damping_halvings: usize,
+    /// Dense or sparse linear algebra — see [`Solver`]. Default [`Solver::Auto`]: dense below
+    /// [`crate::sparse::SPARSE_THRESHOLD`] unknowns, sparse from it. The answer does not depend
+    /// on it beyond rounding (the pivot order differs), so every convergence aid behaves the
+    /// same either way.
+    pub solver: Solver,
 }
 
 impl Default for NewtonConfig {
@@ -74,6 +88,7 @@ impl Default for NewtonConfig {
             max_damping_halvings: 0,
             limit_junctions: true,
             gmin_steps: 0,
+            solver: Solver::Auto,
         }
     }
 }
@@ -178,6 +193,9 @@ pub fn solve_with_events_from(
         Some(x0) => x0.to_vec(),
         None => vec![0.0; dim],
     };
+    // One for the whole solve, across every `gmin` stage: the pattern does not change with the
+    // shunt (every diagonal is always in it), so it is found and analysed once.
+    let mut linear = Linear::new(cfg.solver, dim);
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
@@ -194,9 +212,96 @@ pub fn solve_with_events_from(
                 junction: &junction,
             },
             fired,
+            &mut linear,
         )?;
     }
     Ok(x)
+}
+
+/// The linear algebra one Newton solve uses: nothing to keep for the dense path, the system and
+/// the factorization cache for the sparse one.
+enum Linear {
+    Dense,
+    Sparse {
+        sys: Box<SparseSystem>,
+        lu: SparseLu,
+        /// For [`damped_scale`]'s trial points, kept apart from `sys` so a trial point's
+        /// assembly cannot disturb the iterate's.
+        trial: Box<SparseSystem>,
+    },
+}
+
+impl Linear {
+    fn new(solver: Solver, dim: usize) -> Self {
+        if solver.uses_sparse(dim) {
+            Linear::Sparse {
+                sys: Box::new(SparseSystem::new(dim)),
+                lu: SparseLu::new(),
+                trial: Box::new(SparseSystem::new(dim)),
+            }
+        } else {
+            Linear::Dense
+        }
+    }
+
+    /// Assemble at `x` with `gmin` shunted, and return the residual's infinity norm and the
+    /// Newton step solving `J · dx = −f`.
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        &mut self,
+        instances: &[&dyn ModelInstance],
+        x: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+        dim: usize,
+        fired: &va_abi::FiredEvents,
+        gmin: f64,
+        kinds: &[UnknownKind],
+    ) -> Result<(f64, Vec<f64>), CoreError> {
+        match self {
+            Linear::Dense => {
+                let mut sys = mna::assemble_with_events(instances, x, ctx, dim, fired);
+                sys.shunt_gmin(x, gmin, kinds);
+                let residual_norm = inf_norm(&sys.residual);
+                let neg_f: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
+                let dx = linsolve::solve_dense(&sys.jacobian, &neg_f, dim)?;
+                Ok((residual_norm, dx))
+            }
+            Linear::Sparse { sys, lu, .. } => {
+                sparse::assemble_into(instances, x, ctx, fired, sys);
+                sys.shunt_gmin(x, gmin, kinds);
+                let residual_norm = inf_norm(sys.residual_values());
+                let neg_f: Vec<f64> = sys.residual_values().iter().map(|v| -v).collect();
+                let dx = lu.solve(sys.jacobian(), &neg_f)?;
+                Ok((residual_norm, dx))
+            }
+        }
+    }
+
+    /// The residual's infinity norm at trial point `x`, with `gmin` shunted — all
+    /// [`damped_scale`] needs, and on the sparse path without a `dim²` buffer.
+    fn trial_residual_norm(
+        &mut self,
+        instances: &[&dyn ModelInstance],
+        x: &[f64],
+        dim: usize,
+        fired: &va_abi::FiredEvents,
+        gmin: f64,
+        kinds: &[UnknownKind],
+    ) -> f64 {
+        match self {
+            Linear::Dense => {
+                let mut sys =
+                    mna::assemble_with_events(instances, x, &va_abi::ANALYSIS_DC, dim, fired);
+                sys.shunt_gmin(x, gmin, kinds);
+                inf_norm(&sys.residual)
+            }
+            Linear::Sparse { trial, .. } => {
+                sparse::assemble_into(instances, x, &va_abi::ANALYSIS_DC, fired, trial);
+                trial.shunt_gmin(x, gmin, kinds);
+                inf_norm(trial.residual_values())
+            }
+        }
+    }
 }
 
 /// The inner Newton iteration, starting from `x0` and shunting `gmin` onto every `Node`-kind
@@ -212,6 +317,7 @@ struct Classification<'a> {
     junction: &'a [bool],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solve_from(
     mut x: Vec<f64>,
     instances: &[&dyn ModelInstance],
@@ -220,6 +326,7 @@ fn solve_from(
     gmin: f64,
     class: &Classification<'_>,
     fired: &va_abi::FiredEvents,
+    linear: &mut Linear,
 ) -> Result<Vec<f64>, CoreError> {
     let Classification {
         kinds,
@@ -241,13 +348,8 @@ fn solve_from(
         // *iteration number* is not fixed, which is exactly why `$simparam("iteration")` cannot
         // be answered anywhere earlier than here.
         let ctx = va_abi::ANALYSIS_DC.with_sim(sim.at_iteration(iteration, gmin));
-        let mut sys = mna::assemble_with_events(instances, &x, &ctx, dim, fired);
-        sys.shunt_gmin(&x, gmin, kinds);
-        let residual_norm = inf_norm(&sys.residual);
-
-        // Solve J · dx = −f.
-        let neg_f: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
-        let dx = linsolve::solve_dense(&sys.jacobian, &neg_f, dim)?;
+        // Assemble, shunt, and solve J · dx = −f, dense or sparse.
+        let (residual_norm, dx) = linear.step(instances, &x, &ctx, dim, fired, gmin, kinds)?;
 
         // Apply the step, optionally damped: `scale` is 1.0 unless the full step made the
         // residual worse, in which case `damped_scale` backtracks (§ `max_damping_halvings`).
@@ -264,6 +366,7 @@ fn solve_from(
             residual_norm,
             junction,
             fired,
+            linear,
         );
 
         let mut update_small = true;
@@ -318,6 +421,7 @@ fn damped_scale(
     residual_norm: f64,
     junction: &[bool],
     fired: &va_abi::FiredEvents,
+    linear: &mut Linear,
 ) -> f64 {
     if cfg.max_damping_halvings == 0 {
         return 1.0;
@@ -334,12 +438,11 @@ fn damped_scale(
                 }
             })
             .collect();
-        let mut sys =
-            mna::assemble_with_events(instances, &candidate, &va_abi::ANALYSIS_DC, dim, fired);
-        sys.shunt_gmin(&candidate, gmin, kinds);
         // A non-finite residual (an exponential that overflowed at this trial point) is not an
         // improvement by any reading, and `<` against a NaN is false, so it backtracks.
-        if inf_norm(&sys.residual) < residual_norm {
+        if linear.trial_residual_norm(instances, &candidate, dim, fired, gmin, kinds)
+            < residual_norm
+        {
             return scale;
         }
         scale *= 0.5;
@@ -819,5 +922,134 @@ mod tests {
             solve(&insts, 3, cfg),
             Err(CoreError::NoConvergence { .. })
         ));
+    }
+
+    /// Solve `insts` with `cfg` on both paths and require the same operating point. Not
+    /// bit-identical — the pivot order differs — but far inside every tolerance the solve uses.
+    fn assert_paths_agree(insts: &[&dyn ModelInstance], dim: usize, cfg: NewtonConfig) {
+        let dense = solve(
+            insts,
+            dim,
+            NewtonConfig {
+                solver: Solver::Dense,
+                ..cfg
+            },
+        )
+        .expect("dense solves");
+        let sparse = solve(
+            insts,
+            dim,
+            NewtonConfig {
+                solver: Solver::Sparse,
+                ..cfg
+            },
+        )
+        .expect("sparse solves");
+        for (i, (d, s)) in dense.iter().zip(&sparse).enumerate() {
+            assert!(
+                (d - s).abs() <= 1e-9 * d.abs().max(1e-6),
+                "x[{i}]: dense {d}, sparse {s}"
+            );
+        }
+    }
+
+    /// A 20-diode chain at 20 V: plain Newton fails on it (`gmin_stepping_rescues_...` above),
+    /// so this exercises the sparse path through every `gmin` stage, one pattern throughout.
+    #[test]
+    fn sparse_newton_matches_dense_through_gmin_stepping() {
+        let n_diodes = 20;
+        let branch = n_diodes + 1;
+        let vs = VSource::new(0, GROUND, branch, 20.0);
+        let r = Resistor::new(0, 1, 10.0);
+        let mut diodes: Vec<Diode> = (1..n_diodes)
+            .map(|i| Diode::new(i, i + 1, 1e-14, 1.0, VT_NOMINAL))
+            .collect();
+        diodes.push(Diode::new(n_diodes, GROUND, 1e-14, 1.0, VT_NOMINAL));
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs, &r];
+        insts.extend(diodes.iter().map(|d| d as &dyn ModelInstance));
+        let cfg = NewtonConfig {
+            max_iters: 150,
+            gmin_steps: 30,
+            ..NewtonConfig::default()
+        };
+        assert_paths_agree(&insts, branch + 1, cfg);
+    }
+
+    /// Damping assembles trial points; on the sparse path that uses its own scratch system.
+    #[test]
+    fn sparse_newton_matches_dense_with_damping() {
+        let vs = VSource::new(0, GROUND, 2, 5.0);
+        let r = Resistor::new(0, 1, 100.0);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
+        let cfg = NewtonConfig {
+            max_damping_halvings: 8,
+            ..NewtonConfig::default()
+        };
+        assert_paths_agree(&insts, 3, cfg);
+    }
+
+    /// Above the threshold `Auto` is the sparse path, and it lands where dense does: a 600-node
+    /// ladder with a diode at every node, 601 unknowns. Driven at 0.5 V: at 2 V plain Newton
+    /// overflows the junctions on *both* paths (found while writing this), which would test
+    /// nothing about the solver.
+    #[test]
+    fn auto_above_the_threshold_matches_dense() {
+        let n = 600;
+        let vs = VSource::new(0, GROUND, n, 0.5);
+        let mut rs: Vec<Resistor> = (0..n - 1).map(|i| Resistor::new(i, i + 1, 10.0)).collect();
+        rs.extend((0..n).map(|i| Resistor::new(i, GROUND, 1e4)));
+        let ds: Vec<Diode> = (0..n)
+            .map(|i| Diode::new(i, GROUND, 1e-14, 1.0, VT_NOMINAL))
+            .collect();
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs];
+        insts.extend(rs.iter().map(|r| r as &dyn ModelInstance));
+        insts.extend(ds.iter().map(|d| d as &dyn ModelInstance));
+        let dim = n + 1;
+        assert!(Solver::Auto.uses_sparse(dim));
+        let auto = solve(&insts, dim, NewtonConfig::default()).expect("auto solves");
+        let dense = solve(
+            &insts,
+            dim,
+            NewtonConfig {
+                solver: Solver::Dense,
+                ..NewtonConfig::default()
+            },
+        )
+        .expect("dense solves");
+        for (i, (d, a)) in dense.iter().zip(&auto).enumerate() {
+            assert!(
+                (d - a).abs() <= 1e-9 * d.abs().max(1e-6),
+                "x[{i}]: dense {d}, auto {a}"
+            );
+        }
+    }
+
+    /// A floating node is a singular matrix on the sparse path too, and the `gmin` rescue in
+    /// `dc::operating_point` gets past it the same way.
+    #[test]
+    fn sparse_path_reports_a_floating_node_and_the_rescue_solves_it() {
+        // Node 1 hangs off a diode's cathode with nothing else attached: no DC path.
+        let vs = VSource::new(0, GROUND, 2, 1.0);
+        let d = Diode::new(0, 1, 1e-14, 1.0, VT_NOMINAL);
+        let insts: [&dyn ModelInstance; 2] = [&vs, &d];
+        let sparse = NewtonConfig {
+            solver: Solver::Sparse,
+            ..NewtonConfig::default()
+        };
+        let dense = NewtonConfig {
+            solver: Solver::Dense,
+            ..NewtonConfig::default()
+        };
+        assert_eq!(
+            solve(&insts, 3, sparse).is_err(),
+            solve(&insts, 3, dense).is_err(),
+            "both paths agree on whether plain Newton fails"
+        );
+        let s = crate::dc::operating_point(&insts, 3, sparse).expect("sparse rescue solves");
+        let d = crate::dc::operating_point(&insts, 3, dense).expect("dense rescue solves");
+        for (a, b) in s.x.iter().zip(&d.x) {
+            assert!((a - b).abs() < 1e-9, "sparse {a}, dense {b}");
+        }
     }
 }

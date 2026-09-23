@@ -1,7 +1,7 @@
 # Proposal: a sparse linear solve above 500 unknowns
 
-**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Step 1 done
-(1.5.0, 2026-09-23)**; Steps 2–5 open.
+**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1 and 2 done
+(1.5.0, 1.6.0, 2026-09-23)**; Steps 3–5 open.
 **Affects:** `va-core` (new sparse assembler + solver, the selector), `va-transient` and
 `va-acnoise` (their assemblers and solve call sites), `va-cli` (`--solver`, the pre-flight line),
 `xtask` (`bench-scale` gains a sparse column). **`va-abi` (Interface β) and `va-ir`
@@ -259,6 +259,20 @@ work. In a real run the model evaluation is often the larger cost (PSP103 is ~30
 point), so the whole-run gain at small sizes will be far smaller than these ratios. That the
 Step 1 path beats dense even at 11 unknowns here does not by itself argue for a lower
 threshold; Step 5 measures whole runs on real circuits before the 500 moves.
+
+**Step 2 — done, 1.6.0 (2026-09-23).** DC runs on the sparse path from 500 unknowns.
+`NewtonConfig::solver` (default `Auto`); `newton` keeps one `SparseSystem` and one `SparseLu` for
+the whole solve, every `gmin` stage included, and damping's trial points assemble into a scratch
+sparse system. The dense branch is the same statements as before. `va-cli sim --solver
+auto|dense|sparse`; `solve_*_with` variants in `va-cli` and `run_*_with` in `va-harness`, the
+old names delegating with `Auto`; a third pre-flight line names the solver, why, and what it
+covers (for `.tran`/`.ac`/`.noise` only the operating point, until Steps 3–4); `xtask validate
+--solver sparse`, also run as a test so CI keeps it.
+
+Evidence: default `xtask validate` output identical line for line to 1.4.1; with `--solver
+sparse` all 28 gates pass and every printed error figure is the same as dense's. `bench-scale`
+(two runs): a whole `.op` at 802 unknowns, now sparse under `Auto`, takes 2.0–2.3 ms, against
+63.46 ms dense on 2026-09-17 and 9.0–9.8 ms for the dense 402-unknown row in the same runs.
 
 ## 7. Decided, and still open
 

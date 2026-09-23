@@ -16,9 +16,23 @@ use crate::{metrics, tol, HarnessError, Verdict};
 /// [`HarnessError::Run`] if the netlist/model can't be read or parsed, the deck has no `.tran`
 /// card, or the integration diverges.
 pub fn run_tran(circuit: &str, model: Option<&str>) -> Result<GoldenTran, HarnessError> {
+    run_tran_with(circuit, model, va_cli::Solver::Auto)
+}
+
+/// [`run_tran`] with an explicit linear solver — how `xtask validate --solver sparse` runs
+/// every golden gate on the sparse path although each is far below the threshold.
+///
+/// # Errors
+///
+/// As [`run_tran`].
+pub fn run_tran_with(
+    circuit: &str,
+    model: Option<&str>,
+    solver: va_cli::Solver,
+) -> Result<GoldenTran, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    let wf = va_cli::solve_transient(&net, &compiled, va_cli::Integration::default())
+    let wf = va_cli::solve_transient_with(&net, &compiled, va_cli::Integration::default(), solver)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let branch_currents = va_cli::branch_currents(&net, &compiled)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;

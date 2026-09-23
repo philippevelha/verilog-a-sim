@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     let cmd = args.next();
     let rest: Vec<String> = args.collect();
     match cmd.as_deref() {
-        Some("validate") => validate(),
+        Some("validate") => validate(parse_solver(&rest)?),
         Some("gen-golden") => gen_golden(),
         Some("tutorials") => tutorials(&rest),
         Some("bench-linsolve") => bench_linsolve(),
@@ -37,11 +37,27 @@ fn main() -> Result<()> {
     }
 }
 
+/// `--solver auto|dense|sparse` from `rest`, default `auto`. `validate --solver sparse` runs
+/// every golden gate on the sparse path, which none of them reaches under `auto` (all are far
+/// below 500 unknowns) — the sparse path's validation suite (`docs/proposals/sparse-solve.md` §5).
+fn parse_solver(rest: &[String]) -> Result<va_cli::Solver> {
+    let value = rest
+        .iter()
+        .position(|a| a == "--solver")
+        .map(|i| rest.get(i + 1).map(String::as_str).unwrap_or(""));
+    Ok(match value {
+        None | Some("auto") => va_cli::Solver::Auto,
+        Some("dense") => va_cli::Solver::Dense,
+        Some("sparse") => va_cli::Solver::Sparse,
+        Some(v) => bail!("unknown --solver `{v}` (expected `auto`, `dense`, or `sparse`)"),
+    })
+}
+
 fn print_usage() {
     eprintln!(
         "cargo xtask <subcommand>\n\n\
          SUBCOMMANDS:\n    \
-         validate            Run va-harness over the model zoo vs golden/\n    \
+         validate [--solver auto|dense|sparse]  Run va-harness over the model zoo vs golden/\n    \
          gen-golden          (Re)generate golden outputs from QSPICE, if installed\n    \
          tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)\n    \
          bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)\n    \
@@ -257,7 +273,7 @@ fn try_solve<T>(
 /// pass/fail/skip per circuit. A circuit with no committed `golden/<name>.golden` is *skipped*,
 /// not failed — most of `golden/` (see [`gen_golden`]) is still empty, and that's a legitimate
 /// "nothing captured yet," not a build error.
-fn validate_dc_circuits(root: &Path) -> Result<Tally> {
+fn validate_dc_circuits(root: &Path, solver: va_cli::Solver) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in DC_CIRCUITS {
         let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
@@ -279,7 +295,7 @@ fn validate_dc_circuits(root: &Path) -> Result<Tally> {
             .transpose()?;
         let Some(got) = try_solve(
             circuit,
-            || va_harness::dc::run_dc(circuit_str, model_str),
+            || va_harness::dc::run_dc_with(circuit_str, model_str, solver),
             &mut tally,
         ) else {
             continue;
@@ -292,7 +308,7 @@ fn validate_dc_circuits(root: &Path) -> Result<Tally> {
 }
 
 /// Like [`validate_dc_circuits`], for every known `.dc`-sweep circuit (§ ladder rung 2).
-fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
+fn validate_sweep_circuits(root: &Path, solver: va_cli::Solver) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in SWEEP_CIRCUITS {
         let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
@@ -314,7 +330,7 @@ fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
             .transpose()?;
         let Some(got) = try_solve(
             circuit,
-            || va_harness::dc::run_dc_sweep(circuit_str, model_str),
+            || va_harness::dc::run_dc_sweep_with(circuit_str, model_str, solver),
             &mut tally,
         ) else {
             continue;
@@ -328,7 +344,7 @@ fn validate_sweep_circuits(root: &Path) -> Result<Tally> {
 
 /// Like [`validate_dc_circuits`], for every known `.tran` transient circuit (§ ladder rungs
 /// 3/4/6).
-fn validate_tran_circuits(root: &Path) -> Result<Tally> {
+fn validate_tran_circuits(root: &Path, solver: va_cli::Solver) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in TRAN_CIRCUITS {
         let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
@@ -350,7 +366,7 @@ fn validate_tran_circuits(root: &Path) -> Result<Tally> {
             .transpose()?;
         let Some(got) = try_solve(
             circuit,
-            || va_harness::tran::run_tran(circuit_str, model_str),
+            || va_harness::tran::run_tran_with(circuit_str, model_str, solver),
             &mut tally,
         ) else {
             continue;
@@ -363,7 +379,7 @@ fn validate_tran_circuits(root: &Path) -> Result<Tally> {
 }
 
 /// Like [`validate_dc_circuits`], for every known `.ac` small-signal circuit (T5).
-fn validate_ac_circuits(root: &Path) -> Result<Tally> {
+fn validate_ac_circuits(root: &Path, solver: va_cli::Solver) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in AC_CIRCUITS {
         let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
@@ -385,7 +401,7 @@ fn validate_ac_circuits(root: &Path) -> Result<Tally> {
             .transpose()?;
         let Some(got) = try_solve(
             circuit,
-            || va_harness::ac::run_ac(circuit_str, model_str),
+            || va_harness::ac::run_ac_with(circuit_str, model_str, solver),
             &mut tally,
         ) else {
             continue;
@@ -398,7 +414,7 @@ fn validate_ac_circuits(root: &Path) -> Result<Tally> {
 }
 
 /// Like [`validate_dc_circuits`], for every known `.noise` circuit (T5.2).
-fn validate_noise_circuits(root: &Path) -> Result<Tally> {
+fn validate_noise_circuits(root: &Path, solver: va_cli::Solver) -> Result<Tally> {
     let mut tally = Tally::default();
     for &(circuit, model) in NOISE_CIRCUITS {
         let (circuit_path, model_path, golden_path) = circuit_paths(root, circuit, model)?;
@@ -420,7 +436,7 @@ fn validate_noise_circuits(root: &Path) -> Result<Tally> {
             .transpose()?;
         let Some(got) = try_solve(
             circuit,
-            || va_harness::noise::run_noise(circuit_str, model_str),
+            || va_harness::noise::run_noise_with(circuit_str, model_str, solver),
             &mut tally,
         ) else {
             continue;
@@ -478,15 +494,19 @@ fn report_verdict(circuit: &str, verdict: va_harness::Verdict, tally: &mut Tally
 /// attempted and reported first — a single non-convergent circuit no longer aborts the batch
 /// before the rest are checked (T6.4's own point: the convergence fraction is only useful if
 /// computed over the *whole* zoo, not just however much of it ran before the first failure).
-fn validate() -> Result<()> {
+fn validate(solver: va_cli::Solver) -> Result<()> {
     eprintln!("[xtask] validate: running va-harness over the model zoo vs golden/ …");
+    // Said only when it is not the default, so a default run's output is unchanged.
+    if solver != va_cli::Solver::Auto {
+        eprintln!("[xtask] validate: linear solver forced to {solver:?}");
+    }
     let root = workspace_root()?;
 
-    let mut tally = validate_dc_circuits(&root)?;
-    tally.merge(validate_sweep_circuits(&root)?);
-    tally.merge(validate_tran_circuits(&root)?);
-    tally.merge(validate_ac_circuits(&root)?);
-    tally.merge(validate_noise_circuits(&root)?);
+    let mut tally = validate_dc_circuits(&root, solver)?;
+    tally.merge(validate_sweep_circuits(&root, solver)?);
+    tally.merge(validate_tran_circuits(&root, solver)?);
+    tally.merge(validate_ac_circuits(&root, solver)?);
+    tally.merge(validate_noise_circuits(&root, solver)?);
 
     eprintln!(
         "[xtask] validate: {} checked, {} failed golden, {} did not converge, {} skipped (no golden)",
@@ -2578,7 +2598,18 @@ mod tests {
         // `diode_noise.net` from a native-model translation (`ring_osc.net`'s golden additionally
         // truncated to `RING_OSC_GOLDEN_TSTOP`, its own doc comment explains why). Nothing is
         // skipped anymore; `validate` must pass all nine for real.
-        validate().expect("validate should pass: all nine known circuits have real golden");
+        validate(va_cli::Solver::Auto)
+            .expect("validate should pass: all nine known circuits have real golden");
+    }
+
+    /// Every golden gate again, with the sparse solver forced. None of them reaches it under
+    /// `auto` (all are far below 500 unknowns), so this is what validates the sparse path
+    /// against QSPICE at all (`docs/proposals/sparse-solve.md` §5). Same tolerances; the results
+    /// are not bit-identical to the dense run, because the pivot order differs.
+    #[test]
+    fn validate_passes_with_the_sparse_solver_forced() {
+        validate(va_cli::Solver::Sparse)
+            .expect("every golden gate should also pass on the sparse path");
     }
 
     #[test]

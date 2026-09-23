@@ -52,10 +52,24 @@ impl AcVerdict {
 /// card or no AC-excited source, the DC operating point it linearizes about diverges, or the
 /// complex solve is singular at some frequency.
 pub fn run_ac(circuit: &str, model: Option<&str>) -> Result<GoldenAc, HarnessError> {
+    run_ac_with(circuit, model, va_cli::Solver::Auto)
+}
+
+/// [`run_ac`] with an explicit linear solver — how `xtask validate --solver sparse` runs
+/// every golden gate on the sparse path although each is far below the threshold.
+///
+/// # Errors
+///
+/// As [`run_ac`].
+pub fn run_ac_with(
+    circuit: &str,
+    model: Option<&str>,
+    solver: va_cli::Solver,
+) -> Result<GoldenAc, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    let response =
-        va_cli::solve_ac(&net, &compiled).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    let response = va_cli::solve_ac_with(&net, &compiled, solver)
+        .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let branch_currents = va_cli::branch_currents(&net, &compiled)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     Ok(GoldenAc::from_response(

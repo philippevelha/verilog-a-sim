@@ -18,6 +18,37 @@
 //! factorization takes over. A single extrapolated number would be more precise than the data.
 
 use crate::Analysis;
+use va_core::sparse::{Solver, SPARSE_THRESHOLD};
+
+/// The pre-flight line naming the linear solver a run uses, why it was chosen, and what it
+/// covers.
+///
+/// "What it covers" is the part a user could not guess. Step 2 of
+/// `docs/proposals/sparse-solve.md` moved DC to the sparse path; a `.tran`, `.ac` or `.noise`
+/// run still factors densely inside its own loop, and only its starting operating point goes
+/// sparse. The cost estimate above this line is calibrated on dense LU, so on the sparse path it
+/// overstates the matrix time — said here rather than left for a user to notice.
+#[must_use]
+pub fn solver_line(solver: Solver, unknowns: usize, analysis: Analysis) -> String {
+    let sparse = solver.uses_sparse(unknowns);
+    let why = match solver {
+        Solver::Auto if sparse => format!("{unknowns} >= {SPARSE_THRESHOLD} unknowns"),
+        Solver::Auto => format!("{unknowns} < {SPARSE_THRESHOLD} unknowns"),
+        Solver::Dense => "--solver dense".to_string(),
+        Solver::Sparse => "--solver sparse".to_string(),
+    };
+    if !sparse {
+        return format!("[va-cli] linear solve: dense LU ({why})");
+    }
+    let scope = match analysis {
+        Analysis::Dc => "the whole run (the dense-calibrated estimate above overstates it)",
+        Analysis::Transient => "the operating point only; the timestep loop is still dense LU",
+        Analysis::Ac | Analysis::Noise => {
+            "the operating point only; the frequency sweep is still dense LU"
+        }
+    };
+    format!("[va-cli] linear solve: sparse LU ({why}), for {scope}")
+}
 
 /// The machine every figure in [`TRAN_MS_PER_POINT`] and its siblings was measured on. Named
 /// in the output because the absolute numbers belong to it; `cargo run --release -p xtask --
@@ -510,5 +541,21 @@ mod tests {
                 assert!(pair[0].1 <= pair[1].1, "{name}: cost must not decrease");
             }
         }
+    }
+
+    #[test]
+    fn solver_line_names_the_solver_the_reason_and_the_scope() {
+        let dense = solver_line(Solver::Auto, 499, Analysis::Dc);
+        assert!(dense.contains("dense LU (499 < 500 unknowns)"), "{dense}");
+        let auto = solver_line(Solver::Auto, 500, Analysis::Dc);
+        assert!(auto.contains("sparse LU (500 >= 500 unknowns)"), "{auto}");
+        assert!(auto.contains("whole run"), "{auto}");
+        let forced = solver_line(Solver::Sparse, 12, Analysis::Transient);
+        assert!(forced.contains("--solver sparse"), "{forced}");
+        assert!(forced.contains("timestep loop is still dense"), "{forced}");
+        let ac = solver_line(Solver::Sparse, 12, Analysis::Ac);
+        assert!(ac.contains("frequency sweep is still dense"), "{ac}");
+        let kept = solver_line(Solver::Dense, 10_000, Analysis::Dc);
+        assert!(kept.contains("dense LU (--solver dense)"), "{kept}");
     }
 }

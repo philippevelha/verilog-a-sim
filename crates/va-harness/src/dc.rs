@@ -15,9 +15,24 @@ use crate::{metrics, tol, HarnessError, Verdict};
 ///
 /// [`HarnessError::Run`] if the netlist/model can't be read or parsed, or the solve diverges.
 pub fn run_dc(circuit: &str, model: Option<&str>) -> Result<GoldenDc, HarnessError> {
+    run_dc_with(circuit, model, va_cli::Solver::Auto)
+}
+
+/// [`run_dc`] with an explicit linear solver — how `xtask validate --solver sparse` runs
+/// every golden gate on the sparse path although each is far below the threshold.
+///
+/// # Errors
+///
+/// As [`run_dc`].
+pub fn run_dc_with(
+    circuit: &str,
+    model: Option<&str>,
+    solver: va_cli::Solver,
+) -> Result<GoldenDc, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
-    let op = va_cli::solve_dc(&net, &compiled).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
+    let op = va_cli::solve_dc_with(&net, &compiled, solver)
+        .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let branch_currents = va_cli::branch_currents(&net, &compiled)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     Ok(GoldenDc::from_operating_point(
@@ -52,13 +67,27 @@ pub fn compare_dc(got: &GoldenDc, golden: &GoldenDc) -> Result<Verdict, HarnessE
 /// [`HarnessError::Run`] if the netlist/model can't be read or parsed, the deck has no `.dc`
 /// sweep card, or the sweep diverges at any point.
 pub fn run_dc_sweep(circuit: &str, model: Option<&str>) -> Result<GoldenSweep, HarnessError> {
+    run_dc_sweep_with(circuit, model, va_cli::Solver::Auto)
+}
+
+/// [`run_dc_sweep`] with an explicit linear solver — how `xtask validate --solver sparse` runs
+/// every golden gate on the sparse path although each is far below the threshold.
+///
+/// # Errors
+///
+/// As [`run_dc_sweep`].
+pub fn run_dc_sweep_with(
+    circuit: &str,
+    model: Option<&str>,
+    solver: va_cli::Solver,
+) -> Result<GoldenSweep, HarnessError> {
     let (net, compiled) =
         va_cli::load(circuit, model).map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let sweep = net
         .dc
         .clone()
         .ok_or_else(|| HarnessError::Run(format!("{circuit}: no `.dc` sweep card")))?;
-    let points = va_cli::solve_dc_sweep(&net, &compiled, &sweep)
+    let points = va_cli::solve_dc_sweep_with(&net, &compiled, &sweep, solver)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
     let branch_currents = va_cli::branch_currents(&net, &compiled)
         .map_err(|e| HarnessError::Run(format!("{e:#}")))?;
