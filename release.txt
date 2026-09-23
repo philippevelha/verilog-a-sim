@@ -20,6 +20,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.12.0 - 2026-09-23
+-------------------
+**ISCAS'85 c432 solves at transistor level, through a new DC rescue tier that caps each node's
+Newton step.** `NewtonConfig` gains `max_node_step` (default infinite: off, the default path's
+arithmetic unchanged). The DC rescue in `va_core::dc` is now plain → `gmin` ladder → **ladder with
+node steps capped at 0.5 V** (`RESCUE_NODE_STEP`) → ladder with the line search (1.10.1's tier,
+now last). Each tier runs only after the ones before it fail, so anything an earlier tier solves
+keeps its path and answer bit for bit.
+
+Why: c432 (910 PSP103 devices, 15 416 unknowns) failed every existing tier. Traced, the ladder
+cycled and the damped ladder stalled on the internal nodes of 4-high NMOS stacks (the `and4` cell
+inside a composed 4-input NAND), set only by leakage while a lower device is off: each step
+proposed 11–23 V on a 1.8 V circuit. Capping each node separately lets every other row take its
+full step. It also beats damping on the PSP103 inverter chains 1.10.1 was about: 95 stages
+23.2 s → 9.6 s, 160 stages 40.8 s → 15.7 s (320 still fails, as before). The cap is in each
+unknown's own units: 0.5 V electrically, 0.5 of anything else — reached only after the plain
+ladder fails.
+
+c432 (`circuits/benchmark/iscas85/`): `c432.bench` fetched and checked gate for gate against an
+independent Verilog copy (160 gates, 36 inputs, 7 outputs, identical). `gen_iscas.py` turns any
+`.bench` into a deck in the c7552 style; gates the library lacks are composed from its cells —
+the user's rule: use the cells we have, compose the rest (a buffer is two inverters, now
+supported; NAND3/4 = AND3/4 + NOT, XOR = XNOR + NOT, AND8/AND9 from AND4/AND3). `check_iscas.py`
+checks an `.op` against the logic. Five vectors solve; four checked on all 160 gate outputs,
+**640/640 correct**.
+
+Wall time, release, one run each: c432 `.op` 2.9–6.9 min (the same deck and binary 6.9 min once
+and 2.9 min later — a single figure is good to ~2× on this laptop); before this change it failed
+after 7.1 min. Profiled: per Newton step assembly 218 ms (~70%, the PSP103 evaluation), sparse LU
+88 ms (~28%). The pre-flight estimate (44–719 ms) was off by ~250–600×, as it is for any rescued
+compiled-model `.op`. A c432 transient would be an estimated 3–4 h; not run.
+
+Measured at 1.12.0: `cargo test --workspace` **885 passed / 0 failed** (+1: the node-step cap
+converges a diode clamp plain Newton cannot and leaves a converging answer unchanged; the tier
+test now also checks the capped tier's order). fmt + clippy clean. `cargo xtask validate`:
+**28/28**, identical to 1.11.0. All 69 other decks under `circuits/` give output identical to
+1.11.0's.
+
+
 1.11.0 - 2026-09-23
 -------------------
 **The netlist parser reads SPICE deck structure — `.subckt`, `.model` cards, `+` continuations,

@@ -91,9 +91,12 @@ pub fn operating_point_continued(
 /// A caller that has already asked for stepping (`cfg.gmin_steps > 0`) is left alone: it chose
 /// its own ladder and a second one would not be a rescue but a contradiction.
 ///
-/// **Two tiers.** If the ladder fails too, it is run once more with Newton's residual line search
-/// on ([`RESCUE_DAMPING_HALVINGS`]) — the same fallback shape one level down, so what the plain
-/// ladder solves never pays for the line search.
+/// **Three tiers, cheapest first.** If the ladder fails too, it is run again with each Newton
+/// step's change to a node capped ([`RESCUE_NODE_STEP`]), and if that fails, with Newton's
+/// residual line search on instead ([`RESCUE_DAMPING_HALVINGS`]). Each tier is reached only when
+/// the ones before it have failed — the same fallback shape one level down each time — so what an
+/// earlier tier solves keeps its path and its answer bit for bit and never pays for a later one.
+/// A tier whose aid the caller already asked for is skipped.
 ///
 /// The **original** failure is what surfaces if the rescue also fails. It describes the real
 /// circuit, naming the row that went singular or non-finite; the laddered one describes a
@@ -128,23 +131,27 @@ fn with_gmin_rescue<T>(
                 max_iters: cfg.max_iters.max(GMIN_RESCUE_ITERS),
                 ..cfg
             };
-            match attempt(laddered) {
-                Ok(ok) => Ok(ok),
-                // The second tier: the same ladder with the residual line search on. Reached
-                // only when the ladder alone has failed too, so everything the ladder solves
-                // keeps its path and its answer bit for bit (§ `RESCUE_DAMPING_HALVINGS`).
-                Err(second)
-                    if cfg.max_damping_halvings < RESCUE_DAMPING_HALVINGS
-                        && worth_a_gmin_retry(&second) =>
-                {
-                    attempt(NewtonConfig {
-                        max_damping_halvings: RESCUE_DAMPING_HALVINGS,
-                        ..laddered
-                    })
-                    .map_err(|_| first)
+            // The tiers, cheapest first; later ones are only reached when earlier ones fail
+            // (§ `RESCUE_NODE_STEP`, `RESCUE_DAMPING_HALVINGS`).
+            let tiers = [
+                Some(laddered),
+                (cfg.max_node_step > RESCUE_NODE_STEP).then_some(NewtonConfig {
+                    max_node_step: RESCUE_NODE_STEP,
+                    ..laddered
+                }),
+                (cfg.max_damping_halvings < RESCUE_DAMPING_HALVINGS).then_some(NewtonConfig {
+                    max_damping_halvings: RESCUE_DAMPING_HALVINGS,
+                    ..laddered
+                }),
+            ];
+            for tier in tiers.into_iter().flatten() {
+                match attempt(tier) {
+                    Ok(ok) => return Ok(ok),
+                    Err(e) if worth_a_gmin_retry(&e) => {}
+                    Err(_) => break,
                 }
-                Err(_) => Err(first),
             }
+            Err(first)
         }
         Err(e) => Err(e),
     }
@@ -155,7 +162,27 @@ fn with_gmin_rescue<T>(
 /// reached on a solve that has already failed.
 const GMIN_RESCUE_STEPS: usize = 30;
 
-/// Step halvings allowed in the rescue's second tier, which reruns the `gmin` ladder with
+/// The node-step cap in the rescue's second tier (`NewtonConfig::max_node_step`), in the node's
+/// own units: 0.5 V on an electrical node.
+///
+/// **Why it exists.** ISCAS'85 c432 at transistor level (910 PSP103 devices, 15 416 unknowns) is
+/// not solved by the ladder or the damped ladder. Traced, both stuck on the internal nodes of
+/// 4-high NMOS stacks (the `and4` cell inside a composed 4-input NAND), which are set only by
+/// leakage while a lower device is off: each linearized step divides by a near-zero conductance
+/// and proposes 11–23 V on a 1.8 V circuit. Undamped the ladder cycles between two such points
+/// for its 150 iterations; damped, the whole step shrinks until nothing moves (the residual sat
+/// at 1.01e-4). Capping each node's step instead lets every other row take its full step, and
+/// the ladder converges: c432 solves in 3.8 min, all seven outputs matching the logic.
+///
+/// **Why before damping.** It costs nothing per iteration, where the line search costs a trial
+/// evaluation per halving: the PSP103 inverter chains the damped tier was added for (1.10.1)
+/// solve with the cap too, faster — 95 stages in 14.0 s against 23.2 s damped, 160 in 27.4 s
+/// against 40.8 s. **Not in units other than volts:** on a thermal or optical node 0.5 is 0.5 of
+/// that node's unit, which may be slow; this tier is only reached after the plain ladder has
+/// failed, and the damped one still follows it.
+const RESCUE_NODE_STEP: f64 = 0.5;
+
+/// Step halvings allowed in the rescue's third tier, which reruns the `gmin` ladder with
 /// Newton's residual line search (`NewtonConfig::max_damping_halvings`) switched on.
 ///
 /// **Why it exists.** On a chain of PSP103 CMOS inverters the ladder alone fails from ~95
@@ -169,7 +196,10 @@ const GMIN_RESCUE_STEPS: usize = 30;
 /// still fails, differently — the Jacobian goes singular right after a 0.5 V step, not a runaway
 /// one, which no line search can help. Not diagnosed.
 ///
-/// **Why a second tier rather than part of the ladder.** Damping costs at least one extra
+/// Since 1.12.0 the node-step tier comes first and solves those chains itself; this tier remains
+/// as the last resort.
+///
+/// **Why a tier rather than part of the ladder.** Damping costs at least one extra
 /// assembly per iteration. Switched on for the whole rescue, the 80-stage chain — which the
 /// ladder alone already solves — went from 6.8 s to 35 s. As its own tier it costs nothing to
 /// anything the first tier solves. Twenty halvings reduce the 5.7e4 V step to ~0.05 V.
@@ -378,25 +408,29 @@ mod tests {
     }
 
     /// The rescue's tiers, driven by a scripted attempt so the control flow is checked on its
-    /// own: which configs are tried, in which order, and which error surfaces. The physical case
-    /// the second tier exists for (a PSP103 inverter chain, `RESCUE_DAMPING_HALVINGS`) needs a
-    /// model that is not in the repository, so it is measured and recorded in
-    /// `docs/validation.md` rather than run here.
+    /// own: which configs are tried, in which order, and which error surfaces. The physical cases
+    /// the later tiers exist for (a PSP103 inverter chain, ISCAS'85 c432) need a model that is not
+    /// in the repository, so they are measured and recorded in `docs/validation.md` rather than
+    /// run here.
     #[test]
     fn the_rescue_tries_the_ladder_then_the_damped_ladder_then_reports_the_first_failure() {
+        let inf = f64::INFINITY;
         let tried = std::cell::RefCell::new(Vec::new());
-        // Fails unless the ladder *and* the line search are both on.
-        let needs_both = |c: NewtonConfig| {
+        let record = |c: &NewtonConfig| {
             tried
                 .borrow_mut()
-                .push((c.gmin_steps, c.max_damping_halvings));
+                .push((c.gmin_steps, c.max_node_step, c.max_damping_halvings));
+        };
+        // Fails unless the ladder *and* the line search are on: every tier is tried, in order.
+        let needs_damping = |c: NewtonConfig| {
+            record(&c);
             if c.gmin_steps > 0 && c.max_damping_halvings > 0 {
                 Ok(c.max_damping_halvings)
             } else {
                 Err(CoreError::Singular)
             }
         };
-        let got = with_gmin_rescue(NewtonConfig::default(), needs_both);
+        let got = with_gmin_rescue(NewtonConfig::default(), needs_damping);
         assert_eq!(
             got.expect("the damped ladder solves it"),
             RESCUE_DAMPING_HALVINGS
@@ -404,18 +438,30 @@ mod tests {
         assert_eq!(
             *tried.borrow(),
             vec![
-                (0, 0),
-                (GMIN_RESCUE_STEPS, 0),
-                (GMIN_RESCUE_STEPS, RESCUE_DAMPING_HALVINGS)
+                (0, inf, 0),
+                (GMIN_RESCUE_STEPS, inf, 0),
+                (GMIN_RESCUE_STEPS, RESCUE_NODE_STEP, 0),
+                (GMIN_RESCUE_STEPS, inf, RESCUE_DAMPING_HALVINGS)
             ]
         );
 
-        // What the plain ladder solves never reaches the damped tier.
+        // What the node-step tier solves never reaches the damped one.
+        tried.borrow_mut().clear();
+        let needs_cap = |c: NewtonConfig| {
+            record(&c);
+            if c.max_node_step.is_finite() {
+                Ok(())
+            } else {
+                Err(CoreError::Singular)
+            }
+        };
+        with_gmin_rescue(NewtonConfig::default(), needs_cap).expect("the capped ladder solves it");
+        assert_eq!(tried.borrow().len(), 3);
+
+        // What the plain ladder solves never reaches either.
         tried.borrow_mut().clear();
         let needs_ladder = |c: NewtonConfig| {
-            tried
-                .borrow_mut()
-                .push((c.gmin_steps, c.max_damping_halvings));
+            record(&c);
             if c.gmin_steps > 0 {
                 Ok(())
             } else {
@@ -423,7 +469,10 @@ mod tests {
             }
         };
         with_gmin_rescue(NewtonConfig::default(), needs_ladder).expect("the ladder solves it");
-        assert_eq!(*tried.borrow(), vec![(0, 0), (GMIN_RESCUE_STEPS, 0)]);
+        assert_eq!(
+            *tried.borrow(),
+            vec![(0, inf, 0), (GMIN_RESCUE_STEPS, inf, 0)]
+        );
 
         // If every tier fails, the error is the first one: the real circuit's, not a variant's.
         let always_fails = |c: NewtonConfig| -> Result<(), CoreError> {

@@ -973,6 +973,15 @@ sparse LU. **No golden** — the check is the logic function (`circuits/benchmar
 - `.tran 1p 12n`: 13 466 points in 4.1 min; all 5 528 settled output samples, over 11 input
   vectors, match NAND logic. The pre-flight estimate (0.08–2.4 min) undershot by ~1.7×.
 
+**c432 (1.12.0):** 160 gates, 910 PSP103 devices, 15 416 unknowns, from the standard `.bench`
+(cross-checked against an independent Verilog copy) by `gen_iscas.py`, missing gates composed
+from c7552's cells. Five input vectors solve; four checked on all 160 gate outputs, **640/640
+correct**. It needed a new DC rescue tier — the `gmin` ladder with each node's Newton step capped
+at 0.5 V (`va_core::dc`, `RESCUE_NODE_STEP`) — because leakage-only nodes inside 4-high NMOS
+stacks made the ladder cycle and the damped ladder stall. Wall time 2.9–6.9 min per `.op`, the
+same deck varying >2× between runs; per Newton step, assembly (PSP103 evaluation) 218 ms (~70%),
+sparse LU 88 ms (~28%). Details and the full table: `circuits/benchmark/iscas85/README.md`.
+
 c7552 itself (~250 000 unknowns) is out of reach for size, not syntax: see the circuit-size
 limit above.
 

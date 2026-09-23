@@ -72,6 +72,20 @@ pub struct NewtonConfig {
     /// actually produced. It cannot rescue a genuinely singular Jacobian, and it costs one
     /// extra assemble per halving, which is why it is off unless asked for.
     pub max_damping_halvings: usize,
+    /// The largest change one Newton step may make to a [`UnknownKind::Node`] unknown, in that
+    /// unknown's own units (volts, for an electrical node); larger components of the step are
+    /// clamped to it, one by one. Branch rows are never clamped. `f64::INFINITY` (the default)
+    /// disables it: every step is taken as solved, exactly as before this existed.
+    ///
+    /// SPICE's answer to a node set only by leakage — the inside of a transistor stack whose
+    /// lower device is off — where the linearized step divides by a near-zero conductance and
+    /// proposes tens of volts on a circuit whose supply is under two. Unlike
+    /// [`Self::max_damping_halvings`] it costs nothing per iteration (no trial evaluation), and
+    /// unlike it, it bounds each unknown separately, so one runaway row does not shrink the
+    /// whole step. The converged answer does not depend on it: a clamp only binds on a step
+    /// larger than itself, and the convergence test is on the step actually applied. Used by
+    /// the DC rescue (`crate::dc`), not by default.
+    pub max_node_step: f64,
     /// Dense or sparse linear algebra — see [`Solver`]. Default [`Solver::Auto`]: dense below
     /// [`crate::sparse::SPARSE_THRESHOLD`] unknowns, sparse from it. The answer does not depend
     /// on it beyond rounding (the pivot order differs), so every convergence aid behaves the
@@ -86,6 +100,7 @@ impl Default for NewtonConfig {
             abstol: 1e-12,
             reltol: 1e-9,
             max_damping_halvings: 0,
+            max_node_step: f64::INFINITY,
             limit_junctions: true,
             gmin_steps: 0,
             solver: Solver::Auto,
@@ -372,7 +387,7 @@ fn solve_from(
         let mut update_small = true;
         for i in 0..dim {
             let vold = x[i];
-            let vnew_raw = vold + scale * dx[i];
+            let vnew_raw = vold + node_step(scale * dx[i], kinds[i], cfg.max_node_step);
             let vnew = if junction[i] {
                 convergence::limit_junction(vnew_raw, vold, vt, vcrit)
             } else {
@@ -430,7 +445,7 @@ fn damped_scale(
     for _ in 0..=cfg.max_damping_halvings {
         let candidate: Vec<f64> = (0..dim)
             .map(|i| {
-                let raw = x[i] + scale * dx[i];
+                let raw = x[i] + node_step(scale * dx[i], kinds[i], cfg.max_node_step);
                 if junction[i] {
                     convergence::limit_junction(raw, x[i], vt, vcrit)
                 } else {
@@ -448,6 +463,17 @@ fn damped_scale(
         scale *= 0.5;
     }
     scale * 2.0
+}
+
+/// One component of a Newton step, clamped to `max` when it moves a `Node` unknown
+/// ([`NewtonConfig::max_node_step`]). With `max` infinite this is `step` exactly, so the default
+/// path's arithmetic is unchanged.
+fn node_step(step: f64, kind: UnknownKind, max: f64) -> f64 {
+    if max.is_finite() && matches!(kind, UnknownKind::Node) {
+        step.clamp(-max, max)
+    } else {
+        step
+    }
 }
 
 /// Infinity norm (max absolute component) of a vector.
@@ -535,6 +561,52 @@ mod tests {
             (0.4..1.0).contains(&vd),
             "a forward-biased silicon junction should sit near 0.6-0.8 V, got {vd}"
         );
+    }
+
+    /// § `max_node_step`, in the same "fails one way, succeeds the other" shape: the fixture
+    /// plain Newton cannot solve without junction limiting converges with only the node-step
+    /// cap on, to the same KCL-exact answer — and on a circuit that converges either way, the
+    /// cap changes the path, not the answer.
+    #[test]
+    fn a_node_step_cap_converges_what_plain_newton_cannot_and_keeps_the_answer() {
+        let vs = VSource::new(0, GROUND, 2, 10.0);
+        let r = Resistor::new(0, 1, 1.0);
+        let d = Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
+        let plain = NewtonConfig {
+            limit_junctions: false,
+            ..NewtonConfig::default()
+        };
+        assert!(
+            solve(&insts, 3, plain).is_err(),
+            "the fixture must defeat plain Newton"
+        );
+        let capped = NewtonConfig {
+            max_node_step: 0.5,
+            ..plain
+        };
+        let x = solve(&insts, 3, capped).expect("the capped iteration converges");
+        let vd = x[1];
+        let id = 1e-14 * ((vd / VT_NOMINAL).exp() - 1.0);
+        let ir = x[0] - vd;
+        assert!(
+            (id - ir).abs() < 1e-9 * ir.abs().max(1e-6),
+            "KCL at the junction: diode {id} vs resistor {ir} (V(d) = {vd})"
+        );
+
+        // With junction limiting on, both converge; the cap does not move the answer.
+        let limited = NewtonConfig::default();
+        let a = solve(&insts, 3, limited).expect("converges");
+        let b = solve(
+            &insts,
+            3,
+            NewtonConfig {
+                max_node_step: 0.5,
+                ..limited
+            },
+        )
+        .expect("converges");
+        assert!((a[1] - b[1]).abs() < 1e-9, "{} vs {}", a[1], b[1]);
     }
 
     /// § junction limiting, in the same "fails one way, succeeds the other" shape the damping
