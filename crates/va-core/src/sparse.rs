@@ -32,8 +32,9 @@
 //!
 //! **Limitations, stated:** the per-stamp slot lookup is a hash lookup — the simple version the
 //! proposal names; a per-instance slot cache is the fast version, to be built only if Step 5's
-//! profile says the hash is where the time goes. The sink ignores `excitation` and
-//! `bound_step`, which only AC (Step 4) and transient (Step 3) consume.
+//! profile says the hash is where the time goes. The sink records `bound_step` (transient,
+//! Step 3) the way `va_abi::stamps::DenseStamp` does, and ignores `excitation`, which only AC
+//! (Step 4) consumes.
 
 use crate::linsolve::RESIDUAL_TOL;
 use crate::CoreError;
@@ -180,6 +181,11 @@ impl<'a> SparseMatrix<'a> {
         self.pattern.slot(row, col).map_or(0.0, |s| self.values[s])
     }
 
+    /// The stored values, one per entry of the pattern, in slot order.
+    pub fn values(&self) -> &'a [f64] {
+        self.values
+    }
+
     /// `A · x`.
     pub fn mul_vec(&self, x: &[f64]) -> Vec<f64> {
         let mut y = vec![0.0; self.dim()];
@@ -208,6 +214,9 @@ pub struct SparseSystem {
     /// Stamps at entries the pattern does not hold yet, as `(jacobian, dcharge)` sums. Empty
     /// between [`Self::finish`] and the next stamp outside the pattern.
     overflow: HashMap<(usize, usize), (f64, f64)>,
+    /// The tightest `bound_step` request since the last [`Self::clear`], as
+    /// `va_abi::stamps::DenseStamp::bound_step` keeps it.
+    bound_step: Option<f64>,
 }
 
 impl SparseSystem {
@@ -223,6 +232,7 @@ impl SparseSystem {
             jacobian: vec![0.0; nnz],
             dcharge: vec![0.0; nnz],
             overflow: HashMap::new(),
+            bound_step: None,
         }
     }
 
@@ -243,6 +253,7 @@ impl SparseSystem {
         self.jacobian.iter_mut().for_each(|v| *v = 0.0);
         self.dcharge.iter_mut().for_each(|v| *v = 0.0);
         self.overflow.clear();
+        self.bound_step = None;
     }
 
     /// Fold any stamps that fell outside the pattern into it, growing the pattern to the union.
@@ -284,6 +295,11 @@ impl SparseSystem {
     /// The charge `Q(x)`, length `dim`.
     pub fn charge_values(&self) -> &[f64] {
         &self.charge
+    }
+
+    /// The tightest `bound_step` a model asked for since the last [`Self::clear`], if any.
+    pub fn bound_step(&self) -> Option<f64> {
+        self.bound_step
     }
 
     /// The Jacobian `∂f/∂x`. Call after [`Self::finish`]: a stamp still in overflow is not in it.
@@ -358,6 +374,14 @@ impl StampSink for SparseSystem {
                 Some(s) => self.dcharge[s] += value,
                 None => self.overflow.entry((row, col)).or_default().1 += value,
             }
+        }
+    }
+
+    /// The same rule as `DenseStamp`: keep the tightest meaningful request, and discard a
+    /// non-positive or non-finite one, which the LRM gives no meaning.
+    fn bound_step(&mut self, dt: f64) {
+        if dt.is_finite() && dt > 0.0 {
+            self.bound_step = Some(self.bound_step.map_or(dt, |cur| cur.min(dt)));
         }
     }
 }
@@ -795,5 +819,17 @@ mod tests {
                 assert_eq!(sparse.dcharge().get(r, c), dense.dcharge[r * 2 + c]);
             }
         }
+    }
+
+    #[test]
+    fn bound_step_keeps_the_tightest_meaningful_request_and_clears() {
+        let mut sys = SparseSystem::new(1);
+        assert_eq!(sys.bound_step(), None);
+        for dt in [1e-6, 1e-3, 0.0, -1.0, f64::NAN, 1e-9] {
+            StampSink::bound_step(&mut sys, dt);
+        }
+        assert_eq!(sys.bound_step(), Some(1e-9));
+        sys.clear();
+        assert_eq!(sys.bound_step(), None, "a bound belongs to one evaluation");
     }
 }

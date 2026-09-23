@@ -20,6 +20,36 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.7.0 - 2026-09-23
+------------------
+**Sparse solve, Step 3: the transient timestep loop uses it from 500 unknowns.** `TranConfig`
+gains `solver` (`Auto` by default). The integrator holds one dense-or-sparse `Linear` for the
+whole run: on the sparse path the pattern is found at the seed evaluation at `tstart` and the
+symbolic factorization is reused by every Newton iteration of every timestep, and the
+companion matrix `J + coeff·dQ` is one pass over the values of the shared pattern.
+`va_core::sparse::SparseSystem` now records `bound_step` the way `DenseStamp` does. The
+`@(final_step)` probe compares the two evaluations' value arrays; if the pattern grew between
+them the arrays differ in length, which counts as a change and is honoured with a re-solve (the
+conservative reading). Below 500 unknowns the dense branch is unchanged, apart from one loop
+rewritten as a zip that clippy asked for, with the same arithmetic. `va-cli`'s pre-flight line
+now says sparse covers the whole run for `.tran`; `.ac`/`.noise` loops stay dense until Step 4.
+
+Found while writing the tests: in a debug build, dense LU at 501 unknowns costs 0.2 s per solve,
+and a 501-unknown RC run made ~500 of them. 103 s dense, 1.6 s sparse. The test comparing `Auto`
+with dense at that size took three minutes; it now checks that `Auto` is bit-for-bit the
+forced-sparse run, and agreement with dense is shown by the smaller tests.
+
+Measured at 1.7.0: `cargo test --workspace` **867 passed / 0 failed** (+5: RC charge and ring
+oscillator, same steps and values on both paths; `bound_step` on the sparse path; `Auto` at 501
+unknowns is the sparse path; `SparseSystem`'s `bound_step`). fmt + clippy clean.
+`cargo xtask validate`: **28/28**, output identical line for line to 1.4.1.
+`cargo xtask validate --solver sparse`: **28/28**, no printed error figure differs from the dense
+run, with the transient gates now integrated sparse throughout. `bench-scale`, two runs: a whole
+`.tran` at 802 unknowns (101 points, now sparse under `Auto`) **68–236 ms**, 0.68–2.3 ms per
+point, against 3.0–3.5 s (29.7–35.0 ms per point) dense in the 1.6.0 runs earlier the same day.
+The second run was noisy throughout (its dense `.ac` column doubled too), hence the range.
+
+
 1.6.0 - 2026-09-23
 ------------------
 **Sparse solve, Step 2: DC uses it from 500 unknowns.** `NewtonConfig` gains `solver`

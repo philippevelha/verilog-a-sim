@@ -2108,9 +2108,8 @@ pub fn solve_transient(
     solve_transient_with(net, compiled, integration, Solver::Auto)
 }
 
-/// [`solve_transient`] with an explicit [`Solver`] — which, until Step 3 of
-/// `docs/proposals/sparse-solve.md`, governs only the operating point the run starts from. The
-/// timestep loop itself is dense.
+/// [`solve_transient`] with an explicit [`Solver`], used for the operating point the run starts
+/// from and for every timestep's Newton solve (`docs/proposals/sparse-solve.md`, Step 3).
 ///
 /// # Errors
 ///
@@ -2146,6 +2145,7 @@ pub fn solve_transient_with(
         // were re-validated under it on 2026-08-31 against the same, unchanged QSPICE golden
         // -- see `va_transient::integrator::LteEstimator` and docs/roadmap.md's T4.2 entry.
         lte_estimator: LteEstimator::DividedDifference,
+        solver,
     };
 
     let BuiltInstances {
@@ -3470,6 +3470,7 @@ mod tests {
             lte_reltol: 1e-6,
             lte_abstol: 1e-12,
             lte_estimator: LteEstimator::DividedDifference,
+            solver: Solver::Auto,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -3606,6 +3607,7 @@ mod tests {
             lte_reltol: 1e-6,
             lte_abstol: 1e-9,
             lte_estimator: LteEstimator::DividedDifference,
+            solver: Solver::Auto,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -3667,6 +3669,7 @@ mod tests {
             lte_reltol: 1e-6,
             lte_abstol: 1e-9,
             lte_estimator: LteEstimator::DividedDifference,
+            solver: Solver::Auto,
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");

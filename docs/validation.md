@@ -646,11 +646,12 @@ a Laplace filter still evaluates to `H(0)` — a stated limitation at the constr
 
 ## The dense-LU circuit-size limit (re-measured 2026-09-17, v1.1.0)
 
-> **Since 1.6.0 (2026-09-23) this is no longer the DC limit.** From 500 unknowns the DC
-> operating point and `.dc` sweeps use sparse LU (`docs/proposals/sparse-solve.md`, Step 2): the
-> `.op` at 802 unknowns below, 63.46 ms dense, measured 2.0–2.3 ms on the sparse path. The
-> `.tran`, `.ac` and `.noise` columns are still dense and still describe the limit, until
-> Steps 3–4.
+> **Since 1.6.0/1.7.0 (2026-09-23) this is no longer the DC or transient limit.** From 500
+> unknowns `.op`, `.dc` and `.tran` use sparse LU (`docs/proposals/sparse-solve.md`, Steps 2–3).
+> At 802 unknowns the `.op` below (63.46 ms dense) measured 2.0–2.3 ms, and the `.tran`
+> (52.3 ms per point dense here; 29.7–35.0 ms dense on 2026-09-23) measured 0.68–2.3 ms per
+> point. The `.ac` and `.noise` columns are still dense and still describe the limit, until
+> Step 4.
 
 The production linear solve is dense LU (`va_core::linsolve::solve_dense`); the sparse solver
 beside it is a benchmark subject, not the shipped path (roadmap, 2026-08-31: "stay dense, the

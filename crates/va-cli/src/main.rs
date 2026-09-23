@@ -64,9 +64,9 @@ fn print_usage() {
                                  Names a net (`mid`), a device current (`V1`), or a full
                                  label (`V(mid)`); an unknown name is an error.
          --solver auto|dense|sparse  Linear algebra. Default auto: dense below 500
-                                 unknowns, sparse from 500. Sparse covers the DC
-                                 operating point and .dc sweeps; .tran/.ac/.noise
-                                 loops are still dense."
+                                 unknowns, sparse from 500. Sparse covers .op, .dc
+                                 and .tran; the .ac/.noise frequency loops are
+                                 still dense."
     );
 }
 

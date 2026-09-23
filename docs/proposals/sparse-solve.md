@@ -1,7 +1,7 @@
 # Proposal: a sparse linear solve above 500 unknowns
 
-**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1 and 2 done
-(1.5.0, 1.6.0, 2026-09-23)**; Steps 3–5 open.
+**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1–3 done
+(1.5.0, 1.6.0, 1.7.0, 2026-09-23)**; Steps 4–5 open.
 **Affects:** `va-core` (new sparse assembler + solver, the selector), `va-transient` and
 `va-acnoise` (their assemblers and solve call sites), `va-cli` (`--solver`, the pre-flight line),
 `xtask` (`bench-scale` gains a sparse column). **`va-abi` (Interface β) and `va-ir`
@@ -273,6 +273,27 @@ Evidence: default `xtask validate` output identical line for line to 1.4.1; with
 sparse` all 28 gates pass and every printed error figure is the same as dense's. `bench-scale`
 (two runs): a whole `.op` at 802 unknowns, now sparse under `Auto`, takes 2.0–2.3 ms, against
 63.46 ms dense on 2026-09-17 and 9.0–9.8 ms for the dense 402-unknown row in the same runs.
+
+**Step 3 — done, 1.7.0 (2026-09-23).** The transient timestep loop is on the sparse path
+from 500 unknowns. `TranConfig::solver`; one `Linear` holder for the whole run, so the pattern is
+found at the seed evaluation and the symbolic factorization reused by every Newton iteration of
+every timestep; the companion matrix is one pass over the values of the shared J/dQ pattern.
+`SparseSystem` now records `bound_step` the way `DenseStamp` does. The final-step probe compares
+the two evaluations' value arrays; a pattern that grew between them counts as a change, so the
+flag is honoured with a re-solve (the conservative reading). The dense branch is unchanged.
+
+Evidence: default `xtask validate` identical line for line to 1.4.1; `--solver sparse` 28/28
+with no printed error figure differing from dense, now with the transient gates integrated
+sparse throughout. Tests: the RC charge and the BJT ring oscillator take the same steps and land
+on the same values on both paths; `bound_step` is honoured on the sparse path; `Auto` at 501
+unknowns is bit-for-bit the forced-sparse run. `bench-scale` (two runs): a whole `.tran` at 802
+unknowns, 101 points, takes 68–236 ms (0.68–2.3 ms per point), against 3.0–3.5 s (29.7–35.0 ms
+per point) dense earlier the same day on the same machine.
+
+Found on the way: in a *debug* build, dense LU at 501 unknowns costs 0.2 s per solve, and a
+501-unknown RC ladder run made ~500 of them (103 s; the sparse run took 1.6 s). The test that
+first compared those two paths at that size took three minutes, and was changed to compare
+`Auto` against forced sparse instead.
 
 ## 7. Decided, and still open
 

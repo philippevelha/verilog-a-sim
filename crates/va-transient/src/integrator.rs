@@ -75,6 +75,8 @@ use va_abi::stamps::DenseStamp;
 use va_abi::{AnalysisCtx, ModelInstance};
 use va_core::convergence;
 use va_core::linsolve;
+pub use va_core::sparse::Solver;
+use va_core::sparse::{SparseLu, SparseMatrix, SparseSystem};
 
 /// Integration method for the charge channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +114,11 @@ pub struct TranConfig {
     pub lte_abstol: f64,
     /// Which LTE estimator drives step accept/reject. See [`LteEstimator`].
     pub lte_estimator: LteEstimator,
+    /// Dense or sparse linear algebra for every timestep's Newton solve — see [`Solver`].
+    /// [`Solver::Auto`] is dense below `va_core::sparse::SPARSE_THRESHOLD` unknowns and sparse
+    /// from it (`docs/proposals/sparse-solve.md`, Step 3). The trajectory does not depend on it
+    /// beyond rounding.
+    pub solver: Solver,
 }
 
 /// A sampled transient waveform: aligned time and solution-vector columns.
@@ -508,6 +515,23 @@ fn classify_dynamic_rows(dcharge: &[f64], charge: &[f64], dim: usize) -> Vec<boo
         .collect()
 }
 
+/// [`classify_dynamic_rows`] for an evaluation assembled on the sparse path, where `dcharge`
+/// holds one value per entry of `pattern`. The same rule: a row is dynamic if its charge or any
+/// of its charge-Jacobian entries is nonzero.
+fn classify_dynamic_rows_sparse(
+    pattern: &va_core::sparse::Pattern,
+    dcharge: &[f64],
+    charge: &[f64],
+) -> Vec<bool> {
+    let mut dynamic: Vec<bool> = charge.iter().map(|&q| q != 0.0).collect();
+    for ((row, _), &dq) in pattern.entries().zip(dcharge) {
+        if dq != 0.0 {
+            dynamic[row] = true;
+        }
+    }
+    dynamic
+}
+
 /// Which rows may still veto a step once shrinking it has stopped helping.
 ///
 /// Everything except a **constraint row that carries no state**: a row that
@@ -796,6 +820,69 @@ impl Phase {
 /// rebuild a time-varying source from scratch at every step.
 /// `state` carries Interface β's per-instance state channel (§6 change, 2026-08-06). See
 /// [`StateBuffers`] for the commit/rollback discipline this function is one half of.
+/// What one evaluation produced, in the form the step controller reads it.
+///
+/// The vectors are the same on both paths. `jacobian` and `dcharge` are dense row-major
+/// `dim × dim` on the dense path, exactly `DenseStamp`'s buffers moved out; on the sparse path
+/// they are one value per entry of the [`Linear`] system's pattern *as it stood after this
+/// evaluation*, which is the pattern [`Linear::solve`] pairs them with.
+struct Assembled {
+    residual: Vec<f64>,
+    charge: Vec<f64>,
+    jacobian: Vec<f64>,
+    dcharge: Vec<f64>,
+    bound_step: Option<f64>,
+}
+
+/// The linear algebra a transient run uses, held for the whole run: nothing for the dense path;
+/// for the sparse one, the system whose pattern is found once and the LU whose symbolic
+/// factorization is reused by every Newton iteration of every timestep.
+enum Linear {
+    Dense,
+    Sparse {
+        sys: Box<SparseSystem>,
+        lu: SparseLu,
+    },
+}
+
+impl Linear {
+    fn new(solver: Solver, dim: usize) -> Self {
+        if solver.uses_sparse(dim) {
+            Linear::Sparse {
+                sys: Box::new(SparseSystem::new(dim)),
+                lu: SparseLu::new(),
+            }
+        } else {
+            Linear::Dense
+        }
+    }
+
+    /// Solve `j · dx = b`, `j` being an [`Assembled::jacobian`]-shaped matrix from the latest
+    /// evaluation.
+    fn solve(&mut self, j: &[f64], b: &[f64], dim: usize) -> Result<Vec<f64>, TransientError> {
+        match self {
+            Linear::Dense => Ok(linsolve::solve_dense(j, b, dim)?),
+            Linear::Sparse { sys, lu } => {
+                // `j` came from the latest evaluation on this same system, so its length is the
+                // pattern's; a mismatch would be a bug in this file, reported rather than
+                // panicked on.
+                let a = SparseMatrix::new(sys.pattern(), j).ok_or(va_core::CoreError::Singular)?;
+                Ok(lu.solve(a, b)?)
+            }
+        }
+    }
+
+    /// Which rows are dynamic, from the initial evaluation — see [`classify_dynamic_rows`].
+    fn dynamic_rows(&self, initial: &Assembled, dim: usize) -> Vec<bool> {
+        match self {
+            Linear::Dense => classify_dynamic_rows(&initial.dcharge, &initial.charge, dim),
+            Linear::Sparse { sys, .. } => {
+                classify_dynamic_rows_sparse(sys.pattern(), &initial.dcharge, &initial.charge)
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble(
     instances: &[&dyn ModelInstance],
@@ -808,7 +895,8 @@ fn assemble(
     fired: &FiredEvents,
     ddt: (f64, f64, f64),
     sim: va_abi::SimParams,
-) -> DenseStamp {
+    linear: &mut Linear,
+) -> Assembled {
     let ctx = AnalysisCtx::transient(t)
         .with_tstep(tstep)
         .with_initial_step(phase.initial)
@@ -819,15 +907,41 @@ fn assemble(
     // Every evaluation starts from the last *committed* state, so an unwritten slot means
     // "unchanged" rather than inheriting whatever a rejected candidate proposed.
     state.reset_scratch();
-    let mut sink = DenseStamp::new(dim);
-    for (i, inst) in instances.iter().enumerate() {
-        let (prev, next) = state.slices(i);
-        // Which of this instance's monitored events the consumer determined fired at this
-        // timepoint — the input an `@(cross(...))` body is gated on.
-        let mut st = va_abi::ModelState::with_events(prev, next, fired.slice(i));
-        inst.load(x, &ctx, &mut st, &mut sink);
+    match linear {
+        Linear::Dense => {
+            let mut sink = DenseStamp::new(dim);
+            for (i, inst) in instances.iter().enumerate() {
+                let (prev, next) = state.slices(i);
+                // Which of this instance's monitored events the consumer determined fired at
+                // this timepoint — the input an `@(cross(...))` body is gated on.
+                let mut st = va_abi::ModelState::with_events(prev, next, fired.slice(i));
+                inst.load(x, &ctx, &mut st, &mut sink);
+            }
+            Assembled {
+                residual: sink.residual,
+                charge: sink.charge,
+                jacobian: sink.jacobian,
+                dcharge: sink.dcharge,
+                bound_step: sink.bound_step,
+            }
+        }
+        Linear::Sparse { sys, .. } => {
+            sys.clear();
+            for (i, inst) in instances.iter().enumerate() {
+                let (prev, next) = state.slices(i);
+                let mut st = va_abi::ModelState::with_events(prev, next, fired.slice(i));
+                inst.load(x, &ctx, &mut st, sys.as_mut());
+            }
+            sys.finish();
+            Assembled {
+                residual: sys.residual_values().to_vec(),
+                charge: sys.charge_values().to_vec(),
+                jacobian: sys.jacobian().values().to_vec(),
+                dcharge: sys.dcharge().values().to_vec(),
+                bound_step: sys.bound_step(),
+            }
+        }
     }
-    sink
 }
 
 /// The consumer half of Interface β's state channel: one flat `committed` buffer holding state
@@ -927,6 +1041,7 @@ fn newton_step(
     companion: &Companion,
     junction: &[bool],
     per_abstol: &[f64],
+    linear: &mut Linear,
 ) -> Result<Solved, TransientError> {
     const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
@@ -961,19 +1076,34 @@ fn newton_step(
                 companion.prev2_weight,
             ),
             sim.at_iteration(iteration, 0.0),
+            linear,
         );
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
-        for i in 0..dim {
-            f[i] += companion.coeff * sink.charge[i] + companion.offset[i];
-            for k in 0..dim {
-                j[i * dim + k] += companion.coeff * sink.dcharge[i * dim + k];
+        for ((fi, qi), oi) in f.iter_mut().zip(&sink.charge).zip(&companion.offset) {
+            *fi += companion.coeff * qi + oi;
+        }
+        // The companion matrix `J + coeff·dQ`, entry by entry. On the sparse path both live on
+        // one pattern (`va_core::sparse::SparseSystem::companion`'s rule), so it is one pass
+        // over the values.
+        match linear {
+            Linear::Dense => {
+                for i in 0..dim {
+                    for k in 0..dim {
+                        j[i * dim + k] += companion.coeff * sink.dcharge[i * dim + k];
+                    }
+                }
+            }
+            Linear::Sparse { .. } => {
+                for (jv, qv) in j.iter_mut().zip(&sink.dcharge) {
+                    *jv += companion.coeff * qv;
+                }
             }
         }
         let residual_norm = f.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
 
         let neg_f: Vec<f64> = f.iter().map(|v| -v).collect();
-        let dx = linsolve::solve_dense(&j, &neg_f, dim)?;
+        let dx = linear.solve(&j, &neg_f, dim)?;
 
         let mut update_small = true;
         for i in 0..dim {
@@ -1083,6 +1213,9 @@ pub fn run_with_events(
 
     let mut x = x0;
     let mut state = StateBuffers::new(instances);
+    // One for the whole run: the pattern is found on the first evaluation and the symbolic
+    // factorization reused by every Newton iteration of every timestep after it.
+    let mut linear = Linear::new(cfg.solver, dim);
     // The one evaluation of the run that is genuinely the analysis's first: a stateful model
     // seeds itself from its input here rather than from a zero-filled `prev`.
     // No step has been taken, so there is no rate to report: `is_initial_step` already
@@ -1102,6 +1235,7 @@ pub fn run_with_events(
         &fired,
         (0.0, 0.0, 0.0),
         sim,
+        &mut linear,
     );
     state.commit();
     // Seed the event channel's history at the initial condition. A crossing is a change of
@@ -1148,7 +1282,7 @@ pub fn run_with_events(
             .map(|&(_, _, t)| t)
             .filter(|&t| t > cfg.tstart),
     );
-    let is_dynamic = classify_dynamic_rows(&initial.dcharge, &initial.charge, dim);
+    let is_dynamic = linear.dynamic_rows(&initial, dim);
     // Which rows the step controller may still judge once shrinking has stopped helping.
     // See the floor rule at the accept/reject decision, and `lte_controllable_rows`.
     let lte_controlled = lte_controllable_rows(
@@ -1276,6 +1410,7 @@ pub fn run_with_events(
                 &primary,
                 &junction,
                 &per_abstol,
+                &mut linear,
             ) {
                 Ok(solved) => solved,
                 // A step Newton cannot converge on is a step that was too long, the same
@@ -1368,6 +1503,7 @@ pub fn run_with_events(
                         &reference_companion,
                         &junction,
                         &per_abstol,
+                        &mut linear,
                     )?
                     .x;
                     (
@@ -1545,6 +1681,7 @@ pub fn run_with_events(
                         &fired,
                         ddt,
                         probe_sim,
+                        &mut linear,
                     );
                     let ordinary = assemble(
                         instances,
@@ -1557,7 +1694,11 @@ pub fn run_with_events(
                         &fired,
                         ddt,
                         probe_sim,
+                        &mut linear,
                     );
+                    // On the sparse path a pattern that grew between the two evaluations makes
+                    // the matrices differ in length, which counts as a change: the flag is then
+                    // honoured with a re-solve, the conservative reading.
                     if last.residual == ordinary.residual
                         && last.jacobian == ordinary.jacobian
                         && last.charge == ordinary.charge
@@ -1584,6 +1725,7 @@ pub fn run_with_events(
                         &primary,
                         &junction,
                         &per_abstol,
+                        &mut linear,
                     )?;
                     x = resolved.x;
                     converged_at = resolved.iterations;
@@ -1612,6 +1754,7 @@ pub fn run_with_events(
                         primary.prev2_weight,
                     ),
                     commit_sim,
+                    &mut linear,
                 );
                 state.commit();
                 // Shift the charge history before overwriting it: what was `q_prev` becomes
@@ -2098,6 +2241,7 @@ mod tests {
             lte_reltol: 1e-3,
             lte_abstol: 1e-6,
             lte_estimator: LteEstimator::EmbeddedPair,
+            solver: Solver::Auto,
         }
     }
 
@@ -2929,6 +3073,7 @@ mod tests {
             lte_reltol: 5e-2,
             lte_abstol: 2e-3,
             lte_estimator: LteEstimator::EmbeddedPair,
+            solver: Solver::Auto,
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage
@@ -2960,5 +3105,151 @@ mod tests {
             "expected a deeper trough later in the run (growing oscillation): first-half min \
              {first_half_min}, second-half min {second_half_min}"
         );
+    }
+
+    /// `cfg` with the linear solver replaced.
+    fn with_solver(cfg: TranConfig, solver: Solver) -> TranConfig {
+        TranConfig { solver, ..cfg }
+    }
+
+    /// The two paths take the same steps and land on the same values, to rounding. The step grid
+    /// is compared first: the LTE controller decides every step from the solution, so a grid that
+    /// matched while the values drifted would mean the values were compared at the wrong times.
+    fn assert_same_trajectory(dense: &Waveform, sparse: &Waveform, rel: f64) {
+        assert_eq!(
+            dense.t.len(),
+            sparse.t.len(),
+            "different number of accepted steps"
+        );
+        let scale = dense
+            .x
+            .iter()
+            .flatten()
+            .fold(1e-12_f64, |m, v| m.max(v.abs()));
+        for (k, (td, ts)) in dense.t.iter().zip(&sparse.t).enumerate() {
+            assert!(
+                (td - ts).abs() <= 1e-12 * td.abs().max(1e-15),
+                "t[{k}]: {td} vs {ts}"
+            );
+            for (c, (d, s)) in dense.x[k].iter().zip(&sparse.x[k]).enumerate() {
+                assert!(
+                    (d - s).abs() <= rel * scale,
+                    "x[{k}][{c}] at t={td}: dense {d}, sparse {s}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_transient_matches_dense_on_an_rc_charge() {
+        let (vs, r, c) = rc_circuit(5.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let cfg = default_cfg(5e-3, 1e-4, Method::Trapezoidal);
+        let dense = run(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            with_solver(cfg, Solver::Dense),
+        )
+        .expect("dense integrates");
+        let sparse = run(
+            &insts,
+            3,
+            vec![5.0, 0.0, 0.0],
+            with_solver(cfg, Solver::Sparse),
+        )
+        .expect("sparse integrates");
+        assert_same_trajectory(&dense, &sparse, 1e-12);
+    }
+
+    /// Nonlinear, three gain stages, the embedded-pair estimator solving every step twice: the
+    /// most the reference zoo can put through one run.
+    #[test]
+    fn sparse_transient_matches_dense_on_the_ring_oscillator() {
+        let devices = ring_oscillator();
+        let insts: Vec<&dyn ModelInstance> = devices.iter().map(|d| d.as_ref()).collect();
+        let dim = 8;
+        let dc_cfg = va_core::newton::NewtonConfig {
+            gmin_steps: 12,
+            ..va_core::newton::NewtonConfig::default()
+        };
+        let op = va_core::dc::operating_point(&insts, dim, dc_cfg).expect("DC bias converges");
+        let mut x0 = op.x.clone();
+        x0[3] += 0.05;
+        let cfg = default_cfg(2e-3, 2e-5, Method::Trapezoidal);
+        let dense = run(&insts, dim, x0.clone(), with_solver(cfg, Solver::Dense))
+            .expect("dense integrates");
+        let sparse =
+            run(&insts, dim, x0, with_solver(cfg, Solver::Sparse)).expect("sparse integrates");
+        assert_same_trajectory(&dense, &sparse, 1e-9);
+    }
+
+    /// `bound_step` travels through the sparse sink too: `SparseSystem` records it the way
+    /// `DenseStamp` does, and the controller reads it from there.
+    #[test]
+    fn a_bound_step_request_is_honoured_on_the_sparse_path() {
+        struct Bounded {
+            terminals: [usize; 2],
+        }
+        impl ModelInstance for Bounded {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn load(
+                &self,
+                x: &[f64],
+                ctx: &AnalysisCtx,
+                st: &mut va_abi::ModelState,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
+                va_abi::reference::Resistor::new(self.terminals[0], self.terminals[1], 1000.0)
+                    .load(x, ctx, st, sink);
+                sink.bound_step(1e-6);
+            }
+        }
+        let src = va_abi::reference::VSource::new(0, va_abi::reference::GROUND, 1, 1.0);
+        let r = Bounded {
+            terminals: [0, va_abi::reference::GROUND],
+        };
+        let insts: [&dyn ModelInstance; 2] = [&src, &r];
+        let cfg = with_solver(
+            default_cfg(1e-4, 1e-4, Method::BackwardEuler),
+            Solver::Sparse,
+        );
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates");
+        assert!(
+            wf.t.len() > 90,
+            "only {} points: the bound was dropped",
+            wf.t.len()
+        );
+        for pair in wf.t.windows(2) {
+            assert!(pair[1] - pair[0] <= 1e-6 * (1.0 + 1e-9));
+        }
+    }
+
+    /// Above the threshold `Auto` routes to the sparse path: an RC ladder of 500 sections (501
+    /// unknowns) under `Auto` is bit-for-bit the forced-sparse run. That it agrees with *dense* is
+    /// what the RC and ring-oscillator tests above establish; comparing against dense here too
+    /// cost ~100 s, because a debug build's dense LU at 501 unknowns is 0.2 s per solve and this
+    /// run makes ~500 of them (the sparse run takes ~1.6 s).
+    #[test]
+    fn auto_above_the_threshold_is_the_sparse_path_in_transient() {
+        use va_abi::reference::{Capacitor, Resistor, VSource, GROUND};
+        let n = 500;
+        let vs = VSource::new(0, GROUND, n, 1.0);
+        let rs: Vec<Resistor> = (0..n - 1).map(|i| Resistor::new(i, i + 1, 100.0)).collect();
+        let cs: Vec<Capacitor> = (1..n).map(|i| Capacitor::new(i, GROUND, 1e-9)).collect();
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs];
+        insts.extend(rs.iter().map(|r| r as &dyn ModelInstance));
+        insts.extend(cs.iter().map(|c| c as &dyn ModelInstance));
+        let dim = n + 1;
+        assert!(Solver::Auto.uses_sparse(dim));
+        let mut x0 = vec![0.0; dim];
+        x0[0] = 1.0;
+        let cfg = default_cfg(5e-8, 5e-8, Method::BackwardEuler);
+        let auto = run(&insts, dim, x0.clone(), cfg).expect("auto integrates");
+        let sparse = run(&insts, dim, x0, with_solver(cfg, Solver::Sparse)).expect("sparse");
+        assert_eq!(auto.t, sparse.t);
+        assert_eq!(auto.x, sparse.x);
     }
 }
