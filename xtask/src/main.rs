@@ -39,7 +39,7 @@ fn main() -> Result<()> {
 
 /// `--solver auto|dense|sparse` from `rest`, default `auto`. `validate --solver sparse` runs
 /// every golden gate on the sparse path, which none of them reaches under `auto` (all are far
-/// below 500 unknowns) — the sparse path's validation suite (`docs/proposals/sparse-solve.md` §5).
+/// below 100 unknowns) — the sparse path's validation suite (`docs/proposals/sparse-solve.md` §5).
 fn parse_solver(rest: &[String]) -> Result<va_cli::Solver> {
     let value = rest
         .iter()
@@ -2702,7 +2702,7 @@ mod tests {
     }
 
     /// Every golden gate again, with the sparse solver forced. None of them reaches it under
-    /// `auto` (all are far below 500 unknowns), so this is what validates the sparse path
+    /// `auto` (all are far below 100 unknowns), so this is what validates the sparse path
     /// against QSPICE at all (`docs/proposals/sparse-solve.md` §5). Same tolerances; the results
     /// are not bit-identical to the dense run, because the pivot order differs.
     #[test]

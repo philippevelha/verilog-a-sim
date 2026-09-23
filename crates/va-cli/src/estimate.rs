@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn a_transient_estimate_scales_with_points_and_widens_for_adaptive_stepping() {
         let s = sizing(Analysis::Transient, 300, Points::Adaptive(1000));
-        let (lo, hi) = s.seconds();
+        let (lo, hi) = s.seconds_with(Solver::Dense);
         assert!((lo - 3.319 * 1000.0 / 1e3).abs() < 1e-9, "{lo}");
         assert!((hi - 14.242 * 1500.0 / 1e3).abs() < 1e-9, "{hi}");
     }
@@ -582,7 +582,7 @@ mod tests {
     /// An AC sweep pays one operating-point solve before the grid; a transient does not.
     #[test]
     fn an_ac_estimate_includes_the_operating_point_solve_a_transient_does_not() {
-        let ac = sizing(Analysis::Ac, 300, Points::Exact(10)).seconds();
+        let ac = sizing(Analysis::Ac, 300, Points::Exact(10)).seconds_with(Solver::Dense);
         let grid = (
             AC_MS_PER_POINT[4].1 * 10.0 / 1e3,
             AC_MS_PER_POINT[5].1 * 10.0 / 1e3,
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn an_operating_point_is_one_solve() {
         let s = sizing(Analysis::Dc, 300, Points::Exact(1));
-        let (lo, hi) = s.seconds();
+        let (lo, hi) = s.seconds_with(Solver::Dense);
         assert!((lo - DC_MS_PER_SOLVE[4].1 / 1e3).abs() < 1e-9, "{lo}");
         assert!((hi - DC_MS_PER_SOLVE[5].1 / 1e3).abs() < 1e-9, "{hi}");
         assert!(s.lines()[0].contains("1 point"), "{}", s.lines()[0]);
@@ -761,12 +761,19 @@ mod tests {
     }
 
     /// The estimate follows the solver: the same 300-unknown transient is quoted from the dense
-    /// table under `Auto` and from the sparse one when sparse is forced, and above the threshold
-    /// `Auto` is the sparse quote. The sparse line quotes no dense matrix memory.
+    /// table with dense forced and from the sparse one with sparse forced; `Auto` is the sparse
+    /// quote from the threshold and the dense one below it. The sparse line quotes no dense
+    /// matrix memory.
     #[test]
     fn the_estimate_is_calibrated_on_the_path_the_run_takes() {
         let s = sizing(Analysis::Transient, 300, Points::Exact(1000));
-        assert_eq!(s.seconds(), s.seconds_with(Solver::Dense));
+        assert_eq!(s.seconds(), s.seconds_with(Solver::Sparse));
+        let small = sizing(
+            Analysis::Transient,
+            SPARSE_THRESHOLD - 1,
+            Points::Exact(1000),
+        );
+        assert_eq!(small.seconds(), small.seconds_with(Solver::Dense));
         let (dense_lo, _) = s.seconds_with(Solver::Dense);
         let (_, sparse_hi) = s.seconds_with(Solver::Sparse);
         assert!(
@@ -806,10 +813,10 @@ mod tests {
 
     #[test]
     fn solver_line_names_the_solver_the_reason_and_the_scope() {
-        let dense = solver_line(Solver::Auto, 499);
-        assert!(dense.contains("dense LU (499 < 500 unknowns)"), "{dense}");
-        let auto = solver_line(Solver::Auto, 500);
-        assert!(auto.contains("sparse LU (500 >= 500 unknowns)"), "{auto}");
+        let dense = solver_line(Solver::Auto, 99);
+        assert!(dense.contains("dense LU (99 < 100 unknowns)"), "{dense}");
+        let auto = solver_line(Solver::Auto, 100);
+        assert!(auto.contains("sparse LU (100 >= 100 unknowns)"), "{auto}");
         assert!(auto.contains("whole run"), "{auto}");
         let forced = solver_line(Solver::Sparse, 12);
         assert!(forced.contains("--solver sparse"), "{forced}");

@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.10.0 - 2026-09-23
+-------------------
+**The sparse threshold moves from 500 to 100 unknowns.** `va_core::sparse::SPARSE_THRESHOLD` is
+100: under `--solver auto` (the default) every analysis of a circuit with 100 or more unknowns now
+runs on sparse LU. Decided by the user on 1.9.0's measurement: whole analyses cross over between
+~20 and ~50 unknowns on an RC ladder and an RC mesh, and at ~100 sparse is 1.9–5× faster on the
+mesh and 4–48× on the ladder, so 100 sits clear of the crossover and of its run-to-run noise. On
+a real device circuit the gain starts here too: a 10-inverter PSP103 chain (336 unknowns) ran
+1.9× faster sparse, and was dense under the old threshold.
+
+The cost: a circuit between 100 and 499 unknowns now gets sparse's last-digit differences from
+dense (a different pivot order; every gate tolerance is far above them), and its pre-flight
+estimate is quoted from the sparse tables. Nothing in the repository sits in that range — every
+validation gate is at most 8 unknowns and the PSP103 benchmark decks are ~35–70 by the ~16 rows
+per instance — so no committed result moves. `--solver dense` restores the old path.
+
+Five estimate tests had pinned the 500 value by using 300 unknowns as "dense under `Auto`"; they
+now force the dense path to test the dense tables, and the solver-line test uses 99/100.
+
+Measured at 1.10.0: `cargo test --workspace` **875 passed / 0 failed** (no new tests; the
+threshold test now asserts 100). fmt + clippy clean. `cargo xtask validate`: **28/28**,
+identical line for line to 1.9.0.
+
+
 1.9.0 - 2026-09-23
 ------------------
 **Sparse solve, Step 5: the crossover measured, and the pre-flight estimate calibrated on the

@@ -1,8 +1,9 @@
 # Proposal: a sparse linear solve above 500 unknowns
 
 **Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1–5 done
-(1.5.0–1.9.0, 2026-09-23)**. Open: whether the measured crossover (~20–50 unknowns) moves the
-threshold, and the large QSPICE golden of §5.
+(1.5.0–1.9.0, 2026-09-23)**; then the user moved the threshold to **100** on Step 5's measurement
+(1.10.0). The rest of this document is the record as written and says 500 where that was the
+value at the time. Open: the large QSPICE golden of §5.
 **Affects:** `va-core` (new sparse assembler + solver, the selector), `va-transient` and
 `va-acnoise` (their assemblers and solve call sites), `va-cli` (`--solver`, the pre-flight line),
 `xtask` (`bench-scale` gains a sparse column). **`va-abi` (Interface β) and `va-ir`
@@ -353,9 +354,8 @@ Findings:
   is not modified.
 - **Decided, Step 4 (1.8.0):** the real embedding, factored sparse. A complex sparse LU is
   recorded as a performance option (`docs/future_development.md` §1a), not a correctness need.
-- **Open (measured in Step 5, 1.9.0):** whether the threshold moves from 500 toward the measured
-  ~20–50-unknown crossover. That is the user's call and its own release; every validation gate
-  (at most 8 unknowns) stays dense for any threshold above 8.
+- **Decided (2026-09-23, the user, 1.10.0):** the threshold moves from 500 to **100**, on Step 5's
+  measured ~20–50-unknown crossover. Every validation gate (at most 8 unknowns) stays dense.
 - **Open, from §5:** the one large QSPICE golden (~5 000 unknowns) has not been generated. Every
   sparse-path result so far is validated against dense on the same matrix and by the 28 gates
   under `--solver sparse`, none of which is above 8 unknowns.

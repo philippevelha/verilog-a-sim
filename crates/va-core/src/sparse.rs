@@ -49,11 +49,13 @@ use va_abi::{AnalysisCtx, FiredEvents, ModelInstance, ModelState, UnknownKind};
 
 /// The number of unknowns at and above which [`Solver::Auto`] chooses the sparse path.
 ///
-/// 500 was decided on 2026-09-23 (`docs/proposals/sparse-solve.md` §2): below it every circuit
-/// stays on the dense path, unchanged; at it, the 2026-08-31 benchmark measured the sparse solve
-/// 8–15× faster than dense. It is a starting value: Step 5 measures the crossover with the real
-/// sparse path and moves it if the data says so.
-pub const SPARSE_THRESHOLD: usize = 500;
+/// 100, decided on 2026-09-23 from Step 5's measurement (`docs/proposals/sparse-solve.md` §7,
+/// `docs/validation.md` "The circuit-size limit"). Whole analyses cross over between ~20 and ~50
+/// unknowns on an RC ladder and an RC mesh; at ~100 sparse is 1.9–5× faster on the mesh and 4–48×
+/// on the ladder, so 100 sits clear of the crossover and its run-to-run noise, and no validation
+/// gate (the largest is 8 unknowns) reaches it. It was 500 from 1.6.0 to 1.9.0, a starting value
+/// chosen before the sparse path could be measured whole.
+pub const SPARSE_THRESHOLD: usize = 100;
 
 /// Which linear solver a circuit uses. Chosen once per circuit, so every analysis of one run
 /// uses the same one.
@@ -562,13 +564,13 @@ mod tests {
     }
 
     #[test]
-    fn solver_threshold_is_500_unknowns() {
+    fn solver_threshold_is_100_unknowns() {
         assert!(!Solver::Auto.uses_sparse(SPARSE_THRESHOLD - 1));
         assert!(Solver::Auto.uses_sparse(SPARSE_THRESHOLD));
         assert!(Solver::Sparse.uses_sparse(2));
         assert!(!Solver::Dense.uses_sparse(1_000_000));
         assert_eq!(Solver::default(), Solver::Auto);
-        assert_eq!(SPARSE_THRESHOLD, 500);
+        assert_eq!(SPARSE_THRESHOLD, 100);
     }
 
     #[test]

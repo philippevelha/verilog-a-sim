@@ -63,8 +63,8 @@ fn print_usage() {
          --report <a,b,...>      Report only these quantities (default: all of them).
                                  Names a net (`mid`), a device current (`V1`), or a full
                                  label (`V(mid)`); an unknown name is an error.
-         --solver auto|dense|sparse  Linear algebra. Default auto: dense below 500
-                                 unknowns, sparse from 500. Every analysis
+         --solver auto|dense|sparse  Linear algebra. Default auto: dense below 100
+                                 unknowns, sparse from 100. Every analysis
                                  (.op, .dc, .tran, .ac, .noise) uses it."
     );
 }
@@ -129,7 +129,7 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         .unwrap_or_default();
 
     // `--solver` chooses the linear algebra (docs/proposals/sparse-solve.md). `auto`, the
-    // default, is dense below 500 unknowns and sparse from there.
+    // default, is dense below 100 unknowns and sparse from there.
     let solver = match parse_flag(args, "--solver").as_deref() {
         None | Some("auto") => Solver::Auto,
         Some("dense") => Solver::Dense,

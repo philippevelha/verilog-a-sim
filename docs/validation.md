@@ -647,8 +647,9 @@ a Laplace filter still evaluates to `H(0)` — a stated limitation at the constr
 ## The circuit-size limit (re-measured 2026-09-23, v1.9.0)
 
 Since 1.6.0–1.8.0 every analysis (`.op`, `.dc`, `.tran`, `.ac`, `.noise`) uses dense LU below
-`va_core::sparse::SPARSE_THRESHOLD` (500) unknowns and sparse LU from it
-(`docs/proposals/sparse-solve.md`); `--solver dense|sparse` overrides the choice. This section
+`va_core::sparse::SPARSE_THRESHOLD` unknowns and sparse LU from it
+(`docs/proposals/sparse-solve.md`) — 500 until 1.9.0, **100 since 1.10.0** on the strength of the
+crossover below; `--solver dense|sparse` overrides the choice. This section
 is Step 5 of that proposal: both paths measured at every size, on two circuits, in one session.
 
 **Method.** `cargo run --release -p xtask -- bench-scale --solver dense|sparse --topology
@@ -697,10 +698,10 @@ both circuits: 1.9–12× on the mesh, 3–200× on the ladder, growing with siz
 **between ~20 and ~50 unknowns**, an order of magnitude below the 500 the threshold was set at; it
 was not measured between 22 and 51. The dense AC/noise columns jump between 12 and 22 unknowns
 (the real `2·dim` embedding crossing some size inside `faer`'s dense LU); it is reproducible, and
-it is why AC's crossover is below 20. **Not decided here:** whether the threshold moves. That is
-a behaviour change for every circuit between the new value and 500 and gets its own release
-(`docs/proposals/sparse-solve.md` §7); no validation gate is affected either way (the largest is
-`ring_osc.net` at 8 unknowns).
+it is why AC's crossover is below 20. **Decided on it (1.10.0):** the threshold moved from 500 to
+**100**, clear of the crossover and its run-to-run noise (at ~100 sparse is 1.9–5× faster on the
+mesh, 4–48× on the ladder). No validation gate is affected (the largest is `ring_osc.net` at 8
+unknowns).
 
 ### Sparse beyond the dense range
 
@@ -722,7 +723,7 @@ The ladder and mesh are linear primitives. The same question on compiled models:
 inverters in a chain (`circuits/benchmark/psp103_inverter_card_tran.net`'s devices and cards,
 chained; `.op`), peak working set sampled while `va-cli` runs, as in v1.3.2. **Each PSP103
 instance adds ~16 internal rows**, so real device circuits reach the threshold fast: 5 inverters
-are 171 unknowns, 15 cross 500.
+are 171 unknowns (above the 100 threshold; 15 would have crossed the old 500).
 
 | inverters | unknowns | dense peak | dense wall | sparse peak | sparse wall |
 |---:|---:|---:|---:|---:|---:|
@@ -733,8 +734,8 @@ are 171 unknowns, 15 cross 500.
 | 80 | 2 646 | 247.1 MB | 63.1 s | 30.2 MB | 12.1 s |
 
 Memory: the dense slope is superlinear (the `dim²` buffers, as v1.3.2 found); the sparse slope is
-~0.1 MB per inverter and linear. At 336 unknowns — below the threshold, so dense under `Auto` —
-sparse is already 1.9× faster on the whole run. One run each, not two: the wall times are
+~0.1 MB per inverter and linear. At 336 unknowns — below the 500 threshold of the time, so dense
+under `Auto` until 1.10.0 moved it to 100 — sparse is already 1.9× faster on the whole run. One run each, not two: the wall times are
 indicative, the memory is not noise-sensitive.
 
 **Found on the way — not a sparse regression.** At **100 or more inverters (≥ 3 306 unknowns)
@@ -762,7 +763,7 @@ bracket cannot include it; the line already says "rough".
 
 ### Dense LU below the threshold (measured 2026-09-17, v1.1.0)
 
-What follows is the dense path's own record, which still describes every run below 500 unknowns
+What follows is the dense path's own record, which still describes every run below 100 unknowns
 and every `--solver dense` run. Measured before the sparse path shipped, on the ladder only, with
 `bench-scale` as it then was. The 2026-09-23 dense ladder columns above are faster than it from
 102 unknowns up — 1.1× at 102, 2.1× at 402, 1.7× at 802 in the transient column — for reasons not
@@ -835,7 +836,7 @@ A typical `.tran` of this project's decks runs 1 000–3 000 accepted points; 10
 | ~1 600 (extrapolated, exponent 2–3) | 0.21–0.42 s | 35–70 min |
 
 So, on dense LU: **up to ~400 unknowns a transient is interactive; ~800 is a coffee break;
-beyond ~1 600 dense LU is impractical.** Since 1.7.0 no `Auto` run is dense above 500 unknowns;
+beyond ~1 600 dense LU is impractical.** Since 1.10.0 no `Auto` run is dense above 100 unknowns;
 this now describes `--solver dense`, and the sparse figures are in the section above. A `.op` stays under 0.1 s even at 800 unknowns —
 operating points and DC sweeps are not where the wall is.
 
@@ -889,7 +890,7 @@ of each wall time above is process start-up and model compilation, independent o
 
 1. **Budget rows, not devices.** Count nets + sources + inductors + (internal nodes + `idt`
    sites + Laplace order) × instances before running.
-2. **Size is no longer the wall it was.** On the sparse path (from 500 unknowns) a transient
+2. **Size is no longer the wall it was.** On the sparse path (from 100 unknowns) a transient
    point costs 4–37 ms at 6 400 unknowns (ladder to mesh); on dense it was 52 ms at 800. What
    caps a large device circuit now is the `.op` of the PSP103 chain failing from ~3 300
    unknowns (above), and model evaluation, not the matrix.
@@ -903,7 +904,7 @@ of each wall time above is process start-up and model compilation, independent o
 6. **Memory is not the binding constraint.** Peak dense storage is three `dim × dim` matrices
    (the assembled Jacobian, the copy `faer` factorizes, and the factors), doubled for the complex
    matrix an AC or noise sweep solves: 15 MB at 800 unknowns, 2.4 GB at 10 000 — but no `Auto`
-   run is dense above 500 unknowns. On the sparse path the whole process peaked at 30 MB for a
+   run is dense above 100 unknowns. On the sparse path the whole process peaked at 30 MB for a
    2 646-unknown PSP103 chain (247 MB dense).
 7. **Re-measure on the machine at hand.** `cargo run --release -p xtask -- bench-scale`; the
    debug profile is 10–60× slower and is not a number to plan with.

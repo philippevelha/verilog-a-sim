@@ -88,7 +88,7 @@ card), and one `sim` call.
 [va-cli] compiled 1 Verilog-A module(s) from models/diode.va
 [va-cli] circuit: 4 device(s) (1 compiled), 3 unknown(s) (2 net(s) + 1 auxiliary row(s)), ~502 points (adaptive, 502 is the card's floor)
 [va-cli] estimate: 3.1-151.1 ms of solve, 216 B of matrix — rough, dense LU scaled from bench-scale on an i7-1185G7
-[va-cli] linear solve: dense LU (3 < 500 unknowns)
+[va-cli] linear solve: dense LU (3 < 100 unknowns)
 Transient analysis (718 points, t=0 to t=5e-3s):
   t=0.000000e0s  V(in)=0.000000 V  V(out)=0.000000 V  I(V1)=0.000000e0 A
   t=1.000000e-5s  V(in)=0.313953 V  V(out)=1.850106e-8 V  I(V1)=-1.868607e-9 A
@@ -182,12 +182,12 @@ Jacobian destroys Newton convergence silently.
 
 Shipped this way on purpose, with the reasoning in `release.txt`'s 1.0.0 entry:
 
-- **Dense LU below 500 unknowns, sparse LU from 500** (1.5.0–1.9.0), for every analysis;
-  `--solver dense|sparse` overrides. Measured on the sparse path, a transient point costs 4–37 ms
-  at 6 400 unknowns (an RC ladder to an RC mesh), where dense took 52 ms at 800. Sparse is
-  already faster from ~50 unknowns, so the 500 threshold is conservative — whether to lower it
-  is open (`docs/validation.md`, "The circuit-size limit"). Every `sim` prints its own size, the
-  solver it uses, and a rough cost bracket calibrated on that solver before it starts.
+- **Dense LU below 100 unknowns, sparse LU from 100** (sparse since 1.5.0–1.9.0, threshold 100
+  since 1.10.0), for every analysis; `--solver dense|sparse` overrides. Measured, sparse wins
+  from ~20–50 unknowns, and a transient point costs 4–37 ms at 6 400 unknowns (an RC ladder to an
+  RC mesh), where dense took 52 ms at 800 (`docs/validation.md`, "The circuit-size limit"). Every
+  `sim` prints its own size, the solver it uses, and a rough cost bracket calibrated on that
+  solver before it starts.
 - **Refused, not approximated:** `absdelay` in a transient run (a pure delay is not an ODE),
   the analog events `absdelta` and `last_crossing`, compound triggers mixing a step event with
   a scheduled one, and `$rdist_*` (this engine has no RNG). Each raises the standard refusal
