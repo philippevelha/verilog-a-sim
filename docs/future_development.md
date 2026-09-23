@@ -57,9 +57,11 @@ is worth the API surface (it is, above ~100 unknowns).
 >
 > **2026-09-23 — shipped, 1.5.0–1.9.0.** Every analysis is sparse from the threshold. Step 5
 > measured the crossover at ~20–50 unknowns on an RC ladder and an RC mesh, and 1.10.0 lowered
-> the threshold from 500 to **100** (`docs/validation.md`, "The circuit-size limit"). What now caps a large device circuit is not the solve: a PSP103 inverter chain's `.op`
-> fails as singular from ~3 300 unknowns on both paths, possibly the solve's residual tolerance
-> not scaling with the matrix — not yet verified.
+> the threshold from 500 to **100** (`docs/validation.md`, "The circuit-size limit"). What now
+> caps a large device circuit is convergence, not the solve: a PSP103 inverter chain's `.op`
+> failed as singular from ~3 150 unknowns on both paths because an undamped Newton step ran away
+> inside the `gmin` rescue; 1.10.1's damped second rescue tier solves it to 5 286 unknowns. At
+> 10 566 it still fails, by a different mechanism, not yet diagnosed.
 
 ### 1a. A complex sparse LU for AC and noise (performance optimization)
 

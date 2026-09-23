@@ -738,15 +738,33 @@ Memory: the dense slope is superlinear (the `dim²` buffers, as v1.3.2 found); t
 under `Auto` until 1.10.0 moved it to 100 — sparse is already 1.9× faster on the whole run. One run each, not two: the wall times are
 indicative, the memory is not noise-sensitive.
 
-**Found on the way — not a sparse regression.** At **100 or more inverters (≥ 3 306 unknowns)
-the `.op` fails with "singular matrix", on both paths** (dense confirmed at 160 inverters, 94 s
-to fail). Instrumented once: the first Newton solve fails the solve's residual check genuinely
-(residual 1.5 against a right-hand side of 1.1), and the `gmin` rescue's solve then fails it with
-a residual of 1.2e-4 against a tolerance of 1e-6·(1 + |b|). That tolerance is absolute in `b` and
-blind to the size of the matrix entries, so it may be rejecting a solve that is fine for a matrix
-this large — the "tolerance constants assume a scale" pattern. **Not fixed and not verified**;
-recorded as the next thing to look at, since it now caps how large a device circuit can get where
-the solver no longer does.
+**Found on the way — not a sparse regression, fixed in 1.10.1 up to 160 inverters.** From ~95
+inverters (≥ 3 150 unknowns) the `.op` failed with "singular matrix" **on both paths**, identically
+(dense checked at 100 and 160). 1.9.0 recorded a guess that the solve's residual tolerance, absolute
+in `b`, was rejecting good solves of a large matrix. **Instrumenting it disproved that:** every
+rejected solve had a componentwise backward error of 1.0 and a solution of 1e14–1e20, and one step
+of iterative refinement did not help — the matrices really were numerically singular. The cause
+was upstream, in Newton: the plain solve always fails at iteration 1 (also at 80 inverters), the
+`gmin` rescue takes over, and part-way down its ladder one undamped step proposes ~5.7e4 V at a
+net near the end of the chain. The residual jumps from 1.5e-4 to 54, and the step back lands on a
+singular Jacobian. Nothing limited that step: junction limiting only covers unknowns a model marks
+as junctions. **Fix (1.10.1):** a second rescue tier reruns the ladder with Newton's residual line
+search on (`va_core::dc`, `RESCUE_DAMPING_HALVINGS = 20`), reached only when the ladder alone has
+failed.
+
+| inverters | unknowns | before (1.10.0) | 1.10.1 | wall, 1.10.1 |
+|---:|---:|---|---|---:|
+| 80 | 2 646 | solves (ladder) | same path, same answer | 7.3 s |
+| 95 | 3 141 | singular | solves (damped ladder) | 23.2 s |
+| 100 | 3 306 | singular | solves | 20.2 s |
+| 160 | 5 286 | singular | solves | 40.8 s |
+| 320 | 10 566 | singular | **still singular** | 13.5 s to fail |
+
+The answers are the physical ones (input at 0 V: odd stages end at 1.199991 V, even at 4.43 µV).
+Damping for the whole rescue instead of as its own tier solved the same chains but took the
+80-inverter run from 6.8 s to 35 s, which is why it is a tier. **At 320 inverters it fails
+differently:** the Jacobian goes singular right after a 0.53 V step, not a runaway one, which no
+line search can help. Not diagnosed; it is now the device-circuit size limit.
 
 ### The pre-flight estimate on the sparse path
 
@@ -892,8 +910,8 @@ of each wall time above is process start-up and model compilation, independent o
    sites + Laplace order) × instances before running.
 2. **Size is no longer the wall it was.** On the sparse path (from 100 unknowns) a transient
    point costs 4–37 ms at 6 400 unknowns (ladder to mesh); on dense it was 52 ms at 800. What
-   caps a large device circuit now is the `.op` of the PSP103 chain failing from ~3 300
-   unknowns (above), and model evaluation, not the matrix.
+   caps a large device circuit now is convergence, not the matrix: the PSP103 chain's `.op`
+   solves to 5 286 unknowns since 1.10.1 and fails at 10 566 (above) — and model evaluation.
 3. **Do not buy internal nodes you do not need.** Collapsing a parasitic node, or writing one
    low-order `laplace_vp` instead of a cascade, removes a row from every timepoint permanently.
 4. **Stiffness costs more than size at small `dim`.** Events, fast switching and

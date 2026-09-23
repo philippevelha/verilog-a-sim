@@ -341,10 +341,10 @@ Findings:
 - **Scaling.** Sparse per-point cost grows with exponent ~1 on the ladder and 1.0–1.6 on the mesh
   up to 6 402 unknowns.
 - **Not a sparse regression, found on the way:** from ~3 300 unknowns (100 inverters) the PSP103
-  chain's `.op` fails as singular **on both paths**. Instrumented once, the `gmin` rescue's solve
-  is rejected by the residual check at 1.2e-4 against 1e-6·(1 + |b|), a tolerance blind to the
-  matrix's scale. Not fixed, not verified; it now caps the device circuit size where the solver
-  no longer does.
+  chain's `.op` fails as singular **on both paths**. Recorded here at 1.9.0 as a possible
+  scale-blind residual tolerance; **1.10.1 disproved that** (backward error 1.0, the matrices
+  really singular) and traced it to a runaway undamped Newton step inside the `gmin` rescue,
+  fixed by a damped second rescue tier (`docs/validation.md`).
 - **The pre-flight estimate misses compiled-model `.op`s by 30–1 000× on both paths**: it is per
   Newton loop on a linear circuit, and a `gmin` rescue is many. Stated, not fixable from `dim`.
 
