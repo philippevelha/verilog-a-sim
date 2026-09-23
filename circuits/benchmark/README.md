@@ -27,8 +27,8 @@ internal node that floats when the lower device is off, which a single transisto
 exercises.
 
 The `_card_` pair is the same circuit as the plain `psp103_inverter_*` decks with the real model
-card folded onto the device lines, because this parser has no `.model` card and no `+`
-continuation. Keeping both is deliberate: the difference between them is exactly what a model
+card folded onto the device lines, because when they were converted this parser had no `.model`
+card and no `+` continuation (it has both since 1.11.0). Keeping both is deliberate: the difference between them is exactly what a model
 card is worth, and `benchmark.md` § 3 quotes it.
 
 Each file's header says how to run it, what it should produce, and — for the ones adapted from

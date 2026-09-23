@@ -13,6 +13,8 @@
 * Geometry (`l`, `w`, `sa`, `sb`, `ab*`, `ls*`, `lg*`, `mult`) comes from the deck's own device
 * lines. The `not1` subcircuit is flattened -- `.subckt` is unsupported -- and `.param Vcc` is
 * substituted literally.
+* (Since 1.11.0 the netlist parser reads `.subckt`, `.model` cards and `+` continuations, so
+* the conversion described here is no longer forced; the deck is kept as converted.)
 *
 *   cargo run -p va-cli -- sim circuits/benchmark/psp103_inverter_card_tran.net \
 *       --model external/code/psp103/vacode/psp103.va --tran --report in,out

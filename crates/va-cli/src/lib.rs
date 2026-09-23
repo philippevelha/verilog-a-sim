@@ -264,9 +264,8 @@ fn approximations_in(src: &str) -> Vec<&'static str> {
 ///
 /// If the netlist or model file cannot be read, or either fails to parse/compile.
 pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)> {
-    let deck =
-        std::fs::read_to_string(netlist).with_context(|| format!("reading netlist {netlist}"))?;
-    let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {netlist}"))?;
+    let net = va_netlist::parser::parse_file(std::path::Path::new(netlist))
+        .with_context(|| format!("parsing {netlist}"))?;
 
     let compiled = match model {
         Some(path) => compile_model_path(path)?,
@@ -626,9 +625,13 @@ pub fn run_sim(
     report_only: &[String],
     solver: Solver,
 ) -> Result<()> {
-    let deck =
-        std::fs::read_to_string(netlist).with_context(|| format!("reading netlist {netlist}"))?;
-    let net = va_netlist::parser::parse(&deck).with_context(|| format!("parsing {netlist}"))?;
+    let net = va_netlist::parser::parse_file(std::path::Path::new(netlist))
+        .with_context(|| format!("parsing {netlist}"))?;
+    // What of the deck was recognised and not applied (an ngspice `.control` block, `.options`),
+    // before any result, so a result is never read without it.
+    for note in &net.notes {
+        eprintln!("[va-cli] note: {note}");
+    }
     let (compiled, library_files) = match model {
         Some(path) => compile_model_library(path)?,
         None => (Vec::new(), Vec::new()),
@@ -2400,8 +2403,7 @@ pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<
     // differentiated code, the expensive case), a non-linear reference primitive (hand-written,
     // but several Newton iterations), or a linear primitive, whose cost the calibration ladder
     // already contains (§ `estimate`).
-    let compiled_names: Vec<&str> = compiled.iter().map(|m| m.name.as_str()).collect();
-    let is_compiled = |dev: &Device| compiled_names.contains(&dev.model.as_str());
+    let is_compiled = |dev: &Device| matches!(module_for(compiled, dev), Ok(Some(_)));
     Ok(estimate::Sizing {
         analysis,
         devices: net.devices.len(),
@@ -2664,11 +2666,16 @@ fn build_instance(
     }
 
     // Use the compiled Verilog-A model when its name matches the device's model.
-    if let Some(module) = compiled.iter().find(|m| m.name == dev.model) {
+    if let Some(module) = module_for(compiled, dev)? {
+        let params = if dev.spice_names {
+            spice_param_names(module, &dev.params)?
+        } else {
+            dev.params.clone()
+        };
         let (inst, assignment) = build_from_model(
             module,
             dev.value,
-            &dev.params,
+            &params,
             &dev.terminals,
             next_unknown,
             cache,
@@ -2678,6 +2685,66 @@ fn build_instance(
     }
 
     Ok((reference_instance(dev)?, None, Vec::new()))
+}
+
+/// The compiled module `dev` names, if any.
+///
+/// Verilog-A names are case-sensitive, so a device line's model name matches exactly — except
+/// for a device written in SPICE's syntax (`Device::spice_names`: an `N` line, or a name
+/// resolved through a `.model` card), where names are case-insensitive: a card saying
+/// `psp103va` means the module `PSP103VA`. Two modules matching it ignoring case is ambiguous
+/// and refused rather than picked between.
+fn module_for<'a>(compiled: &'a [Module], dev: &Device) -> Result<Option<&'a Module>> {
+    if let Some(m) = compiled.iter().find(|m| m.name == dev.model) {
+        return Ok(Some(m));
+    }
+    if !dev.spice_names {
+        return Ok(None);
+    }
+    let mut hits = compiled
+        .iter()
+        .filter(|m| m.name.eq_ignore_ascii_case(&dev.model));
+    let first = hits.next();
+    if let Some(second) = hits.next() {
+        bail!(
+            "`{}` names model `{}`, which matches both `{}` and `{}` ignoring case — SPICE              names are case-insensitive, so the deck cannot say which; rename one module",
+            dev.name,
+            dev.model,
+            first.map(|m| m.name.as_str()).unwrap_or(""),
+            second.name
+        );
+    }
+    Ok(first)
+}
+
+/// A SPICE-syntax device's parameter names (`Device::spice_names`), respelled as `module`
+/// declares them. A name matching one declaration ignoring case takes its spelling (`l` becomes
+/// PSP103's `L`); one matching two is refused, since the deck cannot say which it means; one
+/// matching none is lower-cased and left for [`build_from_model`] to reject with the model's
+/// parameter list — or, as `mult`/`m`, to read as the instance multiplicity.
+fn spice_param_names(module: &Module, params: &[(String, f64)]) -> Result<Vec<(String, f64)>> {
+    params
+        .iter()
+        .map(|(name, v)| {
+            if module.params.iter().any(|p| p.name == *name) {
+                return Ok((name.clone(), *v));
+            }
+            let mut hits = module
+                .params
+                .iter()
+                .filter(|p| p.name.eq_ignore_ascii_case(name));
+            match (hits.next(), hits.next()) {
+                (Some(one), None) => Ok((one.name.clone(), *v)),
+                (Some(a), Some(b)) => bail!(
+                    "parameter `{name}` matches both `{}` and `{}` of model `{}` ignoring case —                      SPICE names are case-insensitive, so the deck cannot say which",
+                    a.name,
+                    b.name,
+                    module.name
+                ),
+                (None, _) => Ok((name.to_ascii_lowercase(), *v)),
+            }
+        })
+        .collect()
 }
 
 /// Build a device instance from a compiled IR module, applying the device's parameter
@@ -7952,6 +8019,57 @@ X1 a gnd resistor
             "V(mid) = {}",
             op.x[mid_idx]
         );
+    }
+
+    /// A SPICE-syntax deck end to end: `N` lines inside a `.subckt`, resolved through a `.model`
+    /// card whose module name (`RESISTOR`) and parameter name (`r`) are both spelled in a case the
+    /// module does not declare (`resistor`, `R`). They resolve ignoring case because the lines
+    /// are SPICE syntax, and the divider solves to 4 V · 3k / (1k + 3k) = 3 V. The same module
+    /// name on a plain `X` line keeps Verilog-A's exact match and does not resolve.
+    #[test]
+    fn a_spice_deck_resolves_cards_and_names_ignoring_case() {
+        let design = compile_model(include_str!("../../../models/resistor.va"), "resistor.va");
+        let net = va_netlist::parser::parse(
+            ".model rcard RESISTOR r=1k\n\
+             .subckt div top mid\n\
+             N1 top mid rcard\n\
+             N2 mid 0 rcard r=3k\n\
+             .ends\n\
+             V1 in 0 DC 4\n\
+             X1 in out div\n\
+             .op\n",
+        )
+        .expect("parses");
+        let op = solve_dc(&net, &design.modules).expect("solves");
+        let out = op.x[net.nodes["out"]];
+        assert!((out - 3.0).abs() < 1e-9, "V(out) = {out}");
+        let sizing = sizing(&net, &design.modules, Analysis::Dc).expect("sizes");
+        assert_eq!(
+            sizing.compiled, 2,
+            "both N lines count as compiled instances"
+        );
+
+        let exact = va_netlist::parser::parse("X1 a 0 RESISTOR\nV1 a 0 1\n").expect("parses");
+        assert!(solve_dc(&exact, &design.modules).is_err());
+    }
+
+    /// A SPICE-syntax name matching two declarations ignoring case, and neither exactly, is
+    /// refused rather than picked; the exact spellings still resolve.
+    #[test]
+    fn an_ambiguous_spice_parameter_name_is_refused() {
+        let design = compile_model(
+            "`include \"disciplines.vams\"\n\
+             module twin(p, n); inout p, n; electrical p, n;\n\
+             parameter real gm = 1.0; parameter real GM = 2.0;\n\
+             analog I(p, n) <+ (gm + GM) * V(p, n);\n\
+             endmodule\n",
+            "twin.va",
+        );
+        let fine = va_netlist::parser::parse("N1 a 0 twin gm=3 GM=1\nV1 a 0 1\n").expect("parses");
+        solve_dc(&fine, &design.modules).expect("exact spellings resolve");
+        let net = va_netlist::parser::parse("N1 a 0 twin Gm=3\nV1 a 0 1\n").expect("parses");
+        let err = solve_dc(&net, &design.modules).expect_err("ambiguous");
+        assert!(format!("{err:#}").contains("matches both"), "{err:#}");
     }
 
     #[test]

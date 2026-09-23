@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod parser;
+mod spice;
 
 use std::collections::HashMap;
 use thiserror::Error;
@@ -84,6 +85,11 @@ pub struct Netlist {
     /// `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` spec (T5.2), on the
     /// same "must fully parse or it's `None`" terms as [`Self::ac`].
     pub noise: Option<NoiseCard>,
+    /// Constructs the deck contains that were recognised and **not applied**, one sentence each
+    /// saying what was skipped and why (an ngspice `.control` block, `.options`). Not errors: the
+    /// circuit itself parsed. `va-cli` prints them before solving, so a result is never read
+    /// without knowing what of the deck it ignored.
+    pub notes: Vec<String>,
 }
 
 /// A `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (T5.2): sweep the
@@ -227,6 +233,13 @@ pub struct Device {
     /// Empty for a device with no overrides, and for the primitives (`R`/`C`/`L`/`V`) whose
     /// single positional value already says everything the line can say.
     pub params: Vec<(String, f64)>,
+    /// Whether [`Self::model`] and the names in [`Self::params`] were written in **SPICE's**
+    /// case-insensitive spelling rather than Verilog-A's case-sensitive one: set for an `N` line
+    /// (ngspice's element for a compiled Verilog-A device) and for any device whose model name
+    /// resolved through a `.model` card. `va-cli` then matches them to the module's declared names
+    /// ignoring case, and refuses a name that matches two declarations. `false` for every other
+    /// line, which keeps its exact-match semantics.
+    pub spice_names: bool,
 }
 
 /// A time-domain source waveform beyond a bare DC value.

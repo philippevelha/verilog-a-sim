@@ -20,6 +20,52 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.11.0 - 2026-09-23
+-------------------
+**The netlist parser reads SPICE deck structure — `.subckt`, `.model` cards, `+` continuations,
+`.include`, `.global`, and ngspice's `N` element — and ISCAS'85 c17 runs at transistor level.**
+
+`va_netlist` resolves the structure in a new pass before its line parser (`spice.rs`), so a deck
+that uses none of it parses exactly as before:
+
+  * `.subckt`/`.ends` are flattened, with ngspice's naming: internal net `sig3` of instance `X5`
+    becomes `X5.sig3`, element `nm01` becomes `n.X5.nm01`; ports map to the instance's nets;
+    `0`, `gnd` and `.global` nets stay global; definitions may follow their use and nest by
+    instantiation; self-instantiation is an error.
+  * `.model <name> <module> …` cards apply to `X` and `N` lines: the card names the Verilog-A
+    module, its parameters come first and the line's own replace them by name; `level=` is
+    dropped (SPICE's dispatch, not a parameter).
+  * `N` lines (ngspice's element for an OSDI-compiled Verilog-A device) are read as `X` lines.
+  * `.include` resolves relative to the including file (`va_netlist::parser::parse_file`,
+    which `va-cli` now uses); from a string deck it is an error saying so.
+  * An ngspice `.control` block and `.options` are skipped with a note each, which `va-cli`
+    prints before solving (`Netlist::notes`).
+
+Names from SPICE syntax — an `N` line, or anything resolved through a card — match the module's
+declarations **ignoring case** (`Device::spice_names`): a card's `psp103va` and `l=` reach
+`PSP103VA` and `L`. A name matching two declarations ignoring case, and neither exactly, is
+refused. Plain `X` lines keep Verilog-A's exact matching.
+
+Limitations: no subcircuit parameters (an error, not defaults), no `.subckt` defined inside
+another, no `.lib`; `.model` cards do not apply to `M`/`D`/`Q` lines.
+
+**c17** (`circuits/benchmark/iscas85/`): six NAND2 gates in the c7552 deck's style — its `nand2`
+subcircuit verbatim, its PSP103 cards, RC nets with its element values (a star per net, not its
+generator's trees). 24 PSP103 devices, 420 unknowns, sparse. `.op` over all 32 input vectors:
+192/192 gate outputs correct (highs ≥ 1.799992 V, lows ≤ 25.3 µV). `.tran 1p 12n`: 13 466 points
+in 4.1 min, all 5 528 settled output samples correct over 11 input vectors; the pre-flight
+estimate (0.08–2.4 min) undershot by ~1.7×. No golden — the check is the logic function
+(`check_c17.py`), since the project's oracle has no PSP103 set up. c7552 now parses in
+principle but is ~250 000 unknowns; the next step is c432.
+
+Measured at 1.11.0: `cargo test --workspace` **884 passed / 0 failed** (+8: flattening and
+scoping, cards and continuations on `N` lines, `.control`/`.options` notes, `.global`,
+`.include` relative to the including file, six malformed-structure errors, and end to end in
+`va-cli` a subcircuit divider through a card with mis-cased module and parameter names, plus the
+ambiguity refusal). fmt + clippy clean. `cargo xtask validate`: **28/28**, identical to 1.10.1.
+All 69 decks under `circuits/` give output identical to 1.10.1's (solver/estimate lines aside).
+
+
 1.10.1 - 2026-09-23
 -------------------
 **A damped second tier for the `gmin` rescue: long device chains that went singular now solve.**

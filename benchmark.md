@@ -167,9 +167,11 @@ Plots: `docs/examples/psp103_inverter_card_{vtc,crowbar,tran}.svg`, beside the d
 ones.
 
 **Still out of reach:** `external/benchmarkExt/iscas85_benchmark_circuit/` is the other deck in
-that drop — 89,240 lines, 7,119 subcircuit instances. It needs `.subckt`, which this netlist
-parser does not have, and it would put tens of thousands of unknowns through a dense LU, which
-§7's first two open items are about.
+that drop — ISCAS'85 c7552: 89,240 lines, 7,119 subcircuit instances, 14,942 PSP103 devices,
+~250,000 unknowns. Since 1.11.0 the netlist parser reads its `.subckt`, `.model` cards, `N` lines
+and `.include`, and the linear solve is sparse, so what remains is size: 50× the largest device
+circuit solved so far (5,286 unknowns). The first circuit of the suite, **c17, runs** in the
+same style (`circuits/benchmark/iscas85/`, `docs/validation.md`).
 
 What is worth recording is that the deck runs at all. Before 1.2.4 it could not be integrated
 from `t = 0` (the cold start, §7's closed list), and before 1.2.5 it underflowed on the first

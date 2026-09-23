@@ -6,7 +6,8 @@
 *   cargo run -p va-cli -- sim circuits/benchmark/psp103_inverter_vtc.net \
 *       --model external/code/psp103/vacode/psp103.va --report out,Vmeas
 *
-* Differences from the original deck, all forced by what this netlist parser does not have:
+* Differences from the original deck, all forced by what this netlist parser did not have when
+* it was converted (since 1.11.0 it reads `.subckt`, `.model` and `+`):
 * the `not1` subcircuit is flattened (`.subckt` is unsupported), `.param Vcc` is substituted
 * literally, `.model nch/pch` cards become `TYPE=+1`/`TYPE=-1` overrides on the X lines, and
 * `+` continuation lines are folded. There is no model card (`Modelcards/psp103_*.mod` was

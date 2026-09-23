@@ -33,12 +33,13 @@
 //!
 //! # Limitations
 //!
-//! - No independent current source (`I`), and no SPICE `.subckt`/`.ends` definitions — `X`
-//!   places a compiled Verilog-A module, not a deck-defined subcircuit. `.model` cards are
-//!   ignored (`parse_card`): a device's parameters go on its own line as `name=value`. Every
-//!   other element letter listed above (`R C L D M Q V X K E F G H`) is parsed. (Until
-//!   2026-09-11 this bullet still claimed controlled sources, `X` and `K` were unparsed — a
-//!   premise that expired when they landed.)
+//! - No independent current source (`I`). Every other element letter listed above
+//!   (`R C L D M Q V X K E F G H`) is parsed, and `N` (ngspice's element for a compiled
+//!   Verilog-A device) is read as `X`. `.subckt`/`.ends`, `.model` cards, `+` continuations,
+//!   `.include` and `.global` are resolved before this parser runs, with their own limitations
+//!   (`crate::spice`); until 1.11.0 this bullet said `.subckt` was unsupported and `.model`
+//!   ignored. (Until 2026-09-11 it also claimed controlled sources, `X` and `K` were unparsed
+//!   — a premise that expired when they landed.)
 //! - A `V` source accepts `DC <value>`, `SIN(off amp freq)`, or `PULSE(v1 v2 …)`; no `PWL`,
 //!   `EXP`, or other SPICE waveforms. A waveform's value at `t = 0` (`SIN`'s offset, `PULSE`'s
 //!   `v1`) becomes the DC value (what a DC operating point needs) *and* the full waveform is
@@ -67,20 +68,53 @@
 //!   (SPICE's own convention). An unrecognized sweep type leaves the card unparsed rather
 //!   than being guessed at. A source's AC phase defaults to 0°.
 
+use crate::spice::ModelCard;
 use crate::{
     AcSpec, AcSweepCard, AcSweepKindCard, AnalysisCard, DcSweep, Device, Netlist, NetlistError,
     NoiseCard, Waveform,
 };
+use std::collections::HashMap;
 use va_abi::reference::GROUND;
 
 /// Parse a netlist deck into a [`Netlist`].
 ///
+/// SPICE structure — `+` continuations, `.model` cards, `.subckt` definitions and instances,
+/// `.global`, ngspice `.control` blocks and `.options` — is resolved first
+/// ([`crate::spice`]'s module docs). A deck given as a string has no location, so an
+/// `.include` in it is an error; use [`parse_file`] for a deck that includes files.
+///
 /// # Errors
 ///
 /// Returns [`NetlistError::Parse`] on a malformed line (unknown element letter, too few
-/// tokens, or an unparseable value).
+/// tokens, or an unparseable value), or on malformed SPICE structure (an unclosed `.subckt`, a
+/// port-count mismatch, a subcircuit that instantiates itself, …).
 pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
-    let mut net = Netlist::default();
+    parse_with_base(deck, None)
+}
+
+/// Read and parse the deck at `path`, resolving its `.include` lines relative to the directory
+/// each including file is in.
+///
+/// # Errors
+///
+/// As [`parse`], and [`NetlistError::Parse`] (line 0) if `path` cannot be read.
+pub fn parse_file(path: &std::path::Path) -> Result<Netlist, NetlistError> {
+    let deck = std::fs::read_to_string(path).map_err(|e| NetlistError::Parse {
+        line: 0,
+        message: format!("cannot read `{}`: {e}", path.display()),
+    })?;
+    parse_with_base(
+        &deck,
+        Some(path.parent().unwrap_or(std::path::Path::new("."))),
+    )
+}
+
+fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist, NetlistError> {
+    let expanded = crate::spice::expand(deck, base)?;
+    let mut net = Netlist {
+        notes: expanded.notes,
+        ..Netlist::default()
+    };
     // `PULSE`'s optional trailing parameters default to values SPICE derives from the `.tran`
     // card (one timestep for an omitted rise/fall, the run length for an omitted width or
     // period), and that card may appear *after* the source line. So the raw numbers are held
@@ -88,24 +122,24 @@ pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
     // timing that may not have been parsed yet.
     let mut pending_pulses: Vec<(usize, Vec<f64>)> = Vec::new();
 
-    for (idx, raw) in deck.lines().enumerate() {
-        let line = raw.trim();
-        // Skip blank lines and `*` comments.
-        if line.is_empty() || line.starts_with('*') {
-            continue;
-        }
-        // Strip a trailing inline comment (`;` …).
-        let line = line.split(';').next().unwrap_or(line).trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let line_no = idx + 1;
+    // Comments, blank lines and `+` continuations are already resolved by `spice::expand`.
+    for src in &expanded.lines {
+        let line = src.text.as_str();
+        let line_no = src.line;
         if let Some(stripped) = line.strip_prefix('.') {
             parse_card(&mut net, stripped);
             continue;
         }
-        let device = parse_device(&mut net, line, line_no)?;
+        let device =
+            parse_device(&mut net, line, line_no, &expanded.models).map_err(|e| {
+                match (e, &src.origin) {
+                    (NetlistError::Parse { line, message }, Some(o)) => NetlistError::Parse {
+                        line,
+                        message: format!("{message} ({o})"),
+                    },
+                    (e, _) => e,
+                }
+            })?;
         if let Some(nums) = pulse_numbers(line) {
             pending_pulses.push((net.devices.len(), nums));
         }
@@ -327,8 +361,36 @@ fn parse_voltage_probe(tok: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
+/// Resolve an `X`/`N` line's model name through the deck's `.model` cards: the module the card
+/// names, and the card's parameters with the line's own layered on top (a line's `name=value`
+/// replaces the card's entry of the same name, compared ignoring case as SPICE does). `None`
+/// when no card has that name.
+fn apply_card(
+    models: &HashMap<String, ModelCard>,
+    model: &str,
+    line_params: &[(String, f64)],
+) -> Option<(String, Vec<(String, f64)>)> {
+    let card = models.get(&model.to_ascii_lowercase())?;
+    let mut params = card.params.clone();
+    for (name, v) in line_params {
+        match params
+            .iter_mut()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        {
+            Some(slot) => slot.1 = *v,
+            None => params.push((name.clone(), *v)),
+        }
+    }
+    Some((card.module.clone(), params))
+}
+
 /// Parse one element line into a [`Device`], interning its terminal nets.
-fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device, NetlistError> {
+fn parse_device(
+    net: &mut Netlist,
+    line: &str,
+    line_no: usize,
+    models: &HashMap<String, ModelCard>,
+) -> Result<Device, NetlistError> {
     let toks: Vec<&str> = line.split_whitespace().collect();
     let name = toks[0].to_string();
     let kind = name.chars().next().unwrap_or(' ').to_ascii_uppercase();
@@ -392,6 +454,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic,
                 params: Vec::new(),
                 controls: Vec::new(),
+                spice_names: false,
             })
         }
         // `X<name> <node>... <model> [param=value]...` — SPICE's subcircuit line, used
@@ -403,7 +466,12 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
         // The model name is the **last** token that is not a `name=value` override, following
         // SPICE, where a subcircuit's name trails its node list. Everything between the
         // instance name and it is a node.
-        'X' => {
+        //
+        // `N<name> <node>... <model> [param=value]...` is ngspice's element for a device
+        // compiled from Verilog-A (OSDI), written exactly like `X`; it is read as one, with
+        // SPICE's case-insensitive names (`Device::spice_names`). A model name that matches a
+        // `.model` card (either letter) takes the card's module and parameters.
+        'X' | 'N' => {
             need(3)?;
             let mut end = toks.len();
             while end > 2 && toks[end - 1].contains('=') {
@@ -416,8 +484,13 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                      <model>`)"
                 )));
             }
-            let model = toks[end - 1].to_string();
+            let written = toks[end - 1].to_string();
             let terminals: Vec<usize> = toks[1..end - 1].iter().map(|t| intern(net, t)).collect();
+            let line_params = parse_param_overrides(&toks[end..], line_no)?;
+            let (model, params, spice_names) = match apply_card(models, &written, &line_params) {
+                Some((module, params)) => (module, params, true),
+                None => (written, line_params, kind == 'N'),
+            };
             Ok(Device {
                 name,
                 model,
@@ -426,8 +499,9 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 waveform: None,
                 ac: None,
                 ic: None,
-                params: parse_param_overrides(&toks[end..], line_no)?,
+                params,
                 controls: Vec::new(),
+                spice_names,
             })
         }
         // `K<name> <inductor> <inductor> <coupling>` — mutual inductance. It connects to no
@@ -453,6 +527,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: Vec::new(),
                 controls: vec![toks[1].to_string(), toks[2].to_string()],
+                spice_names: false,
             })
         }
         // `F<name> p n <controlling element> <gain>` / `H<name> p n <controlling element>
@@ -476,6 +551,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: Vec::new(),
                 controls: vec![toks[3].to_string()],
+                spice_names: false,
             })
         }
         // `E<name> p n cp cn <gain>` / `G<name> p n cp cn <gm>` — linear
@@ -502,6 +578,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: Vec::new(),
                 controls: Vec::new(),
+                spice_names: false,
             })
         }
         'D' => {
@@ -520,6 +597,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: parse_param_overrides(&toks[4..], line_no)?,
                 controls: Vec::new(),
+                spice_names: false,
             })
         }
         // `M<name> d g s model` — a three-terminal model-referencing device (e.g. a MOSFET, §
@@ -542,6 +620,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: parse_param_overrides(&toks[5..], line_no)?,
                 controls: Vec::new(),
+                spice_names: false,
             })
         }
         'V' => {
@@ -561,6 +640,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: Vec::new(),
                 controls: Vec::new(),
+                spice_names: false,
             })
         }
         // `Q<name> c b e model` — a three-terminal model-referencing device (a BJT, § ladder rung
@@ -583,6 +663,7 @@ fn parse_device(net: &mut Netlist, line: &str, line_no: usize) -> Result<Device,
                 ic: None,
                 params: parse_param_overrides(&toks[5..], line_no)?,
                 controls: Vec::new(),
+                spice_names: false,
             })
         }
         _ => Err(err(format!("unsupported element `{name}`"))),
@@ -712,7 +793,7 @@ fn parse_source_ac(rest: &[&str]) -> Option<AcSpec> {
 /// Recognized suffixes (case-insensitive): `T G MEG K M U N P F A`. Note `MEG` is `1e6`
 /// while a bare `M` is milli (`1e-3`), matching SPICE. A trailing unit string after the
 /// suffix (e.g. `1kOhm`) is ignored.
-fn parse_value(tok: &str) -> Option<f64> {
+pub(crate) fn parse_value(tok: &str) -> Option<f64> {
     let s = tok.trim();
     if s.is_empty() {
         return None;

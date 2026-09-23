@@ -961,6 +961,21 @@ predict them — and it is checked against every deck in the table by
 `estimate::tests::the_bracket_contains_every_measured_deck`, so it cannot silently stop covering
 reality.
 
+## ISCAS'85 c17: a transistor-level logic benchmark (1.11.0)
+
+The first circuit of the ISCAS'85 suite, in the style of the c7552 deck from
+`external/benchmarkExt/` (PSP103 `N` devices in gate `.subckt`s, RC-net `.subckt`s, `.include`d
+model cards), which the netlist parser reads since 1.11.0: 24 PSP103 devices, 420 unknowns,
+sparse LU. **No golden** — the check is the logic function (`circuits/benchmark/iscas85/`):
+
+- `.op` over all 32 input vectors: **192/192 gate outputs correct**, highs ≥ 1.799992 V, lows
+  ≤ 25.3 µV on a 1.8 V rail, 0.9–1.3 s per vector.
+- `.tran 1p 12n`: 13 466 points in 4.1 min; all 5 528 settled output samples, over 11 input
+  vectors, match NAND logic. The pre-flight estimate (0.08–2.4 min) undershot by ~1.7×.
+
+c7552 itself (~250 000 unknowns) is out of reach for size, not syntax: see the circuit-size
+limit above.
+
 ## Bring-up ladder
 
 Each rung is a checkpoint; it is "passed" only when `va-harness` is green against golden:
