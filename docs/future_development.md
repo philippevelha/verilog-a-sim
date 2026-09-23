@@ -42,11 +42,18 @@ times the size would not fit the matrix in RAM, and no amount of further sharing
 (`sparse_singular_matrix_is_rejected`). What is missing: (a) the Jacobian is assembled dense
 (`mna::System` is a `Vec<f64>` of `dim²`) — the sparse solve currently *re-derives* the
 pattern from the dense matrix every call, which throws away most of the win; a sparse
-assembly needs `StampSink` to accumulate triplets, which is a `va-abi` (Interface β) change
-under §6; (b) symbolic factorization should be reused across Newton iterations and timesteps
+assembly needs a sink that accumulates triplets — a new `StampSink` implementation in
+`va-core`, **not** a `va-abi` change (corrected 2026-09-23: the trait only ever receives
+`(row, col, value)` calls, so how a sink stores them is the sink's business); (b) symbolic factorization should be reused across Newton iterations and timesteps
 (the pattern is fixed for a given circuit); (c) `CoreError::NonFinite`'s row/column reporting
 must survive the format change. **Decide first:** the size threshold, and whether pattern reuse
 is worth the API surface (it is, above ~100 unknowns).
+
+> **2026-09-23 — proposed:** `docs/proposals/sparse-solve.md`. Threshold decided by the user:
+> dense below 500 unknowns (the current path, unchanged), sparse from 500, with a
+> `--solver dense|sparse|auto` override so the 28 golden gates can also be run on the sparse
+> path. Five steps (sink + solve, DC, transient, AC/noise, measure the crossover), each its own
+> release.
 
 ## 2. Per-unit-axis plots and a proper results file
 

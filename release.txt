@@ -20,6 +20,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.4.0+2 - 2026-09-23
+--------------------
+**Docs only: a proposal for a sparse linear solve** (`docs/proposals/sparse-solve.md`). No code
+changes. Dense LU stays for circuits below 500 unknowns, as it is today; from 500 unknowns the
+solve would be sparse (`faer`'s pure-Rust sparse LU), with a `--solver dense|sparse|auto`
+override. 500 rather than a higher value because `.tran` is already impractical on dense LU
+between ~800 and ~1 600 unknowns (docs/validation.md, 2026-09-17), and because a threshold every
+golden gate sits under leaves the sparse path untested unless it can be forced; the proposal
+runs all 28 gates with `--solver sparse` as well. Five steps, each its own release: sink + solve,
+DC, transient, AC/noise, then measuring the real crossover, which may move the 500.
+
+Also corrects `docs/future_development.md` §1, which said sparse assembly needs an Interface β
+change. It does not: `StampSink` only receives `(row, col, value)` calls, so a sparse sink is a
+new implementation in `va-core` and no model or trait changes.
+
+Nothing was run for this entry beyond `cargo metadata` for the version; the figures quoted in
+the proposal come from the 2026-08-31 and 2026-09-17 measurements, which it cites by date.
+
+
 1.4.0 - 2026-09-22  (tagged v1.4.0)
 -----------------------------------
 **A release, and a correction to how the last two were numbered.** Nothing in the code changes
