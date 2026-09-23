@@ -55,6 +55,37 @@ is worth the API surface (it is, above ~100 unknowns).
 > path. Five steps (sink + solve, DC, transient, AC/noise, measure the crossover), each its own
 > release.
 
+### 1a. A complex sparse LU for AC and noise (performance optimization)
+
+**What.** Solve the small-signal system `(G + jω·C)·X = B` as an `n × n` complex sparse matrix
+with `faer`'s complex LU, instead of the real `2n × 2n` embedding `[[G, −ωC], [ωC, G]]` that the
+sparse path uses since Step 4 (1.8.0) — the embedding the dense path has always used.
+
+**Why.** Performance, not correctness: Step 4 already gives AC and noise the sparse path's
+asymptotic gain, and the embedding solves the identical system. What complex would add is a
+constant factor: half the dimension; for dense LU about half the arithmetic ((8/3)n³ against
+(16/3)n³ real flops), for sparse LU expected to be similar or less but **not measured**; `G` and
+`C` stored once rather than twice; pivoting on complex magnitude rather than on halves of complex
+numbers. And for noise, one factorization would serve the adjoint: `faer`'s sparse LU solves with
+the transpose of a factorization it already holds (`solve_transpose_in_place_with_conj`,
+checked in `faer` 0.22.6), so the transposed embedding and its second symbolic factorization go
+away.
+
+**Cost and risks.** `va_core::sparse::SparseLu` is `f64`-only; it needs a complex counterpart
+(generic, or a second type) with the same singularity guard, residual check and `NonFinite`
+reporting, plus conversion between `va-acnoise`'s `(f64, f64)` and `faer`'s `c64`. The one
+correctness trap: the noise adjoint needs the **plain** transpose, and `faer`'s transpose solve
+takes a `Conj` flag — `Conj::Yes` gives the conjugate transpose, silently wrong at every
+frequency where the imaginary part matters and plausible near DC. It needs a test at high
+frequency on a non-symmetric circuit against the embedding path (the one Step 4 added,
+`sparse_noise_matches_dense_on_a_nonsymmetric_circuit`, is the model). The dense and sparse paths
+would also no longer factor the same real system, so their agreement becomes mathematical rather
+than structural.
+
+**Decide first.** Whether it is worth it: Step 5's measurement of whole AC/noise runs on the
+embedding says how much of the per-point time is still the factorization. Decided 2026-09-23 (the
+user): the embedding for Step 4, this as a later, measured optimization.
+
 ## 2. Per-unit-axis plots and a proper results file
 
 **What.** `--plot` with one y-axis per unit (V, A, K, W, …) or normalized traces with a legend

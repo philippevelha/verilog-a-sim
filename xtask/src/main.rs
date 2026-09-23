@@ -2214,7 +2214,8 @@ fn bench_scale(args: &[String]) -> Result<()> {
 
     eprintln!(
         "[xtask] bench-scale: whole-pipeline .op, .tran, .ac and .noise wall time on a ladder \
-         (va_abi::reference primitives, dense LU) …"
+         (va_abi::reference primitives; `--solver auto`: dense LU below \
+         va_core::sparse::SPARSE_THRESHOLD unknowns, sparse from it) …"
     );
     // Warm-up, for the same reason `bench-linsolve` does one.
     let _ = run_scale_row(5);
@@ -2248,9 +2249,9 @@ fn bench_scale(args: &[String]) -> Result<()> {
         );
     }
     eprintln!(
-        "[xtask] bench-scale: done. Dense LU is O(dim^3) per Newton solve; the per-point columns \
-         are the numbers to watch, and they are what `va-cli`'s pre-flight estimate is \
-         calibrated against (va_cli::estimate). See docs/validation.md for the stated limits \
+        "[xtask] bench-scale: done. Dense LU is O(dim^3) per Newton solve, so rows at or above \
+         the sparse threshold are off the dense curve; the per-point columns below it are what \
+         `va-cli`'s pre-flight estimate is calibrated against (va_cli::estimate). See docs/validation.md for the stated limits \
          and the machine they were measured on."
     );
     Ok(())

@@ -4,6 +4,8 @@ use crate::AcNoiseError;
 use std::f64::consts::PI;
 use va_abi::stamps::StampSink;
 use va_abi::ModelInstance;
+pub use va_core::sparse::Solver;
+use va_core::sparse::{Pattern, SparseLu, SparseMatrix, SparseSystem};
 
 /// One complex value as an (real, imag) pair. Kept dependency-free; a `num-complex` type can
 /// replace this if the workspace adds it.
@@ -189,6 +191,250 @@ pub fn linearize(
     lin
 }
 
+/// [`Linearization`]'s sparse counterpart: `G` and `C` on one shared pattern — exactly the
+/// Jacobian / charge-Jacobian pair [`SparseSystem`] already holds — and the model excitation kept
+/// here, since `SparseSystem` does not record it. Used above
+/// [`va_core::sparse::SPARSE_THRESHOLD`] unknowns (`docs/proposals/sparse-solve.md`, Step 4).
+pub(crate) struct SparseLinearization {
+    sys: SparseSystem,
+    excitation: Vec<Complex>,
+}
+
+impl SparseLinearization {
+    fn new(dim: usize) -> Self {
+        Self {
+            sys: SparseSystem::new(dim),
+            excitation: vec![(0.0, 0.0); dim],
+        }
+    }
+
+    /// Clear, linearize every instance at `x_dc` for `ctx`, and fold the pattern. Returns whether
+    /// the pattern grew — always on the first call with any off-diagonal entry, afterwards only
+    /// if a model stamped an entry it had not before.
+    fn load(
+        &mut self,
+        instances: &[&dyn ModelInstance],
+        x_dc: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+    ) -> bool {
+        self.sys.clear();
+        self.excitation.iter_mut().for_each(|e| *e = (0.0, 0.0));
+        for inst in instances {
+            inst.load(x_dc, ctx, &mut va_abi::ModelState::stateless(), self);
+        }
+        self.sys.finish()
+    }
+}
+
+impl StampSink for SparseLinearization {
+    fn residual(&mut self, _row: usize, _value: f64) {}
+
+    fn jacobian(&mut self, row: usize, col: usize, value: f64) {
+        StampSink::jacobian(&mut self.sys, row, col, value);
+    }
+
+    fn charge(&mut self, _row: usize, _value: f64) {}
+
+    fn dcharge(&mut self, row: usize, col: usize, value: f64) {
+        StampSink::dcharge(&mut self.sys, row, col, value);
+    }
+
+    fn excitation(&mut self, row: usize, re: f64, im: f64) {
+        if let Some(e) = self.excitation.get_mut(row) {
+            e.0 += re;
+            e.1 += im;
+        }
+    }
+}
+
+/// The real `2n × 2n` embedding of `A = G + jω·C` — or of its plain transpose — on the sparse
+/// path: the same blocks [`solve_block_embedded`] fills densely, so the two paths solve the
+/// identical real system and differ only in how it is factored.
+///
+/// Built once per `G`/`C` pattern. Each entry of that pattern is mapped to the four slots it
+/// fills in the embedded pattern up front, so a frequency point is a pass over the values and a
+/// numeric factorization: the embedded pattern does not depend on `ω`, and [`SparseLu`] keeps
+/// its symbolic factorization for the whole sweep.
+pub(crate) struct SparseEmbedding {
+    n: usize,
+    pattern: Pattern,
+    /// For entry `k` of the `n × n` pattern, the embedded slots of `G`, `−ω·C`, `ω·C`, `G`.
+    slots: Vec<[usize; 4]>,
+    values: Vec<f64>,
+    lu: SparseLu,
+}
+
+impl SparseEmbedding {
+    fn new(base: &Pattern, transpose: bool) -> Self {
+        let n = base.dim();
+        // `transpose` swaps each entry's row and column as the blocks are laid out, which is
+        // what the dense `transpose` flag does: the plain transpose, not the conjugate one.
+        let ij: Vec<(usize, usize)> = base
+            .entries()
+            .map(|(r, c)| if transpose { (c, r) } else { (r, c) })
+            .collect();
+        let pattern = Pattern::new(
+            2 * n,
+            ij.iter()
+                .flat_map(|&(i, j)| [(i, j), (i, n + j), (n + i, j), (n + i, n + j)]),
+        );
+        let slot = |r, c| {
+            pattern
+                .slot(r, c)
+                .expect("every embedded entry was inserted into the pattern just above")
+        };
+        let slots = ij
+            .iter()
+            .map(|&(i, j)| {
+                [
+                    slot(i, j),
+                    slot(i, n + j),
+                    slot(n + i, j),
+                    slot(n + i, n + j),
+                ]
+            })
+            .collect();
+        let values = vec![0.0; pattern.nnz()];
+        Self {
+            n,
+            pattern,
+            slots,
+            values,
+            lu: SparseLu::new(),
+        }
+    }
+
+    /// Solve the embedded system at `omega`, `g` and `c` being the values of the base pattern
+    /// this embedding was built from (in its slot order).
+    fn solve(
+        &mut self,
+        g: &[f64],
+        c: &[f64],
+        omega: f64,
+        rhs: &[Complex],
+    ) -> Result<Vec<Complex>, AcNoiseError> {
+        let n = self.n;
+        self.values.iter_mut().for_each(|v| *v = 0.0);
+        // Each base entry is distinct, so each embedded slot is written once: assignment, as the
+        // dense embedding does, rather than accumulation.
+        for (s, (&gk, &ck)) in self.slots.iter().zip(g.iter().zip(c)) {
+            self.values[s[0]] = gk;
+            self.values[s[1]] = -omega * ck;
+            self.values[s[2]] = omega * ck;
+            self.values[s[3]] = gk;
+        }
+        let mut b = vec![0.0; 2 * n];
+        for (i, &(re, im)) in rhs.iter().enumerate() {
+            b[i] = re;
+            b[n + i] = im;
+        }
+        let a =
+            SparseMatrix::new(&self.pattern, &self.values).ok_or(va_core::CoreError::Singular)?;
+        let sol = self.lu.solve(a, &b)?;
+        Ok((0..n).map(|i| (sol[i], sol[n + i])).collect())
+    }
+}
+
+/// A linearized small-signal system, dense or sparse, ready to be solved at any frequency —
+/// shared by [`run_with`] and [`crate::noise::run_with`] so the dense/sparse choice is made in one
+/// place, as the embedding convention is.
+pub(crate) enum SmallSignal {
+    /// The dense path: exactly what AC and noise did before Step 4.
+    Dense {
+        lin: Linearization,
+        dim: usize,
+        transpose: bool,
+    },
+    /// The sparse path: `G`/`C` on one pattern and the real embedding built from it.
+    Sparse {
+        lin: Box<SparseLinearization>,
+        embedding: Box<SparseEmbedding>,
+        transpose: bool,
+    },
+}
+
+impl SmallSignal {
+    /// Linearize `instances` at `x_dc` for `ctx`, on the path `solver` picks for `dim` unknowns.
+    /// `transpose` asks for `Aᵀ` (the noise adjoint) instead of `A`.
+    pub(crate) fn linearize(
+        instances: &[&dyn ModelInstance],
+        x_dc: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+        dim: usize,
+        solver: Solver,
+        transpose: bool,
+    ) -> Self {
+        if solver.uses_sparse(dim) {
+            let mut lin = SparseLinearization::new(dim);
+            lin.load(instances, x_dc, ctx);
+            let embedding = Box::new(SparseEmbedding::new(lin.sys.pattern(), transpose));
+            SmallSignal::Sparse {
+                lin: Box::new(lin),
+                embedding,
+                transpose,
+            }
+        } else {
+            SmallSignal::Dense {
+                lin: linearize(instances, x_dc, ctx, dim),
+                dim,
+                transpose,
+            }
+        }
+    }
+
+    /// Re-linearize for a new `ctx` — a frequency-dependent circuit's next point. The sparse
+    /// path keeps its pattern and embedding, and so its symbolic factorization, unless the
+    /// pattern grew.
+    pub(crate) fn relinearize(
+        &mut self,
+        instances: &[&dyn ModelInstance],
+        x_dc: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+    ) {
+        match self {
+            SmallSignal::Dense { lin, dim, .. } => *lin = linearize(instances, x_dc, ctx, *dim),
+            SmallSignal::Sparse {
+                lin,
+                embedding,
+                transpose,
+            } => {
+                if lin.load(instances, x_dc, ctx) {
+                    **embedding = SparseEmbedding::new(lin.sys.pattern(), *transpose);
+                }
+            }
+        }
+    }
+
+    /// The model-supplied `ac_stim`, in [`Linearization::excitation`]'s convention.
+    pub(crate) fn excitation(&self) -> &[Complex] {
+        match self {
+            SmallSignal::Dense { lin, .. } => &lin.excitation,
+            SmallSignal::Sparse { lin, .. } => &lin.excitation,
+        }
+    }
+
+    /// Solve `A·X = rhs` (or `Aᵀ·X = rhs`) at angular frequency `omega`.
+    pub(crate) fn solve(
+        &mut self,
+        omega: f64,
+        rhs: &[Complex],
+    ) -> Result<Vec<Complex>, AcNoiseError> {
+        match self {
+            SmallSignal::Dense {
+                lin,
+                dim,
+                transpose,
+            } => solve_block_embedded(&lin.g, &lin.c, *dim, omega, rhs, *transpose),
+            SmallSignal::Sparse { lin, embedding, .. } => embedding.solve(
+                lin.sys.jacobian().values(),
+                lin.sys.dcharge().values(),
+                omega,
+                rhs,
+            ),
+        }
+    }
+}
+
 /// Run an AC sweep about a precomputed DC operating point `x_dc`.
 ///
 /// `excitation` is the complex small-signal RHS vector (length `dim`), nonzero only at the
@@ -200,7 +446,9 @@ pub fn linearize(
 /// At each frequency this solves the complex linear system `(G + jω·C)·X(ω) = excitation` by
 /// embedding it as a real `2·dim × 2·dim` block system (stacking `[Re(X); Im(X)]`) and reusing
 /// [`va_core::linsolve::solve_dense`] — this avoids adding a complex-linear-algebra dependency,
-/// consistent with `CLAUDE.md` §5's pure-Rust/`faer`-only numerics rule.
+/// consistent with `CLAUDE.md` §5's pure-Rust/`faer`-only numerics rule. That is the path below
+/// [`va_core::sparse::SPARSE_THRESHOLD`] unknowns; from it the same embedding is factored with
+/// sparse LU instead (see [`run_with`]).
 ///
 /// # Errors
 ///
@@ -211,6 +459,25 @@ pub fn run(
     dim: usize,
     sweep: AcSweep,
     excitation: &[Complex],
+) -> Result<AcResponse, AcNoiseError> {
+    run_with(instances, x_dc, dim, sweep, excitation, Solver::Auto)
+}
+
+/// [`run`] with an explicit [`Solver`]. Below [`va_core::sparse::SPARSE_THRESHOLD`] unknowns
+/// (under [`Solver::Auto`]) the dense real embedding solves every point, exactly as before
+/// Step 4; from it, the same embedding is factored sparse, with one symbolic factorization for
+/// the whole sweep.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with(
+    instances: &[&dyn ModelInstance],
+    x_dc: &[f64],
+    dim: usize,
+    sweep: AcSweep,
+    excitation: &[Complex],
+    solver: Solver,
 ) -> Result<AcResponse, AcNoiseError> {
     debug_assert_eq!(excitation.len(), dim, "excitation must cover every unknown");
     let freqs = sweep.frequencies();
@@ -224,16 +491,33 @@ pub fn run(
     if per_point {
         // O(points) linearizations. Paid only by a circuit that actually contains a filter,
         // which is why `is_frequency_dependent` is opt-in (§ `va_abi::ModelInstance`).
+        let mut small: Option<SmallSignal> = None;
         for &f in &freqs {
-            let lin = linearize(instances, x_dc, &va_abi::AnalysisCtx::ac_at(f), dim);
-            let rhs = combine_excitation(excitation, &lin.excitation);
-            x.push(solve_at(&lin.g, &lin.c, dim, 2.0 * PI * f, &rhs)?);
+            let ctx = va_abi::AnalysisCtx::ac_at(f);
+            let small = match &mut small {
+                Some(s) => {
+                    s.relinearize(instances, x_dc, &ctx);
+                    s
+                }
+                None => small.insert(SmallSignal::linearize(
+                    instances, x_dc, &ctx, dim, solver, false,
+                )),
+            };
+            let rhs = combine_excitation(excitation, small.excitation());
+            x.push(small.solve(2.0 * PI * f, &rhs)?);
         }
     } else {
-        let lin = linearize(instances, x_dc, &va_abi::AnalysisCtx::ac(), dim);
-        let rhs = combine_excitation(excitation, &lin.excitation);
+        let mut small = SmallSignal::linearize(
+            instances,
+            x_dc,
+            &va_abi::AnalysisCtx::ac(),
+            dim,
+            solver,
+            false,
+        );
+        let rhs = combine_excitation(excitation, small.excitation());
         for &f in &freqs {
-            x.push(solve_at(&lin.g, &lin.c, dim, 2.0 * PI * f, &rhs)?);
+            x.push(small.solve(2.0 * PI * f, &rhs)?);
         }
     }
     Ok(AcResponse { f: freqs, x })
@@ -253,18 +537,6 @@ fn combine_excitation(netlist: &[Complex], model: &[Complex]) -> Vec<Complex> {
         .collect()
 }
 
-/// Solve `(G + jω·C)·X = excitation` at one angular frequency `ω`, via the real `2n × 2n`
-/// block embedding (see [`solve_block_embedded`]).
-fn solve_at(
-    g: &[f64],
-    c: &[f64],
-    dim: usize,
-    omega: f64,
-    excitation: &[Complex],
-) -> Result<Vec<Complex>, AcNoiseError> {
-    solve_block_embedded(g, c, dim, omega, excitation, false)
-}
-
 /// Solve `A·X = rhs` (or `Aᵀ·X = rhs` when `transpose`) for `A = G + jω·C`, via the real
 /// `2n × 2n` block embedding:
 ///
@@ -279,7 +551,8 @@ fn solve_at(
 ///
 /// Shared by [`ac::run`](run) and [`crate::noise::run`] so there is exactly one place where the
 /// complex-to-real embedding convention lives; a sign error here would otherwise have to be
-/// found twice.
+/// found twice. [`SparseEmbedding`], next to it, lays out the same four blocks on the sparse
+/// path.
 pub(crate) fn solve_block_embedded(
     g: &[f64],
     c: &[f64],
@@ -594,5 +867,126 @@ mod tests {
                 "f={f}: phase got {got_phase}, want {expected_phase}"
             );
         }
+    }
+
+    /// Dense and sparse agree at every frequency, to rounding. They factor the identical real
+    /// embedding, so the tolerance is tight.
+    fn assert_same_response(dense: &AcResponse, sparse: &AcResponse) {
+        assert_eq!(dense.f, sparse.f);
+        for (k, (xd, xs)) in dense.x.iter().zip(&sparse.x).enumerate() {
+            let scale = xd.iter().fold(1e-30_f64, |m, &v| m.max(magnitude(v)));
+            for (i, (&d, &s)) in xd.iter().zip(xs).enumerate() {
+                let diff = magnitude((d.0 - s.0, d.1 - s.1));
+                assert!(
+                    diff <= 1e-12 * scale,
+                    "f={} x[{i}]: dense {d:?}, sparse {s:?}",
+                    dense.f[k]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_ac_matches_dense_on_the_rc_lowpass() {
+        let vs = VSource::new(0, GROUND, 2, 5.0);
+        let res = Resistor::new(0, 1, 1000.0);
+        let capacitor = Capacitor::new(1, GROUND, 1e-6);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &res, &capacitor];
+        let sweep = AcSweep::dec(1.0, 1e6, 5);
+        let exc = [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0)];
+        let x_dc = [5.0, 5.0, 0.0];
+        let dense = run_with(&insts, &x_dc, 3, sweep, &exc, Solver::Dense).expect("dense");
+        let sparse = run_with(&insts, &x_dc, 3, sweep, &exc, Solver::Sparse).expect("sparse");
+        assert_same_response(&dense, &sparse);
+    }
+
+    /// A transconductance makes `G` non-symmetric and a coupling capacitor puts `C` off the
+    /// diagonal: every block of the embedding is exercised, in both orientations.
+    #[test]
+    fn sparse_ac_matches_dense_on_a_nonsymmetric_system() {
+        use va_abi::reference::controlled::Vccs;
+        // 0 = in, 1 = mid, 2 = out, 3 = source branch.
+        let vs = VSource::new(0, GROUND, 3, 0.0);
+        let r1 = Resistor::new(0, 1, 1e3);
+        let c1 = Capacitor::new(1, GROUND, 1e-9);
+        let gm = Vccs::new(2, GROUND, 1, GROUND, 5e-3);
+        let r2 = Resistor::new(2, GROUND, 2e3);
+        let cc = Capacitor::new(1, 2, 2e-10);
+        let insts: [&dyn ModelInstance; 6] = [&vs, &r1, &c1, &gm, &r2, &cc];
+        let sweep = AcSweep::dec(10.0, 1e8, 4);
+        let exc = [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)];
+        let x_dc = [0.0; 4];
+        let dense = run_with(&insts, &x_dc, 4, sweep, &exc, Solver::Dense).expect("dense");
+        let sparse = run_with(&insts, &x_dc, 4, sweep, &exc, Solver::Sparse).expect("sparse");
+        assert_same_response(&dense, &sparse);
+    }
+
+    /// The per-frequency path: a conductance that moves with frequency forces re-linearization
+    /// at every point. The sparse path keeps its pattern and embedding across points (the
+    /// pattern does not grow), and still matches dense.
+    #[test]
+    fn sparse_ac_matches_dense_when_the_circuit_is_frequency_dependent() {
+        struct Rising {
+            terminals: [usize; 2],
+        }
+        impl ModelInstance for Rising {
+            fn unknowns(&self) -> &[usize] {
+                &self.terminals
+            }
+            fn is_frequency_dependent(&self) -> bool {
+                true
+            }
+            fn load(
+                &self,
+                _x: &[f64],
+                ctx: &va_abi::AnalysisCtx,
+                _st: &mut va_abi::ModelState,
+                sink: &mut dyn StampSink,
+            ) {
+                let g = 1e-3 * (1.0 + ctx.freq / 1e3);
+                let [p, n] = self.terminals;
+                sink.jacobian(p, p, g);
+                sink.jacobian(p, n, -g);
+                sink.jacobian(n, p, -g);
+                sink.jacobian(n, n, g);
+            }
+        }
+        let vs = VSource::new(0, GROUND, 2, 1.0);
+        let r = Resistor::new(0, 1, 1e3);
+        let load = Rising {
+            terminals: [1, GROUND],
+        };
+        let c = Capacitor::new(1, GROUND, 1e-7);
+        let insts: [&dyn ModelInstance; 4] = [&vs, &r, &load, &c];
+        let sweep = AcSweep::dec(1.0, 1e6, 3);
+        let exc = [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0)];
+        let x_dc = [1.0, 0.5, 0.0];
+        let dense = run_with(&insts, &x_dc, 3, sweep, &exc, Solver::Dense).expect("dense");
+        let sparse = run_with(&insts, &x_dc, 3, sweep, &exc, Solver::Sparse).expect("sparse");
+        assert_same_response(&dense, &sparse);
+    }
+
+    /// Above the threshold `Auto` is the sparse path: a 500-section RC ladder (501 unknowns)
+    /// under `Auto` is bit-for-bit the forced-sparse sweep. Agreement with dense is the tests
+    /// above; comparing at this size too would factor a dense 1002 × 1002 embedding per point in
+    /// a debug build.
+    #[test]
+    fn auto_above_the_threshold_is_the_sparse_path_in_ac() {
+        let n = 500;
+        let vs = VSource::new(0, GROUND, n, 0.0);
+        let rs: Vec<Resistor> = (0..n - 1).map(|i| Resistor::new(i, i + 1, 100.0)).collect();
+        let cs: Vec<Capacitor> = (1..n).map(|i| Capacitor::new(i, GROUND, 1e-9)).collect();
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs];
+        insts.extend(rs.iter().map(|r| r as &dyn ModelInstance));
+        insts.extend(cs.iter().map(|c| c as &dyn ModelInstance));
+        let dim = n + 1;
+        assert!(Solver::Auto.uses_sparse(dim));
+        let mut exc = vec![(0.0, 0.0); dim];
+        exc[n] = (1.0, 0.0);
+        let x_dc = vec![0.0; dim];
+        let sweep = AcSweep::dec(1e3, 1e6, 2);
+        let auto = run(&insts, &x_dc, dim, sweep, &exc).expect("auto");
+        let sparse = run_with(&insts, &x_dc, dim, sweep, &exc, Solver::Sparse).expect("sparse");
+        assert_eq!(auto.x, sparse.x);
     }
 }

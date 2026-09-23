@@ -1,7 +1,7 @@
 # Proposal: a sparse linear solve above 500 unknowns
 
-**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1–3 done
-(1.5.0, 1.6.0, 1.7.0, 2026-09-23)**; Steps 4–5 open.
+**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1–4 done
+(1.5.0, 1.6.0, 1.7.0, 1.8.0, 2026-09-23)**; Step 5 open.
 **Affects:** `va-core` (new sparse assembler + solver, the selector), `va-transient` and
 `va-acnoise` (their assemblers and solve call sites), `va-cli` (`--solver`, the pre-flight line),
 `xtask` (`bench-scale` gains a sparse column). **`va-abi` (Interface β) and `va-ir`
@@ -295,10 +295,35 @@ Found on the way: in a *debug* build, dense LU at 501 unknowns costs 0.2 s per s
 first compared those two paths at that size took three minutes, and was changed to compare
 `Auto` against forced sparse instead.
 
+**Step 4 — done, 1.8.0 (2026-09-23).** AC and noise solve every frequency point on the sparse
+path from 500 unknowns. Chosen: the **real embedding** `[[G, −ωC], [ωC, G]]` factored sparse —
+the same system the dense path solves — not a complex sparse LU. The embedding's pattern is built
+once from the `G`/`C` pattern, so one symbolic factorization serves the whole sweep; a
+frequency-dependent circuit re-linearizes per point and rebuilds the embedding only if the
+pattern grew. The noise adjoint embeds the plain transpose `Aᵀ` on both paths. The complex LU
+(half the dimension, one factorization serving the adjoint through a transpose solve) is written
+up as a later performance option in `docs/future_development.md` §1a, with its one correctness
+trap: `faer`'s transpose solve takes a `Conj` flag, and the conjugate transpose is wrong.
+
+Evidence: default `xtask validate` identical line for line to 1.7.0 (stash diff); `--solver
+sparse` 28/28, one printed figure differing in the last digits (`rc_ac_oct` |mag| error
+1.78e-15 against 1.94e-15). Tests: dense and sparse AC agree on an RC low-pass, on a
+non-symmetric `G` with off-diagonal `C`, and on a frequency-dependent circuit; noise agrees
+(spectrum, input-referred, per-device split) on a non-symmetric circuit up to 100 MHz, where a
+conjugate-transpose mistake would show; `Auto` at 501 unknowns is bit-for-bit forced sparse.
+`bench-scale`, two runs of each in the same session: at 802 unknowns, `.ac` **0.43–0.49 ms per
+point** against 156–172 ms dense (1.7.0), `.noise` **0.38–0.46 ms** against 194–198 ms. Rows
+below 500 unknowns are unchanged within run-to-run noise.
+
+For Step 5: sparse at 802 unknowns (0.4–0.5 ms per AC point) is already faster than dense at 402
+(16–17 ms per point), and `.tran`/`.op` show the same shape. The crossover is well below 500 on
+this ladder — but a ladder is sparse's best case, so it is the measurement Step 5 has to make on
+denser circuits, not a conclusion.
+
 ## 7. Decided, and still open
 
 - **Decided (2026-09-23, the user):** dense below 500 unknowns, sparse from 500; the dense path
   is not modified.
-- **Open, for Step 4:** a complex sparse LU for AC/noise (recommended) or a sparse version of the
-  real embedding. Need to check what are the advantages abd drwaback of each before choosing.
+- **Decided, Step 4 (1.8.0):** the real embedding, factored sparse. A complex sparse LU is
+  recorded as a performance option (`docs/future_development.md` §1a), not a correctness need.
 - **Open, for Step 5:** whether the measured crossover moves the threshold.

@@ -78,7 +78,7 @@
 //!   Interface β's noise channel; see `va_abi::noise`'s own module doc.
 //! - **No per-mechanism split within a device**, as above.
 
-use crate::ac::{linearize, solve_block_embedded, AcSweep, Complex};
+use crate::ac::{AcSweep, Complex, SmallSignal};
 use crate::AcNoiseError;
 use va_abi::noise::{NoiseSink, NoiseSource, TableInterp, TEMP_NOMINAL};
 use va_abi::ModelInstance;
@@ -212,6 +212,36 @@ pub fn run(
     input: Option<usize>,
     temp: f64,
 ) -> Result<NoiseSpectrum, AcNoiseError> {
+    run_with(
+        instances,
+        x_dc,
+        dim,
+        sweep,
+        output,
+        input,
+        temp,
+        crate::ac::Solver::Auto,
+    )
+}
+
+/// [`run`] with an explicit linear solver: the adjoint `Aᵀ·y = e_out` is solved on the dense
+/// real embedding below `va_core::sparse::SPARSE_THRESHOLD` unknowns (under `Auto`) and on the
+/// same embedding factored sparse from it — the plain transpose on both paths.
+///
+/// # Errors
+///
+/// As [`run`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_with(
+    instances: &[&dyn ModelInstance],
+    x_dc: &[f64],
+    dim: usize,
+    sweep: AcSweep,
+    output: usize,
+    input: Option<usize>,
+    temp: f64,
+    solver: crate::ac::Solver,
+) -> Result<NoiseSpectrum, AcNoiseError> {
     if output >= dim {
         return Err(AcNoiseError::InvalidOutput { index: output, dim });
     }
@@ -226,8 +256,8 @@ pub fn run(
     // `ac_stim` is deliberately ignored here — an applied stimulus is not a noise source, and
     // this analysis's excitation is the adjoint probe at the output, built below.
     let ctx = va_abi::AnalysisCtx::noise().with_temp(temp);
-    let lin = linearize(instances, x_dc, &ctx, dim);
-    let (g, c) = (lin.g, lin.c);
+    // `true`: the adjoint needs `Aᵀ`, the plain transpose.
+    let mut small = SmallSignal::linearize(instances, x_dc, &ctx, dim, solver, true);
     let mut collected = SourceList::default();
     for (i, inst) in instances.iter().enumerate() {
         collected.current = i;
@@ -252,7 +282,7 @@ pub fn run(
     let mut per_instance: Vec<Vec<f64>> = vec![Vec::with_capacity(f.len()); contributors.len()];
     for &freq in &f {
         let omega = 2.0 * std::f64::consts::PI * freq;
-        let y = solve_block_embedded(&g, &c, dim, omega, &e_out, true)?;
+        let y = small.solve(omega, &e_out)?;
 
         let mut buckets = vec![0.0; contributors.len()];
         for (id, p, n, source) in &collected.sources {
@@ -925,5 +955,43 @@ mod tests {
             "hot/cold = {}",
             hot.psd[0] / cold.psd[0]
         );
+    }
+
+    /// The adjoint on the sparse path: a non-symmetric `G` (a transconductance) with capacitors,
+    /// so `Aᵀ`, `A` and the conjugate transpose all differ above DC. Dense and sparse must give
+    /// the same spectrum and the same per-device split — both solve the plain transpose.
+    #[test]
+    fn sparse_noise_matches_dense_on_a_nonsymmetric_circuit() {
+        use va_abi::reference::controlled::Vccs;
+        let vs = VSource::new(0, GROUND, 3, 0.0);
+        let r1 = Resistor::new(0, 1, 1e3);
+        let c1 = Capacitor::new(1, GROUND, 1e-9);
+        let gm = Vccs::new(2, GROUND, 1, GROUND, 5e-3);
+        let r2 = Resistor::new(2, GROUND, 2e3);
+        let cc = Capacitor::new(1, 2, 2e-10);
+        let insts: [&dyn ModelInstance; 6] = [&vs, &r1, &c1, &gm, &r2, &cc];
+        let sweep = AcSweep::dec(10.0, 1e8, 4);
+        let x_dc = [0.0; 4];
+        let solve = |solver| {
+            run_with(&insts, &x_dc, 4, sweep, 2, Some(3), TEMP_NOMINAL, solver).expect("solves")
+        };
+        let dense = solve(crate::ac::Solver::Dense);
+        let sparse = solve(crate::ac::Solver::Sparse);
+        let close = |a: &[f64], b: &[f64]| {
+            let scale = a.iter().fold(1e-300_f64, |m, v| m.max(v.abs()));
+            a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-12 * scale)
+        };
+        assert!(
+            close(&dense.psd, &sparse.psd),
+            "{:?} vs {:?}",
+            dense.psd,
+            sparse.psd
+        );
+        assert!(close(&dense.input_psd, &sparse.input_psd));
+        assert_eq!(dense.per_instance.len(), sparse.per_instance.len());
+        for ((di, d), (si, s)) in dense.per_instance.iter().zip(&sparse.per_instance) {
+            assert_eq!(di, si);
+            assert!(close(d, s));
+        }
     }
 }

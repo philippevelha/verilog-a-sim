@@ -23,13 +23,11 @@ use va_core::sparse::{Solver, SPARSE_THRESHOLD};
 /// The pre-flight line naming the linear solver a run uses, why it was chosen, and what it
 /// covers.
 ///
-/// "What it covers" is the part a user could not guess. Steps 2 and 3 of
-/// `docs/proposals/sparse-solve.md` moved DC and transient to the sparse path; an `.ac` or
-/// `.noise` run still factors densely inside its frequency loop, and only its operating point
-/// goes sparse. The cost estimate above this line is calibrated on dense LU, so on the sparse path it
-/// overstates the matrix time — said here rather than left for a user to notice.
+/// Since Step 4 of `docs/proposals/sparse-solve.md` every analysis runs wholly on the path
+/// chosen here. The cost estimate above this line is calibrated on dense LU, so on the sparse
+/// path it overstates the matrix time — said here rather than left for a user to notice.
 #[must_use]
-pub fn solver_line(solver: Solver, unknowns: usize, analysis: Analysis) -> String {
+pub fn solver_line(solver: Solver, unknowns: usize) -> String {
     let sparse = solver.uses_sparse(unknowns);
     let why = match solver {
         Solver::Auto if sparse => format!("{unknowns} >= {SPARSE_THRESHOLD} unknowns"),
@@ -40,15 +38,10 @@ pub fn solver_line(solver: Solver, unknowns: usize, analysis: Analysis) -> Strin
     if !sparse {
         return format!("[va-cli] linear solve: dense LU ({why})");
     }
-    let scope = match analysis {
-        Analysis::Dc | Analysis::Transient => {
-            "the whole run (the dense-calibrated estimate above overstates it)"
-        }
-        Analysis::Ac | Analysis::Noise => {
-            "the operating point only; the frequency sweep is still dense LU"
-        }
-    };
-    format!("[va-cli] linear solve: sparse LU ({why}), for {scope}")
+    format!(
+        "[va-cli] linear solve: sparse LU ({why}), for the whole run (the dense-calibrated \
+         estimate above overstates it)"
+    )
 }
 
 /// The machine every figure in [`TRAN_MS_PER_POINT`] and its siblings was measured on. Named
@@ -546,17 +539,17 @@ mod tests {
 
     #[test]
     fn solver_line_names_the_solver_the_reason_and_the_scope() {
-        let dense = solver_line(Solver::Auto, 499, Analysis::Dc);
+        let dense = solver_line(Solver::Auto, 499);
         assert!(dense.contains("dense LU (499 < 500 unknowns)"), "{dense}");
-        let auto = solver_line(Solver::Auto, 500, Analysis::Dc);
+        let auto = solver_line(Solver::Auto, 500);
         assert!(auto.contains("sparse LU (500 >= 500 unknowns)"), "{auto}");
         assert!(auto.contains("whole run"), "{auto}");
-        let forced = solver_line(Solver::Sparse, 12, Analysis::Transient);
+        let forced = solver_line(Solver::Sparse, 12);
         assert!(forced.contains("--solver sparse"), "{forced}");
         assert!(forced.contains("whole run"), "{forced}");
-        let ac = solver_line(Solver::Sparse, 12, Analysis::Ac);
-        assert!(ac.contains("frequency sweep is still dense"), "{ac}");
-        let kept = solver_line(Solver::Dense, 10_000, Analysis::Dc);
+        let ac = solver_line(Solver::Sparse, 12);
+        assert!(ac.contains("whole run"), "{ac}");
+        let kept = solver_line(Solver::Dense, 10_000);
         assert!(kept.contains("dense LU (--solver dense)"), "{kept}");
     }
 }

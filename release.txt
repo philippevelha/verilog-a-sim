@@ -20,6 +20,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.8.0 - 2026-09-23
+------------------
+**Sparse solve, Step 4: AC and noise use it from 500 unknowns — every analysis now does.**
+`va_acnoise::ac::run_with` and `noise::run_with` take a `Solver` (the old names are `Auto`), and
+`va-cli`'s `solve_ac_with`/`solve_noise_with` pass `--solver` through to the frequency loop, not
+only to the operating point. On the sparse path the small-signal system is the same real
+embedding `[[G, -wC], [wC, G]]` the dense path solves, factored sparse; its pattern is built
+once from the `G`/`C` pattern, so one symbolic factorization serves the whole sweep. The noise
+adjoint embeds the plain transpose on both paths. Below 500 unknowns nothing changed.
+
+Why the embedding and not a complex sparse LU: it solves the identical system, so dense and
+sparse agree structurally, and it needed no complex counterpart of `SparseLu`. A complex LU
+would be a constant factor faster (half the dimension; one factorization could also serve the
+noise adjoint by a transpose solve) but brings a trap — `faer`'s transpose solve takes a `Conj`
+flag, and the conjugate transpose is silently wrong above DC. Recorded as an option, not done:
+`docs/future_development.md` §1a.
+
+The pre-flight line no longer carries a per-analysis scope ("the frequency sweep is still
+dense"): it now says sparse covers the whole run, for every analysis. `bench-scale`'s banner no
+longer claims every row is dense LU.
+
+Measured at 1.8.0: `cargo test --workspace` **872 passed / 0 failed** (+5: dense and sparse AC
+agree on an RC low-pass, a non-symmetric G with off-diagonal C, and a frequency-dependent
+circuit; `Auto` at 501 unknowns is bit-for-bit forced sparse in AC; noise spectrum, input-referred
+PSD and per-device split agree on a non-symmetric circuit up to 100 MHz). fmt + clippy clean.
+`cargo xtask validate`: **28/28**, output identical line for line to 1.7.0 (stash diff).
+`cargo xtask validate --solver sparse`: **28/28**; one printed figure differs, in the last
+digits: `rc_ac_oct` |mag| error 1.78e-15 against 1.94e-15. `bench-scale`, two runs each on
+1.8.0 and on 1.7.0 in the same session: at 802 unknowns `.ac` **0.43–0.49 ms per point**
+against 156–172 ms dense, `.noise` **0.38–0.46 ms** against 194–198 ms — about 350x and 450x.
+Rows below 500 unknowns match 1.7.0 within run-to-run noise.
+
+Not yet: the pre-flight cost estimate is still calibrated on dense LU and overstates sparse
+runs (Step 5). And on this ladder sparse at 802 unknowns is already faster than dense at 402,
+which says the crossover lies well below 500 — for a ladder, sparse's best case. Whether the
+threshold moves is Step 5's measurement on denser circuits.
+
+
 1.7.0 - 2026-09-23
 ------------------
 **Sparse solve, Step 3: the transient timestep loop uses it from 500 unknowns.** `TranConfig`

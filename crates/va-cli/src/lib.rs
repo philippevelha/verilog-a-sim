@@ -644,10 +644,7 @@ pub fn run_sim(
         for line in sizing.lines() {
             eprintln!("{line}");
         }
-        eprintln!(
-            "{}",
-            estimate::solver_line(solver, sizing.unknowns, analysis)
-        );
+        eprintln!("{}", estimate::solver_line(solver, sizing.unknowns));
     }
     // Plottable analyses are the ones that produce a *curve*: a transient waveform, or a `.dc`
     // sweep. A bare DC operating point is a single point — plotting one would be an empty
@@ -2298,9 +2295,8 @@ pub fn solve_ac(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::ac::Ac
     solve_ac_with(net, compiled, Solver::Auto)
 }
 
-/// [`solve_ac`] with an explicit [`Solver`] — which, until Step 4 of
-/// `docs/proposals/sparse-solve.md`, governs only the operating point the sweep linearizes
-/// about. The per-frequency solve is dense.
+/// [`solve_ac`] with an explicit [`Solver`], used for the operating point and for every
+/// frequency point's solve (`docs/proposals/sparse-solve.md`, Step 4).
 ///
 /// # Errors
 ///
@@ -2335,7 +2331,8 @@ pub fn solve_ac_with(
             va_netlist::AcSweepKindCard::Lin => va_acnoise::ac::AcSweepKind::Lin,
         },
     };
-    va_acnoise::ac::run(&refs, &op.x, dim, sweep, &excitation).context("AC sweep failed")
+    va_acnoise::ac::run_with(&refs, &op.x, dim, sweep, &excitation, solver)
+        .context("AC sweep failed")
 }
 
 /// What `analysis` is about to solve on `net`: the device and unknown counts, and how many
@@ -2442,9 +2439,8 @@ pub fn solve_noise(net: &Netlist, compiled: &[Module]) -> Result<va_acnoise::noi
     solve_noise_with(net, compiled, Solver::Auto)
 }
 
-/// [`solve_noise`] with an explicit [`Solver`] — which, until Step 4 of
-/// `docs/proposals/sparse-solve.md`, governs only the operating point the spectrum linearizes
-/// about. The per-frequency adjoint solve is dense.
+/// [`solve_noise`] with an explicit [`Solver`], used for the operating point and for every
+/// frequency point's adjoint solve (`docs/proposals/sparse-solve.md`, Step 4).
 ///
 /// # Errors
 ///
@@ -2524,8 +2520,17 @@ pub fn solve_noise_with(
         points: card.points_per_decade,
         kind: va_acnoise::ac::AcSweepKind::Dec,
     };
-    va_acnoise::noise::run_at_nominal_temp(&refs, &op.x, dim, sweep, output, input)
-        .context("noise sweep failed")
+    va_acnoise::noise::run_with(
+        &refs,
+        &op.x,
+        dim,
+        sweep,
+        output,
+        input,
+        va_abi::noise::TEMP_NOMINAL,
+        solver,
+    )
+    .context("noise sweep failed")
 }
 
 /// Name each contributor in a solved [`va_acnoise::noise::NoiseSpectrum`]'s per-device
