@@ -1,7 +1,7 @@
 # Proposal: a sparse linear solve above 500 unknowns
 
-**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. Everything else
-is open for review.
+**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Step 1 done
+(1.5.0, 2026-09-23)**; Steps 2–5 open.
 **Affects:** `va-core` (new sparse assembler + solver, the selector), `va-transient` and
 `va-acnoise` (their assemblers and solve call sites), `va-cli` (`--solver`, the pre-flight line),
 `xtask` (`bench-scale` gains a sparse column). **`va-abi` (Interface β) and `va-ir`
@@ -230,10 +230,40 @@ Each step lands as its own release. Steps 1–4 each add a feature and bump the 
 - **Not in scope:** iterative solvers, parallel factorization, and any FFI solver (KLU,
   SuiteSparse, PARDISO), which CLAUDE.md §5 forbids. The sparse LU is `faer`'s, pure Rust.
 
+## 6a. Progress
+
+**Step 1 — done, 1.5.0 (2026-09-23).** `crates/va-core/src/sparse.rs`: `Solver` and
+`SPARSE_THRESHOLD = 500`, `Pattern`, `SparseSystem` (a `StampSink`, pattern found by an
+overflow map on first assembly and grown to the union when a new entry appears), `assemble_into`,
+and `SparseLu` (symbolic factorization cached per pattern identity, `faer` panics caught, the
+dense path's residual check and `NonFinite` entry). No analysis calls it yet. Tests assert it
+against the dense path: the same assembled matrix entry by entry, the same solution on a ladder,
+a chain of voltage sources (every branch row a zero diagonal), and a diode Jacobian; a Newton
+loop reaching `dc::operating_point`'s answer with one symbolic factorization; pattern growth
+refactoring exactly once; singular and `NonFinite` agreement; `gmin`; the companion matrix.
+
+`cargo xtask bench-linsolve` gained the Step 1 path. Two release runs on the ladder, one solve
+each (so the small sizes are noisy):
+
+| dim | dense solve (ms) | Step 1 solve (ms) | dense iteration (ms) | Step 1 iteration (ms) |
+|---:|---:|---:|---:|---:|
+| 11 | 0.007–0.011 | 0.003–0.004 | 0.008 | 0.004–0.006 |
+| 101 | 0.50–2.4 | 0.012–0.014 | 0.41–0.44 | 0.024–0.027 |
+| 501 | 5.7–7.2 | 0.056–0.067 | 6.6–10.1 | 0.12–0.14 |
+| 2 001 | 110–113 | 0.27–0.28 | 126–128 | 0.61–0.66 |
+| 10 001 | 8 067–8 852 | 2.6–2.8 | 8 171–10 062 | 5.1–5.4 |
+
+"Iteration" is assembly plus solve, which is what a Newton step costs. **Read with care:** the
+ladder is tridiagonal, the best case for sparse LU, and the benchmark times only the matrix
+work. In a real run the model evaluation is often the larger cost (PSP103 is ~30 ms per DC
+point), so the whole-run gain at small sizes will be far smaller than these ratios. That the
+Step 1 path beats dense even at 11 unknowns here does not by itself argue for a lower
+threshold; Step 5 measures whole runs on real circuits before the 500 moves.
+
 ## 7. Decided, and still open
 
 - **Decided (2026-09-23, the user):** dense below 500 unknowns, sparse from 500; the dense path
   is not modified.
 - **Open, for Step 4:** a complex sparse LU for AC/noise (recommended) or a sparse version of the
-  real embedding.
+  real embedding. Need to check what are the advantages abd drwaback of each before choosing.
 - **Open, for Step 5:** whether the measured crossover moves the threshold.

@@ -7,7 +7,9 @@
 //! The solver consumes a slice of [`va_abi::ModelInstance`] objects, assembles their stamps
 //! into an MNA system ([`mna`]), and drives Newton ([`newton`]) with a dense linear solve
 //! ([`linsolve`]) plus convergence aids ([`convergence`]). [`dc`] wires these into an
-//! operating-point / sweep analysis.
+//! operating-point / sweep analysis. [`sparse`] is the sparse assembly and solve for circuits of
+//! [`sparse::SPARSE_THRESHOLD`] unknowns and more — built and tested, not yet used by any
+//! analysis (`docs/proposals/sparse-solve.md`, Step 1).
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +18,7 @@ pub mod dc;
 pub mod linsolve;
 pub mod mna;
 pub mod newton;
+pub mod sparse;
 
 use thiserror::Error;
 

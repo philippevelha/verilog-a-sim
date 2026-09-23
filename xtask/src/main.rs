@@ -1951,6 +1951,19 @@ struct BenchRow {
     /// — would indicate a real correctness bug, not an expected benchmark outcome. `None` when
     /// there is no sparse solution to compare (`sparse_time` was `None`).
     sparse_matches_dense: Option<bool>,
+    /// The Step 1 sparse path (`va_core::sparse`, `docs/proposals/sparse-solve.md`): one solve
+    /// with the symbolic factorization already cached — the steady state every Newton iteration
+    /// after the first pays. Directly comparable with `dense_time`.
+    step1_solve_time: Duration,
+    /// One whole Newton iteration on each path, assembly included: `mna::assemble` +
+    /// `solve_dense` against `sparse::assemble_into` (pattern known) + `SparseLu::solve`. The
+    /// dense path zeroes and fills a `dim²` buffer before it factors; this is where that shows.
+    dense_iter_time: Duration,
+    /// See [`Self::dense_iter_time`].
+    step1_iter_time: Duration,
+    /// Whether the Step 1 solution agrees with the dense one to the same tolerance as
+    /// `sparse_matches_dense`.
+    step1_matches_dense: bool,
 }
 
 /// Build the ladder at `n_nodes`, assemble its MNA system, and time one dense and one sparse
@@ -1995,6 +2008,40 @@ fn run_bench_row(n_nodes: usize) -> Result<BenchRow> {
             }
         };
 
+    // The Step 1 path. The first iteration discovers the pattern and does the symbolic
+    // factorization, once per circuit; the timed ones are what every later iteration costs.
+    let fired = va_abi::FiredEvents::default();
+    let mut ssys = va_core::sparse::SparseSystem::new(dim);
+    let mut lu = va_core::sparse::SparseLu::new();
+    va_core::sparse::assemble_into(&insts, &x, &va_abi::ANALYSIS_DC, &fired, &mut ssys);
+    let sb: Vec<f64> = ssys.residual_values().iter().map(|v| -v).collect();
+    lu.solve(ssys.jacobian(), &sb)
+        .with_context(|| format!("Step 1 sparse solve failed at n_nodes={n_nodes}"))?;
+
+    let t2 = Instant::now();
+    let step1_x = lu
+        .solve(ssys.jacobian(), &sb)
+        .with_context(|| format!("Step 1 sparse solve failed at n_nodes={n_nodes}"))?;
+    let step1_solve_time = t2.elapsed();
+
+    let t3 = Instant::now();
+    va_core::sparse::assemble_into(&insts, &x, &va_abi::ANALYSIS_DC, &fired, &mut ssys);
+    let sb: Vec<f64> = ssys.residual_values().iter().map(|v| -v).collect();
+    lu.solve(ssys.jacobian(), &sb)?;
+    let step1_iter_time = t3.elapsed();
+
+    let t4 = Instant::now();
+    let dsys = va_core::mna::assemble(&insts, &x, &va_abi::ANALYSIS_DC, dim);
+    let db: Vec<f64> = dsys.residual.iter().map(|v| -v).collect();
+    va_core::linsolve::solve_dense(&dsys.jacobian, &db, dim)?;
+    let dense_iter_time = t4.elapsed();
+    drop(dsys);
+
+    let step1_matches_dense = dense_x
+        .iter()
+        .zip(&step1_x)
+        .all(|(a, s)| (a - s).abs() < 1e-6);
+
     Ok(BenchRow {
         n_nodes,
         dim,
@@ -2003,6 +2050,10 @@ fn run_bench_row(n_nodes: usize) -> Result<BenchRow> {
         dense_time,
         sparse_time,
         sparse_matches_dense,
+        step1_solve_time,
+        dense_iter_time,
+        step1_iter_time,
+        step1_matches_dense,
     })
 }
 
@@ -2198,8 +2249,20 @@ fn bench_linsolve() -> Result<()> {
     let _ = run_bench_row(5);
 
     eprintln!(
-        "[xtask]   {:>7} {:>6} {:>8} {:>8} {:>10} {:>11} {:>11} {:>9}",
-        "n_nodes", "dim", "nnz", "fill", "dense_MB", "dense_ms", "sparse_ms", "speedup"
+        "[xtask]   {:>7} {:>6} {:>8} {:>8} {:>10} {:>11} {:>11} {:>9} {:>10} {:>9} {:>11} {:>11} {:>9}",
+        "n_nodes",
+        "dim",
+        "nnz",
+        "fill",
+        "dense_MB",
+        "dense_ms",
+        "sparse_ms",
+        "speedup",
+        "step1_ms",
+        "speedup",
+        "dense_it_ms",
+        "step1_it_ms",
+        "speedup"
     );
 
     let mut measured = 0usize;
@@ -2220,17 +2283,35 @@ fn bench_linsolve() -> Result<()> {
                 )
             })
             .unwrap_or_else(|| "n/a".to_string());
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let ratio = |a: Duration, b: Duration| {
+            format!(
+                "{:.2}x",
+                a.as_secs_f64() / b.as_secs_f64().max(f64::EPSILON)
+            )
+        };
         eprintln!(
-            "[xtask]   {:>7} {:>6} {:>8} {:>8.4} {:>10.3} {:>11.3} {:>11} {:>9}",
+            "[xtask]   {:>7} {:>6} {:>8} {:>8.4} {:>10.3} {:>11.3} {:>11} {:>9} {:>10.3} {:>9} {:>11.3} {:>11.3} {:>9}",
             row.n_nodes,
             row.dim,
             row.nnz,
             fill,
             dense_mb,
-            row.dense_time.as_secs_f64() * 1e3,
+            ms(row.dense_time),
             sparse_ms_str,
             speedup_str,
+            ms(row.step1_solve_time),
+            ratio(row.dense_time, row.step1_solve_time),
+            ms(row.dense_iter_time),
+            ms(row.step1_iter_time),
+            ratio(row.dense_iter_time, row.step1_iter_time),
         );
+        if !row.step1_matches_dense {
+            eprintln!(
+                "[xtask]   WARNING: dense/Step 1 sparse solutions disagree beyond tolerance at                  n_nodes={}",
+                row.n_nodes
+            );
+        }
         if row.sparse_matches_dense == Some(false) {
             eprintln!(
                 "[xtask]   WARNING: dense/sparse solutions disagree beyond tolerance at \
@@ -2469,6 +2550,10 @@ mod tests {
         let row = run_bench_row(8).expect("well-conditioned ladder solves");
         assert_eq!(row.dim, 9);
         assert_eq!(row.sparse_matches_dense, Some(true));
+        assert!(
+            row.step1_matches_dense,
+            "the Step 1 sparse path agrees with dense"
+        );
         // Well under half-full: each node row touches only its neighbors + the shunt + (for
         // node 0) the source branch — nowhere near a dense n*n fill.
         let fill = row.nnz as f64 / (row.dim * row.dim) as f64;

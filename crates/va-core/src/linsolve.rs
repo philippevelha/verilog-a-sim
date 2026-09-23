@@ -16,7 +16,7 @@ use faer::Mat;
 /// Relative tolerance for the post-solve residual sanity check. A solve whose `‖A·x − b‖∞`
 /// exceeds this (scaled by `‖b‖`) is treated as singular — this catches the near-singular
 /// case partial pivoting would otherwise return as finite garbage.
-const RESIDUAL_TOL: f64 = 1e-6;
+pub(crate) const RESIDUAL_TOL: f64 = 1e-6;
 
 /// Whether `x` solves `a · x = b` (dense row-major `a`, `n × n`) to within [`RESIDUAL_TOL`].
 ///

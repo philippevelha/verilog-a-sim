@@ -20,6 +20,39 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.5.0 - 2026-09-23
+------------------
+**Sparse solve, Step 1: built and tested, not used by any analysis yet.** New module
+`va_core::sparse` (docs/proposals/sparse-solve.md): `Solver { Dense, Sparse, Auto }` with
+`SPARSE_THRESHOLD = 500`; `SparseSystem`, a `StampSink` that stores the Jacobian and the charge
+Jacobian over one shared compressed-column pattern and never allocates `dim²`; `assemble_into`;
+and `SparseLu`, which caches the symbolic factorization per pattern so each Newton iteration
+redoes only the numeric one. The pattern is found on the first assembly and grows to the union
+if a model later stamps an entry it had not (an `if` arm or an `@(above)` body), with exactly
+one new symbolic factorization. Entries stamped `0.0` and every diagonal are kept in the
+pattern. No Interface β change: models only ever see `(row, col, value)` calls.
+
+It keeps the dense path's guarantees: `faer`'s sparse-LU panic on some singular inputs is caught
+and reported as `Singular`, the post-solve residual check uses the same tolerance, and
+`NonFinite` names the same entry dense would (the first bad one in row-major order, though the
+sparse values are stored column by column). The prototype `linsolve::solve_sparse` stays as the
+benchmark reference.
+
+Why a minor bump for code nothing calls yet: it is new public API and the proposal counts each of
+Steps 1–4 as a feature. Nothing a user runs changes: dense stays the only path until Step 2.
+Limitation: the slot lookup per stamp is a hash lookup; a faster per-instance cache is deferred
+until a profile asks for it.
+
+Measured at 1.5.0: `cargo test --workspace` **855 passed / 0 failed** (+13: 11 in
+`va_core::sparse`, and `bench-linsolve`'s row test now also checks the Step 1 path against
+dense). fmt + clippy clean. `xtask validate` not re-run: no analysis path changed.
+`cargo xtask bench-linsolve` gained the Step 1 path; two release runs, ladder circuit: at 501
+unknowns one solve takes 0.06 ms against dense's 5.7–7.2 ms, and one Newton iteration (assembly
++ solve) 0.12–0.14 ms against 6.6–10.1 ms; at 10 001, 5.1–5.4 ms against 8.2–10.1 s per
+iteration. The ladder is tridiagonal, sparse LU's best case, and the benchmark times matrix work
+only, so whole-run gains on real circuits will be smaller. Step 5 measures those.
+
+
 1.4.1 - 2026-09-23
 ------------------
 **Redundant ideal shorts no longer make the matrix singular.** `V(a,b) <+ 0.0` gives each
