@@ -164,10 +164,13 @@ impl CompiledModel {
         // Scanned once rather than per Newton iteration: `unknown_is_junction` is consulted for
         // every unknown on every solve, and the answer is a property of the source text.
         let node_is_junction = classify_nodes(module);
+        // Decided here because it depends on the parameter values, which this model owns.
+        let ideal_shorts = lower::ideal_shorts(module, &lowered, &params);
         let shared = Rc::new(SharedModel {
             module: module.clone(),
             params,
             lowered,
+            ideal_shorts,
             vt: VT,
             temp: TEMP,
             node_is_junction,
@@ -181,6 +184,7 @@ impl CompiledModel {
         let prototype = GeneratedModel {
             terminals: (0..shared.lowered.n_unknowns).collect(),
             shared: Rc::clone(&shared),
+            pinned: Vec::new(),
         };
         prototype.validate()?;
 
@@ -210,6 +214,40 @@ impl CompiledModel {
         terminals: &[usize],
         next_unknown: &mut usize,
     ) -> Result<Box<dyn ModelInstance>, CodegenError> {
+        self.instantiate_with_shorts(terminals, next_unknown, |_, _| true)
+    }
+
+    /// The branches this model provably holds at zero volts (`V(p,n) <+ 0.0`) under its
+    /// parameter values — see [`lower::IdealShort`] and [`lower::ideal_shorts`] for what
+    /// qualifies. Usually empty.
+    pub fn ideal_shorts(&self) -> &[lower::IdealShort] {
+        &self.shared.ideal_shorts
+    }
+
+    /// [`Self::instantiate`], asking `keep(global_p, global_n)` about each of
+    /// [`Self::ideal_shorts`] in order, with its terminals already mapped to global unknowns.
+    ///
+    /// A short answered `false` is **pinned**: its branch current is fixed at zero and its
+    /// `V(p) - V(n) = 0` row is not stamped. Answer `false` exactly when the two nodes are
+    /// already held equal by shorts kept earlier (or are the same node), because then this
+    /// row repeats what those rows say and the matrix would be singular. The kept shorts carry
+    /// the whole current between the nodes, so node voltages and every other current are
+    /// unchanged; what changes is that the pinned instance reports zero on its own
+    /// auxiliary row (`X2.b0`) and the kept one reports the total.
+    ///
+    /// `va-cli` answers with a union-find over every short in the deck. Nothing is pinned
+    /// unless `keep` says so, so a caller that always answers `true` gets exactly
+    /// [`Self::instantiate`].
+    ///
+    /// # Errors
+    ///
+    /// [`CodegenError::TerminalCount`] if `terminals` does not match the module's port count.
+    pub fn instantiate_with_shorts(
+        &self,
+        terminals: &[usize],
+        next_unknown: &mut usize,
+        mut keep: impl FnMut(usize, usize) -> bool,
+    ) -> Result<Box<dyn ModelInstance>, CodegenError> {
         let nodes = self.shared.module.nodes.len();
         if terminals.len() != nodes {
             return Err(CodegenError::TerminalCount {
@@ -226,9 +264,17 @@ impl CompiledModel {
             full.push(*next_unknown);
             *next_unknown += 1;
         }
+        let pinned = self
+            .shared
+            .ideal_shorts
+            .iter()
+            .filter(|s| !keep(full[s.p_slot], full[s.n_slot]))
+            .map(|s| s.local_slot)
+            .collect();
         Ok(Box::new(GeneratedModel {
             shared: Rc::clone(&self.shared),
             terminals: full,
+            pinned,
         }))
     }
 }
@@ -262,6 +308,10 @@ struct GeneratedModel {
     /// This instance's local-slot → global-unknown map. The only genuinely per-instance thing:
     /// two instances of one model differ in where they are wired and in nothing else.
     terminals: Vec<usize>,
+    /// Local slots of the ideal shorts this instance does **not** stamp, because another short
+    /// already holds the same two nodes equal (see [`CompiledModel::instantiate_with_shorts`]).
+    /// Empty for every instance except a redundant one.
+    pinned: Vec<usize>,
 }
 
 /// A model compiled once: the arena, the lowered plan, the resolved parameters, and everything
@@ -276,6 +326,8 @@ struct SharedModel {
     module: Module,
     params: Vec<f64>,
     lowered: Lowered,
+    /// [`lower::ideal_shorts`] under `params`.
+    ideal_shorts: Vec<lower::IdealShort>,
     vt: f64,
     temp: f64,
     /// Which of `module.nodes` are junction potentials — the answer
@@ -946,6 +998,13 @@ impl GeneratedModel {
                 }
             }
             Some(local_slot) => {
+                // A pinned short's row is `ib = 0`, stamped by `stamp_branch_currents` or
+                // `finalize_mixed_branch_currents`. Its contribution is a proven zero, so
+                // skipping it drops nothing — and not marking the branch used is what makes
+                // the mixed finalizer do the pinning.
+                if self.pinned.contains(&local_slot) {
+                    return;
+                }
                 if self.is_mixed_branch(local_slot) && ctx.mark_potential_used(local_slot) {
                     Self::stamp_branch_current_structural(
                         self.terminals[c.p_slot],
@@ -1712,7 +1771,9 @@ impl GeneratedModel {
     /// [`Self::finalize_mixed_branch_currents`] for what happens when one doesn't.
     fn stamp_branch_currents(&self, x: &[f64], sink: &mut dyn StampSink) {
         for bc in &self.shared.lowered.branch_currents {
-            if !bc.mixed {
+            if !bc.mixed && self.pinned.contains(&bc.local_slot) {
+                Self::stamp_pinned_branch_current(self.terminals[bc.local_slot], x, sink);
+            } else if !bc.mixed {
                 Self::stamp_branch_current_structural(
                     self.terminals[bc.p_slot],
                     self.terminals[bc.n_slot],
@@ -1740,11 +1801,16 @@ impl GeneratedModel {
                     .borrow()
                     .contains(&bc.local_slot)
             {
-                let gb = self.terminals[bc.local_slot];
-                sink.residual(gb, ctx.x.get(gb).copied().unwrap_or(0.0));
-                sink.jacobian(gb, gb, 1.0);
+                Self::stamp_pinned_branch_current(self.terminals[bc.local_slot], ctx.x, sink);
             }
         }
+    }
+
+    /// Pin the auxiliary current at global row `gb` to zero: residual `x[gb]`, unit diagonal.
+    /// Its KCL injection is left out, since a current that is zero injects nothing.
+    fn stamp_pinned_branch_current(gb: usize, x: &[f64], sink: &mut dyn StampSink) {
+        sink.residual(gb, x.get(gb).copied().unwrap_or(0.0));
+        sink.jacobian(gb, gb, 1.0);
     }
 
     /// Stamp every `idt` accumulator's own row: residual `-arg` (so Newton drives the row's

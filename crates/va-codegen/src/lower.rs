@@ -1285,6 +1285,229 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     })
 }
 
+/// A potential branch that this compiled model provably holds at zero volts, `V(p,n) <+ 0.0`:
+/// an **ideal short**, the Verilog-A idiom for node collapse.
+///
+/// Why it matters: each instance gives the branch its own current unknown with the constraint
+/// row `V(p) - V(n) = 0`. Two instances whose shorts land on the *same* pair of circuit nodes
+/// give two identical rows — the voltage is determined, the split of current between two ideal
+/// shorts is not — and the matrix is singular. BSIM-BULK's `Temp(t) <+ 0.0` (self-heating off)
+/// is where compact models write it, which is why two such devices on one thermal net failed.
+/// The caller of [`crate::CompiledModel::instantiate_with_shorts`] sees every short in global
+/// terms and pins the redundant ones (see there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdealShort {
+    /// Local node slot of the branch's positive terminal.
+    pub p_slot: usize,
+    /// Local node slot of the branch's negative terminal.
+    pub n_slot: usize,
+    /// Local slot of the branch's own current unknown (its [`BranchCurrent::local_slot`]).
+    pub local_slot: usize,
+}
+
+/// Every branch in `lowered` that is an [`IdealShort`] under the parameter values `params`.
+///
+/// **Prove it, or leave it alone.** A wrong "yes" pins a real branch current to zero and
+/// silently deletes physics; a wrong "no" only leaves a case singular that already was. So a
+/// branch qualifies only if all of these hold:
+///
+/// - every potential contribution to it that can run is a plain zero: its resistive terms fold
+///   to exactly `0.0` from literals and parameters, and it has no charge, noise, `ac_stim`,
+///   `laplace_*` or `zi_*` channel;
+/// - no flow contribution to it can run. For a **mixed** branch (flow in one arm, potential in
+///   another, as BSIM-BULK writes it) that means the `if`/`case` conditions around the flow arm
+///   fold, from literals and parameters alone, to not taking it — and additionally a zero
+///   potential contribution is certain to run, since a mixed branch that no potential
+///   contribution claims is left unconstrained (`finalize_mixed_branch_currents`), not shorted;
+/// - its current is never read: no `I(...)` probe of the same node pair in either orientation,
+///   and no node-KCL probe that sums it.
+///
+/// A condition that reads anything but literals and parameters — a variable, a probe, a
+/// function call, an event — does not fold, and then every arm below it counts as possibly
+/// running. Loop bodies always count as possibly running.
+///
+/// **Limitation:** variables computed from parameters alone do not fold, even though they are
+/// bias-independent. BSIM-BULK's `RDrainGeo > 0` arms are that shape; its thermal
+/// `SHMOD != 0 && RTH0 > 0` is not, and that is the case that motivated this.
+pub fn ideal_shorts(module: &Module, lowered: &Lowered, params: &[f64]) -> Vec<IdealShort> {
+    let mut facts: HashMap<u32, ShortFacts> = HashMap::new();
+    walk_short_facts(module, params, &lowered.stmts, true, &mut facts);
+
+    let pair = |b: BranchId| {
+        let br = module.branches[b.0 as usize];
+        (br.p, br.n)
+    };
+    let read_pairs: Vec<(NodeId, NodeId)> = module
+        .exprs
+        .iter()
+        .filter_map(|e| match e {
+            Expr::Probe(a) if a.kind == AccessKind::Flow => Some(pair(a.branch)),
+            _ => None,
+        })
+        .collect();
+
+    lowered
+        .branch_currents
+        .iter()
+        .filter(|bc| {
+            let (p, n) = pair(bc.branch);
+            let read = read_pairs
+                .iter()
+                .any(|&(a, b)| (a, b) == (p, n) || (a, b) == (n, p))
+                || lowered
+                    .node_kcl_probes
+                    .iter()
+                    .any(|probe| probe.terms.iter().any(|&(s, _)| s == bc.local_slot));
+            let f = facts.get(&bc.branch.0).copied().unwrap_or_default();
+            !read && !f.flow && !f.nonzero_potential && (!bc.mixed || f.certain_zero_potential)
+        })
+        .map(|bc| IdealShort {
+            p_slot: bc.p_slot,
+            n_slot: bc.n_slot,
+            local_slot: bc.local_slot,
+        })
+        .collect()
+}
+
+/// What [`walk_short_facts`] learned about one branch.
+#[derive(Clone, Copy, Debug, Default)]
+struct ShortFacts {
+    /// A flow contribution to it can run.
+    flow: bool,
+    /// A potential contribution that is not a plain zero can run.
+    nonzero_potential: bool,
+    /// A plain-zero potential contribution runs on every path.
+    certain_zero_potential: bool,
+}
+
+/// Walk `stmts` for [`ideal_shorts`]. `certain` is whether these statements run on every path
+/// under the given parameters.
+fn walk_short_facts(
+    module: &Module,
+    params: &[f64],
+    stmts: &[LoweredStmt],
+    certain: bool,
+    facts: &mut HashMap<u32, ShortFacts>,
+) {
+    let fold = |e: ExprId| fold_param_expr(module, params, e);
+    for stmt in stmts {
+        match stmt {
+            LoweredStmt::Contribute(c) => {
+                let f = facts.entry(c.branch.0).or_default();
+                if c.branch_slot.is_none() {
+                    f.flow = true;
+                } else if c.charge.is_empty()
+                    && c.noise.is_empty()
+                    && c.ac_stim.is_empty()
+                    && c.laplace.is_empty()
+                    && c.zi.is_empty()
+                    && c.resistive.iter().all(|t| fold(t.expr) == Some(0.0))
+                {
+                    f.certain_zero_potential |= certain;
+                } else {
+                    f.nonzero_potential = true;
+                }
+            }
+            LoweredStmt::If { cond, then_, else_ } => match fold(*cond) {
+                // The same truth test `GeneratedModel::run` applies, so a NaN takes `then_` here
+                // exactly as it does at run time.
+                Some(v) if v != 0.0 => walk_short_facts(module, params, then_, certain, facts),
+                Some(_) => walk_short_facts(module, params, else_, certain, facts),
+                None => {
+                    walk_short_facts(module, params, then_, false, facts);
+                    walk_short_facts(module, params, else_, false, facts);
+                }
+            },
+            LoweredStmt::Case {
+                selector,
+                arms,
+                default,
+            } => match case_arm_taken(module, params, *selector, arms) {
+                Some(Some(i)) => walk_short_facts(module, params, &arms[i].body, certain, facts),
+                Some(None) => walk_short_facts(module, params, default, certain, facts),
+                None => {
+                    for arm in arms {
+                        walk_short_facts(module, params, &arm.body, false, facts);
+                    }
+                    walk_short_facts(module, params, default, false, facts);
+                }
+            },
+            LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => {
+                walk_short_facts(module, params, body, false, facts);
+            }
+            LoweredStmt::For {
+                init, step, body, ..
+            } => {
+                walk_short_facts(module, params, init, certain, facts);
+                walk_short_facts(module, params, step, false, facts);
+                walk_short_facts(module, params, body, false, facts);
+            }
+            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => {}
+        }
+    }
+}
+
+/// Which arm of a `case` runs, decided from literals and parameters: `Some(Some(i))` for arm
+/// `i`, `Some(None)` for `default`, `None` if the selector or a label met before the match does
+/// not fold. First matching arm wins, as in `GeneratedModel::run`.
+fn case_arm_taken(
+    module: &Module,
+    params: &[f64],
+    selector: ExprId,
+    arms: &[LoweredCaseArm],
+) -> Option<Option<usize>> {
+    let sel = fold_param_expr(module, params, selector)?;
+    for (i, arm) in arms.iter().enumerate() {
+        for &label in &arm.labels {
+            if fold_param_expr(module, params, label)? == sel {
+                return Some(Some(i));
+            }
+        }
+    }
+    Some(None)
+}
+
+/// The value of `e` if it is built only from literals, parameters, and the arithmetic,
+/// comparison and logical operators — with the operator semantics `ad::eval` uses — and `None`
+/// for anything else.
+fn fold_param_expr(module: &Module, params: &[f64], e: ExprId) -> Option<f64> {
+    let b = |v: bool| if v { 1.0 } else { 0.0 };
+    match module.expr(e) {
+        Expr::Const(v) => Some(*v),
+        Expr::Param(p) => params.get(p.0 as usize).copied(),
+        Expr::Unary(op, a) => {
+            let a = fold_param_expr(module, params, *a)?;
+            match op {
+                UnOp::Neg => Some(-a),
+                UnOp::Not => Some(b(a == 0.0)),
+                UnOp::BitNot => None,
+            }
+        }
+        Expr::Binary(op, l, r) => {
+            let l = fold_param_expr(module, params, *l)?;
+            let r = fold_param_expr(module, params, *r)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                // `Dual::div`'s spelling, not `l / r`: the two can round differently, and a
+                // folded condition must agree with the run-time one to the last bit.
+                BinOp::Div => Some(l * (1.0 / r)),
+                BinOp::Lt => Some(b(l < r)),
+                BinOp::Le => Some(b(l <= r)),
+                BinOp::Gt => Some(b(l > r)),
+                BinOp::Ge => Some(b(l >= r)),
+                BinOp::Eq => Some(b(l == r)),
+                BinOp::Ne => Some(b(l != r)),
+                BinOp::And => Some(b(l != 0.0 && r != 0.0)),
+                BinOp::Or => Some(b(l != 0.0 || r != 0.0)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The module's implicit global reference node, if a single-terminal access anywhere ever
 /// created one (see `va-frontend::elaborate::Elaborator::reference_node`) — identified by name,
 /// the same `"gnd"` sentinel convention `va-netlist` uses when wiring nodes across module

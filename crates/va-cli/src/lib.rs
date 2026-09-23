@@ -1449,6 +1449,9 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
     // placed from a handful of model cards, and this is what makes the arena be cloned and
     // lowered once per *card* rather than once per device.
     let mut cache = CompiledCache::new();
+    // Every ideal short (`V(p,n) <+ 0.0`) placed so far, across all devices — see
+    // [`ShortForest`]. Deck order decides which of two redundant shorts is kept.
+    let mut shorts = ShortForest::default();
     for dev in &net.devices {
         if matches!(dev.model.as_str(), "cccs" | "ccvs" | "mutual") {
             continue;
@@ -1456,7 +1459,7 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
         let before = next_unknown;
         let slot_index = instances.len();
         let (inst, branch, assignment) =
-            build_instance(dev, compiled, &mut next_unknown, &mut cache)?;
+            build_instance(dev, compiled, &mut next_unknown, &mut cache, &mut shorts)?;
         slots.push(DeviceSlot {
             name: dev.name.clone(),
             index: slot_index,
@@ -1805,9 +1808,17 @@ pub fn solve_dc_sweep(
         // dead entry per point. A source's module is small; the sweep's real cost saving is
         // that the *other* devices are not rebuilt at all.
         let mut cache = CompiledCache::new();
-        let (instance, _, _) =
-            build_instance(&swept_device, compiled, &mut next_unknown, &mut cache)
-                .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
+        // A fresh forest is exact here only because the swept device is a `vsource` (checked
+        // above), a primitive with no ideal shorts for the forest to decide about.
+        let mut shorts = ShortForest::default();
+        let (instance, _, _) = build_instance(
+            &swept_device,
+            compiled,
+            &mut next_unknown,
+            &mut cache,
+            &mut shorts,
+        )
+        .with_context(|| format!("rebuilding `{}` at {value}", sweep.source))?;
         // A device that claimed a different number of unknowns on the rebuild would push every
         // later device's rows out of alignment, and the solve would quietly be of a different
         // circuit. It cannot happen for a source — its row count does not depend on its value —
@@ -2478,6 +2489,7 @@ fn build_instance(
     compiled: &[Module],
     next_unknown: &mut usize,
     cache: &mut CompiledCache,
+    shorts: &mut ShortForest,
 ) -> Result<BuiltDevice> {
     // Read lazily rather than up front: every *letter* device has at least two terminals, but
     // an `X` line places a model with whatever port count that model declares, and a
@@ -2566,6 +2578,7 @@ fn build_instance(
             &dev.terminals,
             next_unknown,
             cache,
+            shorts,
         )?;
         return Ok((inst, None, assignment));
     }
@@ -2654,6 +2667,50 @@ fn split_multiplicity(module: &Module, overrides: &[(String, f64)]) -> Result<Sp
 /// for the whole build and cheaper than comparing names. The override half is canonicalized by
 /// sorting, so two device lines setting the same parameters in a different order still share.
 type CompiledCache = std::collections::HashMap<(usize, String), va_codegen::CompiledModel>;
+
+/// A union-find over global unknowns, joined by every ideal short (`V(p,n) <+ 0.0`) placed so
+/// far — `va_codegen::CompiledModel::ideal_shorts`.
+///
+/// Two ideal shorts across the same pair of nodes write the same row twice, which is singular:
+/// the voltage is fixed, the split of current between them is not. More generally any short
+/// whose two ends are already held equal by earlier shorts closes a loop of them, and so does
+/// a short whose two ends are the same node. The shorts this keeps form a spanning forest of
+/// the ones placed; every other one is pinned to zero current, which leaves node voltages and
+/// every other current as they were. A deck with no redundant short pins nothing, so its
+/// matrix is exactly what it was before this existed.
+///
+/// **What it does not see:** a loop closed through a deck's own voltage sources, or through a
+/// model's nonzero `V(p,n) <+ expr`. Those are still singular, as in any MNA simulator.
+#[derive(Default)]
+struct ShortForest {
+    parent: std::collections::HashMap<usize, usize>,
+}
+
+impl ShortForest {
+    fn root(&mut self, mut a: usize) -> usize {
+        while let Some(&p) = self.parent.get(&a) {
+            if p == a {
+                break;
+            }
+            // Path halving: point `a` at its grandparent on the way up.
+            let gp = self.parent.get(&p).copied().unwrap_or(p);
+            self.parent.insert(a, gp);
+            a = gp;
+        }
+        a
+    }
+
+    /// Record a short between `a` and `b`. `true` if it joined two sets, so it must be kept;
+    /// `false` if they were already held equal, so it is redundant and must be pinned.
+    fn join(&mut self, a: usize, b: usize) -> bool {
+        let (ra, rb) = (self.root(a), self.root(b));
+        if ra == rb {
+            return false;
+        }
+        self.parent.insert(ra, rb);
+        true
+    }
+}
 
 /// The cache key for one device's `(module, overrides, unconnected ports)` triple.
 fn compiled_key(
@@ -2830,6 +2887,7 @@ fn build_from_model(
     terminals: &[usize],
     next_unknown: &mut usize,
     cache: &mut CompiledCache,
+    shorts: &mut ShortForest,
 ) -> Result<(Box<dyn ModelInstance>, NodeAssignment)> {
     // § instance multiplicity. Split out of the override list *before* anything is applied, so
     // the rest of this function keeps seeing only real model parameters.
@@ -2888,7 +2946,7 @@ fn build_from_model(
         .collect();
 
     let inst = compiled
-        .instantiate(&full, next_unknown)
+        .instantiate_with_shorts(&full, next_unknown, |p, n| shorts.join(p, n))
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
     // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
@@ -8462,6 +8520,128 @@ X2 xmid gnd resistor R=3000
             (op.x[shaft.index] - omega_expected).abs() < 1e-9,
             "Omega(shaft) = {}, want {omega_expected}",
             op.x[shaft.index]
+        );
+    }
+
+    /// `V(a,b) <+ 0.0` — the Verilog-A ideal short, as compact models write node collapse.
+    const CLAMP_VA: &str = "`include \"disciplines.vams\"
+module clamp(a, b); inout a, b; electrical a, b;
+  analog begin V(a, b) <+ 0.0; end
+endmodule
+";
+
+    /// Solve `deck` against [`CLAMP_VA`], returning the node-voltage lookup and `I(V1)`.
+    fn solve_clamp_deck(deck: &str) -> (impl Fn(&str) -> f64, f64) {
+        let design = compile_model(CLAMP_VA, "clamp");
+        let net = va_netlist::parser::parse(deck).expect("parses");
+        let op = solve_dc(&net, &design.modules).expect("solves");
+        let currents = branch_currents(&net, &design.modules).expect("currents");
+        let i_v1 = op.x[currents.iter().find(|(n, _)| n == "V1").expect("V1").1];
+        let order = net.node_order.clone();
+        let x = op.x.clone();
+        let v = move |n: &str| x[order.iter().position(|m| m == n).expect("node")];
+        (v, i_v1)
+    }
+
+    /// Two ideal shorts across the same two nodes write the same row twice. That was a singular
+    /// matrix — found as two BSIM-BULK devices sharing a thermal node, whose `Temp(t) <+ 0.0`
+    /// is this — and is now one kept short plus one pinned to zero current. Each variant here
+    /// was singular before: the same pair, the same pair reversed, and a short from a node to
+    /// itself (a row that says `0 = 0`).
+    #[test]
+    fn redundant_ideal_shorts_on_one_node_pair_solve() {
+        for (what, extra) in [
+            ("same pair", "X2 m gnd clamp"),
+            ("reversed pair", "X2 gnd m clamp"),
+            ("node to itself", "X2 m m clamp"),
+        ] {
+            let deck =
+                format!("V1 n gnd DC 1.0\nR1 n m 1000\nX1 m gnd clamp\n{extra}\n.op\n.end\n");
+            let (v, i_v1) = solve_clamp_deck(&deck);
+            assert_eq!(v("m"), 0.0, "{what}: the short holds m at ground");
+            assert!((i_v1 + 1e-3).abs() < 1e-12, "{what}: I(V1) = {i_v1}");
+        }
+    }
+
+    /// A loop of shorts — a to b, b to ground, a to ground — is the general form: three distinct
+    /// node pairs, no duplicate, and still one redundant row. The forest keeps two and pins the
+    /// one that closes the loop.
+    #[test]
+    fn a_loop_of_ideal_shorts_solves() {
+        let (v, i_v1) = solve_clamp_deck(
+            "V1 n gnd DC 1.0\nR1 n a 1000\nX1 a b clamp\nX2 b gnd clamp\nX3 a gnd clamp\n.op\n.end\n",
+        );
+        assert_eq!(v("a"), 0.0);
+        assert_eq!(v("b"), 0.0);
+        assert!((i_v1 + 1e-3).abs() < 1e-12, "I(V1) = {i_v1}");
+    }
+
+    /// Which branches `va_codegen` proves are ideal shorts. The costly mistake is a false "yes",
+    /// which pins a real current to zero, so most cases here are ones that must be refused.
+    #[test]
+    fn only_provable_zero_potential_branches_are_ideal_shorts() {
+        let count = |body: &str, sh: Option<f64>| -> usize {
+            let src = format!(
+                "`include \"disciplines.vams\"
+module m(a, b); inout a, b; electrical a, b; parameter real sh = 0;
+  analog begin {body} end
+endmodule
+"
+            );
+            let design = compile_model(&src, body);
+            let mut module = design.modules[0].clone();
+            if let Some(v) = sh {
+                module.params[0].default = v;
+            }
+            va_codegen::CompiledModel::new(&module)
+                .expect("compiles")
+                .ideal_shorts()
+                .len()
+        };
+        assert_eq!(count("V(a, b) <+ 0.0;", None), 1, "the plain idiom");
+        assert_eq!(
+            count("V(a, b) <+ sh * 2.0;", None),
+            1,
+            "folds to zero from a parameter"
+        );
+        assert_eq!(count("V(a, b) <+ 1.0;", None), 0, "a nonzero source");
+        assert_eq!(
+            count("V(a, b) <+ sh * 2.0;", Some(1.0)),
+            0,
+            "the same, overridden"
+        );
+        assert_eq!(
+            count("V(a, b) <+ 0.0; I(a) <+ 1e-3 * I(a, b);", None),
+            0,
+            "its current is read"
+        );
+        // (Reading it as `I(b, a)` is not expressible: an uncontributed reversed branch is
+        // refused by the codegen before this question arises. `ideal_shorts` still treats a
+        // probe of either orientation as a read.)
+        // BSIM-BULK's shape: flow in one arm, the clamp in the other, chosen by a parameter.
+        let mixed = "if (sh != 0) I(a, b) <+ V(a, b) / 1k; else V(a, b) <+ 0.0;";
+        assert_eq!(
+            count(mixed, None),
+            1,
+            "mixed, clamp arm selected by the parameter"
+        );
+        assert_eq!(
+            count(mixed, Some(1.0)),
+            0,
+            "mixed, flow arm selected by the parameter"
+        );
+        assert_eq!(
+            count(
+                "if (V(a, b) > 0.5) I(a, b) <+ V(a, b) / 1k; else V(a, b) <+ 0.0;",
+                None
+            ),
+            0,
+            "mixed, arm chosen by the bias: cannot be proven"
+        );
+        assert_eq!(
+            count("if (V(a) > 0.5) V(a, b) <+ 0.0;", None),
+            1,
+            "non-mixed under a bias condition: the row is zero on every path anyway"
         );
     }
 }

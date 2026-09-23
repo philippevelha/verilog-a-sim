@@ -20,6 +20,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.4.1 - 2026-09-23
+------------------
+**Redundant ideal shorts no longer make the matrix singular.** `V(a,b) <+ 0.0` gives each
+instance its own branch-current row saying `V(a) - V(b) = 0`. Two instances across the same
+pair of nodes wrote that row twice, and the solve failed with `singular matrix`. This is how
+the bug was first seen: two BSIM-BULK devices sharing one thermal node, whose self-heating-off
+arm is `Temp(t) <+ 0.0`. `circuits/benchmark/nand/README.md` recorded it as a thermal-node bug.
+It was not one: twelve lines with no compact model reproduce it.
+
+`va_codegen::lower::ideal_shorts` proves, per compiled model and under its parameter values,
+which branches are ideal shorts. Only what can be proven counts: every potential contribution
+that can run folds to zero from literals and parameters, no flow contribution can run (for
+BSIM-BULK's mixed `if (SHMOD...) Pwr(t) <+ ... else Temp(t) <+ 0.0`, the condition folds from
+parameters), and the branch current is never read. `va-cli` runs a union-find over every short
+in deck order (`ShortForest`). A short whose ends are already held equal is pinned to zero
+current through the new `CompiledModel::instantiate_with_shorts`. That covers duplicates,
+reversed duplicates, a short from a node to itself, and loops of shorts. Node voltages and
+every other current are unchanged. The pinned instance reports `0` on its own auxiliary row
+(`X2.b0`) and the kept one reports the total, which is the one visible difference.
+
+Limitations: a mixed branch whose arm depends on a variable, even one computed from parameters
+alone, is not proven to be a short and is left alone. Loops through deck voltage sources or a
+nonzero `V(p,n) <+ expr` are still singular, as in any MNA simulator.
+
+Measured at 1.4.1: `cargo test --workspace` **842 passed / 0 failed** (+3: redundant shorts,
+a loop of shorts, and which branches qualify); with pinning disabled the two deck tests fail
+with the original `singular matrix`. `cargo xtask validate` **28 checked, 0 failed, 28/28**,
+output identical line for line to 1.4.0+2 (checked by stashing the change and diffing, apart
+from cargo's build lines). fmt + clippy clean. The NAND decks `bsimbulk107`, `bsimcmg`,
+`bsimimg` and `lutsoi` with their four thermal nodes merged into one: all solve, and `V(out)`
+matches the separate-node decks to 1e-16 V over the whole sweep. The decks themselves keep
+separate nodes; only their header comments changed.
+
+
 1.4.0+2 - 2026-09-23
 --------------------
 **Docs only: a proposal for a sparse linear solve** (`docs/proposals/sparse-solve.md`). No code

@@ -66,9 +66,9 @@ parameters is the device rather than the solver.
 and its header says why: it is the eight-line reproduction of what a floating node does, and it
 is more useful demonstrating the problem than hiding it.
 
-### 2. Two instances sharing a thermal node give a singular matrix — a bug, still open
+### 2. Two instances sharing a thermal node gave a singular matrix — fixed in 1.4.1
 
-Reproduced minimally, and it is not about the NAND:
+The original report:
 
 ```
 X1 out g gnd gnd tn bsimbulk TYPE=1
@@ -76,12 +76,31 @@ X2 out g gnd gnd tn bsimbulk TYPE=1     <- same tn
 RT tn gnd 1e-3
 ```
 
-One instance on that node solves. Two instances on *separate* nodes solve. Two sharing one
-node: singular. Four-port models sharing a node are fine — `psp103.net` has M3 and M4 sharing
-`vdd` as their bulk and works — so it is specific to the extra port. Root cause not established.
+One instance on that node solved; two sharing it were singular. It was never about thermal
+nodes. With self-heating off, BSIM-BULK writes `Temp(t) <+ 0.0`, an **ideal short**, and each
+instance gives that branch its own current unknown with the row `V(t) - V(gnd) = 0`. Two
+instances on the same node write the same row twice: the voltage is fixed, but how the current
+splits between two ideal shorts is not. Twelve lines with no compact model reproduce it
+(`clamp` = `V(a,b) <+ 0.0`, two of them across one node pair). Four-port models were fine only
+because their zero clamps land on internal nodes, which are per instance and never collide.
 
-The five-port decks here therefore give each instance its own thermal node, which is a
-workaround and is marked as one in each header.
+The fix (`va_codegen::lower::ideal_shorts`, `va_cli::ShortForest`): the codegen proves which
+branches are ideal shorts under each model's parameter values, and `va-cli` runs a union-find
+over them in deck order. A short whose two ends are already held equal by earlier shorts (a
+duplicate, a reversed duplicate, a short from a node to itself, or one that closes a loop) is
+pinned to zero current. Node voltages and every other current are unchanged. The one visible
+difference is that the pinned instance reports `0` on its own auxiliary row and the kept one
+reports the total. A deck with no redundant short pins nothing, and `xtask validate`'s output is
+identical line for line.
+
+Checked on these decks: with `tn1..tn4` merged into one node, `bsimbulk107`, `bsimcmg`,
+`bsimimg` and `lutsoi` all solve, and `V(out)` over the whole sweep matches the separate-node
+decks to 1e-16 V. The decks keep separate nodes so their results stay comparable with earlier
+runs.
+
+**Still singular, as in any MNA simulator:** a loop closed through a deck's own voltage sources
+or through a nonzero `V(p,n) <+ expr`. A mixed branch whose arm is chosen by a *variable*, even
+one computed only from parameters, is not proven to be a short and is left alone.
 
 ### 3. `bsimimg.net` is the deck's fault, not the simulator's
 

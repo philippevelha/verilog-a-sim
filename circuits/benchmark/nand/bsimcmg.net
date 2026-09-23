@@ -32,9 +32,10 @@ XM2  n001 b    gnd  gnd  tn2  bsimcmg_va TYPE=1
 XM3  vdd  b    out  vdd  tn3  bsimcmg_va TYPE=-1
 XM4  vdd  a    out  vdd  tn4  bsimcmg_va TYPE=-1
 * The thermal port needs terminating; 1 mOhm to ground is isothermal, which is what a deck
-* with no `rth` in its card would be anyway. **Each instance gets its own node**: two
-* instances sharing one thermal node currently give a singular matrix, which is a bug in this
-* simulator rather than anything about the circuit -- see `nand/README.md`.
+* with no `rth` in its card would be anyway. Each instance gets its own node. Before 1.4.1,
+* two instances sharing one thermal node gave a singular matrix (a bug in this simulator, not
+* the circuit -- see `nand/README.md`). Sharing works now and gives the same curve; separate
+* nodes are kept so results stay comparable with earlier runs.
 RT1  tn1  gnd 1e-3
 RT2  tn2  gnd 1e-3
 RT3  tn3  gnd 1e-3
