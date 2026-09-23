@@ -61,8 +61,9 @@ fn print_usage() {
          gen-golden          (Re)generate golden outputs from QSPICE, if installed\n    \
          tutorials [--preview]  Render the Quarto developer-tutorial book (docs/tutorials/)\n    \
          bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)\n    \
-         bench-scale [--max-nodes N]  Whole-pipeline .op/.tran wall time vs circuit size on\n                                 \
-                                 an RC ladder: the dense-LU size limit, measured
+         bench-scale [--solver S] [--topology ladder|mesh] [--max-nodes N]\n                                 \
+                                 Whole-pipeline .op/.tran/.ac/.noise wall time vs circuit\n                                 \
+                                 size: the dense/sparse crossover and the size limit
     \n         bench-model [<model.va>...]  One ModelInstance::load() per model: the cost every
                                  \n                                 Newton iteration of every timepoint pays"
     );
@@ -2100,28 +2101,81 @@ fn run_bench_row(n_nodes: usize) -> Result<BenchRow> {
 /// If a dense solve fails at some `n_nodes` — this ladder is well-conditioned by construction
 /// (every node has its own shunt to ground), so that would indicate a real bug, not an expected
 /// benchmark outcome.
-/// Ladder sizes `bench-scale` runs, in nodes. Each is a *whole* `.op` and `.tran` through
-/// `va_cli`, not a bare factorization, so the numbers are what a user waits for. The list stops
-/// where a `.tran` is no longer interactive on the development machine; `--max-nodes` caps it.
-const SCALE_NODE_COUNTS: &[usize] = &[10, 20, 50, 100, 200, 400, 800];
+/// Circuit sizes `bench-scale` runs, in nodes. Each is a *whole* `.op`, `.tran`, `.ac` and
+/// `.noise` through `va_cli`, not a bare factorization, so the numbers are what a user waits
+/// for. The dense path stops at [`SCALE_DENSE_MAX_NODES`] by default, where a dense `.tran` is no
+/// longer interactive on the development machine; the sparse and auto paths run the whole list.
+/// `--max-nodes` caps either.
+const SCALE_NODE_COUNTS: &[usize] = &[10, 20, 50, 100, 200, 400, 800, 1600, 3200, 6400];
+
+/// Default size cap for `bench-scale --solver dense`: past 800 nodes one dense row takes
+/// minutes (the AC and noise columns factor a `2·dim` real embedding per frequency point).
+const SCALE_DENSE_MAX_NODES: usize = 800;
 
 /// Points per decade for the `.ac`/`.noise` columns: three decades at 10/decade is 31 points,
 /// enough that a per-point figure is not swamped by the one operating-point solve each sweep
-/// does first, and few enough that the 800-node row still finishes.
+/// does first, and few enough that the 800-node dense row still finishes.
 const SCALE_AC_PPD: usize = 10;
+
+/// The circuit `bench-scale` grows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Topology {
+    /// An RC ladder ([`rc_ladder_deck`]): tridiagonal, so LU has no fill-in at all. Sparse
+    /// LU's best case.
+    Ladder,
+    /// A square RC mesh ([`rc_mesh_deck`]): the 5-point pattern of a 2-D grid, whose LU fills
+    /// in even under a good ordering. A harder case for sparse LU, and closer to a power grid
+    /// or a thermal network than the ladder is. Still not the worst: a compact model with many
+    /// mutually coupled internal nodes stamps a dense block, which neither shape has.
+    Mesh,
+}
+
+impl Topology {
+    fn name(self) -> &'static str {
+        match self {
+            Topology::Ladder => "ladder",
+            Topology::Mesh => "mesh",
+        }
+    }
+
+    /// The deck for about `n` nodes, and the name of the node the `.op` check and the `.noise`
+    /// output read. A mesh is `k × k` with `k = round(√n)`, so its node count is the nearest
+    /// square; the table prints the real `dim`.
+    fn deck(self, n: usize) -> (String, String) {
+        match self {
+            Topology::Ladder => (rc_ladder_deck(n), format!("n{n}")),
+            Topology::Mesh => {
+                let k = ((n as f64).sqrt().round() as usize).max(2);
+                (rc_mesh_deck(k), format!("m{}_{}", k - 1, k - 1))
+            }
+        }
+    }
+}
+
+/// The analysis cards every `bench-scale` deck ends with, observing `out`.
+///
+/// `AC 1` on the source costs a DC or transient run nothing -- it is read only by the AC
+/// linearization -- so one deck serves all four analyses and every column times the same
+/// circuit. The sweep is decade-spaced across the 1 µs section constant's corner (159 kHz), and
+/// `.noise` uses the same grid so the two columns are comparable per frequency point. Every
+/// resistor is a thermal-noise source, so the noise run has something to sum.
+fn scale_analysis_cards(out: &str) -> String {
+    format!(
+        ".tran 50n 5u\n.ac dec {SCALE_AC_PPD} 1e3 1e6\n.noise V({out}) V1 dec {SCALE_AC_PPD} 1e3 \
+         1e6\n.end\n"
+    )
+}
 
 /// An RC ladder of `n` sections: `V1 in gnd DC 1`, then `R_k` from node `k-1` to node `k` and
 /// `C_k` from node `k` to ground, `R = 1 kΩ`, `C = 1 nF` (a 1 µs section time constant). The
 /// unknowns are `n` node potentials plus the source's branch current: `dim = n + 1`.
 ///
-/// Reference primitives only (`va-abi`), so what is timed is MNA assembly, Newton and dense
-/// LU — not the compiler. The `.tran` window is fixed at 5 µs with a 50 ns step hint whatever
-/// `n` is: the input edge at `t = 0` is the same event at every size, so the accepted-point
-/// count stays comparable and the per-point cost isolates the solve's growth with `dim`.
+/// Reference primitives only (`va-abi`), so what is timed is MNA assembly, Newton and the
+/// linear solve — not the compiler. The `.tran` window is fixed at 5 µs with a 50 ns step hint
+/// whatever `n` is: the input edge at `t = 0` is the same event at every size, so the
+/// accepted-point count stays comparable and the per-point cost isolates the solve's growth
+/// with `dim`.
 fn rc_ladder_deck(n: usize) -> String {
-    // `AC 1` on the source costs a DC or transient run nothing -- it is read only by the AC
-    // linearization -- so one deck serves all four analyses and every column times the same
-    // circuit.
     let mut deck = String::from("* RC ladder for bench-scale\nV1 in gnd DC 1 AC 1\n");
     let mut prev = "in".to_string();
     for k in 1..=n {
@@ -2129,17 +2183,36 @@ fn rc_ladder_deck(n: usize) -> String {
         deck.push_str(&format!("R{k} {prev} {node} 1000\nC{k} {node} gnd 1e-9\n"));
         prev = node;
     }
-    deck.push_str(".tran 50n 5u\n");
-    // A decade-spaced sweep across the ladder's own corner (a 1 us section constant is 159 kHz),
-    // and the same grid for `.noise` so the two columns are comparable per frequency point.
-    // Every resistor is a thermal-noise source, so the noise run has something to sum.
-    deck.push_str(&format!(".ac dec {SCALE_AC_PPD} 1e3 1e6\n"));
-    deck.push_str(&format!(".noise V(n{n}) V1 dec {SCALE_AC_PPD} 1e3 1e6\n"));
-    deck.push_str(".end\n");
+    deck.push_str(&scale_analysis_cards(&format!("n{n}")));
     deck
 }
 
-/// One `bench-scale` row: `.op` and `.tran` wall time on an `n`-node RC ladder.
+/// A `k × k` RC mesh: node `m{i}_{j}` has `C = 1 nF` to ground and `R = 1 kΩ` to its right and
+/// lower neighbours, and `V1` drives corner `m0_0` through `1 kΩ` from `in`. The unknowns are
+/// the `k²` mesh nodes, `in`, and the source's branch current: `dim = k² + 2`. Same element
+/// values, source and analysis cards as [`rc_ladder_deck`]; only the connectivity differs.
+fn rc_mesh_deck(k: usize) -> String {
+    let mut deck =
+        String::from("* RC mesh for bench-scale\nV1 in gnd DC 1 AC 1\nR0 in m0_0 1000\n");
+    let mut r = 1;
+    for i in 0..k {
+        for j in 0..k {
+            deck.push_str(&format!("C{i}_{j} m{i}_{j} gnd 1e-9\n"));
+            if j + 1 < k {
+                deck.push_str(&format!("R{r} m{i}_{j} m{i}_{} 1000\n", j + 1));
+                r += 1;
+            }
+            if i + 1 < k {
+                deck.push_str(&format!("R{r} m{i}_{j} m{}_{j} 1000\n", i + 1));
+                r += 1;
+            }
+        }
+    }
+    deck.push_str(&scale_analysis_cards(&format!("m{}_{}", k - 1, k - 1)));
+    deck
+}
+
+/// One `bench-scale` row: whole-analysis wall times on one generated circuit.
 struct ScaleRow {
     n_nodes: usize,
     dim: usize,
@@ -2151,35 +2224,44 @@ struct ScaleRow {
     noise: Duration,
 }
 
-fn run_scale_row(n_nodes: usize) -> Result<ScaleRow> {
-    let deck = rc_ladder_deck(n_nodes);
-    let net = va_netlist::parser::parse(&deck).context("parsing the generated ladder")?;
+fn run_scale_row(n_nodes: usize, topology: Topology, solver: va_cli::Solver) -> Result<ScaleRow> {
+    let (deck, out) = topology.deck(n_nodes);
+    let net = va_netlist::parser::parse(&deck).context("parsing the generated deck")?;
     let dim = net.node_order.len() + 1;
 
     let t0 = Instant::now();
-    let op = va_cli::solve_dc(&net, &[]).context("ladder .op")?;
+    let op = va_cli::solve_dc_with(&net, &[], solver).context(".op")?;
     let op_time = t0.elapsed();
-    // Sanity: a DC-driven RC ladder settles to the source voltage everywhere.
-    let last = net.node_order.len() - 1;
-    if (op.x[last] - 1.0).abs() > 1e-9 {
-        bail!("ladder .op is wrong: V(n{n_nodes}) = {}", op.x[last]);
+    // Sanity: a DC-driven RC network with no resistive path to ground settles to the source
+    // voltage everywhere.
+    let probe = net
+        .node_order
+        .iter()
+        .position(|name| *name == out)
+        .context("the observed node is in the deck")?;
+    if (op.x[probe] - 1.0).abs() > 1e-9 {
+        bail!(
+            "{} .op is wrong: V({out}) = {}",
+            topology.name(),
+            op.x[probe]
+        );
     }
 
     let t0 = Instant::now();
-    let wf = va_cli::solve_transient(&net, &[], va_cli::Integration::default())
-        .context("ladder .tran")?;
+    let wf = va_cli::solve_transient_with(&net, &[], va_cli::Integration::default(), solver)
+        .context(".tran")?;
     let tran_time = t0.elapsed();
 
-    // An AC point is one *complex* factorization and no Newton loop; a noise point is that plus
-    // an adjoint solve. Timing both on the same circuit is what lets `va-cli`'s pre-flight
+    // An AC point is one complex solve and no Newton loop; a noise point is that plus an
+    // adjoint solve. Timing both on the same circuit is what lets `va-cli`'s pre-flight
     // estimate quote a frequency sweep from measurement rather than from an assumed ratio to
     // the transient column.
     let t0 = Instant::now();
-    let resp = va_cli::solve_ac(&net, &[]).context("ladder .ac")?;
+    let resp = va_cli::solve_ac_with(&net, &[], solver).context(".ac")?;
     let ac_time = t0.elapsed();
 
     let t0 = Instant::now();
-    let _ = va_cli::solve_noise(&net, &[]).context("ladder .noise")?;
+    let _ = va_cli::solve_noise_with(&net, &[], solver).context(".noise")?;
     let noise_time = t0.elapsed();
 
     Ok(ScaleRow {
@@ -2194,31 +2276,48 @@ fn run_scale_row(n_nodes: usize) -> Result<ScaleRow> {
     })
 }
 
-/// `cargo xtask bench-scale [--max-nodes N]`: how long a whole `.op` and a whole `.tran`
-/// take as the circuit grows, on the dense-LU production path. This is the measurement the
-/// Road to 1.0 asked for ("state the dense-LU circuit-size limit"): `bench-linsolve` times the
-/// factorization alone and says where sparse *would* win; this says where a user actually
-/// starts waiting.
+/// `cargo xtask bench-scale [--solver auto|dense|sparse] [--topology ladder|mesh]
+/// [--max-nodes N]`: how long a whole `.op`, `.tran`, `.ac` and `.noise` take as the circuit
+/// grows. `bench-linsolve` times the factorization alone; this says where a user actually
+/// starts waiting. Running it once with `--solver dense` and once with `--solver sparse` on the
+/// same topology is the crossover measurement behind `va_core::sparse::SPARSE_THRESHOLD`
+/// (`docs/proposals/sparse-solve.md`, Step 5), and the tables are what `va-cli`'s pre-flight
+/// estimate is calibrated against.
 ///
-/// Every `.tran` row is checked against the previous one for the same accepted-point count
-/// order of magnitude, so a per-point figure is comparable down the table, and the machine is
-/// named in the output because the absolute numbers belong to it.
+/// The machine is named in `docs/validation.md` because the absolute numbers belong to it.
 fn bench_scale(args: &[String]) -> Result<()> {
+    let solver = parse_solver(args)?;
+    let topology = match args
+        .iter()
+        .position(|a| a == "--topology")
+        .map(|i| args.get(i + 1).map(String::as_str).unwrap_or(""))
+    {
+        None | Some("ladder") => Topology::Ladder,
+        Some("mesh") => Topology::Mesh,
+        Some(v) => bail!("unknown --topology `{v}` (expected `ladder` or `mesh`)"),
+    };
+    let default_max = if solver == va_cli::Solver::Dense {
+        SCALE_DENSE_MAX_NODES
+    } else {
+        usize::MAX
+    };
     let max_nodes = args
         .iter()
         .position(|a| a == "--max-nodes")
         .and_then(|i| args.get(i + 1))
         .map(|v| v.parse::<usize>().context("--max-nodes takes an integer"))
         .transpose()?
-        .unwrap_or(usize::MAX);
+        .unwrap_or(default_max);
 
     eprintln!(
-        "[xtask] bench-scale: whole-pipeline .op, .tran, .ac and .noise wall time on a ladder \
-         (va_abi::reference primitives; `--solver auto`: dense LU below \
-         va_core::sparse::SPARSE_THRESHOLD unknowns, sparse from it) …"
+        "[xtask] bench-scale: whole-pipeline .op, .tran, .ac and .noise wall time on an RC {} \
+         (va_abi::reference primitives), --solver {solver:?} (Auto: dense LU below {} unknowns, \
+         sparse from it) …",
+        topology.name(),
+        va_core::sparse::SPARSE_THRESHOLD,
     );
     // Warm-up, for the same reason `bench-linsolve` does one.
-    let _ = run_scale_row(5);
+    let _ = run_scale_row(5, topology, solver);
     eprintln!(
         "[xtask]   {:>7} {:>6} {:>9} {:>10} {:>7} {:>11} {:>9} {:>10} {:>7}",
         "n_nodes",
@@ -2232,7 +2331,7 @@ fn bench_scale(args: &[String]) -> Result<()> {
         "ac_pts"
     );
     for &n in SCALE_NODE_COUNTS.iter().filter(|&&n| n <= max_nodes) {
-        let row = run_scale_row(n)?;
+        let row = run_scale_row(n, topology, solver)?;
         let tran_ms = row.tran.as_secs_f64() * 1e3;
         let per = |d: Duration, pts: usize| d.as_secs_f64() * 1e3 / pts.max(1) as f64;
         eprintln!(
@@ -2249,10 +2348,9 @@ fn bench_scale(args: &[String]) -> Result<()> {
         );
     }
     eprintln!(
-        "[xtask] bench-scale: done. Dense LU is O(dim^3) per Newton solve, so rows at or above \
-         the sparse threshold are off the dense curve; the per-point columns below it are what \
-         `va-cli`'s pre-flight estimate is calibrated against (va_cli::estimate). See docs/validation.md for the stated limits \
-         and the machine they were measured on."
+        "[xtask] bench-scale: done. The per-point columns are the numbers to watch; they are what \
+         `va-cli`'s pre-flight estimate is calibrated against (va_cli::estimate). See \
+         docs/validation.md for the stated limits and the machine they were measured on."
     );
     Ok(())
 }

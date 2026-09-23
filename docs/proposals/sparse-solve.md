@@ -1,7 +1,8 @@
 # Proposal: a sparse linear solve above 500 unknowns
 
-**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1–4 done
-(1.5.0, 1.6.0, 1.7.0, 1.8.0, 2026-09-23)**; Step 5 open.
+**Status:** proposed, 2026-09-23. The threshold (500) was chosen by the user. **Steps 1–5 done
+(1.5.0–1.9.0, 2026-09-23)**. Open: whether the measured crossover (~20–50 unknowns) moves the
+threshold, and the large QSPICE golden of §5.
 **Affects:** `va-core` (new sparse assembler + solver, the selector), `va-transient` and
 `va-acnoise` (their assemblers and solve call sites), `va-cli` (`--solver`, the pre-flight line),
 `xtask` (`bench-scale` gains a sparse column). **`va-abi` (Interface β) and `va-ir`
@@ -320,10 +321,41 @@ For Step 5: sparse at 802 unknowns (0.4–0.5 ms per AC point) is already faster
 this ladder — but a ladder is sparse's best case, so it is the measurement Step 5 has to make on
 denser circuits, not a conclusion.
 
+**Step 5 — done, 1.9.0 (2026-09-23).** `bench-scale` gained `--solver` and `--topology
+ladder|mesh` (a square RC grid, whose LU fills in: the harder case the ladder could not speak
+for) and runs sparse to 6 400 nodes. Both solvers were measured on both circuits, two runs each,
+in one session; `docs/validation.md`'s size-limit section is rewritten from them. `va-cli`'s
+pre-flight estimate is now calibrated on the path the run takes: on the sparse path its bracket
+runs from the ladder's cost to the mesh's, with exponents 1 and 2 beyond 6 402 unknowns.
+
+Findings:
+
+- **The crossover is ~20–50 unknowns, not 500.** Dense wins only at 11–22 unknowns (up to 5×, by
+  tens of microseconds per point); from ~50 sparse wins every column on both circuits, 1.9–12× on
+  the mesh and 3–200× on the ladder at 50–800 unknowns. On a real device circuit (a PSP103
+  inverter chain, each instance ~16 internal rows) sparse is 1.9× faster on the whole run at 336
+  unknowns, below the threshold. The threshold is **not** changed in this step (§7).
+- **Memory.** Peak RSS on the PSP103 chain: 247 MB dense against 30 MB sparse at 2 646 unknowns;
+  the sparse slope is ~0.1 MB per inverter and linear.
+- **Scaling.** Sparse per-point cost grows with exponent ~1 on the ladder and 1.0–1.6 on the mesh
+  up to 6 402 unknowns.
+- **Not a sparse regression, found on the way:** from ~3 300 unknowns (100 inverters) the PSP103
+  chain's `.op` fails as singular **on both paths**. Instrumented once, the `gmin` rescue's solve
+  is rejected by the residual check at 1.2e-4 against 1e-6·(1 + |b|), a tolerance blind to the
+  matrix's scale. Not fixed, not verified; it now caps the device circuit size where the solver
+  no longer does.
+- **The pre-flight estimate misses compiled-model `.op`s by 30–1 000× on both paths**: it is per
+  Newton loop on a linear circuit, and a `gmin` rescue is many. Stated, not fixable from `dim`.
+
 ## 7. Decided, and still open
 
 - **Decided (2026-09-23, the user):** dense below 500 unknowns, sparse from 500; the dense path
   is not modified.
 - **Decided, Step 4 (1.8.0):** the real embedding, factored sparse. A complex sparse LU is
   recorded as a performance option (`docs/future_development.md` §1a), not a correctness need.
-- **Open, for Step 5:** whether the measured crossover moves the threshold.
+- **Open (measured in Step 5, 1.9.0):** whether the threshold moves from 500 toward the measured
+  ~20–50-unknown crossover. That is the user's call and its own release; every validation gate
+  (at most 8 unknowns) stays dense for any threshold above 8.
+- **Open, from §5:** the one large QSPICE golden (~5 000 unknowns) has not been generated. Every
+  sparse-path result so far is validated against dense on the same matrix and by the 28 gates
+  under `--solver sparse`, none of which is above 8 unknowns.

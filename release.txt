@@ -20,6 +20,54 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.9.0 - 2026-09-23
+------------------
+**Sparse solve, Step 5: the crossover measured, and the pre-flight estimate calibrated on the
+path the run takes.** `cargo xtask bench-scale` gains `--solver auto|dense|sparse` and `--topology
+ladder|mesh` — a square RC mesh beside the RC ladder, because the ladder has no LU fill-in and is
+sparse's best case — and runs sparse to 6 400 nodes (dense stops at 800 by default). `va-cli`'s
+estimate now quotes a sparse run from sparse tables, its bracket running from the ladder's cost
+(low end) to the mesh's (high end), exponents 1 and 2 beyond 6 402 unknowns; the sparse cost line
+prints `sparse matrix` instead of a dense `dim²` memory figure, and the solver line no longer
+says the estimate overstates. `docs/validation.md`'s size-limit section is rewritten from the
+new measurements; the 2026-09-17 dense record is kept below it. The dense tables are unchanged.
+
+What was found, all measured today on the i7-1185G7 (release, two runs each, slower kept):
+
+  * **The dense/sparse crossover is ~20–50 unknowns, not 500.** Dense wins only at 11–22 unknowns
+    (up to 5×, by tens of microseconds per point); from ~50 sparse wins every column of both
+    circuits — 1.9–12× on the mesh, 3–195× on the ladder, up to ~800 unknowns. **The threshold
+    is not changed here**: that is a behaviour change for every circuit between the new value
+    and 500, the user's decision, and its own release. No gate would move (the largest is 8
+    unknowns).
+  * **Sparse scaling:** a transient point at 6 402 unknowns costs 4.2 ms (ladder) to 36.8 ms
+    (mesh); dense took 31–38 ms at ~800. Exponent ~1 on the ladder, 1.0–1.6 on the mesh.
+  * **A real device circuit** (a PSP103 inverter chain, `.op`; each instance adds ~16 internal
+    rows, so 15 inverters already cross 500): at 2 646 unknowns 247 MB / 63 s dense against
+    30 MB / 12 s sparse; at 336 unknowns, below the threshold, sparse is already 1.9× faster.
+    One run each.
+  * **Not a sparse regression:** from 100 inverters (3 306 unknowns) the chain's `.op` fails as
+    singular **on both paths** (dense confirmed at 160 inverters). Instrumented once and reverted:
+    the `gmin` rescue's solve is rejected by the residual check, 1.2e-4 against 1e-6·(1 + |b|), a
+    tolerance that does not scale with the matrix entries. Not fixed and not verified — the next
+    thing to look at, since it now caps device-circuit size where the solver no longer does.
+  * **The estimate's blind spot, both paths:** on that chain it undershoots by 30–1 000× (40
+    inverters: 174–303 ms quoted dense vs 9.6 s; 2.2–37 ms sparse vs 2.2 s), because it is per
+    Newton loop on a linear circuit and a `gmin` rescue is many loops. Documented; not knowable
+    from `dim`.
+  * Today's dense ladder is 1.1–2.1× faster than the 2026-09-17 tables from 102 unknowns up (not
+    investigated), so the unchanged dense estimate now errs slow.
+
+Measured at 1.9.0: `cargo test --workspace` **875 passed / 0 failed** (+3: the sparse bracket is
+ordered at every size and spans ladder to mesh; the estimate follows the solver, and above the
+threshold `Auto` is the sparse quote; the sparse bracket contains both calibration circuits'
+faster runs). fmt + clippy clean. `cargo xtask validate`: **28/28**, identical line for line to
+1.8.0 (no solve path changed).
+
+Still open from the proposal: the threshold decision, and the one large (~5 000-unknown) QSPICE
+golden §5 called for, which has not been generated.
+
+
 1.8.0 - 2026-09-23
 ------------------
 **Sparse solve, Step 4: AC and noise use it from 500 unknowns — every analysis now does.**

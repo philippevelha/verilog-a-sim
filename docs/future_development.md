@@ -54,6 +54,13 @@ is worth the API surface (it is, above ~100 unknowns).
 > `--solver dense|sparse|auto` override so the 28 golden gates can also be run on the sparse
 > path. Five steps (sink + solve, DC, transient, AC/noise, measure the crossover), each its own
 > release.
+>
+> **2026-09-23 — shipped, 1.5.0–1.9.0.** Every analysis is sparse from 500 unknowns. Step 5
+> measured the crossover at ~20–50 unknowns on an RC ladder and an RC mesh, an order of magnitude
+> below the threshold; whether to lower it is open (`docs/validation.md`, "The circuit-size
+> limit"). What now caps a large device circuit is not the solve: a PSP103 inverter chain's `.op`
+> fails as singular from ~3 300 unknowns on both paths, possibly the solve's residual tolerance
+> not scaling with the matrix — not yet verified.
 
 ### 1a. A complex sparse LU for AC and noise (performance optimization)
 

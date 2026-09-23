@@ -641,7 +641,7 @@ pub fn run_sim(
     // raises the same error a moment later, with its own context -- so a sizing error is
     // swallowed here rather than short-circuiting the run.
     if let Ok(sizing) = sizing(&net, &compiled, analysis) {
-        for line in sizing.lines() {
+        for line in sizing.lines_with(solver) {
             eprintln!("{line}");
         }
         eprintln!("{}", estimate::solver_line(solver, sizing.unknowns));

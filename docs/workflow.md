@@ -111,11 +111,14 @@ project's decks); for `.ac`/`.noise` it is the exact frequency grid; for `.op` i
 
 The second line is a **rough bracket**, and the width is the honest part: inside the measured
 range its ends are neighbouring rows of `cargo run --release -p xtask -- bench-scale`, beyond it
-they are the exponent-2 and exponent-3 scalings dense LU sits between, and on top of that sits a
-per-instance model-evaluation term that no matrix dimension can predict. It covers the solve, not
-process start-up or model compilation (~77 ms, independent of circuit size). `docs/validation.md`
-§"The dense-LU circuit-size limit" has the calibration table, what to do when the estimate says
-minutes, and the size at which this simulator stops being the right tool.
+they are the exponent-2 and exponent-3 scalings dense LU sits between (on the sparse path, from
+500 unknowns: an RC ladder's cost for the low end and an RC mesh's for the high end, exponents 1
+and 2 beyond), and on top of that sits a per-instance model-evaluation term that no matrix
+dimension can predict. It covers the solve, not process start-up or model compilation (~77 ms,
+independent of circuit size), and it cannot see a Newton loop that needs many iterations or a
+`gmin` rescue, which a large compiled-model `.op` can. `docs/validation.md` §"The circuit-size
+limit" has the calibration tables, the dense/sparse crossover, and what to do when the estimate
+says minutes.
 
 ## What one `sim` call does inside
 
