@@ -1015,7 +1015,7 @@ checks the answers bit for bit, both paths, all aids on).
 | `probe_allocs` | (1.14.0) gradient vectors allocated by a `V(…)`, `I(…)` or `idt` read, one per read, each the instance's own size |
 | `ctx_map_lookups` | (1.14.0) hash lookups into those per-call maps and sets |
 | `grad_allocs` | (1.14.0) dense gradient vectors the dual-number arithmetic allocates — one per operation on a value that depends on an unknown, and one per copy of such a value; probe reads excluded (they are `probe_allocs`) |
-| `grad_clones` | (1.14.0) the part of `grad_allocs` that copied an existing gradient (reading a local variable copies its value) |
+| `grad_clones` | (1.14.0) copies of a gradient (reading a local variable copies its value); since 1.14.0+1 a shared buffer, not an allocation |
 
 Each counter reports its **increase** over the line's iteration or stage, and a closing
 `[logfull] run` line gives the whole process's totals, printed whether the run succeeded or not.
@@ -1027,6 +1027,15 @@ while it is on, one relaxed atomic add per event.
 in every circuit, so properties of the model): per PSP103 evaluation, **~1 850 gradient
 allocations, ~47% of them clones**, against 12 probe allocations, 18 context-map lookups, 3 map
 builds, and ~79 stamp lookups per instance per iteration.
+
+**A count is not a heap allocation, and not a cost.** `grad_allocs` counts gradient *vectors*.
+The first attempt at removing the clones (1.14.0+1, as `Rc<Vec<f64>>`) cut it 47% and gained
+nothing — because that representation takes two heap allocations per vector, so real heap
+allocations per PSP103 `load()` went *up*, 1 845 → 1 946. A sampling profile found it (~29% of
+the time inside the allocator, called from the dual-number operators); `Rc<[f64]>`, one
+allocation per vector, took them to 988 and `load()` from 173 to 130 µs (`xtask bench-model`,
+medians of seven alternating runs). Count heap allocations with an allocator, and time a change,
+before believing either a count or an estimate.
 
 A failed iteration's line is not printed (it has no step), but its assembly and solve time are in
 its stage's totals.

@@ -20,6 +20,38 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.14.0+1 - 2026-09-24
+---------------------
+**Dual-number gradients live in one shared allocation (`Rc<[f64]>`): copying a value no longer
+copies its gradient, and a new gradient is one heap allocation. PSP103 `load()` is 24% faster.**
+Reading a local variable copies its value; 1.14.0's counters showed those copies were 47% of every
+gradient vector a PSP103 evaluation builds. A gradient is never modified after it is built, so
+sharing it changes no arithmetic: every result is bit-identical.
+
+Measured, `xtask bench-model` on PSP103's `load()`, seven runs of each binary alternated: median
+172.7 → 130.2 µs, best 157.4 → 120.0 µs; the two sets do not overlap. Heap allocations per `load()`
+(a counting allocator, scratch build): **1 845 → 988**.
+
+**How it was found, because the first attempt measured nothing.** It was first written as
+`Rc<Vec<f64>>` and showed no speed-up (216 → 221 µs), which I read as "allocation is not the cost"
+and wrote into the docs. A sampling profile (samply, attached to `bench-model`) said otherwise:
+~29% of the run inside the heap allocator, called from `Dual::mul/add/sub`, plus freeing
+(`Rc::drop_slow` 10.5%). The cause was the first version itself: `Rc<Vec<f64>>` takes **two**
+allocations per new gradient (the `Rc` box and the buffer), so removing 874 copies added ~970
+allocations — 1 845 → 1 946 per `load()`, a net increase. `grad_allocs` counts gradient vectors,
+not heap allocations, and could not see it. `Rc<[f64]>`, collected straight from the iterator, is
+one. The profile and its analysis script are kept locally (`/perf-logs/`).
+
+Still open, from the same profile: the tree walk itself (`eval` ~19% self time, `get_var`/
+`set_var` ~6%) and the remaining ~990 allocations per `load()` — about 22% of which are
+one-zero-operand results in `zip_with`, a full-length scaled copy that operators consuming their
+operands could write in place.
+
+Measured at 1.14.0+1: `cargo test --workspace` **887 passed / 0 failed** (the finite-difference
+Jacobian checks included). fmt + clippy clean. `cargo xtask validate`: **28/28**, identical to
+1.12.0. All 70 decks under `circuits/` give output identical to 1.14.0's.
+
+
 1.14.0 - 2026-09-24
 -------------------
 **`va-cli sim` builds the circuit once instead of three times, and `--logfull` counts hash
@@ -48,7 +80,7 @@ What they showed (PSP103 chains of 10–320 instances and c432, the same rates i
 every PSP103 evaluation does **~1 850 gradient allocations, ~880 of them copies** of a local
 variable's value — 941 million over one c432 `.op`. Against that, 12 probe allocations, 18 map
 lookups, 3 map builds, and ~79 stamp lookups per instance per iteration. These are how often
-things happen, not what they cost. The run logs are kept locally (`/perf-logs/`, now in `.gitignore`), not in
+things happen, not what they cost; 1.14.0+1 acted on the biggest of them. The run logs are kept locally (`/perf-logs/`, now in `.gitignore`), not in
 the repository.
 
 Measured at 1.14.0: `cargo test --workspace` **887 passed / 0 failed** (+1:

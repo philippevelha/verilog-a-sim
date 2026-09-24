@@ -14,10 +14,12 @@
 //!   bookkeeping sets (`mixed_branch_potential_used`, `flow_current_totals`).
 //! - [`Counters::grad_allocs`] — dense gradient vectors the dual-number arithmetic allocates:
 //!   every operation on a value that depends on an unknown builds a new one (`Grad::map`,
-//!   `zip_with`, `Dual::variable`), and so does every copy of such a value
-//!   ([`Counters::grad_clones`], a subset — reading a local variable copies it). Probe reads are
-//!   not in it; they are [`Counters::probe_allocs`]. A value depending on no unknown carries a
-//!   `Grad::Zero` and allocates nothing, so is never counted.
+//!   `zip_with`, `Dual::variable`). Probe reads are not in it; they are
+//!   [`Counters::probe_allocs`]. A value depending on no unknown carries a `Grad::Zero` and
+//!   allocates nothing, so is never counted.
+//! - [`Counters::grad_clones`] — copies of a dense gradient (reading a local variable copies its
+//!   value). A copy shares the buffer, so it is **not** an allocation and not in `grad_allocs`;
+//!   until 1.14.0+1 it was, and was ~47% of them.
 //!
 //! **Off by default, and nearly free while off**: each site checks one relaxed atomic flag
 //! before counting. On, each count is a relaxed atomic add — a few nanoseconds against
@@ -45,10 +47,9 @@ pub struct Counters {
     pub probe_allocs: u64,
     /// Hash lookups into the evaluation context's maps and sets.
     pub ctx_map_lookups: u64,
-    /// Dense gradient vectors allocated by dual-number arithmetic and copies, probe reads
-    /// excluded; [`Self::grad_clones`] included.
+    /// Dense gradient vectors allocated by dual-number arithmetic, probe reads excluded.
     pub grad_allocs: u64,
-    /// The part of [`Self::grad_allocs`] that copied an existing gradient.
+    /// Copies of a dense gradient: shared buffers, not allocations.
     pub grad_clones: u64,
 }
 
@@ -104,9 +105,8 @@ pub(crate) fn grad_alloc() {
     bump(&GRAD_ALLOCS, 1);
 }
 
-/// A copy is an allocation too: counted in both.
+/// A copy shares its buffer, so it is counted as a copy, not an allocation.
 #[inline]
 pub(crate) fn grad_clone() {
-    bump(&GRAD_ALLOCS, 1);
     bump(&GRAD_CLONES, 1);
 }

@@ -16,6 +16,7 @@
 use crate::CodegenError;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use va_ir::{BinOp, Builtin, Expr, ExprId, Function, Module, Stmt, UnOp, VarId};
 
 /// A value carried with its gradient w.r.t. the active unknowns (a dual number), **split into
@@ -82,19 +83,27 @@ enum Grad {
     Zero,
     /// One entry per local unknown, in slot order. Every `Dense` within one evaluation has the
     /// same length, since the only thing that introduces one is [`Dual::variable`].
-    Dense(Vec<f64>),
+    ///
+    /// Shared, not owned: copying a `Dual` — which reading a local variable does, every time —
+    /// shares the buffer instead of allocating a new one. `Rc<[f64]>`, not `Rc<Vec<f64>>`: the
+    /// count and the partials live in **one** allocation, collected straight into it. The `Vec`
+    /// form cost two per gradient (the `Rc` box and the buffer), which cancelled what sharing
+    /// saved — a sampling profile showed it (1.14.0+1). A gradient is never modified after it
+    /// is built, so sharing is safe. Before this, those copies were ~47% of every gradient
+    /// allocation a PSP103 evaluation made (`crate::counters`, 2026-09-24).
+    Dense(Rc<[f64]>),
 }
 
 /// By hand rather than derived, only so a copy of a dense gradient is counted
-/// (`crate::counters::grad_clone`): copying a `Dual` — reading a local variable, for one — is an
-/// allocation like any other.
+/// (`crate::counters::grad_clone`). The copy shares the buffer ([`Grad::Dense`]): a
+/// reference-count bump, not an allocation.
 impl Clone for Grad {
     fn clone(&self) -> Self {
         match self {
             Grad::Zero => Grad::Zero,
             Grad::Dense(v) => {
                 crate::counters::grad_clone();
-                Grad::Dense(v.clone())
+                Grad::Dense(Rc::clone(v))
             }
         }
     }
@@ -168,7 +177,7 @@ impl Dual {
         grad[i] = 1.0;
         Self {
             value,
-            grad: Grad::Dense(grad),
+            grad: Grad::Dense(Rc::from(grad)),
             grad_ddt: Grad::Zero,
         }
     }
@@ -538,7 +547,7 @@ fn zip_with(a: &Grad, b: &Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
         (Grad::Dense(x), Grad::Dense(y)) => {
             crate::counters::grad_alloc();
             debug_assert_eq!(x.len(), y.len(), "both duals span the same unknowns");
-            Grad::Dense(x.iter().zip(y).map(|(&p, &q)| f(p, q)).collect())
+            Grad::Dense(x.iter().zip(y.iter()).map(|(&p, &q)| f(p, q)).collect())
         }
     }
 }
@@ -1084,7 +1093,11 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 if n < count {
                     grad[n] -= 1.0;
                 }
-                Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
+                Ok(Dual::from_parts(
+                    value,
+                    Grad::Dense(Rc::from(grad)),
+                    Grad::Zero,
+                ))
             }
             va_ir::AccessKind::Flow => {
                 crate::counters::ctx_map_lookup();
@@ -1105,7 +1118,11 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 if slot < count {
                     grad[slot] = 1.0;
                 }
-                Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
+                Ok(Dual::from_parts(
+                    value,
+                    Grad::Dense(Rc::from(grad)),
+                    Grad::Zero,
+                ))
             }
         },
         Expr::Unary(op, e) => {
@@ -1172,7 +1189,11 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             if slot < count {
                 grad[slot] = 1.0;
             }
-            Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
+            Ok(Dual::from_parts(
+                value,
+                Grad::Dense(Rc::from(grad)),
+                Grad::Zero,
+            ))
         }
         Expr::Call(builtin, args) => eval_call(ctx, expr, *builtin, args),
         Expr::CallUser(fid, args) => {
