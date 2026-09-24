@@ -20,6 +20,26 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.16.0+1 - 2026-09-24
+---------------------
+**Proposal: stop paying the system heap for every gradient** (`docs/proposals/gradient-storage.md`).
+No code change. Two measurements behind it, both scratch builds, reverted:
+
+  * A sampling profile of PSP103's `load()` with the dual-number operations kept out of line, so
+    each shows under its own name: heap allocate/free 24.1 µs of 108.8 (22%); the model's own
+    arithmetic — maths functions 1.2 µs and derivative loops 10.9 µs — about 11%; the rest moving,
+    copying and wrapping dual numbers.
+  * An upper bound on what allocation costs a real `load()`: a size-class caching allocator in
+    front of the Windows heap made `bench-model` **12.9–19.0% faster** (medians; PSP103 −19.0%,
+    BSIM4 −14.4%, BSIM-BULK107 −12.9%; nine interleaved runs each on mains power).
+
+Options weighed: (A) a caching allocator for the three binaries — the measured win with no
+evaluator change, but `unsafe` and so §5's sign-off; (B) a per-evaluation gradient arena in
+`va-codegen` — removes allocation and most copying, safe, but a rewrite of the AD core;
+(C) recycled buffers with a hand-written refcount; (D) sparse gradients. Proposed: decide A first,
+re-profile, then B only if copying dominates. Nothing decided.
+
+
 1.16.0 - 2026-09-24
 -------------------
 **Compiled models evaluate their expressions from flat instruction tapes instead of walking
