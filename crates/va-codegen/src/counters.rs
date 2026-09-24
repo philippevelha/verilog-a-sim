@@ -20,6 +20,9 @@
 //! - [`Counters::grad_clones`] — copies of a dense gradient (reading a local variable copies its
 //!   value). A copy shares the buffer, so it is **not** an allocation and not in `grad_allocs`;
 //!   until 1.14.0+1 it was, and was ~47% of them.
+//! - [`Counters::grad_in_place`] — gradient results written into an operand's own buffer
+//!   because the operation owned it and nothing else shared it (1.14.0+2): each one an
+//!   allocation `grad_allocs` no longer shows.
 //!
 //! **Off by default, and nearly free while off**: each site checks one relaxed atomic flag
 //! before counting. On, each count is a relaxed atomic add — a few nanoseconds against
@@ -37,6 +40,7 @@ static PROBE_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static CTX_MAP_LOOKUPS: AtomicU64 = AtomicU64::new(0);
 static GRAD_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static GRAD_CLONES: AtomicU64 = AtomicU64::new(0);
+static GRAD_IN_PLACE: AtomicU64 = AtomicU64::new(0);
 
 /// A snapshot of the counters since the process started (or since [`reset`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +55,9 @@ pub struct Counters {
     pub grad_allocs: u64,
     /// Copies of a dense gradient: shared buffers, not allocations.
     pub grad_clones: u64,
+    /// Gradient results written into an operand's own buffer instead of a new one (an
+    /// operation that owned an unshared operand); each is an allocation avoided.
+    pub grad_in_place: u64,
 }
 
 /// Switch counting on or off. Counts already taken are kept.
@@ -65,6 +72,7 @@ pub fn reset() {
     CTX_MAP_LOOKUPS.store(0, Ordering::Relaxed);
     GRAD_ALLOCS.store(0, Ordering::Relaxed);
     GRAD_CLONES.store(0, Ordering::Relaxed);
+    GRAD_IN_PLACE.store(0, Ordering::Relaxed);
 }
 
 /// The current totals.
@@ -75,6 +83,7 @@ pub fn snapshot() -> Counters {
         ctx_map_lookups: CTX_MAP_LOOKUPS.load(Ordering::Relaxed),
         grad_allocs: GRAD_ALLOCS.load(Ordering::Relaxed),
         grad_clones: GRAD_CLONES.load(Ordering::Relaxed),
+        grad_in_place: GRAD_IN_PLACE.load(Ordering::Relaxed),
     }
 }
 
@@ -103,6 +112,11 @@ pub(crate) fn ctx_map_lookup() {
 #[inline]
 pub(crate) fn grad_alloc() {
     bump(&GRAD_ALLOCS, 1);
+}
+
+#[inline]
+pub(crate) fn grad_in_place() {
+    bump(&GRAD_IN_PLACE, 1);
 }
 
 /// A copy shares its buffer, so it is counted as a copy, not an allocation.

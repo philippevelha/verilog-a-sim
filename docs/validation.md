@@ -1016,6 +1016,7 @@ checks the answers bit for bit, both paths, all aids on).
 | `ctx_map_lookups` | (1.14.0) hash lookups into those per-call maps and sets |
 | `grad_allocs` | (1.14.0) dense gradient vectors the dual-number arithmetic allocates — one per operation on a value that depends on an unknown, and one per copy of such a value; probe reads excluded (they are `probe_allocs`) |
 | `grad_clones` | (1.14.0) copies of a gradient (reading a local variable copies its value); since 1.14.0+1 a shared buffer, not an allocation |
+| `grad_in_place` | (1.14.0+2) results written into an operand's own gradient buffer because the operation owned it and nothing else shared it — each an allocation avoided |
 
 Each counter reports its **increase** over the line's iteration or stage, and a closing
 `[logfull] run` line gives the whole process's totals, printed whether the run succeeded or not.
@@ -1034,7 +1035,9 @@ nothing — because that representation takes two heap allocations per vector, s
 allocations per PSP103 `load()` went *up*, 1 845 → 1 946. A sampling profile found it (~29% of
 the time inside the allocator, called from the dual-number operators); `Rc<[f64]>`, one
 allocation per vector, took them to 988 and `load()` from 173 to 130 µs (`xtask bench-model`,
-medians of seven alternating runs). Count heap allocations with an allocator, and time a change,
+medians of seven alternating runs). 1.14.0+2 then wrote results into operands' own buffers where
+unshared: 443 allocations, 101 µs — 42% below 1.14.0 — and on the 160-stage chain, assembly per
+Newton iteration 65 → 40 ms. Count heap allocations with an allocator, and time a change,
 before believing either a count or an estimate.
 
 A failed iteration's line is not printed (it has no step), but its assembly and solve time are in

@@ -20,6 +20,36 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.14.0+2 - 2026-09-24
+---------------------
+**Dual-number operations write their result into an operand's gradient buffer when nothing else
+holds it: PSP103 `load()` a further 23% faster, 42% faster than 1.14.0.** `zip_with` is now one
+implementation over owned gradients with three cases — both zero (no allocation), exactly one zero
+(the rule applied to the other operand's partials alone, a single pass, in place when that buffer
+is unshared), both dense (written into whichever operand's buffer is unshared). `Grad::map` (the
+chain rule, `scale`, `neg`) does the same. `add/sub/mul/div/powf/neg/exp/ln/sqrt/abs` gained
+by-value forms (`*_owned`) that consume their operands; the `&self` forms delegate to them with
+shared handles, so a borrowed operand is never written and every other caller behaves as before.
+`eval`'s arithmetic arms and `eval_call`'s `exp/ln/sqrt/abs/pow` pass their own temporaries by
+value. Whether a buffer is unshared is decided by `Rc::get_mut` at run time, so a local
+variable's value (shared with the variable table) is never overwritten.
+
+Each rule keeps its own per-element function, applied to the same elements in the same order —
+not reduced to two coefficients `ca·p + cb·q`, which rounds differently for `div` — so every
+result is **bit-identical** and the change could be checked against every deck exactly.
+
+Measured, all against the same session: `xtask bench-model` on PSP103's `load()`, seven runs of
+each binary interleaved — 1.14.0 median 175.6 µs, 1.14.0+1 131.2 µs, **1.14.0+2 101.2 µs** (best
+171.9 / 118.4 / 94.0). Heap allocations per `load()` (counting allocator, scratch build): 1 845 →
+988 → **443**. In a circuit, the 160-stage PSP103 chain `.op`, five runs alternated against 1.14.0:
+assembly per Newton iteration 65.2 → 40.1 ms, wall 14.0 → 10.1 s; gradient vectors allocated
+88.6M → 19.9M, 26.7M results written in place (`grad_in_place`, a new counter).
+
+Measured at 1.14.0+2: `cargo test --workspace` **887 passed / 0 failed** (the finite-difference
+Jacobian checks included). fmt + clippy clean. `cargo xtask validate`: **28/28**, identical to
+1.12.0. All 70 decks under `circuits/` give output identical to 1.14.0+1's.
+
+
 1.14.0+1 - 2026-09-24
 ---------------------
 **Dual-number gradients live in one shared allocation (`Rc<[f64]>`): copying a value no longer

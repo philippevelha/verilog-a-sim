@@ -145,15 +145,40 @@ impl Grad {
         }
     }
 
-    /// Apply `f` elementwise. **`f(0.0)` must be `0.0`**, which every caller guarantees by
-    /// mapping a zero partial to zero explicitly — see [`Dual::chain`] for why that matters at
-    /// a singularity. `Zero` is therefore left alone rather than materialized.
-    fn map(&self, f: impl Fn(f64) -> f64) -> Grad {
+    /// Another handle on the same buffer, for a by-reference caller of an owned operation:
+    /// the extra handle makes the buffer shared, so the operation allocates rather than
+    /// writing in place — exactly what a borrowed operand requires. Not counted as a clone:
+    /// it is how the by-reference entry points reach the one implementation, not a copy a
+    /// model made.
+    fn share(&self) -> Grad {
         match self {
             Grad::Zero => Grad::Zero,
-            Grad::Dense(v) => {
-                crate::counters::grad_alloc();
-                Grad::Dense(v.iter().map(|g| f(*g)).collect())
+            Grad::Dense(v) => Grad::Dense(Rc::clone(v)),
+        }
+    }
+
+    /// Apply `f` elementwise, on a gradient this call owns: written **in place** when nothing
+    /// else holds the buffer, into a new one otherwise — the same `f` on the same elements
+    /// either way, so the result is bit-identical; only where it is written differs. A
+    /// by-reference caller passes [`Self::share`], which makes the buffer shared.
+    ///
+    /// **`f(0.0)` must be `0.0`**, which every caller guarantees by mapping a zero partial to
+    /// zero explicitly — see [`Dual::chain`] for why that matters at a singularity. `Zero` is
+    /// therefore left alone rather than materialized.
+    fn map_owned(self, f: impl Fn(f64) -> f64) -> Grad {
+        match self {
+            Grad::Zero => Grad::Zero,
+            Grad::Dense(mut v) => {
+                if let Some(buf) = Rc::get_mut(&mut v) {
+                    crate::counters::grad_in_place();
+                    for g in buf.iter_mut() {
+                        *g = f(*g);
+                    }
+                    Grad::Dense(v)
+                } else {
+                    crate::counters::grad_alloc();
+                    Grad::Dense(v.iter().map(|g| f(*g)).collect())
+                }
             }
         }
     }
@@ -253,28 +278,55 @@ impl Dual {
 
     /// Scale value and gradient by a constant `s`.
     pub fn scale(&self, s: f64) -> Dual {
+        self.share().scale_owned(s)
+    }
+
+    /// [`Self::scale`] consuming `self`, so the gradient can be scaled in place.
+    pub fn scale_owned(self, s: f64) -> Dual {
         // A zero partial maps to zero explicitly rather than being multiplied: for an
         // infinite `s` it must still contribute nothing rather than a NaN, exactly as in
         // `chain`.
         let f = |g: f64| if g == 0.0 { 0.0 } else { g * s };
-        Dual::from_parts(self.value * s, self.grad.map(f), self.grad_ddt.map(f))
+        Dual::from_parts(
+            self.value * s,
+            self.grad.map_owned(f),
+            self.grad_ddt.map_owned(f),
+        )
+    }
+
+    /// Another handle on the same gradients (see [`Grad::share`]): how each by-reference
+    /// operation reaches its by-value implementation without copying, and without writing
+    /// into a buffer its caller still holds.
+    fn share(&self) -> Dual {
+        Dual::from_parts(self.value, self.grad.share(), self.grad_ddt.share())
     }
 
     /// Sum: `(a + b)' = a' + b'`.
     pub fn add(&self, o: &Dual) -> Dual {
+        self.share().add_owned(o.share())
+    }
+
+    /// [`Self::add`] consuming both operands, so the result can be written into one of their
+    /// gradient buffers instead of a new one ([`zip_owned`]). Bit-identical to [`Self::add`].
+    pub fn add_owned(self, o: Dual) -> Dual {
         Dual::from_parts(
             self.value + o.value,
-            zip_with(&self.grad, &o.grad, |a, b| a + b),
-            zip_with(&self.grad_ddt, &o.grad_ddt, |a, b| a + b),
+            zip_owned(self.grad, o.grad, |a, b| a + b),
+            zip_owned(self.grad_ddt, o.grad_ddt, |a, b| a + b),
         )
     }
 
     /// Difference: `(a - b)' = a' - b'`.
     pub fn sub(&self, o: &Dual) -> Dual {
+        self.share().sub_owned(o.share())
+    }
+
+    /// [`Self::sub`] consuming both operands (see [`Self::add_owned`]).
+    pub fn sub_owned(self, o: Dual) -> Dual {
         Dual::from_parts(
             self.value - o.value,
-            zip_with(&self.grad, &o.grad, |a, b| a - b),
-            zip_with(&self.grad_ddt, &o.grad_ddt, |a, b| a - b),
+            zip_owned(self.grad, o.grad, |a, b| a - b),
+            zip_owned(self.grad_ddt, o.grad_ddt, |a, b| a - b),
         )
     }
 
@@ -285,30 +337,45 @@ impl Dual {
     /// yields `grad_ddt = c₀·∂q/∂x` **and** `grad = (dq/dt)·∂c/∂x` — the two halves of the
     /// product rule — provided the `ddt` carries a real primal value (see [`Dual::into_ddt`]).
     pub fn mul(&self, o: &Dual) -> Dual {
+        self.share().mul_owned(o.share())
+    }
+
+    /// [`Self::mul`] consuming both operands (see [`Self::add_owned`]).
+    pub fn mul_owned(self, o: Dual) -> Dual {
+        let (sv, ov) = (self.value, o.value);
         Dual::from_parts(
-            self.value * o.value,
-            zip_with(&self.grad, &o.grad, |a, b| a * o.value + b * self.value),
-            zip_with(&self.grad_ddt, &o.grad_ddt, |a, b| {
-                a * o.value + b * self.value
-            }),
+            sv * ov,
+            zip_owned(self.grad, o.grad, |a, b| a * ov + b * sv),
+            zip_owned(self.grad_ddt, o.grad_ddt, |a, b| a * ov + b * sv),
         )
     }
 
     /// Quotient: `(a/b)' = (a'b - ab') / b²`.
     pub fn div(&self, o: &Dual) -> Dual {
-        let inv = 1.0 / o.value;
+        self.share().div_owned(o.share())
+    }
+
+    /// [`Self::div`] consuming both operands (see [`Self::add_owned`]).
+    pub fn div_owned(self, o: Dual) -> Dual {
+        let (sv, ov) = (self.value, o.value);
+        let inv = 1.0 / ov;
         let inv2 = inv * inv;
-        let rule = |a: f64, b: f64| (a * o.value - self.value * b) * inv2;
+        let rule = |a: f64, b: f64| (a * ov - sv * b) * inv2;
         Dual::from_parts(
-            self.value * inv,
-            zip_with(&self.grad, &o.grad, rule),
-            zip_with(&self.grad_ddt, &o.grad_ddt, rule),
+            sv * inv,
+            zip_owned(self.grad, o.grad, rule),
+            zip_owned(self.grad_ddt, o.grad_ddt, rule),
         )
     }
 
     /// Negation.
     pub fn neg(&self) -> Dual {
         self.scale(-1.0)
+    }
+
+    /// [`Self::neg`] consuming `self`, so the gradient is negated in place.
+    pub fn neg_owned(self) -> Dual {
+        self.scale_owned(-1.0)
     }
 
     /// Apply a differentiable unary function given its value and derivative at `self.value`.
@@ -318,6 +385,12 @@ impl Dual {
     /// came from `δx` or from `dδx/dt`. This one line is why no nonlinear operator needed
     /// changing.
     fn chain(&self, value: f64, dvalue: f64) -> Dual {
+        self.share().chain_owned(value, dvalue)
+    }
+
+    /// [`Self::chain`] consuming `self`, so the gradient is scaled in place (see
+    /// [`Grad::map_owned`]); the guard and the arithmetic are the same.
+    fn chain_owned(self, value: f64, dvalue: f64) -> Dual {
         // A channel whose incoming gradient is exactly `0.0` stays `0.0` rather than being
         // multiplied: the value does not depend on that unknown at all, so its contribution is
         // zero whatever `dvalue` is. Multiplying anyway is wrong at a function's *own*
@@ -328,7 +401,11 @@ impl Dual {
         // statement cannot affect the Jacobian at all — yet `sqrt(0.0)` gave it an all-NaN
         // gradient that reached the drain node's row and ended the solve on iteration 1.
         let scale = |g: f64| if g == 0.0 { 0.0 } else { g * dvalue };
-        Dual::from_parts(value, self.grad.map(scale), self.grad_ddt.map(scale))
+        Dual::from_parts(
+            value,
+            self.grad.map_owned(scale),
+            self.grad_ddt.map_owned(scale),
+        )
     }
 
     /// [`Self::chain`] for a caller outside this impl: a value and its derivative w.r.t.
@@ -339,13 +416,24 @@ impl Dual {
 
     /// `exp`.
     pub fn exp(&self) -> Dual {
+        self.share().exp_owned()
+    }
+
+    /// [`Self::exp`] consuming `self` (see [`Self::chain_owned`]).
+    pub fn exp_owned(self) -> Dual {
         let e = self.value.exp();
-        self.chain(e, e)
+        self.chain_owned(e, e)
     }
 
     /// Natural log.
     pub fn ln(&self) -> Dual {
-        self.chain(self.value.ln(), 1.0 / self.value)
+        self.share().ln_owned()
+    }
+
+    /// [`Self::ln`] consuming `self`.
+    pub fn ln_owned(self) -> Dual {
+        let (v, d) = (self.value.ln(), 1.0 / self.value);
+        self.chain_owned(v, d)
     }
 
     /// Base-10 log.
@@ -358,13 +446,24 @@ impl Dual {
 
     /// Square root.
     pub fn sqrt(&self) -> Dual {
+        self.share().sqrt_owned()
+    }
+
+    /// [`Self::sqrt`] consuming `self`.
+    pub fn sqrt_owned(self) -> Dual {
         let r = self.value.sqrt();
-        self.chain(r, 0.5 / r)
+        self.chain_owned(r, 0.5 / r)
     }
 
     /// Absolute value (derivative `sign(x)`; subgradient `0` at the kink).
     pub fn abs(&self) -> Dual {
-        self.chain(self.value.abs(), self.value.signum())
+        self.share().abs_owned()
+    }
+
+    /// [`Self::abs`] consuming `self`.
+    pub fn abs_owned(self) -> Dual {
+        let (v, d) = (self.value.abs(), self.value.signum());
+        self.chain_owned(v, d)
     }
 
     /// Power `self ** exp`.
@@ -390,6 +489,11 @@ impl Dual {
     /// `ln u` is `-inf`/NaN for `u ≤ 0`, and multiplying it by a zero derivative it is not a
     /// term of would poison the result with the same `0·inf` NaN.
     pub fn powf(&self, exp: &Dual) -> Dual {
+        self.share().powf_owned(exp.share())
+    }
+
+    /// [`Self::powf`] consuming both operands (see [`Self::add_owned`]).
+    pub fn powf_owned(self, exp: Dual) -> Dual {
         let (u, v) = (self.value, exp.value);
         let value = u.powf(v);
         let d_du = v * u.powf(v - 1.0);
@@ -405,8 +509,8 @@ impl Dual {
         };
         Dual::from_parts(
             value,
-            zip_with(&self.grad, &exp.grad, rule),
-            zip_with(&self.grad_ddt, &exp.grad_ddt, rule),
+            zip_owned(self.grad, exp.grad, rule),
+            zip_owned(self.grad_ddt, exp.grad_ddt, rule),
         )
     }
 
@@ -534,20 +638,45 @@ impl Dual {
 /// materializing anything. That case is the common one: it is every constant folded against
 /// every other constant, 78–87% of the work in a CMC compact model (see [`Grad`]).
 fn zip_with(a: &Grad, b: &Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
+    zip_owned(a.share(), b.share(), f)
+}
+
+/// [`zip_with`] on gradients this call owns — the one implementation, in three cases:
+///
+/// - **both zero**: zero, no allocation (the common case, see [`Grad`]);
+/// - **exactly one zero**: `f` applied to the other operand's partials alone — `f(g, 0.0)` or
+///   `f(0.0, g)`, a single pass over one buffer, written in place when that buffer is not
+///   shared ([`Grad::map_owned`]);
+/// - **both dense**: written into whichever operand's buffer is not shared, else a new one.
+///
+/// Each rule's own `f` is applied to the same elements in every case, so the result is
+/// bit-identical to computing it into a fresh vector; only the buffer differs. `f` is kept
+/// rather than reduced to two coefficients `ca·p + cb·q`: some rules round differently in that
+/// form (`div`'s `(a·B − A·b)·inv²`), and bit-identity is what lets a change here be checked
+/// against every deck exactly.
+fn zip_owned(a: Grad, b: Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
     match (a, b) {
         (Grad::Zero, Grad::Zero) => Grad::Zero,
-        (Grad::Dense(x), Grad::Zero) => {
-            crate::counters::grad_alloc();
-            Grad::Dense(x.iter().map(|&g| f(g, 0.0)).collect())
-        }
-        (Grad::Zero, Grad::Dense(y)) => {
-            crate::counters::grad_alloc();
-            Grad::Dense(y.iter().map(|&g| f(0.0, g)).collect())
-        }
-        (Grad::Dense(x), Grad::Dense(y)) => {
-            crate::counters::grad_alloc();
+        (x @ Grad::Dense(_), Grad::Zero) => x.map_owned(|g| f(g, 0.0)),
+        (Grad::Zero, y @ Grad::Dense(_)) => y.map_owned(|g| f(0.0, g)),
+        (Grad::Dense(mut x), Grad::Dense(mut y)) => {
             debug_assert_eq!(x.len(), y.len(), "both duals span the same unknowns");
-            Grad::Dense(x.iter().zip(y.iter()).map(|(&p, &q)| f(p, q)).collect())
+            if let Some(xb) = Rc::get_mut(&mut x) {
+                crate::counters::grad_in_place();
+                for (p, &q) in xb.iter_mut().zip(y.iter()) {
+                    *p = f(*p, q);
+                }
+                Grad::Dense(x)
+            } else if let Some(yb) = Rc::get_mut(&mut y) {
+                crate::counters::grad_in_place();
+                for (q, &p) in yb.iter_mut().zip(x.iter()) {
+                    *q = f(p, *q);
+                }
+                Grad::Dense(y)
+            } else {
+                crate::counters::grad_alloc();
+                Grad::Dense(x.iter().zip(y.iter()).map(|(&p, &q)| f(p, q)).collect())
+            }
         }
     }
 }
@@ -1128,7 +1257,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         Expr::Unary(op, e) => {
             let d = eval(ctx, *e)?;
             Ok(match op {
-                UnOp::Neg => d.neg(),
+                UnOp::Neg => d.neg_owned(),
                 UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0)),
                 // Bitwise NOT, like the comparison/logical operators above, is an integer
                 // operation with no continuous derivative — zero-gradient.
@@ -1139,15 +1268,17 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             let a = eval(ctx, *l)?;
             let b = eval(ctx, *r)?;
             Ok(match op {
-                BinOp::Add => a.add(&b),
-                BinOp::Sub => a.sub(&b),
-                BinOp::Mul => a.mul(&b),
-                BinOp::Div => a.div(&b),
+                // By value: `a` and `b` are this arm's own temporaries, so the result can be
+                // written into one of their gradient buffers (`zip_owned`).
+                BinOp::Add => a.add_owned(b),
+                BinOp::Sub => a.sub_owned(b),
+                BinOp::Mul => a.mul_owned(b),
+                BinOp::Div => a.div_owned(b),
                 // Modulus is genuinely discontinuous (it jumps at every multiple of `b`), so —
                 // like the bitwise/comparison operators below — it's zero-gradient in AD rather
                 // than attempting an analytic derivative.
                 BinOp::Mod => Dual::constant(a.value % b.value),
-                BinOp::Pow => a.powf(&b),
+                BinOp::Pow => a.powf_owned(b),
                 BinOp::Lt => Dual::constant(bool_to_f64(a.value < b.value)),
                 BinOp::Le => Dual::constant(bool_to_f64(a.value <= b.value)),
                 BinOp::Gt => Dual::constant(bool_to_f64(a.value > b.value)),
@@ -1245,17 +1376,17 @@ fn eval_call(
         eval(ctx, *id)
     };
     Ok(match builtin {
-        Builtin::Exp => arg(0)?.exp(),
-        Builtin::Ln => arg(0)?.ln(),
+        Builtin::Exp => arg(0)?.exp_owned(),
+        Builtin::Ln => arg(0)?.ln_owned(),
         Builtin::Log => arg(0)?.log10(),
-        Builtin::Sqrt => arg(0)?.sqrt(),
-        Builtin::Abs => arg(0)?.abs(),
+        Builtin::Sqrt => arg(0)?.sqrt_owned(),
+        Builtin::Abs => arg(0)?.abs_owned(),
         // Rounding functions are piecewise constant: value is the rounded primal, gradient 0.
         Builtin::Floor => Dual::constant(arg(0)?.value.floor()),
         Builtin::Ceil => Dual::constant(arg(0)?.value.ceil()),
         Builtin::Round => Dual::constant(arg(0)?.value.round()),
         Builtin::Int => Dual::constant(arg(0)?.value.trunc()),
-        Builtin::Pow => arg(0)?.powf(&arg(1)?),
+        Builtin::Pow => arg(0)?.powf_owned(arg(1)?),
         Builtin::Hypot => arg(0)?.hypot(&arg(1)?),
         Builtin::Atan2 => arg(0)?.atan2(&arg(1)?),
         Builtin::Min => arg(0)?.min(&arg(1)?),

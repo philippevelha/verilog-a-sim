@@ -64,6 +64,7 @@ fn codegen_counts(out: &mut Vec<(&'static str, u64)>) {
     out.push(("ctx_map_lookups", c.ctx_map_lookups));
     out.push(("grad_allocs", c.grad_allocs));
     out.push(("grad_clones", c.grad_clones));
+    out.push(("grad_in_place", c.grad_in_place));
 }
 
 /// The whole run's counter totals as one `[logfull] run` line, or `None` unless
