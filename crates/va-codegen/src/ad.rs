@@ -73,7 +73,7 @@ pub struct Dual {
 /// A second, smaller benefit falls out: `Zero ⊗ Zero → Zero` never multiplies a zero partial by
 /// an infinite coefficient, so the `0 · inf` NaNs that v1.1.1 fixed one rule at a time cannot
 /// re-enter through a rule nobody thought about.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 enum Grad {
     /// Structurally zero: this value depends on no unknown at all. Holds no allocation, and
     /// carries no length — a `Zero` is the zero gradient over *whatever* the ambient unknown
@@ -83,6 +83,21 @@ enum Grad {
     /// One entry per local unknown, in slot order. Every `Dense` within one evaluation has the
     /// same length, since the only thing that introduces one is [`Dual::variable`].
     Dense(Vec<f64>),
+}
+
+/// By hand rather than derived, only so a copy of a dense gradient is counted
+/// (`crate::counters::grad_clone`): copying a `Dual` — reading a local variable, for one — is an
+/// allocation like any other.
+impl Clone for Grad {
+    fn clone(&self) -> Self {
+        match self {
+            Grad::Zero => Grad::Zero,
+            Grad::Dense(v) => {
+                crate::counters::grad_clone();
+                Grad::Dense(v.clone())
+            }
+        }
+    }
 }
 
 impl Grad {
@@ -127,7 +142,10 @@ impl Grad {
     fn map(&self, f: impl Fn(f64) -> f64) -> Grad {
         match self {
             Grad::Zero => Grad::Zero,
-            Grad::Dense(v) => Grad::Dense(v.iter().map(|g| f(*g)).collect()),
+            Grad::Dense(v) => {
+                crate::counters::grad_alloc();
+                Grad::Dense(v.iter().map(|g| f(*g)).collect())
+            }
         }
     }
 }
@@ -145,6 +163,7 @@ impl Dual {
 
     /// An independent variable: value `value`, unit derivative in slot `i` of `n`.
     pub fn variable(value: f64, i: usize, n: usize) -> Self {
+        crate::counters::grad_alloc();
         let mut grad = vec![0.0; n];
         grad[i] = 1.0;
         Self {
@@ -508,9 +527,16 @@ impl Dual {
 fn zip_with(a: &Grad, b: &Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
     match (a, b) {
         (Grad::Zero, Grad::Zero) => Grad::Zero,
-        (Grad::Dense(x), Grad::Zero) => Grad::Dense(x.iter().map(|&g| f(g, 0.0)).collect()),
-        (Grad::Zero, Grad::Dense(y)) => Grad::Dense(y.iter().map(|&g| f(0.0, g)).collect()),
+        (Grad::Dense(x), Grad::Zero) => {
+            crate::counters::grad_alloc();
+            Grad::Dense(x.iter().map(|&g| f(g, 0.0)).collect())
+        }
+        (Grad::Zero, Grad::Dense(y)) => {
+            crate::counters::grad_alloc();
+            Grad::Dense(y.iter().map(|&g| f(0.0, g)).collect())
+        }
         (Grad::Dense(x), Grad::Dense(y)) => {
+            crate::counters::grad_alloc();
             debug_assert_eq!(x.len(), y.len(), "both duals span the same unknowns");
             Grad::Dense(x.iter().zip(y).map(|(&p, &q)| f(p, q)).collect())
         }
@@ -635,6 +661,7 @@ impl Ctx<'_> {
     /// `crate::GeneratedModel::stamp` uses to know whether it still owes that branch its
     /// constraint row's structural (`V(p)-V(n)`) stamp.
     pub fn mark_potential_used(&self, local_slot: usize) -> bool {
+        crate::counters::ctx_map_lookup();
         self.mixed_branch_potential_used
             .borrow_mut()
             .insert(local_slot)
@@ -669,6 +696,9 @@ impl Ctx<'_> {
     /// may receive more than one flow contribution (`crate::lower::FlowCurrentAccumulator`'s
     /// `diode_basic.va` example has two), each folded in as it runs.
     pub fn add_flow_current(&self, branch: u32, value: &Dual) {
+        // A get and an insert: two lookups.
+        crate::counters::ctx_map_lookup();
+        crate::counters::ctx_map_lookup();
         let mut totals = self.flow_current_totals.borrow_mut();
         let updated = match totals.get(&branch) {
             Some(existing) => existing.add(value),
@@ -1046,6 +1076,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 let br = ctx.module.branches[access.branch.0 as usize];
                 let (p, n) = (br.p.0 as usize, br.n.0 as usize);
                 let value = ctx.node_voltage(p) - ctx.node_voltage(n);
+                crate::counters::probe_alloc();
                 let mut grad = vec![0.0; count];
                 if p < count {
                     grad[p] += 1.0;
@@ -1056,6 +1087,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 Ok(Dual::from_parts(value, Grad::Dense(grad), Grad::Zero))
             }
             va_ir::AccessKind::Flow => {
+                crate::counters::ctx_map_lookup();
                 let slot = *ctx
                     .branch_current_slots
                     .get(&access.branch.0)
@@ -1068,6 +1100,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                     })?;
                 let g = ctx.terminals.get(slot).copied().unwrap_or(usize::MAX);
                 let value = ctx.x.get(g).copied().unwrap_or(0.0);
+                crate::counters::probe_alloc();
                 let mut grad = vec![0.0; count];
                 if slot < count {
                     grad[slot] = 1.0;
@@ -1127,12 +1160,14 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         // it, to stamp the accumulator's own row). `expr` is this call's own id, exactly the key
         // `lower::lower` registered it under in `ctx.idt_slots`.
         Expr::Call(Builtin::Idt, _) => {
+            crate::counters::ctx_map_lookup();
             let slot = *ctx.idt_slots.get(&expr.0).ok_or_else(|| {
                 unsupported(
                     "idt accumulator not registered for this call site (internal codegen error)",
                 )
             })?;
             let value = ctx.node_voltage(slot);
+            crate::counters::probe_alloc();
             let mut grad = vec![0.0; count];
             if slot < count {
                 grad[slot] = 1.0;
@@ -1412,6 +1447,7 @@ fn eval_call(
         Builtin::Slew => {
             let value = arg(0)?;
             let (pos, neg) = (arg(1)?.value.abs(), arg(2)?.value.abs());
+            crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
                 return Err(unsupported("slew call site has no state slot allocated"));
             };
@@ -1448,6 +1484,7 @@ fn eval_call(
         Builtin::Transition => {
             let value = arg(0)?;
             let (delay, rise, fall) = (arg(1)?.value, arg(2)?.value.abs(), arg(3)?.value.abs());
+            crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
                 return Err(unsupported(
                     "transition call site has no state slot allocated",
@@ -1539,6 +1576,7 @@ fn eval_call(
         // which is what keeps `load` a pure function of `(x, ctx, committed-state)`.
         Builtin::Ddt => {
             let q = arg(0)?;
+            crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
                 return Err(unsupported(
                     "ddt call site has no state slots allocated (internal codegen error)",

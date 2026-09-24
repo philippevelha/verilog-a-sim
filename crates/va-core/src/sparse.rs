@@ -357,6 +357,7 @@ impl StampSink for SparseSystem {
 
     fn jacobian(&mut self, row: usize, col: usize, value: f64) {
         if row < self.dim() && col < self.dim() {
+            crate::counters::stamp_lookup();
             match self.pattern.slot(row, col) {
                 Some(s) => self.jacobian[s] += value,
                 None => self.overflow.entry((row, col)).or_default().0 += value,
@@ -372,6 +373,7 @@ impl StampSink for SparseSystem {
 
     fn dcharge(&mut self, row: usize, col: usize, value: f64) {
         if row < self.dim() && col < self.dim() {
+            crate::counters::stamp_lookup();
             match self.pattern.slot(row, col) {
                 Some(s) => self.dcharge[s] += value,
                 None => self.overflow.entry((row, col)).or_default().1 += value,

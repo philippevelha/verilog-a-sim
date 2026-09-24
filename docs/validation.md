@@ -1010,6 +1010,23 @@ checks the answers bit for bit, both paths, all aids on).
 | `scale`, `residual`, `max_step` | the step fraction taken (below 1 only with `damp`), the residual ∞-norm the step was solved from, and the largest change actually applied |
 | `iterations`, `outcome` | per stage: the iterations it took, and `converged`, `no convergence` or `failed: <error>` |
 | `instances` | every device after flattening, compiled or not — divide by the compiled count `va-cli`'s `circuit:` line gives for a per-model cost |
+| `stamp_lookups` | (1.14.0) hash lookups by sparse stamping, one per Jacobian/`dcharge` stamp; `0` on the dense path (`va_core::counters`) |
+| `ctx_maps_built` | (1.14.0) lookup maps a compiled instance builds at the start of each evaluation — three per call, so ÷3 = compiled-instance evaluations (`va_codegen::counters`) |
+| `probe_allocs` | (1.14.0) gradient vectors allocated by a `V(…)`, `I(…)` or `idt` read, one per read, each the instance's own size |
+| `ctx_map_lookups` | (1.14.0) hash lookups into those per-call maps and sets |
+| `grad_allocs` | (1.14.0) dense gradient vectors the dual-number arithmetic allocates — one per operation on a value that depends on an unknown, and one per copy of such a value; probe reads excluded (they are `probe_allocs`) |
+| `grad_clones` | (1.14.0) the part of `grad_allocs` that copied an existing gradient (reading a local variable copies its value) |
+
+Each counter reports its **increase** over the line's iteration or stage, and a closing
+`[logfull] run` line gives the whole process's totals, printed whether the run succeeded or not.
+The run line also covers work that has no per-iteration line, such as the transient
+integrator's timesteps. While `--logfull` is off the counters cost one relaxed atomic load each;
+while it is on, one relaxed atomic add per event.
+
+**What the counters found** (1.14.0, PSP103 chains of 10–320 instances and c432; the same rates
+in every circuit, so properties of the model): per PSP103 evaluation, **~1 850 gradient
+allocations, ~47% of them clones**, against 12 probe allocations, 18 context-map lookups, 3 map
+builds, and ~79 stamp lookups per instance per iteration.
 
 A failed iteration's line is not printed (it has no step), but its assembly and solve time are in
 its stage's totals.

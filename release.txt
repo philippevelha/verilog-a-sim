@@ -20,6 +20,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.14.0 - 2026-09-24
+-------------------
+**`va-cli sim` builds the circuit once instead of three times, and `--logfull` counts hash
+lookups, per-call map builds and probe allocations.**
+
+Build once: a run used to call `build_instances` separately for the pre-flight estimate, for the
+solve and for the report's row labels — compiling every distinct model card again each time,
+because the compiled-model cache lives inside one build. `run_sim` now builds once and shares
+it. The solvers take an optional prebuilt circuit (`solve_*_impl`); the public `solve_*_with`
+functions keep their signatures and build their own, so `va-harness` is unchanged. A circuit
+that fails to build still reports that error where the solve used to, after the `--plot` check.
+Saved ~0.8 s on c432 (0.37 s before the first Newton stage and 0.41 s after the last), ~0.12 s
+on a 320-instance chain: about 0.6–1% of a long `.op`, more of a short run.
+
+Counters (`va_codegen::counters`, `va_core::counters`): `stamp_lookups` (sparse stamping's
+`(row, col) → slot` hash lookups), `ctx_maps_built` (three per compiled-instance evaluation),
+`probe_allocs` (a gradient vector per `V`/`I`/`idt` read), `ctx_map_lookups`, `grad_allocs`
+(every dense gradient vector the dual-number arithmetic allocates, copies included) and
+`grad_clones` (the copies; `Grad`'s `Clone` is now written by hand to count them). Each `[logfull]`
+line reports their increase over its iteration or stage, and a closing `[logfull] run` line the
+process totals, transient timesteps included. `va-core` cannot see `va-codegen`, so the Newton
+log reads the codegen counters through `NewtonConfig::log_counters`, a function pointer
+`va-cli` supplies. Off by default at one relaxed atomic load per site; on, a relaxed add.
+
+What they showed (PSP103 chains of 10–320 instances and c432, the same rates in every circuit):
+every PSP103 evaluation does **~1 850 gradient allocations, ~880 of them copies** of a local
+variable's value — 941 million over one c432 `.op`. Against that, 12 probe allocations, 18 map
+lookups, 3 map builds, and ~79 stamp lookups per instance per iteration. These are how often
+things happen, not what they cost. The run logs are kept locally (`/perf-logs/`, now in `.gitignore`), not in
+the repository.
+
+Measured at 1.14.0: `cargo test --workspace` **887 passed / 0 failed** (+1:
+`counters_count_evaluations_only_while_enabled`, including the gradient counters). fmt + clippy clean. `cargo xtask validate`:
+**28/28**, identical to 1.12.0. All 70 decks under `circuits/` (c432 and c17's transient aside,
+compared through their logs) give output identical to 1.13.0's, exit codes included.
+
+
 1.13.0 - 2026-09-24
 -------------------
 **`va-cli sim --logfull`: a per-iteration trace of the DC Newton solve.** Every iteration prints

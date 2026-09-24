@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ad;
+pub mod counters;
 pub mod lower;
 
 use ad::{eval, Ctx, Dual};
@@ -417,6 +418,9 @@ impl GeneratedModel {
         validating: bool,
         static_vars: &'a [Option<crate::ad::Dual>],
     ) -> Ctx<'a> {
+        // Three maps built per call (branch-current slots, `idt` slots, stateful-call slots):
+        // counted for `--logfull` (`crate::counters`).
+        crate::counters::ctx_maps_built(3);
         // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
         // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't (and
         // shouldn't) need to know which of the two reasons gave this branch a slot.
@@ -1186,6 +1190,7 @@ impl GeneratedModel {
             }
 
             // Transient: the sampled difference equation.
+            crate::counters::ctx_map_lookup();
             let Some(&(kind, base)) = ctx.state_slots.get(&term.expr_id) else {
                 continue;
             };
@@ -1795,6 +1800,9 @@ impl GeneratedModel {
     /// carry anything.
     fn finalize_mixed_branch_currents(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
         for bc in &self.shared.lowered.branch_currents {
+            if bc.mixed {
+                crate::counters::ctx_map_lookup();
+            }
             if bc.mixed
                 && !ctx
                     .mixed_branch_potential_used
@@ -1864,6 +1872,7 @@ impl GeneratedModel {
     fn stamp_flow_current_accumulators(&self, ctx: &Ctx, sink: &mut dyn StampSink) {
         for acc in &self.shared.lowered.flow_current_accumulators {
             let g = self.terminals[acc.local_slot];
+            crate::counters::ctx_map_lookup();
             let total = ctx
                 .flow_current_totals
                 .borrow()
@@ -2285,6 +2294,7 @@ impl GeneratedModel {
         const POINTS_PER_RAMP: f64 = 8.0;
         let mut bound: Option<f64> = None;
         for term in &self.shared.lowered.zi_terms {
+            crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&term.expr_id) else {
                 continue;
             };
@@ -2839,6 +2849,48 @@ mod tests {
             },
         ];
         m
+    }
+
+    #[test]
+    fn counters_count_evaluations_only_while_enabled() {
+        // § `crate::counters`: three maps built per evaluation, at least one probe allocation
+        // for a model that reads `V(...)`, and nothing at all while switched off. Lower bounds
+        // while on, because the counters are process-wide and another test's loads may land in
+        // the window; exact zero while off, because only this test switches them on.
+        let inst = build_instance(&varactor_like_ir(), &[0, 1], &mut 2).unwrap();
+        let load = || {
+            let mut sink = DenseStamp::new(1);
+            inst.load(
+                &[0.6],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sink,
+            );
+        };
+        let loads = 5;
+
+        crate::counters::enable(true);
+        let before = crate::counters::snapshot();
+        (0..loads).for_each(|_| load());
+        let after = crate::counters::snapshot();
+        crate::counters::enable(false);
+        assert!(after.ctx_maps_built - before.ctx_maps_built >= 3 * loads);
+        assert!(after.probe_allocs - before.probe_allocs >= loads);
+        // The charge is non-linear in `V`, so each load does dual arithmetic on a value that
+        // depends on an unknown: at least one gradient allocation per load.
+        assert!(after.grad_allocs - before.grad_allocs >= loads);
+        assert!(
+            after.grad_clones <= after.grad_allocs,
+            "clones are a subset"
+        );
+
+        let before = crate::counters::snapshot();
+        (0..loads).for_each(|_| load());
+        assert_eq!(
+            crate::counters::snapshot(),
+            before,
+            "counting while switched off"
+        );
     }
 
     #[test]

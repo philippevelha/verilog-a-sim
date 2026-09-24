@@ -30,3 +30,6 @@ Thumbs.db
 # written against their normative text, but not ours to redistribute. Fetch your own copies
 # into this directory; nothing in the build reads them.
 /references/
+
+# Local performance logs (`va-cli sim --logfull` runs); kept out of the repository by choice.
+/perf-logs/

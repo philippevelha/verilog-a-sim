@@ -69,7 +69,9 @@ fn print_usage() {
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per
-                                 gmin stage the iteration count and totals. For
+                                 gmin stage the iteration count and totals, with
+                                 counts of hash lookups, per-call map builds and
+                                 probe allocations, and whole-run totals. For
                                  debugging convergence and cost; not the transient
                                  integrator's per-timestep iterations."
     );
@@ -146,7 +148,7 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // `--logfull` switches on the per-iteration Newton trace for every DC solve this run does.
     va_cli::set_log_full(args.iter().any(|a| a == "--logfull"));
 
-    run_sim(
+    let result = run_sim(
         netlist,
         model.as_deref(),
         analysis,
@@ -154,7 +156,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         integration,
         &report_only,
         solver,
-    )
+    );
+    // Printed whether the run succeeded or not: a failed solve's counts are the ones most
+    // worth having.
+    if let Some(totals) = va_cli::log_full_run_totals() {
+        eprintln!("{totals}");
+    }
+    result
 }
 
 /// Pull the value following `flag` out of `args`.

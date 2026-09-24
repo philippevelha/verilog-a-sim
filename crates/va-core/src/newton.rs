@@ -104,7 +104,18 @@ pub struct NewtonConfig {
     /// analysis's operating point, `.dc` sweeps included — not the transient integrator's own
     /// per-timestep Newton loop (`va-transient`).
     pub log_full: bool,
+    /// Event counters from outside this crate for [`Self::log_full`]'s lines, as a function
+    /// that appends `(name, running total)` pairs — `va-cli` passes one reading
+    /// `va_codegen::counters`, which `va-core` cannot depend on. Every line reports each
+    /// counter's increase over its iteration (or stage), next to this crate's own
+    /// `stamp_lookups` ([`crate::counters`]). `None` (the default) reports `stamp_lookups` only.
+    /// Read only when `log_full` is on.
+    pub log_counters: Option<CounterSource>,
 }
+
+/// A source of named running totals for [`NewtonConfig::log_counters`]: appends
+/// `(name, total so far)` pairs to the vector it is given.
+pub type CounterSource = fn(&mut Vec<(&'static str, u64)>);
 
 impl Default for NewtonConfig {
     fn default() -> Self {
@@ -118,6 +129,7 @@ impl Default for NewtonConfig {
             gmin_steps: 0,
             solver: Solver::Auto,
             log_full: false,
+            log_counters: None,
         }
     }
 }
@@ -423,6 +435,7 @@ fn solve_from(
     let mut log = StageLog::new(cfg, gmin, dim, instances.len());
     let mut cost = StepCost::default();
     for iteration in 0..cfg.max_iters {
+        log.begin_iteration();
         // This crate solves DC operating points only (`crate::dc`), so the analysis kind is
         // fixed here rather than plumbed in from the caller: an AC or noise run linearizes about
         // a point this same DC solve produced, and asks its own analysis's question later. The
@@ -516,6 +529,10 @@ struct StageLog {
     solve_ms: f64,
     trial_ms: f64,
     new_symbolic: usize,
+    counter_source: Option<CounterSource>,
+    /// Counter totals when the stage began, and when the current iteration began.
+    stage_counts: Vec<(&'static str, u64)>,
+    iteration_counts: Vec<(&'static str, u64)>,
 }
 
 impl StageLog {
@@ -535,7 +552,42 @@ impl StageLog {
             solve_ms: 0.0,
             trial_ms: 0.0,
             new_symbolic: 0,
+            counter_source: cfg.log_counters,
+            stage_counts: Vec::new(),
+            iteration_counts: Vec::new(),
         }
+        .with_stage_counts()
+    }
+
+    fn with_stage_counts(mut self) -> Self {
+        if self.on {
+            self.stage_counts = self.counts();
+        }
+        self
+    }
+
+    /// Every counter's running total: this crate's, then the caller's.
+    fn counts(&self) -> Vec<(&'static str, u64)> {
+        let mut counts = vec![("stamp_lookups", crate::counters::stamp_lookups())];
+        if let Some(source) = self.counter_source {
+            source(&mut counts);
+        }
+        counts
+    }
+
+    fn begin_iteration(&mut self) {
+        if self.on {
+            self.iteration_counts = self.counts();
+        }
+    }
+
+    /// ` name=increase` for every counter, against the totals in `since`.
+    fn count_increases(&self, since: &[(&'static str, u64)]) -> String {
+        self.counts()
+            .iter()
+            .zip(since)
+            .map(|((name, now), (_, then))| format!(" {name}={}", now.saturating_sub(*then)))
+            .collect()
     }
 
     fn add(&mut self, cost: &StepCost, trial_ms: f64) {
@@ -558,7 +610,7 @@ impl StageLog {
             return;
         }
         eprintln!(
-            "[logfull] iter  aids={} gmin={:.3e} iter={iteration} assemble_ms={:.3} solve_ms={:.3} trial_ms={:.3} nnz={} new_symbolic={} scale={scale:.3e} residual={residual:.3e} max_step={max_applied:.3e}",
+            "[logfull] iter  aids={} gmin={:.3e} iter={iteration} assemble_ms={:.3} solve_ms={:.3} trial_ms={:.3} nnz={} new_symbolic={} scale={scale:.3e} residual={residual:.3e} max_step={max_applied:.3e}{}",
             self.aids,
             self.gmin,
             cost.assemble_ms,
@@ -566,6 +618,7 @@ impl StageLog {
             trial_ms,
             cost.nnz.map_or_else(|| "dense".to_string(), |n| n.to_string()),
             u8::from(cost.new_symbolic),
+            self.count_increases(&self.iteration_counts),
         );
     }
 
@@ -574,7 +627,7 @@ impl StageLog {
             return;
         }
         eprintln!(
-            "[logfull] stage aids={} gmin={:.3e} iterations={iterations} outcome=\"{outcome}\" assemble_ms={:.1} solve_ms={:.1} trial_ms={:.1} wall_ms={:.1} new_symbolic={} unknowns={} instances={}",
+            "[logfull] stage aids={} gmin={:.3e} iterations={iterations} outcome=\"{outcome}\" assemble_ms={:.1} solve_ms={:.1} trial_ms={:.1} wall_ms={:.1} new_symbolic={} unknowns={} instances={}{}",
             self.aids,
             self.gmin,
             self.assemble_ms,
@@ -584,6 +637,7 @@ impl StageLog {
             self.new_symbolic,
             self.dim,
             self.instances,
+            self.count_increases(&self.stage_counts),
         );
     }
 }

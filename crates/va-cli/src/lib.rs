@@ -51,8 +51,32 @@ fn newton_cfg(solver: Solver) -> NewtonConfig {
     NewtonConfig {
         solver,
         log_full: LOG_FULL.load(std::sync::atomic::Ordering::Relaxed),
+        log_counters: Some(codegen_counts),
         ..NewtonConfig::default()
     }
+}
+
+/// `va-codegen`'s evaluation counters, for the `[logfull]` lines ([`NewtonConfig::log_counters`]).
+fn codegen_counts(out: &mut Vec<(&'static str, u64)>) {
+    let c = va_codegen::counters::snapshot();
+    out.push(("ctx_maps_built", c.ctx_maps_built));
+    out.push(("probe_allocs", c.probe_allocs));
+    out.push(("ctx_map_lookups", c.ctx_map_lookups));
+    out.push(("grad_allocs", c.grad_allocs));
+    out.push(("grad_clones", c.grad_clones));
+}
+
+/// The whole run's counter totals as one `[logfull] run` line, or `None` unless
+/// [`set_log_full`] switched the trace on. Covers everything the process evaluated — the
+/// transient integrator's timesteps included, which have no per-iteration lines.
+pub fn log_full_run_totals() -> Option<String> {
+    if !LOG_FULL.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let mut counts = vec![("stamp_lookups", va_core::counters::stamp_lookups())];
+    codegen_counts(&mut counts);
+    let fields: String = counts.iter().map(|(n, v)| format!(" {n}={v}")).collect();
+    Some(format!("[logfull] run  {}", fields.trim_start()))
 }
 
 /// Whether DC solves print [`NewtonConfig::log_full`]'s trace; see [`set_log_full`].
@@ -67,8 +91,13 @@ static LOG_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// debugging switch, not a property of a run's result: nothing it touches changes a number. It
 /// covers the DC operating point of every analysis and each `.dc` sweep point, but **not** the
 /// transient integrator's per-timestep Newton loop.
+///
+/// Also switches on the event counters it reports (`va_codegen::counters`,
+/// `va_core::counters`), which cost a relaxed atomic add per event while on.
 pub fn set_log_full(on: bool) {
     LOG_FULL.store(on, std::sync::atomic::Ordering::Relaxed);
+    va_codegen::counters::enable(on);
+    va_core::counters::enable(on);
 }
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};
@@ -661,7 +690,13 @@ pub fn run_sim(
     // finished. Failing to *size* the circuit is not a reason to refuse to run it -- the solve
     // raises the same error a moment later, with its own context -- so a sizing error is
     // swallowed here rather than short-circuiting the run.
-    if let Ok(sizing) = sizing(&net, &compiled, analysis) {
+    //
+    // Built once, here, and shared: the estimate reads its size, the solve runs on it, and the
+    // report labels its rows from it. Until 1.14.0 each of the three built the whole circuit
+    // again — compiled models included — which on ISCAS'85 c432 (910 PSP103) was ~0.4 s apiece.
+    let built = build_instances(&net, &compiled);
+    if let Ok(b) = &built {
+        let sizing = sizing_for(&net, &compiled, analysis, b.dim);
         for line in sizing.lines_with(solver) {
             eprintln!("{line}");
         }
@@ -682,6 +717,8 @@ pub fn run_sim(
              a DC operating point is a single point, not a curve"
         );
     }
+    let built = built?;
+    let all_quantities = built.quantities.clone();
 
     if analysis == Analysis::Transient {
         // Checked *before* solving, so the refusal is not buried under a waveform -- and so no
@@ -695,7 +732,7 @@ pub fn run_sim(
             .filter(|(path, _)| reached.contains(path))
             .collect();
         refuse_transient_approximations(&sources)?;
-        let wf = solve_transient_with(&net, &compiled, integration, solver)?;
+        let wf = solve_transient_impl(&net, &compiled, integration, solver, Some(built))?;
         // Said only when a request actually went unmet, rather than whenever a tolerance is
         // written: the bracketing step control (§ `cross`) normally honours it, and a blanket
         // warning would cry wolf on every model that asks for one.
@@ -705,7 +742,7 @@ pub fn run_sim(
                 wf.unresolved_events
             );
         }
-        let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
+        let shown = select_quantities(&all_quantities, report_only)?;
         report_transient(&shown, &wf);
         if let Some(path) = plot {
             // The plot shows exactly what the report shows, `--report` included: a chart and a
@@ -717,8 +754,8 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote transient plot to {path}");
         }
     } else if analysis == Analysis::Ac {
-        let response = solve_ac_with(&net, &compiled, solver)?;
-        let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
+        let response = solve_ac_impl(&net, &compiled, solver, Some(built))?;
+        let shown = select_quantities(&all_quantities, report_only)?;
         report_ac(&shown, &response);
         if let Some(path) = plot {
             plot::plot_ac(path, &shown, &response)
@@ -726,17 +763,17 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote AC plot to {path}");
         }
     } else if analysis == Analysis::Noise {
-        let spectrum = solve_noise_with(&net, &compiled, solver)?;
+        let spectrum = solve_noise_impl(&net, &compiled, solver, Some(built))?;
         // Not `select_quantities`: a `.noise` run reports one output the card itself names,
         // so the table is consulted for that output's *units*, not to choose columns.
-        report_noise(&net, &quantities(&net, &compiled)?, &spectrum);
+        report_noise(&net, &all_quantities, &spectrum);
         if let Some(path) = plot {
             plot::plot_noise(path, &spectrum).with_context(|| format!("plotting to {path}"))?;
             eprintln!("[va-cli] wrote noise plot to {path}");
         }
     } else if let Some(sweep) = &net.dc {
-        let points = solve_dc_sweep_with(&net, &compiled, sweep, solver)?;
-        let shown = select_quantities(&quantities(&net, &compiled)?, report_only)?;
+        let points = solve_dc_sweep_impl(&net, &compiled, sweep, solver, Some(built))?;
+        let shown = select_quantities(&all_quantities, report_only)?;
         report_sweep(&shown, sweep, &points);
         if let Some(path) = plot {
             plot::plot_sweep(path, &shown, sweep, &points)
@@ -744,11 +781,8 @@ pub fn run_sim(
             eprintln!("[va-cli] wrote sweep plot to {path}");
         }
     } else {
-        let op = solve_dc_with(&net, &compiled, solver)?;
-        report(
-            &select_quantities(&quantities(&net, &compiled)?, report_only)?,
-            &op.x,
-        );
+        let op = solve_dc_impl(&net, &compiled, solver, Some(built))?;
+        report(&select_quantities(&all_quantities, report_only)?, &op.x);
     }
     Ok(())
 }
@@ -1452,6 +1486,18 @@ fn node_label(decl: Option<&va_ir::NodeDecl>) -> (String, String) {
 /// instantiation); a device is matched against whichever one shares its model name. Shared by
 /// both DC and transient solving — building the instance set doesn't depend on which analysis
 /// will run on it.
+/// `prebuilt` when the caller built the circuit already, else a fresh [`build_instances`].
+fn prebuilt_or_build(
+    prebuilt: Option<BuiltInstances>,
+    net: &Netlist,
+    compiled: &[Module],
+) -> Result<BuiltInstances> {
+    match prebuilt {
+        Some(built) => Ok(built),
+        None => build_instances(net, compiled),
+    }
+}
+
 fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances> {
     let n_nodes = net.node_order.len();
 
@@ -1734,12 +1780,23 @@ pub fn solve_dc_with(
     compiled: &[Module],
     solver: Solver,
 ) -> Result<va_core::dc::OperatingPoint> {
+    solve_dc_impl(net, compiled, solver, None)
+}
+
+/// [`solve_dc_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
+/// builds once and shares the build with the estimate and the report), else building it.
+fn solve_dc_impl(
+    net: &Netlist,
+    compiled: &[Module],
+    solver: Solver,
+    prebuilt: Option<BuiltInstances>,
+) -> Result<va_core::dc::OperatingPoint> {
     let BuiltInstances {
         instances,
         dim,
         quantities,
         ..
-    } = build_instances(net, compiled)?;
+    } = prebuilt_or_build(prebuilt, net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
@@ -1823,6 +1880,18 @@ pub fn solve_dc_sweep_with(
     sweep: &va_netlist::DcSweep,
     solver: Solver,
 ) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
+    solve_dc_sweep_impl(net, compiled, sweep, solver, None)
+}
+
+/// [`solve_dc_sweep_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
+/// builds once and shares the build with the estimate and the report), else building it.
+fn solve_dc_sweep_impl(
+    net: &Netlist,
+    compiled: &[Module],
+    sweep: &va_netlist::DcSweep,
+    solver: Solver,
+    prebuilt: Option<BuiltInstances>,
+) -> Result<Vec<(f64, va_core::dc::OperatingPoint)>> {
     let src = net
         .devices
         .iter()
@@ -1837,7 +1906,7 @@ pub fn solve_dc_sweep_with(
     }
 
     let points = sweep_points(sweep.start, sweep.stop, sweep.step);
-    let mut built = build_instances(net, compiled)?;
+    let mut built = prebuilt_or_build(prebuilt, net, compiled)?;
     let slot = built
         .slots
         .iter()
@@ -2138,6 +2207,18 @@ pub fn solve_transient_with(
     integration: Integration,
     solver: Solver,
 ) -> Result<Waveform> {
+    solve_transient_impl(net, compiled, integration, solver, None)
+}
+
+/// [`solve_transient_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
+/// builds once and shares the build with the estimate and the report), else building it.
+fn solve_transient_impl(
+    net: &Netlist,
+    compiled: &[Module],
+    integration: Integration,
+    solver: Solver,
+    prebuilt: Option<BuiltInstances>,
+) -> Result<Waveform> {
     let (tstep, tstop) = net
         .tran
         .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
@@ -2172,7 +2253,7 @@ pub fn solve_transient_with(
         currents,
         quantities,
         ..
-    } = build_instances(net, compiled)?;
+    } = prebuilt_or_build(prebuilt, net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Where the integration starts, and it is not a detail. SPICE solves the DC operating
     // point first and integrates from there unless the deck says `UIC`; this project did the
@@ -2327,6 +2408,17 @@ pub fn solve_ac_with(
     compiled: &[Module],
     solver: Solver,
 ) -> Result<va_acnoise::ac::AcResponse> {
+    solve_ac_impl(net, compiled, solver, None)
+}
+
+/// [`solve_ac_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
+/// builds once and shares the build with the estimate and the report), else building it.
+fn solve_ac_impl(
+    net: &Netlist,
+    compiled: &[Module],
+    solver: Solver,
+    prebuilt: Option<BuiltInstances>,
+) -> Result<va_acnoise::ac::AcResponse> {
     let card = net
         .ac
         .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
@@ -2336,7 +2428,7 @@ pub fn solve_ac_with(
         dim,
         currents,
         ..
-    } = build_instances(net, compiled)?;
+    } = prebuilt_or_build(prebuilt, net, compiled)?;
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
@@ -2377,6 +2469,16 @@ pub fn solve_ac_with(
 /// deck may not set) — the same errors the solve would raise, raised before it starts.
 pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<estimate::Sizing> {
     let BuiltInstances { dim, .. } = build_instances(net, compiled)?;
+    Ok(sizing_for(net, compiled, analysis, dim))
+}
+
+/// [`sizing`] for a circuit already built, whose solution vector has `dim` unknowns.
+fn sizing_for(
+    net: &Netlist,
+    compiled: &[Module],
+    analysis: Analysis,
+    dim: usize,
+) -> estimate::Sizing {
     let points = match analysis {
         Analysis::Transient => {
             // `tstop / tstep`, the count a fixed-step integrator would take. Rounded up and
@@ -2422,7 +2524,7 @@ pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<
     // but several Newton iterations), or a linear primitive, whose cost the calibration ladder
     // already contains (§ `estimate`).
     let is_compiled = |dev: &Device| matches!(module_for(compiled, dev), Ok(Some(_)));
-    Ok(estimate::Sizing {
+    estimate::Sizing {
         analysis,
         devices: net.devices.len(),
         compiled: net.devices.iter().filter(|d| is_compiled(d)).count(),
@@ -2434,7 +2536,7 @@ pub fn sizing(net: &Netlist, compiled: &[Module], analysis: Analysis) -> Result<
         nodes: net.node_order.len(),
         unknowns: dim,
         points,
-    })
+    }
 }
 
 /// Build every device instance, solve the DC operating point, and sweep the small-signal output
@@ -2470,6 +2572,17 @@ pub fn solve_noise_with(
     compiled: &[Module],
     solver: Solver,
 ) -> Result<va_acnoise::noise::NoiseSpectrum> {
+    solve_noise_impl(net, compiled, solver, None)
+}
+
+/// [`solve_noise_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
+/// builds once and shares the build with the estimate and the report), else building it.
+fn solve_noise_impl(
+    net: &Netlist,
+    compiled: &[Module],
+    solver: Solver,
+    prebuilt: Option<BuiltInstances>,
+) -> Result<va_acnoise::noise::NoiseSpectrum> {
     let card = net.noise.as_ref().context(
         "noise analysis requires a `.noise V(<out>) <source> dec <ppd> <fstart> <fstop>` card",
     )?;
@@ -2486,7 +2599,7 @@ pub fn solve_noise_with(
         dim,
         currents,
         ..
-    } = build_instances(net, compiled)?;
+    } = prebuilt_or_build(prebuilt, net, compiled)?;
     // The `.noise` card's input source, resolved to its own branch-current row — the row an AC
     // stimulus would excite, and therefore (§ `va_acnoise::noise`) the row of the adjoint vector
     // that already holds the forward gain. Only a `vsource` has such a row, so naming anything

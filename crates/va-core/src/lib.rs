@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod convergence;
+pub mod counters;
 pub mod dc;
 pub mod linsolve;
 pub mod mna;
