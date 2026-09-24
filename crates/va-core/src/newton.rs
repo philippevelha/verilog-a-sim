@@ -91,6 +91,19 @@ pub struct NewtonConfig {
     /// on it beyond rounding (the pivot order differs), so every convergence aid behaves the
     /// same either way.
     pub solver: Solver,
+    /// Write a line to stderr for every Newton iteration and for every solve stage (one per
+    /// `gmin` step): the time spent assembling (evaluating every instance and stamping), the
+    /// time spent in the linear solve, the line search's trial time, the iteration count each
+    /// stage took, and on the sparse path the nonzero count and whether the symbolic
+    /// factorization was redone. Every line starts `[logfull]`; the format is in
+    /// `docs/validation.md` § "Reading a `--logfull` trace". Default `false`.
+    ///
+    /// A debugging aid, not a result: it does not change the iteration (the timers run either
+    /// way; only the printing is switched), but writing one line per iteration costs time of its
+    /// own on a solve with many cheap iterations. Covers the DC Newton loop only — every
+    /// analysis's operating point, `.dc` sweeps included — not the transient integrator's own
+    /// per-timestep Newton loop (`va-transient`).
+    pub log_full: bool,
 }
 
 impl Default for NewtonConfig {
@@ -104,7 +117,45 @@ impl Default for NewtonConfig {
             limit_junctions: true,
             gmin_steps: 0,
             solver: Solver::Auto,
+            log_full: false,
         }
+    }
+}
+
+/// What one [`Linear::step`] cost, for [`NewtonConfig::log_full`]: filled in as the step goes,
+/// so an iteration whose solve fails still reports the assembly it paid for.
+#[derive(Clone, Copy, Debug, Default)]
+struct StepCost {
+    assemble_ms: f64,
+    solve_ms: f64,
+    /// Stored entries of the assembled Jacobian; `None` on the dense path, which stores all `dim²`.
+    nnz: Option<usize>,
+    /// Whether this step's solve computed a new symbolic factorization (the pattern grew).
+    new_symbolic: bool,
+}
+
+fn ms_since(t: std::time::Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1e3
+}
+
+/// The convergence aids a stage runs with, for [`NewtonConfig::log_full`]'s lines: `plain`, or
+/// the aids joined with `+` (`ladder`, `cap`, `damp`) — which tier of `crate::dc`'s rescue
+/// a stage belongs to reads straight off it.
+fn aids_label(cfg: &NewtonConfig) -> String {
+    let mut aids = Vec::new();
+    if cfg.gmin_steps > 0 {
+        aids.push("ladder");
+    }
+    if cfg.max_node_step.is_finite() {
+        aids.push("cap");
+    }
+    if cfg.max_damping_halvings > 0 {
+        aids.push("damp");
+    }
+    if aids.is_empty() {
+        "plain".to_string()
+    } else {
+        aids.join("+")
     }
 }
 
@@ -260,7 +311,8 @@ impl Linear {
     }
 
     /// Assemble at `x` with `gmin` shunted, and return the residual's infinity norm and the
-    /// Newton step solving `J · dx = −f`.
+    /// Newton step solving `J · dx = −f`. `cost` receives what the step took (§ `log_full`),
+    /// the assembly time included even when the solve then fails.
     #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
@@ -271,23 +323,35 @@ impl Linear {
         fired: &va_abi::FiredEvents,
         gmin: f64,
         kinds: &[UnknownKind],
+        cost: &mut StepCost,
     ) -> Result<(f64, Vec<f64>), CoreError> {
+        *cost = StepCost::default();
+        let t0 = std::time::Instant::now();
         match self {
             Linear::Dense => {
                 let mut sys = mna::assemble_with_events(instances, x, ctx, dim, fired);
                 sys.shunt_gmin(x, gmin, kinds);
                 let residual_norm = inf_norm(&sys.residual);
                 let neg_f: Vec<f64> = sys.residual.iter().map(|v| -v).collect();
-                let dx = linsolve::solve_dense(&sys.jacobian, &neg_f, dim)?;
-                Ok((residual_norm, dx))
+                cost.assemble_ms = ms_since(t0);
+                let t1 = std::time::Instant::now();
+                let dx = linsolve::solve_dense(&sys.jacobian, &neg_f, dim);
+                cost.solve_ms = ms_since(t1);
+                Ok((residual_norm, dx?))
             }
             Linear::Sparse { sys, lu, .. } => {
                 sparse::assemble_into(instances, x, ctx, fired, sys);
                 sys.shunt_gmin(x, gmin, kinds);
                 let residual_norm = inf_norm(sys.residual_values());
                 let neg_f: Vec<f64> = sys.residual_values().iter().map(|v| -v).collect();
-                let dx = lu.solve(sys.jacobian(), &neg_f)?;
-                Ok((residual_norm, dx))
+                cost.assemble_ms = ms_since(t0);
+                cost.nnz = Some(sys.pattern().nnz());
+                let symbolic_before = lu.symbolic_factorizations();
+                let t1 = std::time::Instant::now();
+                let dx = lu.solve(sys.jacobian(), &neg_f);
+                cost.solve_ms = ms_since(t1);
+                cost.new_symbolic = lu.symbolic_factorizations() > symbolic_before;
+                Ok((residual_norm, dx?))
             }
         }
     }
@@ -356,6 +420,8 @@ fn solve_from(
     // asking for it is told the conductance really in the circuit, not a nominal one.
     let sim = va_abi::SimParams::new().with_tolerances(cfg.abstol, cfg.reltol);
     let mut last_residual = f64::INFINITY;
+    let mut log = StageLog::new(cfg, gmin, dim, instances.len());
+    let mut cost = StepCost::default();
     for iteration in 0..cfg.max_iters {
         // This crate solves DC operating points only (`crate::dc`), so the analysis kind is
         // fixed here rather than plumbed in from the caller: an AC or noise run linearizes about
@@ -364,8 +430,17 @@ fn solve_from(
         // be answered anywhere earlier than here.
         let ctx = va_abi::ANALYSIS_DC.with_sim(sim.at_iteration(iteration, gmin));
         // Assemble, shunt, and solve J · dx = −f, dense or sparse.
-        let (residual_norm, dx) = linear.step(instances, &x, &ctx, dim, fired, gmin, kinds)?;
+        let (residual_norm, dx) =
+            match linear.step(instances, &x, &ctx, dim, fired, gmin, kinds, &mut cost) {
+                Ok(v) => v,
+                Err(e) => {
+                    log.add(&cost, 0.0);
+                    log.stage(iteration + 1, &format!("failed: {e}"));
+                    return Err(e);
+                }
+            };
 
+        let trial_start = std::time::Instant::now();
         // Apply the step, optionally damped: `scale` is 1.0 unless the full step made the
         // residual worse, in which case `damped_scale` backtracks (§ `max_damping_halvings`).
         let scale = damped_scale(
@@ -383,8 +458,10 @@ fn solve_from(
             fired,
             linear,
         );
+        let trial_ms = ms_since(trial_start);
 
         let mut update_small = true;
+        let mut max_applied = 0.0_f64;
         for i in 0..dim {
             let vold = x[i];
             let vnew_raw = vold + node_step(scale * dx[i], kinds[i], cfg.max_node_step);
@@ -396,21 +473,119 @@ fn solve_from(
             x[i] = vnew;
 
             let applied = vnew - vold;
+            max_applied = max_applied.max(applied.abs());
             if applied.abs() > cfg.reltol * vnew.abs() + per_abstol[i] {
                 update_small = false;
             }
         }
 
+        log.add(&cost, trial_ms);
+        log.iteration(
+            iteration,
+            &cost,
+            trial_ms,
+            scale,
+            residual_norm,
+            max_applied,
+        );
         if residual_norm <= cfg.abstol || update_small {
+            log.stage(iteration + 1, "converged");
             return Ok(x);
         }
         last_residual = residual_norm;
     }
 
+    log.stage(cfg.max_iters, "no convergence");
     Err(CoreError::NoConvergence {
         iters: cfg.max_iters,
         residual: last_residual,
     })
+}
+
+/// [`NewtonConfig::log_full`]'s printer for one [`solve_from`] call (one `gmin` stage): a line
+/// per iteration, and a closing line with the stage's iteration count and totals. Inert when
+/// the flag is off.
+struct StageLog {
+    on: bool,
+    aids: String,
+    gmin: f64,
+    dim: usize,
+    instances: usize,
+    start: std::time::Instant,
+    assemble_ms: f64,
+    solve_ms: f64,
+    trial_ms: f64,
+    new_symbolic: usize,
+}
+
+impl StageLog {
+    fn new(cfg: NewtonConfig, gmin: f64, dim: usize, instances: usize) -> Self {
+        Self {
+            on: cfg.log_full,
+            aids: if cfg.log_full {
+                aids_label(&cfg)
+            } else {
+                String::new()
+            },
+            gmin,
+            dim,
+            instances,
+            start: std::time::Instant::now(),
+            assemble_ms: 0.0,
+            solve_ms: 0.0,
+            trial_ms: 0.0,
+            new_symbolic: 0,
+        }
+    }
+
+    fn add(&mut self, cost: &StepCost, trial_ms: f64) {
+        self.assemble_ms += cost.assemble_ms;
+        self.solve_ms += cost.solve_ms;
+        self.trial_ms += trial_ms;
+        self.new_symbolic += usize::from(cost.new_symbolic);
+    }
+
+    fn iteration(
+        &self,
+        iteration: usize,
+        cost: &StepCost,
+        trial_ms: f64,
+        scale: f64,
+        residual: f64,
+        max_applied: f64,
+    ) {
+        if !self.on {
+            return;
+        }
+        eprintln!(
+            "[logfull] iter  aids={} gmin={:.3e} iter={iteration} assemble_ms={:.3} solve_ms={:.3} trial_ms={:.3} nnz={} new_symbolic={} scale={scale:.3e} residual={residual:.3e} max_step={max_applied:.3e}",
+            self.aids,
+            self.gmin,
+            cost.assemble_ms,
+            cost.solve_ms,
+            trial_ms,
+            cost.nnz.map_or_else(|| "dense".to_string(), |n| n.to_string()),
+            u8::from(cost.new_symbolic),
+        );
+    }
+
+    fn stage(&self, iterations: usize, outcome: &str) {
+        if !self.on {
+            return;
+        }
+        eprintln!(
+            "[logfull] stage aids={} gmin={:.3e} iterations={iterations} outcome=\"{outcome}\" assemble_ms={:.1} solve_ms={:.1} trial_ms={:.1} wall_ms={:.1} new_symbolic={} unknowns={} instances={}",
+            self.aids,
+            self.gmin,
+            self.assemble_ms,
+            self.solve_ms,
+            self.trial_ms,
+            ms_since(self.start),
+            self.new_symbolic,
+            self.dim,
+            self.instances,
+        );
+    }
 }
 
 /// The fraction of `dx` to actually apply: `1.0` when damping is off or when the full step
@@ -519,6 +694,68 @@ mod tests {
     /// iteration never recovers. Damping needs no per-device knowledge to fix that -- it just
     /// notices the residual got worse and backs off -- which is exactly the property that
     /// makes it complementary to limiting rather than redundant with it.
+    #[test]
+    fn log_full_changes_no_number_on_either_path() {
+        // § `log_full`: a trace is only trustworthy for debugging if running with it is running
+        // the same solve. So: every aid that has its own code path on (the ladder, the node cap,
+        // damping's trial assemblies), on the dense and the sparse path, bit-identical answers
+        // with and without it -- and the failure path (the log's early return) reports the same
+        // error.
+        let (vs, r, d) = (
+            VSource::new(0, GROUND, 2, 10.0),
+            Resistor::new(0, 1, 1.0),
+            Diode::new(1, GROUND, 1e-14, 1.0, VT_NOMINAL),
+        );
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &d];
+        for solver in [Solver::Dense, Solver::Sparse] {
+            let quiet = NewtonConfig {
+                gmin_steps: 8,
+                max_damping_halvings: 20,
+                max_node_step: 0.5,
+                solver,
+                ..NewtonConfig::default()
+            };
+            let traced = NewtonConfig {
+                log_full: true,
+                ..quiet
+            };
+            let a = solve(&insts, 3, quiet).expect("the aided diode clamp converges");
+            let b = solve(&insts, 3, traced).expect("and does so with the trace on");
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{solver:?}: the trace changed the answer"
+            );
+
+            let failing = NewtonConfig {
+                limit_junctions: false,
+                max_iters: 3,
+                solver,
+                ..NewtonConfig::default()
+            };
+            let e1 = solve(&insts, 3, failing).expect_err("3 unaided iterations cannot converge");
+            let e2 = solve(
+                &insts,
+                3,
+                NewtonConfig {
+                    log_full: true,
+                    ..failing
+                },
+            )
+            .expect_err("nor with the trace on");
+            assert_eq!(format!("{e1:?}"), format!("{e2:?}"), "{solver:?}");
+        }
+        assert_eq!(aids_label(&NewtonConfig::default()), "plain");
+        assert_eq!(
+            aids_label(&NewtonConfig {
+                gmin_steps: 30,
+                max_node_step: 0.5,
+                ..NewtonConfig::default()
+            }),
+            "ladder+cap"
+        );
+    }
+
     #[test]
     fn damping_converges_a_circuit_undamped_newton_cannot() {
         let build = || {

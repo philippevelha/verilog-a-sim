@@ -65,7 +65,13 @@ fn print_usage() {
                                  label (`V(mid)`); an unknown name is an error.
          --solver auto|dense|sparse  Linear algebra. Default auto: dense below 100
                                  unknowns, sparse from 100. Every analysis
-                                 (.op, .dc, .tran, .ac, .noise) uses it."
+                                 (.op, .dc, .tran, .ac, .noise) uses it.
+         --logfull               Trace every DC Newton iteration on stderr (lines
+                                 start `[logfull]`): assembly vs linear-solve time,
+                                 line-search time, residual, largest step; and per
+                                 gmin stage the iteration count and totals. For
+                                 debugging convergence and cost; not the transient
+                                 integrator's per-timestep iterations."
     );
 }
 
@@ -136,6 +142,9 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         Some("sparse") => Solver::Sparse,
         Some(v) => bail!("unknown --solver `{v}` (expected `auto`, `dense`, or `sparse`)"),
     };
+
+    // `--logfull` switches on the per-iteration Newton trace for every DC solve this run does.
+    va_cli::set_log_full(args.iter().any(|a| a == "--logfull"));
 
     run_sim(
         netlist,

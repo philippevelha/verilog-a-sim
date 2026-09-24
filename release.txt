@@ -20,6 +20,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.13.0 - 2026-09-24
+-------------------
+**`va-cli sim --logfull`: a per-iteration trace of the DC Newton solve.** Every iteration prints
+a `[logfull] iter` line on stderr — its tier of convergence aids (`plain`, `ladder`, `ladder+cap`,
+`ladder+damp`), `gmin`, assembly time, linear-solve time, line-search trial time, nonzero count
+and whether the symbolic factorization was redone (sparse path), step fraction, residual and
+largest applied step — and every solve stage a `[logfull] stage` line with the iterations it took,
+its outcome and its totals. `va_core::newton::NewtonConfig` gains `log_full` (default off) and
+`va_cli::set_log_full`; format in `docs/validation.md` § "Reading a `--logfull` trace".
+
+Why: splitting assembly from solve took a scratch build each time (2026-09-23), and a combined
+timer gave a misleading per-instance figure; the user asked for the split to stay available for
+debugging. Process-wide rather than a new argument on every `*_with` solver, because it changes
+no number. **Limitation:** DC Newton only (every analysis's operating point, `.dc` points), not
+the transient integrator's per-timestep loop.
+
+What it measured (release, one run each, `docs/validation.md`): PSP103 evaluation costs
+**176–204 µs per instance per iteration, flat from 80 to 910 instances**. The 0.7–0.8 ms quoted
+for the chains yesterday came from the combined timer, so it was wrong. Assembly is 72–96% of
+run time, the sparse solve the rest. c432 `.op` took 151 s and 557 iterations, and the plain
+ladder's failed 265 iterations (75 s) were half of it. Unexplained: the sparse solve jumps 13×
+between 1 326 and 2 646 unknowns on the chain.
+
+Measured at 1.13.0: `cargo test --workspace` **886 passed / 0 failed** (+1:
+`log_full_changes_no_number_on_either_path`, which requires bit-identical answers with the trace
+on and off on both paths with all aids on, and the same error on a failing solve). fmt + clippy
+clean. `cargo xtask validate`: **28/28**, identical to 1.12.0.
+
+
 1.12.0 - 2026-09-23
 -------------------
 **ISCAS'85 c432 solves at transistor level, through a new DC rescue tier that caps each node's

@@ -45,12 +45,30 @@ use va_core::newton::NewtonConfig;
 /// `va-harness`) can choose without depending on `va-core` itself.
 pub use va_core::sparse::Solver;
 
-/// The Newton configuration every analysis's DC solve uses: the defaults, with `solver`.
+/// The Newton configuration every analysis's DC solve uses: the defaults, with `solver`, and
+/// the per-iteration trace if [`set_log_full`] switched it on.
 fn newton_cfg(solver: Solver) -> NewtonConfig {
     NewtonConfig {
         solver,
+        log_full: LOG_FULL.load(std::sync::atomic::Ordering::Relaxed),
         ..NewtonConfig::default()
     }
+}
+
+/// Whether DC solves print [`NewtonConfig::log_full`]'s trace; see [`set_log_full`].
+static LOG_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Switch on (or off) the `[logfull]` trace for every DC Newton solve this process runs from
+/// here on: per iteration, the assembly time, linear-solve time, line-search trial time,
+/// residual and largest applied step; per `gmin` stage, the iteration count and totals (see
+/// [`NewtonConfig::log_full`]). `va-cli sim --logfull` calls it.
+///
+/// Process-wide rather than another argument on every `*_with` solver, because it is a
+/// debugging switch, not a property of a run's result: nothing it touches changes a number. It
+/// covers the DC operating point of every analysis and each `.dc` sweep point, but **not** the
+/// transient integrator's per-timestep Newton loop.
+pub fn set_log_full(on: bool) {
+    LOG_FULL.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 use va_ir::{Module, NodeId};
 use va_netlist::{AnalysisCard, Device, Netlist};

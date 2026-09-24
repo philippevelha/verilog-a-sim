@@ -985,6 +985,68 @@ sparse LU 88 ms (~28%). Details and the full table: `circuits/benchmark/iscas85/
 c7552 itself (~250 000 unknowns) is out of reach for size, not syntax: see the circuit-size
 limit above.
 
+## Reading a `--logfull` trace (1.13.0)
+
+`va-cli sim … --logfull` prints a line on stderr for every DC Newton iteration, and one for every
+solve stage (a `gmin` step, or the single plain solve). It covers the operating point of every
+analysis and each `.dc` sweep point; it does **not** cover the transient integrator's own
+per-timestep Newton loop. Nothing it prints changes the solve (`log_full_changes_no_number_on_either_path`
+checks the answers bit for bit, both paths, all aids on).
+
+```
+[logfull] iter  aids=ladder+cap gmin=1.000e-3 iter=4 assemble_ms=88.599 solve_ms=60.726 trial_ms=0.000 nnz=20332 new_symbolic=0 scale=1.000e0 residual=4.663e-1 max_step=7.619e-2
+[logfull] stage aids=ladder+cap gmin=1.000e-3 iterations=14 outcome="converged" assemble_ms=1111.4 solve_ms=538.6 trial_ms=0.0 wall_ms=1660.4 new_symbolic=2 unknowns=5286 instances=483
+```
+
+| field | meaning |
+|---|---|
+| `aids` | the stage's convergence aids — `plain`, or `ladder` / `cap` / `damp` joined by `+`. For a rescued `.op` this names the tier of `va_core::dc`'s rescue: `plain` → `ladder` → `ladder+cap` → `ladder+damp` |
+| `gmin` | the shunt this stage runs at (`0` for the plain solve and the ladder's last stage) |
+| `assemble_ms` | evaluating every instance and stamping, plus the `gmin` shunt — the model-evaluation cost |
+| `solve_ms` | the linear solve: dense LU, or sparse numeric LU (plus a symbolic one when `new_symbolic=1`) |
+| `trial_ms` | the line search's extra assemblies (non-zero only with `damp`) |
+| `nnz` | stored Jacobian entries on the sparse path; `dense` on the dense path |
+| `new_symbolic` | the pattern grew, so this solve redid the symbolic factorization |
+| `scale`, `residual`, `max_step` | the step fraction taken (below 1 only with `damp`), the residual ∞-norm the step was solved from, and the largest change actually applied |
+| `iterations`, `outcome` | per stage: the iterations it took, and `converged`, `no convergence` or `failed: <error>` |
+| `instances` | every device after flattening, compiled or not — divide by the compiled count `va-cli`'s `circuit:` line gives for a per-model cost |
+
+A failed iteration's line is not printed (it has no step), but its assembly and solve time are in
+its stage's totals.
+
+### What it measured (1.13.0, release, i7-1185G7, one run each)
+
+`.op` of the PSP103 inverter chains (`docs/validation.md` § "A real device circuit") and of ISCAS'85
+c432; medians over every iteration of the run. "Per instance" divides assembly by the compiled
+(PSP103) instances; the R/C/V devices are in the numerator too, and cheap.
+
+| circuit | unknowns | PSP103 | iterations | assemble | per instance | solve | assembly share | wall |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| chain, 40 stages | 1 326 | 80 | 118 | 14.1 ms | 176 µs | 0.62 ms | 96% | 2.2 s |
+| chain, 80 | 2 646 | 160 | 137 | 28.2 ms | 176 µs | 8.1 ms | 77% | 5.5 s |
+| chain, 95 | 3 141 | 190 | 151 | 34.3 ms | 181 µs | 11.3 ms | 75% | 7.5 s |
+| chain, 160 | 5 286 | 320 | 148 | 65.2 ms | 204 µs | 22.8 ms | 72% | 14.3 s |
+| c432 | 15 416 | 910 | 557 | 184 ms | 202 µs | 44 ms | 77% | 151 s |
+
+- **Model evaluation costs ~0.18–0.20 ms per PSP103 instance per iteration, flat in circuit
+  size** — 80 to 910 instances, two different model cards, within ~15%, which is about the
+  run-to-run spread (the 160-stage chain measured 188 µs in a second run). Nothing in the
+  assembly scales per instance with the circuit: a stamp is one hash lookup, and the
+  circuit-sized work (clearing the system, the `gmin` shunt) is once per assembly, not per
+  instance. An earlier figure of 0.7–0.8 ms per instance for the chains (2026-09-23) came
+  from a combined step timer that included the solve, not from the model.
+- **Assembly is 72–96% of every run;** the sparse solve is the rest. The solve does not scale
+  smoothly: 0.62 ms at 1 326 unknowns but 8.1 ms at 2 646 (13× for 2×), then about linear to
+  5 286. Not diagnosed — fill-in and ordering are the suspects; the trace does not report the
+  factors' size.
+- **Where c432's iterations go:** the plain solve fails in 3; the plain `gmin` ladder converges
+  5 stages, then spends its full 150-iteration budget cycling at `gmin` = 3.2e-5 (48 s) and fails
+  — 265 iterations, 75 s, half the run, discarded; the node-capped ladder then solves in 290
+  iterations over 31 stages (73 s): 41 and 59 at `gmin` = 6.3e-5 and 3.2e-5 — the very stages
+  where the plain ladder struggled and cycled — about 5 through the middle of the ladder, and 2–3
+  at the small end. The first tier's cost is the price of 1.12.0's ordering, which keeps anything the plain
+  ladder solves bit-identical.
+
 ## Bring-up ladder
 
 Each rung is a checkpoint; it is "passed" only when `va-harness` is green against golden:
