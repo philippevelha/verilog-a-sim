@@ -18,3 +18,8 @@ va-cli = { workspace = true }
 va-core = { workspace = true }
 va-harness = { workspace = true }
 va-netlist = { workspace = true }
+
+[features]
+# `bench-model`'s `visited`/`hoistable` columns: `cargo run -p xtask --features walk-stats --
+# bench-model`. See `va-codegen`'s feature of the same name for why it is not on by default.
+walk-stats = ["va-codegen/walk-stats"]

@@ -20,6 +20,11 @@
 //! - [`Counters::grad_clones`] — copies of a dense gradient (reading a local variable copies its
 //!   value). A copy shares the buffer, so it is **not** an allocation and not in `grad_allocs`;
 //!   until 1.14.0+1 it was, and was ~47% of them.
+//! - [`Counters::exprs_visited`], [`Counters::exprs_hoistable`] — expression nodes the tree
+//!   walk visits, and how many of them sit inside an invariant subtree
+//!   (`lower::Invariance::hoistable`): Stage 1 of `docs/proposals/evaluator-tree-walk.md`.
+//!   **Only with `--features walk-stats`**; zero otherwise, because counting puts a check on
+//!   every node of every evaluation.
 //! - [`Counters::grad_in_place`] — gradient results written into an operand's own buffer
 //!   because the operation owned it and nothing else shared it (1.14.0+2): each one an
 //!   allocation `grad_allocs` no longer shows.
@@ -41,6 +46,8 @@ static CTX_MAP_LOOKUPS: AtomicU64 = AtomicU64::new(0);
 static GRAD_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static GRAD_CLONES: AtomicU64 = AtomicU64::new(0);
 static GRAD_IN_PLACE: AtomicU64 = AtomicU64::new(0);
+static EXPRS_VISITED: AtomicU64 = AtomicU64::new(0);
+static EXPRS_HOISTABLE: AtomicU64 = AtomicU64::new(0);
 
 /// A snapshot of the counters since the process started (or since [`reset`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,6 +65,12 @@ pub struct Counters {
     /// Gradient results written into an operand's own buffer instead of a new one (an
     /// operation that owned an unshared operand); each is an allocation avoided.
     pub grad_in_place: u64,
+    /// Expression nodes `ad::eval` visited — the tree walk's work.
+    pub exprs_visited: u64,
+    /// The part of [`Self::exprs_visited`] that `lower::Invariance::hoistable` marks: nodes
+    /// strictly inside a subtree whose value is the same on every evaluation, which a hoisting
+    /// stage could stop visiting (`docs/proposals/evaluator-tree-walk.md`, Stage 1).
+    pub exprs_hoistable: u64,
 }
 
 /// Switch counting on or off. Counts already taken are kept.
@@ -73,6 +86,8 @@ pub fn reset() {
     GRAD_ALLOCS.store(0, Ordering::Relaxed);
     GRAD_CLONES.store(0, Ordering::Relaxed);
     GRAD_IN_PLACE.store(0, Ordering::Relaxed);
+    EXPRS_VISITED.store(0, Ordering::Relaxed);
+    EXPRS_HOISTABLE.store(0, Ordering::Relaxed);
 }
 
 /// The current totals.
@@ -84,6 +99,8 @@ pub fn snapshot() -> Counters {
         grad_allocs: GRAD_ALLOCS.load(Ordering::Relaxed),
         grad_clones: GRAD_CLONES.load(Ordering::Relaxed),
         grad_in_place: GRAD_IN_PLACE.load(Ordering::Relaxed),
+        exprs_visited: EXPRS_VISITED.load(Ordering::Relaxed),
+        exprs_hoistable: EXPRS_HOISTABLE.load(Ordering::Relaxed),
     }
 }
 
@@ -112,6 +129,19 @@ pub(crate) fn ctx_map_lookup() {
 #[inline]
 pub(crate) fn grad_alloc() {
     bump(&GRAD_ALLOCS, 1);
+}
+
+/// One `ad::eval` visit to node `expr`, and whether `hoistable` marks it. Called only when the
+/// crate is built with `--features walk-stats`.
+#[cfg(feature = "walk-stats")]
+#[inline]
+pub(crate) fn expr_visit(hoistable: &[bool], expr: usize) {
+    if ENABLED.load(Ordering::Relaxed) {
+        EXPRS_VISITED.fetch_add(1, Ordering::Relaxed);
+        if hoistable.get(expr).copied().unwrap_or(false) {
+            EXPRS_HOISTABLE.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[inline]

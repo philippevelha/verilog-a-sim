@@ -20,6 +20,49 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.15.0 - 2026-09-24
+-------------------
+**Stage 1 of the tree-walk proposal: an invariance analysis that counts what hoisting could
+save, and `cargo xtask deck-diff`.** No evaluation changes: every result is bit-identical.
+
+`va_codegen::lower::invariance` finds every expression and variable whose value is the same on
+every evaluation of an instance — the dependence analysis the setup prefix does without. Variables
+by a greatest fixpoint (an assignment counts only if its right-hand side *and* every condition it
+sits under are invariant; anything a user-defined function writes, or is passed, is struck out
+up front); expressions by the prefix's own exhaustive whitelist. `Lowered::invariance` stores the
+result; nothing evaluates differently yet. Behind a new `walk-stats` feature (off by default),
+`ad::eval` counts visited nodes and those strictly inside an invariant subtree —
+`cargo run --release -p xtask --features walk-stats -- bench-model` adds `visited` and
+`hoistable` columns.
+
+What it found, the benchmark's seven CMC models: a hoist could skip **11.0% of PSP103's visited
+nodes** (3 441 per `load()`), 11.1% BSIM-SOI, 12.5% BSIM4, 14.3% EKV2.6, 16.5% JUNCAP200, 21.5%
+HICUM/L2v3, 21.7% BSIM-BULK107 — far below the 47–69% of nodes with no gradient, most of which are
+leaves feeding bias-dependent operations. At the walk's ~48% of a PSP103 evaluation that is at
+most ~5%. The proposal (`docs/proposals/evaluator-tree-walk.md`) now records this and recommends
+the flat tape (Stage 3) before hoisting; not decided.
+
+Why the counter is opt-in: a check on every `eval` call, even disabled, measured +6.6%, +7.0% and
++0.5% on PSP103's median in three interleaved sets. This laptop cannot settle a few percent, and
+the evaluator's hottest path is not the place for an unproven cost. The analysis runs once per
+model build and stays on.
+
+`cargo xtask deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]` runs every deck under
+`circuits/` through two binaries and fails on any difference in exit code, stdout or stderr
+(timing lines aside) — the check 1.14.0–1.14.0+3 ran from a scratch script. The two decks that
+take minutes are skipped unless `--all`. `xtask`'s help text also lost the stray blank lines its
+`bench-model` entry had.
+
+Measured at 1.15.0: `cargo test --workspace` **889 passed / 0 failed** (+2: the analysis finds
+invariant work past the first probe and leaves a subtree's root in place; and it answers
+*dependent* for every way a value can move — a probe-dependent condition, a later dependent
+assignment found on a later fixpoint round, a user-function argument, result, parameter and
+return variable. Each of the three guards was removed in turn and the test failed each time).
+fmt clean; clippy clean with and without `walk-stats`. `cargo xtask validate`: **28/28**,
+identical to 1.12.0. `cargo xtask deck-diff` against 1.14.0+3: **70 identical**, 2 skipped.
+`va-cli check external --codegen`: output identical to 1.14.0+3 (200 passes).
+
+
 1.14.0+4 - 2026-09-24
 ---------------------
 **Proposal: cut the evaluator's tree-walk overhead** (`docs/proposals/evaluator-tree-walk.md`).

@@ -1,6 +1,7 @@
 # Proposal: cut the evaluator's tree-walk overhead
 
-**Status:** proposed, 2026-09-24. Nothing decided; Stage 1 is the proposed first step.
+**Status:** proposed, 2026-09-24. **Stage 1 done (1.15.0, 2026-09-24)** — results and the
+decision it leaves open are at the end of Stage 1 below.
 **Affects:** `va-codegen` only — `lower.rs` (a new analysis and a new lowered form), `ad.rs` and
 `lib.rs` (the evaluation loop), `xtask` (`bench-model` reporting). **`va-ir` (Interface α) and
 `va-abi` (Interface β) are not touched**: everything proposed here is internal to how
@@ -105,6 +106,39 @@ the analysis can show otherwise. Exhaustive `match` with no wildcard, exactly as
 
 **Decision point:** if the net removable nodes are small (say under 15% of the walk), skip A and
 go to B. The count answers this before any evaluation changes.
+
+**Stage 1 result (1.15.0).** Built as `lower::invariance` (stored in `Lowered::invariance`,
+unused by evaluation) and counted per visited node behind a `walk-stats` feature. `cargo run
+--release -p xtask --features walk-stats -- bench-model`, the benchmark's seven CMC models:
+
+| model | visited per `load()` | net hoistable |
+|---|---:|---:|
+| PSP103 | 3 441 | **11.0%** |
+| BSIM-SOI | 4 530 | 11.1% |
+| BSIM4 | 3 390 | 12.5% |
+| EKV2.6 | 1 806 | 14.3% |
+| JUNCAP200 | 1 238 | 16.5% |
+| HICUM/L2v3 | 1 974 | 21.5% |
+| BSIM-BULK107 | 6 168 | 21.7% |
+
+Far below §1's 47–69% of nodes carrying no gradient: most of those are leaves — constants and
+variable reads — feeding bias-dependent operations, which a hoist would leave in place as reads,
+or they sit under bias-dependent control. With the walk at ~48% of a PSP103 `load()`, hoisting
+11% of its nodes is worth at most ~5% of the evaluation, and less if hoisted nodes are cheaper
+than average. The three largest models sit under the 15% line, the other four above it.
+
+**Recommendation:** skip A for now and do B, which lowers the cost of *every* visited node, and
+revisit A on top of the tape, where a hoisted subtree is a contiguous run of instructions and
+cheaper to move. Not decided — the proposal's owner and T2 to confirm.
+
+Two findings from building it, both kept:
+
+- The per-node counter is **not on by default**. A check on every `ad::eval` call, even a
+  disabled one, measured +6.6%, +7.0% and +0.5% on PSP103's median in three interleaved sets —
+  this laptop cannot settle a few percent, and the evaluator's hottest path is not the place to
+  leave an unproven cost. The analysis itself runs once per model build and stays on.
+- **Deck comparison is now `cargo xtask deck-diff <old va-cli> <new va-cli>`** (§4), replacing
+  the scratch script used for 1.14.0–1.14.0+3.
 
 ### Stage 2 — A: hoist (bit-identical)
 

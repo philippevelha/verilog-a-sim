@@ -10,3 +10,11 @@ description = "T2: lower va-ir to differentiated model instances (automatic diff
 va-ir = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }
+
+[features]
+# Count every expression node the tree walk visits, and how many of them an invariant-subexpression
+# hoist could skip (`counters::Counters::exprs_visited`/`exprs_hoistable`;
+# `docs/proposals/evaluator-tree-walk.md`, Stage 1). Off by default: it puts a check on every
+# `ad::eval` call, the evaluator's hottest path. `cargo run -p xtask --features walk-stats --
+# bench-model` turns it on for the benchmark only.
+walk-stats = []

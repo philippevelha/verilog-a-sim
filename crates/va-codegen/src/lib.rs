@@ -478,6 +478,7 @@ impl GeneratedModel {
             // but doing it once here keeps a 1400-variable model from reallocating its way up.
             vars: RefCell::new(vec![None; self.shared.module.vars.len()]),
             static_vars,
+            hoistable: &self.shared.lowered.invariance.hoistable,
             branch_current_slots,
             idt_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
@@ -2419,6 +2420,170 @@ mod tests {
         });
         m.analog = stmts;
         m
+    }
+
+    /// A small module for [`lower::invariance`]: `v0 = R` (setup), then a probe read, then
+    /// statements after it that the setup prefix cannot reach, each built to land on a known
+    /// side of the analysis. Returns the module and the `ExprId`s the tests inspect.
+    fn invariance_ir() -> (Module, [ExprId; 3]) {
+        use va_ir::{ArgDir, BinOp, FuncId, Function};
+        let mut m = resistor_ir();
+        m.analog.clear();
+        m.vars = (0..12)
+            .map(|i| VarDecl {
+                name: format!("v{i}"),
+            })
+            .collect();
+        let var = |m: &mut Module, i: u32| m.push_expr(Expr::Var(VarId(i)));
+        let probe = |m: &mut Module| {
+            m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }))
+        };
+        let mut s = Vec::new();
+        // v0 = R — the setup prefix.
+        let r = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        s.push(Stmt::Assign {
+            lhs: VarId(0),
+            rhs: r,
+        });
+        // v1 = V(p,n) / v0 — bias-dependent; the prefix ends here.
+        let (p, v0) = (probe(&mut m), var(&mut m, 0));
+        let q = m.push_expr(Expr::Binary(BinOp::Div, p, v0));
+        s.push(Stmt::Assign {
+            lhs: VarId(1),
+            rhs: q,
+        });
+        // v2 = v0 * 2 — invariant, but after the probe: only the analysis finds it.
+        let (v0b, two) = (var(&mut m, 0), m.push_expr(Expr::Const(2.0)));
+        let twice = m.push_expr(Expr::Binary(BinOp::Mul, v0b, two));
+        s.push(Stmt::Assign {
+            lhs: VarId(2),
+            rhs: twice,
+        });
+        // if (V(p,n) > 0) v3 = R; — invariant value, bias-dependent control: dependent.
+        let (p2, zero) = (probe(&mut m), m.push_expr(Expr::Const(0.0)));
+        let cond = m.push_expr(Expr::Binary(BinOp::Gt, p2, zero));
+        let r2 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        s.push(Stmt::If {
+            cond,
+            then_: vec![Stmt::Assign {
+                lhs: VarId(3),
+                rhs: r2,
+            }],
+            else_: vec![],
+        });
+        // v5 = v4 + 1 *before* v4's dependent assignment; v4 = R; v4 = V(p,n). The fixpoint has
+        // to strike v4 and then, a round later, v5.
+        let (v4, one) = (var(&mut m, 4), m.push_expr(Expr::Const(1.0)));
+        let inc = m.push_expr(Expr::Binary(BinOp::Add, v4, one));
+        s.push(Stmt::Assign {
+            lhs: VarId(5),
+            rhs: inc,
+        });
+        let r3 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        s.push(Stmt::Assign {
+            lhs: VarId(4),
+            rhs: r3,
+        });
+        let p3 = probe(&mut m);
+        s.push(Stmt::Assign {
+            lhs: VarId(4),
+            rhs: p3,
+        });
+        // v6 = R; v7 = f(v6) — anything a user function touches is dependent.
+        let r4 = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        s.push(Stmt::Assign {
+            lhs: VarId(6),
+            rhs: r4,
+        });
+        let arg = var(&mut m, 8);
+        m.functions.push(Function {
+            name: "f".into(),
+            args: vec![VarId(8)],
+            arg_dirs: vec![ArgDir::Input],
+            ret: VarId(9),
+            body: vec![Stmt::Assign {
+                lhs: VarId(9),
+                rhs: arg,
+            }],
+        });
+        let v6 = var(&mut m, 6);
+        let call = m.push_expr(Expr::CallUser(FuncId(0), vec![v6]));
+        s.push(Stmt::Assign {
+            lhs: VarId(7),
+            rhs: call,
+        });
+        // I(p,n) <+ v1 * v2 — the contribution reads both sides.
+        let (v1, v2) = (var(&mut m, 1), var(&mut m, 2));
+        let prod = m.push_expr(Expr::Binary(BinOp::Mul, v1, v2));
+        s.push(Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: prod,
+        });
+        m.analog = s;
+        (m, [v0b, twice, v1])
+    }
+
+    /// Stage 1 of `docs/proposals/evaluator-tree-walk.md`: the analysis finds invariant work
+    /// the leading-prefix rule cannot reach, and marks the operands inside it — not the
+    /// subtree's root, which a hoisting stage would keep as the read of the stored value.
+    #[test]
+    fn invariance_reaches_past_the_first_probe() {
+        let (m, [v0_read, twice, v1_read]) = invariance_ir();
+        let lowered = lower::lower(&m).expect("lowers");
+        let inv = &lowered.invariance;
+        assert_eq!(
+            lowered.static_prefix, 1,
+            "the prefix stops at the probe read"
+        );
+        assert!(
+            inv.var[0] && inv.var[2],
+            "v0 = R and v2 = v0 * 2 are invariant"
+        );
+        assert!(!inv.var[1], "v1 reads a probe");
+        assert!(inv.expr[twice.0 as usize], "v0 * 2 is invariant");
+        assert!(
+            inv.hoistable[v0_read.0 as usize],
+            "an operand inside an invariant subtree is hoistable"
+        );
+        assert!(
+            !inv.hoistable[twice.0 as usize],
+            "a statement's own expression is a root: it stays, as the read"
+        );
+        assert!(
+            !inv.hoistable[v1_read.0 as usize],
+            "a read of a bias-dependent variable is never hoistable"
+        );
+    }
+
+    /// The directions that matter for correctness: every way a value can move between two
+    /// evaluations must make the analysis say *dependent*. A wrong "invariant" here, once a
+    /// later stage acts on it, freezes a value that should move.
+    #[test]
+    fn invariance_refuses_every_way_a_value_can_move() {
+        let (m, _) = invariance_ir();
+        let lowered = lower::lower(&m).expect("lowers");
+        let var = &lowered.invariance.var;
+        assert!(!var[3], "assigned under a condition that reads a probe");
+        assert!(!var[4], "one of its assignments reads a probe");
+        assert!(
+            !var[5],
+            "reads v4, whose dependence the fixpoint only finds on a later round"
+        );
+        assert!(
+            !var[6],
+            "passed to a user function (may be an output argument)"
+        );
+        assert!(!var[7], "the result of a user function call");
+        assert!(
+            !var[8] && !var[9],
+            "a user function's own argument and return variable"
+        );
     }
 
     /// The preamble is hoisted and the bias-dependent core is not — the split lands exactly

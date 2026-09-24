@@ -26,6 +26,7 @@ fn main() -> Result<()> {
         Some("bench-linsolve") => bench_linsolve(),
         Some("bench-scale") => bench_scale(&rest),
         Some("bench-model") => bench_model(&rest),
+        Some("deck-diff") => deck_diff(&rest),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -63,9 +64,12 @@ fn print_usage() {
          bench-linsolve      Dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog)\n    \
          bench-scale [--solver S] [--topology ladder|mesh] [--max-nodes N]\n                                 \
                                  Whole-pipeline .op/.tran/.ac/.noise wall time vs circuit\n                                 \
-                                 size: the dense/sparse crossover and the size limit
-    \n         bench-model [<model.va>...]  One ModelInstance::load() per model: the cost every
-                                 \n                                 Newton iteration of every timepoint pays"
+                                 size: the dense/sparse crossover and the size limit\n    \
+         bench-model [<model.va>...]  One ModelInstance::load() per model: the cost every\n                                 \
+                                 Newton iteration of every timepoint pays\n    \
+         deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]...\n                                 \
+                                 Every deck under circuits/ through two va-cli binaries;\n                                 \
+                                 any difference in output or exit code fails"
     );
 }
 
@@ -2509,14 +2513,23 @@ fn bench_model(args: &[String]) -> Result<()> {
         "[xtask] bench-model: one ModelInstance::load() — the cost every Newton iteration pays …"
     );
     eprintln!(
-        "[xtask]   {:>14} {:>8} {:>6} {:>7} {:>7} {:>10} {:>10} {:>12}",
-        "model", "exprs", "unkns", "stmts", "setup", "front_ms", "build_ms", "load_us"
+        "[xtask]   {:>14} {:>8} {:>6} {:>7} {:>7} {:>10} {:>10} {:>12} {:>8} {:>9}",
+        "model",
+        "exprs",
+        "unkns",
+        "stmts",
+        "setup",
+        "front_ms",
+        "build_ms",
+        "load_us",
+        "visited",
+        "hoistable"
     );
     for (name, path) in &paths {
         let row = bench_one_model(path)
             .with_context(|| format!("benchmarking {name} ({})", path.display()))?;
         eprintln!(
-            "[xtask]   {:>14} {:>8} {:>6} {:>7} {:>7} {:>10.1} {:>10.1} {:>12.1}",
+            "[xtask]   {:>14} {:>8} {:>6} {:>7} {:>7} {:>10.1} {:>10.1} {:>12.1} {:>8.0} {:>8.1}%",
             name,
             row.exprs,
             row.unknowns,
@@ -2525,6 +2538,14 @@ fn bench_model(args: &[String]) -> Result<()> {
             row.frontend.as_secs_f64() * 1e3,
             row.build.as_secs_f64() * 1e3,
             row.load.as_secs_f64() * 1e6,
+            row.visited,
+            100.0 * row.hoistable / row.visited.max(1.0),
+        );
+    }
+    if !cfg!(feature = "walk-stats") {
+        eprintln!(
+            "[xtask]   (visited/hoistable are 0 without the counters: \
+             `cargo run --release -p xtask --features walk-stats -- bench-model`)"
         );
     }
     Ok(())
@@ -2544,6 +2565,12 @@ struct ModelBenchRow {
     frontend: Duration,
     /// IR → `ModelInstance`, once.
     build: Duration,
+    /// Expression nodes the tree walk visits per `load()` (`va_codegen::counters`).
+    visited: f64,
+    /// Of those, the ones inside an invariant subtree that the setup prefix does not already
+    /// cover — what hoisting invariant subexpressions would stop visiting
+    /// (`docs/proposals/evaluator-tree-walk.md`, Stage 1).
+    hoistable: f64,
     /// One `load()`, steady state.
     load: Duration,
 }
@@ -2595,6 +2622,23 @@ fn bench_one_model(path: &Path) -> Result<ModelBenchRow> {
     for _ in 0..MODEL_BENCH_WARMUP {
         instance.load(&x, &actx, &mut state, &mut sink);
     }
+    // The tree walk's work per `load()`, and how much of it an invariant-subexpression hoist
+    // could remove (`docs/proposals/evaluator-tree-walk.md`, Stage 1). Counted in their own
+    // untimed loop, so the counters' cost stays out of the timing below.
+    let (visited, hoistable) = {
+        va_codegen::counters::enable(true);
+        let before = va_codegen::counters::snapshot();
+        for _ in 0..MODEL_BENCH_COUNTED {
+            instance.load(&x, &actx, &mut state, &mut sink);
+        }
+        let after = va_codegen::counters::snapshot();
+        va_codegen::counters::enable(false);
+        let per = |a: u64, b: u64| (a - b) as f64 / f64::from(MODEL_BENCH_COUNTED);
+        (
+            per(after.exprs_visited, before.exprs_visited),
+            per(after.exprs_hoistable, before.exprs_hoistable),
+        )
+    };
     // Best of several batches rather than one long average: a batch that happened to share the
     // machine with something else should not become the published number.
     let mut best = Duration::MAX;
@@ -2614,9 +2658,13 @@ fn bench_one_model(path: &Path) -> Result<ModelBenchRow> {
         frontend,
         build,
         load: best,
+        visited,
+        hoistable,
     })
 }
 
+/// Untimed `load`s whose tree-walk counters are read (`ModelBenchRow::visited`).
+const MODEL_BENCH_COUNTED: u32 = 20;
 /// Untimed `load`s before measuring, so the first call's cold caches are not in the number.
 const MODEL_BENCH_WARMUP: u32 = 20;
 /// Timed batches; the best one is reported (see `bench_one_model`).
@@ -2625,6 +2673,168 @@ const MODEL_BENCH_BATCHES: u32 = 5;
 const MODEL_BENCH_REPS: u32 = 50;
 
 /// The repository root, from this crate's manifest directory (`<root>/xtask`).
+/// Decks `deck-diff` leaves out unless `--all`: each takes minutes per binary (ISCAS'85 c432's
+/// `.op`, c17's 13 000-point transient), and both have their own checks
+/// (`circuits/benchmark/iscas85/`).
+const DECK_DIFF_SLOW: &[&str] = &[
+    "circuits/benchmark/iscas85/c432.net",
+    "circuits/benchmark/iscas85/c17_tran.net",
+];
+
+/// `cargo xtask deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]...` — run every
+/// deck under `circuits/` through two `va-cli` binaries and report any deck whose output
+/// differs: exit code, stdout, and stderr with the pre-flight `estimate:` lines removed (they
+/// carry timings). The check behind "every deck gives identical output" for a change meant
+/// not to move any answer (`docs/proposals/evaluator-tree-walk.md` §4).
+///
+/// Each deck runs as `va-cli sim <deck> --model <m> [--tran|--ac|--noise]`: `<m>` is the path
+/// after the first `--model` the deck's own comments mention, else `models`; the analysis flag
+/// follows the deck's cards (`.tran`, else `.ac`, else `.noise`, else DC). A deck that fails
+/// the same way under both binaries is a match — this compares behaviour, not success.
+///
+/// # Errors
+///
+/// If either binary is missing, a deck cannot be read or run, or **any deck differs**.
+fn deck_diff(args: &[String]) -> Result<()> {
+    let mut exes = Vec::new();
+    let mut skip: Vec<String> = Vec::new();
+    let mut all = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--all" => all = true,
+            "--skip" => skip.push(
+                it.next()
+                    .context("--skip needs a deck path")?
+                    .replace('\\', "/"),
+            ),
+            _ => exes.push(PathBuf::from(a)),
+        }
+    }
+    let [old, new] = exes.as_slice() else {
+        bail!(
+            "expected two va-cli binaries: cargo xtask deck-diff <old> <new> [--all] [--skip <deck>]"
+        );
+    };
+    for exe in [old, new] {
+        if !exe.is_file() {
+            bail!("{} is not a file", exe.display());
+        }
+    }
+    if !all {
+        skip.extend(DECK_DIFF_SLOW.iter().map(|s| (*s).to_string()));
+    }
+
+    let root = repo_root();
+    let mut decks = Vec::new();
+    collect_decks(&root.join("circuits"), &mut decks)?;
+    decks.sort();
+
+    let (mut same, mut differ, mut skipped) = (0, 0, 0);
+    for deck in &decks {
+        let rel = deck
+            .strip_prefix(&root)
+            .unwrap_or(deck)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if skip.contains(&rel) {
+            skipped += 1;
+            continue;
+        }
+        let text = std::fs::read_to_string(deck).with_context(|| format!("reading {rel}"))?;
+        let model = deck_model(&text);
+        let flag = deck_analysis_flag(&text);
+        let run = |exe: &Path| -> Result<(Option<i32>, String, String)> {
+            let mut cmd = Command::new(exe);
+            cmd.current_dir(&root)
+                .args(["sim", rel.as_str(), "--model", model.as_str()]);
+            if let Some(f) = flag {
+                cmd.arg(f);
+            }
+            let out = cmd
+                .output()
+                .with_context(|| format!("running {} on {rel}", exe.display()))?;
+            let stderr: String = String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .filter(|l| !l.contains("estimate:"))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            Ok((
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr,
+            ))
+        };
+        let a = run(old)?;
+        let b = run(new)?;
+        if a == b {
+            same += 1;
+            continue;
+        }
+        differ += 1;
+        eprintln!("[xtask] DIFF {rel} (exit {:?} vs {:?})", a.0, b.0);
+        for (what, x, y) in [("stdout", &a.1, &b.1), ("stderr", &a.2, &b.2)] {
+            if let Some((i, (l, r))) = x
+                .lines()
+                .zip(y.lines())
+                .enumerate()
+                .find(|(_, (l, r))| l != r)
+            {
+                eprintln!(
+                    "[xtask]   {what} line {}:\n[xtask]     old: {l}\n[xtask]     new: {r}",
+                    i + 1
+                );
+            } else if x.lines().count() != y.lines().count() {
+                eprintln!(
+                    "[xtask]   {what}: {} lines vs {}",
+                    x.lines().count(),
+                    y.lines().count()
+                );
+            }
+        }
+    }
+    eprintln!("[xtask] deck-diff: {same} identical, {differ} different, {skipped} skipped");
+    if differ > 0 {
+        bail!("{differ} deck(s) differ");
+    }
+    Ok(())
+}
+
+/// Every `.net` file under `dir`, recursively.
+fn collect_decks(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_decks(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "net") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The model path a deck's comments name after `--model`, else `models`.
+fn deck_model(text: &str) -> String {
+    text.split_once("--model")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .map_or_else(|| "models".to_string(), str::to_string)
+}
+
+/// `va-cli`'s analysis flag for a deck: `.tran`, else `.ac`, else `.noise`, else none (DC).
+fn deck_analysis_flag(text: &str) -> Option<&'static str> {
+    let has = |card: &str| {
+        text.lines().any(|l| {
+            let l = l.trim_start().to_ascii_lowercase();
+            l.strip_prefix(card)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+    };
+    [(".tran", "--tran"), (".ac", "--ac"), (".noise", "--noise")]
+        .into_iter()
+        .find(|(card, _)| has(card))
+        .map(|(_, flag)| flag)
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

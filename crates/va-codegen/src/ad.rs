@@ -781,6 +781,10 @@ pub struct Ctx<'a> {
     /// Empty for a context that is walking the setup itself, and for `validate`/`noise`/
     /// `events`, which still walk every statement from the top.
     pub static_vars: &'a [Option<Dual>],
+    /// `crate::lower::Invariance::hoistable`, indexed by `ExprId.0`, for the tree-walk
+    /// counters only (`crate::counters::expr_visit`): whether a visited node is one a hoisting
+    /// stage could skip. Empty for a hand-built context, which then counts none as hoistable.
+    pub hoistable: &'a [bool],
     /// Maps a branch (by `BranchId.0`) to the local terminal slot of its own auxiliary current
     /// unknown — populated from both `crate::lower::Lowered::branch_currents` (a branch with a
     /// potential contribution) and `crate::lower::Lowered::flow_current_accumulators` (a purely
@@ -1192,6 +1196,10 @@ pub fn phase_mask_active(analysis: &va_abi::AnalysisCtx, mask: u32) -> bool {
 /// ever assigned, and anything [`call_function`] rejects (a `<+` contribution inside a function
 /// body, a wrong argument count, or a runaway loop inside one).
 pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
+    // Compiled in only with `--features walk-stats`: a check here runs on every node of every
+    // evaluation (`counters::expr_visit`).
+    #[cfg(feature = "walk-stats")]
+    crate::counters::expr_visit(ctx.hoistable, expr.0 as usize);
     let count = ctx.count();
     match ctx.module.expr(expr) {
         Expr::Const(c) => Ok(Dual::constant(*c)),
@@ -2206,6 +2214,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2268,6 +2277,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2417,6 +2427,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2507,6 +2518,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2594,6 +2606,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2636,6 +2649,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2665,6 +2679,7 @@ mod tests {
             bound_step: Cell::new(None),
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
+            hoistable: &[],
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),

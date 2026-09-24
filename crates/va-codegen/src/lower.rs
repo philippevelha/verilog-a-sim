@@ -935,6 +935,13 @@ pub struct Lowered {
     /// `crate::GeneratedModel` evaluates them once, on the first `load`, and starts every later
     /// `load` at `stmts[static_prefix..]` with those bindings already in scope.
     pub static_prefix: usize,
+    /// Which expressions and variables are **invariant** — the same on every evaluation of
+    /// this instance — found by [`invariance`] over the whole statement list, not just the
+    /// leading run [`Self::static_prefix`] takes. Stage 1 of
+    /// `docs/proposals/evaluator-tree-walk.md`: **counted, not yet used** — evaluation is
+    /// unchanged; `crate::counters` reports how many visited nodes it would let a later stage
+    /// skip.
+    pub invariance: Invariance,
 }
 
 /// Which time-domain construct a [`StatefulCall`] is, and how many state slots it needs.
@@ -1268,6 +1275,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     collect_zi_terms(&stmts, &mut zi_terms);
 
     let static_prefix = static_prefix_len(module, &stmts);
+    let invariance = invariance(module, &stmts);
     Ok(Lowered {
         n_unknowns: next_slot,
         taint: Taint::of(module, &module.analog),
@@ -1282,6 +1290,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         state_len,
         has_laplace,
         static_prefix,
+        invariance,
     })
 }
 
@@ -2971,6 +2980,269 @@ fn expr_is_bias_free(
 /// Whether a built-in's value is fixed for an instance's whole life given fixed arguments.
 ///
 /// Exhaustive on purpose — see [`static_prefix_len`] on why there is no wildcard arm.
+/// The result of [`invariance`]: per expression-arena node and per variable, whether its value
+/// is the same on every evaluation of an instance.
+#[derive(Clone, Debug, Default)]
+pub struct Invariance {
+    /// `expr[e]`: node `e`'s value is invariant.
+    pub expr: Vec<bool>,
+    /// `var[v]`: every value variable `v` ever holds during an evaluation is invariant.
+    pub var: Vec<bool>,
+    /// `hoistable[e]`: `e` is invariant **and so is every node that has it as an operand** —
+    /// it sits strictly inside an invariant subtree. These are the nodes a hoisting stage
+    /// would stop visiting; a subtree's root stays, as the read of the stored value, and is
+    /// not counted. A node nothing has as an operand (a statement's own expression) is a root.
+    pub hoistable: Vec<bool>,
+}
+
+/// Find every invariant expression and variable in a lowered module — the dependence analysis
+/// `static_prefix_len` says it does not do.
+///
+/// **Variables**, by a greatest fixpoint: start with every variable invariant, and strike out
+/// one whenever any assignment to it is not — an assignment is invariant when its right-hand
+/// side is **and** every condition it sits under is (an `if` on a voltage makes whatever its
+/// arms assign bias-dependent, whatever the right-hand side). Repeat until nothing changes.
+/// Once stable, every value an invariant variable holds comes from invariant computation under
+/// invariant control, so each read of it sees the same value on every evaluation: the same
+/// assignments run, in the same order, on the same values.
+///
+/// Variables written anywhere this does not look are struck out up front: every argument,
+/// return variable and body assignment of a user-defined analog function, and every variable
+/// passed to one (it may be an `output`/`inout` argument). A user-function call is itself
+/// dependent (as in `expr_is_bias_free`), so none of this is lost precision in practice.
+///
+/// **Expressions** follow `expr_is_bias_free`'s whitelist exactly — the same exhaustive match,
+/// the same `builtin_is_bias_free` — with "a variable an earlier setup statement bound"
+/// widened to "an invariant variable".
+///
+/// Getting a node wrong in the permissive direction would, once a later stage acts on it,
+/// freeze a value that should move — a silently wrong answer. Stage 1 only counts, and the
+/// stage that hoists must be defended by a differential test against the plain evaluator
+/// (the proposal's §3, Stage 2).
+pub fn invariance(module: &Module, stmts: &[LoweredStmt]) -> Invariance {
+    let n_vars = module.vars.len();
+    let mut var = vec![true; n_vars];
+    let strike = |var: &mut Vec<bool>, v: VarId| {
+        if let Some(slot) = var.get_mut(v.0 as usize) {
+            *slot = false;
+        }
+    };
+
+    // Writes the fixpoint does not model.
+    for f in &module.functions {
+        for a in &f.args {
+            strike(&mut var, *a);
+        }
+        strike(&mut var, f.ret);
+        let mut written = Vec::new();
+        ir_assigned_vars(&f.body, &mut written);
+        for v in written {
+            strike(&mut var, v);
+        }
+    }
+    for e in &module.exprs {
+        if let Expr::CallUser(_, args) = e {
+            for a in args {
+                if let Expr::Var(v) = module.expr(*a) {
+                    strike(&mut var, *v);
+                }
+            }
+        }
+    }
+
+    // Every assignment in the analog block, with the conditions it sits under.
+    let mut assigns: Vec<(VarId, ExprId, Vec<ExprId>)> = Vec::new();
+    collect_guarded_assigns(stmts, &mut Vec::new(), &mut assigns);
+
+    loop {
+        let mut memo = HashMap::new();
+        let mut changed = false;
+        for (lhs, rhs, conds) in &assigns {
+            if !var.get(lhs.0 as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let ok = expr_is_invariant(module, *rhs, &var, &mut memo)
+                && conds
+                    .iter()
+                    .all(|c| expr_is_invariant(module, *c, &var, &mut memo));
+            if !ok {
+                var[lhs.0 as usize] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut memo = HashMap::new();
+    let expr: Vec<bool> = (0..module.exprs.len())
+        .map(|i| expr_is_invariant(module, ExprId(i as u32), &var, &mut memo))
+        .collect();
+    let mut has_parent = vec![false; expr.len()];
+    let mut all_parents_invariant = vec![true; expr.len()];
+    for (i, e) in module.exprs.iter().enumerate() {
+        for child in expr_operands(e) {
+            let c = child.0 as usize;
+            if c < expr.len() {
+                has_parent[c] = true;
+                all_parents_invariant[c] &= expr[i];
+            }
+        }
+    }
+    let hoistable = (0..expr.len())
+        .map(|i| expr[i] && has_parent[i] && all_parents_invariant[i])
+        .collect();
+    Invariance {
+        expr,
+        var,
+        hoistable,
+    }
+}
+
+/// The operands of an expression node — exhaustive, so a new variant with operands cannot be
+/// silently treated as a leaf.
+fn expr_operands(e: &Expr) -> Vec<ExprId> {
+    match e {
+        Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::Var(_)
+        | Expr::Probe(_)
+        | Expr::ParamGiven(_)
+        | Expr::PortConnected(_)
+        | Expr::EventFired(_) => Vec::new(),
+        Expr::Unary(_, a) | Expr::Ddx(a, _) => vec![*a],
+        Expr::Binary(_, a, b) => vec![*a, *b],
+        Expr::Select(c, a, b) => vec![*c, *a, *b],
+        Expr::Call(_, args) | Expr::CallUser(_, args) => args.clone(),
+    }
+}
+
+/// Every `(lhs, rhs, enclosing conditions)` assignment in a lowered statement list.
+fn collect_guarded_assigns(
+    stmts: &[LoweredStmt],
+    conds: &mut Vec<ExprId>,
+    out: &mut Vec<(VarId, ExprId, Vec<ExprId>)>,
+) {
+    for s in stmts {
+        match s {
+            LoweredStmt::Assign { lhs, rhs } => out.push((*lhs, *rhs, conds.clone())),
+            LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) => {}
+            LoweredStmt::If { cond, then_, else_ } => {
+                conds.push(*cond);
+                collect_guarded_assigns(then_, conds, out);
+                collect_guarded_assigns(else_, conds, out);
+                conds.pop();
+            }
+            LoweredStmt::Case {
+                selector,
+                arms,
+                default,
+            } => {
+                let depth = conds.len();
+                conds.push(*selector);
+                for arm in arms {
+                    conds.extend(arm.labels.iter().copied());
+                }
+                for arm in arms {
+                    collect_guarded_assigns(&arm.body, conds, out);
+                }
+                collect_guarded_assigns(default, conds, out);
+                conds.truncate(depth);
+            }
+            LoweredStmt::While { cond, body } => {
+                conds.push(*cond);
+                collect_guarded_assigns(body, conds, out);
+                conds.pop();
+            }
+            LoweredStmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                // `init` runs unconditionally (under the enclosing conditions); `step` and
+                // `body` run as many times as `cond` says.
+                collect_guarded_assigns(init, conds, out);
+                conds.push(*cond);
+                collect_guarded_assigns(step, conds, out);
+                collect_guarded_assigns(body, conds, out);
+                conds.pop();
+            }
+            LoweredStmt::Repeat { count, body } => {
+                conds.push(*count);
+                collect_guarded_assigns(body, conds, out);
+                conds.pop();
+            }
+        }
+    }
+}
+
+/// Every variable an IR statement list assigns, at any depth (a user function's body).
+fn ir_assigned_vars(stmts: &[va_ir::Stmt], out: &mut Vec<VarId>) {
+    for s in stmts {
+        match s {
+            va_ir::Stmt::Assign { lhs, .. } => out.push(*lhs),
+            va_ir::Stmt::Contribute { .. } | va_ir::Stmt::BoundStep(_) => {}
+            va_ir::Stmt::If { then_, else_, .. } => {
+                ir_assigned_vars(then_, out);
+                ir_assigned_vars(else_, out);
+            }
+            va_ir::Stmt::Block(b)
+            | va_ir::Stmt::While { body: b, .. }
+            | va_ir::Stmt::Repeat { body: b, .. } => ir_assigned_vars(b, out),
+            va_ir::Stmt::For {
+                init, step, body, ..
+            } => {
+                ir_assigned_vars(std::slice::from_ref(init.as_ref()), out);
+                ir_assigned_vars(std::slice::from_ref(step.as_ref()), out);
+                ir_assigned_vars(body, out);
+            }
+            va_ir::Stmt::Case { arms, default, .. } => {
+                for arm in arms {
+                    ir_assigned_vars(&arm.body, out);
+                }
+                ir_assigned_vars(default, out);
+            }
+        }
+    }
+}
+
+/// [`expr_is_bias_free`] with "invariant variable" in place of "bound by the setup so far".
+fn expr_is_invariant(
+    module: &Module,
+    expr: ExprId,
+    var: &[bool],
+    memo: &mut HashMap<u32, bool>,
+) -> bool {
+    if let Some(hit) = memo.get(&expr.0) {
+        return *hit;
+    }
+    let answer = match module.expr(expr) {
+        Expr::Const(_) | Expr::Param(_) | Expr::ParamGiven(_) | Expr::PortConnected(_) => true,
+        Expr::Var(v) => var.get(v.0 as usize).copied().unwrap_or(false),
+        Expr::Unary(_, a) => expr_is_invariant(module, *a, var, memo),
+        Expr::Binary(_, a, b) => {
+            expr_is_invariant(module, *a, var, memo) && expr_is_invariant(module, *b, var, memo)
+        }
+        Expr::Select(c, a, b) => {
+            expr_is_invariant(module, *c, var, memo)
+                && expr_is_invariant(module, *a, var, memo)
+                && expr_is_invariant(module, *b, var, memo)
+        }
+        Expr::Call(builtin, args) => {
+            builtin_is_bias_free(*builtin)
+                && args
+                    .iter()
+                    .all(|a| expr_is_invariant(module, *a, var, memo))
+        }
+        // As in `expr_is_bias_free`, and for the same reasons.
+        Expr::Probe(_) | Expr::Ddx(..) | Expr::EventFired(_) | Expr::CallUser(..) => false,
+    };
+    memo.insert(expr.0, answer);
+    answer
+}
+
 fn builtin_is_bias_free(builtin: Builtin) -> bool {
     match builtin {
         // Pure functions of their arguments.
