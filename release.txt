@@ -20,6 +20,47 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.16.0 - 2026-09-24
+-------------------
+**Compiled models evaluate their expressions from flat instruction tapes instead of walking
+trees — Stage 3 of the tree-walk proposal. Bit-identical; about 2% faster.** `va_codegen::tape`
+compiles every root a lowered statement or contribution evaluates, once per compiled model, into
+a post-order instruction list run on a value stack: constants, and parameters,
+`$param_given`/`$port_connected` resolved at compile time; variable reads; unary, binary and pure
+maths operators calling the very functions `eval` does (`ad::apply_unary`, `apply_binary`,
+`pure_call1`, `pure_call2`, factored out of `eval` for this, unchanged); and a `Tree`
+instruction handing any other subtree (probes, `?:`, user functions, analog operators) to `eval`.
+
+Checked, not assumed: `CompiledModel::new_without_tapes` is the tree-walk reference; a unit test
+covers every instruction kind at bias points that take both branches of a `?:`; and the new
+`cargo xtask tape-check [<model.va>...]` loads the benchmark's seven CMC models with and without
+tapes at 42 bias points each and compares every stamp bit for bit — 0 differing. A deliberately
+wrong tape (a binary operator's operands popped in the wrong order) fails both.
+
+Measured: per PSP103 `load()`, 3 384 of 3 441 visited nodes run as tape instructions, 99 `eval`
+calls remain. `bench-model` against 1.15.0, nine interleaved runs each, two sets on mains power:
+PSP103 median −1.9% and −0.8%, BSIM4 −2.5% and −0.6%, BSIM-BULK107 −2.5% and −5.0% — always
+faster, by about 2%. Heap allocations per `load()` 431 → 432 (the value stack, sized once per
+call).
+
+**What it showed:** the proposal expected far more, because it read the profile's ~46 µs of
+`eval` self time as dispatch overhead. It was mostly work inlined *into* `eval` — building each
+node's dual number, copying variable values, dropping temporaries — which the tape still does,
+one instruction at a time. The proposal now says so, and no longer recommends a JIT (Stage 4) on
+this evidence: it would compile the same work. The next lever, if any, is the dual-number
+representation (option D).
+
+Also: `CodegenError::Internal`, for a broken invariant of the crate's own (a tape running out of
+operands) — deliberately not `Unsupported`, which `va-cli` reports as a refusal of the user's
+model. `bench-model`'s model selection is shared with `tape-check` (`model_paths`).
+
+Measured at 1.16.0: `cargo test --workspace` **890 passed / 0 failed** (+1: the tape matches
+the tree walk bit for bit). fmt clean; clippy clean with and without `walk-stats` (with it, the
+tape's counts equal the tree walk's: PSP103 3 441 visited, 11.0% hoistable). `cargo xtask
+validate`: **28/28**, identical to 1.12.0. `cargo xtask deck-diff` against 1.15.0: **70
+identical**, 2 skipped. `va-cli check external --codegen`: output identical to 1.15.0.
+
+
 1.15.0 - 2026-09-24
 -------------------
 **Stage 1 of the tree-walk proposal: an invariance analysis that counts what hoisting could

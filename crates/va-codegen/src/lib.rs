@@ -42,6 +42,7 @@
 pub mod ad;
 pub mod counters;
 pub mod lower;
+pub mod tape;
 
 use ad::{eval, Ctx, Dual};
 use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
@@ -85,6 +86,12 @@ pub enum CodegenError {
     /// The IR used a construct this codegen subset does not yet support.
     #[error("unsupported construct: {0}")]
     Unsupported(String),
+
+    /// An invariant of this crate's own was broken — a bug here, not a property of the model
+    /// being compiled, and deliberately not [`Self::Unsupported`], which `va-cli` reports as a
+    /// refusal of the user's model.
+    #[error("internal codegen error: {0}")]
+    Internal(String),
 
     /// `terminals` did not provide one global index per IR node.
     #[error("expected {expected} terminals (one per node), got {got}")]
@@ -160,6 +167,22 @@ impl CompiledModel {
     /// lower, or one whose evaluation `validate` can already prove will fail. Doing it here
     /// means a model that cannot be built says so once rather than once per placement.
     pub fn new(module: &Module) -> Result<Self, CodegenError> {
+        Self::build(module, true)
+    }
+
+    /// [`Self::new`] without the flat tapes ([`tape`]): every expression is evaluated by
+    /// walking its tree, as before the tapes existed. The reference a tape is checked against —
+    /// `cargo xtask tape-check` and the differential tests load both and require every stamp
+    /// to agree bit for bit. Not for simulation: it is the slower of two identical answers.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn new_without_tapes(module: &Module) -> Result<Self, CodegenError> {
+        Self::build(module, false)
+    }
+
+    fn build(module: &Module, with_tapes: bool) -> Result<Self, CodegenError> {
         let lowered = lower::lower(module)?;
         let params: Vec<f64> = module.params.iter().map(|p| p.default).collect();
         // Scanned once rather than per Newton iteration: `unknown_is_junction` is consulted for
@@ -167,6 +190,13 @@ impl CompiledModel {
         let node_is_junction = classify_nodes(module);
         // Decided here because it depends on the parameter values, which this model owns.
         let ideal_shorts = lower::ideal_shorts(module, &lowered, &params);
+        // After `params` is final: a tape resolves parameter reads when it is built, which is
+        // exact because this model's parameter values never change (see `tape`'s module doc).
+        let tapes = if with_tapes {
+            tape::Tapes::compile(module, &params, &lowered)
+        } else {
+            tape::Tapes::default()
+        };
         let shared = Rc::new(SharedModel {
             module: module.clone(),
             params,
@@ -176,6 +206,7 @@ impl CompiledModel {
             temp: TEMP,
             node_is_junction,
             setup: RefCell::new(None),
+            tapes,
         });
 
         // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -353,6 +384,10 @@ struct SharedModel {
     /// those are fixed when the instance is built. See `lower::static_prefix_len`'s closing
     /// caveat for the one future change that would invalidate this and require a key.
     setup: RefCell<Option<Setup>>,
+    /// Every root expression the lowered statements evaluate, as a flat instruction tape
+    /// ([`tape::Tapes::compile`]) — evaluated by [`tape::eval_root`] instead of walking the
+    /// tree, with bit-identical results.
+    tapes: tape::Tapes,
 }
 
 /// The result of evaluating a model's setup once — see [`GeneratedModel::setup`].
@@ -479,6 +514,8 @@ impl GeneratedModel {
             vars: RefCell::new(vec![None; self.shared.module.vars.len()]),
             static_vars,
             hoistable: &self.shared.lowered.invariance.hoistable,
+            tapes: &self.shared.tapes,
+            tape_stack: RefCell::new(Vec::with_capacity(self.shared.tapes.max_depth)),
             branch_current_slots,
             idt_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
@@ -575,16 +612,18 @@ impl GeneratedModel {
         for stmt in stmts {
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => {
-                    let d = eval(ctx, *rhs)?;
+                    let d = tape::eval_root(ctx, *rhs)?;
                     ctx.set_var(*lhs, d);
                 }
                 LoweredStmt::Contribute(c) => on_contribute(self, ctx, c),
                 // Recorded on the context rather than handed to the callback: `walk` is shared
                 // with the noise channel, which has no stamp sink to emit into. `load` drains
                 // it once the walk is done (see `Ctx::request_bound_step`).
-                LoweredStmt::BoundStep(e) => ctx.request_bound_step(eval(ctx, *e)?.value),
+                LoweredStmt::BoundStep(e) => {
+                    ctx.request_bound_step(tape::eval_root(ctx, *e)?.value)
+                }
                 LoweredStmt::If { cond, then_, else_ } => {
-                    let taken = if eval(ctx, *cond)?.value != 0.0 {
+                    let taken = if tape::eval_root(ctx, *cond)?.value != 0.0 {
                         then_
                     } else {
                         else_
@@ -596,11 +635,11 @@ impl GeneratedModel {
                     arms,
                     default,
                 } => {
-                    let sel = eval(ctx, *selector)?;
+                    let sel = tape::eval_root(ctx, *selector)?;
                     let mut taken = default;
                     'arms: for arm in arms {
                         for &label in &arm.labels {
-                            if eval(ctx, label)?.value == sel.value {
+                            if tape::eval_root(ctx, label)?.value == sel.value {
                                 taken = &arm.body;
                                 break 'arms;
                             }
@@ -610,7 +649,7 @@ impl GeneratedModel {
                 }
                 LoweredStmt::While { cond, body } => {
                     let mut iters = 0usize;
-                    while eval(ctx, *cond)?.value != 0.0 {
+                    while tape::eval_root(ctx, *cond)?.value != 0.0 {
                         self.walk(ctx, body, on_contribute)?;
                         iters += 1;
                         if iters > MAX_LOOP_ITERATIONS {
@@ -626,7 +665,7 @@ impl GeneratedModel {
                 } => {
                     self.walk(ctx, init, on_contribute)?;
                     let mut iters = 0usize;
-                    while eval(ctx, *cond)?.value != 0.0 {
+                    while tape::eval_root(ctx, *cond)?.value != 0.0 {
                         self.walk(ctx, body, on_contribute)?;
                         self.walk(ctx, step, on_contribute)?;
                         iters += 1;
@@ -636,7 +675,7 @@ impl GeneratedModel {
                     }
                 }
                 LoweredStmt::Repeat { count, body } => {
-                    let n = eval(ctx, *count)?.value;
+                    let n = tape::eval_root(ctx, *count)?.value;
                     if n > MAX_LOOP_ITERATIONS as f64 {
                         return Err(loop_iteration_cap_exceeded());
                     }
@@ -877,7 +916,7 @@ impl GeneratedModel {
     fn sum_terms(ctx: &Ctx, terms: &[lower::Term]) -> Result<Dual, CodegenError> {
         let mut acc = Dual::constant(0.0);
         for term in terms {
-            let d = eval(ctx, term.expr)?;
+            let d = tape::eval_root(ctx, term.expr)?;
             acc = acc.add(&d.scale(term.sign));
         }
         Ok(acc)
@@ -892,9 +931,9 @@ impl GeneratedModel {
     fn sum_charge_terms(ctx: &Ctx, terms: &[lower::ChargeTerm]) -> Result<Dual, CodegenError> {
         let mut acc = Dual::constant(0.0);
         for term in terms {
-            let mut d = eval(ctx, term.expr)?;
+            let mut d = tape::eval_root(ctx, term.expr)?;
             for &(coeff_expr, is_divisor) in &term.coeffs {
-                let coeff = eval(ctx, coeff_expr)?.value;
+                let coeff = tape::eval_root(ctx, coeff_expr)?.value;
                 d = if is_divisor {
                     d.scale(1.0 / coeff)
                 } else {
@@ -2527,6 +2566,133 @@ mod tests {
         });
         m.analog = s;
         (m, [v0b, twice, v1])
+    }
+
+    /// Load `module` with tapes and without, at `points`, and require every stamp to agree bit
+    /// for bit — the check behind the tape's claim to change no answer. `Debug` of a
+    /// `DenseStamp` prints every `f64` in shortest round-trip form, so equal text is equal bits.
+    fn assert_tape_matches_tree(module: &Module, points: &[Vec<f64>]) {
+        let taped = CompiledModel::new(module).expect("compiles");
+        let walked = CompiledModel::new_without_tapes(module).expect("compiles");
+        let terminals: Vec<usize> = (0..module.nodes.len()).collect();
+        let (mut n1, mut n2) = (module.nodes.len(), module.nodes.len());
+        let a = taped
+            .instantiate(&terminals, &mut n1)
+            .expect("instantiates");
+        let b = walked
+            .instantiate(&terminals, &mut n2)
+            .expect("instantiates");
+        let dim = n1.max(1);
+        for x in points {
+            let mut x = x.clone();
+            x.resize(dim, 0.25);
+            let mut sa = DenseStamp::new(dim);
+            let mut sb = DenseStamp::new(dim);
+            a.load(
+                &x,
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sa,
+            );
+            b.load(
+                &x,
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sb,
+            );
+            assert_eq!(
+                format!("{sa:?}"),
+                format!("{sb:?}"),
+                "tape and tree walk disagree at x = {x:?}"
+            );
+        }
+    }
+
+    /// Every tape instruction kind against the tree walk: constants and parameters (resolved
+    /// when the tape is built), variable reads, unary and binary operators, one- and
+    /// two-argument maths built-ins, and the `Tree` fallback (a probe, a `?:`), at bias points
+    /// that flip the sign of the terminal voltage so the `?:` takes both branches.
+    #[test]
+    fn the_tape_matches_the_tree_walk_bit_for_bit() {
+        use va_ir::{BinOp, UnOp};
+        let mut m = resistor_ir();
+        m.analog.clear();
+        m.vars = (0..4)
+            .map(|i| VarDecl {
+                name: format!("t{i}"),
+            })
+            .collect();
+        let v = |m: &mut Module| {
+            m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }))
+        };
+        let mut s = Vec::new();
+        // t0 = exp(V / R) - 1 + min(V, 0.5) * 3;
+        let (p, r) = (v(&mut m), m.push_expr(Expr::Param(va_ir::ParamId(0))));
+        let q = m.push_expr(Expr::Binary(BinOp::Div, p, r));
+        let e = m.push_expr(Expr::Call(Builtin::Exp, vec![q]));
+        let one = m.push_expr(Expr::Const(1.0));
+        let em1 = m.push_expr(Expr::Binary(BinOp::Sub, e, one));
+        let (p2, half) = (v(&mut m), m.push_expr(Expr::Const(0.5)));
+        let mn = m.push_expr(Expr::Call(Builtin::Min, vec![p2, half]));
+        let three = m.push_expr(Expr::Const(3.0));
+        let prod = m.push_expr(Expr::Binary(BinOp::Mul, mn, three));
+        let sum = m.push_expr(Expr::Binary(BinOp::Add, em1, prod));
+        s.push(Stmt::Assign {
+            lhs: VarId(0),
+            rhs: sum,
+        });
+        // t1 = (V > 0) ? sqrt(abs(V)) : -pow(V, 2);   — a `Tree` fallback with both branches
+        let (p3, zero) = (v(&mut m), m.push_expr(Expr::Const(0.0)));
+        let gt = m.push_expr(Expr::Binary(BinOp::Gt, p3, zero));
+        let p4 = v(&mut m);
+        let ab = m.push_expr(Expr::Call(Builtin::Abs, vec![p4]));
+        let sq = m.push_expr(Expr::Call(Builtin::Sqrt, vec![ab]));
+        let (p5, two) = (v(&mut m), m.push_expr(Expr::Const(2.0)));
+        let pw = m.push_expr(Expr::Call(Builtin::Pow, vec![p5, two]));
+        let ng = m.push_expr(Expr::Unary(UnOp::Neg, pw));
+        let sel = m.push_expr(Expr::Select(gt, sq, ng));
+        s.push(Stmt::Assign {
+            lhs: VarId(1),
+            rhs: sel,
+        });
+        // t2 = t0 * t1 / (1 + t0 * t0);  — variable reads feeding operators
+        let (a0, a1) = (
+            m.push_expr(Expr::Var(VarId(0))),
+            m.push_expr(Expr::Var(VarId(1))),
+        );
+        let num = m.push_expr(Expr::Binary(BinOp::Mul, a0, a1));
+        let (b0, c0) = (
+            m.push_expr(Expr::Var(VarId(0))),
+            m.push_expr(Expr::Var(VarId(0))),
+        );
+        let sqr = m.push_expr(Expr::Binary(BinOp::Mul, b0, c0));
+        let one2 = m.push_expr(Expr::Const(1.0));
+        let den = m.push_expr(Expr::Binary(BinOp::Add, one2, sqr));
+        let t2 = m.push_expr(Expr::Binary(BinOp::Div, num, den));
+        s.push(Stmt::Assign {
+            lhs: VarId(2),
+            rhs: t2,
+        });
+        // I(p,n) <+ t2;
+        let read = m.push_expr(Expr::Var(VarId(2)));
+        s.push(Stmt::Contribute {
+            target: Access {
+                kind: AccessKind::Flow,
+                branch: BranchId(0),
+            },
+            value: read,
+        });
+        m.analog = s;
+        let points: Vec<Vec<f64>> = [-1.3, -0.2, 0.0, 1e-9, 0.2, 0.7, 2.5]
+            .iter()
+            .flat_map(|&a| [vec![a, 0.0], vec![0.0, a], vec![a, -a]])
+            .collect();
+        assert_tape_matches_tree(&m, &points);
+        // And a model with a charge channel (`ddt`), through `sum_charge_terms`.
+        assert_tape_matches_tree(&varactor_like_ir(), &points);
     }
 
     /// Stage 1 of `docs/proposals/evaluator-tree-walk.md`: the analysis finds invariant work

@@ -785,6 +785,14 @@ pub struct Ctx<'a> {
     /// counters only (`crate::counters::expr_visit`): whether a visited node is one a hoisting
     /// stage could skip. Empty for a hand-built context, which then counts none as hoistable.
     pub hoistable: &'a [bool],
+    /// The compiled model's flat instruction tapes ([`crate::tape`]), which
+    /// [`crate::tape::eval_root`] runs instead of walking a root expression's tree.
+    /// [`crate::tape::NO_TAPES`] for a hand-built context, whose expressions all go through
+    /// [`eval`].
+    pub tapes: &'a crate::tape::Tapes,
+    /// The value stack those tapes run on, kept for the context's life so a `load()` does not
+    /// allocate one per statement.
+    pub tape_stack: RefCell<Vec<Dual>>,
     /// Maps a branch (by `BranchId.0`) to the local terminal slot of its own auxiliary current
     /// unknown — populated from both `crate::lower::Lowered::branch_currents` (a branch with a
     /// potential contribution) and `crate::lower::Lowered::flow_current_accumulators` (a purely
@@ -907,7 +915,7 @@ impl Ctx<'_> {
     /// genuinely uninitialized variable (undefined in real Verilog-A too), or, more likely
     /// today, an assignment that lives inside a still-unsupported `if`/`case` arm this
     /// straight-line statement walk never executes.
-    fn get_var(&self, id: VarId) -> Result<Dual, CodegenError> {
+    pub(crate) fn get_var(&self, id: VarId) -> Result<Dual, CodegenError> {
         let i = id.0 as usize;
         if let Some(bound) = self.vars.borrow().get(i).cloned().flatten() {
             return Ok(bound);
@@ -1279,50 +1287,12 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         },
         Expr::Unary(op, e) => {
             let d = eval(ctx, *e)?;
-            Ok(match op {
-                UnOp::Neg => d.neg_owned(),
-                UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0)),
-                // Bitwise NOT, like the comparison/logical operators above, is an integer
-                // operation with no continuous derivative — zero-gradient.
-                UnOp::BitNot => Dual::constant(!to_i64(d.value) as f64),
-            })
+            Ok(apply_unary(*op, d))
         }
         Expr::Binary(op, l, r) => {
             let a = eval(ctx, *l)?;
             let b = eval(ctx, *r)?;
-            Ok(match op {
-                // By value: `a` and `b` are this arm's own temporaries, so the result can be
-                // written into one of their gradient buffers (`zip_owned`).
-                BinOp::Add => a.add_owned(b),
-                BinOp::Sub => a.sub_owned(b),
-                BinOp::Mul => a.mul_owned(b),
-                BinOp::Div => a.div_owned(b),
-                // Modulus is genuinely discontinuous (it jumps at every multiple of `b`), so —
-                // like the bitwise/comparison operators below — it's zero-gradient in AD rather
-                // than attempting an analytic derivative.
-                BinOp::Mod => Dual::constant(a.value % b.value),
-                BinOp::Pow => a.powf_owned(b),
-                BinOp::Lt => Dual::constant(bool_to_f64(a.value < b.value)),
-                BinOp::Le => Dual::constant(bool_to_f64(a.value <= b.value)),
-                BinOp::Gt => Dual::constant(bool_to_f64(a.value > b.value)),
-                BinOp::Ge => Dual::constant(bool_to_f64(a.value >= b.value)),
-                BinOp::Eq => Dual::constant(bool_to_f64(a.value == b.value)),
-                BinOp::Ne => Dual::constant(bool_to_f64(a.value != b.value)),
-                BinOp::And => Dual::constant(bool_to_f64(a.value != 0.0 && b.value != 0.0)),
-                BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0)),
-                // Bitwise/shift operators are integer operations with no continuous derivative,
-                // same treatment as the comparison operators above: zero-gradient.
-                BinOp::BitAnd => Dual::constant((to_i64(a.value) & to_i64(b.value)) as f64),
-                BinOp::BitOr => Dual::constant((to_i64(a.value) | to_i64(b.value)) as f64),
-                BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64),
-                BinOp::BitXnor => Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64),
-                BinOp::Shl => {
-                    Dual::constant(to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64)
-                }
-                BinOp::Shr => Dual::constant(
-                    (to_i64(a.value) as u64).wrapping_shr(to_i64(b.value) as u32) as f64,
-                ),
-            })
+            Ok(apply_binary(*op, a, b))
         }
         // `idt(...)`'s value is a plain read of its own accumulator unknown (see
         // `crate::lower::IdtAccumulator`'s doc comment) — never evaluated through `eval_call`'s
@@ -1378,6 +1348,99 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
     }
 }
 
+/// A unary operator on an evaluated operand — `eval`'s `Expr::Unary` arm, shared with the flat
+/// tape (`crate::tape`) so both evaluators run the same arithmetic.
+pub(crate) fn apply_unary(op: UnOp, d: Dual) -> Dual {
+    match op {
+        UnOp::Neg => d.neg_owned(),
+        UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0)),
+        // Bitwise NOT, like the comparison/logical operators above, is an integer
+        // operation with no continuous derivative — zero-gradient.
+        UnOp::BitNot => Dual::constant(!to_i64(d.value) as f64),
+    }
+}
+
+/// A binary operator on two evaluated operands — `eval`'s `Expr::Binary` arm, shared with the
+/// flat tape (`crate::tape`). Operands are evaluated by the caller, left before right.
+pub(crate) fn apply_binary(op: BinOp, a: Dual, b: Dual) -> Dual {
+    match op {
+        // By value: `a` and `b` are this arm's own temporaries, so the result can be
+        // written into one of their gradient buffers (`zip_owned`).
+        BinOp::Add => a.add_owned(b),
+        BinOp::Sub => a.sub_owned(b),
+        BinOp::Mul => a.mul_owned(b),
+        BinOp::Div => a.div_owned(b),
+        // Modulus is genuinely discontinuous (it jumps at every multiple of `b`), so —
+        // like the bitwise/comparison operators below — it's zero-gradient in AD rather
+        // than attempting an analytic derivative.
+        BinOp::Mod => Dual::constant(a.value % b.value),
+        BinOp::Pow => a.powf_owned(b),
+        BinOp::Lt => Dual::constant(bool_to_f64(a.value < b.value)),
+        BinOp::Le => Dual::constant(bool_to_f64(a.value <= b.value)),
+        BinOp::Gt => Dual::constant(bool_to_f64(a.value > b.value)),
+        BinOp::Ge => Dual::constant(bool_to_f64(a.value >= b.value)),
+        BinOp::Eq => Dual::constant(bool_to_f64(a.value == b.value)),
+        BinOp::Ne => Dual::constant(bool_to_f64(a.value != b.value)),
+        BinOp::And => Dual::constant(bool_to_f64(a.value != 0.0 && b.value != 0.0)),
+        BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0)),
+        // Bitwise/shift operators are integer operations with no continuous derivative,
+        // same treatment as the comparison operators above: zero-gradient.
+        BinOp::BitAnd => Dual::constant((to_i64(a.value) & to_i64(b.value)) as f64),
+        BinOp::BitOr => Dual::constant((to_i64(a.value) | to_i64(b.value)) as f64),
+        BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64),
+        BinOp::BitXnor => Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64),
+        BinOp::Shl => Dual::constant(to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64),
+        BinOp::Shr => {
+            Dual::constant((to_i64(a.value) as u64).wrapping_shr(to_i64(b.value) as u32) as f64)
+        }
+    }
+}
+
+/// The one-argument pure maths built-ins, applied to an evaluated argument: `eval_call`'s arms
+/// for them, shared with the flat tape (`crate::tape`). `None` for any other built-in — which is
+/// also how the tape compiler asks whether a built-in is one of these
+/// (`crate::tape::is_pure_call1`), so the two lists cannot drift apart.
+pub(crate) fn pure_call1(builtin: Builtin, a: Dual) -> Option<Dual> {
+    Some(match builtin {
+        Builtin::Exp => a.exp_owned(),
+        Builtin::Ln => a.ln_owned(),
+        Builtin::Log => a.log10(),
+        Builtin::Sqrt => a.sqrt_owned(),
+        Builtin::Abs => a.abs_owned(),
+        // Rounding functions are piecewise constant: value is the rounded primal, gradient 0.
+        Builtin::Floor => Dual::constant(a.value.floor()),
+        Builtin::Ceil => Dual::constant(a.value.ceil()),
+        Builtin::Round => Dual::constant(a.value.round()),
+        Builtin::Int => Dual::constant(a.value.trunc()),
+        Builtin::Sin => a.sin(),
+        Builtin::Cos => a.cos(),
+        Builtin::Tan => a.tan(),
+        Builtin::Sinh => a.sinh(),
+        Builtin::Cosh => a.cosh(),
+        Builtin::Tanh => a.tanh(),
+        Builtin::Asin => a.asin(),
+        Builtin::Acos => a.acos(),
+        Builtin::Atan => a.atan(),
+        Builtin::Asinh => a.asinh(),
+        Builtin::Acosh => a.acosh(),
+        Builtin::Atanh => a.atanh(),
+        _ => return None,
+    })
+}
+
+/// The two-argument pure maths built-ins (see [`pure_call1`]); arguments evaluated by the
+/// caller, first before second.
+pub(crate) fn pure_call2(builtin: Builtin, a: Dual, b: Dual) -> Option<Dual> {
+    Some(match builtin {
+        Builtin::Pow => a.powf_owned(b),
+        Builtin::Hypot => a.hypot(&b),
+        Builtin::Atan2 => a.atan2(&b),
+        Builtin::Min => a.min(&b),
+        Builtin::Max => a.max(&b),
+        _ => return None,
+    })
+}
+
 /// `site` is the call's own `ExprId` — needed only by the stateful constructs
 /// (`transition`/`slew`), which key their state slots on the call site so that the same
 /// function written twice keeps two independent histories (§ `crate::lower::StatefulCall`).
@@ -1395,33 +1458,36 @@ fn eval_call(
         eval(ctx, *id)
     };
     Ok(match builtin {
-        Builtin::Exp => arg(0)?.exp_owned(),
-        Builtin::Ln => arg(0)?.ln_owned(),
-        Builtin::Log => arg(0)?.log10(),
-        Builtin::Sqrt => arg(0)?.sqrt_owned(),
-        Builtin::Abs => arg(0)?.abs_owned(),
-        // Rounding functions are piecewise constant: value is the rounded primal, gradient 0.
-        Builtin::Floor => Dual::constant(arg(0)?.value.floor()),
-        Builtin::Ceil => Dual::constant(arg(0)?.value.ceil()),
-        Builtin::Round => Dual::constant(arg(0)?.value.round()),
-        Builtin::Int => Dual::constant(arg(0)?.value.trunc()),
-        Builtin::Pow => arg(0)?.powf_owned(arg(1)?),
-        Builtin::Hypot => arg(0)?.hypot(&arg(1)?),
-        Builtin::Atan2 => arg(0)?.atan2(&arg(1)?),
-        Builtin::Min => arg(0)?.min(&arg(1)?),
-        Builtin::Max => arg(0)?.max(&arg(1)?),
-        Builtin::Sin => arg(0)?.sin(),
-        Builtin::Cos => arg(0)?.cos(),
-        Builtin::Tan => arg(0)?.tan(),
-        Builtin::Sinh => arg(0)?.sinh(),
-        Builtin::Cosh => arg(0)?.cosh(),
-        Builtin::Tanh => arg(0)?.tanh(),
-        Builtin::Asin => arg(0)?.asin(),
-        Builtin::Acos => arg(0)?.acos(),
-        Builtin::Atan => arg(0)?.atan(),
-        Builtin::Asinh => arg(0)?.asinh(),
-        Builtin::Acosh => arg(0)?.acosh(),
-        Builtin::Atanh => arg(0)?.atanh(),
+        // The pure maths built-ins: argument(s) evaluated here, first before second, the
+        // arithmetic shared with the flat tape (`pure_call1`/`pure_call2`).
+        Builtin::Exp
+        | Builtin::Ln
+        | Builtin::Log
+        | Builtin::Sqrt
+        | Builtin::Abs
+        | Builtin::Floor
+        | Builtin::Ceil
+        | Builtin::Round
+        | Builtin::Int
+        | Builtin::Sin
+        | Builtin::Cos
+        | Builtin::Tan
+        | Builtin::Sinh
+        | Builtin::Cosh
+        | Builtin::Tanh
+        | Builtin::Asin
+        | Builtin::Acos
+        | Builtin::Atan
+        | Builtin::Asinh
+        | Builtin::Acosh
+        | Builtin::Atanh => pure_call1(builtin, arg(0)?)
+            .ok_or_else(|| internal_error("a one-argument maths built-in has no rule"))?,
+        Builtin::Pow | Builtin::Hypot | Builtin::Atan2 | Builtin::Min | Builtin::Max => {
+            let a = arg(0)?;
+            let b = arg(1)?;
+            pure_call2(builtin, a, b)
+                .ok_or_else(|| internal_error("a two-argument maths built-in has no rule"))?
+        }
         // `$vt` is the thermal voltage `kT/q` at the ambient temperature; `$vt(T)` evaluates it
         // at the given absolute temperature `T` (kelvin). The two share `k/q`, recovered as
         // `ctx.vt / ctx.temp`, so `$vt` and `$vt(ctx.temp)` agree exactly. `T` may depend on
@@ -1998,6 +2064,11 @@ fn loop_iteration_cap_exceeded() -> CodegenError {
     ))
 }
 
+/// A broken invariant of this crate's own ([`CodegenError::Internal`]) — not a refusal.
+pub(crate) fn internal_error(msg: &str) -> CodegenError {
+    CodegenError::Internal(msg.to_string())
+}
+
 fn unsupported(msg: &str) -> CodegenError {
     CodegenError::Unsupported(msg.to_string())
 }
@@ -2215,6 +2286,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2278,6 +2351,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2428,6 +2503,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2519,6 +2596,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2607,6 +2686,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2650,6 +2731,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),
@@ -2680,6 +2763,8 @@ mod tests {
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
+            tapes: &crate::tape::NO_TAPES,
+            tape_stack: RefCell::new(Vec::new()),
             branch_current_slots: HashMap::new(),
             idt_slots: HashMap::new(),
             mixed_branch_potential_used: RefCell::new(HashSet::new()),

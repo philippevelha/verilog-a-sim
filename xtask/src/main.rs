@@ -27,6 +27,7 @@ fn main() -> Result<()> {
         Some("bench-scale") => bench_scale(&rest),
         Some("bench-model") => bench_model(&rest),
         Some("deck-diff") => deck_diff(&rest),
+        Some("tape-check") => tape_check(&rest),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -69,7 +70,9 @@ fn print_usage() {
                                  Newton iteration of every timepoint pays\n    \
          deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]...\n                                 \
                                  Every deck under circuits/ through two va-cli binaries;\n                                 \
-                                 any difference in output or exit code fails"
+                                 any difference in output or exit code fails\n    \
+         tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
+                                 at many bias points; any bit that differs fails"
     );
 }
 
@@ -2468,19 +2471,13 @@ const BENCH_MODELS: &[(&str, &str)] = &[
     ("JUNCAP200", "external/code/psp103/vacode/juncap200.va"),
 ];
 
-/// `cargo xtask bench-model [<model.va> …]` — where the time in a simulation actually goes.
+/// The model files `bench-model` and `tape-check` run on: the paths given, or
+/// [`BENCH_MODELS`] (skipping any that are not present).
 ///
-/// `bench-scale` measures the *solver*: matrix size against wall time on an RC ladder of
-/// `va-abi` reference primitives, which carry no Verilog-A at all. This measures the other half,
-/// the part that dominates on a real compact model: how long one `ModelInstance::load` takes —
-/// one residual + Jacobian evaluation, which is what every Newton iteration of every timepoint
-/// pays for. A 19k-expression BSIM4 costs three orders of magnitude more per evaluation than the
-/// solve of the 19×19 matrix it stamps into.
+/// # Errors
 ///
-/// Reported per model: the arena size, the local unknown count, one-off frontend and
-/// `build_instance` times, and the steady-state cost of `load` (best of several batches, after a
-/// warm-up, since the first calls pay for cache misses the rest do not).
-fn bench_model(args: &[String]) -> Result<()> {
+/// If none remain.
+fn model_paths(args: &[String]) -> Result<Vec<(String, PathBuf)>> {
     let paths: Vec<(String, PathBuf)> = if args.is_empty() {
         BENCH_MODELS
             .iter()
@@ -2506,8 +2503,25 @@ fn bench_model(args: &[String]) -> Result<()> {
             .collect()
     };
     if paths.is_empty() {
-        bail!("no model files to benchmark (pass paths, or populate external/code)");
+        bail!("no model files (pass paths, or populate external/code)");
     }
+    Ok(paths)
+}
+
+/// `cargo xtask bench-model [<model.va> …]` — where the time in a simulation actually goes.
+///
+/// `bench-scale` measures the *solver*: matrix size against wall time on an RC ladder of
+/// `va-abi` reference primitives, which carry no Verilog-A at all. This measures the other half,
+/// the part that dominates on a real compact model: how long one `ModelInstance::load` takes —
+/// one residual + Jacobian evaluation, which is what every Newton iteration of every timepoint
+/// pays for. A 19k-expression BSIM4 costs three orders of magnitude more per evaluation than the
+/// solve of the 19×19 matrix it stamps into.
+///
+/// Reported per model: the arena size, the local unknown count, one-off frontend and
+/// `build_instance` times, and the steady-state cost of `load` (best of several batches, after a
+/// warm-up, since the first calls pay for cache misses the rest do not).
+fn bench_model(args: &[String]) -> Result<()> {
+    let paths = model_paths(args)?;
 
     eprintln!(
         "[xtask] bench-model: one ModelInstance::load() — the cost every Newton iteration pays …"
@@ -2673,6 +2687,94 @@ const MODEL_BENCH_BATCHES: u32 = 5;
 const MODEL_BENCH_REPS: u32 = 50;
 
 /// The repository root, from this crate's manifest directory (`<root>/xtask`).
+/// `cargo xtask tape-check [<model.va> …]` — load each model (default: `bench-model`'s list)
+/// with its flat tapes and without (`va_codegen::CompiledModel::new_without_tapes`), at
+/// `TAPE_CHECK_POINTS` bias points, and require every stamp to agree bit for bit. The
+/// differential test behind the tape's claim to change no answer, on real compact models
+/// (`docs/proposals/evaluator-tree-walk.md`, Stage 3).
+///
+/// Bias points: all zero, all 0.1 (`bench-model`'s point), and pseudo-random vectors in
+/// ±1.5 with a fixed seed — so the check is repeatable, and bias-dependent branches go both
+/// ways.
+///
+/// # Errors
+///
+/// If a model cannot be compiled, or **any stamp differs**.
+fn tape_check(args: &[String]) -> Result<()> {
+    let paths = model_paths(args)?;
+    let mut failed = 0;
+    for (name, path) in &paths {
+        let src =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let design = va_frontend::compile_with_includes(&src, &[dir])
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("{name}: frontend"))?;
+        let module = design
+            .modules
+            .first()
+            .cloned()
+            .with_context(|| format!("{name}: declares no module"))?;
+        let taped = va_codegen::CompiledModel::new(&module)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("{name}: codegen"))?;
+        let walked = va_codegen::CompiledModel::new_without_tapes(&module)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("{name}: codegen"))?;
+        let terminals: Vec<usize> = (0..module.nodes.len()).collect();
+        let (mut n1, mut n2) = (module.nodes.len(), module.nodes.len());
+        let a = taped
+            .instantiate(&terminals, &mut n1)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let b = walked
+            .instantiate(&terminals, &mut n2)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let dim = n1.max(1);
+        let mut seed: u64 = 0x5eed_7a9e;
+        let mut points = vec![vec![0.0; dim], vec![0.1; dim]];
+        for _ in 0..TAPE_CHECK_POINTS {
+            points.push(
+                (0..dim)
+                    .map(|_| {
+                        seed = seed
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        ((seed >> 11) as f64 / (1u64 << 53) as f64) * 3.0 - 1.5
+                    })
+                    .collect(),
+            );
+        }
+        let actx = va_abi::AnalysisCtx::dc();
+        let mut mismatches = 0;
+        for x in &points {
+            let mut sa = va_abi::stamps::DenseStamp::new(dim);
+            let mut sb = va_abi::stamps::DenseStamp::new(dim);
+            a.load(x, &actx, &mut va_abi::ModelState::stateless(), &mut sa);
+            b.load(x, &actx, &mut va_abi::ModelState::stateless(), &mut sb);
+            if format!("{sa:?}") != format!("{sb:?}") {
+                mismatches += 1;
+            }
+        }
+        eprintln!(
+            "[xtask] tape-check {name:>14}: {} bias points, {mismatches} differing",
+            points.len()
+        );
+        if mismatches > 0 {
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} model(s) evaluate differently with tapes");
+    }
+    Ok(())
+}
+
+/// Pseudo-random bias points per model in `tape-check`, besides all-zero and all-0.1.
+const TAPE_CHECK_POINTS: usize = 40;
+
 /// Decks `deck-diff` leaves out unless `--all`: each takes minutes per binary (ISCAS'85 c432's
 /// `.op`, c17's 13 000-point transient), and both have their own checks
 /// (`circuits/benchmark/iscas85/`).

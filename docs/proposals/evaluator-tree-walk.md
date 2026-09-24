@@ -1,7 +1,8 @@
 # Proposal: cut the evaluator's tree-walk overhead
 
-**Status:** proposed, 2026-09-24. **Stage 1 done (1.15.0, 2026-09-24)** — results and the
-decision it leaves open are at the end of Stage 1 below.
+**Status:** proposed, 2026-09-24. **Stage 1 done (1.15.0); Stage 2 (hoisting) skipped on
+Stage 1's count; Stage 3 (flat tape) done (1.16.0), ~2% faster.** Stage 3 also showed that
+§1's reading of the profile was wrong — see the correction at the end of §1 and Stage 3's result.
 **Affects:** `va-codegen` only — `lower.rs` (a new analysis and a new lowered form), `ad.rs` and
 `lib.rs` (the evaluation loop), `xtask` (`bench-model` reporting). **`va-ir` (Interface α) and
 `va-abi` (Interface β) are not touched**: everything proposed here is internal to how
@@ -37,6 +38,13 @@ bench-model`), self time converted to µs with the binary's measured 96.4 µs pe
 
 The heap share came down from ~101 µs in two steps (1.14.0+1, +2); the walk did not move
 (46.6 → 45.8 µs across those changes) and is now half of every evaluation.
+
+> **Correction (Stage 3, 1.16.0).** "Tree walk" above is `eval`'s *self time*, and in an
+> optimised build that includes everything inlined into `eval`: constructing each node's `Dual`,
+> the variable read's copy (reference-count increments), the comparison and constant arms,
+> dropping temporaries. The recursion, arena lookup and `Result` plumbing this proposal set out to
+> remove are only part of it. Stage 3 removed them for ~98% of visited nodes and gained ~2%. The
+> per-node cost is the dual-number values themselves — option D below — not the dispatch.
 
 **What the walk visits** — nodes `eval` enters per `load()`, counted over 100 calls after
 warm-up (scratch instrumentation, 1.14.0+3). "No gradient" means the node's result carries a
@@ -164,6 +172,28 @@ the few operations that can still fail at run time (a loop's iteration cap) keep
 
 Keep the tree walker as the reference: the Stage 2 differential test runs tape against tree. When
 it has been bit-identical across the corpus for a release, the tree walker can become test-only.
+
+**Stage 3 result (1.16.0).** `va_codegen::tape`: every root a lowered statement or contribution
+evaluates is compiled, when the model is built, to a post-order instruction list — constants,
+parameters, `$param_given`/`$port_connected` resolved then; variable reads; unary, binary and pure
+maths operators, which call the same functions `eval` does (`ad::apply_unary`, `apply_binary`,
+`pure_call1`, `pure_call2`, factored out of `eval` for this); and one `Tree` instruction handing
+any other subtree (probes, `?:`, user functions, analog operators) to `eval`. It runs on a value
+stack held for the context's life. Stage 2's differential test was built here instead:
+`CompiledModel::new_without_tapes` is the tree-walk reference, a unit test covers every
+instruction kind, and `cargo xtask tape-check` loads the benchmark's seven CMC models both ways
+at 42 bias points each — bit-identical, and a deliberately wrong tape (operands popped in the
+wrong order) fails both.
+
+Coverage per PSP103 `load()` (scratch count): 3 384 of 3 441 visited nodes run as tape
+instructions, 99 `eval` calls remain. Time, `bench-model`, nine interleaved runs each against
+1.15.0 on mains power: PSP103 median 97.0 → 95.2 µs (−1.9%), BSIM4 126.5 → 123.3 µs (−2.5%),
+BSIM-BULK107 210.3 → 205.1 µs (−2.5%); minima +1.5%, −9.5%, −4.0%. Kept on that consistent ~2%.
+
+With dispatch gone and the time still there, **Stage 4 (a JIT) would compile the same per-node
+work and is not recommended on this evidence.** The next step, if any, is option D, starting
+from a profile with the `Dual` operations kept out of line (`#[inline(never)]` in a scratch
+build) so their costs show under their own names.
 
 ### Stage 4 — decide about C
 
