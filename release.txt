@@ -20,6 +20,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.14.0+4 - 2026-09-24
+---------------------
+**Proposal: cut the evaluator's tree-walk overhead** (`docs/proposals/evaluator-tree-walk.md`).
+No code change. After 1.14.0+3 the walk itself — `eval`'s recursion, dispatch, arena lookups and
+per-node `Result` — is the largest cost of a PSP103 `load()`: ~46 µs of ~96 µs, ~13 ns per node
+over 3 441 nodes visited per call. Measured for the proposal (scratch instrumentation, reverted):
+nodes visited per `load()` — PSP103 3 441, BSIM4 3 390, BSIM-BULK 7 106 — of which 47%, 59%, 69%
+carry no gradient, an upper bound on what is still recomputed every call despite not depending on
+the unknowns (the setup split only takes a leading run of statements).
+
+Proposed, in stages, each measured and bit-identical: (1) a dependence analysis that only
+*counts* what could be hoisted, with a go/no-go threshold; (2) hoisting bias-independent
+subexpressions beyond the prefix into setup, defended by a differential test against the plain
+evaluator; (3) a flat instruction tape in place of recursive evaluation; (4) a Cranelift JIT only
+if the walk still dominates, with its own proposal for §5's `unsafe` sign-off. `va-codegen` only;
+Interfaces α and β untouched; the T2 owner to agree before stage 2.
+
+Also recorded there: a pooled variable table (reuse one table per model instead of allocating
+~81 KB per PSP103 call) was bit-identical and saved nothing measurable (92.1 → 91.2 µs median),
+and was reverted — the table's allocation is not where local-variable time goes.
+
+
 1.14.0+3 - 2026-09-24
 ---------------------
 **A probe read's gradient is collected straight into its `Rc<[f64]>`: one allocation instead of
