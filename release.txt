@@ -20,6 +20,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.14.0+3 - 2026-09-24
+---------------------
+**A probe read's gradient is collected straight into its `Rc<[f64]>`: one allocation instead of
+a `Vec` plus a copy.** The three probe reads (`V(p, n)`, a flow `I(...)`, an `idt` value) filled a
+`vec![0.0; n]` and then called `Rc::from(vec)`, which allocates the `Rc` and copies — two
+allocations each. They now share `probe_grad`, which maps a range straight into the `Rc`; each
+slot's arithmetic is the old code's, so results are bit-identical. The arithmetic paths
+(`map_owned`, `zip_owned`) were already single allocations: they collect from length-reporting
+iterators, which the standard library builds into the `Rc` directly — confirmed by the counts,
+988 allocations per `load()` at 1.14.0+1 against ~972 gradient vectors. `Dual::variable` keeps
+its `Vec`: it is not on the solve path, and its out-of-range slot panics today, which a rewrite
+would silently change.
+
+Heap allocations per PSP103 `load()` (counting allocator): 443 → **431**, the 12 probe reads per
+evaluation. Time: no measurable change — `bench-model`, seven interleaved runs, medians 90.0 µs
+before and 91.1 µs after, inside the noise; 12 of 431 allocations is under 3%.
+
+Measured at 1.14.0+3: `cargo test --workspace` **887 passed / 0 failed**. fmt + clippy clean.
+`cargo xtask validate`: **28/28**, identical to 1.12.0. All 70 decks under `circuits/` give
+output identical to 1.14.0+2's.
+
+
 1.14.0+2 - 2026-09-24
 ---------------------
 **Dual-number operations write their result into an operand's gradient buffer when nothing else

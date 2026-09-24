@@ -631,6 +631,32 @@ impl Dual {
     }
 }
 
+/// A probe read's gradient over `count` local unknowns: `+1` at `plus`, `−1` at `minus`, zero
+/// elsewhere — `V(p, n)` is `(p, Some(n))`, a flow or `idt` read `(slot, None)`. A slot out of
+/// range (ground) simply never matches.
+///
+/// Collected straight into the `Rc<[f64]>`: a mapped range reports its exact length, so this is
+/// **one** allocation. Filling a `Vec` and then `Rc::from(vec)`, as before 1.14.0+3, allocated
+/// twice and copied — twelve extra allocations per PSP103 evaluation. Each slot's arithmetic is
+/// the old code's (`0.0`, `+= 1.0`, `-= 1.0`, in that order), so the result is bit-identical,
+/// `p == n` included.
+fn probe_grad(count: usize, plus: usize, minus: Option<usize>) -> Grad {
+    Grad::Dense(
+        (0..count)
+            .map(|k| {
+                let mut g = 0.0;
+                if k == plus {
+                    g += 1.0;
+                }
+                if Some(k) == minus {
+                    g -= 1.0;
+                }
+                g
+            })
+            .collect(),
+    )
+}
+
 /// Combine two gradient channels elementwise.
 ///
 /// **`f(0.0, 0.0)` must be `0.0`** — true of every rule that uses this, each of which is linear
@@ -1215,16 +1241,9 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 let (p, n) = (br.p.0 as usize, br.n.0 as usize);
                 let value = ctx.node_voltage(p) - ctx.node_voltage(n);
                 crate::counters::probe_alloc();
-                let mut grad = vec![0.0; count];
-                if p < count {
-                    grad[p] += 1.0;
-                }
-                if n < count {
-                    grad[n] -= 1.0;
-                }
                 Ok(Dual::from_parts(
                     value,
-                    Grad::Dense(Rc::from(grad)),
+                    probe_grad(count, p, Some(n)),
                     Grad::Zero,
                 ))
             }
@@ -1243,13 +1262,9 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 let g = ctx.terminals.get(slot).copied().unwrap_or(usize::MAX);
                 let value = ctx.x.get(g).copied().unwrap_or(0.0);
                 crate::counters::probe_alloc();
-                let mut grad = vec![0.0; count];
-                if slot < count {
-                    grad[slot] = 1.0;
-                }
                 Ok(Dual::from_parts(
                     value,
-                    Grad::Dense(Rc::from(grad)),
+                    probe_grad(count, slot, None),
                     Grad::Zero,
                 ))
             }
@@ -1316,13 +1331,9 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
             })?;
             let value = ctx.node_voltage(slot);
             crate::counters::probe_alloc();
-            let mut grad = vec![0.0; count];
-            if slot < count {
-                grad[slot] = 1.0;
-            }
             Ok(Dual::from_parts(
                 value,
-                Grad::Dense(Rc::from(grad)),
+                probe_grad(count, slot, None),
                 Grad::Zero,
             ))
         }
