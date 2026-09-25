@@ -20,6 +20,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.16.0+2 - 2026-09-25
+---------------------
+**Proposal: evaluate device instances in parallel, reproducibly** (`docs/proposals/parallel-assembly.md`).
+No code change. A change of strategy: the single-thread evaluator work of 1.13.0–1.16.0 stops here,
+and the next lever is parallelism, after `references/eespice.pdf` (EEspice, graph-coloured
+parallel stamping). The proposal takes EEspice's simpler variant — evaluate every instance in
+parallel into its own stamp buffer, replay the buffers in instance order — because our evaluation
+dwarfs our stamping and replay keeps results bit-identical, which colouring does not.
+
+Behind it, a prototype that is **not committed** (a local branch and stash):
+
+  * Serial vs parallel: all 72 decks identical (`deck-diff --all`, incl. c432 and c17's transient);
+    chain160's 5 286 unknowns bit-identical at 1, 2, 4 and 8 threads. That needed two fixes the
+    proposal carries: MinGW's `exp`/`pow` give different bits on the main thread and on any other
+    (x87 precision is per-thread on Windows) — replaced by the pure-Rust `libm` crate, ≤1 ulp
+    everywhere measured and faster for exp/ln/pow; and `faer`'s default parallel LU rounds
+    according to the core count.
+  * **That last one is a live bug in this release:** the same deck gives different last digits on
+    machines with different core counts (chain160's output changes with `RAYON_NUM_THREADS`).
+    Proposed fix: pin `faer` sequential — which also measured faster.
+  * `libm` + sequential LU against 1.16.0+1: 59/70 decks identical; three adaptive transients take
+    a different step count, waveform RMS ≤ 3.7e-4 of swing; `validate` 28/28, errors unchanged.
+  * Speed, c432 `.op`: 87.5 s → 42.1 s on 8 threads (evaluation 62.4 → 17.5 s). After that the
+    numeric LU is the largest cost; the proposal adds a parallel sparse LU (§5.1 — `faer`'s own is
+    *slower* here, 16.0 → 36.5 s at 8 threads) and factorization reuse across Newton iterations
+    (§5.2), both to be measured before built.
+
+**Caution:** the timings are preliminary — one laptop, one run each, power unstable on the day
+(it fell to battery at least twice). The c17 transient timing is void and to be redone. The 32-core
+and whole-ISCAS figures are extrapolations. The correctness results are deterministic and firm.
+
+Measured at this version: no code change; figures above are the prototype's, from 2026-09-25.
+
+
 1.16.0+1 - 2026-09-24
 ---------------------
 **Proposal: stop paying the system heap for every gradient** (`docs/proposals/gradient-storage.md`).
