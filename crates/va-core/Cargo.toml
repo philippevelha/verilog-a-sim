@@ -13,8 +13,6 @@ libm = { workspace = true }
 va-abi = { workspace = true }
 faer = { workspace = true }
 thiserror = { workspace = true }
+# Parallel device evaluation (`par`, 1.18.0). Pure Rust, and already in the build through `faer`.
+rayon = { workspace = true }
 
-[dev-dependencies]
-# Test-only: runs the solve under rayon pools of different sizes (it is already in the build,
-# through `faer`). Not a runtime dependency, so §2's va-abi-only invariant is untouched.
-rayon = "1"

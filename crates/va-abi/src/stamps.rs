@@ -15,6 +15,10 @@
 /// `ac_stim` and `bound_step`, which only a compiled Verilog-A model emits, and only one
 /// analysis each consumes. Defaulting them keeps every existing assembler compiling untouched,
 /// exactly as [`crate::ModelInstance::unknown_kind`] and [`crate::ModelInstance::noise`] did.
+///
+/// **A method added here must also be recorded by `va_core::par::Recorder`**, which stores a
+/// model's calls for replay when instances are evaluated in parallel: a defaulted method the
+/// recorder does not override would be silently dropped on the parallel path only.
 pub trait StampSink {
     /// Add `value` to the residual at global row `row` (current flowing **into** node `row`).
     fn residual(&mut self, row: usize, value: f64);

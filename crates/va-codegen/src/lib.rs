@@ -48,7 +48,7 @@ use ad::{eval, Ctx, Dual};
 use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use va_abi::{ModelInstance, StampSink, UnknownKind};
 use va_ir::{Builtin, Expr, ExprId, Module};
@@ -155,7 +155,7 @@ pub fn build_instance(
 /// still collapses the common case, where one NMOS card and one PMOS card serve a whole netlist.
 #[derive(Clone)]
 pub struct CompiledModel {
-    shared: Rc<SharedModel>,
+    shared: Arc<SharedModel>,
 }
 
 impl CompiledModel {
@@ -197,7 +197,7 @@ impl CompiledModel {
         } else {
             tape::Tapes::default()
         };
-        let shared = Rc::new(SharedModel {
+        let shared = Arc::new(SharedModel {
             module: module.clone(),
             params,
             lowered,
@@ -205,7 +205,7 @@ impl CompiledModel {
             vt: VT,
             temp: TEMP,
             node_is_junction,
-            setup: RefCell::new(None),
+            setup: OnceLock::new(),
             tapes,
         });
 
@@ -215,7 +215,7 @@ impl CompiledModel {
         // is what lets this happen once instead of per instance.
         let prototype = GeneratedModel {
             terminals: (0..shared.lowered.n_unknowns).collect(),
-            shared: Rc::clone(&shared),
+            shared: Arc::clone(&shared),
             pinned: Vec::new(),
         };
         prototype.validate()?;
@@ -304,7 +304,7 @@ impl CompiledModel {
             .map(|s| s.local_slot)
             .collect();
         Ok(Box::new(GeneratedModel {
-            shared: Rc::clone(&self.shared),
+            shared: Arc::clone(&self.shared),
             terminals: full,
             pinned,
         }))
@@ -336,7 +336,7 @@ struct LaplaceRealization {
 /// would have needed ~85 GB for the instances alone.
 struct GeneratedModel {
     /// The compiled model, shared by every instance placed from it.
-    shared: Rc<SharedModel>,
+    shared: Arc<SharedModel>,
     /// This instance's local-slot → global-unknown map. The only genuinely per-instance thing:
     /// two instances of one model differ in where they are wired and in nothing else.
     terminals: Vec<usize>,
@@ -347,7 +347,7 @@ struct GeneratedModel {
 }
 
 /// A model compiled once: the arena, the lowered plan, the resolved parameters, and everything
-/// derived from them. Shared by `Rc` across every instance placed from it.
+/// derived from them. Shared by `Arc` across every instance placed from it.
 ///
 /// Parameter values live here rather than per instance, which means two devices with *different*
 /// overrides are two `SharedModel`s — correctly so, since an override changes the numbers every
@@ -373,9 +373,11 @@ struct SharedModel {
     /// only parameters, `$param_given`/`$port_connected`, `$mfactor` and `$temperature`/`$vt`,
     /// all of which are properties of the compiled model rather than of the placement.
     ///
-    /// `RefCell` because `load` takes `&self` — the ABI's shape, since `va-core` holds
-    /// instances immutably and evaluates them from a shared reference. `None` until the first
-    /// `load`; filled lazily rather than in `build_instance` so that constructing an instance
+    /// `OnceLock` because `load` takes `&self` — the ABI's shape, since `va-core` holds
+    /// instances immutably and evaluates them from a shared reference — and because instances
+    /// are evaluated on several threads at once (`ModelInstance: Send + Sync`, 1.18.0): the
+    /// first `load` to arrive computes it, any other waits. Empty until then; filled lazily
+    /// rather than in `build_instance` so that constructing an instance
     /// stays cheap for a caller that never evaluates it (`unknowns()`, `state_len()`,
     /// `unknown_is_junction()` all answer without it).
     ///
@@ -383,7 +385,7 @@ struct SharedModel {
     /// `$param_given`/`$port_connected`, `$mfactor`, and `$temperature`/`$vt` — and all of
     /// those are fixed when the instance is built. See `lower::static_prefix_len`'s closing
     /// caveat for the one future change that would invalidate this and require a key.
-    setup: RefCell<Option<Setup>>,
+    setup: OnceLock<Setup>,
     /// Every root expression the lowered statements evaluate, as a flat instruction tape
     /// ([`tape::Tapes::compile`]) — evaluated by [`tape::eval_root`] instead of walking the
     /// tree, with bit-identical results.
@@ -570,21 +572,25 @@ impl GeneratedModel {
     /// for the same reason [`Self::load`] swallows one: `validate` already proved every
     /// statement evaluable at `build_instance` time, and whatever bindings did get made are
     /// still the right ones for the statements that follow.
-    fn ensure_setup(&self) {
-        if self.shared.lowered.static_prefix == 0 || self.shared.setup.borrow().is_some() {
-            return;
+    ///
+    /// `None` for a model with no setup prefix.
+    fn setup(&self) -> Option<&Setup> {
+        if self.shared.lowered.static_prefix == 0 {
+            return None;
         }
-        let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], false, &[]);
-        let outcome = self.walk(
-            &ctx,
-            &self.shared.lowered.stmts[..self.shared.lowered.static_prefix],
-            &mut |_, _, _| {},
-        );
-        let vars = ctx.vars.borrow().clone();
-        *self.shared.setup.borrow_mut() = Some(Setup {
-            vars,
-            completed: outcome.is_ok(),
-        });
+        Some(self.shared.setup.get_or_init(|| {
+            let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], false, &[]);
+            let outcome = self.walk(
+                &ctx,
+                &self.shared.lowered.stmts[..self.shared.lowered.static_prefix],
+                &mut |_, _, _| {},
+            );
+            let vars = ctx.vars.borrow().clone();
+            Setup {
+                vars,
+                completed: outcome.is_ok(),
+            }
+        }))
     }
 
     fn run(
@@ -2236,10 +2242,9 @@ impl ModelInstance for GeneratedModel {
         state: &mut va_abi::ModelState,
         sink: &mut dyn StampSink,
     ) {
-        self.ensure_setup();
-        let setup = self.shared.setup.borrow();
-        let static_vars: &[Option<crate::ad::Dual>] = setup.as_ref().map_or(&[], |s| &s.vars);
-        let setup_completed = setup.as_ref().is_none_or(|s| s.completed);
+        let setup = self.setup();
+        let static_vars: &[Option<crate::ad::Dual>] = setup.map_or(&[], |s| &s.vars);
+        let setup_completed = setup.is_none_or(|s| s.completed);
         let ctx = self.ctx(
             x,
             actx,
@@ -2253,7 +2258,7 @@ impl ModelInstance for GeneratedModel {
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).
         //
         // The walk starts at `static_prefix`, not at 0: everything before it is the model's
-        // setup, already evaluated into `static_vars` by `ensure_setup` and in scope through
+        // setup, already evaluated into `static_vars` by `Self::setup` and in scope through
         // `Ctx::static_vars`. That is the whole of this optimisation at the call site.
         //
         // Guarded on the setup having completed, because a walk that aborts skips every

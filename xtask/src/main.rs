@@ -71,8 +71,10 @@ fn print_usage() {
          bench-model [<model.va>...]  One ModelInstance::load() per model: the cost every\n                                 \
                                  Newton iteration of every timepoint pays\n    \
          deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]...\n                                 \
-                                 Every deck under circuits/ through two va-cli binaries;\n                                 \
-                                 any difference in output or exit code fails\n    \
+                   [--env-old K=V] [--env-new K=V]...\n                                 \
+                                 Every deck under circuits/ through two va-cli binaries\n                                 \
+                                 (or one, under two environments); any difference in\n                                 \
+                                 output or exit code fails\n    \
          tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
                                  at many bias points; any bit that differs fails"
     );
@@ -2796,6 +2798,11 @@ const DECK_DIFF_SLOW: &[&str] = &[
 /// follows the deck's cards (`.tran`, else `.ac`, else `.noise`, else DC). A deck that fails
 /// the same way under both binaries is a match — this compares behaviour, not success.
 ///
+/// `--env-old KEY=VALUE` / `--env-new KEY=VALUE` (repeatable) set an environment variable for
+/// one side only, so a binary can be compared **with itself** under two settings — e.g.
+/// `--env-old RAYON_NUM_THREADS=1 --env-new RAYON_NUM_THREADS=8`, the check that parallel
+/// evaluation gives serial evaluation's bits (`va_core::par`).
+///
 /// # Errors
 ///
 /// If either binary is missing, a deck cannot be read or run, or **any deck differs**.
@@ -2803,6 +2810,8 @@ fn deck_diff(args: &[String]) -> Result<()> {
     let mut exes = Vec::new();
     let mut skip: Vec<String> = Vec::new();
     let mut all = false;
+    let mut env_old: Vec<(String, String)> = Vec::new();
+    let mut env_new: Vec<(String, String)> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -2812,6 +2821,18 @@ fn deck_diff(args: &[String]) -> Result<()> {
                     .context("--skip needs a deck path")?
                     .replace('\\', "/"),
             ),
+            "--env-old" | "--env-new" => {
+                let kv = it.next().with_context(|| format!("{a} needs KEY=VALUE"))?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .with_context(|| format!("{a} expects KEY=VALUE, got `{kv}`"))?;
+                let side = if a == "--env-old" {
+                    &mut env_old
+                } else {
+                    &mut env_new
+                };
+                side.push((k.to_string(), v.to_string()));
+            }
             _ => exes.push(PathBuf::from(a)),
         }
     }
@@ -2848,8 +2869,9 @@ fn deck_diff(args: &[String]) -> Result<()> {
         let text = std::fs::read_to_string(deck).with_context(|| format!("reading {rel}"))?;
         let model = deck_model(&text);
         let flag = deck_analysis_flag(&text);
-        let run = |exe: &Path| -> Result<(Option<i32>, String, String)> {
+        let run = |exe: &Path, env: &[(String, String)]| -> Result<(Option<i32>, String, String)> {
             let mut cmd = Command::new(exe);
+            cmd.envs(env.iter().map(|(k, v)| (k, v)));
             cmd.current_dir(&root)
                 .args(["sim", rel.as_str(), "--model", model.as_str()]);
             if let Some(f) = flag {
@@ -2869,8 +2891,8 @@ fn deck_diff(args: &[String]) -> Result<()> {
                 stderr,
             ))
         };
-        let a = run(old)?;
-        let b = run(new)?;
+        let a = run(old, &env_old)?;
+        let b = run(new, &env_new)?;
         if a == b {
             same += 1;
             continue;

@@ -32,7 +32,11 @@ pub enum UnknownKind {
 /// Implementations are produced two ways and are interchangeable to `va-core`:
 /// - hand-written, in [`crate::reference`];
 /// - generated from Verilog-A by `va-codegen`.
-pub trait ModelInstance {
+///
+/// `Send + Sync` (§6 change, ratified 2026-09-26): `va-core` evaluates instances on several
+/// threads at once (`va_core::par`), so anything `load` mutates through `&self` — a lazily
+/// computed cache, say — must be thread-safe (`OnceLock`, atomics), not `Cell`/`RefCell`/`Rc`.
+pub trait ModelInstance: Send + Sync {
     /// The global unknown indices this instance contributes to (nodes + internal unknowns).
     ///
     /// The order is the instance's own local convention; the values are positions in the

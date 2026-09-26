@@ -386,7 +386,7 @@ pub trait NoiseSink {
     fn table_current(&mut self, p: usize, n: usize, points: &[(f64, f64)], interp: TableInterp) {}
 }
 
-pub trait ModelInstance {
+pub trait ModelInstance: Send + Sync {
     /// Global unknown indices this instance contributes to (nodes + internal unknowns).
     fn unknowns(&self) -> &[usize];
     /// Structural kind of `unknowns()[i]`. Default `UnknownKind::Node`.
@@ -988,3 +988,16 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > the transient realization rides the existing state channel (one `StatefulKind::Zi` block per
 > call site) and asks for its sample instants through the existing `EventSink::breakpoint`,
 > which `va-transient` now polls for every instance rather than only those with event sites.
+
+> **Revision (§6 change, ratified 2026-09-26):** `ModelInstance` gained the supertraits
+> **`Send + Sync`**, so `va-core` can evaluate instances on several threads at once
+> (`va_core::par`, 1.18.0; `docs/proposals/parallel-assembly.md` Step 1). No method changed.
+> What it asks of an implementation: anything `load` mutates through `&self` must be
+> thread-safe. In this workspace that was three places — `va-codegen`'s shared model (`Rc` →
+> `Arc`, and its lazily computed setup `RefCell<Option<_>>` → `OnceLock<_>`), its gradient
+> buffers (`Rc<[f64]>` → `Arc<[f64]>`, since setup values hold them), and one test double in
+> `va-transient` (`Cell<usize>` counter → `AtomicUsize`). Per-evaluation scratch (`Ctx`'s
+> `RefCell`s) is untouched: it lives for one `load` call and is never shared. The contract
+> `load` already had — pure in `x`, state through `ModelState`, stamps through the sink — is
+> what makes parallel evaluation give serial evaluation's bits once the stamps are replayed in
+> instance order.

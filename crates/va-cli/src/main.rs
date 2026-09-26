@@ -66,6 +66,11 @@ fn print_usage() {
          --solver auto|dense|sparse  Linear algebra. Default auto: dense below 100
                                  unknowns, sparse from 100. Every analysis
                                  (.op, .dc, .tran, .ac, .noise) uses it.
+         --threads <n>           Threads evaluating device instances. Default: one per
+                                 logical core (or RAYON_NUM_THREADS). Results are
+                                 identical at every thread count; only speed changes.
+                                 VA_PARALLEL=auto|always|never overrides when the
+                                 parallel path is used (default auto: by measured cost).
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per
@@ -96,6 +101,32 @@ fn cmd_check(args: &[String]) -> Result<()> {
 /// The `sim` subcommand: run a netlist through the pipeline.
 fn cmd_sim(args: &[String]) -> Result<()> {
     let netlist = args.first().context("expected a netlist path")?;
+    // `--threads <n>`: how many threads evaluate device instances (`va_core::par`). Without it,
+    // rayon's default — `RAYON_NUM_THREADS`, else one per logical core. Speed only: every
+    // thread count gives the same bits.
+    if let Some(n) = parse_flag(args, "--threads") {
+        let n: usize = n
+            .parse()
+            .ok()
+            .filter(|&n| n > 0)
+            .with_context(|| format!("--threads expects a positive integer, got `{n}`"))?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .context("setting up the evaluation thread pool")?;
+    }
+    // `VA_PARALLEL=auto|always|never`: when instances are evaluated in parallel
+    // (`va_core::par::Mode`). For verification — `always` makes a serial-vs-parallel
+    // `xtask deck-diff` exercise the parallel path on every deck — not for tuning.
+    if let Some(v) = std::env::var_os("VA_PARALLEL") {
+        let mode = match v.to_string_lossy().as_ref() {
+            "auto" => va_core::par::Mode::Auto,
+            "always" => va_core::par::Mode::Always,
+            "never" => va_core::par::Mode::Never,
+            other => bail!("VA_PARALLEL expects auto, always or never, got `{other}`"),
+        };
+        va_core::par::set_mode(mode);
+    }
     // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
     // models, so a Verilog-A model is only needed for custom devices.
     let model = parse_flag(args, "--model");

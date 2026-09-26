@@ -1330,6 +1330,7 @@ dependencies = [
  "anyhow",
  "libm",
  "plotters",
+ "rayon",
  "va-abi",
  "va-acnoise",
  "va-codegen",

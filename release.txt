@@ -20,6 +20,51 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.18.0 - 2026-09-26
+-------------------
+**Device instances are evaluated in parallel, with results bit-identical to serial evaluation
+at every thread count.** Step 3 of `docs/proposals/parallel-assembly.md`. `va_core::par::load_all`
+evaluates each instance into its own stamp recording on rayon's pool, then replays the
+recordings into the system in instance order, so the system receives exactly the serial loop's
+calls in the serial loop's order. Used by every DC assembly (dense and sparse) and every
+transient assembly; AC and noise load once per analysis and stay serial.
+
+  * **§6 interface change, ratified 2026-09-26:** `ModelInstance: Send + Sync`
+    (`docs/interfaces.md`). `va-codegen`: shared model and gradient buffers `Rc` → `Arc`, lazy
+    setup `RefCell<Option<_>>` → `OnceLock<_>`; one `va-transient` test double `Cell` →
+    `AtomicUsize`. Per-evaluation scratch is untouched.
+  * **When it goes parallel is measured, not a count:** thread hand-off costs ~40 µs per
+    assembly here, which made the 13-instance reference-model `ring_osc` 2.2× *slower* in
+    parallel (0.54 vs 0.24 s) while c17's ~30 PSP103 transistors ran 2.0× *faster* (82 vs
+    165 s, 8 threads, two runs each). So `load_all` times a serial assembly now and then
+    (first call, then every 256th), keeps an evaluation-time-per-instance estimate, and goes
+    parallel when `instances × estimate` ≥ 200 µs (`PARALLEL_MIN_WORK_NS`). The choice
+    depends on timing; the result does not.
+  * `va-cli sim --threads <n>` sizes the pool (default: one per logical core, or
+    `RAYON_NUM_THREADS`). `VA_PARALLEL=auto|always|never` forces the path, for verification.
+  * `cargo xtask deck-diff` gained `--env-old K=V` / `--env-new K=V`, to compare one binary
+    with itself under two environments — the gate below.
+
+**Gate:** `deck-diff --all`, 72 of 72 decks identical in each of: 1.17.0 vs 1.18.0 (defaults);
+1 thread vs `VA_PARALLEL=always` at 2, 4 and 8 threads. deck-diff compares printed output; the
+bit-level claim rests on the new unit tests — a replayed recording is the same `StampSink`
+calls as direct stamping, for all six methods, and `load_all` in pools of 1/2/4/8 threads
+hands the sink exactly the serial call sequence (compared with `==` on the `f64`s).
+
+**Speed,** c432 `.op` (ISCAS'85: 2 458 devices, 910 of them PSP103; 15 416 unknowns), this
+laptop (i7-1185G7, 4 cores / 8 threads), mains power, two interleaved rounds, same output at
+every thread count: 1 thread 80.5 / 80.4 s; 4 threads 46.1 / 48.5 s (1.7×); 8 threads
+43.6 / 43.7 s (1.84×). What is left is mostly serial: the numeric LU (~16 s, proposal §5.1)
+and the replay. c17's transient: 165 → 82 s at 8 threads (2.0×).
+
+**Limitations:** replay is serial and a recording is allocated per instance per assembly; the
+cost estimate is one process-wide number; the numeric LU is now the largest serial cost
+(Step 4 measures what a parallel one could gain before anything is built).
+
+Measured at this version: `cargo test --workspace` 893 passed; `validate` 28/28, convergence
+28/28; clippy clean.
+
+
 1.17.0 - 2026-09-26
 -------------------
 **Every transcendental that can reach a simulated number now comes from the pure-Rust `libm`

@@ -304,14 +304,16 @@ Design points that need deciding:
 
 ## 6. Steps
 
-1. **Ratify the §6 interface change** (`Send + Sync` on `ModelInstance`) with the owners of
+1. **Ratify the §6 interface change** (ratified 2026-09-26; `docs/interfaces.md`) (`Send + Sync` on `ModelInstance`) with the owners of
    `va-codegen` (T2), `va-transient` (T4), `va-acnoise` (T5), `va-netlist`/`va-cli` (T6).
 2. **Reproducibility first, as its own release:** `libm` for all evaluation-path maths (§3.3) +
    `faer` pinned sequential (§3.4 — done in 1.16.1) + the `disallowed_methods` lint (done in
    1.17.0). No parallelism yet. Its
    release entry states the §4.2 shift. A feature that moves answers → a minor bump.
-3. **Parallel assembly:** record/replay in `va-core` (DC, dense and sparse — the prototype did
-   sparse only) and `va-transient`; `--threads`; the small-circuit threshold. Gate: `deck-diff`
+3. **Parallel assembly** (done in 1.18.0 — `va_core::par`; the threshold turned out to need
+   measured *cost*, not an instance count, see release.txt): record/replay in `va-core` (DC,
+   dense and sparse — the prototype did sparse only) and `va-transient`; `--threads`; the
+   small-circuit threshold. Gate: `deck-diff`
    serial vs parallel at 1/2/4/8 threads, identical, plus a unit test that a model's stamps
    replay to the same system as direct stamping.
 4. **Solve, measured before built:** count BTF blocks on c432/chains (§5.1a); time a value-only

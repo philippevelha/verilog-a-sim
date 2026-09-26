@@ -16,7 +16,7 @@
 use crate::CodegenError;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 use va_ir::{BinOp, Builtin, Expr, ExprId, Function, Module, Stmt, UnOp, VarId};
 
 /// A value carried with its gradient w.r.t. the active unknowns (a dual number), **split into
@@ -85,13 +85,13 @@ enum Grad {
     /// same length, since the only thing that introduces one is [`Dual::variable`].
     ///
     /// Shared, not owned: copying a `Dual` — which reading a local variable does, every time —
-    /// shares the buffer instead of allocating a new one. `Rc<[f64]>`, not `Rc<Vec<f64>>`: the
+    /// shares the buffer instead of allocating a new one. `Arc<[f64]>`, not `Arc<Vec<f64>>`: the
     /// count and the partials live in **one** allocation, collected straight into it. The `Vec`
-    /// form cost two per gradient (the `Rc` box and the buffer), which cancelled what sharing
+    /// form cost two per gradient (the `Arc` box and the buffer), which cancelled what sharing
     /// saved — a sampling profile showed it (1.14.0+1). A gradient is never modified after it
     /// is built, so sharing is safe. Before this, those copies were ~47% of every gradient
     /// allocation a PSP103 evaluation made (`crate::counters`, 2026-09-24).
-    Dense(Rc<[f64]>),
+    Dense(Arc<[f64]>),
 }
 
 /// By hand rather than derived, only so a copy of a dense gradient is counted
@@ -103,7 +103,7 @@ impl Clone for Grad {
             Grad::Zero => Grad::Zero,
             Grad::Dense(v) => {
                 crate::counters::grad_clone();
-                Grad::Dense(Rc::clone(v))
+                Grad::Dense(Arc::clone(v))
             }
         }
     }
@@ -153,7 +153,7 @@ impl Grad {
     fn share(&self) -> Grad {
         match self {
             Grad::Zero => Grad::Zero,
-            Grad::Dense(v) => Grad::Dense(Rc::clone(v)),
+            Grad::Dense(v) => Grad::Dense(Arc::clone(v)),
         }
     }
 
@@ -169,7 +169,7 @@ impl Grad {
         match self {
             Grad::Zero => Grad::Zero,
             Grad::Dense(mut v) => {
-                if let Some(buf) = Rc::get_mut(&mut v) {
+                if let Some(buf) = Arc::get_mut(&mut v) {
                     crate::counters::grad_in_place();
                     for g in buf.iter_mut() {
                         *g = f(*g);
@@ -202,7 +202,7 @@ impl Dual {
         grad[i] = 1.0;
         Self {
             value,
-            grad: Grad::Dense(Rc::from(grad)),
+            grad: Grad::Dense(Arc::from(grad)),
             grad_ddt: Grad::Zero,
         }
     }
@@ -645,8 +645,8 @@ impl Dual {
 /// elsewhere — `V(p, n)` is `(p, Some(n))`, a flow or `idt` read `(slot, None)`. A slot out of
 /// range (ground) simply never matches.
 ///
-/// Collected straight into the `Rc<[f64]>`: a mapped range reports its exact length, so this is
-/// **one** allocation. Filling a `Vec` and then `Rc::from(vec)`, as before 1.14.0+3, allocated
+/// Collected straight into the `Arc<[f64]>`: a mapped range reports its exact length, so this is
+/// **one** allocation. Filling a `Vec` and then `Arc::from(vec)`, as before 1.14.0+3, allocated
 /// twice and copied — twelve extra allocations per PSP103 evaluation. Each slot's arithmetic is
 /// the old code's (`0.0`, `+= 1.0`, `-= 1.0`, in that order), so the result is bit-identical,
 /// `p == n` included.
@@ -697,13 +697,13 @@ fn zip_owned(a: Grad, b: Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
         (Grad::Zero, y @ Grad::Dense(_)) => y.map_owned(|g| f(0.0, g)),
         (Grad::Dense(mut x), Grad::Dense(mut y)) => {
             debug_assert_eq!(x.len(), y.len(), "both duals span the same unknowns");
-            if let Some(xb) = Rc::get_mut(&mut x) {
+            if let Some(xb) = Arc::get_mut(&mut x) {
                 crate::counters::grad_in_place();
                 for (p, &q) in xb.iter_mut().zip(y.iter()) {
                     *p = f(*p, q);
                 }
                 Grad::Dense(x)
-            } else if let Some(yb) = Rc::get_mut(&mut y) {
+            } else if let Some(yb) = Arc::get_mut(&mut y) {
                 crate::counters::grad_in_place();
                 for (q, &p) in yb.iter_mut().zip(x.iter()) {
                     *q = f(p, *q);

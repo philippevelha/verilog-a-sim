@@ -910,13 +910,7 @@ fn assemble(
     match linear {
         Linear::Dense => {
             let mut sink = DenseStamp::new(dim);
-            for (i, inst) in instances.iter().enumerate() {
-                let (prev, next) = state.slices(i);
-                // Which of this instance's monitored events the consumer determined fired at
-                // this timepoint — the input an `@(cross(...))` body is gated on.
-                let mut st = va_abi::ModelState::with_events(prev, next, fired.slice(i));
-                inst.load(x, &ctx, &mut st, &mut sink);
-            }
+            va_core::par::load_all(instances, x, &ctx, state.states(fired), &mut sink);
             Assembled {
                 residual: sink.residual,
                 charge: sink.charge,
@@ -927,11 +921,7 @@ fn assemble(
         }
         Linear::Sparse { sys, .. } => {
             sys.clear();
-            for (i, inst) in instances.iter().enumerate() {
-                let (prev, next) = state.slices(i);
-                let mut st = va_abi::ModelState::with_events(prev, next, fired.slice(i));
-                inst.load(x, &ctx, &mut st, sys.as_mut());
-            }
+            va_core::par::load_all(instances, x, &ctx, state.states(fired), sys.as_mut());
             sys.finish();
             Assembled {
                 residual: sys.residual_values().to_vec(),
@@ -990,12 +980,27 @@ impl StateBuffers {
         }
     }
 
-    /// Instance `i`'s committed slice and its proposal slice. Two different buffers, so the
+    /// Every instance's state view at once: its committed slice, its proposal slice, and which
+    /// of its monitored events fired — the input an `@(cross(...))` body is gated on.
+    ///
+    /// All at once, as disjoint slices, so the instances can be evaluated in parallel
+    /// (`va_core::par::load_all`). Committed and proposal are two different buffers, so the
     /// borrow checker permits the simultaneous `&`/`&mut` — which is also exactly the
     /// read-old/write-new invariant the contract requires.
-    fn slices(&mut self, i: usize) -> (&[f64], &mut [f64]) {
-        let (lo, hi) = (self.offsets[i], self.offsets[i + 1]);
-        (&self.committed[lo..hi], &mut self.scratch[lo..hi])
+    fn states<'a>(&'a mut self, fired: &'a FiredEvents) -> Vec<va_abi::ModelState<'a>> {
+        let mut out = Vec::with_capacity(self.offsets.len().saturating_sub(1));
+        let mut rest: &mut [f64] = &mut self.scratch;
+        for (i, w) in self.offsets.windows(2).enumerate() {
+            let (lo, hi) = (w[0], w[1]);
+            let (mine, tail) = std::mem::take(&mut rest).split_at_mut(hi - lo);
+            out.push(va_abi::ModelState::with_events(
+                &self.committed[lo..hi],
+                mine,
+                fired.slice(i),
+            ));
+            rest = tail;
+        }
+        out
     }
 
     /// Promote the last evaluation's proposal to history. Called only from an **accepted**
@@ -1983,7 +1988,7 @@ mod tests {
     /// the counter is the only addition, so the run it takes part in is a real run.
     struct CountingCapacitor {
         inner: va_abi::reference::Capacitor,
-        loads: std::cell::Cell<usize>,
+        loads: std::sync::atomic::AtomicUsize,
     }
 
     impl ModelInstance for CountingCapacitor {
@@ -1997,7 +2002,8 @@ mod tests {
             state: &mut va_abi::ModelState,
             sink: &mut dyn va_abi::stamps::StampSink,
         ) {
-            self.loads.set(self.loads.get() + 1);
+            self.loads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.inner.load(x, ctx, state, sink);
         }
     }
@@ -2015,7 +2021,7 @@ mod tests {
             let (vs, r, _) = rc_circuit(vs_val);
             let cap = CountingCapacitor {
                 inner: va_abi::reference::Capacitor::new(1, va_abi::reference::GROUND, 1e-6),
-                loads: std::cell::Cell::new(0),
+                loads: std::sync::atomic::AtomicUsize::new(0),
             };
             let insts: [&dyn ModelInstance; 3] = [&vs, &r, &cap];
             let mut cfg = default_cfg(5.0 * rc, rc / 10.0, Method::Trapezoidal);
@@ -2024,7 +2030,7 @@ mod tests {
 
             let analytic = vs_val * (1.0 - libm::exp(-1.0f64));
             let err = (interpolate(&wf, rc, 1) - analytic).abs() / analytic;
-            (cap.loads.get(), err)
+            (cap.loads.load(std::sync::atomic::Ordering::Relaxed), err)
         };
 
         let (pair_loads, pair_err) = run_with(LteEstimator::EmbeddedPair);

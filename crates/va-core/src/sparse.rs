@@ -401,10 +401,10 @@ pub fn assemble_into(
     sys: &mut SparseSystem,
 ) -> bool {
     sys.clear();
-    for (i, inst) in instances.iter().enumerate() {
-        let mut st = ModelState::with_events(&[], &mut [], fired.slice(i));
-        inst.load(x, ctx, &mut st, sys);
-    }
+    let states = (0..instances.len())
+        .map(|i| ModelState::with_events(&[], &mut [], fired.slice(i)))
+        .collect();
+    crate::par::load_all(instances, x, ctx, states, sys);
     sys.finish()
 }
 

@@ -19,6 +19,7 @@ pub mod dc;
 pub mod linsolve;
 pub mod mna;
 pub mod newton;
+pub mod par;
 pub mod sparse;
 
 use thiserror::Error;

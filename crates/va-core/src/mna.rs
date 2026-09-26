@@ -179,10 +179,10 @@ pub fn assemble_with_events(
     fired: &va_abi::FiredEvents,
 ) -> System {
     let mut sys = System::new(dim);
-    for (i, inst) in instances.iter().enumerate() {
-        let mut st = va_abi::ModelState::with_events(&[], &mut [], fired.slice(i));
-        inst.load(x, ctx, &mut st, &mut sys);
-    }
+    let states = (0..instances.len())
+        .map(|i| va_abi::ModelState::with_events(&[], &mut [], fired.slice(i)))
+        .collect();
+    crate::par::load_all(instances, x, ctx, states, &mut sys);
     sys
 }
 
