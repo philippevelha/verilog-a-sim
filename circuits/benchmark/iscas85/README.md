@@ -19,7 +19,7 @@ every net an RC `.subckt`, the PSP103 model cards pulled in by `.include`, Vdd =
 | `check_c17.py` | the truth-table check (all 32 vectors) and the transient check |
 | `c432.bench`, `c432.net` | c432's netlist, and its deck for one vector (below) |
 | `c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552 .bench` | the rest of the suite (2026-09-26, Road to 2.0 item 1), each with its provenance and cross-check in its header |
-| `c499.net`, `c880.net`, `c1355.net`, `c1908.net`, `c2670.net`, `c3540.net` | `.op` decks for one seeded vector each (seed = the circuit number) |
+| `c499.net`, `c880.net`, `c1355.net`, `c1908.net`, `c2670.net`, `c3540.net`, `c5315.net`, `c6288.net` | `.op` decks for one seeded vector each (seed = the circuit number) |
 | `crosscheck_bench.py` | compare two copies of a circuit (`.bench` or gate-level `.v`): gate counts by type and the function on 4 096 random vectors, I/O matched by position or by signal number |
 | `c432_tran.net` | `.tran 1p 1n`, all 36 inputs pulsing — a c432-size transient for measuring the transient solve (`docs/proposals/transient-solve.md`); 1 ns, not 12, because it runs for many minutes |
 | `gen_iscas.py`, `check_iscas.py` | any `.bench` to a deck (`tran [<tstop>]` for a transient); check an `.op` against the logic |
@@ -154,6 +154,8 @@ combinations; `c432.net` regenerates unchanged.
 | c1908 | 880 | 62 055 | 32.1 s | 913/913 (25/25 outputs) |
 | c2670 | 1193 | 93 252 | 78.0 s | 1426/1426 (140/140 outputs) |
 | c3540 | 1669 | 134 246 | 214.6 s | 1719/1719 (22/22 outputs) |
+| c5315 | 2307 | 197 274 | 247.3 s | 2485/2485 (123/123 outputs) |
+| c6288 | 2416 | 171 714 | 142.3 s | 2448/2448 (32/32 outputs) |
 
 `check_iscas.py` matched only numeric net names before this; on c499 (`Gid0`, …) it checked **0**
 signals and reported nothing wrong. It now matches any net name.
