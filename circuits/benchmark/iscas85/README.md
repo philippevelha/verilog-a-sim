@@ -152,6 +152,8 @@ combinations; `c432.net` regenerates unchanged.
 | c880 | 383 | 32 366 | 17.5 s | 443/443 (26/26 outputs) |
 | c1355 | 546 | 39 892 | 24.7 s | 587/587 (32/32 outputs) |
 | c1908 | 880 | 62 055 | 32.1 s | 913/913 (25/25 outputs) |
+| c2670 | 1193 | 93 252 | 78.0 s | 1426/1426 (140/140 outputs) |
+| c3540 | 1669 | 134 246 | 214.6 s | 1719/1719 (22/22 outputs) |
 
 `check_iscas.py` matched only numeric net names before this; on c499 (`Gid0`, …) it checked **0**
 signals and reported nothing wrong. It now matches any net name.
