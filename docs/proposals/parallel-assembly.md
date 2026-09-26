@@ -155,6 +155,10 @@ in library crates keeps it that way.
 
 ### 3.4 A reproducible linear solve (an existing bug this found)
 
+> **Landed in 1.16.1** (2026-09-26), ahead of the rest of Step 2 because it is a bug on main,
+> not part of the feature: every `va-core` solve now pins `faer` to `Par::Seq`. Verified on
+> chain160 (identical at 1, 4 and 8 threads) and by a unit test that fails without the pin.
+
 With `libm` in place, parallel evaluation was bit-identical to serial at 8 threads but not at 1, 2
 or 4. The serial binary showed the same thing under `RAYON_NUM_THREADS=1`, and so does **main**:
 chain160's printed output changes with `RAYON_NUM_THREADS` (6 lines at 1, 159 at 4). `faer`
@@ -299,7 +303,7 @@ Design points that need deciding:
 1. **Ratify the §6 interface change** (`Send + Sync` on `ModelInstance`) with the owners of
    `va-codegen` (T2), `va-transient` (T4), `va-acnoise` (T5), `va-netlist`/`va-cli` (T6).
 2. **Reproducibility first, as its own release:** `libm` for all evaluation-path maths (§3.3) +
-   `faer` pinned sequential (§3.4) + the `disallowed_methods` lint. No parallelism yet. Its
+   `faer` pinned sequential (§3.4 — done in 1.16.1) + the `disallowed_methods` lint. No parallelism yet. Its
    release entry states the §4.2 shift. A feature that moves answers → a minor bump.
 3. **Parallel assembly:** record/replay in `va-core` (DC, dense and sparse — the prototype did
    sparse only) and `va-transient`; `--threads`; the small-circuit threshold. Gate: `deck-diff`

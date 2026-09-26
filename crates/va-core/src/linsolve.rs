@@ -18,6 +18,26 @@ use faer::Mat;
 /// case partial pivoting would otherwise return as finite garbage.
 pub(crate) const RESIDUAL_TOL: f64 = 1e-6;
 
+/// Make `faer` factorize and solve sequentially. Every solve in this crate calls it first.
+///
+/// `faer`'s high-level solvers (`partial_piv_lu`, sparse `Lu`) read a process-global
+/// parallelism setting whose default is "rayon, all cores". A parallel factorization splits its
+/// work — and so orders its floating-point sums — by the pool size, so the same deck gave
+/// different last digits on machines with different core counts (measured on chain160, 5 286
+/// unknowns: 159 of 5 292 printed lines differ between `RAYON_NUM_THREADS=1` and `=4`; fixed in
+/// 1.16.1). Sequential is also the faster setting on circuit matrices: c432's numeric LU took
+/// 16.0 s sequential, 22.5 s 4-way and 36.5 s 8-way (`docs/proposals/parallel-assembly.md` §5.1).
+///
+/// Set on every call, not once, because the setting is global: anything else in the process
+/// that changes it would otherwise silently change our answers. A fixed `Par::rayon(n)` would
+/// also be reproducible; "all cores" (`n = 0`, the default) is what must never be used.
+///
+/// **Limitation:** it is a process-wide setting, so it also makes any other `faer` user in the
+/// same process sequential. No such user exists in this workspace.
+pub(crate) fn pin_sequential() {
+    faer::set_global_parallelism(faer::Par::Seq);
+}
+
 /// Whether `x` solves `a · x = b` (dense row-major `a`, `n × n`) to within [`RESIDUAL_TOL`].
 ///
 /// Shared by [`solve_dense`] and [`solve_sparse`] so both solvers apply *the same* singularity
@@ -52,6 +72,7 @@ pub fn solve_dense(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreError
         return Ok(Vec::new());
     }
     crate::check_finite(a, b, n)?;
+    pin_sequential();
 
     let mat = Mat::from_fn(n, n, |i, j| a[i * n + j]);
     let rhs = Mat::from_fn(n, 1, |i, _| b[i]);
@@ -113,6 +134,7 @@ pub fn solve_sparse(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreErro
         return Ok(Vec::new());
     }
     crate::check_finite(a, b, n)?;
+    pin_sequential();
 
     let triplets: Vec<Triplet<usize, usize, f64>> = (0..n)
         .flat_map(|i| (0..n).map(move |j| (i, j)))

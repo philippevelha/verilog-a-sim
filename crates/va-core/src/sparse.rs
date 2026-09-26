@@ -36,7 +36,7 @@
 //! Step 3) the way `va_abi::stamps::DenseStamp` does, and ignores `excitation`, which only AC
 //! (Step 4) consumes.
 
-use crate::linsolve::RESIDUAL_TOL;
+use crate::linsolve::{pin_sequential, RESIDUAL_TOL};
 use crate::CoreError;
 use faer::prelude::*;
 use faer::sparse::linalg::solvers::{Lu, SymbolicLu};
@@ -453,6 +453,7 @@ impl SparseLu {
             return Ok(Vec::new());
         }
         check_finite(a, b)?;
+        pin_sequential();
 
         let symbolic = match &self.symbolic {
             Some((id, s)) if *id == a.pattern.id => s.clone(),
@@ -835,5 +836,72 @@ mod tests {
         assert_eq!(sys.bound_step(), Some(1e-9));
         sys.clear();
         assert_eq!(sys.bound_step(), None, "a bound belongs to one evaluation");
+    }
+
+    /// The answer does not depend on the machine's core count (the 1.16.1 fix). `faer`'s
+    /// default is to factorize over rayon's pool with all its threads, and the rounding then
+    /// follows the pool size; the solve pins it sequential. The test sets that default back
+    /// before each solve and runs it in pools of 1, 2 and 4 threads: the bits must agree.
+    ///
+    /// Discriminating, checked: with the pin removed from `SparseLu::solve`, 300 of the 40 000
+    /// entries differ already at 2 threads. The matrix has to be big and fill-heavy for `faer` to
+    /// split the work at all: a 200 × 200 grid does, a 160 × 160 one (25 600 unknowns) still
+    /// agrees without the pin. That is why this test is slow in a debug build (~15 s).
+    #[test]
+    fn solve_is_bit_identical_whatever_the_thread_count() {
+        let side = 200;
+        let dim = side * side;
+        let idx = |i: usize, j: usize| i * side + j;
+        let mut entries = Vec::new();
+        for i in 0..side {
+            for j in 0..side {
+                if i + 1 < side {
+                    entries.push((idx(i, j), idx(i + 1, j)));
+                    entries.push((idx(i + 1, j), idx(i, j)));
+                }
+                if j + 1 < side {
+                    entries.push((idx(i, j), idx(i, j + 1)));
+                    entries.push((idx(i, j + 1), idx(i, j)));
+                }
+            }
+        }
+        let p = Pattern::new(dim, entries);
+        // A diagonally dominant, non-symmetric operator with irregular coefficients, so the
+        // partial sums a parallel factorization reorders are not exactly representable.
+        let mut values = vec![0.0; p.nnz()];
+        for (k, (r, c)) in p.entries().enumerate() {
+            let w = 1.0 + ((r * 7919 + c * 104_729) % 1000) as f64 / 997.0;
+            values[k] = if r == c {
+                4.5 + w
+            } else {
+                -w / (1.0 + (r > c) as u8 as f64 / 3.0)
+            };
+        }
+        let a = SparseMatrix::new(&p, &values).unwrap();
+        let b: Vec<f64> = (0..dim)
+            .map(|i| ((i * 31) % 17) as f64 / 7.0 - 1.1)
+            .collect();
+
+        let bits = |threads: usize| -> Vec<u64> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                // `faer`'s own default: rayon, as many threads as the current pool has.
+                faer::set_global_parallelism(faer::Par::rayon(0));
+                let x = SparseLu::new().solve(a, &b).expect("solves");
+                x.iter().map(|v| v.to_bits()).collect()
+            })
+        };
+        let serial = bits(1);
+        for threads in [2, 4] {
+            let other = bits(threads);
+            let differ = serial.iter().zip(&other).filter(|(s, o)| s != o).count();
+            assert_eq!(
+                differ, 0,
+                "{differ} of {dim} entries differ at {threads} threads"
+            );
+        }
     }
 }

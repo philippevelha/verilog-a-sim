@@ -20,6 +20,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.16.1 - 2026-09-26
+-------------------
+**Fix: the same deck no longer gives different last digits on machines with different core
+counts.** `faer`'s solvers read a process-global parallelism setting whose default is "rayon,
+all cores", and a parallel factorization orders its floating-point sums by the pool size. Every
+`va-core` solve (`solve_dense`, `solve_sparse`, `SparseLu::solve`) now pins it to `Par::Seq`
+first (`linsolve::pin_sequential`). Taken out of the parallel-assembly proposal's Step 2 (§3.4)
+and shipped alone, because it is a bug on main, not part of that feature; `libm` and the
+parallel evaluator stay in the stash.
+
+  * chain160 (5 286 unknowns, PSP103): before, 159 of 5 292 printed lines differed between
+    `RAYON_NUM_THREADS=1` and `=4`; now 1, 4 and 8 threads print byte-identical output.
+  * **Answers move, within rounding noise:** 156 chain160 lines differ from 1.16.0+2 (at any
+    thread count — `faer`'s 1-thread rayon path is not its sequential path). All are branch
+    currents that are numerical zeros, largest change 3.2e-34 A; no value above 1e-20 moved.
+    `deck-diff --all` 1.16.0+2 vs 1.16.1: 71 of 72 decks identical (the small ones go dense and
+    `faer` never split them). c432 differs in 212 of 15 416 printed values: two are one
+    4.1e-13 A branch current moving in its 7th (last printed) digit, the rest numerical zeros
+    ≤ 6.3e-30 A.
+  * Sequential is also the faster setting here (c432 numeric LU 16.0 s seq vs 36.5 s 8-way,
+    proposal §5.1) — not re-timed for this release.
+  * New gate `solve_is_bit_identical_whatever_the_thread_count` (va-core): a 40 000-unknown
+    grid solved in rayon pools of 1, 2 and 4 threads must agree bit for bit. Without the pin,
+    300 entries differ at 2 threads; a 25 600-unknown grid does not split and would not have
+    caught it — so the test is big, ~15 s in a debug build. `rayon` is a va-core
+    dev-dependency only (it was already in the build via `faer`).
+
+**Limitation:** the setting is process-global, so it also makes any other `faer` user in the
+same process sequential (there is none in this workspace).
+
+Measured at this version: `cargo test --workspace` 891 passed (890 + the new gate); `validate`
+28/28, convergence 28/28; clippy clean.
+
+
 1.16.0+2 - 2026-09-25
 ---------------------
 **Proposal: evaluate device instances in parallel, reproducibly** (`docs/proposals/parallel-assembly.md`).
