@@ -3,7 +3,7 @@
 **Status:** decided 2026-09-26 — implement it in any case; the default in the DC rescue if the
 measurements show it winning everywhere, behind a switch that is off by default if they show it
 failing or slower anywhere (agreed in advance). They show it winning everywhere (§3): it is the
-rescue's default.
+rescue's default, implemented in 1.24.0.
 **Affects:** `va-core` only — `newton.rs` (`NewtonConfig::gmin_adaptive`, the adaptive ramp) and
 `dc.rs` (the rescue switches it on). No interface change.
 **Follows:** `docs/proposals/dc-rescue.md` §3 option (C4), whose ceiling estimate this replaces

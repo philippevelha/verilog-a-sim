@@ -96,15 +96,20 @@ pub fn default_vcrit(vt: f64) -> f64 {
 /// The schedule decreases geometrically from a large starting conductance toward a small
 /// floor, then returns `0.0` once `step` reaches `total_steps` (the final, unshunted solve).
 pub fn gmin_for_step(step: usize, total_steps: usize) -> f64 {
+    if total_steps == 0 || step >= total_steps {
+        return 0.0;
+    }
+    gmin_at(step as f64 / total_steps as f64)
+}
+
+/// The `gmin` ramp at position `frac` along it: `1e-3` S at `0`, falling geometrically to
+/// `1e-12` S at `1`. [`gmin_for_step`] samples it at `step / total_steps`; the adaptive schedule
+/// (`NewtonConfig::gmin_adaptive`) at positions it chooses as it goes.
+pub fn gmin_at(frac: f64) -> f64 {
     /// Initial (largest) shunt conductance, in siemens.
     const GMAX: f64 = 1e-3;
     /// Final floor conductance the ramp approaches, in siemens.
     const GMIN: f64 = 1e-12;
-
-    if total_steps == 0 || step >= total_steps {
-        return 0.0;
-    }
-    let frac = step as f64 / total_steps as f64;
     GMAX * libm::pow(GMIN / GMAX, frac)
 }
 

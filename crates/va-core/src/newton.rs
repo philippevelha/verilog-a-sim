@@ -56,6 +56,16 @@ pub struct NewtonConfig {
     /// constraint row — see [`crate::mna::System::shunt_gmin`]), so it's safe to enable on any
     /// circuit, including ones with ideal sources.
     pub gmin_steps: usize,
+    /// Walk the `gmin` ramp adaptively instead of in `gmin_steps` equal stages: start with the
+    /// same step (`1 / gmin_steps` of the ramp), **double** it after a stage that converges in
+    /// at most [`ADAPTIVE_FAST_ITERS`] iterations (up to [`ADAPTIVE_MAX_STEP`] of the ramp), and
+    /// after a stage that fails, **return to the last converged point and halve** it — failing
+    /// the solve only once it would drop below [`ADAPTIVE_MIN_STEP_FRACTION`] of the starting
+    /// step. The ends are the fixed schedule's: `1e-3` S first, exactly `0` last. No effect when
+    /// `gmin_steps == 0`. Default `false`, so a caller that asks for `gmin_steps` gets the equal
+    /// stages it asked for; the DC rescue (`crate::dc`) switches it on
+    /// (`docs/proposals/adaptive-gmin.md`).
+    pub gmin_adaptive: bool,
     /// Maximum number of times a Newton step may be halved when the full step does not reduce
     /// the residual — a backtracking line search, the third convergence aid alongside junction
     /// limiting and `gmin` stepping.
@@ -132,6 +142,7 @@ impl Default for NewtonConfig {
             max_node_step: f64::INFINITY,
             limit_junctions: true,
             gmin_steps: 0,
+            gmin_adaptive: false,
             solver: Solver::Auto,
             btf: true,
             log_full: false,
@@ -283,26 +294,84 @@ pub fn solve_with_events_from(
     // One for the whole solve, across every `gmin` stage: the pattern does not change with the
     // shunt (every diagonal is always in it), so it is found and analysed once.
     let mut linear = Linear::new(cfg.solver, cfg.btf, dim);
+    let class = Classification {
+        kinds: &kinds,
+        per_abstol: &per_abstol,
+        junction: &junction,
+    };
+    if cfg.gmin_adaptive && cfg.gmin_steps > 0 {
+        return adaptive_ladder(x, cfg.gmin_steps, |x, gmin| {
+            solve_from(x, instances, dim, cfg, gmin, &class, fired, &mut linear)
+        });
+    }
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
         let gmin = convergence::gmin_for_step(step, cfg.gmin_steps);
-        x = solve_from(
-            x,
-            instances,
-            dim,
-            cfg,
-            gmin,
-            &Classification {
-                kinds: &kinds,
-                per_abstol: &per_abstol,
-                junction: &junction,
-            },
-            fired,
-            &mut linear,
-        )?;
+        x = solve_from(x, instances, dim, cfg, gmin, &class, fired, &mut linear)?.0;
     }
     Ok(x)
+}
+
+/// In [`NewtonConfig::gmin_adaptive`], a stage that converges in at most this many Newton
+/// iterations doubles the next step along the ramp.
+///
+/// Measured, not guessed (`docs/proposals/adaptive-gmin.md`): with 4, c432's stages — which mostly
+/// converge in 5 — almost never doubled (293 → 281 assemblies); 6 gave 245, 8 gave 228, and the
+/// PSP103 chains solved at every value tried.
+pub const ADAPTIVE_FAST_ITERS: usize = 8;
+
+/// In [`NewtonConfig::gmin_adaptive`], the largest step, as a fraction of the whole ramp
+/// (`1e-3` → `1e-12` S): a quarter, so no step divides `gmin` by more than ~180.
+pub const ADAPTIVE_MAX_STEP: f64 = 0.25;
+
+/// In [`NewtonConfig::gmin_adaptive`], the smallest step, as a fraction of the starting step
+/// (`1 / gmin_steps`): after three halvings in a row the solve fails.
+pub const ADAPTIVE_MIN_STEP_FRACTION: f64 = 0.125;
+
+/// The adaptive `gmin` ramp ([`NewtonConfig::gmin_adaptive`]): the fixed ramp's ends, with the
+/// steps between them chosen by how the last stage went. `stage(x, gmin)` runs one Newton solve
+/// from `x` with `gmin` shunted and returns the solution and its iteration count — a parameter
+/// so the schedule can be tested on its own.
+fn adaptive_ladder(
+    x0: Vec<f64>,
+    gmin_steps: usize,
+    mut stage: impl FnMut(Vec<f64>, f64) -> Result<(Vec<f64>, usize), CoreError>,
+) -> Result<Vec<f64>, CoreError> {
+    let start_step = 1.0 / gmin_steps as f64;
+    let min_step = start_step * ADAPTIVE_MIN_STEP_FRACTION;
+    // The first stage, at the largest shunt, has nothing to back off to: it must converge.
+    let (mut x, _) = stage(x0, convergence::gmin_at(0.0))?;
+    let mut pos = 0.0_f64;
+    let mut step = start_step;
+    loop {
+        // Past the end of the ramp is the unshunted solve, as in the fixed schedule.
+        let next = pos + step;
+        let last = next >= 1.0 - 1e-12;
+        let gmin = if last {
+            0.0
+        } else {
+            convergence::gmin_at(next)
+        };
+        match stage(x.clone(), gmin) {
+            Ok((converged, iterations)) => {
+                if last {
+                    return Ok(converged);
+                }
+                x = converged;
+                pos = next;
+                if iterations <= ADAPTIVE_FAST_ITERS {
+                    step = (step * 2.0).min(ADAPTIVE_MAX_STEP);
+                }
+            }
+            Err(e) => {
+                step /= 2.0;
+                if step < min_step {
+                    return Err(e);
+                }
+            }
+        }
+    }
 }
 
 /// The linear algebra one Newton solve uses: nothing to keep for the dense path, the system and
@@ -435,7 +504,7 @@ fn solve_from(
     class: &Classification<'_>,
     fired: &va_abi::FiredEvents,
     linear: &mut Linear,
-) -> Result<Vec<f64>, CoreError> {
+) -> Result<(Vec<f64>, usize), CoreError> {
     let Classification {
         kinds,
         per_abstol,
@@ -520,7 +589,7 @@ fn solve_from(
         );
         if residual_norm <= cfg.abstol || update_small {
             log.stage(iteration + 1, "converged");
-            return Ok(x);
+            return Ok((x, iteration + 1));
         }
         last_residual = residual_norm;
     }
@@ -1438,6 +1507,112 @@ mod tests {
         let d = crate::dc::operating_point(&insts, 3, dense).expect("dense rescue solves");
         for (a, b) in s.x.iter().zip(&d.x) {
             assert!((a - b).abs() < 1e-9, "sparse {a}, dense {b}");
+        }
+    }
+
+    /// The adaptive schedule, scripted: fast stages double the step, a failed stage is retried
+    /// from the last converged point with half the step, the run ends with the unshunted solve,
+    /// and too many halvings in a row fail with the stage's own error.
+    #[test]
+    fn the_adaptive_gmin_ramp_grows_backs_off_and_ends_unshunted() {
+        // Every stage converges in 3 iterations: the step doubles 1/30 -> 2/30 -> 4/30 -> 8/30,
+        // capped at 1/4, and the unshunted solve comes last.
+        let mut seen = Vec::new();
+        let x = adaptive_ladder(vec![0.0], 30, |x, g| {
+            seen.push(g);
+            Ok((vec![x[0] + 1.0], 3))
+        })
+        .expect("solves");
+        assert_eq!(*seen.last().unwrap(), 0.0, "ends unshunted");
+        assert!(seen[..seen.len() - 1].iter().all(|&g| g > 0.0));
+        assert!(
+            seen.len() < 31,
+            "fewer stages than the fixed 31: {}",
+            seen.len()
+        );
+        assert_eq!(x, vec![(seen.len()) as f64]);
+        let ratio = |i: usize| libm::log10(seen[i] / seen[i + 1]);
+        assert!(
+            ratio(1) > ratio(0) * 1.9,
+            "the second step is about twice the first"
+        );
+
+        // A stage that fails is retried from the last converged `x` with a smaller step.
+        let mut calls: Vec<(f64, f64)> = Vec::new();
+        let mut failed_once = false;
+        adaptive_ladder(vec![0.0], 30, |x, g| {
+            calls.push((x[0], g));
+            if calls.len() == 3 && !failed_once {
+                failed_once = true;
+                return Err(CoreError::Singular);
+            }
+            Ok((vec![x[0] + 1.0], 10))
+        })
+        .expect("solves after backing off");
+        let (x_fail, g_fail) = calls[2];
+        let (x_retry, g_retry) = calls[3];
+        assert_eq!(
+            x_retry, x_fail,
+            "the retry starts from the same converged point"
+        );
+        assert!(
+            g_retry > g_fail,
+            "the retry takes a smaller step down the ramp"
+        );
+
+        // A stage that keeps failing ends the solve after the step has shrunk to its floor,
+        // with that stage's error.
+        let err = adaptive_ladder(vec![0.0], 30, |x, g| {
+            if g < 1e-4 {
+                Err(CoreError::NoConvergence {
+                    iters: 5,
+                    residual: 1.0,
+                })
+            } else {
+                Ok((x, 10))
+            }
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, CoreError::NoConvergence { iters: 5, .. }),
+            "{err}"
+        );
+    }
+
+    /// On a real circuit that needs the ladder — the 20-diode chain of
+    /// `gmin_stepping_converges_a_circuit_plain_newton_cannot` — the adaptive ramp reaches the
+    /// same operating point as the fixed one.
+    #[test]
+    fn the_adaptive_gmin_ramp_solves_the_diode_chain_like_the_fixed_one() {
+        let n_diodes = 20;
+        let branch = n_diodes + 1;
+        let dim = branch + 1;
+        let vs = VSource::new(0, GROUND, branch, 20.0);
+        let r = Resistor::new(0, 1, 10.0);
+        let mut diodes = Vec::new();
+        for i in 1..n_diodes {
+            diodes.push(Diode::new(i, i + 1, 1e-14, 1.0, VT_NOMINAL));
+        }
+        diodes.push(Diode::new(n_diodes, GROUND, 1e-14, 1.0, VT_NOMINAL));
+        let mut insts: Vec<&dyn ModelInstance> = vec![&vs, &r];
+        insts.extend(diodes.iter().map(|d| d as &dyn ModelInstance));
+        let fixed = NewtonConfig {
+            max_iters: 150,
+            gmin_steps: 30,
+            ..NewtonConfig::default()
+        };
+        let a = solve(&insts, dim, fixed).expect("fixed ramp");
+        let b = solve(
+            &insts,
+            dim,
+            NewtonConfig {
+                gmin_adaptive: true,
+                ..fixed
+            },
+        )
+        .expect("adaptive ramp");
+        for (u, w) in a.iter().zip(&b) {
+            assert!((u - w).abs() <= 1e-9 * w.abs().max(1e-3), "{u} vs {w}");
         }
     }
 }

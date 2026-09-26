@@ -135,8 +135,13 @@ fn with_gmin_rescue<T>(
         // circuit, naming the row that went singular or non-finite, where the laddered one
         // describes a shunted variant of it that the user never wrote.
         Err(first) if cfg.gmin_steps == 0 && worth_a_gmin_retry(&first) => {
+            // Adaptive steps along the ramp (since 1.24.0): fewer stages where they converge
+            // quickly, a retry from the last point with a smaller step where one fails —
+            // measured 39–45% fewer iterations on the PSP103 chains and 22% on c432, every deck
+            // still solved (`docs/proposals/adaptive-gmin.md`).
             let laddered = NewtonConfig {
                 gmin_steps: GMIN_RESCUE_STEPS,
+                gmin_adaptive: true,
                 max_iters: cfg.max_iters.max(GMIN_RESCUE_ITERS),
                 ..cfg
             };
@@ -166,9 +171,11 @@ fn with_gmin_rescue<T>(
     }
 }
 
-/// How many stages the `gmin` rescue ramps over. Thirty is enough for the floating-node cases
-/// this exists for and cheap enough to be worth trying before giving up, since it is only ever
-/// reached on a solve that has already failed.
+/// How many stages the `gmin` rescue ramps over — since 1.24.0 the **starting** step of the
+/// adaptive ramp (`1/30` of it), which then grows where stages converge quickly and shrinks
+/// where one fails. Thirty equal stages were enough for the floating-node cases this exists for;
+/// fewer equal stages (10, 15, 20) failed outright on three PSP103 chains
+/// (`docs/proposals/dc-rescue.md`), which is why the step now adapts instead of starting larger.
 const GMIN_RESCUE_STEPS: usize = 30;
 
 /// The node-step cap in the rescue's first tier (`NewtonConfig::max_node_step`), in the node's
