@@ -6,6 +6,8 @@
 * with two [0:3] vector ports needs eight terminals.
 * Expected, by hand: each arm is a conductance against a 1k load, so V(b) = 2*g1/(g1 + 1m) = 1 V
 * and V(d) = 3*g2/(g2 + 1m) = 2 V.
+*
+*   cargo run -p va-cli -- sim circuits/lib_tee.net --model tests/fixtures/lib
 V1 a gnd DC 2
 V2 c gnd DC 3
 X1 a b c d tee

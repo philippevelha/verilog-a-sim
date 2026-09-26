@@ -2803,8 +2803,8 @@ const DECK_DIFF_SLOW: &[&str] = &[
 /// carry timings). The check behind "every deck gives identical output" for a change meant
 /// not to move any answer (`docs/proposals/evaluator-tree-walk.md` §4).
 ///
-/// Each deck runs as `va-cli sim <deck> --model <m> [--tran|--ac|--noise]`: `<m>` is the path
-/// after the first `--model` the deck's own comments mention, else `models`; the analysis flag
+/// Each deck runs as `va-cli sim <deck> [--model <m>] [--tran|--ac|--noise]`: `--model` as the
+/// deck's own documented `-- sim` command line gives it (see `deck_model`); the analysis flag
 /// follows the deck's cards (`.tran`, else `.ac`, else `.noise`, else DC). A deck that fails
 /// the same way under both binaries is a match — this compares behaviour, not success.
 ///
@@ -2877,13 +2877,15 @@ fn deck_diff(args: &[String]) -> Result<()> {
             continue;
         }
         let text = std::fs::read_to_string(deck).with_context(|| format!("reading {rel}"))?;
-        let model = deck_model(&text);
+        let model = deck_model(&text, &rel, &root);
         let flag = deck_analysis_flag(&text);
         let run = |exe: &Path, env: &[(String, String)]| -> Result<(Option<i32>, String, String)> {
             let mut cmd = Command::new(exe);
             cmd.envs(env.iter().map(|(k, v)| (k, v)));
-            cmd.current_dir(&root)
-                .args(["sim", rel.as_str(), "--model", model.as_str()]);
+            cmd.current_dir(&root).args(["sim", rel.as_str()]);
+            if let Some(m) = &model {
+                cmd.args(["--model", m.as_str()]);
+            }
             if let Some(f) = flag {
                 cmd.arg(f);
             }
@@ -2949,11 +2951,60 @@ fn collect_decks(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// The model path a deck's comments name after `--model`, else `models`.
-fn deck_model(text: &str) -> String {
-    text.split_once("--model")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .map_or_else(|| "models".to_string(), str::to_string)
+/// The `--model` argument to run a deck with, or `None` to run it without one.
+///
+/// **The deck's own documented command line decides** — the `-- sim <deck> …` line in its
+/// comments (continued over lines ending in `\`), preferring one that names this deck, else any:
+/// its `--model` if it has one, and **no** `--model` if it has none, because some decks must not
+/// have one (`diode_noise.net` resolves its diode to the hand-written reference model on purpose;
+/// the compiled `models/diode.va` would silently replace it). Only a deck that documents no
+/// command line falls back to the first path after a `--model` in its comments **that exists**,
+/// else `models`.
+///
+/// Before 1.26.1 the rule was "the word after the first `--model` in the file": four decks whose
+/// prose mentions `--model` ("no `--model` is used", "(via --model)") were run with a model path
+/// of `` ` `` or `),`, failed under both binaries alike, and so were reported *identical* by every
+/// comparison — never actually compared.
+fn deck_model(text: &str, rel: &str, root: &Path) -> Option<String> {
+    // Comment lines, with `\`-continued ones joined.
+    let mut lines: Vec<String> = Vec::new();
+    let mut pending = String::new();
+    for l in text.lines() {
+        let Some(c) = l.trim_start().strip_prefix('*') else {
+            continue;
+        };
+        let c = c.trim();
+        if let Some(head) = c.strip_suffix('\\') {
+            pending.push_str(head);
+            pending.push(' ');
+        } else {
+            pending.push_str(c);
+            lines.push(std::mem::take(&mut pending));
+        }
+    }
+    let usage: Vec<&String> = lines.iter().filter(|l| l.contains("-- sim ")).collect();
+    let chosen = usage
+        .iter()
+        .find(|l| l.split_whitespace().any(|t| t == rel))
+        .or_else(|| usage.first());
+    if let Some(line) = chosen {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        return toks
+            .iter()
+            .position(|t| *t == "--model")
+            .and_then(|i| toks.get(i + 1))
+            .map(|m| (*m).to_string());
+    }
+    let clean = |t: &str| {
+        t.trim_matches(|c: char| "`'\"(),.;:".contains(c))
+            .to_string()
+    };
+    let existing = text.match_indices("--model").find_map(|(i, _)| {
+        let next = text[i + "--model".len()..].split_whitespace().next()?;
+        let path = clean(next);
+        (!path.is_empty() && root.join(&path).exists()).then_some(path)
+    });
+    Some(existing.unwrap_or_else(|| "models".to_string()))
 }
 
 /// `va-cli`'s analysis flag for a deck: `.tran`, else `.ac`, else `.noise`, else none (DC).
@@ -2981,6 +3032,48 @@ fn repo_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `deck_model` follows the deck's own documented command line, and ignores `--model` in
+    /// prose — the four decks the pre-1.26.1 rule could not run.
+    #[test]
+    fn deck_model_follows_the_documented_command_line() {
+        let root = repo_root();
+        let m = |text: &str| deck_model(text, "circuits/x.net", &root);
+        // A usage line with a model, including one continued over two lines.
+        assert_eq!(
+            m("*   cargo run -- sim circuits/x.net --model models/a.va\nR1 a 0 1\n"),
+            Some("models/a.va".into())
+        );
+        assert_eq!(
+            m("*   cargo run -- sim circuits/x.net \\\n*       --model models/b.va --tran\n"),
+            Some("models/b.va".into())
+        );
+        // A usage line without one means: no `--model` (diode_noise.net's case).
+        assert_eq!(
+            m("* NOTE: no `--model` is used.\n*   cargo run -- sim circuits/x.net --noise\n"),
+            None
+        );
+        // The line naming this deck wins over one naming another.
+        assert_eq!(
+            m("*   cargo run -- sim circuits/y.net --model models/y.va\n*   cargo run -- sim circuits/x.net --model models/x.va\n"),
+            Some("models/x.va".into())
+        );
+        // No usage line: prose mentions of `--model` that are not paths fall back to `models`.
+        assert_eq!(
+            m("* compiled models/r.va (via --model), whose ...\n"),
+            Some("models".into())
+        );
+        assert_eq!(
+            m("* and `--model` takes a directory\n"),
+            Some("models".into())
+        );
+        // ... and one that is an existing path is used.
+        assert_eq!(m("* run with --model models\n"), Some("models".into()));
+        assert_eq!(
+            m("* run with --model tests/fixtures/lib.\n"),
+            Some("tests/fixtures/lib".into())
+        );
+    }
 
     /// Fast structural sanity check on the ladder builder — the full `bench_linsolve` sweep is
     /// deliberately *not* exercised here (§ its own doc comment: minutes-scale by design, and

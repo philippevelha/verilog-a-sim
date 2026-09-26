@@ -11,6 +11,8 @@
 * lowered by va-codegen yet, so a compiled diode would contribute *no* noise at all and this
 * deck would measure only R1's. `D1 ... diode` therefore resolves to the hand-written
 * va-abi::reference::Diode (same Is/N), which does implement Interface beta's noise channel.
+*
+*   cargo run -p va-cli -- sim circuits/diode_noise.net --noise
 V1 in  gnd  DC 0.7
 R1 in  a    1000
 D1 a   gnd  diode

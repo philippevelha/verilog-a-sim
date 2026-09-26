@@ -33,3 +33,6 @@ Thumbs.db
 
 # Local performance logs (`va-cli sim --logfull` runs); kept out of the repository by choice.
 /perf-logs/
+
+# Python bytecode from the benchmark scripts (circuits/benchmark/**)
+__pycache__/

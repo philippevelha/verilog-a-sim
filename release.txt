@@ -20,6 +20,37 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.26.1 - 2026-09-26
+-------------------
+**Fix: `xtask deck-diff` ran four decks with a garbage `--model`, and reported them identical.**
+The rule was "the word after the first `--model` in the deck file". Four decks mention `--model`
+in prose — `diode_noise.net` ("no `--model` is used"), `lib_tee.net` ("`--model` takes a
+directory"), `resistor_noise_table.net` and `resistor_noise_va.net` ("(via --model)") — so they
+were run with a model path of `` ` `` or `),`, failed to load under both binaries alike, and every
+comparison counted that as a match. They were never compared by deck-diff; `validate` (the three
+noise decks, with explicit models) and a `va-cli` unit test (`lib_tee`) did exercise them.
+
+Now the deck's own documented command line decides (`-- sim <deck> …`, continued lines joined;
+the one naming the deck preferred): its `--model`, or **none** if it has none — `diode_noise.net`
+must run without one, its diode resolving to the hand-written reference model on purpose. A deck
+that documents no command line falls back to an existing path after `--model`, else `models`.
+`lib_tee.net` and `diode_noise.net` gained usage lines. Unit-tested on each case.
+
+Checked for anything missed: the four decks, run by the start-of-day binary (1.16.0+2) and by
+1.26.0 with the right arguments, are **identical**, exit 0.
+
+**Final full rerun at 1.26.0** (the user's request), every deck with outputs streamed to files:
+73 decks, 68 exit 0; the 5 others are these four (the old rule) and `nand/hisim2.net`, the known
+failure (a NaN from the model on Newton's first iteration). Slowest: c432's 1 ns transient
+886.9 s, c17's 66.3 s, c432 `.op` 10.6 s. Logic checks: c17 `.op` all 32 vectors 192/192 gate
+outputs; c17 transient 5 540/5 540 settled samples over 11 input vectors; c432 `.op` 196/196
+signals (7/7 primary outputs). Zoo `check models --codegen` 36/36; corpus 182/191 self-contained
+(200 passes). `cargo xtask tutorials`: 21/21 pages rendered (40 s; Quarto warns about the
+output directory being outside the project, as before).
+
+Measured at this version: `cargo test --workspace` 908 passed (+1 `deck_model`); `validate` 28/28; clippy clean.
+
+
 1.26.0+2 - 2026-09-26
 ---------------------
 **Road to 2.0, ratified.** No code change. The user kept items 1-3 of the proposal: the
