@@ -20,6 +20,20 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.23.0+1 - 2026-09-26
+---------------------
+**Proposal: adaptive `gmin` stepping in the DC rescue** (`docs/proposals/adaptive-gmin.md`).
+No code change in this release; the implementation is 1.24.0. The fixed rescue ramp takes 30
+equal steps whatever the circuit does, and fewer equal steps fail outright on three PSP103
+chains. Proposed: the same ends, with the step doubled after a stage that converges quickly and
+halved — from the last converged point — after one that fails. Measured with `xtask ladder` on
+the five rescue decks: 39–50% fewer Newton iterations on the chains, 22% on c432, every deck
+solved, answers within the Newton tolerance. Decided in advance: the rescue's default if it won
+everywhere, a switch off by default otherwise; it won everywhere.
+
+Measured at this version: no code change; the figures are the proposal's.
+
+
 1.23.0 - 2026-09-26
 -------------------
 **The DC rescue tries the node-step-capped `gmin` ladder before the plain one**
