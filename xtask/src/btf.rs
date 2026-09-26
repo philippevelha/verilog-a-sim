@@ -138,7 +138,10 @@ pub fn btf(args: &[String]) -> Result<()> {
 
 /// Print one pattern's BTF summary.
 fn report(name: &str, n: usize, entries: &[(usize, usize)]) {
-    let Some(blocks) = decompose(n, entries) else {
+    let t0 = std::time::Instant::now();
+    let decomposed = decompose(n, entries);
+    let btf_time = t0.elapsed();
+    let Some(blocks) = decomposed else {
         println!(
             "  {name:18} {} entries: structurally singular (no full transversal)",
             entries.len()
@@ -160,6 +163,16 @@ fn report(name: &str, n: usize, entries: &[(usize, usize)]) {
         top.get(1..).map_or(String::new(), |t| t.join(", ")),
         blocks.depth,
         blocks.widest,
+    );
+    // Dense LU of every diagonal block: Σ s³/3 flops. A proxy for a block solver's
+    // factorization work (it ignores the off-block entries, which substitution touches once).
+    let work: f64 = sizes.iter().map(|&s| (s as f64).powi(3) / 3.0).sum();
+    let multi: usize = sizes.iter().filter(|&&s| s > 1).count();
+    let in_multi: usize = sizes.iter().filter(|&&s| s > 1).sum();
+    println!(
+        "  {:18} {multi} blocks larger than 1 hold {in_multi} unknowns; dense-block LU work Σs³/3 = {work:.2e} flops; BTF itself took {:.1} ms",
+        "",
+        btf_time.as_secs_f64() * 1e3,
     );
 }
 

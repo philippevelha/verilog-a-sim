@@ -20,6 +20,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.19.1 - 2026-09-26
+-------------------
+**Proposal: a block-triangular (BTF) front end for the sparse DC solve**
+(`docs/proposals/btf-solver.md`). No simulator change. At 8 threads the linear solve is about
+half of a large DC run (c432 22.7 of 43.6 s; chain160 1.62 of 3.55 s) and, being serial, does
+not shrink with cores. By value, a DC logic matrix is almost triangular: c432 splits into
+10 829 blocks, the largest 52 unknowns, whose dense factorization is 1.6 × 10⁶ flops (~1 ms)
+against `faer`'s 40 ms per solve. Proposed: (A) BTF on the nonzero pattern, small blocks dense,
+large ones through `faer` — measured in `xtask` before anything enters `va-core`. The BTF itself
+costs 7 ms on c432, so it must be cached; how often the nonzero set changes during a Newton
+solve is the first measurement. Expected (not measured): ~20 s off c432 at 8 threads.
+Decided: a last-digit shift in DC answers is acceptable for this.
+
+`cargo xtask btf` now also prints, per pattern, the unknowns in blocks larger than one, the
+dense-block LU work Σ s³/3, and how long the BTF itself took. `va-core`'s `sparse.rs` header
+said the sparse path was "not wired into any analysis yet" — untrue since the sparse-solve
+steps landed; it now says which analyses use it and why, and points at the BTF proposal.
+
+Measured at this version: `cargo test --workspace` 896 passed; `validate` 28/28, convergence
+28/28; clippy clean.
+
+
 1.19.0 - 2026-09-26
 -------------------
 **`cargo xtask btf <deck> [--model <m>] [--time-lu]`: how far a circuit's Jacobian splits into

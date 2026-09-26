@@ -1,17 +1,24 @@
-//! Sparse MNA assembly and linear solve — Step 1 of `docs/proposals/sparse-solve.md`.
+//! Sparse MNA assembly and linear solve — built by `docs/proposals/sparse-solve.md`.
 //!
-//! **Not wired into any analysis yet.** [`crate::newton`], `va-transient` and `va-acnoise` still
-//! assemble into dense buffers and call [`crate::linsolve::solve_dense`]; Steps 2–4 of the
-//! proposal switch them over one at a time, above [`SPARSE_THRESHOLD`] unknowns. What this
-//! module provides is everything those steps need:
+//! **Every analysis uses it above [`SPARSE_THRESHOLD`] unknowns** — DC operating point and
+//! sweep ([`crate::newton`]), transient (`va-transient`), AC and noise (`va-acnoise`); below it
+//! they assemble into dense buffers and call [`crate::linsolve::solve_dense`] as before the
+//! sparse path existed. The choice is made once per circuit ([`Solver`]), so every analysis of
+//! one run uses the same solver; `va-cli --solver` overrides it. What this module provides:
 //!
 //! - [`SparseSystem`], a [`StampSink`] that stores the Jacobian and the charge Jacobian over one
-//!   fixed [`Pattern`] and never allocates a `dim × dim` buffer. Models are unchanged: a sink
-//!   only ever receives `(row, col, value)` calls, so how it stores them is its own business
-//!   (which is why this needs no Interface β change).
+//!   [`Pattern`] and never allocates a `dim × dim` buffer. Models are unchanged: a sink only
+//!   ever receives `(row, col, value)` calls, so how it stores them is its own business (which
+//!   is why this needed no Interface β change).
 //! - [`SparseLu`], `faer`'s pure-Rust sparse LU with the symbolic factorization computed once
-//!   per pattern and reused for every numeric factorization after it.
+//!   per pattern and reused for every numeric factorization after it; `faer` runs sequentially
+//!   so answers do not depend on the core count ([`crate::linsolve`], 1.16.1).
+//! - [`assemble_into`], which evaluates the instances — in parallel when it pays
+//!   ([`crate::par`], 1.18.0) — into a [`SparseSystem`].
 //! - [`Solver`], the dense/sparse choice, with the threshold as one named constant.
+//!
+//! At 8 threads the sparse LU is about half of a large DC run (c432: 22.7 of 43.6 s); a
+//! block-triangular front end to cut it is proposed in `docs/proposals/btf-solver.md`.
 //!
 //! **How the pattern is found.** The first assembly into a fresh [`SparseSystem`] has an empty
 //! pattern, so every stamp lands in an overflow map; [`SparseSystem::finish`] then builds the
@@ -31,10 +38,10 @@
 //!   ([`SparseSystem::companion`]), not a new matrix.
 //!
 //! **Limitations, stated:** the per-stamp slot lookup is a hash lookup — the simple version the
-//! proposal names; a per-instance slot cache is the fast version, to be built only if Step 5's
-//! profile says the hash is where the time goes. The sink records `bound_step` (transient,
-//! Step 3) the way `va_abi::stamps::DenseStamp` does, and ignores `excitation`, which only AC
-//! (Step 4) consumes.
+//! proposal names; a per-instance slot cache is the fast version, not built because no profile
+//! has shown the hash to be where the time goes. The sink records `bound_step` (transient) the way
+//! `va_abi::stamps::DenseStamp` does, and ignores `excitation`: AC is the only consumer, and
+//! `va-acnoise` records it in its own sink wrapped around this one.
 
 use crate::linsolve::{pin_sequential, RESIDUAL_TOL};
 use crate::CoreError;
