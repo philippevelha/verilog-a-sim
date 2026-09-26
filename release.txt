@@ -20,6 +20,21 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.24.0+1 - 2026-09-26
+---------------------
+**Proposal: what to speed up in a transient run — measured on c17**
+(`docs/proposals/transient-solve.md`). No code change. c17's 0–12 ns transient (420 unknowns,
+13 462 points), timers placed temporarily around the integrator's assembly and solve: at 8
+threads, **evaluation 64.4 s (85%)** of 75.5 s, the linear solve 6.9 s (9%); at 1 thread 147.8 s
+and 4.6 s of 156.1 s. So the transient solve is not the bottleneck at this size — a block solver
+for it (its matrix keeps one 180-unknown block) could save at most ~7 s. Also found: the serial
+solve is 50% slower while evaluation runs on 8 threads (0.115 → 0.172 ms, likely rayon workers
+still spinning); evaluation scales only 2.3× with ~30 instances; one assembly in four is the
+post-accept evaluation that commits charges and state. Options (B)–(E) listed; nothing decided.
+
+Measured at this version: no code change; the figures are the proposal's.
+
+
 1.24.0 - 2026-09-26
 -------------------
 **The DC rescue walks its `gmin` ramp adaptively** (`docs/proposals/adaptive-gmin.md`). Same
