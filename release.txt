@@ -20,6 +20,22 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.27.0+1 - 2026-09-26
+---------------------
+**ISCAS'85 c1355, c1908 at transistor level, `.op` checked against the logic** (Road to
+2.0, item 1; one seeded input vector each, `check_iscas.py`). No code change; decks added to
+`xtask deck-diff`'s slow list.
+
+  * **c1355** (546 gates, 39 892 unknowns): 587/587 signals correct (32/32 primary outputs);
+    24.7 s on 8 threads, 191 Newton iterations over 14 rescue stages (plain Newton singular, the
+    capped adaptive ladder solves it).
+  * **c1908** (880 gates, 62 055 unknowns): 913/913 signals correct (25/25 primary outputs);
+    32.1 s on 8 threads, 180 Newton iterations over 14 rescue stages (plain Newton singular, the
+    capped adaptive ladder solves it).
+
+Measured at this version: no code change; 1.27.0's test and `validate` figures stand.
+
+
 1.27.0 - 2026-09-26
 -------------------
 **The rest of ISCAS'85 as verified netlists, and the first two checked at transistor level**
@@ -3330,8 +3346,8 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
 
   [ ] 1. The ISCAS'85 suite at transistor level (c17 ... c7552, from gen_iscas.py and the c7552
          cells), every circuit's `.op` solved and every gate output matching the `.bench`
-         logic for a set of input vectors. Done: c17 (all 32 vectors), c432, c499, c880 (one
-         vector each).
+         logic for a set of input vectors. Done: c17 (all 32 vectors), c432, c499, c880, c1355,
+         c1908 (one vector each).
          First risk to understand: the 320-stage PSP103 chain (10 566 unknowns) fails, cause
          not diagnosed.
   [ ] 2. A c432 transient checked against its logic: every settled sample of every output
