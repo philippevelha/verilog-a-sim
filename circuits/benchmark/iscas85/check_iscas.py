@@ -20,7 +20,9 @@ def main(bench, vector, output):
     val = evaluate(ins, gates, [int(c) for c in vector])
     by_net = {net_name(sig): v for sig, v in val.items()}
     text = open(output, encoding='utf-8', errors='replace').read()
-    got = {m.group(1): float(m.group(2)) for m in re.finditer(r'V\((g\d+)_0\) = (\S+) V', text)}
+    # Any net name, not only `g<digits>`: `net_name` keeps a non-numeric ISCAS name (c499's `Gid0`)
+    # lower-cased, and a numeric-only pattern silently checked 0 of c499's signals.
+    got = {m.group(1): float(m.group(2)) for m in re.finditer(r'V\(([A-Za-z0-9_]+?)_0\) = (\S+) V', text)}
     bad = 0
     worst_hi, worst_lo = VDD, 0.0
     for net, v in sorted(got.items()):

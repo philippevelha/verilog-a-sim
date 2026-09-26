@@ -15,8 +15,9 @@ The gate cells are copied verbatim from the c7552 deck in
 external/benchmarkExt/iscas85_benchmark_circuit/ (read at generation time; the deck written is
 self-contained apart from the PSP103 model cards it `.include`s). That library stops at four
 inputs and has no XOR, so the gates it lacks are **composed** from its cells, as subcircuits:
-BUF = NOT + NOT, NANDn = ANDn + NOT, XOR2 = XNOR2 + NOT, AND8 = 2 x AND4 + AND2,
-AND9 = 3 x AND3 + AND3. The
+BUF = NOT + NOT, NAND3/4 = AND3/4 + NOT, XOR2 = XNOR2 + NOT, AND8 = 2 x AND4 + AND2,
+AND9 = 3 x AND3 + AND3; and for the rest of the suite (2026-09-26) AND5 = AND4 + AND2,
+NAND5 = AND4 + NAND2, NAND8 = 2 x AND4 + NAND2, OR5 = OR4 + OR2, NOR8 = 2 x OR4 + NOR2. The
 logic is exact; the timing of a composed gate is not that of a single cell. Nets are RC
 subcircuits with c7552's element values, as a star from the driver pin to each load pin.
 """
@@ -47,6 +48,19 @@ COMPOSED = {
                  ['X1 a b c vdd vss m1 and3', 'X2 d e f vdd vss m2 and3',
                   'X3 g h i vdd vss m3 and3', 'X4 m1 m2 m3 vdd vss z and3'],
                  'a b c d e f g h i'),
+    # Added 2026-09-26 for the rest of ISCAS'85 (c499-c7552), fewest cells that are exact.
+    ('and', 5): ('and5c', ['and4', 'and2'],
+                 ['X1 a b c d vdd vss m and4', 'X2 m e vdd vss z and2'], 'a b c d e'),
+    ('nand', 5): ('nand5c', ['and4', 'nand2'],
+                  ['X1 a b c d vdd vss m and4', 'X2 m e vdd vss z nand2'], 'a b c d e'),
+    ('nand', 8): ('nand8c', ['and4', 'nand2'],
+                  ['X1 a b c d vdd vss m1 and4', 'X2 e f g h vdd vss m2 and4',
+                   'X3 m1 m2 vdd vss z nand2'], 'a b c d e f g h'),
+    ('or', 5): ('or5c', ['or4', 'or2'],
+                ['X1 a b c d vdd vss m or4', 'X2 m e vdd vss z or2'], 'a b c d e'),
+    ('nor', 8): ('nor8c', ['or4', 'nor2'],
+                 ['X1 a b c d vdd vss m1 or4', 'X2 e f g h vdd vss m2 or4',
+                  'X3 m1 m2 vdd vss z nor2'], 'a b c d e f g h'),
 }
 DIRECT = {('not', 1): 'not1', ('nand', 2): 'nand2', ('nor', 2): 'nor2', ('and', 2): 'and2',
           ('and', 3): 'and3', ('and', 4): 'and4', ('nor', 3): 'nor3', ('nor', 4): 'nor4',

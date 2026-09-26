@@ -20,6 +20,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.27.0 - 2026-09-26
+-------------------
+**The rest of ISCAS'85 as verified netlists, and the first two checked at transistor level**
+(Road to 2.0, item 1; `circuits/benchmark/iscas85/README.md`). No simulator change.
+
+  * Nine `.bench` files (c499 ... c7552), each agreeing with an independent copy in gate counts
+    and function on 4 096 random vectors, provenance in its header. Two discrepancies found, both
+    in the other copy: the gate-level c1355.v inverts all 32 outputs (the `.bench` computes
+    c499's function, as c1355 must); the c2670.v is a padded variant (76 extra buffers). A
+    c7552 check against the transistor deck in `external/` is inconclusive (it renumbers every
+    signal) and recorded as such. `crosscheck_bench.py` is the tool.
+  * `gen_iscas.py`: AND5, NAND5, NAND8, OR5, NOR8 composed from the c7552 cells; every
+    composition verified exhaustively; `c432.net` regenerates unchanged.
+  * `check_iscas.py` matched only numeric net names — on c499 it checked 0 signals and said
+    nothing. Fixed; c432 still 196/196.
+  * **c499 `.op` 243/243 signals (32/32 outputs), 13.6 s; c880 443/443 (26/26), 17.5 s** —
+    28 492 and 32 366 unknowns, 8 threads. Decks `c499.net`, `c880.net`, in `xtask
+    deck-diff`'s slow list (run with `--all`) like c432's.
+
+Road to 2.0 item 1: c17, c432, c499, c880 done; c1355, c1908, c2670, c3540, c5315, c6288, c7552
+to go.
+
+Measured at this version: `cargo test --workspace` 908 passed; `validate` 28/28; clippy clean.
+
+
 1.26.1 - 2026-09-26
 -------------------
 **Fix: `xtask deck-diff` ran four decks with a garbage `--model`, and reported them identical.**
@@ -3305,7 +3330,8 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
 
   [ ] 1. The ISCAS'85 suite at transistor level (c17 ... c7552, from gen_iscas.py and the c7552
          cells), every circuit's `.op` solved and every gate output matching the `.bench`
-         logic for a set of input vectors. Done: c17 (all 32 vectors), c432 (one vector).
+         logic for a set of input vectors. Done: c17 (all 32 vectors), c432, c499, c880 (one
+         vector each).
          First risk to understand: the 320-stage PSP103 chain (10 566 unknowns) fails, cause
          not diagnosed.
   [ ] 2. A c432 transient checked against its logic: every settled sample of every output

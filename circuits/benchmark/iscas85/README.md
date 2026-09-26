@@ -18,6 +18,9 @@ every net an RC `.subckt`, the PSP103 model cards pulled in by `.include`, Vdd =
 | `gen_c17.py` | writes either deck, any input vector (`python … gen_c17.py <out> op 10101`) |
 | `check_c17.py` | the truth-table check (all 32 vectors) and the transient check |
 | `c432.bench`, `c432.net` | c432's netlist, and its deck for one vector (below) |
+| `c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552 .bench` | the rest of the suite (2026-09-26, Road to 2.0 item 1), each with its provenance and cross-check in its header |
+| `c499.net`, `c880.net` | `.op` decks for one seeded vector each (seed = the circuit number) |
+| `crosscheck_bench.py` | compare two copies of a circuit (`.bench` or gate-level `.v`): gate counts by type and the function on 4 096 random vectors, I/O matched by position or by signal number |
 | `c432_tran.net` | `.tran 1p 1n`, all 36 inputs pulsing — a c432-size transient for measuring the transient solve (`docs/proposals/transient-solve.md`); 1 ns, not 12, because it runs for many minutes |
 | `gen_iscas.py`, `check_iscas.py` | any `.bench` to a deck (`tran [<tstop>]` for a transient); check an `.op` against the logic |
 
@@ -111,3 +114,43 @@ the ~300 iterations c432's took would be ~20 minutes.
 One thing noticed in the c7552 deck and not yet explained: some net subcircuits (`netg10`,
 `netg182`, …) contain only pin capacitors and no resistor, which leaves their pins unconnected to
 each other.
+
+## The rest of the suite (2026-09-26, 1.27.0) — Road to 2.0, item 1
+
+**Netlists.** c499, c880, c1355, c1908, c2670, c3540, c5315 and c6288 fetched from the same
+repository as c432; c7552 (absent there) from the Tallinn University of Technology archive
+(`pld.ttu.ee/~maksim/benchmarks/iscas85/bench/`). Every one agrees with an independent copy —
+same gate counts by type (the published ISCAS'85 figures) and the same function on 4 096 random
+vectors (`crosscheck_bench.py`); each header says which copy and how. Two discrepancies, both
+in the *other* copy, and resolved:
+
+- **c1355:** the gate-level `.v` in `santoshsmalagi/Benchmarks` drives all 32 outputs through
+  inverters where the `.bench` has buffers — every output inverted. The `.bench` is right: c1355
+  is c499 with its XORs expanded into NANDs, and it computes exactly c499's function (32/32
+  outputs); TTU's copy agrees with it.
+- **c2670:** the `.v` pads the circuit with 76 extra buffers (1 269 gates, not 1 193) and keeps
+  the original signal numbers where this `.bench` renumbers them; TTU's copy matches this
+  `.bench` input for input and the `.v` signal for signal — one function, three copies.
+
+A third check of c7552, against the logic of the transistor-level deck in
+`external/benchmarkExt/` (spicegen), is **inconclusive**: that deck renumbers every signal, and
+pairing its 207 inputs with the `.bench`'s by order matches 2 207 of 3 512 internal signals — a
+partial input correspondence, not recovered.
+
+**Cells.** Five gate widths the suite needs and the c7552 library lacks are composed from its
+cells (`gen_iscas.py`'s `COMPOSED`, fewest cells that are exact): AND5 = AND4 + AND2,
+NAND5 = AND4 + NAND2, NAND8 = 2 x AND4 + NAND2, OR5 = OR4 + OR2, NOR8 = 2 x OR4 + NOR2. Every
+composition in the table, old and new, was checked against its gate on all 2^n input
+combinations; `c432.net` regenerates unchanged.
+
+**`.op` against the logic** (1.26.0, 8 threads, one seeded vector each, `check_iscas.py`):
+
+| circuit | gates | unknowns | wall | signals checked |
+|---|---:|---:|---:|---|
+| c432 | 160 | 15 416 | 10.6 s | 196/196 (7/7 outputs) |
+| c499 | 202 | 28 492 | 13.6 s | 243/243 (32/32 outputs) |
+| c880 | 383 | 32 366 | 17.5 s | 443/443 (26/26 outputs) |
+
+`check_iscas.py` matched only numeric net names before this; on c499 (`Gid0`, …) it checked **0**
+signals and reported nothing wrong. It now matches any net name.
+
