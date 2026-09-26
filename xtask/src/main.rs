@@ -18,6 +18,7 @@ use va_abi::reference::{Resistor, VSource, GROUND};
 use va_abi::ModelInstance;
 
 mod btf;
+mod ladder;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -33,6 +34,7 @@ fn main() -> Result<()> {
         Some("deck-diff") => deck_diff(&rest),
         Some("tape-check") => tape_check(&rest),
         Some("btf") => btf::btf(&rest),
+        Some("ladder") => ladder::ladder_cmd(&rest),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())
@@ -81,7 +83,9 @@ fn print_usage() {
          tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
                                  at many bias points; any bit that differs fails
              btf <deck> [--model <m>]  How far the deck's Jacobian splits into block
-                                                                  triangular form: blocks, sizes, dependency depth"
+                                                                  triangular form: blocks, sizes, dependency depth
+             ladder <deck> [--model <m>]  What the DC gmin rescue costs on an .op deck, and
+                                                                  alternative rescue schedules: assemblies, time, answer"
     );
 }
 

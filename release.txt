@@ -20,6 +20,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.22.0 - 2026-09-26
+-------------------
+**Proposal: a cheaper DC rescue — run the node-step-capped ladder first**
+(`docs/proposals/dc-rescue.md`), and **`cargo xtask ladder <deck> [--model <m>]`**, which replays
+the rescue as `newton::solve` calls under alternative schedules, counting assemblies and
+comparing answers. No simulator change.
+
+Why c432 needs 558 Newton iterations: plain Newton goes singular in 3; the `gmin` ladder then
+spends **265 iterations and fails** (one stage burns its whole 150-iteration budget in a 2-cycle,
+proposing steps up to 5.8e9 V on a 1.8 V circuit); the node-step-capped ladder then converges in
+290 — 47% of the iterations are a tier that fails. Measured on the five `.op` decks that need
+the rescue: running the capped ladder first is never more expensive and takes c432 from 558 to
+**293 assemblies (26.8 → 14.1 s)**, bit-identical where the cap tier already solved; fewer,
+larger gmin steps (10/15/20 instead of 30) fail outright on three of the five decks; an early
+stall cut has no clean signal in the data. A scratch build with the order swapped: `deck-diff
+--all` 71 of 72 identical (NAND sweeps and `hisim2` included); c17's transient moves (its start
+point is rescued by the plain ladder) by RMS ≤ 5.9e-5 of scale, edges ≤ 12 fs. Decided: cap first.
+
+Measured at this version: `cargo test --workspace` 903 passed; `validate` 28/28; clippy clean.
+
+
 1.21.0 - 2026-09-26
 -------------------
 **DC solves use a block-triangular (BTF) solver before `faer`'s sparse LU — Step 3 of
