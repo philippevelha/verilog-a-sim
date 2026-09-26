@@ -1459,7 +1459,7 @@ impl GeneratedModel {
                 }
                 if ac {
                     let wt = omega * tau.value;
-                    ad::Cx(wt.cos(), -wt.sin())
+                    ad::Cx(libm::cos(wt), -libm::sin(wt))
                 } else {
                     ad::Cx(1.0, 0.0)
                 }
@@ -1651,7 +1651,7 @@ impl GeneratedModel {
         let omega0 = if m == 0 {
             1.0
         } else {
-            (den[0].abs() / den[m].abs()).powf(1.0 / m as f64)
+            libm::pow(den[0].abs() / den[m].abs(), 1.0 / m as f64)
         };
         let scale = |c: &[f64]| -> Vec<f64> {
             c.iter()
@@ -1776,7 +1776,7 @@ impl GeneratedModel {
                 continue;
             };
             let a = term.sign * mag.value;
-            let (re, im) = (a * phase.value.cos(), a * phase.value.sin());
+            let (re, im) = (a * libm::cos(phase.value), a * libm::sin(phase.value));
             let (are, aim) = acc.unwrap_or((0.0, 0.0));
             acc = Some((are + re, aim + im));
         }
@@ -3237,9 +3237,9 @@ mod tests {
         );
 
         let (c0, c1) = (1e-12, 0.5e-12);
-        let q_expected = c0 * v + c1 * v.cosh().ln();
+        let q_expected = c0 * v + c1 * libm::log(libm::cosh(v));
         // d/dv[c0*v + c1*ln(cosh(v))] = c0 + c1*tanh(v).
-        let dqdv_expected = c0 + c1 * v.tanh();
+        let dqdv_expected = c0 + c1 * libm::tanh(v);
         assert!(
             (sink.charge[0] - q_expected).abs() / q_expected.abs() < 1e-9,
             "charge: {} vs {}",
@@ -4161,8 +4161,8 @@ mod tests {
 
         let is = 1e-14;
         let nvt = 1.0 * VT;
-        let i_expected = is * ((vd / nvt).exp() - 1.0);
-        let g_expected = (is / nvt) * (vd / nvt).exp();
+        let i_expected = is * (libm::exp(vd / nvt) - 1.0);
+        let g_expected = (is / nvt) * libm::exp(vd / nvt);
         assert!((sink.residual[0] - i_expected).abs() / i_expected.abs() < 1e-12);
         assert!((sink.jac(0, 0) - g_expected).abs() / g_expected.abs() < 1e-12);
     }
@@ -6269,7 +6269,7 @@ mod tests {
         assert!((h1.0 - 1.0).abs() < 1e-15 && h1.1.abs() < 1e-15);
         let omega = 2.0 * std::f64::consts::PI * 1e5;
         let h = ad::zi_at(omega, 1e-6, &r);
-        let zinv = ad::Cx((omega * 1e-6).cos(), -(omega * 1e-6).sin());
+        let zinv = ad::Cx(libm::cos(omega * 1e-6), -libm::sin(omega * 1e-6));
         let expect = ad::Cx(0.2, 0.0).div(ad::Cx(1.0 - 0.8 * zinv.0, -0.8 * zinv.1));
         assert!((h.0 - expect.0).abs() < 1e-12 && (h.1 - expect.1).abs() < 1e-12);
         // A delay of one sample multiplies by z^-1.

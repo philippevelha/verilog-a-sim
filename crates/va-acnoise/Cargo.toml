@@ -7,6 +7,7 @@ publish.workspace = true
 description = "T5: AC linearization and noise analysis (PSD, adjoint)."
 
 [dependencies]
+libm = { workspace = true }
 va-core = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }

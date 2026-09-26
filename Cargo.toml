@@ -4,7 +4,7 @@ members = ["crates/*", "xtask"]
 
 [workspace.package]
 # Bump together with release.txt; the two must always agree.
-version = "1.16.1"
+version = "1.17.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/philippevelha/verilog-a-sim"
@@ -18,6 +18,9 @@ faer = "0.22"
 thiserror = "2"
 logos = "0.15"
 anyhow = "1"
+# Pure-Rust port of musl's libm, for every transcendental that can reach a simulated number:
+# same bits on every platform and thread (1.17.0; clippy.toml's disallowed-methods enforces it).
+libm = "0.2"
 # SVG backend only (`default-features = false`): keeps the pure-Rust, no-native-deps posture
 # (§5) — the bitmap backend pulls in font-rasterization deps for no benefit here. Decision
 # recorded in docs/roadmap.md's Quarto-tutorials conventions.

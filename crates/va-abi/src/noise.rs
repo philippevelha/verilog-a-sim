@@ -158,7 +158,7 @@ pub fn flicker_psd_at(coeff: f64, exponent: f64, f: f64) -> f64 {
     if f <= 0.0 {
         return 0.0;
     }
-    coeff / f.powf(exponent)
+    coeff / libm::pow(f, exponent)
 }
 
 /// PSD at frequency `f` of a table of `(frequency, power)` pairs, per `interp`
@@ -199,9 +199,9 @@ pub fn table_psd_at(points: &[(f64, f64)], interp: TableInterp, f: f64) -> f64 {
     if log_ok {
         // P = 10^( log p1 + (log p2 - log p1)·(log f - log f1)/(log f2 - log f1) ), verbatim from
         // the LRM's §4.6.4.4 formula.
-        let (lf1, lf2, lf) = (f1.log10(), f2.log10(), f.log10());
-        let (lp1, lp2) = (p1.log10(), p2.log10());
-        return 10f64.powf(lp1 + (lp2 - lp1) * (lf - lf1) / (lf2 - lf1));
+        let (lf1, lf2, lf) = (libm::log10(f1), libm::log10(f2), libm::log10(f));
+        let (lp1, lp2) = (libm::log10(p1), libm::log10(p2));
+        return libm::pow(10f64, lp1 + (lp2 - lp1) * (lf - lf1) / (lf2 - lf1));
     }
     p1 + (p2 - p1) * (f - f1) / (f2 - f1)
 }

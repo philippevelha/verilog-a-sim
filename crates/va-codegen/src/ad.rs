@@ -421,7 +421,7 @@ impl Dual {
 
     /// [`Self::exp`] consuming `self` (see [`Self::chain_owned`]).
     pub fn exp_owned(self) -> Dual {
-        let e = self.value.exp();
+        let e = libm::exp(self.value);
         self.chain_owned(e, e)
     }
 
@@ -432,14 +432,14 @@ impl Dual {
 
     /// [`Self::ln`] consuming `self`.
     pub fn ln_owned(self) -> Dual {
-        let (v, d) = (self.value.ln(), 1.0 / self.value);
+        let (v, d) = (libm::log(self.value), 1.0 / self.value);
         self.chain_owned(v, d)
     }
 
     /// Base-10 log.
     pub fn log10(&self) -> Dual {
         self.chain(
-            self.value.log10(),
+            libm::log10(self.value),
             1.0 / (self.value * std::f64::consts::LN_10),
         )
     }
@@ -495,10 +495,14 @@ impl Dual {
     /// [`Self::powf`] consuming both operands (see [`Self::add_owned`]).
     pub fn powf_owned(self, exp: Dual) -> Dual {
         let (u, v) = (self.value, exp.value);
-        let value = u.powf(v);
-        let d_du = v * u.powf(v - 1.0);
+        let value = libm::pow(u, v);
+        let d_du = v * libm::pow(u, v - 1.0);
         let exp_varies = exp.grad.any_nonzero() || exp.grad_ddt.any_nonzero();
-        let d_dv = if exp_varies { value * u.ln() } else { 0.0 };
+        let d_dv = if exp_varies {
+            value * libm::log(u)
+        } else {
+            0.0
+        };
         // A zero derivative contributes nothing, and is skipped rather than multiplied: at a
         // singular `u` the partial is `inf`, and `inf · 0.0` is NaN rather than the 0 that a
         // channel the operand does not depend on must contribute.
@@ -516,40 +520,40 @@ impl Dual {
 
     /// Sine. `sin' = cos`.
     pub fn sin(&self) -> Dual {
-        self.chain(self.value.sin(), self.value.cos())
+        self.chain(libm::sin(self.value), libm::cos(self.value))
     }
 
     /// Cosine. `cos' = -sin`.
     pub fn cos(&self) -> Dual {
-        self.chain(self.value.cos(), -self.value.sin())
+        self.chain(libm::cos(self.value), -libm::sin(self.value))
     }
 
     /// Tangent. `tan' = 1 + tan²`.
     pub fn tan(&self) -> Dual {
-        let t = self.value.tan();
+        let t = libm::tan(self.value);
         self.chain(t, 1.0 + t * t)
     }
 
     /// Hyperbolic sine. `sinh' = cosh`.
     pub fn sinh(&self) -> Dual {
-        self.chain(self.value.sinh(), self.value.cosh())
+        self.chain(libm::sinh(self.value), libm::cosh(self.value))
     }
 
     /// Hyperbolic cosine. `cosh' = sinh`.
     pub fn cosh(&self) -> Dual {
-        self.chain(self.value.cosh(), self.value.sinh())
+        self.chain(libm::cosh(self.value), libm::sinh(self.value))
     }
 
     /// Hyperbolic tangent. `tanh' = 1 - tanh²`.
     pub fn tanh(&self) -> Dual {
-        let t = self.value.tanh();
+        let t = libm::tanh(self.value);
         self.chain(t, 1.0 - t * t)
     }
 
     /// Arcsine. `asin'(x) = 1/√(1-x²)`.
     pub fn asin(&self) -> Dual {
         self.chain(
-            self.value.asin(),
+            libm::asin(self.value),
             1.0 / (1.0 - self.value * self.value).sqrt(),
         )
     }
@@ -557,20 +561,23 @@ impl Dual {
     /// Arccosine. `acos'(x) = -1/√(1-x²)`.
     pub fn acos(&self) -> Dual {
         self.chain(
-            self.value.acos(),
+            libm::acos(self.value),
             -1.0 / (1.0 - self.value * self.value).sqrt(),
         )
     }
 
     /// Arctangent. `atan'(x) = 1/(1+x²)`.
     pub fn atan(&self) -> Dual {
-        self.chain(self.value.atan(), 1.0 / (1.0 + self.value * self.value))
+        self.chain(
+            libm::atan(self.value),
+            1.0 / (1.0 + self.value * self.value),
+        )
     }
 
     /// Inverse hyperbolic sine. `asinh'(x) = 1/√(x²+1)`.
     pub fn asinh(&self) -> Dual {
         self.chain(
-            self.value.asinh(),
+            libm::asinh(self.value),
             1.0 / (self.value * self.value + 1.0).sqrt(),
         )
     }
@@ -578,14 +585,17 @@ impl Dual {
     /// Inverse hyperbolic cosine. `acosh'(x) = 1/√(x²-1)`.
     pub fn acosh(&self) -> Dual {
         self.chain(
-            self.value.acosh(),
+            libm::acosh(self.value),
             1.0 / (self.value * self.value - 1.0).sqrt(),
         )
     }
 
     /// Inverse hyperbolic tangent. `atanh'(x) = 1/(1-x²)`.
     pub fn atanh(&self) -> Dual {
-        self.chain(self.value.atanh(), 1.0 / (1.0 - self.value * self.value))
+        self.chain(
+            libm::atanh(self.value),
+            1.0 / (1.0 - self.value * self.value),
+        )
     }
 
     /// Two-argument arctangent `atan2(self, x)` (self is `y`):
@@ -594,7 +604,7 @@ impl Dual {
         let (y, denom) = (self, self.value * self.value + x.value * x.value);
         let rule = |yg: f64, xg: f64| (x.value * yg - y.value * xg) / denom;
         Dual::from_parts(
-            y.value.atan2(x.value),
+            libm::atan2(y.value, x.value),
             zip_with(&y.grad, &x.grad, rule),
             zip_with(&y.grad_ddt, &x.grad_ddt, rule),
         )
@@ -603,7 +613,7 @@ impl Dual {
     /// Euclidean norm `hypot(self, o) = √(self²+o²)`:
     /// `d hypot = (self·dself + o·do) / hypot`.
     pub fn hypot(&self, o: &Dual) -> Dual {
-        let value = self.value.hypot(o.value);
+        let value = libm::hypot(self.value, o.value);
         let rule = |sg: f64, og: f64| (self.value * sg + o.value * og) / value;
         Dual::from_parts(
             value,
@@ -1100,7 +1110,7 @@ pub fn zi_realization(
 /// `π/T` it aliases exactly as the mathematics does.
 pub fn zi_at(omega: f64, period: f64, r: &ZiRealization) -> Cx {
     // z^-1 = e^{-jωT}
-    let zinv = Cx((omega * period).cos(), -(omega * period).sin());
+    let zinv = Cx(libm::cos(omega * period), -libm::sin(omega * period));
     fn poly(zinv: Cx, coeffs: &[f64]) -> Cx {
         let mut acc = Cx(0.0, 0.0);
         for &c in coeffs.iter().rev() {
@@ -2161,7 +2171,7 @@ mod tests {
         let f = u.powf(&v);
         assert!((f.value - 8.0).abs() < 1e-12);
         assert!((f.grad_at(0) - 12.0).abs() < 1e-10, "d/du {}", f.grad_at(0));
-        let expect = 8.0 * 2.0_f64.ln();
+        let expect = 8.0 * libm::log(2.0_f64);
         assert!(
             (f.grad_at(1) - expect).abs() < 1e-10,
             "d/dv {}",
@@ -2226,7 +2236,7 @@ mod tests {
         let x = Dual::variable(0.5, 0, 1);
         let two = Dual::constant(2.0);
         let f = two.mul(&x).exp();
-        let e = 1.0_f64.exp();
+        let e = libm::exp(1.0_f64);
         assert!((f.value - e).abs() < 1e-12);
         assert!((f.grad_at(0) - 2.0 * e).abs() < 1e-12);
     }
@@ -2240,18 +2250,18 @@ mod tests {
         // §5: every differentiated operator must agree with a central finite difference.
         let h = 1e-6;
         let cases: &[UnaryCase] = &[
-            ("sin", Dual::sin, f64::sin, 0.7),
-            ("cos", Dual::cos, f64::cos, 0.7),
-            ("tan", Dual::tan, f64::tan, 0.5),
-            ("sinh", Dual::sinh, f64::sinh, 0.6),
-            ("cosh", Dual::cosh, f64::cosh, 0.6),
-            ("tanh", Dual::tanh, f64::tanh, 0.6),
-            ("asin", Dual::asin, f64::asin, 0.4),
-            ("acos", Dual::acos, f64::acos, 0.4),
-            ("atan", Dual::atan, f64::atan, 0.4),
-            ("asinh", Dual::asinh, f64::asinh, 0.4),
-            ("acosh", Dual::acosh, f64::acosh, 1.5),
-            ("atanh", Dual::atanh, f64::atanh, 0.4),
+            ("sin", Dual::sin, libm::sin, 0.7),
+            ("cos", Dual::cos, libm::cos, 0.7),
+            ("tan", Dual::tan, libm::tan, 0.5),
+            ("sinh", Dual::sinh, libm::sinh, 0.6),
+            ("cosh", Dual::cosh, libm::cosh, 0.6),
+            ("tanh", Dual::tanh, libm::tanh, 0.6),
+            ("asin", Dual::asin, libm::asin, 0.4),
+            ("acos", Dual::acos, libm::acos, 0.4),
+            ("atan", Dual::atan, libm::atan, 0.4),
+            ("asinh", Dual::asinh, libm::asinh, 0.4),
+            ("acosh", Dual::acosh, libm::acosh, 1.5),
+            ("atanh", Dual::atanh, libm::atanh, 0.4),
         ];
         for (name, dfn, ffn, x0) in cases {
             let analytic = dfn(&Dual::variable(*x0, 0, 1)).grad_at(0);
@@ -2625,7 +2635,7 @@ mod tests {
         // `gdio` should be the diode's small-signal conductance at the operating point,
         // cross-checked against a central finite difference on `idio` itself (§5).
         fn idio_at(is: f64, vt: f64, va: f64) -> f64 {
-            is * ((va / vt).exp() - 1.0)
+            is * (libm::exp(va / vt) - 1.0)
         }
 
         let mut m = Module::new("diode");

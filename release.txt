@@ -20,6 +20,55 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.17.0 - 2026-09-26
+-------------------
+**Every transcendental that can reach a simulated number now comes from the pure-Rust `libm`
+crate, not the platform's maths library — the same bits on every OS, toolchain and thread.**
+Step 2 of `docs/proposals/parallel-assembly.md`. `exp`, `ln`, `pow`, trig, hyperbolic, `hypot`,
+… go through `libm` in the AD rules and constant folding, the reference models and noise
+tables, junction limiting and gmin stepping, the step-size controller, the AC sweep grid and
+excitation, and the sine source. `clippy.toml`'s `disallowed-methods` now rejects `f64::exp`
+and its relatives, so it stays that way; tests use `libm` too. Opted out, each with a written
+reason: va-cli's plots and run-time estimate, va-harness's metrics, xtask. `sqrt`/`abs`/`powi`
+are untouched (IEEE 754 fixes the first two; `powi` is multiplication).
+
+Why: MinGW's `exp`/`pow` round differently on the main thread and on any other (x87 precision
+is per-thread on Windows), which rules out parallel evaluation (Step 3); and Linux, macOS, MSVC
+and GNU Windows each brought their own libm, so a deck's last digits depended on the platform.
+`libm` measured ≤1 ulp everywhere, including where MinGW was 8–19 ulp out, and is faster for
+`exp`/`ln`/`pow` (proposal §3.3).
+
+**Cost — a one-time shift in answers,** `deck-diff --all` 1.16.1 vs 1.17.0: 54 of 72 decks
+identical, 18 differ:
+
+  * **14 decks keep their timebase** (DC sweeps, AC, fixed-step transients, c432's `.op`):
+    largest change max|Δ| / (the quantity's own max |value|) = 1.4e-9 (bsimbulk107 NAND), and
+    8.0e-7 for the rectifier's sine source; the rest ≤ 3.3e-13. Values below 1e-9 V/A (rounding
+    zeros such as unused branch currents) excluded. c432: 233 of 15 416 printed values differ,
+    one 4.1e-13 A branch current in its 7th digit and numerical zeros.
+  * **4 adaptive transients take a different step count** — c17 13 466 → 13 538,
+    `psp103_inverter_card_tran` 1 810 → 1 778, `psp103_inverter_tran` 1 861 → 1 898,
+    `ring_osc` 2 243 → 2 246. Node voltages resampled onto the old timebase: RMS ≤ 3.7e-4 of
+    scale (inverter `V(out)`), c17 ≤ 5.7e-5; 50%-crossing edges move ≤ 45 fs on the PSP103
+    decks and ≤ 7.6 fs on c17; `ring_osc`'s edges ≤ 0.22 µs over its 0.2 s run.
+  * Observed while measuring, **not changed by this release:** under the trapezoidal rule the
+    c17 input sources' branch currents alternate point to point (e.g. `I(V6)` −1.44e-4 /
+    −0.95e-4 A on consecutive steps after an edge) — trapezoidal ringing on a source current.
+    Resampled across two different step sequences it reads as a 44% RMS "difference" that is
+    not there: where both runs share a timepoint they agree to ~2e-9. Recorded for T4.
+
+**A test was wrong, and is corrected:** `newton::gmin_stepping_converges_a_circuit_plain_newton_cannot`
+claimed plain Newton fails on its 20-diode chain at *any* iteration budget (checked at 2000).
+With `libm`'s `ln` in junction limiting it converges there. A sweep of 5–40 diodes × 5–160 V
+found the 2000-iteration outcome flips at that one cell and nowhere else — one ulp, not a
+property. What holds under either maths, over a contiguous region, is failure within the
+default budget of 100 while gmin stepping succeeds; the test now asserts that. `dc.rs`'s rescue
+test, which only ever relied on the default budget, is unchanged apart from its comment.
+
+Measured at this version: `cargo test --workspace` 891 passed; `validate` 28/28, convergence
+28/28, every gate's error against QSPICE identical to 1.16.1's as printed; clippy clean.
+
+
 1.16.1 - 2026-09-26
 -------------------
 **Fix: the same deck no longer gives different last digits on machines with different core

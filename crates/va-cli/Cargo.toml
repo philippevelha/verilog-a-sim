@@ -19,6 +19,7 @@ name = "va-cli"
 path = "src/main.rs"
 
 [dependencies]
+libm = { workspace = true }
 va-ir = { workspace = true }
 va-abi = { workspace = true }
 va-frontend = { workspace = true }

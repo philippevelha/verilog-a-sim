@@ -771,7 +771,7 @@ fn step_factor(err_ratio: f64, method: Method, accepted: bool) -> f64 {
     let raw = if err_ratio <= 0.0 || !err_ratio.is_finite() {
         MAX_GROWTH
     } else {
-        SAFETY * err_ratio.powf(-exponent)
+        SAFETY * libm::pow(err_ratio, -exponent)
     };
     if accepted {
         raw.clamp(1.0, MAX_GROWTH)
@@ -1951,9 +1951,11 @@ mod tests {
         let h = 1e-3;
         let t_next = 1.0;
         let times: Vec<f64> = (0..3).map(|k| t_next - h * k as f64).collect();
-        let values: Vec<f64> = times.iter().map(|t| t.exp()).collect();
-        let history: Vec<(f64, Vec<f64>)> =
-            times[1..].iter().map(|t| (*t, vec![t.exp()])).collect();
+        let values: Vec<f64> = times.iter().map(|t| libm::exp(*t)).collect();
+        let history: Vec<(f64, Vec<f64>)> = times[1..]
+            .iter()
+            .map(|t| (*t, vec![libm::exp(*t)]))
+            .collect();
 
         // reltol 0 / abstol 1 makes the returned ratio the raw |LTE| in the unknown's units.
         let ratio = divided_difference_error_ratio(
@@ -1968,7 +1970,7 @@ mod tests {
         )
         .expect("enough history");
 
-        let analytic = 0.5 * h * h * t_next.exp();
+        let analytic = 0.5 * h * h * libm::exp(t_next);
         let rel = (ratio - analytic).abs() / analytic;
         assert!(
             rel < 1e-3,
@@ -2020,7 +2022,7 @@ mod tests {
             cfg.lte_estimator = estimator;
             let wf = run(&insts, 3, vec![vs_val, 0.0, 0.0], cfg).expect("integrates");
 
-            let analytic = vs_val * (1.0 - (-1.0f64).exp());
+            let analytic = vs_val * (1.0 - libm::exp(-1.0f64));
             let err = (interpolate(&wf, rc, 1) - analytic).abs() / analytic;
             (cap.loads.get(), err)
         };
@@ -2134,10 +2136,10 @@ mod tests {
     /// `c(v)·dv/dt + v/R = 0` with `c(v) = 1 + a·v` separates to `ln v + a·v = const − t/R`.
     /// Solved for `v(t)` by Newton — the closed form this study measures against.
     fn bias_dependent_exact(v0: f64, a: f64, r: f64, t: f64) -> f64 {
-        let k = v0.ln() + a * v0 - t / r;
+        let k = libm::log(v0) + a * v0 - t / r;
         let mut v = v0;
         for _ in 0..200 {
-            let f = v.ln() + a * v - k;
+            let f = libm::log(v) + a * v - k;
             let df = 1.0 / v + a;
             let step = f / df;
             v -= step;
@@ -2208,7 +2210,7 @@ mod tests {
                 coarse.is_finite() && fine.is_finite() && fine > 0.0,
                 "{method:?}: non-finite or zero error (coarse {coarse:e}, fine {fine:e})"
             );
-            (coarse / fine).log2()
+            libm::log2(coarse / fine)
         };
 
         let be = order(Method::BackwardEuler);
@@ -2273,7 +2275,7 @@ mod tests {
         let cfg = default_cfg(5.0 * rc, rc / 10.0, Method::BackwardEuler);
         let wf = run(&insts, 3, vec![vs_val, 0.0, 0.0], cfg).expect("integrates");
 
-        let analytic_at_rc = vs_val * (1.0 - (-1.0f64).exp());
+        let analytic_at_rc = vs_val * (1.0 - libm::exp(-1.0f64));
         let v1_at_rc = interpolate(&wf, rc, 1);
         let rel_err = (v1_at_rc - analytic_at_rc).abs() / analytic_at_rc;
         assert!(
@@ -2344,7 +2346,7 @@ mod tests {
         // shared schedule: trapezoidal's second-order reported answer should still beat
         // backward Euler's first-order one at the same point in time.
         let rc = 1e-3;
-        let analytic_at_rc = 5.0 * (1.0 - (-1.0f64).exp());
+        let analytic_at_rc = 5.0 * (1.0 - libm::exp(-1.0f64));
         let run_with_method = |method: Method| {
             let (vs, r, c) = rc_circuit(5.0);
             let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
@@ -2429,7 +2431,7 @@ mod tests {
                 coarse.is_finite() && fine.is_finite() && fine > 0.0,
                 "{method:?}: non-finite or zero error (coarse {coarse:e}, fine {fine:e})"
             );
-            (coarse / fine).log2()
+            libm::log2(coarse / fine)
         };
 
         let be = order(Method::BackwardEuler);
@@ -2458,7 +2460,7 @@ mod tests {
         let cfg = default_cfg(5.0 * rc, rc / 10.0, Method::Gear);
         let wf = run(&insts, 3, vec![vs_val, 0.0, 0.0], cfg).expect("Gear integrates");
 
-        let analytic = vs_val * (1.0 - (-1.0f64).exp());
+        let analytic = vs_val * (1.0 - libm::exp(-1.0f64));
         let got = interpolate(&wf, rc, 1);
         let rel = (got - analytic).abs() / analytic;
         assert!(
@@ -2717,7 +2719,7 @@ mod tests {
         let (watch_idx, t_cross) = wf.crossings[0];
         assert_eq!(watch_idx, 0);
 
-        let analytic_t = rc * 2.0f64.ln();
+        let analytic_t = rc * libm::log(2.0f64);
         let rel_err = (t_cross - analytic_t).abs() / analytic_t;
         assert!(
             rel_err < 1e-2,
@@ -2781,7 +2783,7 @@ mod tests {
 
     impl SinSource {
         fn value_at(&self, t: f64) -> f64 {
-            self.amplitude * (2.0 * std::f64::consts::PI * self.freq * t).sin()
+            self.amplitude * libm::sin(2.0 * std::f64::consts::PI * self.freq * t)
         }
     }
 

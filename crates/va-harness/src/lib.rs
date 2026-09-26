@@ -4,6 +4,8 @@
 //! against golden references, and reports pass/fail against the stated tolerances. No analysis
 //! result is trusted until it is green here.
 
+// Platform maths is fine here (clippy.toml's disallowed-methods, 1.17.0): metrics measure results against golden data; they produce no simulated number.
+#![allow(clippy::disallowed_methods)]
 #![forbid(unsafe_code)]
 
 pub mod ac;

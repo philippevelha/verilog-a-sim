@@ -45,15 +45,15 @@ impl Bjt {
 
     /// Base current `Ib(Vbe, Vbc) = Ibe + Ibc`.
     pub fn ib(&self, vbe: f64, vbc: f64) -> f64 {
-        let ibe = (self.is / self.beta_f) * ((vbe / self.vt).exp() - 1.0);
-        let ibc = (self.is / self.beta_r) * ((vbc / self.vt).exp() - 1.0);
+        let ibe = (self.is / self.beta_f) * (libm::exp(vbe / self.vt) - 1.0);
+        let ibc = (self.is / self.beta_r) * (libm::exp(vbc / self.vt) - 1.0);
         ibe + ibc
     }
 
     /// Collector current `Ic(Vbe, Vbc) = Icc - Ibc`.
     pub fn ic(&self, vbe: f64, vbc: f64) -> f64 {
-        let icc = self.is * ((vbe / self.vt).exp() - (vbc / self.vt).exp());
-        let ibc = (self.is / self.beta_r) * ((vbc / self.vt).exp() - 1.0);
+        let icc = self.is * (libm::exp(vbe / self.vt) - libm::exp(vbc / self.vt));
+        let ibc = (self.is / self.beta_r) * (libm::exp(vbc / self.vt) - 1.0);
         icc - ibc
     }
 }
@@ -91,10 +91,10 @@ impl ModelInstance for Bjt {
         sink.residual(c, ic);
         sink.residual(e, ie_row);
 
-        let gbe = (self.is / (self.beta_f * self.vt)) * (vbe / self.vt).exp();
-        let gbc = (self.is / (self.beta_r * self.vt)) * (vbc / self.vt).exp();
-        let gf = (self.is / self.vt) * (vbe / self.vt).exp();
-        let gr = (self.is / self.vt) * (vbc / self.vt).exp();
+        let gbe = (self.is / (self.beta_f * self.vt)) * libm::exp(vbe / self.vt);
+        let gbc = (self.is / (self.beta_r * self.vt)) * libm::exp(vbc / self.vt);
+        let gf = (self.is / self.vt) * libm::exp(vbe / self.vt);
+        let gr = (self.is / self.vt) * libm::exp(vbc / self.vt);
 
         // dIb/d{Vbe,Vbc} and dIc/d{Vbe,Vbc}, chained through Vbe=x[b]-x[e], Vbc=x[b]-x[c] (see
         // this module's doc comment for the hand derivation; the three columns below each sum
@@ -160,10 +160,10 @@ mod tests {
         let dic_dvbe = (q.ic(vbe + h, vbc) - q.ic(vbe - h, vbc)) / (2.0 * h);
         let dic_dvbc = (q.ic(vbe, vbc + h) - q.ic(vbe, vbc - h)) / (2.0 * h);
 
-        let gbe = (q.is / (q.beta_f * q.vt)) * (vbe / q.vt).exp();
-        let gbc = (q.is / (q.beta_r * q.vt)) * (vbc / q.vt).exp();
-        let gf = (q.is / q.vt) * (vbe / q.vt).exp();
-        let gr = (q.is / q.vt) * (vbc / q.vt).exp();
+        let gbe = (q.is / (q.beta_f * q.vt)) * libm::exp(vbe / q.vt);
+        let gbc = (q.is / (q.beta_r * q.vt)) * libm::exp(vbc / q.vt);
+        let gf = (q.is / q.vt) * libm::exp(vbe / q.vt);
+        let gr = (q.is / q.vt) * libm::exp(vbc / q.vt);
 
         let rel = |fd: f64, analytic: f64| (fd - analytic).abs() / analytic.abs().max(1e-30);
         assert!(

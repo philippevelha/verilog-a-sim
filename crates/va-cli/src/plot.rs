@@ -7,6 +7,8 @@
 //! it is a single point, not a curve — so asking for one is still a clear error rather than an
 //! empty image.
 
+// Platform maths is fine here (clippy.toml's disallowed-methods, 1.17.0): dB and phase axes of a picture, computed from results already final.
+#![allow(clippy::disallowed_methods)]
 use anyhow::{Context, Result};
 use plotters::prelude::*;
 use va_transient::integrator::Waveform;

@@ -43,12 +43,12 @@ impl Diode {
 
     /// Diode current at junction voltage `vd`.
     pub fn current(&self, vd: f64) -> f64 {
-        self.is * ((vd / self.nvt).exp() - 1.0)
+        self.is * (libm::exp(vd / self.nvt) - 1.0)
     }
 
     /// Small-signal conductance `dI/dVd` at junction voltage `vd`.
     pub fn conductance(&self, vd: f64) -> f64 {
-        (self.is / self.nvt) * (vd / self.nvt).exp()
+        (self.is / self.nvt) * libm::exp(vd / self.nvt)
     }
 }
 

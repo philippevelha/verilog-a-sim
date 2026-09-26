@@ -25,6 +25,8 @@
 //! 2; the measured growth per doubling at the top of the two tables is between exponent 0.9 and
 //! 1.6. A circuit denser than a 2-D grid can exceed the high end.
 
+// Platform maths is fine here (clippy.toml's disallowed-methods, 1.17.0): the run-time estimate is printed advice, never a simulated number.
+#![allow(clippy::disallowed_methods)]
 use crate::Analysis;
 use va_core::sparse::{Solver, SPARSE_THRESHOLD};
 

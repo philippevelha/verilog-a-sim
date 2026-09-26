@@ -1308,12 +1308,16 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "va-abi"
-version = "1.16.1"
+version = "1.17.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "va-acnoise"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
+ "libm",
  "thiserror 2.0.18",
  "va-abi",
  "va-core",
@@ -1321,9 +1325,10 @@ dependencies = [
 
 [[package]]
 name = "va-cli"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
  "anyhow",
+ "libm",
  "plotters",
  "va-abi",
  "va-acnoise",
@@ -1337,8 +1342,9 @@ dependencies = [
 
 [[package]]
 name = "va-codegen"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
+ "libm",
  "thiserror 2.0.18",
  "va-abi",
  "va-ir",
@@ -1346,9 +1352,10 @@ dependencies = [
 
 [[package]]
 name = "va-core"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
  "faer",
+ "libm",
  "rayon",
  "thiserror 2.0.18",
  "va-abi",
@@ -1356,8 +1363,9 @@ dependencies = [
 
 [[package]]
 name = "va-frontend"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
+ "libm",
  "logos",
  "thiserror 2.0.18",
  "va-ir",
@@ -1365,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "va-harness"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
  "plotters",
  "thiserror 2.0.18",
@@ -1374,11 +1382,11 @@ dependencies = [
 
 [[package]]
 name = "va-ir"
-version = "1.16.1"
+version = "1.17.0"
 
 [[package]]
 name = "va-netlist"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
  "thiserror 2.0.18",
  "va-abi",
@@ -1386,8 +1394,9 @@ dependencies = [
 
 [[package]]
 name = "va-transient"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
+ "libm",
  "thiserror 2.0.18",
  "va-abi",
  "va-core",
@@ -1568,7 +1577,7 @@ checksum = "9aec5da331524158c6d1a4ac0ab1541149c0b9505fde06423b02f5ef0106b9f0"
 
 [[package]]
 name = "xtask"
-version = "1.16.1"
+version = "1.17.0"
 dependencies = [
  "anyhow",
  "va-abi",

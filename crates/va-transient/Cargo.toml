@@ -7,6 +7,7 @@ publish.workspace = true
 description = "T4: transient integration, timestep/LTE control, and event handling."
 
 [dependencies]
+libm = { workspace = true }
 va-core = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }

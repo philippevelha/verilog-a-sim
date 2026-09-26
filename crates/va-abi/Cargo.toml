@@ -9,3 +9,4 @@ description = "Interface β: the ModelInstance / StampSink ABI plus hand-written
 # va-abi is a LEAF crate (the project's internal 'OSDI'). Do NOT add internal `va-*`
 # dependencies (§3). It must compile and ship working reference models on its own.
 [dependencies]
+libm = { workspace = true }

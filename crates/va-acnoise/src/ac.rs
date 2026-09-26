@@ -85,7 +85,7 @@ impl AcSweep {
             AcSweepKind::Oct => 2f64,
             _ => 10f64,
         };
-        let ratio = per.powf(1.0 / self.points as f64);
+        let ratio = libm::pow(per, 1.0 / self.points as f64);
         let mut freqs = Vec::new();
         let mut f = self.fstart;
         // Stop once a step would overshoot `fstop` by more than half a step (in log space) —
@@ -591,7 +591,7 @@ pub fn magnitude((re, im): Complex) -> f64 {
 
 /// Phase (radians) of a [`Complex`] value.
 pub fn phase((re, im): Complex) -> f64 {
-    im.atan2(re)
+    libm::atan2(im, re)
 }
 
 #[cfg(test)]
@@ -794,7 +794,7 @@ mod tests {
             let expected_mag = r / (1.0 + wrc * wrc).sqrt();
             // Negative real gain rotated by −atan(ωRC): phase = π − atan(ωRC), wrapped.
             let expected_phase = {
-                let p = PI - wrc.atan();
+                let p = PI - libm::atan(wrc);
                 if p > PI {
                     p - 2.0 * PI
                 } else {
@@ -853,7 +853,7 @@ mod tests {
             let omega = 2.0 * PI * f;
             let wrc = omega * r * cap;
             let expected_mag = 1.0 / (1.0 + wrc * wrc).sqrt();
-            let expected_phase = -wrc.atan();
+            let expected_phase = -libm::atan(wrc);
 
             let got_mag = magnitude(x[1]);
             let got_phase = phase(x[1]);

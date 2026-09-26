@@ -345,8 +345,8 @@ mod tests {
     /// The fixture is the one `newton::gmin_stepping_converges_a_circuit_plain_newton_cannot`
     /// established: 20 diodes in series behind a 10 Ω resistor at 20 V from a cold start. A real
     /// operating point exists, but plain Newton's junction limiting walks the chain's internal
-    /// nodes into the exponential's overflow range with no other conductance path to hold them,
-    /// and the factorization goes singular. That test pins that `newton::solve` still fails;
+    /// nodes one at a time with no other conductance path to hold them, and does not arrive
+    /// within the default iteration budget. That test pins that `newton::solve` still fails;
     /// this one pins that `dc::operating_point` no longer does.
     #[test]
     fn a_solve_that_fails_outright_is_retried_with_gmin_stepping() {
@@ -371,10 +371,10 @@ mod tests {
         //
         // Asserted as "fails with something the rescue would retry", not as one named variant.
         // *Which* way a 20-diode chain at 20 V comes apart is a property of the platform's
-        // floating point, not of this code: at a generous iteration budget it overflows the
-        // factorization (`Singular`, what `newton.rs`'s sibling test sees at `max_iters: 2000`),
-        // but at the default budget of 100 it can equally run out of iterations first
-        // (`NoConvergence`) or report a non-finite row on the way. This test pinned `Singular`
+        // floating point, not of this code: at the default budget of 100 it can run out of
+        // iterations (`NoConvergence`), overflow the factorization (`Singular`) or report a
+        // non-finite row on the way. (Given 2000 iterations it now arrives — see `newton.rs`'s
+        // sibling for why that was never a property to rely on.) This test pinned `Singular`
         // and went red on macOS for exactly that reason while Linux and Windows stayed green —
         // a real portability bug in the assertion, not in the solver. The precondition the
         // rescue actually needs is `worth_a_gmin_retry`, so that is what is checked.

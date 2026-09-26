@@ -115,6 +115,10 @@ the existing ones show none needed it.
 
 ### 3.3 Thread-independent maths: `libm` (decided)
 
+> **Landed in 1.17.0** (2026-09-26) — Step 2: every transcendental that can reach a simulated
+> number goes through `libm` in all library crates, tests included, and `clippy.toml`'s
+> `disallowed-methods` keeps it that way. The one-time shift against 1.16.1 is in release.txt.
+
 The first prototype's parallel results differed from serial in the last bits, even with **one**
 worker thread, and even though record/replay on the main thread was bit-identical. Cause, measured:
 on the `x86_64-pc-windows-gnu` toolchain (this project's), `exp` and `pow` come from MinGW and use
@@ -303,7 +307,8 @@ Design points that need deciding:
 1. **Ratify the §6 interface change** (`Send + Sync` on `ModelInstance`) with the owners of
    `va-codegen` (T2), `va-transient` (T4), `va-acnoise` (T5), `va-netlist`/`va-cli` (T6).
 2. **Reproducibility first, as its own release:** `libm` for all evaluation-path maths (§3.3) +
-   `faer` pinned sequential (§3.4 — done in 1.16.1) + the `disallowed_methods` lint. No parallelism yet. Its
+   `faer` pinned sequential (§3.4 — done in 1.16.1) + the `disallowed_methods` lint (done in
+   1.17.0). No parallelism yet. Its
    release entry states the §4.2 shift. A feature that moves answers → a minor bump.
 3. **Parallel assembly:** record/replay in `va-core` (DC, dense and sparse — the prototype did
    sparse only) and `va-transient`; `--threads`; the small-circuit threshold. Gate: `deck-diff`

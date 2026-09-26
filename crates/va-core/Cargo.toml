@@ -9,6 +9,7 @@ description = "T3: MNA assembly, Newton, linear solve, and convergence (DC). Dep
 # CRITICAL INVARIANT (§2): va-core depends on va-abi (Interface β) and NOTHING ELSE.
 # Do not add va-frontend / va-codegen here.
 [dependencies]
+libm = { workspace = true }
 va-abi = { workspace = true }
 faer = { workspace = true }
 thiserror = { workspace = true }

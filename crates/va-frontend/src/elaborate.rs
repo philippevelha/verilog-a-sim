@@ -4905,7 +4905,7 @@ fn eval_binop(op: ast::BinOp, a: f64, b: f64) -> f64 {
         Mul => a * b,
         Div => a / b,
         Mod => a % b,
-        Pow => a.powf(b),
+        Pow => libm::pow(a, b),
         Lt => bool_to_f64(a < b),
         Le => bool_to_f64(a <= b),
         Gt => bool_to_f64(a > b),
@@ -4936,38 +4936,38 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
         _ => Err(arity_err()),
     };
     Ok(match name {
-        "exp" | "limexp" => arg1()?.exp(),
-        "ln" => arg1()?.ln(),
-        "log" => arg1()?.log10(),
+        "exp" | "limexp" => libm::exp(arg1()?),
+        "ln" => libm::log(arg1()?),
+        "log" => libm::log10(arg1()?),
         "sqrt" => arg1()?.sqrt(),
         "abs" => arg1()?.abs(),
         "floor" => arg1()?.floor(),
         "ceil" => arg1()?.ceil(),
         "round" | "integer" => arg1()?.round(),
         "int" => arg1()?.trunc(),
-        "sin" => arg1()?.sin(),
-        "cos" => arg1()?.cos(),
-        "tan" => arg1()?.tan(),
-        "sinh" => arg1()?.sinh(),
-        "cosh" => arg1()?.cosh(),
-        "tanh" => arg1()?.tanh(),
-        "asin" => arg1()?.asin(),
-        "acos" => arg1()?.acos(),
-        "atan" => arg1()?.atan(),
-        "asinh" => arg1()?.asinh(),
-        "acosh" => arg1()?.acosh(),
-        "atanh" => arg1()?.atanh(),
+        "sin" => libm::sin(arg1()?),
+        "cos" => libm::cos(arg1()?),
+        "tan" => libm::tan(arg1()?),
+        "sinh" => libm::sinh(arg1()?),
+        "cosh" => libm::cosh(arg1()?),
+        "tanh" => libm::tanh(arg1()?),
+        "asin" => libm::asin(arg1()?),
+        "acos" => libm::acos(arg1()?),
+        "atan" => libm::atan(arg1()?),
+        "asinh" => libm::asinh(arg1()?),
+        "acosh" => libm::acosh(arg1()?),
+        "atanh" => libm::atanh(arg1()?),
         "pow" => {
             let (x, y) = arg2()?;
-            x.powf(y)
+            libm::pow(x, y)
         }
         "atan2" => {
             let (y, x) = arg2()?;
-            y.atan2(x)
+            libm::atan2(y, x)
         }
         "hypot" => {
             let (x, y) = arg2()?;
-            x.hypot(y)
+            libm::hypot(x, y)
         }
         "min" => {
             let (x, y) = arg2()?;

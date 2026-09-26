@@ -842,7 +842,7 @@ mod tests {
         // And the answer is right, not merely returned: KCL at the junction node says the
         // diode current equals the resistor current, to the solver's own tolerance.
         let vd = x[1];
-        let id = 1e-14 * ((vd / VT_NOMINAL).exp() - 1.0);
+        let id = 1e-14 * (libm::exp(vd / VT_NOMINAL) - 1.0);
         let ir = (x[0] - vd) / 1.0;
         assert!(
             (id - ir).abs() < 1e-9 * ir.abs().max(1e-6),
@@ -878,7 +878,7 @@ mod tests {
         };
         let x = solve(&insts, 3, capped).expect("the capped iteration converges");
         let vd = x[1];
-        let id = 1e-14 * ((vd / VT_NOMINAL).exp() - 1.0);
+        let id = 1e-14 * (libm::exp(vd / VT_NOMINAL) - 1.0);
         let ir = x[0] - vd;
         assert!(
             (id - ir).abs() < 1e-9 * ir.abs().max(1e-6),
@@ -1209,16 +1209,21 @@ mod tests {
         // *needs* gmin stepping, not just tolerates it. 20 diodes in series behind a 10 Ω
         // resistor, driven at 20 V from a cold (zero) start: a real, physically sane operating
         // point exists (~0.81 V/diode, ~0.38 A), but plain Newton's log-ramp junction limiting
-        // walks the chain's *internal* node voltages there one node at a time with no other
-        // conductance path to keep them in check, and some node's voltage crosses into the
-        // exponential's `f64` overflow range en route -- a genuine `Err(Singular)`: the stamped
-        // entries are still *finite* (`check_finite` passes; verified 2026-09-11 when
-        // `NonFinite` was added and this test was expected to move to it, and did not), but so
-        // large that the factorization itself overflows. Confirmed independent of iteration budget (still fails at
-        // `max_iters: 2000`, ~13x this test's default). `gmin` stepping's early, well-
-        // conditioned stages (a competing shunt conductance to ground at every node) keep the
-        // whole chain in range long enough to land near the true operating point before the
-        // final, unshunted stage — which then only needs a handful of iterations to finish.
+        // walks the chain's *internal* node voltages there one node at a time, with no other
+        // conductance path to keep them in check, and does not arrive within the default
+        // iteration budget. `gmin` stepping's early, well-conditioned stages (a competing shunt
+        // conductance to ground at every node) keep the whole chain in range long enough to land
+        // near the true operating point before the final, unshunted stage — which then only
+        // needs a handful of iterations to finish.
+        //
+        // **"Cannot" means "not within the default budget", and only that** (corrected in
+        // 1.17.0). This test used to claim plain Newton fails at *any* budget, checked at
+        // `max_iters: 2000`. That was one ulp: with MinGW's `ln` in `limit_junction` the walk
+        // overflowed the factorization (`Singular`); with `libm`'s it arrives. A sweep of
+        // 5–40 diodes × 5–160 V (2026-09-26) found that 2000-iteration outcome flips at this one
+        // cell and nowhere else — a knife edge, not a property. The default-budget failure is
+        // not: plain Newton fails and gmin stepping succeeds over a contiguous region (20–40
+        // diodes at 20 V, and 30 diodes from 80 V up), under either maths.
         let n_diodes = 20;
         let branch = n_diodes + 1;
         let dim = branch + 1;
@@ -1232,21 +1237,12 @@ mod tests {
         let mut insts: Vec<&dyn ModelInstance> = vec![&vs, &r];
         insts.extend(diodes.iter().map(|d| d as &dyn ModelInstance));
 
-        // Not just this test's default iteration budget: plain Newton stays singular even
-        // given a very generous one, proving this isn't a "just needs more iterations" case.
-        let cfg_no_gmin = NewtonConfig {
-            max_iters: 2000,
-            ..NewtonConfig::default()
-        };
-        // The claim is the one in this test's name — plain Newton *cannot* — so that is what is
-        // asserted. On this machine it comes apart as `Singular` (the comment above records why,
-        // and that it was re-verified when `NonFinite` was added), but which of the three ways a
-        // 20-diode chain at 20 V overflows is a property of the platform's floating point, not
-        // of this solver: its sibling in `dc.rs` pinned `Singular` and went red on macOS while
-        // Linux and Windows stayed green.
+        // Asserted as "fails", not as one named variant: which way the walk comes apart is a
+        // property of the platform's floating point, not of this solver — `dc.rs`'s sibling
+        // pinned `Singular` and went red on macOS while Linux and Windows stayed green.
         assert!(
-            solve(&insts, dim, cfg_no_gmin).is_err(),
-            "expected plain Newton to fail regardless of iteration budget"
+            solve(&insts, dim, NewtonConfig::default()).is_err(),
+            "expected plain Newton to fail within the default iteration budget"
         );
 
         let cfg_with_gmin = NewtonConfig {

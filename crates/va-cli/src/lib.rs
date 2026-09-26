@@ -2078,7 +2078,7 @@ fn waveform_value(waveform: &va_netlist::Waveform, t: f64) -> f64 {
             offset,
             amplitude,
             freq,
-        } => offset + amplitude * (2.0 * PI * freq * t).sin(),
+        } => offset + amplitude * libm::sin(2.0 * PI * freq * t),
         va_netlist::Waveform::Pwl { ref points } => {
             // Held at the ends, linear between: the first segment whose end time is at or past
             // `t` is the one `t` falls in. A repeated time (a vertical step) makes a zero-width
@@ -2367,7 +2367,10 @@ fn ac_excitation(
         };
         if let Some(ac) = dev.ac {
             let phase = ac.phase_deg.to_radians();
-            excitation[*branch] = (ac.magnitude * phase.cos(), ac.magnitude * phase.sin());
+            excitation[*branch] = (
+                ac.magnitude * libm::cos(phase),
+                ac.magnitude * libm::sin(phase),
+            );
             driven += 1;
         }
     }
@@ -4087,7 +4090,7 @@ R2 a gnd 3000
             * l
             * (dndt + n * alpha_l).powi(2)
             / (kappa * lambda * lambda);
-        a * ((kmax4 + w_d) / (kmin4 + w_d)).ln()
+        a * libm::log((kmax4 + w_d) / (kmin4 + w_d))
     }
 
     /// Duan's thermomechanical 1/f phase-noise PSD (rad²/Hz), Bartolo et al. eq. (5), as the
@@ -4113,7 +4116,7 @@ R2 a gnd 3000
     #[test]
     fn wanser_formula_reproduces_bartolos_quoted_figure() {
         let s0 = wanser_psd(1e-3, 80.0, 1319e-9, 2.35e-6, 9.52e-6);
-        let db = 10.0 * s0.log10();
+        let db = 10.0 * libm::log10(s0);
         assert!(
             (db - (-125.5)).abs() < 0.05,
             "F(0): {db} dB, paper says -125.5 dB"
@@ -4121,7 +4124,7 @@ R2 a gnd 3000
         // And the wavelength scaling of their Fig. 3: 1319 nm is louder than 1550 nm by
         // 20·log10(1550/1319) = 1.40 dB from λ alone, plus ~0.2 dB from the mode radius.
         let s1550 = wanser_psd(1e-3, 80.0, 1550e-9, 2.605e-6, 9.488e-6);
-        let ratio_db = 10.0 * (s0 / s1550).log10();
+        let ratio_db = 10.0 * libm::log10(s0 / s1550);
         assert!((ratio_db - 1.6).abs() < 0.1, "1319 vs 1550: {ratio_db} dB");
     }
 
@@ -4165,7 +4168,7 @@ R2 a gnd 3000
             assert!((x3[k] - x4[k]).abs() < 1e-12 * x3[k], "two identical arms");
             // Each detector: 2q·(0.9 A/W · 0.5 mW · the arm's 0.008 dB of loss + Is) into
             // 1 kΩ, through E1's unit gain.
-            let p_det = 0.5e-3 * 10f64.powf(-2e-4 * 40.0 / 10.0);
+            let p_det = 0.5e-3 * libm::pow(10f64, -2e-4 * 40.0 / 10.0);
             let shot = 2.0 * va_abi::noise::ELEMENTARY_CHARGE * (0.9 * p_det + 1e-12) * 1e6;
             assert!(
                 ((x6[k] - shot) / shot).abs() < 1e-6,
@@ -4187,7 +4190,7 @@ R2 a gnd 3000
                 .iter()
                 .position(|&f| (f - hz).abs() < 1e-6 * hz)
                 .unwrap();
-            10.0 * spectrum.input_psd[k].log10()
+            10.0 * libm::log10(spectrum.input_psd[k])
         };
         assert!((at(1e3) - (-124.9)).abs() < 0.2, "1 kHz: {} dB", at(1e3));
         assert!((at(1e5) - (-137.4)).abs() < 0.2, "100 kHz: {} dB", at(1e5));
@@ -4303,9 +4306,10 @@ R2 a gnd 3000
         let v = net.node_order.iter().position(|n| n == "v").unwrap();
         let veq = |c: f64| -> f64 {
             102.0
-                * (1.0 - (c.max(1e-9) / 180.0).powf(1.86))
-                    .max(1e-9)
-                    .powf(11.72)
+                * libm::pow(
+                    (1.0 - libm::pow(c.max(1e-9) / 180.0, 1.86)).max(1e-9),
+                    11.72,
+                )
         };
         let (mut best_c, mut best_q) = (0.0, 0.0);
         for (c, x) in &points {
@@ -5167,7 +5171,7 @@ R2 out gnd 10k
         // 5 ms is exactly 5τ (R = 1 kΩ, C = 1 µF), so the closed form is 5·(1 − e⁻⁵) =
         // 4.96631…, not 5 — checking against the RC law rather than against the rail is what
         // makes this an assertion about the physics instead of about a tolerance.
-        let expected = 5.0 * (1.0 - (-5.0_f64).exp());
+        let expected = 5.0 * (1.0 - libm::exp(-5.0_f64));
         assert!(
             (uic_last - expected).abs() < 1e-3,
             "…and charges along the RC curve over 5τ: V(out) = {uic_last}, want {expected}"
@@ -5258,7 +5262,7 @@ endmodule
                 "V(in) = {} at V1={v}",
                 op.x[in_idx]
             );
-            let expected_id = is * ((v / vt).exp() - 1.0);
+            let expected_id = is * (libm::exp(v / vt) - 1.0);
             // KCL at `in`: id (diode) + ib (source) = 0 (va-abi::VSource's own sign
             // convention — "current flows out of p and into n" internally), so I(V1) = -id.
             let i_v1 = op.x[branch_idx];
@@ -5459,7 +5463,7 @@ X1 out in gnd tr
             let (re, im) = resp.x[i][out];
             let wt = 2.0 * std::f64::consts::PI * f * period;
             // (1−a) / (1 − a e^{−jwT})
-            let (dr, di) = (1.0 - a * wt.cos(), a * wt.sin());
+            let (dr, di) = (1.0 - a * libm::cos(wt), a * libm::sin(wt));
             let dd = dr * dr + di * di;
             let (er, ei) = ((1.0 - a) * dr / dd, -(1.0 - a) * di / dd);
             assert!(
@@ -5512,12 +5516,12 @@ M1 out in gnd resonant
         let mut worst = 0.0_f64;
         let mut peak = 0.0_f64;
         for (&t, row) in wf.t.iter().zip(&wf.x) {
-            let exact = 1.0 - (-a * t).exp() * ((b * t).cos() + (a / b) * (b * t).sin());
+            let exact = 1.0 - libm::exp(-a * t) * (libm::cos(b * t) + (a / b) * libm::sin(b * t));
             worst = worst.max((row[out] - exact).abs());
             peak = peak.max(row[out]);
         }
         assert!(worst < 5e-4, "max deviation from the closed form: {worst}");
-        let expected_peak = 1.0 + (-a * std::f64::consts::PI / b).exp();
+        let expected_peak = 1.0 + libm::exp(-a * std::f64::consts::PI / b);
         assert!(
             (peak - expected_peak).abs() < 5e-3,
             "overshoot peak {peak} vs {expected_peak} (a fold to H(0) would give 1.0)"
@@ -6465,7 +6469,7 @@ C1 mid gnd 1u
             wf.x.last().expect("a last point")[mid],
         );
         // 1 - exp(-t/tau) at tau = 1 ms. The LTE-controlled run is well inside 1 % of it.
-        let expected = 1.0 - (-t_end / 1e-3).exp();
+        let expected = 1.0 - libm::exp(-t_end / 1e-3);
         assert!(
             (x_end - expected).abs() < 1e-2,
             "expected the 1 kOhm time constant (V(mid) ~ {expected:.4} at t = {t_end:e}), got \
@@ -7058,12 +7062,12 @@ endmodule
             let (re, im) = resp.x[i][out];
             // 1 / (1 + e^{-jwt}), by hand: denominator (1 + cos, -sin), then reciprocal.
             let wt = 2.0 * std::f64::consts::PI * f * td;
-            let (dr, di) = (1.0 + k * wt.cos(), -k * wt.sin());
+            let (dr, di) = (1.0 + k * libm::cos(wt), -k * libm::sin(wt));
             let d2 = dr * dr + di * di;
             let (want_re, want_im) = (dr / d2, -di / d2);
             let err = ((re - want_re).powi(2) + (im - want_im).powi(2)).sqrt();
             assert!(
-                err < 1e-9 * (want_re.hypot(want_im)).max(1.0),
+                err < 1e-9 * libm::hypot(want_re, want_im).max(1.0),
                 "at {f:e} Hz: got ({re:.9}, {im:.9}), closed form ({want_re:.9}, {want_im:.9})"
             );
         }
@@ -7119,7 +7123,10 @@ endmodule
                 2.0 * std::f64::consts::PI * f * t2,
             );
             // Arm sum, averaged: (e^{-jw t1} + e^{-jw t2}) / 2.
-            let (ar, ai) = (0.5 * (w1.cos() + w2.cos()), -0.5 * (w1.sin() + w2.sin()));
+            let (ar, ai) = (
+                0.5 * (libm::cos(w1) + libm::cos(w2)),
+                -0.5 * (libm::sin(w1) + libm::sin(w2)),
+            );
             // V = 1 / (1 + k * armsum)
             let (dr, di) = (1.0 + k * ar, k * ai);
             let d2 = dr * dr + di * di;
@@ -7851,7 +7858,7 @@ X1 a gnd resistor
         let (t1, v1) = sample(200e-6);
         let (t2, v2) = sample(300e-6);
         let ratio = (5.0 - v2) / (5.0 - v1);
-        let expected = (-(t2 - t1) / rc).exp();
+        let expected = libm::exp(-(t2 - t1) / rc);
         let rel = (ratio - expected).abs() / expected;
         assert!(
             rel < 1e-2,
@@ -7873,7 +7880,7 @@ X1 a gnd resistor
         let (t3, v3) = sample(700e-6);
         let (t4, v4) = sample(800e-6);
         let decay = v4 / v3;
-        let expected_decay = (-(t4 - t3) / rc).exp();
+        let expected_decay = libm::exp(-(t4 - t3) / rc);
         let rel = (decay - expected_decay).abs() / expected_decay;
         assert!(
             rel < 1e-2,
@@ -7913,7 +7920,7 @@ X1 a gnd resistor
                 wf.t.iter()
                     .position(|&t| t >= n_tau * tau)
                     .expect("a sample at or past the query time");
-            let expected = -i0 * r * (-wf.t[i] / tau).exp();
+            let expected = -i0 * r * libm::exp(-wf.t[i] / tau);
             let rel = (wf.x[i][out] - expected).abs() / expected.abs();
             assert!(
                 rel < 5e-3,
@@ -7954,7 +7961,7 @@ X1 a gnd resistor
 
         // Peak overshoot of an underdamped second-order step: 1 + exp(-pi*zeta/sqrt(1-zeta^2)).
         let expected_peak =
-            5.0 * (1.0 + (-std::f64::consts::PI * zeta / (1.0 - zeta * zeta).sqrt()).exp());
+            5.0 * (1.0 + libm::exp(-std::f64::consts::PI * zeta / (1.0 - zeta * zeta).sqrt()));
         let peak =
             wf.x.iter()
                 .map(|row| row[out])
@@ -8027,7 +8034,7 @@ X1 a gnd resistor
                 wf.t.iter()
                     .position(|&t| t >= t_query)
                     .expect("sample at or past the query time");
-            let expected = 5.0 * (-wf.t[i] / rc).exp();
+            let expected = 5.0 * libm::exp(-wf.t[i] / rc);
             let rel = (wf.x[i][out] - expected).abs() / expected;
             assert!(
                 rel < 1e-3,
@@ -8068,7 +8075,7 @@ X1 a gnd resistor
             let vmid = op.x[mid_idx];
             // KCL at `mid`: the resistor current in equals the diode current out.
             let i_r = (v - vmid) / r;
-            let i_d = is * ((vmid / vt).exp() - 1.0);
+            let i_d = is * (libm::exp(vmid / vt) - 1.0);
             let tol = 1e-12_f64.max(i_d.abs() * 1e-6);
             assert!(
                 (i_r - i_d).abs() < tol,
@@ -8386,7 +8393,7 @@ endmodule
 
             let wrc = 2.0 * PI * f * r * c;
             let expected_mag = 1.0 / (1.0 + wrc * wrc).sqrt();
-            let expected_phase = -wrc.atan();
+            let expected_phase = -libm::atan(wrc);
             let got_mag = va_acnoise::ac::magnitude(x[out_idx]);
             let got_phase = va_acnoise::ac::phase(x[out_idx]);
             assert!(
@@ -8427,7 +8434,7 @@ endmodule
 
         let response = solve_ac(&net, &design.modules).expect("AC sweep");
         // diode.va's own defaults (Is = 1e-14, N = 1) and va-codegen's thermal voltage.
-        let gd = 1e-14 / va_codegen::VT * (vd / va_codegen::VT).exp();
+        let gd = 1e-14 / va_codegen::VT * libm::exp(vd / va_codegen::VT);
         let (r1, c1) = (1000.0, 1e-7);
         for (&f, x) in response.f.iter().zip(&response.x) {
             // Small-signal divider: V(a)/V(in) = Y_load⁻¹ / (R1 + Y_load⁻¹) with
@@ -8480,7 +8487,7 @@ endmodule
                 .map(|(&t, x)| (t, x[out_idx]))
                 .find(|&(t, _)| t >= rc)
                 .expect("a sample at or past t=RC");
-        let analytic_at_rc = vs * (1.0 - (-t_near_rc / rc).exp());
+        let analytic_at_rc = vs * (1.0 - libm::exp(-t_near_rc / rc));
         assert!(
             (v_near_rc - analytic_at_rc).abs() / vs < 1e-2,
             "V(out)={v_near_rc} at t={t_near_rc} vs analytic {analytic_at_rc}"

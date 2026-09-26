@@ -56,12 +56,12 @@ pub fn limit_junction(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
         if vold > 0.0 {
             let arg = 1.0 + (vnew - vold) / vt;
             if arg > 0.0 {
-                vold + vt * arg.ln()
+                vold + vt * libm::log(arg)
             } else {
                 vcrit
             }
         } else {
-            vt * (vnew / vt).ln()
+            vt * libm::log(vnew / vt)
         }
     } else {
         vnew
@@ -87,7 +87,7 @@ const NOMINAL_IS: f64 = 1e-14;
 /// [`NOMINAL_IS`] in place of a real device's `Is` (`va-core` has none to read — see the
 /// module doc comment).
 pub fn default_vcrit(vt: f64) -> f64 {
-    vt * (vt / (std::f64::consts::SQRT_2 * NOMINAL_IS)).ln()
+    vt * libm::log(vt / (std::f64::consts::SQRT_2 * NOMINAL_IS))
 }
 
 /// The `gmin` conductance to shunt across every node at `step` of a gmin-stepping ramp of
@@ -105,7 +105,7 @@ pub fn gmin_for_step(step: usize, total_steps: usize) -> f64 {
         return 0.0;
     }
     let frac = step as f64 / total_steps as f64;
-    GMAX * (GMIN / GMAX).powf(frac)
+    GMAX * libm::pow(GMIN / GMAX, frac)
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ publish.workspace = true
 description = "T2: lower va-ir to differentiated model instances (automatic differentiation)."
 
 [dependencies]
+libm = { workspace = true }
 va-ir = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }

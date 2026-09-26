@@ -7,6 +7,8 @@
 //! - `bench-linsolve` — dense-vs-sparse MNA solve benchmark (T3 sparse-solve backlog).
 //! - `bench-model`    — per-`load()` cost of a compiled Verilog-A model (the evaluation half).
 
+// Platform maths is fine here (clippy.toml's disallowed-methods, 1.17.0): dev automation and benchmarks; it produces no simulated number.
+#![allow(clippy::disallowed_methods)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
