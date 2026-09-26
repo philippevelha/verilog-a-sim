@@ -20,6 +20,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.19.0 - 2026-09-26
+-------------------
+**`cargo xtask btf <deck> [--model <m>] [--time-lu]`: how far a circuit's Jacobian splits into
+block triangular form** — Step 4's first measurement (`docs/proposals/parallel-assembly.md`
+§5.1.1). It assembles the deck at its DC operating point, takes a maximum transversal and the
+strongly connected components of the permuted graph, and reports blocks, sizes and dependency
+depth for the stored pattern and for the numerically nonzero one (DC `G`; transient `G` or `C`),
+each also as a union over four bias points. `--time-lu` times `faer`'s LU with and without the
+exact zeros. New public `va_cli::instances` (a deck's instances and dimension, for tooling).
+
+What it found, c432 (15 416 unknowns): the stored pattern is one block (99.7%); the DC nonzero
+pattern is **10 829 blocks, the largest 52 unknowns**, 72 deep; transient keeps one block of
+43%. chain160: 4 024 blocks of ≤ 9, 324 deep; transient 39%. Explicit zeros are *not* the LU's
+cost (c432 34 → 31 ms per solve without them). At 8 threads the linear solve is now about half
+of each run: c432 22.7 s of 43.6 s (558 iterations × 40.7 ms), chain160 1.62 s of 3.55 s — the
+next lever, and the subject of the BTF-solver decision document.
+
+Also fixes 1.18.0's `Cargo.lock`, committed with the crates still at 1.17.0 (the version was
+bumped after the last build); `cargo build --locked` would have refused it.
+
+**Limitations:** four bias points are evidence, not proof, that an entry is zero everywhere; the
+DAG depth counts blocks, not work.
+
+Measured at this version: `cargo test --workspace` 896 passed (893 + 3 for `btf`); `validate`
+28/28, convergence 28/28; clippy clean.
+
+
 1.18.0 - 2026-09-26
 -------------------
 **Device instances are evaluated in parallel, with results bit-identical to serial evaluation

@@ -1764,6 +1764,21 @@ pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Q
     Ok(out)
 }
 
+/// Every device instance of the deck, in assembly order, and the solution vector's dimension —
+/// what a solver is handed, for tooling that inspects the assembled system itself
+/// (`cargo xtask btf`) rather than a solution.
+///
+/// # Errors
+///
+/// If a device cannot be built (an unknown model, a bad parameter).
+pub fn instances(
+    net: &Netlist,
+    compiled: &[Module],
+) -> Result<(Vec<Box<dyn ModelInstance>>, usize)> {
+    let built = build_instances(net, compiled)?;
+    Ok((built.instances, built.dim))
+}
+
 /// Build every device instance and solve the DC operating point. `pub` so `va-harness` can get
 /// the numeric [`va_core::dc::OperatingPoint`] back directly (§ golden comparison), rather than
 /// parsing [`run_sim`]'s printed stdout.

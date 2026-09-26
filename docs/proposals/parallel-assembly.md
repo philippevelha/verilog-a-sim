@@ -266,6 +266,66 @@ Options, in order of cost:
 Reproducibility is a hard requirement for all three: a fixed schedule derived from the pattern,
 never from the thread count (§3.4).
 
+#### 5.1.1 Measured (2026-09-26): what c432's matrix decomposes into
+
+`cargo xtask btf <deck> --model <m> [--time-lu]` assembles the deck's Jacobian at its DC
+operating point, takes a maximum transversal and the strongly connected components of the
+permuted graph (Duff–Reid; what KLU does first), and reports the blocks. Four patterns per
+circuit: every **stored** entry; only entries **nonzero** at the operating point (DC: `G`;
+transient: `G` or `C`); and each of those as a **union over four bias points** (the operating
+point, all-zero, and two perturbed copies), because a model can stamp an entry only in some
+region — the stored pattern grew by 7 072 entries on c432 across those points.
+
+| c432 (15 416 unknowns, 2 458 devices) | entries | blocks | size-1 | largest block | DAG depth | widest level |
+|---|---:|---:|---:|---:|---:|---:|
+| stored, 4 biases | 63 660 | 53 | 52 | 15 364 (99.7%) | 3 | 26 |
+| **DC nonzero, 4 biases** | 44 219 | **10 829** | 10 595 | **52 (0.3%)** | 72 | 4 420 |
+| transient nonzero, 4 biases | 54 346 | 8 767 | 8 766 | 6 650 (43.1%) | 7 | 2 600 |
+
+| chain160 (5 286 unknowns, 483 devices) | entries | blocks | size-1 | largest block | DAG depth | widest level |
+|---|---:|---:|---:|---:|---:|---:|
+| stored, 4 biases | 22 820 | 19 | 18 | 5 268 (99.7%) | 3 | 9 |
+| **DC nonzero, 4 biases** | 15 614 | **4 024** | 3 864 | **9 (0.2%)** | 324 | 1 292 |
+| transient nonzero, 4 biases | 19 615 | 3 229 | 3 228 | 2 058 (38.9%) | 7 | 960 |
+
+chain160 in time (1.18.0, mains power): 150 Newton iterations over 36 gmin stages; linear solve
+**1.62 s = 10.8 ms per iteration**; wall 7.30 / 7.46 s at 1 thread, **3.55 / 3.61 s at 8** — so
+the solve is ~46% of the 8-thread run, as on c432. `--time-lu`: 9 ms stored, 7 ms zeros dropped.
+Its DC block DAG is 324 deep, two levels per inverter stage: a chain is inherently sequential,
+so its gain from BTF would come from each tiny block being cheap, not from parallelism.
+
+c17 (420 unknowns) reads the same way: DC nonzero splits into blocks of ≤ 22 unknowns,
+transient keeps one block of 43%, and the stored pattern is one block.
+
+What that says:
+
+- **DC is almost triangular by value, not by structure.** Logic is feed-forward: a gate's
+  output depends on its inputs, not the reverse. The stored pattern hides it because models
+  stamp explicit zeros (a gate row carries no DC current) that glue everything into one block.
+- **But the explicit zeros are not what the LU pays for.** `--time-lu`: `faer`'s numeric LU +
+  solve of c432's operating-point matrix takes **34 ms with the stored pattern and 31 ms with
+  exact zeros dropped** (median of 5; chain160 10 → 7 ms). Its fill-reducing ordering already
+  copes; what costs is the general-purpose factorization itself.
+- **At 8 threads the solve is half of c432's time.** `--logfull` on 1.18.0: 558 Newton
+  iterations over 38 gmin stages, linear solve **22.7 s = 40.7 ms per iteration**, in a
+  43.6 s run. (Its assembly figure is inflated by `--logfull`'s shared counters under threads
+  and is not used.) So "16 s of numeric LU" in §4.3 was hundreds of cheap solves, not a few
+  expensive ones — and it is now the largest cost.
+- **Transient keeps a big block** (31–43% of unknowns): gate–drain capacitance couples each
+  stage back to its driver. BTF there peels off the ~57–69% that is trivial and leaves one
+  sparse factorization of the rest.
+
+Implication, unbuilt: a BTF front end with small per-block factorizations should take a DC
+solve from ~40 ms to a few ms on circuits like c432 (the blocks are ≤ 52 unknowns and the work
+is roughly linear in the entries), i.e. most of the 22.7 s — the largest remaining lever for
+DC. Two design questions before building it: (1) BTF must use the **value** pattern, which
+changes with bias, so the block structure has to be recomputed whenever an entry turns nonzero
+(a union that only grows, like the stored pattern's re-symbolic today), and a block that was
+triangular can merge; (2) the 72-deep block DAG is a forward substitution through the logic —
+the blocks are tiny, so parallelism across a level (widest 4 420) is only worth it if a level
+holds real work. For transient, the gain is smaller and bounded by the one large block. Not
+measured: `faer`'s fill on these matrices, and what a KLU-style solver actually achieves here.
+
 ### 5.2 Reusing one factorization across several Newton iterations
 
 Today every Newton iteration assembles a fresh Jacobian and factors it. A *chord* (modified)
@@ -316,8 +376,8 @@ Design points that need deciding:
    small-circuit threshold. Gate: `deck-diff`
    serial vs parallel at 1/2/4/8 threads, identical, plus a unit test that a model's stamps
    replay to the same system as direct stamping.
-4. **Solve, measured before built:** count BTF blocks on c432/chains (§5.1a); time a value-only
-   `load()` (§5.2). Then a decision document per option, as this one was.
+4. **Solve, measured before built:** count BTF blocks on c432/chains (§5.1a — done, §5.1.1);
+   time a value-only `load()` (§5.2). Then a decision document per option, as this one was.
 
 ## 7. How this is proved not to break anything
 
