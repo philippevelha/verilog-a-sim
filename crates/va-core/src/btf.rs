@@ -1,5 +1,5 @@
-//! A block-triangular (BTF) solve for sparse DC systems — Step 3 of
-//! `docs/proposals/btf-solver.md`.
+//! A block-triangular (BTF) solve for sparse systems — Step 3 of `docs/proposals/btf-solver.md`
+//! (DC, 1.21.0), extended to large blocks for transient (1.25.0, `docs/proposals/transient-solve.md`).
 //!
 //! By value, a DC Jacobian of a logic circuit is almost block triangular: a gate's output depends
 //! on its inputs, not the reverse, so the matrix permutes into thousands of small diagonal blocks
@@ -13,14 +13,24 @@
 //! (Duff–Reid; what KLU does first) — and are recomputed only when the union grows. Measured on
 //! c432's real DC solve, the nonzero set changes on almost every other Newton iteration, but the
 //! union stops growing after the second (proposal §6.1), so the analysis runs once or twice per
-//! solve. Each solve then fills every block from the current values, factors it densely with
-//! partial pivoting, and substitutes in block order.
+//! solve. Each solve then fills every block from the current values, factors it — densely with
+//! partial pivoting up to [`MAX_BLOCK`] unknowns, with `faer`'s sparse LU on that block alone above
+//! it — and substitutes in block order.
+//!
+//! **Large blocks (1.25.0).** A transient step's matrix `G + C/h` keeps one large block — gate–drain
+//! capacitance couples each logic stage back to its driver — beside thousands of single unknowns:
+//! c432's has one block of 4 882 of its 15 416 unknowns. Factoring that block with `faer` and the
+//! rest by substitution took 4.1 ms per solve against 33 ms for `faer` on the whole matrix
+//! (`cargo xtask btf --time-tran-block-solve`), and c432's 1 ns transient spends 45% of its time in
+//! the solve.
 //!
 //! **When it steps aside** — returning `None`, so [`crate::sparse::SparseLu`] uses `faer` for that
 //! solve and the caller sees no difference in what "failed" means:
 //! - the union has no full transversal (structurally singular as far as the union knows);
-//! - its largest block exceeds [`MAX_BLOCK`] (a circuit with feedback, or a transient companion
-//!   matrix — dense factorization of a large block would be slower than `faer`);
+//! - its largest block holds at least [`WHOLE_MATRIX_FRACTION`] of the unknowns — a circuit whose
+//!   feedback couples almost everything (a ring oscillator) gains nothing from blocks, so it keeps
+//!   `faer` on the whole matrix and that path's exact answers;
+//! - a large block's `faer` factorization fails;
 //! - a block is numerically singular this time — an entry of the union can be exactly zero in one
 //!   iteration and leave a block singular where the whole matrix is not.
 //!
@@ -29,17 +39,22 @@
 //! order is fixed by the pattern and the values, never by the thread count.
 //!
 //! **Limitations, stated:** serial — the blocks on one level of the block DAG could be factored in
-//! parallel, but on c432 those levels are mostly single unknowns; a block that grows past
-//! [`MAX_BLOCK`] sends the whole matrix to `faer`, not just that block.
+//! parallel, but on c432 those levels are mostly single unknowns; a large block's `faer` solver is
+//! cached with the plan, so a union that grows re-runs its symbolic analysis too.
 
 use crate::sparse::SparseMatrix;
 
-/// Largest diagonal block the dense factorization takes; a larger one sends the solve to `faer`.
+/// Largest diagonal block factored densely; a larger one is factored by `faer`'s sparse LU on
+/// that block alone (1.25.0 — before, it sent the whole matrix to `faer`).
 ///
 /// Dense LU costs `s³/3` per block: at 64 that is ~87 000 flops, well under `faer`'s per-solve
-/// overhead on the matrices where BTF helps (c432's largest block is 34). A circuit with a block
-/// this large is not the near-triangular case this module exists for.
+/// overhead (c432's largest DC block is 34).
 pub const MAX_BLOCK: usize = 64;
+
+/// If one block holds at least this fraction of the unknowns, the solve is left to `faer` on the
+/// whole matrix: blocks would save nothing and cost the permutation. Keeps a fully coupled
+/// circuit (a ring oscillator) on exactly the path, and the answers, it had before.
+pub const WHOLE_MATRIX_FRACTION: f64 = 0.9;
 
 /// The BTF state kept across solves; see the module documentation.
 #[derive(Default)]
@@ -70,6 +85,17 @@ struct Plan {
     place: Vec<(usize, usize)>,
     /// Per row: `(column, slot)` of each union entry in it.
     row_entries: Vec<Vec<(usize, usize)>>,
+    /// Per block: `None` if it is factored densely; for a block over [`MAX_BLOCK`], its own
+    /// pattern and `faer` solver.
+    large: Vec<Option<LargeBlock>>,
+}
+
+/// A block over [`MAX_BLOCK`], factored by `faer` on its own.
+struct LargeBlock {
+    pattern: crate::sparse::Pattern,
+    lu: crate::sparse::SparseLu,
+    /// Each in-block union entry: `(slot in the block's pattern, slot in the matrix's)`.
+    entries: Vec<(usize, usize)>,
 }
 
 impl BtfSolver {
@@ -94,15 +120,15 @@ impl BtfSolver {
             self.analyses += 1;
         }
         self.plan
-            .as_ref()
-            .and_then(Option::as_ref)
+            .as_mut()
+            .and_then(Option::as_mut)
             .and_then(|plan| plan.solve(values, b))
     }
 }
 
 impl Plan {
     /// Analyse the union entries of `a`'s pattern. `None` if the union has no full transversal
-    /// or a block exceeds [`MAX_BLOCK`].
+    /// or one block holds [`WHOLE_MATRIX_FRACTION`] of the unknowns or more.
     fn new(a: SparseMatrix<'_>, union: &[bool]) -> Option<Self> {
         let n = a.dim();
         let entries: Vec<(usize, usize, usize)> = a
@@ -136,7 +162,8 @@ impl Plan {
         for (c, &blk) in comp.iter().enumerate() {
             blocks[blk].push(c);
         }
-        if blocks.iter().any(|b| b.len() > MAX_BLOCK) {
+        let largest = blocks.iter().map(Vec::len).max().unwrap_or(0);
+        if largest as f64 >= WHOLE_MATRIX_FRACTION * n as f64 && largest > MAX_BLOCK {
             return None;
         }
         let mut place = vec![(0, 0); n];
@@ -149,21 +176,77 @@ impl Plan {
         for &(r, c, slot) in &entries {
             row_entries[r].push((c, slot));
         }
+        let large = blocks
+            .iter()
+            .enumerate()
+            .map(|(blk, cols)| {
+                if cols.len() <= MAX_BLOCK {
+                    return None;
+                }
+                let mut local = Vec::new();
+                for (i, &c) in cols.iter().enumerate() {
+                    for &(col, slot) in &row_entries[row_of_col[c]] {
+                        let (cb, j) = place[col];
+                        if cb == blk {
+                            local.push((i, j, slot));
+                        }
+                    }
+                }
+                let pattern =
+                    crate::sparse::Pattern::new(cols.len(), local.iter().map(|&(i, j, _)| (i, j)));
+                let entries = local
+                    .iter()
+                    .filter_map(|&(i, j, slot)| pattern.slot(i, j).map(|k| (k, slot)))
+                    .collect();
+                Some(LargeBlock {
+                    pattern,
+                    lu: crate::sparse::SparseLu::new(),
+                    entries,
+                })
+            })
+            .collect();
         Some(Self {
             blocks,
             row_of_col,
             place,
             row_entries,
+            large,
         })
     }
 
     /// The numeric half. `None` if a block is numerically singular.
-    fn solve(&self, values: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+    fn solve(&mut self, values: &[f64], b: &[f64]) -> Option<Vec<f64>> {
         let mut x = vec![0.0; self.place.len()];
         let mut m_a: Vec<f64> = Vec::new();
         let mut m_b: Vec<f64> = Vec::new();
         for (blk, cols) in self.blocks.iter().enumerate() {
             let m = cols.len();
+            if let Some(large) = self.large[blk].as_mut() {
+                // Right-hand side: `b` minus the already-solved unknowns' contributions.
+                let rhs: Vec<f64> = cols
+                    .iter()
+                    .map(|&c| {
+                        let row = self.row_of_col[c];
+                        let mut r = b[row];
+                        for &(col, slot) in &self.row_entries[row] {
+                            if self.place[col].0 != blk {
+                                r -= values[slot] * x[col];
+                            }
+                        }
+                        r
+                    })
+                    .collect();
+                let mut local = vec![0.0; large.pattern.nnz()];
+                for &(k, slot) in &large.entries {
+                    local[k] += values[slot];
+                }
+                let a = SparseMatrix::new(&large.pattern, &local)?;
+                let sol = large.lu.solve(a, &rhs).ok()?;
+                for (i, &c) in cols.iter().enumerate() {
+                    x[c] = sol[i];
+                }
+                continue;
+            }
             m_a.clear();
             m_a.resize(m * m, 0.0);
             m_b.clear();
@@ -419,8 +502,8 @@ mod tests {
         assert_eq!(lu.btf_stats().unwrap().fallbacks, 1);
     }
 
-    /// A block larger than `MAX_BLOCK` is left to `faer` — and then the answer is `faer`'s to
-    /// the bit, since `faer` computed it.
+    /// A block holding (nearly) the whole matrix is left to `faer` — and then the answer is
+    /// `faer`'s to the bit, since `faer` computed it.
     #[test]
     fn a_block_too_large_goes_to_faer_unchanged() {
         let n = super::MAX_BLOCK + 6;
@@ -438,6 +521,40 @@ mod tests {
         assert_eq!(x, y);
         let stats = lu.btf_stats().unwrap();
         assert_eq!((stats.solves, stats.fallbacks), (0, 1));
+    }
+
+    /// A large block beside small ones (1.25.0): the large one is factored by `faer` on its own,
+    /// the rest densely, and the answer agrees with `faer` on the whole matrix — the shape of a
+    /// transient companion matrix.
+    #[test]
+    fn a_large_block_among_small_ones_is_factored_on_its_own() {
+        let ring = super::MAX_BLOCK + 6;
+        let n = ring + 20;
+        let mut t = Vec::new();
+        for i in 0..ring {
+            t.push((i, i, 4.0 + i as f64 * 0.01));
+            t.push((i, (i + 1) % ring, -1.0)); // one strongly connected block of `ring`
+        }
+        for k in 0..20 {
+            let r = ring + k;
+            t.push((r, r, 2.0));
+            t.push((r, k, 0.5)); // singletons reading the ring
+        }
+        let (p, v) = matrix(n, &t);
+        let a = SparseMatrix::new(&p, &v).unwrap();
+        let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
+        let mut lu = SparseLu::with_btf();
+        let x = lu.solve(a, &b).expect("solves");
+        let y = SparseLu::new().solve(a, &b).expect("solves");
+        for (u, w) in x.iter().zip(&y) {
+            assert!((u - w).abs() <= 1e-12 * w.abs().max(1.0), "{u} vs {w}");
+        }
+        let stats = lu.btf_stats().unwrap();
+        assert_eq!(
+            (stats.solves, stats.fallbacks),
+            (1, 0),
+            "the block path answered"
+        );
     }
 
     /// The block plan is recomputed when an entry becomes nonzero for the first time, and only

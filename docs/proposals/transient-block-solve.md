@@ -42,7 +42,8 @@ that block alone instead of refusing the matrix, and the transient integrator us
 (`WHOLE_MATRIX_FRACTION`) still sends the whole matrix to `faer`: blocks would save nothing, and a
 fully coupled circuit (the ring oscillator) keeps its exact answers.
 
-What it did: see §4 (filled in with the implementation, 1.26.0).
+What it did (1.26.0): **c432's 1 ns transient 1 300.4 s → 877.9 s (1.48×)** at 8 threads, the
+same 2 524 timepoints, node voltages within 7.2e-7 of scale (§4).
 
 ## 3. (B) — the serial solve slows as the pool grows; not worth changing
 
@@ -70,4 +71,16 @@ makes c432's solve cheap and evaluation dominates again.
 
 ## 4. Gates for (A)
 
-To be filled in with the implementation (1.26.0).
+`cargo xtask deck-diff`, 1.24.0 against 1.26.0, every deck under `circuits/` (c432's transient
+compared separately, below):
+
+- **Both with `VA_BTF=off`: 72 of 72 identical** — the `faer` path is untouched.
+- **Defaults: 71 of 72 identical.** The one that moves is c17's transient, the only other sparse
+  transient: 13 462 → 13 486 steps, node voltages resampled RMS ≤ 5.5e-5 of scale, edges ≤ 8.4 fs.
+  DC decks do not move — their blocks are all ≤ `MAX_BLOCK`, so their path is 1.21.0's.
+- **c432's 1 ns transient,** run by both builds (8 threads, mains power): 1 300.4 s → **877.9 s**;
+  the timebase is identical (2 524 points) and the 533 top-level node voltages agree to 7.2e-7 of
+  their scale.
+- `validate` 28/28, errors unchanged (no golden deck reaches the sparse transient).
+- Unit tests: a large block among small ones, factored on its own, agreeing with `faer`; a block
+  holding the whole matrix still left to `faer`, bit for bit.

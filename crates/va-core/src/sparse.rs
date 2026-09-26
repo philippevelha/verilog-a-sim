@@ -439,7 +439,7 @@ pub fn assemble_into(
 pub struct SparseLu {
     symbolic: Option<(u64, SymbolicLu<usize>)>,
     symbolic_count: usize,
-    btf: Option<crate::btf::BtfSolver>,
+    btf: Option<Box<crate::btf::BtfSolver>>,
 }
 
 /// What the block-triangular path of a [`SparseLu::with_btf`] solver has done so far.
@@ -465,7 +465,7 @@ impl SparseLu {
     /// only in rounding.
     pub fn with_btf() -> Self {
         Self {
-            btf: Some(crate::btf::BtfSolver::default()),
+            btf: Some(Box::default()),
             ..Self::default()
         }
     }

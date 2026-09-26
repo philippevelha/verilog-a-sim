@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.26.0 - 2026-09-26
+-------------------
+**Transient steps use the block-triangular solve, with a large block factored by `faer` on its
+own** (`docs/proposals/transient-block-solve.md`, option A). `va_core::btf` no longer refuses a
+matrix with a block over `MAX_BLOCK` (64): such a block gets its own pattern and `faer` solver,
+cached with the plan, and the rest is dense or substitution as before. A block holding ≥ 90% of
+the unknowns (`WHOLE_MATRIX_FRACTION`) still sends the whole matrix to `faer`, so a fully coupled
+circuit keeps its exact path. `TranConfig::btf` (set from `VA_BTF`, default on) switches the
+integrator's solves onto it; `SparseLu` now holds its block solver boxed.
+
+  * **Speed:** c432's 1 ns transient (`c432_tran.net`), 8 threads, mains power: **1 300.4 s →
+    877.9 s (1.48×)**; the solve had been 45% of the run at 39.6 ms per solve.
+  * **Answers:** `deck-diff`, 1.24.0 vs 1.26.0: with `VA_BTF=off` 72 of 72 identical; defaults
+    71 of 72 — c17's transient moves (13 462 → 13 486 steps, node voltages RMS ≤ 5.5e-5 of
+    scale, edges ≤ 8.4 fs). c432's transient keeps its 2 524 timepoints, node voltages within
+    7.2e-7 of scale. DC decks do not move. `validate` 28/28, errors unchanged.
+
+**Limitations:** serial; a union that grows re-runs the large block's symbolic analysis; c17-size
+transients gain nothing measurable (their solve is 0.1–0.2 ms).
+
+Measured at this version: `cargo test --workspace` 907 passed (+1); `validate` 28/28, errors unchanged;
+clippy clean.
+
+
 1.25.0 - 2026-09-26
 -------------------
 **A c432-size transient deck, and the measurements that decide the transient solve**

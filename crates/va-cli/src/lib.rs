@@ -84,7 +84,8 @@ pub fn log_full_run_totals() -> Option<String> {
 /// Whether DC solves print [`NewtonConfig::log_full`]'s trace; see [`set_log_full`].
 static LOG_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether DC solves try the block-triangular path before `faer` ([`NewtonConfig::btf`]).
+/// Whether DC and transient solves try the block-triangular path before `faer`
+/// ([`NewtonConfig::btf`], `TranConfig::btf`).
 ///
 /// Process-wide, like [`set_log_full`], because it selects an implementation, not a result:
 /// both paths give the same answer to rounding. On by default; `va-cli` turns it off for
@@ -2274,6 +2275,7 @@ fn solve_transient_impl(
         // -- see `va_transient::integrator::LteEstimator` and docs/roadmap.md's T4.2 entry.
         lte_estimator: LteEstimator::DividedDifference,
         solver,
+        btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
     };
 
     let BuiltInstances {
@@ -3706,6 +3708,7 @@ mod tests {
             lte_abstol: 1e-12,
             lte_estimator: LteEstimator::DividedDifference,
             solver: Solver::Auto,
+            btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -3843,6 +3846,7 @@ mod tests {
             lte_abstol: 1e-9,
             lte_estimator: LteEstimator::DividedDifference,
             solver: Solver::Auto,
+            btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -3905,6 +3909,7 @@ mod tests {
             lte_abstol: 1e-9,
             lte_estimator: LteEstimator::DividedDifference,
             solver: Solver::Auto,
+            btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");

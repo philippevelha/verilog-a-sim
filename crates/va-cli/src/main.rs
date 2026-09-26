@@ -71,8 +71,9 @@ fn print_usage() {
                                  identical at every thread count; only speed changes.
                                  VA_PARALLEL=auto|always|never overrides when the
                                  parallel path is used (default auto: by measured cost).
-                                 VA_BTF=off solves DC with faer's sparse LU alone instead of
-                                 trying the block-triangular solver first.
+                                 VA_BTF=off solves DC and transient steps with faer's
+                                 sparse LU alone instead of trying the block-triangular
+                                 solver first.
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per

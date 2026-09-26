@@ -119,6 +119,12 @@ pub struct TranConfig {
     /// from it (`docs/proposals/sparse-solve.md`, Step 3). The trajectory does not depend on it
     /// beyond rounding.
     pub solver: Solver,
+    /// On the sparse path, try the block-triangular solve (`va_core::sparse::SparseLu::with_btf`)
+    /// before `faer`'s LU on the whole matrix: a transient step's matrix is one large block —
+    /// factored by `faer` alone — beside many single unknowns, which on c432 cut a solve from
+    /// 33 ms to 4.1 ms (`docs/proposals/transient-solve.md`). Answers differ only in rounding.
+    /// `va-cli` sets it from `VA_BTF` (default on). Since 1.25.0.
+    pub btf: bool,
 }
 
 /// A sampled transient waveform: aligned time and solution-vector columns.
@@ -846,11 +852,15 @@ enum Linear {
 }
 
 impl Linear {
-    fn new(solver: Solver, dim: usize) -> Self {
+    fn new(solver: Solver, btf: bool, dim: usize) -> Self {
         if solver.uses_sparse(dim) {
             Linear::Sparse {
                 sys: Box::new(SparseSystem::new(dim)),
-                lu: SparseLu::new(),
+                lu: if btf {
+                    SparseLu::with_btf()
+                } else {
+                    SparseLu::new()
+                },
             }
         } else {
             Linear::Dense
@@ -1220,7 +1230,7 @@ pub fn run_with_events(
     let mut state = StateBuffers::new(instances);
     // One for the whole run: the pattern is found on the first evaluation and the symbolic
     // factorization reused by every Newton iteration of every timestep after it.
-    let mut linear = Linear::new(cfg.solver, dim);
+    let mut linear = Linear::new(cfg.solver, cfg.btf, dim);
     // The one evaluation of the run that is genuinely the analysis's first: a stateful model
     // seeds itself from its input here rather than from a zero-filled `prev`.
     // No step has been taken, so there is no rate to report: `is_initial_step` already
@@ -2250,6 +2260,7 @@ mod tests {
             lte_abstol: 1e-6,
             lte_estimator: LteEstimator::EmbeddedPair,
             solver: Solver::Auto,
+            btf: true,
         }
     }
 
@@ -3082,6 +3093,7 @@ mod tests {
             lte_abstol: 2e-3,
             lte_estimator: LteEstimator::EmbeddedPair,
             solver: Solver::Auto,
+            btf: true,
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage
