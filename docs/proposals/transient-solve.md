@@ -1,6 +1,7 @@
 # Proposal: what to speed up in a transient run — measured on c17
 
-**Status:** measured 2026-09-26; nothing decided. §4 lists the options with what the measurement
+**Status:** measured 2026-09-26. (A) and (B) decided in `docs/proposals/transient-block-solve.md`
+(1.25.0): (A) built, (B) left as is; (C)–(E) open. §4 lists the options with what the measurement
 says each can gain; §5 the decisions.
 **Affects:** nothing yet. Candidates would touch `va-transient` (the integrator's per-step Newton
 and its linear solve) and `va-core` (`par`, `btf`).

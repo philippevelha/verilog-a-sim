@@ -131,6 +131,18 @@ pub fn btf(args: &[String]) -> Result<()> {
             .collect();
         time_block_solve(dim, &nz, &op.x)?;
     }
+    if args.iter().any(|a| a == "--time-tran-block-solve") {
+        // The companion matrix a transient step factors, `G + C/h`, at the operating point with
+        // `h` = 1 ps (the ISCAS decks' `.tran` step); nonzero entries only.
+        let h = 1e-12;
+        let nz: Vec<((usize, usize), f64)> = entries
+            .iter()
+            .zip(g.iter().zip(&c))
+            .map(|(e, (gv, cv))| (*e, gv + cv / h))
+            .filter(|(_, v)| *v != 0.0)
+            .collect();
+        time_hybrid_solve(dim, &nz, &op.x)?;
+    }
     if args.iter().any(|a| a == "--track-newton") {
         track_newton(&insts, dim)?;
     }
@@ -779,6 +791,178 @@ fn time_block_solve(n: usize, nz: &[((usize, usize), f64)], x_op: &[f64]) -> Res
     Ok(())
 }
 
+/// Blocks larger than this go to `faer` in the hybrid solve; `va_core::btf::MAX_BLOCK`'s value.
+const HYBRID_DENSE_MAX: usize = 64;
+
+/// A block plan whose large blocks are factored by `faer` (their own pattern, symbolic analysis
+/// cached across solves) and small ones densely — option (A) of
+/// `docs/proposals/transient-solve.md`.
+struct HybridPlan {
+    plan: BlockPlan,
+    /// Per block: `None` for a dense one; for a large one its local pattern, a `faer` solver,
+    /// and each in-block entry as `(local row, pattern slot, value index)`.
+    big: Vec<Option<BigBlock>>,
+}
+
+struct BigBlock {
+    pattern: va_core::sparse::Pattern,
+    lu: va_core::sparse::SparseLu,
+    entries: Vec<(usize, usize, usize)>,
+}
+
+impl HybridPlan {
+    fn new(n: usize, entries: &[(usize, usize)]) -> Option<Self> {
+        let plan = BlockPlan::new(n, entries)?;
+        let big = plan
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(blk, cols)| {
+                if cols.len() <= HYBRID_DENSE_MAX {
+                    return None;
+                }
+                let mut local = Vec::new();
+                for (i, &c) in cols.iter().enumerate() {
+                    let row = plan.row_of_col[c];
+                    for &(col, k) in &plan.row_entries[row] {
+                        let (cb, j) = plan.place[col];
+                        if cb == blk {
+                            local.push((i, j, k));
+                        }
+                    }
+                }
+                let pattern = va_core::sparse::Pattern::new(
+                    cols.len(),
+                    local.iter().map(|&(i, j, _)| (i, j)),
+                );
+                let entries = local
+                    .iter()
+                    .map(|&(i, j, k)| (i, pattern.slot(i, j).unwrap_or(0), k))
+                    .collect();
+                Some(BigBlock {
+                    pattern,
+                    lu: va_core::sparse::SparseLu::new(),
+                    entries,
+                })
+            })
+            .collect();
+        Some(Self { plan, big })
+    }
+
+    /// Solve by blocks; `None` if any block fails.
+    fn solve(&mut self, values: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+        let plan = &self.plan;
+        let mut x = vec![0.0; plan.n];
+        for (blk, cols) in plan.blocks.iter().enumerate() {
+            let m = cols.len();
+            // Right-hand side: `b` minus every already-solved unknown's contribution.
+            let mut rhs = vec![0.0; m];
+            for (i, &c) in cols.iter().enumerate() {
+                let row = plan.row_of_col[c];
+                let mut r = b[row];
+                for &(col, k) in &plan.row_entries[row] {
+                    if plan.place[col].0 != blk {
+                        r -= values[k] * x[col];
+                    }
+                }
+                rhs[i] = r;
+            }
+            let sol = match &mut self.big[blk] {
+                Some(bb) => {
+                    let mut vals = vec![0.0; bb.pattern.nnz()];
+                    for &(_, slot, k) in &bb.entries {
+                        vals[slot] += values[k];
+                    }
+                    let a = va_core::sparse::SparseMatrix::new(&bb.pattern, &vals)?;
+                    bb.lu.solve(a, &rhs).ok()?
+                }
+                None => {
+                    let mut a = vec![0.0; m * m];
+                    for (i, &c) in cols.iter().enumerate() {
+                        let row = plan.row_of_col[c];
+                        for &(col, k) in &plan.row_entries[row] {
+                            let (cb, j) = plan.place[col];
+                            if cb == blk {
+                                a[i * m + j] += values[k];
+                            }
+                        }
+                    }
+                    dense_solve(m, &mut a, &mut rhs)?
+                }
+            };
+            for (i, &c) in cols.iter().enumerate() {
+                x[c] = sol[i];
+            }
+        }
+        Some(x)
+    }
+}
+
+/// Time the hybrid block solve against `faer` on the whole matrix, both on `nz`: the first
+/// solve (symbolic + numeric) and the median of five repeats (numeric only), with the same
+/// residual check `SparseLu::solve` makes, against the known answer `x_op`.
+fn time_hybrid_solve(n: usize, nz: &[((usize, usize), f64)], x_op: &[f64]) -> Result<()> {
+    let entries: Vec<(usize, usize)> = nz.iter().map(|(e, _)| *e).collect();
+    let values: Vec<f64> = nz.iter().map(|(_, v)| *v).collect();
+    let mut b = vec![0.0; n];
+    for (&(r, c), v) in entries.iter().zip(&values) {
+        b[r] += v * x_op[c];
+    }
+    let t0 = std::time::Instant::now();
+    let mut plan = HybridPlan::new(n, &entries).context("structurally singular")?;
+    let t_plan = t0.elapsed();
+    let residual_ok = |x: &[f64]| {
+        let mut ax = vec![0.0; n];
+        for (&(r, c), v) in entries.iter().zip(&values) {
+            ax[r] += v * x[c];
+        }
+        let bmax = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let rmax = ax
+            .iter()
+            .zip(&b)
+            .fold(0.0_f64, |m, (a, bb)| m.max((a - bb).abs()));
+        rmax <= 1e-6 * (1.0 + bmax)
+    };
+    let t1 = std::time::Instant::now();
+    let first = plan.solve(&values, &b).context("a block failed")?;
+    let t_first = t1.elapsed();
+    let mut times = Vec::new();
+    let mut x = first;
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        x = plan.solve(&values, &b).context("a block failed")?;
+        let ok = residual_ok(&x);
+        times.push(t.elapsed().as_secs_f64());
+        if !ok {
+            bail!("hybrid solve failed the residual check");
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    let err = x
+        .iter()
+        .zip(x_op)
+        .fold(0.0_f64, |m, (a, t)| m.max((a - t).abs()));
+    let sizes: Vec<usize> = plan.plan.blocks.iter().map(Vec::len).collect();
+    let big: Vec<usize> = sizes
+        .iter()
+        .copied()
+        .filter(|&s| s > HYBRID_DENSE_MAX)
+        .collect();
+    println!(
+        "  hybrid solve       {} entries, {} blocks, {} to faer (sizes {:?}): plan {:.2} ms, \
+         first solve {:.2} ms, numeric + residual check {:.2} ms (median of 5), max |x - x_op| {err:.1e}",
+        entries.len(),
+        sizes.len(),
+        big.len(),
+        big,
+        t_plan.as_secs_f64() * 1e3,
+        t_first.as_secs_f64() * 1e3,
+        times[2] * 1e3,
+    );
+    time_lu("faer, whole matrix", n, &entries, &values, x_op);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,6 +1019,36 @@ mod tests {
         let x = plan.solve(&values, &b).expect("solves");
         for (a, t) in x.iter().zip(&x_true) {
             assert!((a - t).abs() < 1e-14, "{x:?}");
+        }
+    }
+
+    /// The hybrid solve: a 70-unknown ring (one strongly connected block, so it goes to `faer`)
+    /// driving three singleton blocks, reproduces a known answer.
+    #[test]
+    fn the_hybrid_solve_matches_a_known_answer() {
+        let ring = HYBRID_DENSE_MAX + 6;
+        let n = ring + 3;
+        let mut entries = Vec::new();
+        let mut values = Vec::new();
+        for i in 0..ring {
+            entries.extend([(i, i), (i, (i + 1) % ring)]);
+            values.extend([4.0 + i as f64 * 0.01, -1.0]);
+        }
+        for k in 0..3 {
+            let r = ring + k;
+            entries.extend([(r, r), (r, k)]); // each singleton reads one ring unknown
+            values.extend([2.0, 0.5]);
+        }
+        let x_true: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let mut b = vec![0.0; n];
+        for (&(r, c), v) in entries.iter().zip(&values) {
+            b[r] += v * x_true[c];
+        }
+        let mut plan = HybridPlan::new(n, &entries).expect("nonsingular");
+        assert_eq!(plan.big.iter().filter(|b| b.is_some()).count(), 1);
+        let x = plan.solve(&values, &b).expect("solves");
+        for (a, t) in x.iter().zip(&x_true) {
+            assert!((a - t).abs() < 1e-12, "{a} vs {t}");
         }
     }
 

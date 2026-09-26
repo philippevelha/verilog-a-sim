@@ -20,6 +20,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.25.0 - 2026-09-26
+-------------------
+**A c432-size transient deck, and the measurements that decide the transient solve**
+(`docs/proposals/transient-block-solve.md`). No simulator change.
+
+  * `circuits/benchmark/iscas85/c432_tran.net`: c432 with its 36 inputs pulsing, `.tran 1p 1n`
+    — 1 ns because a nanosecond already takes ~20 min. `gen_iscas.py … tran [<tstop>]` writes
+    it (default still 12 ns). In `xtask deck-diff`'s slow list (run with `--all`).
+  * `cargo xtask btf --time-tran-block-solve`: a hybrid block solve (large blocks through
+    `faer` alone, the rest densely) on the transient companion matrix `G + C/h`, against `faer`
+    on the whole matrix.
+  * **(A):** c432's 1 ns transient, 8 threads: 1 306.9 s, of which evaluation 686.3 s (52%) and
+    the linear solve **585.5 s (45%)** at 39.6 ms a solve — unlike c17 (9%). Its companion
+    matrix is one 4 882-unknown block beside 10 534 singletons; the hybrid solves it in 4.1 ms
+    against `faer`'s 33 ms. Decided: build it (1.26.0).
+  * **(B):** c17's serial solve slows steadily with the pool size (0.115 ms at 1 thread →
+    0.18 ms at 6–8), not at 8 alone; its whole cost is ~2.8 s of ~80 s and fewer threads lose
+    more in evaluation. Decided: no change.
+
+Measured at this version: `cargo test --workspace` 906 passed (+1 hybrid-solve test); `validate` 28/28; clippy clean.
+
+
 1.24.0+1 - 2026-09-26
 ---------------------
 **Proposal: what to speed up in a transient run — measured on c17**

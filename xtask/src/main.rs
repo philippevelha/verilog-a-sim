@@ -2789,11 +2789,12 @@ fn tape_check(args: &[String]) -> Result<()> {
 const TAPE_CHECK_POINTS: usize = 40;
 
 /// Decks `deck-diff` leaves out unless `--all`: each takes minutes per binary (ISCAS'85 c432's
-/// `.op`, c17's 13 000-point transient), and both have their own checks
+/// `.op`, c17's 13 000-point transient, c432's 1 ns transient), and they have their own checks
 /// (`circuits/benchmark/iscas85/`).
 const DECK_DIFF_SLOW: &[&str] = &[
     "circuits/benchmark/iscas85/c432.net",
     "circuits/benchmark/iscas85/c17_tran.net",
+    "circuits/benchmark/iscas85/c432_tran.net",
 ];
 
 /// `cargo xtask deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]...` — run every

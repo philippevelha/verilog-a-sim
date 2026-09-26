@@ -2,9 +2,11 @@
 
 Usage (from the repository root):
   python circuits/benchmark/iscas85/gen_iscas.py <circuit.bench> <out.net> op <vector>
-  python circuits/benchmark/iscas85/gen_iscas.py <circuit.bench> <out.net> tran
+  python circuits/benchmark/iscas85/gen_iscas.py <circuit.bench> <out.net> tran [<tstop>]
 
-`<vector>` is one 0/1 digit per primary input, in the `.bench` file's INPUT order.
+`<vector>` is one 0/1 digit per primary input, in the `.bench` file's INPUT order. `<tstop>` is
+the transient's stop time as a SPICE value (default `12n`); the inputs' first edges all fall in
+the first 0.8 ns, so a short run still switches every input once.
 
 **Rule (the user's, 2026-09-23): use the cells we already have, and compose any gate the
 library lacks from them** — a buffer is two inverters (see README.md).
@@ -106,7 +108,7 @@ def evaluate(ins, gates, vector):
     return val
 
 
-def write_deck(bench, out, mode, vector=None):
+def write_deck(bench, out, mode, vector=None, tstop='12n'):
     ins, outs, gates = read_bench(bench)
     cells = c7552_cells()
     name = os.path.splitext(os.path.basename(bench))[0]
@@ -173,7 +175,7 @@ def write_deck(bench, out, mode, vector=None):
     for i, ((g_out, kind, args), cell) in enumerate(zip(gates, use)):
         a_pins = [pin[(a, i, loads[a].index(i) + 1)] for a in args]
         L.append(f'XG{net_name(g_out)} {" ".join(a_pins)} vdd gnd {net_name(g_out)}_0 {cell}')
-    L += ['', '.tran 1p 12n' if mode == 'tran' else '.op', '.end']
+    L += ['', f'.tran 1p {tstop}' if mode == 'tran' else '.op', '.end']
     with open(out, 'w', encoding='utf-8') as f:
         f.write('\n'.join(L) + '\n')
     return ins, outs, gates
@@ -185,4 +187,5 @@ if __name__ == '__main__':
     vec = [int(c) for c in sys.argv[4]] if mode == 'op' else None
     if vec is not None and len(vec) != len(ins):
         raise SystemExit(f'the vector has {len(vec)} digits; the circuit has {len(ins)} inputs')
-    write_deck(bench, out, mode, vec)
+    tstop = sys.argv[4] if mode == 'tran' and len(sys.argv) > 4 else '12n'
+    write_deck(bench, out, mode, vec, tstop)

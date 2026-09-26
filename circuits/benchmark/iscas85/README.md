@@ -18,7 +18,8 @@ every net an RC `.subckt`, the PSP103 model cards pulled in by `.include`, Vdd =
 | `gen_c17.py` | writes either deck, any input vector (`python … gen_c17.py <out> op 10101`) |
 | `check_c17.py` | the truth-table check (all 32 vectors) and the transient check |
 | `c432.bench`, `c432.net` | c432's netlist, and its deck for one vector (below) |
-| `gen_iscas.py`, `check_iscas.py` | any `.bench` to a deck; check an `.op` against the logic |
+| `c432_tran.net` | `.tran 1p 1n`, all 36 inputs pulsing — a c432-size transient for measuring the transient solve (`docs/proposals/transient-solve.md`); 1 ns, not 12, because it runs for many minutes |
+| `gen_iscas.py`, `check_iscas.py` | any `.bench` to a deck (`tran [<tstop>]` for a transient); check an `.op` against the logic |
 
 **c17** is the suite's smallest circuit: six NAND2 gates, five inputs, two outputs —
 `10=NAND(1,3) 11=NAND(3,6) 16=NAND(2,11) 19=NAND(11,7) 22=NAND(10,16) 23=NAND(16,19)`. The `nand2`
