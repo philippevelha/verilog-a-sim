@@ -20,6 +20,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.27.0+2 - 2026-09-26
+---------------------
+**ISCAS'85 c2670, c3540 at transistor level, `.op` checked against the logic** (Road to
+2.0, item 1; one seeded input vector each, `check_iscas.py`). No code change; decks added to
+`xtask deck-diff`'s slow list.
+
+  * **c2670** (1193 gates, 93 252 unknowns): 1426/1426 signals correct (140/140 primary
+    outputs); 78.0 s on 8 threads, 240 Newton iterations over 14 rescue stages (plain Newton
+    singular, the capped adaptive ladder solves it).
+  * **c3540** (1669 gates, 134 246 unknowns): 1719/1719 signals correct (22/22 primary outputs);
+    214.6 s on 8 threads, 367 Newton iterations over 14 rescue stages (plain Newton singular,
+    the capped adaptive ladder solves it).
+
+**Slip, recorded:** commit 6293e13, titled "1.27.0+2", was pushed incomplete — a batch
+script failed after writing the README rows, and the commit went ahead without this entry, the
+version bump or the slow-list entries (its `Cargo.toml` said 1.27.0+1). This commit completes
+it; 1.27.0+2 is this tree.
+
+Measured at this version: no code change; 1.27.0's test and `validate` figures stand.
+
+
 1.27.0+1 - 2026-09-26
 ---------------------
 **ISCAS'85 c1355, c1908 at transistor level, `.op` checked against the logic** (Road to
@@ -3347,7 +3368,7 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
   [ ] 1. The ISCAS'85 suite at transistor level (c17 ... c7552, from gen_iscas.py and the c7552
          cells), every circuit's `.op` solved and every gate output matching the `.bench`
          logic for a set of input vectors. Done: c17 (all 32 vectors), c432, c499, c880, c1355,
-         c1908 (one vector each).
+         c1908, c2670, c3540 (one vector each).
          First risk to understand: the 320-stage PSP103 chain (10 566 unknowns) fails, cause
          not diagnosed.
   [ ] 2. A c432 transient checked against its logic: every settled sample of every output
