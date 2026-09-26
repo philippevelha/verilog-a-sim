@@ -91,12 +91,21 @@ pub fn operating_point_continued(
 /// A caller that has already asked for stepping (`cfg.gmin_steps > 0`) is left alone: it chose
 /// its own ladder and a second one would not be a rescue but a contradiction.
 ///
-/// **Three tiers, cheapest first.** If the ladder fails too, it is run again with each Newton
-/// step's change to a node capped ([`RESCUE_NODE_STEP`]), and if that fails, with Newton's
-/// residual line search on instead ([`RESCUE_DAMPING_HALVINGS`]). Each tier is reached only when
-/// the ones before it have failed — the same fallback shape one level down each time — so what an
-/// earlier tier solves keeps its path and its answer bit for bit and never pays for a later one.
-/// A tier whose aid the caller already asked for is skipped.
+/// **Three tiers, cheapest in practice first** (since 1.23.0): the ladder with each Newton
+/// step's change to a node capped ([`RESCUE_NODE_STEP`]); if that fails, the plain ladder; if
+/// that fails, the ladder with Newton's residual line search ([`RESCUE_DAMPING_HALVINGS`]). Each
+/// tier is reached only when the ones before it have failed, and a tier whose aid the caller
+/// already asked for is skipped.
+///
+/// **Why the capped ladder first** (`docs/proposals/dc-rescue.md`): the plain ladder used to run
+/// first, so that what it solved kept its path bit for bit — but on every circuit measured that
+/// needs the rescue the capped ladder is never more expensive, and where the plain ladder fails
+/// it fails slowly. On c432 it spent 265 Newton iterations failing (a 2-cycle of runaway steps)
+/// before the capped ladder converged in 290; capped first, the solve takes 293 instead of 558.
+/// The plain ladder stays as the next tier, so a circuit the cap cannot solve and the ladder can
+/// is still solved. The cost: a circuit the plain ladder used to rescue now takes the capped
+/// path, and its answer moves in the last digits (c17's starting point; the PSP103 chains of 40
+/// and 80 stages, by 1.6e-16 V).
 ///
 /// The **original** failure is what surfaces if the rescue also fails. It describes the real
 /// circuit, naming the row that went singular or non-finite; the laddered one describes a
@@ -131,14 +140,14 @@ fn with_gmin_rescue<T>(
                 max_iters: cfg.max_iters.max(GMIN_RESCUE_ITERS),
                 ..cfg
             };
-            // The tiers, cheapest first; later ones are only reached when earlier ones fail
-            // (§ `RESCUE_NODE_STEP`, `RESCUE_DAMPING_HALVINGS`).
+            // The tiers, cheapest in practice first; later ones are only reached when earlier
+            // ones fail (§ above, `RESCUE_NODE_STEP`, `RESCUE_DAMPING_HALVINGS`).
             let tiers = [
-                Some(laddered),
                 (cfg.max_node_step > RESCUE_NODE_STEP).then_some(NewtonConfig {
                     max_node_step: RESCUE_NODE_STEP,
                     ..laddered
                 }),
+                Some(laddered),
                 (cfg.max_damping_halvings < RESCUE_DAMPING_HALVINGS).then_some(NewtonConfig {
                     max_damping_halvings: RESCUE_DAMPING_HALVINGS,
                     ..laddered
@@ -162,7 +171,7 @@ fn with_gmin_rescue<T>(
 /// reached on a solve that has already failed.
 const GMIN_RESCUE_STEPS: usize = 30;
 
-/// The node-step cap in the rescue's second tier (`NewtonConfig::max_node_step`), in the node's
+/// The node-step cap in the rescue's first tier (`NewtonConfig::max_node_step`), in the node's
 /// own units: 0.5 V on an electrical node.
 ///
 /// **Why it exists.** ISCAS'85 c432 at transistor level (910 PSP103 devices, 15 416 unknowns) is
@@ -177,12 +186,15 @@ const GMIN_RESCUE_STEPS: usize = 30;
 /// **Why before damping.** It costs nothing per iteration, where the line search costs a trial
 /// evaluation per halving: the PSP103 inverter chains the damped tier was added for (1.10.1)
 /// solve with the cap too, faster — 95 stages in 14.0 s against 23.2 s damped, 160 in 27.4 s
-/// against 40.8 s. **Not in units other than volts:** on a thermal or optical node 0.5 is 0.5 of
-/// that node's unit, which may be slow; this tier is only reached after the plain ladder has
-/// failed, and the damped one still follows it.
+/// against 40.8 s. **Why before the plain ladder** (1.23.0): see [`with_gmin_rescue`].
+///
+/// **Not in units other than volts:** on a thermal or optical node 0.5 is 0.5 of that node's
+/// unit, which may be slow. Since 1.23.0 this tier is the first a failed solve reaches, so that
+/// limitation now applies to every rescue on such a circuit: a solve the cap slows but does not
+/// stop is paid for; one it stops falls through to the plain ladder.
 const RESCUE_NODE_STEP: f64 = 0.5;
 
-/// Step halvings allowed in the rescue's third tier, which reruns the `gmin` ladder with
+/// Step halvings allowed in the rescue's last tier, which reruns the `gmin` ladder with
 /// Newton's residual line search (`NewtonConfig::max_damping_halvings`) switched on.
 ///
 /// **Why it exists.** On a chain of PSP103 CMOS inverters the ladder alone fails from ~95
@@ -409,11 +421,11 @@ mod tests {
 
     /// The rescue's tiers, driven by a scripted attempt so the control flow is checked on its
     /// own: which configs are tried, in which order, and which error surfaces. The physical cases
-    /// the later tiers exist for (a PSP103 inverter chain, ISCAS'85 c432) need a model that is not
-    /// in the repository, so they are measured and recorded in `docs/validation.md` rather than
-    /// run here.
+    /// the tiers exist for (a PSP103 inverter chain, ISCAS'85 c432) need a model that is not in
+    /// the repository, so they are measured and recorded in `docs/validation.md` and
+    /// `docs/proposals/dc-rescue.md` rather than run here.
     #[test]
-    fn the_rescue_tries_the_ladder_then_the_damped_ladder_then_reports_the_first_failure() {
+    fn the_rescue_tries_the_capped_ladder_then_the_ladder_then_the_damped_ladder() {
         let inf = f64::INFINITY;
         let tried = std::cell::RefCell::new(Vec::new());
         let record = |c: &NewtonConfig| {
@@ -439,13 +451,13 @@ mod tests {
             *tried.borrow(),
             vec![
                 (0, inf, 0),
-                (GMIN_RESCUE_STEPS, inf, 0),
                 (GMIN_RESCUE_STEPS, RESCUE_NODE_STEP, 0),
+                (GMIN_RESCUE_STEPS, inf, 0),
                 (GMIN_RESCUE_STEPS, inf, RESCUE_DAMPING_HALVINGS)
             ]
         );
 
-        // What the node-step tier solves never reaches the damped one.
+        // What the capped ladder solves is the first rescue tried, and reaches no other.
         tried.borrow_mut().clear();
         let needs_cap = |c: NewtonConfig| {
             record(&c);
@@ -456,22 +468,31 @@ mod tests {
             }
         };
         with_gmin_rescue(NewtonConfig::default(), needs_cap).expect("the capped ladder solves it");
-        assert_eq!(tried.borrow().len(), 3);
+        assert_eq!(
+            *tried.borrow(),
+            vec![(0, inf, 0), (GMIN_RESCUE_STEPS, RESCUE_NODE_STEP, 0)]
+        );
 
-        // What the plain ladder solves never reaches either.
+        // A circuit the cap cannot solve but the plain ladder can is still solved: the plain
+        // ladder is the next tier, and the rescue stops there.
         tried.borrow_mut().clear();
-        let needs_ladder = |c: NewtonConfig| {
+        let needs_uncapped_ladder = |c: NewtonConfig| {
             record(&c);
-            if c.gmin_steps > 0 {
+            if c.gmin_steps > 0 && !c.max_node_step.is_finite() {
                 Ok(())
             } else {
                 Err(CoreError::Singular)
             }
         };
-        with_gmin_rescue(NewtonConfig::default(), needs_ladder).expect("the ladder solves it");
+        with_gmin_rescue(NewtonConfig::default(), needs_uncapped_ladder)
+            .expect("the plain ladder solves it");
         assert_eq!(
             *tried.borrow(),
-            vec![(0, inf, 0), (GMIN_RESCUE_STEPS, inf, 0)]
+            vec![
+                (0, inf, 0),
+                (GMIN_RESCUE_STEPS, RESCUE_NODE_STEP, 0),
+                (GMIN_RESCUE_STEPS, inf, 0)
+            ]
         );
 
         // If every tier fails, the error is the first one: the real circuit's, not a variant's.

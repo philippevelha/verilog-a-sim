@@ -2,8 +2,9 @@
 //! alternative rescue schedules would cost instead (option C of `docs/proposals/btf-solver.md`,
 //! `docs/proposals/dc-rescue.md`).
 //!
-//! It replays the rescue `va_core::dc` runs — plain Newton, then the `gmin` ladder, then the
-//! ladder with the node-step cap — as a sequence of `va_core::newton::solve` calls, and then
+//! It replays the rescue `va_core::dc` runs — plain Newton, then the `gmin` ladder with the
+//! node-step cap, then the plain ladder (the order since 1.23.0; damping, the last tier, is not
+//! replayed) — as a sequence of `va_core::newton::solve` calls, and then
 //! each variant, counting **assemblies** (one per Newton iteration) with a wrapper on the first
 //! instance, which loads exactly once per assembly. Each variant's answer is compared with the
 //! current rescue's. `.op` decks only: a `.dc` sweep's rescued point is not isolated here.
@@ -107,21 +108,17 @@ pub fn ladder_cmd(args: &[String]) -> Result<()> {
 
     let plain = NewtonConfig::default();
     let mut schedules = vec![Schedule {
-        name: "current: plain, ladder 30, ladder 30 + cap".into(),
-        tiers: vec![plain, ladder(STEPS, false), ladder(STEPS, true)],
+        name: "current: plain, ladder 30 + cap, ladder 30".into(),
+        tiers: vec![plain, ladder(STEPS, true), ladder(STEPS, false)],
     }];
     schedules.push(Schedule {
-        name: "cap first: plain, ladder 30 + cap".into(),
-        tiers: vec![plain, ladder(STEPS, true)],
+        name: "before 1.23.0: plain, ladder 30, + cap".into(),
+        tiers: vec![plain, ladder(STEPS, false), ladder(STEPS, true)],
     });
     for steps in [5, 10, 15, 20] {
         schedules.push(Schedule {
             name: format!("current tiers, {steps} steps"),
-            tiers: vec![plain, ladder(steps, false), ladder(steps, true)],
-        });
-        schedules.push(Schedule {
-            name: format!("cap first, {steps} steps"),
-            tiers: vec![plain, ladder(steps, true)],
+            tiers: vec![plain, ladder(steps, true), ladder(steps, false)],
         });
     }
 

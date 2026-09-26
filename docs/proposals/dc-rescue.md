@@ -1,7 +1,7 @@
 # Proposal: a cheaper DC rescue — run the node-step-capped ladder first
 
-**Status:** proposed and decided, 2026-09-26: cap-first (§4) to be implemented; the other
-options are recorded with their measurements.
+**Status:** decided 2026-09-26 and implemented in 1.23.0: cap-first (§4). The other options are
+recorded with their measurements.
 **Affects:** `va-core` only (`dc.rs`: the order of `with_gmin_rescue`'s tiers). No interface change.
 **Follows:** option (C) of `docs/proposals/btf-solver.md` ("fewer solves instead of cheaper
 ones"); the rescue tiers of 1.3.1 (`gmin` ladder), 1.10.1 (damping) and 1.12.0 (node-step cap).

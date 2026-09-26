@@ -20,6 +20,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.23.0 - 2026-09-26
+-------------------
+**The DC rescue tries the node-step-capped `gmin` ladder before the plain one**
+(`docs/proposals/dc-rescue.md`). New tier order after a failed plain solve: ladder + cap →
+ladder → ladder + damping. On every circuit measured that needs the rescue the capped ladder is
+never more expensive, and where the plain ladder fails it fails slowly — c432 spent 265 Newton
+iterations in it before the capped ladder converged. The plain ladder stays as the next tier, so
+a circuit the cap cannot solve and the ladder can is still solved (unit-tested).
+
+  * **Answers:** `deck-diff --all` against 1.21.0, 71 of 72 identical — the four NAND sweeps
+    whose failing points the plain ladder rescued reach the same printed digits, `hisim2` fails
+    as before, c432 takes the same path. c17's transient moves (its starting point was rescued by
+    the plain ladder): 13 450 → 13 487 steps, node voltages resampled RMS ≤ 5.9e-5 of scale,
+    edges ≤ 12 fs. PSP103 chains of 40/80 stages (not under `circuits/`): ≤ 1.6e-16 V.
+  * The "earlier tiers keep their bits" property the old order was built for now protects plain
+    Newton alone — where almost every circuit is solved.
+  * **Limitation, now wider:** the cap is 0.5 of a node's own unit; on a thermal or optical node
+    that may slow a rescue that the plain ladder would have done faster. The plain ladder is
+    reached only if the capped one fails, not if it is slow.
+
+**Gate and speed:** the real build is identical on all 72 decks to the scratch build the
+proposal measured (`deck-diff --all`), so its 1.21.0 comparison above carries over. c432 `.op`,
+8 threads, mains power, two interleaved rounds: **28.3 / 29.3 s → 15.2 / 15.4 s (1.9×)**, from
+558 Newton iterations to 293. Since 1.18.0 that deck has gone 80.5 s → 15.3 s.
+
+Measured at this version: `cargo test --workspace` 903 passed; `validate` 28/28, errors
+unchanged; clippy clean.
+
+
 1.22.0 - 2026-09-26
 -------------------
 **Proposal: a cheaper DC rescue — run the node-step-capped ladder first**

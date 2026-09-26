@@ -1000,7 +1000,7 @@ checks the answers bit for bit, both paths, all aids on).
 
 | field | meaning |
 |---|---|
-| `aids` | the stage's convergence aids — `plain`, or `ladder` / `cap` / `damp` joined by `+`. For a rescued `.op` this names the tier of `va_core::dc`'s rescue: `plain` → `ladder` → `ladder+cap` → `ladder+damp` |
+| `aids` | the stage's convergence aids — `plain`, or `ladder` / `cap` / `damp` joined by `+`. For a rescued `.op` this names the tier of `va_core::dc`'s rescue: `plain` → `ladder+cap` → `ladder` → `ladder+damp` (the capped ladder before the plain one since 1.23.0, `docs/proposals/dc-rescue.md`) |
 | `gmin` | the shunt this stage runs at (`0` for the plain solve and the ladder's last stage) |
 | `assemble_ms` | evaluating every instance and stamping, plus the `gmin` shunt — the model-evaluation cost |
 | `solve_ms` | the linear solve: dense LU, or sparse numeric LU (plus a symbolic one when `new_symbolic=1`) |
