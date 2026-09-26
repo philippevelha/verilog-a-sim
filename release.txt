@@ -20,6 +20,21 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.26.0+1 - 2026-09-26
+---------------------
+**Roadmap: today's record, and a proposed road to 2.0.** No code change. `docs/roadmap.md` gains
+the dated entry for 1.16.1 → 1.26.0 (c432 `.op` 87.5 s on 1 thread → 11.5 s on 8, every step
+gated and its answer shift recorded; the findings worth keeping) and a **"Toward 2.0 — proposed,
+not ratified"** section: the theme "trusted at scale" and six candidate blockers (the ISCAS'85
+suite's `.op` checked against its logic; a c432 transient checked the same way; reproducibility
+measured across Linux, macOS and Windows; a machine-readable results file; `absdelay` in
+transient; Interface β changes batched at the major version), each with the gate that would
+close it, for the user to ratify. `docs/future_development.md` items 1 and 6 get dated status
+notes (the solve's block-triangular front end; parallel evaluation shipped).
+
+Measured at this version: no code change; 1.26.0's figures stand.
+
+
 1.26.0 - 2026-09-26
 -------------------
 **Transient steps use the block-triangular solve, with a large block factored by `faer` on its
