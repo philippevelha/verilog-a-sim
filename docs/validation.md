@@ -1007,6 +1007,8 @@ checks the answers bit for bit, both paths, all aids on).
 | `trial_ms` | the line search's extra assemblies (non-zero only with `damp`) |
 | `nnz` | stored Jacobian entries on the sparse path; `dense` on the dense path |
 | `new_symbolic` | the pattern grew, so this solve redid the symbolic factorization |
+| `btf` | (`iter`) the block-triangular solve answered (`1`), handed the system to `faer` (`0`: blocks too large, a singular block, or a failed residual check), or was not in use (`-`: dense, or `VA_BTF=off`) — since 1.21.0 |
+| `btf_solves`, `btf_fallbacks` | (`stage`) the same, counted over the stage |
 | `scale`, `residual`, `max_step` | the step fraction taken (below 1 only with `damp`), the residual ∞-norm the step was solved from, and the largest change actually applied |
 | `iterations`, `outcome` | per stage: the iterations it took, and `converged`, `no convergence` or `failed: <error>` |
 | `instances` | every device after flattening, compiled or not — divide by the compiled count `va-cli`'s `circuit:` line gives for a per-model cost |

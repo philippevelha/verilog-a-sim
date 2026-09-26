@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub(crate) mod btf;
 pub mod convergence;
 pub mod counters;
 pub mod dc;

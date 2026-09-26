@@ -20,6 +20,51 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.21.0 - 2026-09-26
+-------------------
+**DC solves use a block-triangular (BTF) solver before `faer`'s sparse LU — Step 3 of
+`docs/proposals/btf-solver.md`.** A DC logic Jacobian is almost block triangular by value, so
+`va_core::btf` permutes it into its diagonal blocks (maximum transversal + Tarjan SCC), factors
+each densely with partial pivoting, and substitutes in block order. The blocks come from the
+**running union** of every entry that has been nonzero in a solve so far, and are recomputed only
+when the union grows (measured: c432's union is fixed after the second Newton iteration, though
+its nonzero set changes on almost every other one). The system goes to `faer` instead — for that
+solve only, with no change in what "failed" means — when the union has no full transversal, a
+block exceeds `MAX_BLOCK` (64), a block is numerically singular, or the block answer fails the
+residual check every sparse answer passes.
+
+  * `SparseLu::with_btf()` and `BtfStats`; `NewtonConfig::btf` (default on) — every DC Newton
+    solve on the sparse path, i.e. above 100 unknowns: `.op`, `.dc` sweeps, and the operating
+    point that starts a transient, AC or noise run. The transient integrator's own per-step solves and
+    AC keep `faer` alone (their matrices keep one large block).
+  * `VA_BTF=off` selects `faer` alone. `--logfull` reports `btf=` per iteration and
+    `btf_solves=`/`btf_fallbacks=` per stage (`docs/validation.md`).
+
+**Gates:** `deck-diff --all` against 1.18.0 (the last release that changed a number):
+with `VA_BTF=off`, 72 of 72 identical — the `faer` path is untouched; with BTF on, 70 of 72
+identical. The two that move are the only decks under `circuits/` whose DC solve is sparse:
+c432 (329 of 15 416 printed values; one 4.1e-13 A branch current in its 7th digit, the rest
+numerical zeros, no node voltage) and c17's transient, whose starting operating point moves in
+its last digits and so its step sequence (13 538 → 13 450 points; node voltages resampled RMS
+≤ 6.6e-5 of scale, edges ≤ 12 fs). `validate` 28/28, errors unchanged (no golden deck reaches
+the sparse path). New unit tests: agreement with `faer`, a pivot inside a block, the same
+`Singular` as `faer`, a too-large block giving `faer`'s bits exactly, the union re-analysing
+only when it grows, and a 150-stage feed-forward Newton solve agreeing with BTF on and off —
+with the block path shown to answer its system.
+
+**Speed,** 8 threads, mains power, two interleaved rounds. c432 `.op`: the block path answered
+557 of 558 solves (one handed to `faer`); total solve **22.7 s → 1.20 s** (`--logfull`);
+wall **45.5 / 44.6 s → 28.0 / 27.9 s (1.6×)**. chain160 `.op`: 4.36 / 4.30 → 2.87 / 2.79 s
+(1.5×). The proposal estimated ~22 s for c432; what is left is almost all device evaluation
+(558 Newton iterations over 38 gmin stages — option (C) of the proposal is next).
+
+**Limitations:** serial; a block over `MAX_BLOCK` sends the whole matrix to `faer`, not that
+block; the answer moves in the last digits against `faer` (accepted, 2026-09-26).
+
+Measured at this version: `cargo test --workspace` 903 passed (+6 `btf`); `validate` 28/28,
+convergence 28/28; clippy clean.
+
+
 1.20.0 - 2026-09-26
 -------------------
 **`cargo xtask btf` gains `--track-newton` and `--time-block-solve`: Steps 1–2 of

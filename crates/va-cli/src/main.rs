@@ -71,6 +71,8 @@ fn print_usage() {
                                  identical at every thread count; only speed changes.
                                  VA_PARALLEL=auto|always|never overrides when the
                                  parallel path is used (default auto: by measured cost).
+                                 VA_BTF=off solves DC with faer's sparse LU alone instead of
+                                 trying the block-triangular solver first.
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per
@@ -126,6 +128,15 @@ fn cmd_sim(args: &[String]) -> Result<()> {
             other => bail!("VA_PARALLEL expects auto, always or never, got `{other}`"),
         };
         va_core::par::set_mode(mode);
+    }
+    // `VA_BTF=on|off`: whether DC solves try the block-triangular path before `faer`
+    // (`va_cli::set_btf`). On by default; `off` is the `faer`-only path, for comparison.
+    if let Some(v) = std::env::var_os("VA_BTF") {
+        match v.to_string_lossy().as_ref() {
+            "on" => va_cli::set_btf(true),
+            "off" => va_cli::set_btf(false),
+            other => bail!("VA_BTF expects on or off, got `{other}`"),
+        }
     }
     // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
     // models, so a Verilog-A model is only needed for custom devices.

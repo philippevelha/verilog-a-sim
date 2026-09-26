@@ -91,6 +91,11 @@ pub struct NewtonConfig {
     /// on it beyond rounding (the pivot order differs), so every convergence aid behaves the
     /// same either way.
     pub solver: Solver,
+    /// On the sparse path, try a block-triangular solve before `faer`'s LU
+    /// ([`crate::sparse::SparseLu::with_btf`]): on near-triangular systems — DC logic — it is
+    /// about 20× faster, and it hands any system it does not suit to `faer`. Answers differ from
+    /// `faer`'s only in rounding. Default `true`; `false` is `faer` alone, as before 1.21.0.
+    pub btf: bool,
     /// Write a line to stderr for every Newton iteration and for every solve stage (one per
     /// `gmin` step): the time spent assembling (evaluating every instance and stamping), the
     /// time spent in the linear solve, the line search's trial time, the iteration count each
@@ -128,6 +133,7 @@ impl Default for NewtonConfig {
             limit_junctions: true,
             gmin_steps: 0,
             solver: Solver::Auto,
+            btf: true,
             log_full: false,
             log_counters: None,
         }
@@ -142,6 +148,9 @@ struct StepCost {
     solve_ms: f64,
     /// Stored entries of the assembled Jacobian; `None` on the dense path, which stores all `dim²`.
     nnz: Option<usize>,
+    /// Whether the block-triangular path answered this step's solve (`Some(true)`), handed it to
+    /// `faer` (`Some(false)`), or was not in use (`None`: dense, or `btf` off).
+    btf: Option<bool>,
     /// Whether this step's solve computed a new symbolic factorization (the pattern grew).
     new_symbolic: bool,
 }
@@ -273,7 +282,7 @@ pub fn solve_with_events_from(
     };
     // One for the whole solve, across every `gmin` stage: the pattern does not change with the
     // shunt (every diagonal is always in it), so it is found and analysed once.
-    let mut linear = Linear::new(cfg.solver, dim);
+    let mut linear = Linear::new(cfg.solver, cfg.btf, dim);
     // `gmin_for_step(step, 0)` returns `0.0` at `step == 0`, so `gmin_steps == 0` collapses
     // this to exactly one iteration at `gmin = 0` — the original, un-homotopied solve.
     for step in 0..=cfg.gmin_steps {
@@ -310,11 +319,15 @@ enum Linear {
 }
 
 impl Linear {
-    fn new(solver: Solver, dim: usize) -> Self {
+    fn new(solver: Solver, btf: bool, dim: usize) -> Self {
         if solver.uses_sparse(dim) {
             Linear::Sparse {
                 sys: Box::new(SparseSystem::new(dim)),
-                lu: SparseLu::new(),
+                lu: if btf {
+                    SparseLu::with_btf()
+                } else {
+                    SparseLu::new()
+                },
                 trial: Box::new(SparseSystem::new(dim)),
             }
         } else {
@@ -359,10 +372,14 @@ impl Linear {
                 cost.assemble_ms = ms_since(t0);
                 cost.nnz = Some(sys.pattern().nnz());
                 let symbolic_before = lu.symbolic_factorizations();
+                let btf_before = lu.btf_stats();
                 let t1 = std::time::Instant::now();
                 let dx = lu.solve(sys.jacobian(), &neg_f);
                 cost.solve_ms = ms_since(t1);
                 cost.new_symbolic = lu.symbolic_factorizations() > symbolic_before;
+                cost.btf = btf_before
+                    .zip(lu.btf_stats())
+                    .map(|(before, after)| after.solves > before.solves);
                 Ok((residual_norm, dx?))
             }
         }
@@ -529,6 +546,8 @@ struct StageLog {
     solve_ms: f64,
     trial_ms: f64,
     new_symbolic: usize,
+    btf_solves: usize,
+    btf_fallbacks: usize,
     counter_source: Option<CounterSource>,
     /// Counter totals when the stage began, and when the current iteration began.
     stage_counts: Vec<(&'static str, u64)>,
@@ -552,6 +571,8 @@ impl StageLog {
             solve_ms: 0.0,
             trial_ms: 0.0,
             new_symbolic: 0,
+            btf_solves: 0,
+            btf_fallbacks: 0,
             counter_source: cfg.log_counters,
             stage_counts: Vec::new(),
             iteration_counts: Vec::new(),
@@ -595,6 +616,11 @@ impl StageLog {
         self.solve_ms += cost.solve_ms;
         self.trial_ms += trial_ms;
         self.new_symbolic += usize::from(cost.new_symbolic);
+        match cost.btf {
+            Some(true) => self.btf_solves += 1,
+            Some(false) => self.btf_fallbacks += 1,
+            None => {}
+        }
     }
 
     fn iteration(
@@ -610,7 +636,7 @@ impl StageLog {
             return;
         }
         eprintln!(
-            "[logfull] iter  aids={} gmin={:.3e} iter={iteration} assemble_ms={:.3} solve_ms={:.3} trial_ms={:.3} nnz={} new_symbolic={} scale={scale:.3e} residual={residual:.3e} max_step={max_applied:.3e}{}",
+            "[logfull] iter  aids={} gmin={:.3e} iter={iteration} assemble_ms={:.3} solve_ms={:.3} trial_ms={:.3} nnz={} new_symbolic={} btf={} scale={scale:.3e} residual={residual:.3e} max_step={max_applied:.3e}{}",
             self.aids,
             self.gmin,
             cost.assemble_ms,
@@ -618,6 +644,7 @@ impl StageLog {
             trial_ms,
             cost.nnz.map_or_else(|| "dense".to_string(), |n| n.to_string()),
             u8::from(cost.new_symbolic),
+            cost.btf.map_or("-", |b| if b { "1" } else { "0" }),
             self.count_increases(&self.iteration_counts),
         );
     }
@@ -627,7 +654,7 @@ impl StageLog {
             return;
         }
         eprintln!(
-            "[logfull] stage aids={} gmin={:.3e} iterations={iterations} outcome=\"{outcome}\" assemble_ms={:.1} solve_ms={:.1} trial_ms={:.1} wall_ms={:.1} new_symbolic={} unknowns={} instances={}{}",
+            "[logfull] stage aids={} gmin={:.3e} iterations={iterations} outcome=\"{outcome}\" assemble_ms={:.1} solve_ms={:.1} trial_ms={:.1} wall_ms={:.1} new_symbolic={} btf_solves={} btf_fallbacks={} unknowns={} instances={}{}",
             self.aids,
             self.gmin,
             self.assemble_ms,
@@ -635,6 +662,8 @@ impl StageLog {
             self.trial_ms,
             ms_since(self.start),
             self.new_symbolic,
+            self.btf_solves,
+            self.btf_fallbacks,
             self.dim,
             self.instances,
             self.count_increases(&self.stage_counts),

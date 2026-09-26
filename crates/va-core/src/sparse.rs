@@ -195,6 +195,17 @@ impl<'a> SparseMatrix<'a> {
         self.values
     }
 
+    /// The pattern the values are stored over.
+    pub fn pattern(&self) -> &'a Pattern {
+        self.pattern
+    }
+
+    /// The pattern's identity: equal for two matrices over the same pattern, different once it
+    /// grows (what [`SparseLu`] keys its caches on).
+    pub(crate) fn pattern_id(&self) -> u64 {
+        self.pattern.id
+    }
+
     /// `A · x`.
     pub fn mul_vec(&self, x: &[f64]) -> Vec<f64> {
         let mut y = vec![0.0; self.dim()];
@@ -421,16 +432,51 @@ pub fn assemble_into(
 /// frequencies, so the symbolic analysis (the fill-reducing column ordering and the elimination
 /// structure) is done once and only the numeric factorization is repeated. A different pattern —
 /// a grown one, or another circuit's — is recognised by its identity and analysed afresh.
+///
+/// [`SparseLu::with_btf`] adds a block-triangular path in front of `faer` for near-triangular
+/// systems (DC logic; [`crate::btf`]), falling back to `faer` whenever it does not apply.
 #[derive(Default)]
 pub struct SparseLu {
     symbolic: Option<(u64, SymbolicLu<usize>)>,
     symbolic_count: usize,
+    btf: Option<crate::btf::BtfSolver>,
+}
+
+/// What the block-triangular path of a [`SparseLu::with_btf`] solver has done so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BtfStats {
+    /// Block plans computed — once per growth of the union of nonzero entries.
+    pub analyses: usize,
+    /// Solves the block path answered (residual check passed).
+    pub solves: usize,
+    /// Solves handed to `faer`: BTF did not apply, a block was singular, or the block answer
+    /// failed the residual check.
+    pub fallbacks: usize,
 }
 
 impl SparseLu {
-    /// A solver with nothing cached.
+    /// A solver with nothing cached; `faer` only.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A solver that tries the block-triangular path ([`crate::btf`]) first and uses `faer`
+    /// when it does not apply. Same guarantees as [`Self::new`]'s; answers differ from `faer`'s
+    /// only in rounding.
+    pub fn with_btf() -> Self {
+        Self {
+            btf: Some(crate::btf::BtfSolver::default()),
+            ..Self::default()
+        }
+    }
+
+    /// The block path's counters, or `None` for a `faer`-only solver.
+    pub fn btf_stats(&self) -> Option<BtfStats> {
+        self.btf.as_ref().map(|b| BtfStats {
+            analyses: b.analyses,
+            solves: b.solves,
+            fallbacks: b.fallbacks,
+        })
     }
 
     /// How many symbolic factorizations this solver has computed — once per distinct pattern
@@ -462,6 +508,16 @@ impl SparseLu {
         check_finite(a, b)?;
         pin_sequential();
 
+        if let Some(btf) = self.btf.as_mut() {
+            match btf.try_solve(a, b) {
+                Some(x) if x.iter().all(|v| v.is_finite()) && residual_ok(a, b, &x) => {
+                    btf.solves += 1;
+                    return Ok(x);
+                }
+                _ => btf.fallbacks += 1,
+            }
+        }
+
         let symbolic = match &self.symbolic {
             Some((id, s)) if *id == a.pattern.id => s.clone(),
             _ => {
@@ -480,21 +536,24 @@ impl SparseLu {
             Some((0..n).map(|i| *sol.get(i, 0)).collect::<Vec<f64>>())
         })?;
 
-        if !x.iter().all(|v| v.is_finite()) {
-            return Err(CoreError::Singular);
-        }
-        let ax = a.mul_vec(&x);
-        let bmax = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        let rmax = ax
-            .iter()
-            .zip(b)
-            .map(|(l, r)| (l - r).abs())
-            .fold(0.0_f64, f64::max);
-        if rmax > RESIDUAL_TOL * (1.0 + bmax) {
+        if !x.iter().all(|v| v.is_finite()) || !residual_ok(a, b, &x) {
             return Err(CoreError::Singular);
         }
         Ok(x)
     }
+}
+
+/// Whether `x` reproduces `b` to the dense path's tolerance — the check every sparse answer
+/// passes before it is returned, whichever factorization produced it.
+fn residual_ok(a: SparseMatrix<'_>, b: &[f64], x: &[f64]) -> bool {
+    let ax = a.mul_vec(x);
+    let bmax = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let rmax = ax
+        .iter()
+        .zip(b)
+        .map(|(l, r)| (l - r).abs())
+        .fold(0.0_f64, f64::max);
+    rmax <= RESIDUAL_TOL * (1.0 + bmax)
 }
 
 /// Run `f`, turning both a `None` and a panic inside `faer` into [`CoreError::Singular`].

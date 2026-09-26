@@ -1,8 +1,8 @@
 # Proposal: a block-triangular (BTF) front end for the sparse DC solve
 
 **Status:** proposed, 2026-09-26. Steps 1–2 measured (§6.1): **go**, with blocks from the
-running union of nonzero entries. A last-digit shift in DC answers is accepted. Step 3 (build
-it in `va-core`) awaits the go-ahead.
+running union of nonzero entries. A last-digit shift in DC answers is accepted. Step 3 built in 1.21.0
+(`va_core::btf`, DC Newton solves; see release.txt for its gates and speed).
 **Affects:** `va-core` only (`sparse.rs`: `SparseLu` and its callers' choice of solver). No
 interface change: models, `StampSink` and `ModelInstance` are untouched.
 **Follows:** `docs/proposals/parallel-assembly.md` §5.1 (option a) and its measurement §5.1.1;
@@ -210,4 +210,4 @@ not change, but it changes pivots); and transient remains the separate Step 4.
 2. ~~Is a last-digit shift in DC answers acceptable?~~ Yes (decided 2026-09-26).
 3. Should (C) — why c432 needs 38 gmin stages, and factorization reuse (§5.2 of the
    parallel-assembly proposal) — be measured in parallel? It reduces both halves of the run.
-4. Build Step 3 in `va-core` (DC only, `faer` kept as the fallback and as a selectable path)?
+4. ~~Build Step 3 in `va-core`?~~ Done in 1.21.0 (DC only; `faer` is the fallback and `VA_BTF=off`).

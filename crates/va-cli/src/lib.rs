@@ -50,6 +50,7 @@ pub use va_core::sparse::Solver;
 fn newton_cfg(solver: Solver) -> NewtonConfig {
     NewtonConfig {
         solver,
+        btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         log_full: LOG_FULL.load(std::sync::atomic::Ordering::Relaxed),
         log_counters: Some(codegen_counts),
         ..NewtonConfig::default()
@@ -82,6 +83,18 @@ pub fn log_full_run_totals() -> Option<String> {
 
 /// Whether DC solves print [`NewtonConfig::log_full`]'s trace; see [`set_log_full`].
 static LOG_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether DC solves try the block-triangular path before `faer` ([`NewtonConfig::btf`]).
+///
+/// Process-wide, like [`set_log_full`], because it selects an implementation, not a result:
+/// both paths give the same answer to rounding. On by default; `va-cli` turns it off for
+/// `VA_BTF=off`, which is how a `faer`-only run is compared against the default one
+/// (`cargo xtask deck-diff --env-old VA_BTF=off`).
+pub fn set_btf(on: bool) {
+    BTF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+static BTF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Switch on (or off) the `[logfull]` trace for every DC Newton solve this process runs from
 /// here on: per iteration, the assembly time, linear-solve time, line-search trial time,
