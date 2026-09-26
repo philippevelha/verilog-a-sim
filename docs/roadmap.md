@@ -4948,6 +4948,8 @@ same trust at ISCAS'85 scale. Each item states the gate that closes it; an item 
 its gate is green, recorded here and in a release entry.
 
 1. **The ISCAS'85 suite at transistor level, every circuit's `.op` checked against its logic.**
+   **✅ Closed 1.27.0+5 (2026-09-26):** all eleven circuits, five vectors each (c17 all 32), every
+   signal correct; the suite takes ~18.8 min per vector on 8 threads.
    c17 and c432 are done (`check_c17.py truth`, `check_iscas.py`); c499–c7552 are to be generated
    by `gen_iscas.py` from the same cells (composing any gate the c7552 library lacks — the rule of
    `circuits/benchmark/iscas85/README.md`). **Gate:** every circuit solves and every gate output
