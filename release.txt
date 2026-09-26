@@ -20,6 +20,23 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.27.0+4 - 2026-09-26
+---------------------
+**ISCAS'85 c7552 at transistor level, `.op` checked against the logic** (Road to
+2.0, item 1; one seeded input vector each, `check_iscas.py`). No code change; decks added to
+`xtask deck-diff`'s slow list.
+
+  * **c7552** (3512 gates, 268 676 unknowns): 3719/3719 signals correct (108/108 primary
+    outputs); 345.9 s on 8 threads, 318 Newton iterations over 15 rescue stages (plain Newton
+    singular, the capped adaptive ladder solves it).
+
+**All eleven ISCAS'85 circuits now solve at transistor level and match their logic** — each on
+one seeded vector (c17 on all 32, c432 on five). Road to 2.0 item 1 stays open: its gate asks
+for a set of vectors per circuit.
+
+Measured at this version: no code change; 1.27.0's test and `validate` figures stand.
+
+
 1.27.0+3 - 2026-09-26
 ---------------------
 **ISCAS'85 c5315, c6288 at transistor level, `.op` checked against the logic** (Road to
@@ -3383,10 +3400,11 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
 
   [ ] 1. The ISCAS'85 suite at transistor level (c17 ... c7552, from gen_iscas.py and the c7552
          cells), every circuit's `.op` solved and every gate output matching the `.bench`
-         logic for a set of input vectors. Done: c17 (all 32 vectors), c432, c499, c880, c1355,
-         c1908, c2670, c3540, c5315, c6288 (one vector each).
-         First risk to understand: the 320-stage PSP103 chain (10 566 unknowns) fails, cause
-         not diagnosed.
+         logic for a set of input vectors. **Every circuit now solves and matches its logic on
+         one vector** (1.27.0+4): c17 all 32 vectors, c432 five (1.12.0), c499 ... c7552 one
+         each. Open: a set of vectors for c499 ... c7552 (~5 min per vector for c7552).
+         The 320-stage PSP103 chain (10 566 unknowns) still fails, cause not diagnosed — but it
+         did not stop the suite: every ISCAS circuit up to 268 676 unknowns solves.
   [ ] 2. A c432 transient checked against its logic: every settled sample of every output
          matches, as `check_c17.py tran` does for c17. Today 1 ns of c432 takes ~15 min on
          8 threads (1.26.0), so evaluation has to get cheaper first

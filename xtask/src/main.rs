@@ -2804,6 +2804,7 @@ const DECK_DIFF_SLOW: &[&str] = &[
     "circuits/benchmark/iscas85/c3540.net",
     "circuits/benchmark/iscas85/c5315.net",
     "circuits/benchmark/iscas85/c6288.net",
+    "circuits/benchmark/iscas85/c7552.net",
 ];
 
 /// `cargo xtask deck-diff <old va-cli> <new va-cli> [--all] [--skip <deck>]...` — run every
