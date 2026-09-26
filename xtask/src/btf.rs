@@ -122,6 +122,18 @@ pub fn btf(args: &[String]) -> Result<()> {
     ] {
         report(name, dim, pat);
     }
+    if args.iter().any(|a| a == "--time-block-solve") {
+        let nz: Vec<((usize, usize), f64)> = entries
+            .iter()
+            .zip(&g)
+            .filter(|(_, v)| **v != 0.0)
+            .map(|(e, v)| (*e, *v))
+            .collect();
+        time_block_solve(dim, &nz, &op.x)?;
+    }
+    if args.iter().any(|a| a == "--track-newton") {
+        track_newton(&insts, dim)?;
+    }
     if args.iter().any(|a| a == "--time-lu") {
         time_lu("stored pattern", dim, &entries, &g, &op.x);
         let nz: Vec<((usize, usize), f64)> = entries
@@ -396,6 +408,377 @@ fn time_lu(name: &str, n: usize, entries: &[(usize, usize)], values: &[f64], x: 
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Step 1 of docs/proposals/btf-solver.md: how often does the nonzero set change during a solve?
+// ---------------------------------------------------------------------------------------------
+
+/// Per-assembly Jacobian values, summed over instances, as the tracked solve goes.
+#[derive(Default)]
+struct Track {
+    /// The assembly being collected: `(row, col) -> summed value`.
+    current: std::collections::HashMap<(usize, usize), f64>,
+    /// Every finished assembly's nonzero set, sorted.
+    sets: Vec<Vec<(usize, usize)>>,
+}
+
+impl Track {
+    fn finish_assembly(&mut self) {
+        if self.current.is_empty() {
+            return;
+        }
+        let mut nz: Vec<(usize, usize)> = self
+            .current
+            .drain()
+            .filter(|(_, v)| *v != 0.0)
+            .map(|(e, _)| e)
+            .collect();
+        nz.sort_unstable();
+        self.sets.push(nz);
+    }
+}
+
+/// Forwards every `ModelInstance` method to `inner` — all ten, so the circuit is unchanged —
+/// and copies each Jacobian stamp into the shared [`Track`]. Instance 0's `load` starts a new
+/// assembly, which is sound because the tracked solve runs with parallel evaluation off, so
+/// instances load in order.
+struct Tracker<'a> {
+    inner: &'a dyn ModelInstance,
+    first: bool,
+    dim: usize,
+    track: &'a std::sync::Mutex<Track>,
+}
+
+/// A `StampSink` that forwards to the real sink and records the Jacobian stamps.
+struct Tee<'a> {
+    sink: &'a mut dyn va_abi::StampSink,
+    dim: usize,
+    track: &'a mut Track,
+}
+
+impl va_abi::StampSink for Tee<'_> {
+    fn residual(&mut self, row: usize, value: f64) {
+        self.sink.residual(row, value);
+    }
+    fn jacobian(&mut self, row: usize, col: usize, value: f64) {
+        if row < self.dim && col < self.dim {
+            *self.track.current.entry((row, col)).or_insert(0.0) += value;
+        }
+        self.sink.jacobian(row, col, value);
+    }
+    fn charge(&mut self, row: usize, value: f64) {
+        self.sink.charge(row, value);
+    }
+    fn dcharge(&mut self, row: usize, col: usize, value: f64) {
+        self.sink.dcharge(row, col, value);
+    }
+    fn excitation(&mut self, row: usize, re: f64, im: f64) {
+        self.sink.excitation(row, re, im);
+    }
+    fn bound_step(&mut self, dt: f64) {
+        self.sink.bound_step(dt);
+    }
+}
+
+impl ModelInstance for Tracker<'_> {
+    fn unknowns(&self) -> &[usize] {
+        self.inner.unknowns()
+    }
+    fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+        self.inner.unknown_kind(i)
+    }
+    fn unknown_is_junction(&self, i: usize) -> bool {
+        self.inner.unknown_is_junction(i)
+    }
+    fn unknown_abstol(&self, i: usize) -> Option<f64> {
+        self.inner.unknown_abstol(i)
+    }
+    fn load(
+        &self,
+        x: &[f64],
+        ctx: &va_abi::AnalysisCtx,
+        state: &mut va_abi::ModelState,
+        sink: &mut dyn va_abi::StampSink,
+    ) {
+        let mut track = self.track.lock().unwrap_or_else(|e| e.into_inner());
+        if self.first {
+            track.finish_assembly();
+        }
+        let mut tee = Tee {
+            sink,
+            dim: self.dim,
+            track: &mut track,
+        };
+        self.inner.load(x, ctx, state, &mut tee);
+    }
+    fn state_len(&self) -> usize {
+        self.inner.state_len()
+    }
+    fn is_frequency_dependent(&self) -> bool {
+        self.inner.is_frequency_dependent()
+    }
+    fn noise(&self, x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::NoiseSink) {
+        self.inner.noise(x, ctx, sink);
+    }
+    fn event_count(&self) -> usize {
+        self.inner.event_count()
+    }
+    fn events(&self, x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+        self.inner.events(x, ctx, sink);
+    }
+}
+
+/// Re-run the deck's DC solve exactly as `va-cli` does (default Newton configuration, the same
+/// rescue ladder) through [`Tracker`]s, and report how the Jacobian's nonzero set moves.
+fn track_newton(insts: &[&dyn ModelInstance], dim: usize) -> Result<()> {
+    let track = std::sync::Mutex::new(Track::default());
+    let wrapped: Vec<Tracker> = insts
+        .iter()
+        .enumerate()
+        .map(|(i, inst)| Tracker {
+            inner: *inst,
+            first: i == 0,
+            dim,
+            track: &track,
+        })
+        .collect();
+    let refs: Vec<&dyn ModelInstance> = wrapped.iter().map(|w| w as &dyn ModelInstance).collect();
+    let before = va_core::par::mode();
+    va_core::par::set_mode(va_core::par::Mode::Never);
+    let solved = va_core::dc::operating_point_with_events(
+        &refs,
+        dim,
+        va_core::newton::NewtonConfig::default(),
+        None,
+    );
+    va_core::par::set_mode(before);
+    solved.map_err(|e| anyhow::anyhow!("tracked DC solve failed: {e}"))?;
+    let mut track = track.into_inner().unwrap_or_else(|e| e.into_inner());
+    track.finish_assembly();
+    let sets = &track.sets;
+
+    let changes = sets.windows(2).filter(|w| w[0] != w[1]).count();
+    let distinct = {
+        let mut all: Vec<&Vec<(usize, usize)>> = sets.iter().collect();
+        all.sort();
+        all.dedup();
+        all.len()
+    };
+    let mut union: std::collections::BTreeSet<(usize, usize)> = Default::default();
+    let mut last_growth = 0;
+    for (k, set) in sets.iter().enumerate() {
+        let before = union.len();
+        union.extend(set.iter().copied());
+        if union.len() > before {
+            last_growth = k;
+        }
+    }
+    let lo = sets.iter().map(Vec::len).min().unwrap_or(0);
+    let hi = sets.iter().map(Vec::len).max().unwrap_or(0);
+    println!(
+        "  Newton tracking: {} assemblies; nonzero set changed between consecutive assemblies \
+         {changes} times ({distinct} distinct sets, {lo}-{hi} entries); running union last grew \
+         at assembly {last_growth}, holds {} entries",
+        sets.len(),
+        union.len(),
+    );
+    if let Some(last) = sets.last() {
+        report("final assembly", dim, last);
+    }
+    let union: Vec<(usize, usize)> = union.into_iter().collect();
+    report("union, whole solve", dim, &union);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step 2: a BTF block solve, prototype, timed against faer on the same matrix.
+// ---------------------------------------------------------------------------------------------
+
+/// Symbolic analysis of a BTF block solve: done once per nonzero pattern.
+struct BlockPlan {
+    n: usize,
+    /// Blocks in solve order (a block depends only on blocks before it), each as its columns.
+    blocks: Vec<Vec<usize>>,
+    /// The row matched to each column by the transversal.
+    row_of_col: Vec<usize>,
+    /// Column -> (block index, position within the block).
+    place: Vec<(usize, usize)>,
+    /// For each row: `(col, index into values)` of its entries.
+    row_entries: Vec<Vec<(usize, usize)>>,
+}
+
+impl BlockPlan {
+    fn new(n: usize, entries: &[(usize, usize)]) -> Option<Self> {
+        let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(r, c) in entries {
+            col_rows[c].push(r);
+        }
+        let row_of_col = max_transversal(n, &col_rows)?;
+        let mut col_of_row = vec![usize::MAX; n];
+        for (c, &r) in row_of_col.iter().enumerate() {
+            col_of_row[r] = c;
+        }
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(r, c) in entries {
+            let i = col_of_row[r];
+            if i != c {
+                adj[i].push(c);
+            }
+        }
+        let comp = tarjan(n, &adj);
+        let nblocks = comp.iter().copied().max().map_or(0, |m| m + 1);
+        // Tarjan numbers a component after everything it reaches, so increasing number is a
+        // valid solve order: a block's off-block unknowns are all in blocks already solved.
+        let mut blocks: Vec<Vec<usize>> = vec![Vec::new(); nblocks];
+        for (c, &b) in comp.iter().enumerate() {
+            blocks[b].push(c);
+        }
+        let mut place = vec![(0, 0); n];
+        for (b, cols) in blocks.iter().enumerate() {
+            for (k, &c) in cols.iter().enumerate() {
+                place[c] = (b, k);
+            }
+        }
+        let mut row_entries: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+        for (k, &(r, c)) in entries.iter().enumerate() {
+            row_entries[r].push((c, k));
+        }
+        Some(Self {
+            n,
+            blocks,
+            row_of_col,
+            place,
+            row_entries,
+        })
+    }
+
+    /// Numeric phase: factor each block (dense, partial pivoting) and substitute, in block
+    /// order. `None` if a block is numerically singular.
+    fn solve(&self, values: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+        let mut x = vec![0.0; self.n];
+        let mut a: Vec<f64> = Vec::new();
+        let mut rhs: Vec<f64> = Vec::new();
+        for (bi, cols) in self.blocks.iter().enumerate() {
+            let m = cols.len();
+            a.clear();
+            a.resize(m * m, 0.0);
+            rhs.clear();
+            rhs.resize(m, 0.0);
+            for (i, &c) in cols.iter().enumerate() {
+                let row = self.row_of_col[c];
+                let mut r = b[row];
+                for &(col, k) in &self.row_entries[row] {
+                    let (cb, j) = self.place[col];
+                    if cb == bi {
+                        a[i * m + j] += values[k];
+                    } else {
+                        r -= values[k] * x[col];
+                    }
+                }
+                rhs[i] = r;
+            }
+            let sol = dense_solve(m, &mut a, &mut rhs)?;
+            for (i, &c) in cols.iter().enumerate() {
+                x[c] = sol[i];
+            }
+        }
+        Some(x)
+    }
+}
+
+/// In-place dense LU with partial pivoting on row-major `a` (`m × m`), then the solve.
+fn dense_solve(m: usize, a: &mut [f64], b: &mut [f64]) -> Option<Vec<f64>> {
+    if m == 1 {
+        return (a[0] != 0.0).then(|| vec![b[0] / a[0]]);
+    }
+    for k in 0..m {
+        let p = (k..m).max_by(|&i, &j| a[i * m + k].abs().total_cmp(&a[j * m + k].abs()))?;
+        if a[p * m + k] == 0.0 {
+            return None;
+        }
+        if p != k {
+            for j in 0..m {
+                a.swap(k * m + j, p * m + j);
+            }
+            b.swap(k, p);
+        }
+        let piv = a[k * m + k];
+        for i in k + 1..m {
+            let f = a[i * m + k] / piv;
+            if f != 0.0 {
+                for j in k..m {
+                    a[i * m + j] -= f * a[k * m + j];
+                }
+                b[i] -= f * b[k];
+            }
+        }
+    }
+    let mut x = vec![0.0; m];
+    for k in (0..m).rev() {
+        let mut s = b[k];
+        for j in k + 1..m {
+            s -= a[k * m + j] * x[j];
+        }
+        x[k] = s / a[k * m + k];
+    }
+    Some(x)
+}
+
+/// Time the block solve on the operating point's nonzero DC matrix, and `faer` on the same
+/// matrix: symbolic once, numeric (+ the same residual check `SparseLu::solve` makes) as the
+/// median of five. Right-hand side `A·x_op`, so the error is against a known answer.
+fn time_block_solve(n: usize, nz: &[((usize, usize), f64)], x_op: &[f64]) -> Result<()> {
+    let entries: Vec<(usize, usize)> = nz.iter().map(|(e, _)| *e).collect();
+    let values: Vec<f64> = nz.iter().map(|(_, v)| *v).collect();
+    let mut b = vec![0.0; n];
+    for (&(r, c), v) in entries.iter().zip(&values) {
+        b[r] += v * x_op[c];
+    }
+    let t0 = std::time::Instant::now();
+    let plan = BlockPlan::new(n, &entries).context("structurally singular")?;
+    let t_sym = t0.elapsed();
+    let residual_ok = |x: &[f64]| {
+        let mut ax = vec![0.0; n];
+        for (&(r, c), v) in entries.iter().zip(&values) {
+            ax[r] += v * x[c];
+        }
+        let bmax = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let rmax = ax
+            .iter()
+            .zip(&b)
+            .fold(0.0_f64, |m, (a, bb)| m.max((a - bb).abs()));
+        rmax <= 1e-6 * bmax.max(1.0)
+    };
+    let mut times = Vec::new();
+    let mut x = Vec::new();
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        x = plan
+            .solve(&values, &b)
+            .context("a block is numerically singular")?;
+        let ok = residual_ok(&x);
+        times.push(t.elapsed().as_secs_f64());
+        if !ok {
+            bail!("block solve failed the residual check");
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    let err = x
+        .iter()
+        .zip(x_op)
+        .fold(0.0_f64, |m, (a, t)| m.max((a - t).abs()));
+    let largest = plan.blocks.iter().map(Vec::len).max().unwrap_or(0);
+    println!(
+        "  block solve        {} entries, {} blocks (largest {largest}): symbolic {:.2} ms, \
+         numeric + residual check {:.2} ms (median of 5), max |x - x_op| {err:.1e}",
+        entries.len(),
+        plan.blocks.len(),
+        t_sym.as_secs_f64() * 1e3,
+        times[2] * 1e3,
+    );
+    time_lu("faer, same matrix", n, &entries, &values, x_op);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +818,24 @@ mod tests {
         let b = decompose(n, &entries).expect("nonsingular");
         assert_eq!(b.sizes.len(), n);
         assert_eq!((b.depth, b.widest), (1, n));
+    }
+
+    /// The block solve reproduces a known solution: a 2×2 block with a zero on its diagonal
+    /// (so the dense LU must swap rows), singletons, and one-way couplings between blocks.
+    #[test]
+    fn the_block_solve_matches_a_known_answer() {
+        let entries = [(0, 1), (1, 0), (1, 1), (0, 2), (2, 2), (3, 3), (2, 3)];
+        let values = [2.0, 3.0, 1.0, 0.5, 4.0, 5.0, -1.0];
+        let x_true = [1.0, -2.0, 0.25, 3.0];
+        let mut b = [0.0; 4];
+        for (&(r, c), v) in entries.iter().zip(&values) {
+            b[r] += v * x_true[c];
+        }
+        let plan = BlockPlan::new(4, &entries).expect("nonsingular");
+        let x = plan.solve(&values, &b).expect("solves");
+        for (a, t) in x.iter().zip(&x_true) {
+            assert!((a - t).abs() < 1e-14, "{x:?}");
+        }
     }
 
     /// An empty column has no transversal.

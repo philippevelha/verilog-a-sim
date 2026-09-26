@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.20.0 - 2026-09-26
+-------------------
+**`cargo xtask btf` gains `--track-newton` and `--time-block-solve`: Steps 1–2 of
+`docs/proposals/btf-solver.md`, measured (§6.1). Verdict: go.** No simulator change.
+
+  * `--track-newton` re-runs the deck's DC solve exactly as `va-cli` does, every instance
+    wrapped (all ten `ModelInstance` methods forwarded) to record each assembly's Jacobian.
+    c432: the nonzero set changes on 251 of 557 iteration steps (147 distinct sets), so caching
+    a BTF per set would not hold — but the **running union stops growing at the second
+    assembly** and its blocks are the final ones (12 597, largest 34). chain160: same, largest 5.
+    Blocks will come from the running union.
+  * `--time-block-solve` is a prototype block solver: transversal + Tarjan once, then per solve
+    dense LU with partial pivoting per block, substitution in block order, and the residual check
+    `SparseLu::solve` makes. Same operating-point matrix, median of 5: **c432 1.24 ms vs `faer`
+    29 ms (23×)**, chain160 0.40 vs 8 ms (20×); max |x − x_op| 4.0e-13 vs `faer`'s 5.7e-13.
+    Estimated (not measured end to end): c432's 8-thread `.op` 43.6 → ~22 s.
+
+**Limitations:** the prototype is not the solver — it does not handle a union entry that is zero
+in one iteration making a block singular, nor the gmin diagonal; Step 3 must.
+
+Measured at this version: `cargo test --workspace` 897 passed (+1 block-solve test); `validate`
+28/28, convergence 28/28; clippy clean.
+
+
 1.19.1 - 2026-09-26
 -------------------
 **Proposal: a block-triangular (BTF) front end for the sparse DC solve**

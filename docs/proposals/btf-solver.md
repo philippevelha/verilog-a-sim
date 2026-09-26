@@ -1,6 +1,8 @@
 # Proposal: a block-triangular (BTF) front end for the sparse DC solve
 
-**Status:** proposed, 2026-09-26. Nothing decided; §8 lists the decisions.
+**Status:** proposed, 2026-09-26. Steps 1–2 measured (§6.1): **go**, with blocks from the
+running union of nonzero entries. A last-digit shift in DC answers is accepted. Step 3 (build
+it in `va-core`) awaits the go-ahead.
 **Affects:** `va-core` only (`sparse.rs`: `SparseLu` and its callers' choice of solver). No
 interface change: models, `StampSink` and `ModelInstance` are untouched.
 **Follows:** `docs/proposals/parallel-assembly.md` §5.1 (option a) and its measurement §5.1.1;
@@ -150,6 +152,49 @@ is addressed.
 4. **Transient**, separately: measure how much of a transient step's solve is the large block, and
    only then choose between (A) as is and (B) for that block.
 
+### 6.1 Steps 1–2, measured (2026-09-26)
+
+`cargo xtask btf <deck> --model <m> --track-newton --time-block-solve`, release build, mains
+power. Decision 2 (§8) is taken: a last-digit shift in DC answers is acceptable.
+
+**Step 1 — the cache.** `--track-newton` re-runs the deck's DC solve exactly as `va-cli` does
+(default Newton configuration, same gmin rescue ladder), with every instance wrapped so each
+assembly's summed Jacobian is recorded. The count of assemblies equals `--logfull`'s count of
+Newton iterations (558 on c432), so every assembly is a solve.
+
+| | assemblies | nonzero set changed | distinct sets | entries | running union stopped growing |
+|---|---:|---:|---:|---|---|
+| c432 | 558 | **251** times | 147 | 31 687 – 37 147 | **at assembly 1** (37 147 entries) |
+| chain160 | 150 | 11 times | 5 | 11 206 – 13 126 | at assembly 1 (13 126 entries) |
+
+**Per-set caching would not hold** on c432 — the set changes on almost every other iteration, as
+devices move between regions. **The union does:** every later set is a subset of the second
+assembly's, so a BTF of the running union is computed once or twice per solve. Its blocks are
+the final assembly's: c432 12 597 blocks, largest **34** (the four-bias union of §2, largest 52,
+was a looser bound); chain160 largest 5. **Decided by the measurement: blocks from the running
+union** of nonzero entries, recomputed only when the union grows.
+
+**Step 2 — the block solve.** `--time-block-solve`: transversal + Tarjan once (symbolic), then
+per solve fill each block from the values, dense LU with partial pivoting, substitute in block
+order, and run the same residual check `SparseLu::solve` makes. On each deck's operating-point
+matrix (nonzero entries), against `faer` on the same matrix:
+
+| | symbolic (once) | block solve (median of 5) | `faer` (median of 5) | speed-up | max \|x − x_op\| block / `faer` |
+|---|---:|---:|---:|---:|---|
+| c432 | 6.1 ms | **1.24 ms** | 29 ms | **23×** | 4.0e-13 / 5.7e-13 |
+| chain160 | 2.2 ms | **0.40 ms** | 8 ms | **20×** | 2.2e-16 / 2.2e-16 |
+
+**Go** (the criterion was 5×). Accuracy is `faer`'s or better on both. What it implies,
+estimated from these numbers rather than measured end to end: c432's 558 solves from 22.7 s to
+about 0.7 s (plus two symbolic phases, ~12 ms), taking its 8-thread `.op` from 43.6 s to roughly
+22 s; chain160's 1.62 s of solve to about 0.06 s.
+
+Not yet covered, and to be handled in Step 3: an entry in the union that is exactly zero in a
+given iteration can make a block numerically singular where the matrix is not (the dense LU then
+fails, and the solve must fall back to `faer` rather than report singular); the `gmin` shunt adds
+diagonal values the tracked stamps did not include (the diagonal adds no edges, so the blocks do
+not change, but it changes pivots); and transient remains the separate Step 4.
+
 ## 7. How it is proved not to break anything
 
 - A solve returns `x` with `‖A·x − b‖` within `RESIDUAL_TOL`, checked after every solve, on every
@@ -161,7 +206,8 @@ is addressed.
 
 ## 8. Decisions needed
 
-1. Proceed with steps 1–2 (measurement and prototype in `xtask`, no `va-core` change)?
-2. Is a last-digit shift in DC answers acceptable for this speed, as it was for `libm` (1.17.0)?
+1. ~~Proceed with steps 1–2?~~ Done (§6.1): go.
+2. ~~Is a last-digit shift in DC answers acceptable?~~ Yes (decided 2026-09-26).
 3. Should (C) — why c432 needs 38 gmin stages, and factorization reuse (§5.2 of the
    parallel-assembly proposal) — be measured in parallel? It reduces both halves of the run.
+4. Build Step 3 in `va-core` (DC only, `faer` kept as the fallback and as a selectable path)?
