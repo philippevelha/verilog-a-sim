@@ -128,7 +128,7 @@ def evaluate(ins, gates, vector):
     return val
 
 
-def write_deck(bench, out, mode, vector=None, tstop='12n', seq=None):
+def write_deck(bench, out, mode, vector=None, tstop='12n', seq=None, nodeset=False):
     ins, outs, gates = read_bench(bench)
     cells = c7552_cells()
     name = os.path.splitext(os.path.basename(bench))[0]
@@ -203,6 +203,22 @@ def write_deck(bench, out, mode, vector=None, tstop='12n', seq=None):
     for i, ((g_out, kind, args), cell) in enumerate(zip(gates, use)):
         a_pins = [pin[(a, i, loads[a].index(i) + 1)] for a in args]
         L.append(f'XG{net_name(g_out)} {" ".join(a_pins)} vdd gnd {net_name(g_out)}_0 {cell}')
+    if nodeset:
+        # Newton's starting point from the logic (1.30.0): every net pin at its logic level
+        # for the vector the deck starts from -- the `.op` vector, a sequence's first vector,
+        # or all inputs low for the PULSE deck (every PULSE starts at 0). Internal cell nodes
+        # (a NAND's stack node) are left to Newton. A hint, not a constraint: see
+        # docs/proposals/initial-guess.md.
+        start = (vector if mode == 'op' else seq[1][0] if mode == 'seq' else [0] * len(ins))
+        val = evaluate(ins, gates, start)
+        hints = [f'V(vdd)={VDD}']
+        for sig in sorted(val, key=net_name):
+            level = VDD * val[sig]
+            n = net_name(sig)
+            hints.append(f'V({n}_0)={level:g}')
+            hints += [f'V({n}_{k})={level:g}' for k in range(1, len(loads.get(sig, [])) + 1)]
+        L += ['', '* starting point for the DC solve, from the .bench logic (gen_iscas.py --nodeset)']
+        L += ['.nodeset ' + ' '.join(hints[i:i + 8]) for i in range(0, len(hints), 8)]
     if mode == 'seq':
         tstop = f'{seq[0] * len(seq[1]):.6g}'
     L += ['', f'.tran 1p {tstop}' if mode in ('tran', 'seq') else '.op', '.end']
@@ -219,6 +235,8 @@ def spice_value(text):
 
 
 if __name__ == '__main__':
+    nodeset = '--nodeset' in sys.argv
+    sys.argv = [a for a in sys.argv if a != '--nodeset']
     bench, out, mode = sys.argv[1], sys.argv[2], sys.argv[3]
     ins, _, _ = read_bench(bench)
     vec = [int(c) for c in sys.argv[4]] if mode == 'op' else None
@@ -235,4 +253,4 @@ if __name__ == '__main__':
         rng = random.Random(seed)
         edge = spice_value(sys.argv[7]) if len(sys.argv) > 7 else 50e-12
         seq = (period, [[rng.randint(0, 1) for _ in ins] for _ in range(n)], edge)
-    write_deck(bench, out, mode, vec, tstop, seq)
+    write_deck(bench, out, mode, vec, tstop, seq, nodeset)

@@ -242,6 +242,10 @@ fn resolve_pulse_defaults(net: &mut Netlist, pending: &[(usize, Vec<f64>)]) {
 fn parse_card(net: &mut Netlist, body: &str) {
     let toks: Vec<&str> = body.split_whitespace().collect();
     let name = toks.first().copied().unwrap_or("");
+    if name.eq_ignore_ascii_case("nodeset") {
+        parse_nodeset(net, body[name.len()..].trim());
+        return;
+    }
     let card = match name.to_ascii_lowercase().as_str() {
         "op" => AnalysisCard::Op,
         "dc" => AnalysisCard::Dc,
@@ -350,6 +354,26 @@ fn parse_card(net: &mut Netlist, body: &str) {
 /// `None` for anything not shaped that way — including SPICE's differential `V(a,b)` form, which
 /// this project's noise analysis has no representation for (its output is a single unknown
 /// index, not a difference of two).
+/// `.nodeset V(a)=1.8 V(b)=0 ...` — each `V(<net>)=<value>` pair, spaces around `=` allowed.
+/// A pair that does not parse is skipped **with a note** (the deck still solves, from a guess
+/// with one hint fewer) rather than failing the deck: a nodeset only ever changes where Newton
+/// starts, so dropping one cannot change what a converged solve means.
+fn parse_nodeset(net: &mut Netlist, rest: &str) {
+    let joined: String = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = joined.replace(" =", "=").replace("= ", "=");
+    for pair in joined.split_whitespace() {
+        let parsed = pair
+            .split_once('=')
+            .and_then(|(probe, value)| Some((parse_voltage_probe(probe)?, parse_value(value)?)));
+        match parsed {
+            Some(hint) => net.nodesets.push(hint),
+            None => net.notes.push(format!(
+                "`.nodeset` entry `{pair}` is not `V(<net>)=<value>`; skipped (a nodeset is                  only Newton's starting point, so the solve proceeds without this hint)"
+            )),
+        }
+    }
+}
+
 fn parse_voltage_probe(tok: &str) -> Option<String> {
     let rest = tok
         .strip_prefix("V(")
@@ -1192,5 +1216,31 @@ C1 out gnd 1e-6 IC=5
             .expect("IC= on an inductor parses");
         assert_eq!(net.devices[0].ic, Some(2e-3));
         assert_eq!(net.devices[0].model, "inductor");
+    }
+
+    /// `.nodeset` pairs are collected in deck order, with or without spaces around `=` and
+    /// with SI suffixes; a malformed pair becomes a note, not an error.
+    #[test]
+    fn nodeset_pairs_are_parsed_and_a_malformed_one_is_noted() {
+        let net = parse(
+            "V1 a 0 1.8
+R1 a b 1k
+R2 b 0 1k
+.nodeset V(a)=1.8 v(b) = 900m
+.nodeset I(a)=1
+.op
+.end
+",
+        )
+        .expect("parses");
+        assert_eq!(
+            net.nodesets,
+            vec![("a".to_string(), 1.8), ("b".to_string(), 0.9)]
+        );
+        assert!(
+            net.notes.iter().any(|n| n.contains("I(a)=1")),
+            "{:?}",
+            net.notes
+        );
     }
 }

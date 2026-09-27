@@ -20,6 +20,37 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.30.0 - 2026-09-27
+-------------------
+**`.nodeset`: a starting point for the DC solve, and a measurement showing that on ISCAS'85 it
+does not help** (`docs/proposals/initial-guess.md`, recommendations awaiting the user's decision).
+
+  * `.nodeset V(<net>)=<value> ...` (SPICE's card) is parsed into `Netlist::nodesets`. `va-cli`
+    starts the `.op` solve, and the operating point before a transient, from those values; every
+    other unknown starts at 0. With no nodeset the call is exactly the old one, so every existing
+    deck is bit-identical. A nodeset naming a missing net is an error; a malformed pair is
+    skipped with a note. **Limitation:** only SPICE's second phase, the starting guess; the first
+    phase, which holds each node at its value, is not implemented.
+  * `gen_iscas.py ... --nodeset` writes every net pin at its logic level for the deck's starting
+    vector (opt-in; no nodeset deck is committed). `xtask ladder ... --current [--nodeset]`
+    replays the rescue from either start, reports plain Newton's error, and with `--nodeset`
+    tries warm starts: capped plain Newton from the hint, unshunted or with a shunt ramp from
+    1e-6 S or 1e-9 S.
+
+**Measured** (nine circuits, c432 ... c6288, one vector each): from the logic levels the answers
+are identical to every printed digit, and so is the effort. The rescue takes the same number of
+Newton iterations on 8 of 9 (c6288 227 -> 225), and wall times are equal within noise. Plain
+Newton fails at its second assembly with a singular matrix whatever the start; on c432 it fails
+the same way from the logic levels with a 1e-6 S or 1e-9 S shunt on every node, and with BTF
+off. The starting point is not what plain Newton lacks; which rows go singular is the next
+question (the doc, §5). **c7552 was not measured:** the run was stopped by Claude Code for low
+system memory and was not restarted. A stray `xtask ladder` from that run's still-running shell
+held ~4 GB until it was found and ended.
+
+Measured at this version: `cargo test --workspace` 917 passed (+1 `va-netlist`, +1 `va-cli`
+nodeset tests); `validate` 28/28; deck-diff against 1.29.0+1's `va-cli`: 70 identical, 0 different (13 slow decks skipped).
+
+
 1.29.0+1 - 2026-09-27
 ---------------------
 **Road to 2.0 item 3, first measurement: Linux and Windows identical; macOS differs.** CI run

@@ -1,4 +1,5 @@
-//! `cargo xtask ladder <deck> [--model <m>]` — what the DC rescue costs on a deck, and what
+//! `cargo xtask ladder <deck> [--model <m>] [--current] [--nodeset]` — what the DC rescue costs
+//! on a deck (from zero, or from its `.nodeset` hints), and what
 //! alternative rescue schedules would cost instead (option C of `docs/proposals/btf-solver.md`,
 //! `docs/proposals/dc-rescue.md`).
 //!
@@ -17,7 +18,7 @@ use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use va_abi::ModelInstance;
-use va_core::newton::{solve, NewtonConfig};
+use va_core::newton::{solve_with_events_from, NewtonConfig};
 
 /// Counts `load` calls on the one instance it wraps; forwards every `ModelInstance` method.
 struct Counted<'a> {
@@ -97,6 +98,11 @@ pub fn ladder_cmd(args: &[String]) -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(String::as_str);
     let (net, compiled) = va_cli::load(deck, model).with_context(|| format!("loading {deck}"))?;
+    // `--current`: only the rescue as `va_core::dc` runs it, not the alternative schedules.
+    // `--nodeset`: every schedule starts from the deck's `.nodeset` hints instead of zero —
+    // `docs/proposals/initial-guess.md`, which compares the two.
+    let current_only = args.iter().any(|a| a == "--current");
+    let from_nodeset = args.iter().any(|a| a == "--nodeset");
     let (boxed, dim) = va_cli::instances(&net, &compiled)?;
     let loads = AtomicUsize::new(0);
     let first = Counted {
@@ -134,7 +140,32 @@ pub fn ladder_cmd(args: &[String]) -> Result<()> {
         });
     }
 
-    println!("{deck}: {dim} unknowns, {} instances", insts.len());
+    if current_only {
+        schedules.truncate(1);
+    }
+    let start: Option<Vec<f64>> = if from_nodeset {
+        anyhow::ensure!(
+            !net.nodesets.is_empty(),
+            "--nodeset: {deck} has no `.nodeset` card"
+        );
+        let mut x = vec![0.0; dim];
+        for (name, v) in &net.nodesets {
+            let i = *net
+                .nodes
+                .get(name)
+                .with_context(|| format!("`.nodeset`: no net `{name}`"))?;
+            x[i] = *v;
+        }
+        Some(x)
+    } else {
+        None
+    };
+
+    println!(
+        "{deck}: {dim} unknowns, {} instances, starting from {}",
+        insts.len(),
+        if from_nodeset { "the nodesets" } else { "zero" }
+    );
     let mut reference: Option<Vec<f64>> = None;
     for s in &schedules {
         let t0 = Instant::now();
@@ -143,12 +174,22 @@ pub fn ladder_cmd(args: &[String]) -> Result<()> {
         let mut answer = None;
         for (k, cfg) in s.tiers.iter().enumerate() {
             let before = loads.load(Ordering::Relaxed);
-            let r = solve(&insts, dim, *cfg);
+            let r = solve_with_events_from(
+                &insts,
+                dim,
+                *cfg,
+                &va_abi::FiredEvents::default(),
+                start.as_deref(),
+            );
             per_tier.push(loads.load(Ordering::Relaxed) - before);
-            if let Ok(x) = r {
-                outcome = format!("solved by tier {k}");
-                answer = Some(x);
-                break;
+            match r {
+                Ok(x) => {
+                    outcome = format!("solved by tier {k}");
+                    answer = Some(x);
+                    break;
+                }
+                Err(e) if k == 0 => println!("    plain Newton: {e}"),
+                Err(_) => {}
             }
         }
         let total: usize = per_tier.iter().sum();
@@ -176,5 +217,98 @@ pub fn ladder_cmd(args: &[String]) -> Result<()> {
             reference = answer;
         }
     }
+    if let Some(x0) = start.as_deref() {
+        warm_starts(&insts, dim, x0, &loads, reference.as_deref());
+    }
     Ok(())
+}
+
+/// With a good starting point, does the rescue still need to start from a 1e-3 S shunt? Each
+/// variant starts from `x0` and runs capped plain Newton (the rescue's first tier's settings)
+/// with a shunt of `g` from every `Node` row to ground, `g` falling tenfold per stage from `g0`
+/// to 1e-12 S, then unshunted. The shunt is `va_abi`'s reference resistor, one per node, so no
+/// stamp is written here. `g0 = 0` is capped plain Newton alone. An experiment for
+/// `docs/proposals/initial-guess.md`, not a schedule `va_core::dc` runs.
+fn warm_starts(
+    insts: &[&dyn ModelInstance],
+    dim: usize,
+    x0: &[f64],
+    loads: &AtomicUsize,
+    reference: Option<&[f64]>,
+) {
+    let mut is_node = vec![true; dim];
+    let mut seen = vec![false; dim];
+    for inst in insts {
+        for (i, &u) in inst.unknowns().iter().enumerate() {
+            if u < dim {
+                seen[u] = true;
+                if matches!(inst.unknown_kind(i), va_abi::UnknownKind::Branch) {
+                    is_node[u] = false;
+                }
+            }
+        }
+    }
+    let nodes: Vec<usize> = (0..dim).filter(|&u| seen[u] && is_node[u]).collect();
+    let capped = NewtonConfig {
+        max_iters: ITERS,
+        max_node_step: CAP,
+        ..NewtonConfig::default()
+    };
+    for g0 in [0.0, 1e-6, 1e-9] {
+        let t0 = Instant::now();
+        let before = loads.load(Ordering::Relaxed);
+        let mut stages = Vec::new();
+        let mut g = g0;
+        while g >= 1e-12 * 0.999 {
+            stages.push(g);
+            g /= 10.0;
+        }
+        stages.push(0.0);
+        let mut x = x0.to_vec();
+        let mut failed = None;
+        for &g in &stages {
+            let shunts: Vec<va_abi::reference::Resistor> = if g > 0.0 {
+                nodes
+                    .iter()
+                    .map(|&u| {
+                        va_abi::reference::Resistor::new(u, va_abi::reference::GROUND, 1.0 / g)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut all: Vec<&dyn ModelInstance> = insts.to_vec();
+            all.extend(shunts.iter().map(|r| r as &dyn ModelInstance));
+            match solve_with_events_from(
+                &all,
+                dim,
+                capped,
+                &va_abi::FiredEvents::default(),
+                Some(&x),
+            ) {
+                Ok(next) => x = next,
+                Err(e) => {
+                    failed = Some(format!("failed at g = {g:.0e} S: {e}"));
+                    break;
+                }
+            }
+        }
+        let agree = match (reference, &failed) {
+            (Some(r), None) => {
+                let d = r
+                    .iter()
+                    .zip(&x)
+                    .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+                format!("; max |x - current| {d:.1e}")
+            }
+            _ => String::new(),
+        };
+        println!(
+            "  warm start, shunt from {g0:.0e} S ({} stages): {}; assemblies {}; {:.1} s{agree}",
+            stages.len(),
+            failed.as_deref().unwrap_or("solved"),
+            loads.load(Ordering::Relaxed) - before,
+            t0.elapsed().as_secs_f64(),
+        );
+    }
 }

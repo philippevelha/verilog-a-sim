@@ -1830,10 +1830,45 @@ fn solve_dc_impl(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
-    va_core::dc::operating_point_with_events(&refs, dim, newton_cfg(solver), None)
+    let start = nodeset_start(net, dim)?;
+    va_core::dc::operating_point_continued(&refs, dim, newton_cfg(solver), None, start.as_deref())
         .map(|(op, _)| op)
         .map_err(|e| name_non_finite_row(e.into(), &quantities))
         .context("DC operating-point solve failed")
+}
+
+/// Newton's starting point from the deck's `.nodeset` cards (1.30.0): each named net at its
+/// value, every other unknown at 0. `None` when the deck has no nodeset — then the solve is
+/// exactly the zero-start one it always was (`operating_point_continued` with no start *is*
+/// `operating_point_with_events`), bit for bit.
+///
+/// A hint moves only where Newton starts, never what counts as converged, so a solve from a
+/// wrong hint is still a solution of the circuit — it may take longer, or on a circuit with
+/// several operating points (a latch) land on another one, which is what a nodeset is for.
+///
+/// # Errors
+///
+/// A nodeset naming a net the deck does not have: a typo would otherwise be a hint silently
+/// dropped, and the cost it was written to save silently paid.
+fn nodeset_start(net: &Netlist, dim: usize) -> Result<Option<Vec<f64>>> {
+    if net.nodesets.is_empty() {
+        return Ok(None);
+    }
+    let mut x = vec![0.0; dim];
+    for (name, value) in &net.nodesets {
+        let Some(&i) = net.nodes.get(name).or_else(|| {
+            net.nodes
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, i)| i)
+        }) else {
+            bail!("`.nodeset V({name})=...`: the deck has no net `{name}`");
+        };
+        if let Some(slot) = x.get_mut(i) {
+            *slot = *value;
+        }
+    }
+    Ok(Some(x))
 }
 
 /// If `err` is a [`va_core::CoreError::NonFinite`] (bare, or inside a
@@ -2351,14 +2386,20 @@ fn solve_transient_impl(
         // The sources read their own `t = 0` value here (a waveform's DC value *is* its value
         // at zero — see `va_netlist::parser`), so this is the operating point the run actually
         // starts from rather than some other bias.
-        let (op, _) =
-            va_core::dc::operating_point_with_events(&refs, dim, newton_cfg(solver), None)
-                .map_err(|e| name_non_finite_row(e.into(), &quantities))
-                .context(
-                    "the operating-point solve that precedes a transient run failed; add `UIC` \
+        let start = nodeset_start(net, dim)?;
+        let (op, _) = va_core::dc::operating_point_continued(
+            &refs,
+            dim,
+            newton_cfg(solver),
+            None,
+            start.as_deref(),
+        )
+        .map_err(|e| name_non_finite_row(e.into(), &quantities))
+        .context(
+            "the operating-point solve that precedes a transient run failed; add `UIC` \
                      to the `.tran` card to start from the zero vector and each element's `IC=` \
                      instead",
-                )?;
+        )?;
         op.x
     };
 
@@ -4600,6 +4641,36 @@ R2 a gnd 3000
         assert!(bad.devices[0].waveform.is_none());
         let odd = va_netlist::parser::parse("V1 a gnd PWL(0 1 2)\n.op\n.end\n").unwrap();
         assert!(odd.devices[0].waveform.is_none());
+    }
+
+    /// `.nodeset` moves where Newton starts, not where it lands: a divider solved from a wild
+    /// hint gives the zero-start answer; a hint naming a net the deck lacks is an error rather
+    /// than a silently dropped hint (1.30.0).
+    #[test]
+    fn a_nodeset_is_a_starting_point_and_a_typo_in_one_is_an_error() {
+        let deck = "V1 a gnd DC 1
+R1 a b 1k
+R2 b gnd 1k
+.op
+.end
+";
+        let plain = solve_dc(&va_netlist::parser::parse(deck).unwrap(), &[]).unwrap();
+        let hinted_deck = deck.replace(
+            ".op",
+            ".nodeset V(b)=-40 V(a)=7
+.op",
+        );
+        let hinted = solve_dc(&va_netlist::parser::parse(&hinted_deck).unwrap(), &[]).unwrap();
+        for (p, h) in plain.x.iter().zip(&hinted.x) {
+            assert!((p - h).abs() < 1e-9, "{p} vs {h}");
+        }
+        let typo = deck.replace(
+            ".op",
+            ".nodeset V(c)=1
+.op",
+        );
+        let err = solve_dc(&va_netlist::parser::parse(&typo).unwrap(), &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("no net `c`"), "{err:#}");
     }
 
     /// A noise source declared in a **potential** contribution reaches the output. Before
