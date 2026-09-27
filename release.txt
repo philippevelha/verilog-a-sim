@@ -20,6 +20,22 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.30.0+3 - 2026-09-27
+---------------------
+**Road to 2.0 item 3: a CI check of the macOS difference's cause.** Tooling and CI only; no
+simulator change.
+
+  * `xtask deck-run` gained `--only <deck>` (run just the named decks) and `--va-arg <arg>`
+    (append an argument to every `sim` command).
+  * CI's `repro` job reruns the three decks macOS differed on (1.30.0+2) with `--solver sparse`,
+    and `repro-compare` compares Linux with macOS on those. If faer's dense-LU SIMD kernels
+    cause the difference, as hypothesised, it disappears on the sparse path. If it persists, the
+    cause is elsewhere, perhaps in model evaluation. Either result is recorded.
+
+Measured at this version: `xtask` tests 42 passed; locally the three decks run on the sparse
+path in 3.8 s (exit 0).
+
+
 1.30.0+2 - 2026-09-27
 ---------------------
 **Road to 2.0 item 3: the macOS difference, bounded.** No code change. CI run for 1.30.0+1

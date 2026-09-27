@@ -98,6 +98,21 @@ jobs:
         with:
           name: repro-${{ matrix.os }}
           path: repro-out
+      # The three decks macOS arm64 differed on (1.30.0+2), rerun on the sparse path: if the
+      # difference comes from faer's dense-LU SIMD kernels, it disappears here.
+      - name: the macOS-differing decks, sparse path
+        shell: bash
+        run: |
+          exe=target/release/va-cli; [ -f "$exe.exe" ] && exe="$exe.exe"
+          cargo xtask deck-run "$exe" repro-sparse \
+            --only circuits/benchmark/psp103_inverter_tran.net \
+            --only circuits/benchmark/psp103_inverter_card_tran.net \
+            --only circuits/benchmark/nand/bsimsoi.net \
+            --va-arg --solver --va-arg sparse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repro-sparse-${{ matrix.os }}
+          path: repro-sparse
 
   repro-compare:
     name: repro compare (Linux vs Windows, Linux vs macOS)
@@ -126,6 +141,9 @@ jobs:
       - name: Linux vs macOS
         if: always()
         run: python3 .github/scripts/compare_annotate.py "Linux vs macOS" repro/repro-ubuntu-latest repro/repro-macos-latest
+      - name: Linux vs macOS, sparse path
+        if: always()
+        run: python3 .github/scripts/compare_annotate.py "Linux vs macOS (sparse)" repro/repro-sparse-ubuntu-latest repro/repro-sparse-macos-latest
 
   deny:
     name: cargo deny (no native-link deps)

@@ -31,7 +31,9 @@ const STDERR: &str = "=== stderr";
 /// run every deck under `circuits/` through one `va-cli` and write `<out-dir>/<deck>.txt` per
 /// deck (the deck's repository path, `/`-separated, plus `.txt`). The deck set and each deck's
 /// command line are `deck-diff`'s: the slow ISCAS'85 decks are left out unless `--all`, or
-/// named with `--include`.
+/// named with `--include`. `--only <deck>` (repeatable) runs just the named decks;
+/// `--va-arg <arg>` (repeatable) appends an argument to every `sim` command — e.g.
+/// `--va-arg --solver --va-arg sparse`, to rerun a set of decks on another solve path.
 ///
 /// # Errors
 ///
@@ -40,17 +42,21 @@ const STDERR: &str = "=== stderr";
 pub fn deck_run(args: &[String]) -> Result<()> {
     let mut positional = Vec::new();
     let (mut all, mut include, mut skip) = (false, Vec::<String>::new(), Vec::<String>::new());
+    let (mut only, mut va_args) = (Vec::<String>::new(), Vec::<String>::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--all" => all = true,
-            "--include" | "--skip" => {
+            "--va-arg" => va_args.push(it.next().context("--va-arg needs an argument")?.clone()),
+            "--include" | "--skip" | "--only" => {
                 let deck = it
                     .next()
                     .with_context(|| format!("{a} needs a deck path"))?
                     .replace('\\', "/");
                 if a == "--include" {
                     include.push(deck);
+                } else if a == "--only" {
+                    only.push(deck);
                 } else {
                     skip.push(deck);
                 }
@@ -82,7 +88,7 @@ pub fn deck_run(args: &[String]) -> Result<()> {
     let (mut ran, mut failed, mut skipped) = (0, 0, 0);
     for deck in &decks {
         let rel = rel_path(deck, &root);
-        if skip.contains(&rel) {
+        if skip.contains(&rel) || (!only.is_empty() && !only.contains(&rel)) {
             skipped += 1;
             continue;
         }
@@ -102,6 +108,7 @@ pub fn deck_run(args: &[String]) -> Result<()> {
         if let Some(f) = deck_analysis_flag(&text) {
             cmd.arg(f);
         }
+        cmd.args(&va_args);
         let started = std::time::Instant::now();
         let status = cmd
             .stdin(Stdio::null())
