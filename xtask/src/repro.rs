@@ -201,6 +201,7 @@ pub fn deck_compare(args: &[String]) -> Result<()> {
                  [xtask]     a: {a}\n[xtask]     b: {b}",
                 i + 1
             );
+            eprintln!("[xtask]   {}", NumericBound::of(&x, &y));
         } else {
             eprintln!(
                 "[xtask]   {} lines vs {}",
@@ -217,6 +218,72 @@ pub fn deck_compare(args: &[String]) -> Result<()> {
         bail!("{differ} deck(s) differ, {one_sided} present on one side only");
     }
     Ok(())
+}
+
+/// Values at or below this magnitude on both sides are round-off around zero (a ground-tied
+/// node's `-7.8e-32 V` against `3.2e-32 V`): their relative difference is meaningless, so the
+/// relative bound skips them. Their absolute difference is still reported.
+const ROUNDOFF_FLOOR: f64 = 1e-15;
+
+/// How far apart two same-shaped outputs are, as numbers: over every whitespace token pair that
+/// differs, `name=value` compared by value. What turns "these decks differ" into a bound that
+/// can be stated in writing (Road to 2.0 item 3: "every difference explained and bounded").
+#[derive(Debug, Default, PartialEq)]
+struct NumericBound {
+    /// Largest `|a - b|`, and the token (`name=`) it was found at.
+    max_abs: (f64, String),
+    /// Largest `|a - b| / max(|a|, |b|)` among pairs above [`ROUNDOFF_FLOOR`], and where.
+    max_rel: (f64, String),
+    /// Differing token pairs that are not both numbers — a structural difference, not a
+    /// numerical one (a line count, a point count in a header).
+    non_numeric: usize,
+}
+
+impl NumericBound {
+    fn of(x: &str, y: &str) -> Self {
+        let mut bound = Self::default();
+        for (l, r) in x.lines().zip(y.lines()).filter(|(l, r)| l != r) {
+            for (a, b) in l.split_whitespace().zip(r.split_whitespace()) {
+                if a == b {
+                    continue;
+                }
+                let (name, va) = a.rsplit_once('=').unwrap_or(("", a));
+                let vb = b.rsplit_once('=').map_or(b, |(_, v)| v);
+                let (Ok(va), Ok(vb)) = (
+                    va.trim_end_matches(['s', ',']).parse::<f64>(),
+                    vb.trim_end_matches(['s', ',']).parse::<f64>(),
+                ) else {
+                    bound.non_numeric += 1;
+                    continue;
+                };
+                let abs = (va - vb).abs();
+                if abs > bound.max_abs.0 {
+                    bound.max_abs = (abs, name.to_string());
+                }
+                let scale = va.abs().max(vb.abs());
+                if scale > ROUNDOFF_FLOOR && abs / scale > bound.max_rel.0 {
+                    bound.max_rel = (abs / scale, name.to_string());
+                }
+            }
+        }
+        bound
+    }
+}
+
+impl std::fmt::Display for NumericBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "numeric: max |a-b| {:.3e} ({}); max relative {:.3e} ({}) among values above {:e}; \
+             {} non-numeric token(s) differ",
+            self.max_abs.0,
+            self.max_abs.1,
+            self.max_rel.0,
+            self.max_rel.1,
+            ROUNDOFF_FLOOR,
+            self.non_numeric
+        )
+    }
 }
 
 /// Where two lines first differ (a 1-based character column) and a window of each around it: a
@@ -277,6 +344,28 @@ mod tests {
 
     /// A tree compared with itself is identical; a changed line, a deck failing on both sides
     /// and a deck missing from one side are each reported as what they are.
+    /// Round-off around zero moves the absolute bound but not the relative one; a real change
+    /// moves the relative one; a point count is non-numeric noise of its own kind.
+    #[test]
+    fn the_numeric_bound_separates_roundoff_from_a_real_change() {
+        let a = "t=1.0e-9s  V(vss)=-7.780757e-32 V  V(out)=1.200000 V\n";
+        let b = "t=1.0e-9s  V(vss)=3.204747e-32 V  V(out)=1.200000 V\n";
+        let n = NumericBound::of(a, b);
+        assert_eq!(n.max_rel.0, 0.0, "{n}");
+        assert!(n.max_abs.0 > 1e-31 && n.max_abs.1 == "V(vss)", "{n}");
+        let c = b.replace("1.200000", "1.200012");
+        let m = NumericBound::of(a, &c);
+        assert!(
+            (m.max_rel.0 - 1e-5).abs() < 1e-9 && m.max_rel.1 == "V(out)",
+            "{m}"
+        );
+        let h = NumericBound::of(
+            "Transient analysis (1778 points",
+            "Transient analysis (1682 points",
+        );
+        assert_eq!(h.non_numeric, 1, "{h}");
+    }
+
     /// The window is centred on the first differing character, so a long line's one changed
     /// number is what gets printed.
     #[test]

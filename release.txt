@@ -20,6 +20,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.30.0+1 - 2026-09-27
+---------------------
+**Road to 2.0 item 3: what differs on macOS, and a bound for it.** 1.29.0+1's CI run gave the
+first readable comparison:
+
+  * **Linux vs Windows: 68 identical, 0 different** (plus the 4 decks whose models are not
+    committed and hisim2, failing on every side). Both runners had the same CPU (AMD EPYC 7763),
+    so this measures the OS and toolchain, not SIMD dispatch across CPUs.
+  * **Linux vs macOS (Apple M1, arm64): 65 identical, 3 different**: `psp103_inverter_tran`,
+    `psp103_inverter_card_tran` and `nand/bsimsoi`. c432 `.op` and c17's transient are identical.
+    Each first differing value is round-off around zero: V(vss) -7.8e-32 V against 3.2e-32 V, and
+    a BSIM-SOI internal branch at 3.5e-35 against 5.3e-35. But `card_tran` differs on 141 lines,
+    so the first line does not bound the rest.
+
+So `deck-compare` now reports, for each differing deck, the largest absolute difference over
+every differing numeric token, the largest relative difference among values above 1e-15 (below
+that, both sides are round-off at zero and a ratio means nothing), and the count of non-numeric
+differences. The CI annotation carries the line. Unit-tested on round-off, a real change and a
+point-count header. Item 3 closes when the next run's bound can be stated in writing.
+
+Measured at this version: `xtask` tests 42 passed; no simulator change.
+
+
 1.30.0 - 2026-09-27
 -------------------
 **`.nodeset`: a starting point for the DC solve, and a measurement showing that on ISCAS'85 it
