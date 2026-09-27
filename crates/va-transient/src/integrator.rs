@@ -1354,6 +1354,12 @@ pub fn run_with_events(
     // channel, which is every model in the zoo — are unaffected in the residual: they read
     // neither `coeff` nor `prev_rate_weight` from `AnalysisCtx`.
     let mut first_step = true;
+    // The step after a breakpoint restart (not the run's opening step): see `err_ratio` below.
+    let mut after_breakpoint = false;
+    // The step size of the last LTE rejection that only rows *without* state asked for (their
+    // stateful ratio was within budget), until a step is accepted: where the floor rule goes
+    // when Newton gives out before the floor does. See the `NoConvergence` arm.
+    let mut stateless_reject_h: Option<f64> = None;
     // Accepted points, newest first, for `LteEstimator::DividedDifference`. Capped at the
     // longest history any implemented method asks for, so the buffer cannot grow with `tstop`.
     let mut history: Vec<(f64, Vec<f64>)> = Vec::new();
@@ -1373,21 +1379,57 @@ pub fn run_with_events(
             // unit error rather than a genuine requirement.
             let trial = step_bound.map_or(h, |b| h.min(b).max(cfg.tstep_min));
             let mut t_next = (t + trial).min(cfg.tstop);
-            if let Some(bp) = events.next_after(t) {
-                t_next = t_next.min(bp);
-            }
+            // The earliest breakpoint ahead, of either kind, and whether this step lands on it —
+            // what decides a restart once the step is accepted (below).
+            //
             // A model-requested breakpoint (`va_abi::EventSink::breakpoint`) lands exactly like
             // a consumer-supplied one: earliest wins, and only ever pulls the step *in*, so a
             // model can tighten the schedule but never stretch it past what the integrator
-            // already chose — the same one-way contract `bound_step` has.
-            if let Some(bp) = model_breakpoints
-                .iter()
-                .copied()
-                .filter(|&bp| bp > t)
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                t_next = t_next.min(bp);
+            // already chose — the same one-way contract `bound_step` has. The one exception is
+            // below `tstep_min`, where breakpoints are *merged*:
+            //
+            // - breakpoints closer than `tstep_min` to each other are one breakpoint, landed on
+            //   at the last of them. Two sources whose corners are "the same" 6.1 ns computed by
+            //   different sums sit 8e-25 s apart (c17_tran); landing on the first and then
+            //   stepping to the second asks for a step twenty orders of magnitude below the
+            //   floor, and after a restart the error controller underflowed on it;
+            // - a step that would stop less than `tstep_min` short of a breakpoint goes to the
+            //   breakpoint instead, so the step after it is never a sub-floor sliver either.
+            //
+            // SPICE merges breakpoints closer than its minimum break the same way.
+            let after = |from: f64| -> Option<f64> {
+                let consumer = events.next_after(from);
+                let model = model_breakpoints
+                    .iter()
+                    .copied()
+                    .filter(|&bp| bp > from)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                match (consumer, model) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            };
+            let mut next_bp = f64::INFINITY;
+            if let Some(first) = after(t) {
+                next_bp = first;
+                while let Some(bp) = after(next_bp) {
+                    if bp - next_bp >= cfg.tstep_min {
+                        break;
+                    }
+                    next_bp = bp;
+                }
             }
+            if t_next >= next_bp - cfg.tstep_min {
+                t_next = next_bp.min(cfg.tstop);
+            }
+            // `tstop` merges the same way: c17_tran's `.tran 1p 12n` parses to
+            // 12·1e-9 = 1.2000000000000002e-8 while its V1 has a corner at exactly 1.2e-8, and the
+            // 1.6e-24 s step left after landing there cannot be shortened by a rejection — the
+            // step is clamped, not sized by `h` — so it underflowed.
+            if t_next < cfg.tstop && cfg.tstop - t_next < cfg.tstep_min {
+                t_next = cfg.tstop;
+            }
+            let lands_on_breakpoint = next_bp.is_finite() && t_next == next_bp;
             let step_h = t_next - t;
 
             // The first step is backward Euler regardless of `cfg.method` (see the long
@@ -1437,6 +1479,24 @@ pub fn run_with_events(
                 // solve retries: the LTE reference and the event re-solve are seeded from a
                 // solution that already converged at this step size.
                 Err(TransientError::Core(va_core::CoreError::NoConvergence { .. })) => {
+                    // **The floor rule, where Newton's floor is higher than `tstep_min`**
+                    // (1.28.0). The rule below forgives a row without state that rejects
+                    // every step size, but only at `tstep_min` — and a compact model's Newton
+                    // can give out well above it. On c432's vector sequence one PSP103
+                    // instance's internal branch row rang (trapezoidal's undamped mode,
+                    // 5.67e-5 / 6.05e-5 alternating) at an error ratio of 1.06 from 1e-16 s
+                    // down, while every row with state sat at 4e-10; at 7e-18 s Newton stopped
+                    // converging, and the run died of `TimestepUnderflow` before the floor rule
+                    // could apply. The smallest step this circuit can be solved at is the floor
+                    // that matters: if the shrinking that got here was asked for only by
+                    // stateless rows, it was futile for the same reason the floor rule gives,
+                    // so relax (latched, as there) and retry the last step Newton converged at.
+                    if let (Some(retry), false) = (stateless_reject_h, lte_relaxed) {
+                        lte_relaxed = true;
+                        stateless_reject_h = None;
+                        h = retry;
+                        continue;
+                    }
                     let shrunk = h * 0.5;
                     if shrunk < cfg.tstep_min {
                         return Err(TransientError::TimestepUnderflow { t });
@@ -1562,6 +1622,22 @@ pub fn run_with_events(
             // that were previously about to be abandoned.
             let at_floor =
                 err_ratio > 1.0 && h * step_factor(err_ratio, step_method, false) < cfg.tstep_min;
+            // **After a breakpoint, the stateful rows decide** (1.28.0). The step after a
+            // restart is judged against a reference built from the flows *before* the corner,
+            // and a row with no integrated state — a source's branch current — legitimately
+            // jumps there: its error ratio is the jump over the tolerance and does not shrink
+            // with `h`. The floor rule above forgives that, but only at `tstep_min`, and on
+            // c432's vector sequence PSP103's Newton gave out first (1.3e-18 s after the
+            // 2 ns corner, ratio stuck at ~70 from 1e-15 s down). At a breakpoint the
+            // discontinuity is declared, not discovered, so there is nothing to prove: the
+            // rows that integrate state judge this one step, exactly as the floor rule would
+            // at the floor. Not latched, and not applied at `t = 0`, which keeps the floor
+            // rule's existing behaviour there.
+            let err_ratio = if after_breakpoint {
+                stateful_ratio
+            } else {
+                err_ratio
+            };
             let err_ratio = if at_floor && stateful_ratio <= 1.0 {
                 // Proven: shrinking is not a remedy here, and what is complaining has no
                 // truncation error to complain about. Latch, so the rest of the run does not
@@ -1778,13 +1854,26 @@ pub fn run_with_events(
                 r_prev = sink.residual;
                 h_prev = step_h;
                 step_bound = sink.bound_step;
-                first_step = false;
+                // **A breakpoint is a restart** (1.28.0), exactly like `t = 0`: the next step is
+                // backward Euler and the error estimate starts over from this point. A breakpoint
+                // marks a discontinuity — a source's corner — where a reactive current jumps
+                // (the ramp starts: `C·dV/dt` from 0), and the trapezoidal rule does not damp a
+                // jump, it rings: an alternating sawtooth around the true value whose divided
+                // difference does not shrink with `h`. On c432 with 18 inputs switching at once
+                // the ringing source currents made the controller reject every step down to
+                // timestep underflow 0.1 ps after the corner (Road to 2.0 item 2); c17 had shown
+                // the same ringing (`I(V6)` alternating ±25% per step) without dying of it.
+                // Backward Euler is L-stable and damps it in one step; SPICE restarts the same
+                // way.
+                first_step = lands_on_breakpoint;
+                after_breakpoint = lands_on_breakpoint;
+                stateless_reject_h = None;
 
                 t = t_next;
                 waveform.t.push(t);
                 waveform.x.push(x.clone());
                 history.insert(0, (t, x.clone()));
-                history.truncate(history_cap);
+                history.truncate(if lands_on_breakpoint { 1 } else { history_cap });
 
                 waveform.model_crossings.extend(crossings);
                 model_breakpoints.extend(poll.breakpoints.iter().copied().filter(|&bp| bp > t));
@@ -1826,6 +1915,7 @@ pub fn run_with_events(
             }
 
             let shrunk = h * step_factor(err_ratio, step_method, false);
+            stateless_reject_h = (stateful_ratio <= 1.0).then_some(h);
             if shrunk < cfg.tstep_min {
                 return Err(TransientError::TimestepUnderflow { t });
             }
@@ -2827,6 +2917,186 @@ mod tests {
             let [p, n, b] = self.terminals;
             va_abi::reference::VSource::new(p, n, b, self.value_at(ctx.time)).load(x, ctx, st, sink)
         }
+    }
+
+    /// Flat until `corner`, then a ramp of `slope` V/s; asks for a breakpoint at its corner, as
+    /// `va-cli`'s netlist sources do since 1.28.0.
+    struct RampSource {
+        terminals: [usize; 3],
+        corner: f64,
+        slope: f64,
+    }
+
+    impl ModelInstance for RampSource {
+        fn unknowns(&self) -> &[usize] {
+            &self.terminals
+        }
+        fn unknown_kind(&self, i: usize) -> va_abi::UnknownKind {
+            if i == 2 {
+                va_abi::UnknownKind::Branch
+            } else {
+                va_abi::UnknownKind::Node
+            }
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &AnalysisCtx,
+            st: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::StampSink,
+        ) {
+            let [p, n, b] = self.terminals;
+            let v = self.slope * (ctx.time - self.corner).max(0.0);
+            va_abi::reference::VSource::new(p, n, b, v).load(x, ctx, st, sink)
+        }
+        fn events(&self, _x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+            if ctx.time < self.corner {
+                sink.breakpoint(self.corner);
+            }
+        }
+    }
+
+    /// **A breakpoint restarts the integration** (1.28.0). A capacitor straight across a ramp
+    /// source: its current jumps from 0 to `C·slope` at the corner. Under the trapezoidal rule
+    /// without a restart that jump rings — the source current alternates around `C·slope` on
+    /// every later step, a sawtooth the error controller cannot shrink (what killed c432's
+    /// vector-sequence transient). With the restart, the step after the corner is backward
+    /// Euler, which damps it: every accepted point after the corner carries `C·slope`.
+    ///
+    /// Discriminating, checked: with `first_step = lands_on_breakpoint` replaced by `false`, the
+    /// currents after the corner alternate by tens of percent and this fails.
+    #[test]
+    fn a_breakpoint_restarts_the_integration_and_the_current_does_not_ring() {
+        let (corner, slope, c) = (1e-9, 1e9, 1e-12);
+        let src = RampSource {
+            terminals: [0, va_abi::reference::GROUND, 1],
+            corner,
+            slope,
+        };
+        let cap = va_abi::reference::Capacitor::new(0, va_abi::reference::GROUND, c);
+        let insts: [&dyn ModelInstance; 2] = [&src, &cap];
+        let cfg = default_cfg(3.0 * corner, 1e-11, Method::Trapezoidal);
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates");
+        let want = c * slope;
+        let after: Vec<(f64, f64)> =
+            wf.t.iter()
+                .zip(&wf.x)
+                .filter(|(t, _)| **t > corner * (1.0 + 1e-9))
+                .map(|(t, x)| (*t, x[1].abs()))
+                .collect();
+        assert!(after.len() > 5, "points after the corner: {}", after.len());
+        for (t, i) in &after {
+            assert!(
+                (i - want).abs() <= 1e-6 * want,
+                "t={t:.4e}: |I| = {i:.6e}, want C*slope = {want:.6e}"
+            );
+        }
+    }
+
+    /// **The step after a breakpoint is judged by its stateful rows** (1.28.0). A capacitor
+    /// straight across a ramp source: at the corner the source's branch current jumps from 0 to
+    /// `C·slope`, a row with no state that the pre-corner reference cannot match at any step
+    /// size. Judged over every row, the step after the corner shrinks to the floor before the
+    /// floor rule forgives it — which PSP103's Newton did not survive on c432. Judged by the
+    /// capacitor's node, it is accepted at an ordinary size.
+    ///
+    /// Discriminating, checked: with `after_breakpoint` never set, the shortest step is at
+    /// the floor (1e-17 s here) and this fails.
+    #[test]
+    fn the_step_after_a_breakpoint_is_not_driven_to_the_floor() {
+        let (corner, slope, c) = (1e-9, 1e9, 1e-12);
+        let src = RampSource {
+            terminals: [0, va_abi::reference::GROUND, 1],
+            corner,
+            slope,
+        };
+        let cap = va_abi::reference::Capacitor::new(0, va_abi::reference::GROUND, c);
+        let insts: [&dyn ModelInstance; 2] = [&src, &cap];
+        let mut cfg = default_cfg(3.0 * corner, 1e-11, Method::Trapezoidal);
+        cfg.lte_estimator = LteEstimator::DividedDifference;
+        let floor = cfg.tstep_min;
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates");
+        assert!(
+            shortest_step(&wf) > 1e3 * floor,
+            "shortest step {:e}, floor {floor:e}",
+            shortest_step(&wf)
+        );
+    }
+
+    /// The shortest accepted step of a run — what the breakpoint merge (1.28.0) bounds below
+    /// by `tstep_min`. A linear test circuit happily *accepts* a 1e-24 s step, so asserting the
+    /// run succeeds would not discriminate; PSP's Newton rejects it (c17_tran), and a rejection
+    /// cannot shorten a step that is clamped to a breakpoint — the sliver itself is the defect.
+    fn shortest_step(wf: &Waveform) -> f64 {
+        wf.t.windows(2)
+            .map(|w| w[1] - w[0])
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// **Breakpoints closer than `tstep_min` merge** (1.28.0). Two sources whose corners are
+    /// the same instant up to rounding — c17_tran's V1 and V2 both turn at "6.1 ns", 8e-25 s
+    /// apart — must not make the integrator step from one to the other: that step is far below
+    /// the floor, and after a restart it underflowed.
+    ///
+    /// Discriminating, checked: with the merge loop removed (`break` unconditionally), the
+    /// shortest step is the 1e-24 s sliver and this fails.
+    #[test]
+    fn breakpoints_closer_than_the_step_floor_merge() {
+        let (corner, slope, c) = (1e-9, 1e9, 1e-12);
+        let a = RampSource {
+            terminals: [0, va_abi::reference::GROUND, 2],
+            corner,
+            slope,
+        };
+        let b = RampSource {
+            terminals: [1, va_abi::reference::GROUND, 3],
+            corner: corner + 1e-24,
+            slope,
+        };
+        let ca = va_abi::reference::Capacitor::new(0, va_abi::reference::GROUND, c);
+        let cb = va_abi::reference::Capacitor::new(1, va_abi::reference::GROUND, c);
+        let insts: [&dyn ModelInstance; 4] = [&a, &b, &ca, &cb];
+        // The divided-difference estimator, as `va-cli` runs: the embedded pair happens to
+        // accept the sub-floor step, which would hide the failure.
+        let mut cfg = default_cfg(3.0 * corner, 1e-11, Method::Trapezoidal);
+        cfg.lte_estimator = LteEstimator::DividedDifference;
+        let floor = cfg.tstep_min;
+        let wf = run(&insts, 4, vec![0.0; 4], cfg).expect("integrates past coincident corners");
+        assert!(
+            shortest_step(&wf) >= floor,
+            "sliver: {:e}",
+            shortest_step(&wf)
+        );
+    }
+
+    /// **A breakpoint closer than `tstep_min` to `tstop` merges with it** (1.28.0): the run
+    /// ends at `tstop` rather than restarting on the breakpoint and then facing a sub-floor
+    /// step it cannot shorten. c17_tran's shape: `tstop` = 12·1e-9 and a corner at 12e-9.
+    ///
+    /// Discriminating, checked: without the `tstop` merge the last step is a 1.6e-24 s sliver
+    /// and this fails.
+    #[test]
+    fn a_breakpoint_just_before_tstop_merges_with_it() {
+        let (slope, c) = (1e9, 1e-12);
+        let tstop = 12.0 * 1e-9;
+        let src = RampSource {
+            terminals: [0, va_abi::reference::GROUND, 1],
+            corner: 12e-9,
+            slope,
+        };
+        assert!(tstop > src.corner && tstop - src.corner < 1e-20);
+        let cap = va_abi::reference::Capacitor::new(0, va_abi::reference::GROUND, c);
+        let insts: [&dyn ModelInstance; 2] = [&src, &cap];
+        let mut cfg = default_cfg(tstop, 1e-11, Method::Trapezoidal);
+        cfg.lte_estimator = LteEstimator::DividedDifference;
+        let floor = cfg.tstep_min;
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates to tstop");
+        assert_eq!(wf.t.last().copied(), Some(tstop));
+        assert!(
+            shortest_step(&wf) >= floor,
+            "sliver: {:e}",
+            shortest_step(&wf)
+        );
     }
 
     #[test]

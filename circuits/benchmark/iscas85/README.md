@@ -22,7 +22,8 @@ every net an RC `.subckt`, the PSP103 model cards pulled in by `.include`, Vdd =
 | `c499.net`, `c880.net`, `c1355.net`, `c1908.net`, `c2670.net`, `c3540.net`, `c5315.net`, `c6288.net`, `c7552.net` | `.op` decks for one seeded vector each (seed = the circuit number) |
 | `crosscheck_bench.py` | compare two copies of a circuit (`.bench` or gate-level `.v`): gate counts by type and the function on 4 096 random vectors, I/O matched by position or by signal number |
 | `c432_tran.net` | `.tran 1p 1n`, all 36 inputs pulsing — a c432-size transient for measuring the transient solve (`docs/proposals/transient-solve.md`); 1 ns, not 12, because it runs for many minutes |
-| `gen_iscas.py`, `check_iscas.py` | any `.bench` to a deck (`tran [<tstop>]` for a transient); check an `.op` against the logic |
+| `c432_seq.net` | `.tran 1p 10n`, a vector sequence: five seeded vectors, 2 ns each, every input switching through a 50 ps PWL edge (Road to 2.0 item 2, below) |
+| `gen_iscas.py`, `check_iscas.py` | any `.bench` to a deck (`tran [<tstop>]` for a transient, `seq <T> <n> [<seed>] [<edge>]` for a vector sequence); check an `.op` against the logic, or a transient (`check_iscas.py tran <bench> <output>`: every settled sample of every reported gate output) |
 
 **c17** is the suite's smallest circuit: six NAND2 gates, five inputs, two outputs —
 `10=NAND(1,3) 11=NAND(3,6) 16=NAND(2,11) 19=NAND(11,7) 22=NAND(10,16) 23=NAND(16,19)`. The `nand2`
@@ -100,8 +101,10 @@ refactorization each). About 0.24 ms per PSP103 instance per iteration. An earli
 pre-flight estimate quoted 44–719 ms, off by ~250–600×: it is per Newton loop on linear circuits
 and cannot see a rescue.
 
-**Not run: a c432 transient.** From the figures above, `.tran 1p 12n` would be ~13 000 points ×
-a few Newton iterations × ~0.3 s per step, i.e. **3–4 hours**. Recorded as an estimate, not run.
+**Not run (at 1.12.0): a c432 transient.** From the figures above, `.tran 1p 12n` would be
+~13 000 points × a few Newton iterations × ~0.3 s per step, i.e. **3–4 hours**. Recorded as an
+estimate, not run. It has since been run: `c432_tran.net` (1 ns) at 1.26.0, and the vector sequence
+at 1.28.0 — see the end of this file.
 
 ## c7552 (not attempted)
 
@@ -161,3 +164,16 @@ combinations; `c432.net` regenerates unchanged.
 `check_iscas.py` matched only numeric net names before this; on c499 (`Gid0`, …) it checked **0**
 signals and reported nothing wrong. It now matches any net name.
 
+## c432 transient against its logic (2026-09-27, 1.28.0) — Road to 2.0, item 2
+
+`c432_seq.net` (`gen_iscas.py c432.bench c432_seq.net seq 2n 5`, seed 432): five vectors held
+2 ns each, all 36 inputs moving to the next vector through a 50 ps PWL edge at once, `.tran 1p 10n`.
+**11 570 points in 46.8 min (8 threads); `check_iscas.py tran`: 1 196 800 settled gate-output
+samples over the 5 vectors, all correct, 7/7 primary outputs among them** (worst high 1.792 V,
+worst low 2.6 mV).
+
+It needed three integrator changes (release.txt, 1.28.0): sources report their corners as
+breakpoints and the integrator restarts there (backward Euler, history cleared) — before, the
+trapezoidal rule rang at the 2 ns corner and the run died of timestep underflow 0.1 ps after it;
+breakpoints closer than the minimum step merge; and the floor rule applies where PSP103's Newton
+gives out, not only at the minimum step.

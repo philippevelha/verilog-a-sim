@@ -3,10 +3,16 @@
 Usage (from the repository root):
   python circuits/benchmark/iscas85/gen_iscas.py <circuit.bench> <out.net> op <vector>
   python circuits/benchmark/iscas85/gen_iscas.py <circuit.bench> <out.net> tran [<tstop>]
+  python circuits/benchmark/iscas85/gen_iscas.py <circuit.bench> <out.net> seq <T> <n> [<seed>] [<edge>]
 
 `<vector>` is one 0/1 digit per primary input, in the `.bench` file's INPUT order. `<tstop>` is
 the transient's stop time as a SPICE value (default `12n`); the inputs' first edges all fall in
 the first 0.8 ns, so a short run still switches every input once.
+
+`seq` is the transient a logic check wants (Road to 2.0, item 2): every input steps together to
+a new random vector (seeded, default seed = the circuit number) every `<T>` (a SPICE value, e.g.
+`2n`), through a ramp of `<edge>` (default 50p), for `<n>` vectors; `.tran 1p <n*T>`. Each interval ends with a
+settled window `check_iscas.py tran` can check against the logic of that interval's vector.
 
 **Rule (the user's, 2026-09-23): use the cells we already have, and compose any gate the
 library lacks from them** — a buffer is two inverters (see README.md).
@@ -122,7 +128,7 @@ def evaluate(ins, gates, vector):
     return val
 
 
-def write_deck(bench, out, mode, vector=None, tstop='12n'):
+def write_deck(bench, out, mode, vector=None, tstop='12n', seq=None):
     ins, outs, gates = read_bench(bench)
     cells = c7552_cells()
     name = os.path.splitext(os.path.basename(bench))[0]
@@ -159,12 +165,20 @@ def write_deck(bench, out, mode, vector=None, tstop='12n'):
          '*', '*   cargo run --release -p va-cli -- sim ' +
          f'circuits/benchmark/iscas85/{os.path.basename(out)} \\',
          '*       --model external/code/psp103/vacode/psp103.va' +
-         (' --tran' if mode == 'tran' else ''),
+         (' --tran' if mode in ('tran', 'seq') else ''),
          '', f'.include {CARDS}/psp103_nmos.mod', f'.include {CARDS}/psp103_pmos.mod', '',
          f'Vdd vdd gnd DC {VDD}']
     for i, sig in enumerate(ins):
         if mode == 'op':
             L.append(f'V{net_name(sig)} {net_name(sig)}_0 gnd DC {VDD if vector[i] else 0.0}')
+        elif mode == 'seq':
+            period, vectors, edge = seq
+            pts = [f'0 {VDD * vectors[0][i]:g}']
+            for k in range(1, len(vectors)):
+                t = k * period
+                pts.append(f'{t:.6g} {VDD * vectors[k - 1][i]:g}')
+                pts.append(f'{t + edge:.6g} {VDD * vectors[k][i]:g}')
+            L.append(f'V{net_name(sig)} {net_name(sig)}_0 gnd PWL({" ".join(pts)})')
         else:
             per = 2 * (i % 8 + 1)
             L.append(f'V{net_name(sig)} {net_name(sig)}_0 gnd PULSE(0 {VDD} {(i % 8) * 100}p '
@@ -189,10 +203,19 @@ def write_deck(bench, out, mode, vector=None, tstop='12n'):
     for i, ((g_out, kind, args), cell) in enumerate(zip(gates, use)):
         a_pins = [pin[(a, i, loads[a].index(i) + 1)] for a in args]
         L.append(f'XG{net_name(g_out)} {" ".join(a_pins)} vdd gnd {net_name(g_out)}_0 {cell}')
-    L += ['', f'.tran 1p {tstop}' if mode == 'tran' else '.op', '.end']
+    if mode == 'seq':
+        tstop = f'{seq[0] * len(seq[1]):.6g}'
+    L += ['', f'.tran 1p {tstop}' if mode in ('tran', 'seq') else '.op', '.end']
     with open(out, 'w', encoding='utf-8') as f:
         f.write('\n'.join(L) + '\n')
     return ins, outs, gates
+
+
+def spice_value(text):
+    """`2n` -> 2e-9: a SPICE number with an optional scale suffix."""
+    scale = {'f': 1e-15, 'p': 1e-12, 'n': 1e-9, 'u': 1e-6, 'm': 1e-3, 'k': 1e3}
+    t = text.strip().lower()
+    return float(t[:-1]) * scale[t[-1]] if t[-1] in scale else float(t)
 
 
 if __name__ == '__main__':
@@ -202,4 +225,14 @@ if __name__ == '__main__':
     if vec is not None and len(vec) != len(ins):
         raise SystemExit(f'the vector has {len(vec)} digits; the circuit has {len(ins)} inputs')
     tstop = sys.argv[4] if mode == 'tran' and len(sys.argv) > 4 else '12n'
-    write_deck(bench, out, mode, vec, tstop)
+    seq = None
+    if mode == 'seq':
+        import random
+        period = spice_value(sys.argv[4])
+        n = int(sys.argv[5])
+        name = os.path.splitext(os.path.basename(bench))[0]
+        seed = int(sys.argv[6]) if len(sys.argv) > 6 else int(re.sub(r'\D', '', name) or 0)
+        rng = random.Random(seed)
+        edge = spice_value(sys.argv[7]) if len(sys.argv) > 7 else 50e-12
+        seq = (period, [[rng.randint(0, 1) for _ in ins] for _ in range(n)], edge)
+    write_deck(bench, out, mode, vec, tstop, seq)

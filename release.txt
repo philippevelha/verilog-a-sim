@@ -20,6 +20,50 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.28.0 - 2026-09-27
+-------------------
+**Road to 2.0 item 2 closed: a c432 transient matches its logic.** `c432_seq.net` (five seeded
+vectors x 2 ns, all 36 inputs switching through a 50 ps PWL edge at once, `.tran 1p 10n`):
+**11 570 points in 46.8 min on 8 threads; 1 196 800 settled gate-output samples, all correct,
+7/7 primary outputs among them.** What stood in the way was the integrator, not evaluation cost:
+
+  * **Sources report their corners as breakpoints, and a breakpoint restarts the integration.**
+    `va-cli`'s PULSE/PWL sources implement `ModelInstance::events` and ask for a breakpoint at
+    their next corner; the step that lands on one is followed by a backward-Euler step with the
+    history cleared, as at `t = 0` and as SPICE does. Before, the trapezoidal rule rang at a
+    corner (source currents alternating step to step, a divided difference that does not shrink
+    with `h`) and c432's sequence died of timestep underflow 0.1 ps after the 2 ns corner.
+  * **Breakpoints closer than `tstep_min` merge**, with each other and with `tstop`. c17_tran's
+    V1 and V2 corners at "6.1 ns" are 8e-25 s apart, and its `12n` tstop is 1.6e-24 s past V1's
+    last corner; with restarts those slivers underflowed (c17_tran failed at first). A step that
+    would stop less than `tstep_min` short of a breakpoint goes to it.
+  * **The step after a breakpoint is judged by the rows that carry state.** Its reference was
+    built from the pre-corner flows, so a source's branch current (a row with no state) showed
+    a jump that no step size removes; at a breakpoint that discontinuity is declared, not
+    discovered.
+  * **The floor rule applies where Newton gives out.** One PSP103 instance's internal branch
+    row rang at 1.06x the error budget at every step size from 1e-16 s down while every row
+    with state sat at 4e-10; Newton stopped converging at 7e-18 s, above the 1e-18 s floor, so
+    the rule that forgives stateless rows never applied. Now a Newton failure on a step shrunk
+    only for stateless rows relaxes (latched, as at the floor) and retries the last step size.
+    **No unit test reaches this path** — it needs a model whose Newton fails above the floor;
+    c432_seq is its check.
+  * `gen_iscas.py seq <T> <n> [<seed>] [<edge>]` writes a vector-sequence deck;
+    `check_iscas.py tran <bench> <output>` checks every settled sample of every reported gate
+    output (`report <bench>` prints the list). `c432_seq.net` added to deck-diff's slow list.
+
+**Answers that moved** (deck-diff against 1.26.0, 11 of 70 decks, all transient, all exit 0 on
+both sides): runs now land on source corners and restart there — point counts change
+(`psp103_inverter_tran` 1898 -> 1740, `rc_pulse` 1076 -> 1021), the motorway decks land exactly on
+the 900 s corner (`V(dr)` 500.000000 instead of an overshoot to 500.000376); and several decks
+lose one point: the old runs ended with a duplicated `tstop` sample a sub-floor sliver apart
+(`rc_discharge` printed t=5.000000e-3 twice). A correction, not a regression.
+
+Measured at this version: `cargo test --workspace` 913 passed (+4 integrator tests, each checked
+to fail without its fix, + 1 `va-cli` source-corner test); `validate` 28/28; clippy clean;
+c17_tran 81 s, 16 860/16 860 settled samples correct; c432_tran (1 ns) 894 s (1.26.0: 887 s).
+
+
 1.27.0+5 - 2026-09-26
 ---------------------
 **Road to 2.0 item 1 closed: the ISCAS'85 suite at transistor level matches its logic on a set of
@@ -3434,10 +3478,10 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
          current simulator: 50 runs, every signal and every primary output correct. The whole
          suite, one vector each, takes ~18.8 min on 8 threads (i7-1185G7). The 320-stage PSP103
          chain (10 566 unknowns) still fails, undiagnosed — it did not stop the suite.
-  [ ] 2. A c432 transient checked against its logic: every settled sample of every output
-         matches, as `check_c17.py tran` does for c17. Today 1 ns of c432 takes ~15 min on
-         8 threads (1.26.0), so evaluation has to get cheaper first
-         (docs/proposals/transient-solve.md (C)-(E)).
+  [x] 2. A c432 transient checked against its logic: every settled sample of every output
+         matches, as `check_c17.py tran` does for c17. **Closed at 1.28.0:** c432_seq.net, five
+         seeded vectors x 2 ns, every input switching through a 50 ps edge at once; 1 196 800
+         settled gate-output samples correct (7/7 primary outputs), 46.8 min on 8 threads.
   [ ] 3. Reproducibility measured across Linux, macOS and Windows: CI runs the deck set on all
          three and a deck-diff of their outputs is identical, or every difference is explained
          and bounded in writing. Today it is measured across thread counts on one machine only.

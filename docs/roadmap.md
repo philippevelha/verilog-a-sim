@@ -4959,6 +4959,12 @@ its gate is green, recorded here and in a release entry.
    unknowns) still fails, by a mechanism not diagnosed (`dc.rs`, `RESCUE_DAMPING_HALVINGS`) — the
    first thing to understand before scaling further.
 2. **A transient of c432 checked against its logic,** the way c17's is (`check_c17.py tran`).
+   **✅ Closed 1.28.0 (2026-09-27):** `c432_seq.net`, five seeded vectors × 2 ns, all 36 inputs
+   switching through 50 ps edges at once: 1 196 800 settled gate-output samples, all correct, in
+   46.8 min on 8 threads. Evaluation did not have to get cheaper first — the transient's blocker
+   turned out to be the integrator, not the cost: the trapezoidal rule rang at every source corner
+   and the run died of timestep underflow. Fixed by breakpoint restarts (sources report their
+   corners), breakpoint merging, and the floor rule applied where PSP103's Newton gives out.
    **Gate:** every settled sample of every output matches the logic of the inputs at that time.
    Needs evaluation to get cheaper (`docs/proposals/transient-solve.md` (C)–(E)): 1 ns of c432
    takes ~15 min on 8 threads today (878 s at 1.26.0), and a check needs several input vectors'

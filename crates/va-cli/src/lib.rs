@@ -2098,6 +2098,55 @@ impl ModelInstance for WaveformSource {
         let [p, n, b] = self.terminals;
         VSource::new(p, n, b, waveform_value(&self.waveform, ctx.time)).load(x, ctx, state, sink)
     }
+
+    /// Ask the integrator to land on this source's next corner — where its slope jumps.
+    ///
+    /// Without it the integrator found a corner only by stepping across it and shrinking the
+    /// step: fine for one edge at a time, but c432 with ~18 inputs switching at the same instant
+    /// died of timestep underflow 0.1 ps after the corner (Road to 2.0 item 2, 1.28.0). Standard
+    /// SPICE behaviour; the transient events machinery (`EventSink::breakpoint`) is polled after
+    /// every accepted step, so the next corner is enough.
+    fn events(&self, _x: &[f64], ctx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+        if let Some(t) = next_corner(&self.waveform, ctx.time) {
+            sink.breakpoint(t);
+        }
+    }
+}
+
+/// The first time strictly after `t` at which `waveform`'s slope changes, or `None` if there is
+/// none (a `SIN`, or past a `PWL`'s last point or a one-shot `PULSE`'s last edge).
+fn next_corner(waveform: &va_netlist::Waveform, t: f64) -> Option<f64> {
+    match *waveform {
+        va_netlist::Waveform::Sin { .. } => None,
+        va_netlist::Waveform::Pwl { ref points } => {
+            points.iter().map(|&(tp, _)| tp).find(|&tp| tp > t)
+        }
+        va_netlist::Waveform::Pulse {
+            td,
+            tr,
+            tf,
+            pw,
+            per,
+            ..
+        } => {
+            // Corners within one cycle, relative to its start: edge starts and ends.
+            let offsets = [0.0, tr, tr + pw, tr + pw + tf];
+            if t < td {
+                return Some(td);
+            }
+            let (cycle, base) = if per > 0.0 {
+                let k = ((t - td) / per).floor();
+                (Some(per), td + k * per)
+            } else {
+                (None, td)
+            };
+            offsets
+                .iter()
+                .map(|&o| base + o)
+                .find(|&c| c > t)
+                .or_else(|| cycle.map(|per| base + per))
+        }
+    }
 }
 
 /// Evaluate a parsed source waveform at time `t`.
@@ -4470,6 +4519,52 @@ R2 a gnd 3000
             "the replayed window cuts TTS by ~10 %: {mp} vs {nc}"
         );
         assert!((mp_wr - 227.0).abs() < 10.0, "its ramp queue peak {mp_wr}");
+    }
+
+    /// A source's next corner (1.28.0): every PWL point; a PULSE's four edge ends in each
+    /// period, then the next period; nothing after a one-shot pulse's last edge or a PWL's last
+    /// point; nothing for a SIN.
+    #[test]
+    fn a_source_reports_its_next_corner() {
+        let pwl = va_netlist::Waveform::Pwl {
+            points: vec![(0.0, 0.0), (2e-9, 0.0), (2.05e-9, 1.8), (4e-9, 1.8)],
+        };
+        assert_eq!(next_corner(&pwl, 0.0), Some(2e-9));
+        assert_eq!(
+            next_corner(&pwl, 2e-9),
+            Some(2.05e-9),
+            "strictly after, not at"
+        );
+        assert_eq!(next_corner(&pwl, 3e-9), Some(4e-9));
+        assert_eq!(next_corner(&pwl, 4e-9), None);
+        let pulse = |per: f64| va_netlist::Waveform::Pulse {
+            v1: 0.0,
+            v2: 1.0,
+            td: 1.0,
+            tr: 0.5,
+            tf: 0.25,
+            pw: 2.0,
+            per,
+        };
+        let p = pulse(10.0);
+        assert_eq!(
+            next_corner(&p, 0.0),
+            Some(1.0),
+            "before the delay: the first edge"
+        );
+        assert_eq!(next_corner(&p, 1.0), Some(1.5));
+        assert_eq!(next_corner(&p, 1.5), Some(3.5));
+        assert_eq!(next_corner(&p, 3.5), Some(3.75));
+        assert_eq!(next_corner(&p, 3.75), Some(11.0), "then the next period");
+        assert_eq!(next_corner(&p, 12.0), Some(13.5));
+        let once = pulse(0.0);
+        assert_eq!(next_corner(&once, 3.75), None, "a one-shot pulse ends");
+        let sin = va_netlist::Waveform::Sin {
+            offset: 0.0,
+            amplitude: 1.0,
+            freq: 1.0,
+        };
+        assert_eq!(next_corner(&sin, 0.3), None);
     }
 
     /// `PWL(t1 v1 t2 v2 …)` (added 2026-09-15 for the metering replay): held at the ends,
