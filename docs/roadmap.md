@@ -4974,6 +4974,16 @@ its gate is green, recorded here and in a release entry.
    library out of the answer — but "the same bits on Linux, macOS and Windows" is a claim, not yet
    a measurement. **Gate:** CI runs the deck set on all three and a `deck-diff` of their outputs
    is identical (or every difference is explained and bounded, in writing).
+   **Measured 2026-09-27 (1.29.0–1.30.0+1; CI job `repro-compare`, 68 comparable decks incl.
+   c432 `.op` and c17's transient): Linux = Windows on every deck, twice, including once across
+   CPU generations (AMD EPYC 9V74 Zen 4 vs 7763 Zen 3). macOS (Apple M1, arm64): 65 identical,
+   3 different, bounded:** `psp103_inverter_tran` and `nand/bsimsoi` differ only in round-off at
+   zero (largest 1.9e-29 and 3.9e-35; no value above 1e-15 differs); `psp103_inverter_card_tran`
+   differs by at most 1.0e-12 absolute, 1.03e-5 relative (internal PSP103 branch rows). **Cause
+   not established.** The three are small circuits on the dense solve (faer's dense LU, whose SIMD
+   kernels differ between x86-64 and NEON), which fits, but no run has isolated it. Whether a
+   bound without a proven cause closes the item is the user's decision; the check that would
+   establish the cause is the same comparison with those decks forced onto the sparse or BTF path.
 
 **Not blockers for 2.0** (kept in `docs/future_development.md`, to be done when a user needs
 them): a machine-readable results file (its item 2), `absdelay` in transient (item 3), Interface β

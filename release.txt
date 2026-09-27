@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.30.0+2 - 2026-09-27
+---------------------
+**Road to 2.0 item 3: the macOS difference, bounded.** No code change. CI run for 1.30.0+1
+(`repro-compare`, annotations):
+
+  * Linux vs Windows: 68 identical, 0 different, for the second time. This time the runners had
+    **different CPU generations** (Linux: AMD EPYC 9V74, Zen 4; Windows: EPYC 7763, Zen 3), so
+    the identity holds across OS, toolchain and CPU generation.
+  * Linux vs macOS (Apple M1, arm64): 65 identical, 3 different, each now bounded:
+    `psp103_inverter_tran` max |a-b| 1.9e-29 (V(vss), a ground-tied node), no value above
+    1e-15 differs; `nand/bsimsoi` max 3.9e-35, same; `psp103_inverter_card_tran` max 1.0e-12
+    absolute (`XMP.b0`), max 1.03e-5 relative (`XMP.b3`), both internal PSP103 branch rows,
+    141 lines.
+  * **Cause not established.** All three are small circuits on the dense path (faer's dense LU,
+    whose SIMD kernels differ between x86-64 and NEON), which fits, but no run isolated it.
+    The runners' AVX-512 query returned nothing, so which kernels ran on x86 is not recorded.
+
+Item 3 is left open: the gate asks for every difference to be "explained and bounded". The bound
+is in writing (docs/roadmap.md, the checklist below); the explanation is a hypothesis.
+Recorded for the user to decide.
+
+Measured at this version: no code change; 1.30.0+1's figures stand.
+
+
 1.30.0+1 - 2026-09-27
 ---------------------
 **Road to 2.0 item 3: what differs on macOS, and a bound for it.** 1.29.0+1's CI run gave the
@@ -3615,7 +3639,10 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
          settled gate-output samples correct (7/7 primary outputs), 46.8 min on 8 threads.
   [ ] 3. Reproducibility measured across Linux, macOS and Windows: CI runs the deck set on all
          three and a deck-diff of their outputs is identical, or every difference is explained
-         and bounded in writing. Today it is measured across thread counts on one machine only.
+         and bounded in writing. **Measured at 1.30.0+2:** Linux = Windows on all 68 comparable
+         decks (also across CPU generations); macOS arm64 differs on 3, bounded (round-off at
+         zero on two; at most 1.0e-12 absolute, 1.03e-5 relative on the third), cause not
+         established — awaiting the user's decision on whether that closes it.
 
   Not blockers (docs/future_development.md): a results file, `absdelay` in transient,
   Interface beta changes (RNG, sensitivities), GPU, PSS/HB, a Python binding.
