@@ -78,9 +78,22 @@ jobs:
         shell: bash
         run: |
           exe=target/release/va-cli; [ -f "$exe.exe" ] && exe="$exe.exe"
-          cargo xtask deck-run "$exe" repro-out             --include circuits/benchmark/iscas85/c432.net             --include circuits/benchmark/iscas85/c17_tran.net
-          # What the runner was, for explaining a difference later.
+          cargo xtask deck-run "$exe" repro-out \
+            --include circuits/benchmark/iscas85/c432.net \
+            --include circuits/benchmark/iscas85/c17_tran.net
+          # What the runner was, for explaining a difference later: the CPU matters, because
+          # faer picks SIMD kernels at run time (AVX2 / AVX-512 / NEON).
           rustc -vV > repro-out/host.info; uname -a >> repro-out/host.info
+          cpu=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 \
+            || true)
+          [ -z "$cpu" ] && cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)
+          [ -z "$cpu" ] && cpu=$(powershell -NoProfile -Command \
+            "(Get-CimInstance Win32_Processor).Name" 2>/dev/null || true)
+          echo "cpu: $cpu" >> repro-out/host.info
+          avx=$(grep -m1 -o "avx512f" /proc/cpuinfo 2>/dev/null || true)
+          [ -z "$avx" ] && avx=$(powershell -NoProfile -Command \
+            "[System.Runtime.Intrinsics.X86.Avx512F]::IsSupported" 2>/dev/null || true)
+          echo "avx512f: ${avx:-unknown}" >> repro-out/host.info
       - uses: actions/upload-artifact@v4
         with:
           name: repro-${{ matrix.os }}
@@ -100,13 +113,19 @@ jobs:
         with:
           path: repro
       - name: host info
-        run: head -n 20 repro/*/host.info
+        run: |
+          head -n 30 repro/*/host.info
+          for f in repro/*/host.info; do
+            echo "::notice title=$(basename $(dirname $f))::$(grep -iE 'cpu:|^host:|avx' $f | tr '\n' ' ')"
+          done
+      # Each difference also becomes an annotation: readable without the job log, which needs
+      # admin rights to download.
       - name: Linux vs Windows
         if: always()
-        run: cargo xtask deck-compare repro/repro-ubuntu-latest repro/repro-windows-latest
+        run: python3 .github/scripts/compare_annotate.py "Linux vs Windows" repro/repro-ubuntu-latest repro/repro-windows-latest
       - name: Linux vs macOS
         if: always()
-        run: cargo xtask deck-compare repro/repro-ubuntu-latest repro/repro-macos-latest
+        run: python3 .github/scripts/compare_annotate.py "Linux vs macOS" repro/repro-ubuntu-latest repro/repro-macos-latest
 
   deny:
     name: cargo deny (no native-link deps)

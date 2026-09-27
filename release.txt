@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.29.0+1 - 2026-09-27
+---------------------
+**Road to 2.0 item 3, first measurement: Linux and Windows identical; macOS differs.** CI run
+for 1.29.0: `repro-compare` passed Linux vs Windows (every deck of the CI set, c432 `.op` and
+c17's transient included, bit-identical output) and failed Linux vs macOS (arm64). The job log
+needs repository admin rights to download, so the difference could not be read. This entry
+makes it readable:
+
+  * `.github/scripts/compare_annotate.py` runs `deck-compare` and turns its report into
+    GitHub annotations: one error per differing deck, a warning per deck failing on both sides,
+    and the summary as a notice. Annotations are public; the log is not. Each runner's
+    `host.info` now records its CPU model and AVX-512 flag (reported as notices), because faer's
+    SIMD dispatch depends on them.
+  * `deck-compare` prints a differing line as a window around its first differing character,
+    with the column and the number of differing lines. A transient's output line runs to
+    thousands of characters, and printed whole it hid the one number that moved. Unit-tested.
+
+Slip, recorded: **1.28.0+1's CI failed `fmt`** on all three platforms. The repoint shortened a
+path in `xtask bench-model`'s list, so rustfmt wanted two lines joined, and `cargo fmt --check`
+was not run before that commit. 1.29.0 carries the reformatted file and is green.
+
+Measured at this version: `xtask` tests 41 passed; no simulator change.
+
+
 1.29.0 - 2026-09-27
 -------------------
 **Road to 2.0 item 3, the tooling: platforms compared deck by deck, on CI.** No simulator change.

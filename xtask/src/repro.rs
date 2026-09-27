@@ -194,8 +194,11 @@ pub fn deck_compare(args: &[String]) -> Result<()> {
             .enumerate()
             .find(|(_, (l, r))| l != r)
         {
+            let (col, a, b) = around_first_difference(l, r);
+            let differing = x.lines().zip(y.lines()).filter(|(l, r)| l != r).count();
             eprintln!(
-                "[xtask]   line {}:\n[xtask]     a: {l}\n[xtask]     b: {r}",
+                "[xtask]   line {}, column {col} ({differing} line(s) differ):\n\
+                 [xtask]     a: {a}\n[xtask]     b: {b}",
                 i + 1
             );
         } else {
@@ -214,6 +217,29 @@ pub fn deck_compare(args: &[String]) -> Result<()> {
         bail!("{differ} deck(s) differ, {one_sided} present on one side only");
     }
     Ok(())
+}
+
+/// Where two lines first differ (a 1-based character column) and a window of each around it: a
+/// transient's output line holds every reported quantity and runs to thousands of characters,
+/// so printing it whole hides the one number that moved.
+fn around_first_difference<'a>(a: &'a str, b: &'a str) -> (usize, &'a str, &'a str) {
+    let at = a
+        .char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((i, _), _)| i);
+    let window = |s: &'a str| -> &'a str {
+        let mut from = at.saturating_sub(60).min(s.len());
+        while !s.is_char_boundary(from) {
+            from -= 1;
+        }
+        let mut to = (at + 60).min(s.len());
+        while !s.is_char_boundary(to) {
+            to += 1;
+        }
+        &s[from..to]
+    };
+    (a[..at].chars().count() + 1, window(a), window(b))
 }
 
 /// The recorded exit code of a result file, as written (`Some(0)`, `Some(1)`, `None`).
@@ -251,6 +277,21 @@ mod tests {
 
     /// A tree compared with itself is identical; a changed line, a deck failing on both sides
     /// and a deck missing from one side are each reported as what they are.
+    /// The window is centred on the first differing character, so a long line's one changed
+    /// number is what gets printed.
+    #[test]
+    fn the_first_difference_is_located_and_windowed() {
+        let a = format!("{}V(out)=1.000000 V{}", "x".repeat(200), "y".repeat(200));
+        let b = a.replace("1.000000", "1.000001");
+        let (col, wa, wb) = around_first_difference(&a, &b);
+        assert_eq!(col, 200 + "V(out)=1.00000".len() + 1);
+        assert!(
+            wa.contains("1.000000") && wb.contains("1.000001"),
+            "{wa} / {wb}"
+        );
+        assert!(wa.len() <= 120);
+    }
+
     #[test]
     fn deck_compare_tells_differences_failures_and_gaps_apart() {
         let base = std::env::temp_dir().join(format!("va-deck-compare-{}", std::process::id()));
