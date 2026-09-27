@@ -4985,10 +4985,12 @@ its gate is green, recorded here and in a release entry.
    (NEON); model evaluation and everything else give the same bits. The same run had
    AVX-512 on one x86 runner and not on the other (EPYC 9V45 against 7763) and was still identical
    on all 68 decks, so on x86 the dense kernels agree with and without AVX-512.
-   **The gate's letter is met** (identical, or explained and bounded). Ticking it makes 2.0.0 due,
-   so that is left to the user. The option that would make macOS identical too: route the dense
-   path through a platform-independent scalar LU, as the BTF blocks already are. That moves every
-   dense-path answer in its last digits and has a speed cost to measure first.
+   **Since 1.31.0 all three are identical:** the dense path now uses a scalar LU (the BTF blocks'
+   kernel). CI run for 1.31.0: Linux vs macOS 68/68, Linux vs Windows 68/68, and a golden-bits
+   unit test passes on macOS arm64. The speed cost was measured: faster than faer on MNA-shaped
+   matrices, up to 1.9x on a fully dense one below the 100-unknown threshold, and no measurable
+   change end to end (release.txt 1.31.0). **The gate is met in its strict form (identical).**
+   Ticking it makes 2.0.0 due, which is the user's call.
 
 **Not blockers for 2.0** (kept in `docs/future_development.md`, to be done when a user needs
 them): a machine-readable results file (its item 2), `absdelay` in transient (item 3), Interface β

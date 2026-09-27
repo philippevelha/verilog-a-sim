@@ -20,6 +20,21 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.31.0+1 - 2026-09-27
+---------------------
+**Road to 2.0 item 3: Linux, macOS and Windows identical.** No code change. The CI run for 1.31.0:
+`repro-compare` **Linux vs macOS 68 identical, 0 different** (the three decks that differed
+before now match), **Linux vs Windows 68 identical**. The four decks whose models are not
+committed fail on every side, as before. The golden-bits test
+(`the_scalar_lu_gives_the_same_bits_on_every_platform`) passes on macOS arm64, Linux and Windows,
+and the x86 runners covered both AVX-512 and non-AVX-512 CPUs (EPYC 9V74, 7763).
+
+Item 3's gate is met in its strict form, "identical". It is not ticked here: all three items
+closed makes 2.0.0 due, and that release is the user's decision.
+
+Measured at this version: no code change; 1.31.0's figures stand.
+
+
 1.31.0 - 2026-09-27
 -------------------
 **The dense solve gives the same bits on every platform: a scalar LU replaces faer's.** The fix
@@ -3732,9 +3747,9 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
          and bounded in writing. **Measured at 1.30.0+2:** Linux = Windows on all 68 comparable
          decks (also across CPU generations); macOS arm64 differs on 3, bounded (round-off at
          zero on two; at most 1.0e-12 absolute, 1.03e-5 relative on the third). **Cause
-         isolated at 1.30.0+4:** the dense solve (faer's dense LU on arm64); on the sparse path
-         the same decks are identical. The gate's letter is met; ticking it makes 2.0.0 due, which
-         is the user's call.
+         isolated at 1.30.0+4:** the dense solve (faer's dense LU on arm64). **Fixed at 1.31.0**
+         (scalar dense LU): Linux = macOS = Windows on all 68 comparable decks (CI, 1.31.0+1).
+         The gate is met in its strict form; ticking it makes 2.0.0 due, the user's call.
 
   Not blockers (docs/future_development.md): a results file, `absdelay` in transient,
   Interface beta changes (RNG, sensitivities), GPU, PSS/HB, a Python binding.
