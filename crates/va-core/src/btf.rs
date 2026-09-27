@@ -264,48 +264,13 @@ impl Plan {
                 }
                 m_b[i] = rhs;
             }
-            dense_solve(m, &mut m_a, &mut m_b)?;
+            crate::linsolve::lu_solve_in_place(m, &mut m_a, &mut m_b)?;
             for (i, &c) in cols.iter().enumerate() {
                 x[c] = m_b[i];
             }
         }
         Some(x)
     }
-}
-
-/// Dense LU with partial pivoting on row-major `a` (`m × m`), solving in place: `b` becomes `x`.
-/// `None` on a zero pivot.
-fn dense_solve(m: usize, a: &mut [f64], b: &mut [f64]) -> Option<()> {
-    for k in 0..m {
-        let p = (k..m).max_by(|&i, &j| a[i * m + k].abs().total_cmp(&a[j * m + k].abs()))?;
-        if a[p * m + k] == 0.0 {
-            return None;
-        }
-        if p != k {
-            for j in 0..m {
-                a.swap(k * m + j, p * m + j);
-            }
-            b.swap(k, p);
-        }
-        let piv = a[k * m + k];
-        for i in k + 1..m {
-            let f = a[i * m + k] / piv;
-            if f != 0.0 {
-                for j in k..m {
-                    a[i * m + j] -= f * a[k * m + j];
-                }
-                b[i] -= f * b[k];
-            }
-        }
-    }
-    for k in (0..m).rev() {
-        let mut s = b[k];
-        for j in k + 1..m {
-            s -= a[k * m + j] * b[j];
-        }
-        b[k] = s / a[k * m + k];
-    }
-    Some(())
 }
 
 /// A row for each column such that every column has one (augmenting paths by iterative DFS).

@@ -1,6 +1,7 @@
-//! Linear solve `J · dx = -f`, backed by `faer` (pure-Rust, per §5).
+//! Linear solve `J · dx = -f`: a scalar dense LU of our own ([`solve_dense`], platform-identical
+//! bits since 1.31.0) and `faer`'s sparse LU (pure Rust, per §5).
 //!
-//! [`solve_dense`] is what `newton`/`dc` actually call — the production path. [`solve_sparse`]
+//! [`solve_dense`] is what `newton`/`dc` call below the sparse threshold. [`solve_sparse`]
 //! is a **prototype**, added 2026-08-31 to answer the sparse-solve backlog question
 //! (`docs/roadmap.md`'s T3 section, staffed since the 2026-07-04 note): not wired into any
 //! solver loop yet, it exists so `cargo xtask bench-linsolve` can measure dense vs. sparse
@@ -54,11 +55,65 @@ fn residual_ok(a: &[f64], b: &[f64], n: usize, x: &[f64]) -> bool {
     rmax <= RESIDUAL_TOL * (1.0 + bmax)
 }
 
+/// Dense LU with partial pivoting on row-major `a` (`m × m`), solving in place: `b` becomes `x`.
+/// `None` on a zero pivot.
+///
+/// **The same bits on every platform** (1.31.0). Each entry is updated by one multiply and one
+/// subtract, in a fixed order, and every sum (the back substitution) runs left to right; Rust
+/// never contracts `a - f*b` into a fused multiply-add or reorders a floating-point reduction on
+/// its own, so auto-vectorisation of the row update cannot change a result. `faer`'s dense LU,
+/// which [`solve_dense`] used before, picks SIMD kernels per architecture, and on arm64 (NEON)
+/// they round differently from x86-64's: three decks differed between Linux and macOS in CI,
+/// and were identical when rerun on the sparse path (Road to 2.0 item 3, release.txt 1.30.0+4).
+///
+/// A multiplier that is exactly zero skips its row, which is most of them in an MNA Jacobian.
+/// Pivoting takes the largest magnitude in the column, the last one on a tie (`max_by`), which is
+/// deterministic. Shared with [`crate::btf`]'s diagonal blocks, which used it first.
+pub(crate) fn lu_solve_in_place(m: usize, a: &mut [f64], b: &mut [f64]) -> Option<()> {
+    for k in 0..m {
+        let p = (k..m).max_by(|&i, &j| a[i * m + k].abs().total_cmp(&a[j * m + k].abs()))?;
+        if a[p * m + k] == 0.0 {
+            return None;
+        }
+        if p != k {
+            for j in 0..m {
+                a.swap(k * m + j, p * m + j);
+            }
+            b.swap(k, p);
+        }
+        let piv = a[k * m + k];
+        for i in k + 1..m {
+            let f = a[i * m + k] / piv;
+            if f != 0.0 {
+                for j in k..m {
+                    a[i * m + j] -= f * a[k * m + j];
+                }
+                b[i] -= f * b[k];
+            }
+        }
+    }
+    for k in (0..m).rev() {
+        let mut s = b[k];
+        for j in k + 1..m {
+            s -= a[k * m + j] * b[j];
+        }
+        b[k] = s / a[k * m + k];
+    }
+    Some(())
+}
+
 /// Solve `a · x = b` where `a` is a dense row-major `n × n` matrix and `b` has length `n`.
 /// Returns `x`.
 ///
-/// Uses LU with partial pivoting. Singularity is detected two ways: a non-finite solution
-/// (a zero pivot propagates `inf`/`NaN`), or a solution that fails to reproduce `b`.
+/// Scalar LU with partial pivoting ([`lu_solve_in_place`]) since 1.31.0, so a dense-path answer
+/// has the same bits on every platform. Singularity is detected three ways: a zero pivot, a
+/// non-finite solution, or a solution that fails to reproduce `b`.
+///
+/// **Cost, stated:** a scalar `O(n³)` factorisation where `faer` uses blocked SIMD kernels. On
+/// a sparse MNA Jacobian the zero-multiplier skip makes it faster; on a genuinely dense matrix it
+/// is slower, increasingly so with `n` (`cargo xtask bench-dense`; the figures are in
+/// release.txt 1.31.0). The dense path is the default only below 100 unknowns
+/// (`sparse::SPARSE_THRESHOLD`); above that it runs only when asked for with `--solver dense`.
 ///
 /// # Errors
 ///
@@ -66,6 +121,32 @@ fn residual_ok(a: &[f64], b: &[f64], n: usize, x: &[f64]) -> bool {
 /// problem, checked before factoring so it is not misreported as singularity — or
 /// [`CoreError::Singular`] if `a` is singular to working precision.
 pub fn solve_dense(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreError> {
+    debug_assert_eq!(a.len(), n * n);
+    debug_assert_eq!(b.len(), n);
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    crate::check_finite(a, b, n)?;
+    let mut lu = a.to_vec();
+    let mut x = b.to_vec();
+    lu_solve_in_place(n, &mut lu, &mut x).ok_or(CoreError::Singular)?;
+    if !x.iter().all(|v| v.is_finite()) {
+        return Err(CoreError::Singular);
+    }
+    if !residual_ok(a, b, n, &x) {
+        return Err(CoreError::Singular);
+    }
+    Ok(x)
+}
+
+/// [`solve_dense`] as it was before 1.31.0: `faer`'s blocked, SIMD partial-pivoting LU. Kept
+/// only as the reference `cargo xtask bench-dense` times the scalar kernel against. It is not
+/// on any solve path, because its last bits depend on the CPU architecture.
+///
+/// # Errors
+///
+/// As [`solve_dense`].
+pub fn solve_dense_faer(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, CoreError> {
     debug_assert_eq!(a.len(), n * n);
     debug_assert_eq!(b.len(), n);
     if n == 0 {
@@ -215,6 +296,73 @@ mod tests {
             Err(CoreError::NonFinite { row: 0, col: None })
         ));
     }
+
+    /// A fixed pseudo-random `n × n` system, diagonally weighted so it is well conditioned, with
+    /// a sprinkling of exact zeros as an MNA Jacobian has. Integer LCG, so it is the same system
+    /// on every platform.
+    fn lcg_system(n: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
+        };
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let v = next();
+                a[i * n + j] = if v.abs() < 0.2 { 0.0 } else { v };
+            }
+            a[i * n + i] += 0.5 * n as f64 * if i % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        let b: Vec<f64> = (0..n).map(|_| next()).collect();
+        (a, b)
+    }
+
+    /// The scalar kernel agrees with `faer`'s LU to rounding, across sizes.
+    #[test]
+    fn the_scalar_lu_agrees_with_faer() {
+        for (n, seed) in [(1, 1), (2, 2), (7, 3), (40, 4), (99, 5), (150, 6)] {
+            let (a, b) = lcg_system(n, seed);
+            let ours = solve_dense(&a, &b, n).expect("scalar solves");
+            let theirs = solve_dense_faer(&a, &b, n).expect("faer solves");
+            for (x, y) in ours.iter().zip(&theirs) {
+                assert!(
+                    (x - y).abs() <= 1e-12 * (1.0 + y.abs()),
+                    "n={n}: {x} vs {y}"
+                );
+            }
+        }
+    }
+
+    /// **The same bits on every platform** (1.31.0). The solution's bit patterns were recorded
+    /// on x86-64 (Windows, MSVC) and are asserted exactly; CI runs this on Linux and macOS
+    /// arm64 too, which is the unit-level form of Road to 2.0 item 3's cross-platform check.
+    /// `faer`'s dense LU fails this kind of test across architectures, which is why it is no
+    /// longer on the solve path.
+    #[test]
+    fn the_scalar_lu_gives_the_same_bits_on_every_platform() {
+        let (a, b) = lcg_system(12, 42);
+        let x = solve_dense(&a, &b, 12).expect("solves");
+        let bits: Vec<u64> = x.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(bits, GOLDEN_BITS, "{bits:#x?}");
+    }
+
+    const GOLDEN_BITS: [u64; 12] = [
+        0x3f883c949dc3b240,
+        0xbfb2e0db88e5ae10,
+        0x3f75bb59e77c5057,
+        0xbf9b2b43c8c5be38,
+        0xbfabc45e7f185fee,
+        0x3f97ed3bdf1ce2de,
+        0x3fa5f82e825355a4,
+        0xbf8155c6f85f2383,
+        0xbf9b372b043f3dd2,
+        0x3fb58934d235292b,
+        0x3f98f470a1514750,
+        0xbf98b7ded895610b,
+    ];
 
     #[test]
     fn solves_2x2() {

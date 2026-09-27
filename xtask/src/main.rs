@@ -17,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use va_abi::reference::{Resistor, VSource, GROUND};
 use va_abi::ModelInstance;
 
+mod bench_dense;
 mod btf;
 mod ladder;
 mod repro;
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
         Some("gen-golden") => gen_golden(),
         Some("tutorials") => tutorials(&rest),
         Some("bench-linsolve") => bench_linsolve(),
+        Some("bench-dense") => bench_dense::bench_dense(),
         Some("bench-scale") => bench_scale(&rest),
         Some("bench-model") => bench_model(&rest),
         Some("deck-diff") => deck_diff(&rest),
@@ -83,16 +85,20 @@ fn print_usage() {
                                  Every deck under circuits/ through two va-cli binaries\n                                 \
                                  (or one, under two environments); any difference in\n                                 \
                                  output or exit code fails\n    \
-         deck-run <va-cli> <out-dir> [--all] [--include <deck>]... [--skip <deck>]...
-                                                                  deck-diff's deck set through one va-cli, one result
-                                                                  file per deck (for comparing platforms)
-             deck-compare <dir-a> <dir-b>  Two deck-run trees, deck by deck; any difference fails
-             tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
-                                 at many bias points; any bit that differs fails
-             btf <deck> [--model <m>]  How far the deck's Jacobian splits into block
-                                                                  triangular form: blocks, sizes, dependency depth
-             ladder <deck> [--model <m>]  What the DC gmin rescue costs on an .op deck, and
-                                                                  alternative rescue schedules: assemblies, time, answer"
+         deck-run <va-cli> <out-dir> [--all] [--include <deck>]... [--skip <deck>]...\n                                 \
+                  [--only <deck>]... [--va-arg <arg>]...\n                                 \
+                                 deck-diff's deck set through one va-cli, one result\n                                 \
+                                 file per deck (for comparing platforms)\n    \
+         deck-compare <dir-a> <dir-b>  Two deck-run trees, deck by deck; any difference fails\n    \
+         bench-dense         Scalar dense LU (the solve path) against faer's dense LU,\n                                 \
+                                 per solve, by size and matrix shape\n    \
+         tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
+                                 at many bias points; any bit that differs fails\n    \
+         btf <deck> [--model <m>]  How far the deck's Jacobian splits into block\n                                 \
+                                 triangular form: blocks, sizes, dependency depth\n    \
+         ladder <deck> [--model <m>] [--current] [--nodeset]\n                                 \
+                                 What the DC gmin rescue costs on an .op deck, and\n                                 \
+                                 alternative rescue schedules: assemblies, time, answer"
     );
 }
 

@@ -20,6 +20,58 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.31.0 - 2026-09-27
+-------------------
+**The dense solve gives the same bits on every platform: a scalar LU replaces faer's.** The fix
+Road to 2.0 item 3 pointed at (1.30.0+4): the three decks that differed on macOS arm64 differed
+only through faer's dense LU, whose kernels round differently on NEON than on x86-64.
+
+  * `va_core::linsolve::solve_dense`, which every dense-path solve goes through (DC Newton, the
+    transient integrator, AC's real-equivalent formulation), now factors with a scalar partial-
+    pivoting LU: one multiply and one subtract per entry, in a fixed order, with left-to-right sums.
+    Rust neither fuses `a - f*b` into an FMA nor reorders a float reduction, so vectorising the
+    row update cannot change a result. It is the kernel the BTF diagonal blocks have used since
+    1.21.0 (moved to `linsolve::lu_solve_in_place` and shared). A multiplier that is exactly zero
+    skips its row. faer's dense LU remains only as `solve_dense_faer`, the benchmark reference.
+  * Tests: the scalar kernel agrees with faer to 1e-12 on sizes 1-150, and **a golden-bits
+    test** pins the exact bit patterns of a 12x12 solve recorded on x86-64 Windows. CI runs it on
+    Linux and on macOS arm64.
+
+**Speed cost, measured** (`cargo run --release -p xtask -- bench-dense`, new; per solve, i7-1185G7,
+one thread, scalar / faer):
+
+| n | ladder | mesh | dense |
+|---:|---:|---:|---:|
+| 10 | 0.36 | 0.39 | 0.39 |
+| 50 | 0.36 | 0.80 | 1.31 |
+| 100 | 0.82 | 0.94 | 1.91 |
+| 200 | 0.82 | 0.94 | 3.02 |
+| 400 | 0.48 | 0.65 | 2.49 |
+| 800 | 0.35 | 0.50 | 3.87 |
+| 1600 | 0.25 (22 vs 87 ms) | 0.36 (33 vs 91 ms) | **9.53 (840 vs 88 ms)** |
+
+On MNA-shaped matrices (ladder, mesh) the scalar kernel is **faster** at every size: the
+zero-multiplier skip does far less work than a full dense factorisation. On a fully dense matrix
+it is slower from n = 50, and 9.5x at n = 1600. The dense path is the default only below 100
+unknowns (above that the sparse/BTF path runs), where a fully dense Jacobian costs at most 1.9x.
+**End to end** (the CI deck set, 72 decks incl. c432 `.op` and c17's transient, min of 2 rounds
+per deck): 104.8 s at 1.30 against 105.2 s at 1.31, within noise.
+
+**Answers that moved** (deck-compare 1.30 -> 1.31: 62 identical, 9 different), as a change of
+rounding moves them:
+  * round-off: `hicum_output_family` (1.6e-28), `fiber_mzi_noise` (1.1e-22), `nand/lutsoi` and
+    `nand/bsimbulk107` (<= 1e-16 absolute), `nand/bsimcmg` (1e-14);
+  * within Newton's tolerance: `nand/bsimsoi` V(out) by 1.6e-5 V of 1.18 V; the two PSP103
+    inverter transients' internal branch rows by <= 1e-11 A;
+  * `ring_osc`: an oscillator's phase is sensitive to its last digits. 2 246 -> 2 243 points, so
+    compared point by point it "differs" by 0.83 V; resampled on a common timebase the RMS
+    difference is 2.0e-4 V and the last edge moves 0.9 us in 0.2 s. `validate` still passes it
+    against QSPICE (error 4.55e-6, tolerance 1e-3).
+
+Measured at this version: `cargo test --workspace` 920 passed (+2 linsolve tests; +1 xtask test since 1.30.0: the
+numeric bound); `validate` 28/28; 1.31 against itself 71/71 identical; clippy clean.
+
+
 1.30.0+4 - 2026-09-27
 ---------------------
 **Road to 2.0 item 3: the macOS difference's cause, isolated.** No code change. 1.30.0+3's CI run:
