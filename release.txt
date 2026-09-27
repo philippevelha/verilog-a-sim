@@ -22,6 +22,39 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.0.0+1 - 2026-09-27
+--------------------
+**A benchmark to paste on each platform, and the roadmap after 2.0.** No simulator change.
+
+  * `scripts/benchmark/`: `bench_linux.sh`, `bench_macos.sh` and `bench_windows.ps1`, each pasted
+    into a terminal inside an unpacked v2.0.0 archive, with step-by-step instructions as
+    comments (unpacking, clearing macOS's quarantine or Windows's download mark, a charger for a
+    clean baseline). Each writes `benchmark.txt`: the machine (CPU, cores, SIMD level or P/E
+    cores, memory, OS, power source and plan or governor, with battery and power-saving runs
+    flagged as not a baseline), then every deck's wall time, exit code and SHA-256 of its output.
+    Since 2.0 the output is platform-identical, so equal hashes across the three files confirm
+    it on real machines. Ten decks, ~4 min: the rectifier, ring oscillator, a PSP103 NAND and
+    inverter, c17, c432 (at default threads and at one thread), c499, c880 and c17's transient.
+    c432's 1 ns transient and c7552 are optional.
+  * Tested here before committing, and three bugs found and fixed:
+    - `exec </dev/null` at the top of the Linux/macOS body **ended the pasted script at that
+      line**, because `bash -s` reads the script from stdin. It exited 0 having run nothing. Only
+      `va-cli` now gets `< /dev/null`.
+    - PowerShell's `Start-Process` reported empty exit codes, and it **cost time**: c432's `.op`
+      took 15.3 s under it against 9.2 s launched through `System.Diagnostics.Process` (10.7 s from
+      bash), so it would have benchmarked itself. The script uses the Process API and copies
+      stdout from the raw byte stream.
+    - Times printed with the locale's decimal comma (Italian here). They now use the invariant
+      culture.
+    Result on this machine (i7-1185G7, Windows 11, Balanced plan, mains): the three bodies (the
+    Linux and macOS ones under Git Bash) give **identical hashes on all ten decks**. c432 `.op`
+    takes 9.0 s at 8 threads and 28.0 s at 1 thread; c17's transient takes 79.8 s.
+  * `docs/roadmap.md`: "After 2.0 — open questions, not yet a road", which lists 2.0's stated
+    limitations as candidates for the next road. It is not ratified; choosing a road is the user's call.
+
+Measured at this version: no simulator change; 2.0.0's figures stand.
+
+
 2.0.0 - 2026-09-27
 ------------------
 **2.0: trusted at scale.** 1.0 meant the language front end and every analysis validated on small

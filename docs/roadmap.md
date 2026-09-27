@@ -4998,6 +4998,37 @@ them): a machine-readable results file (its item 2), `absdelay` in transient (it
 changes such as a seeded RNG for `$rdist_*` and a sensitivity channel (items 4–5, each a §6
 event on its own schedule), GPU execution, PSS/harmonic balance, a Python binding.
 
+## After 2.0 — open questions, not yet a road (2026-09-27)
+
+2.0 closed with its limitations written down (release.txt, 2.0.0). They are the natural
+candidates for whatever comes next. **Nothing here is ratified.** A "Road to 3.0" is the user's
+to choose, as 2.0's was, and the list below is evidence for that choice, not a plan.
+
+1. **Why plain Newton goes singular on ISCAS'85.** Every circuit from c432 up needs the `gmin`
+   rescue: 175–365 Newton iterations where a clean solve takes ~20, and on the large circuits most
+   of the `.op` wall time. The starting point is ruled out: from the logic levels, even with a
+   1e-6 S shunt on every node, the second assembly is singular (`docs/proposals/initial-guess.md`).
+   The next measurement is to name the rows whose pivots vanish, by probing the sparse
+   factorization, not by assembling densely (c432 densely is 1.9 GB). If they are PSP103 internal
+   branch rows, the question becomes a constraint row; if they are node rows, a pivot tolerance.
+   A fix here would be the largest single speed-up left on the `.op` side.
+2. **The 320-stage PSP103 chain** (10 566 unknowns) still fails, undiagnosed. It may share a
+   cause with 1.
+3. **Transient cost.** 1 ns of c432 takes ~15 min, and the vector-sequence check takes 46.8 min.
+   Evaluation dominates, and `docs/proposals/transient-solve.md` (C)–(E) has the options.
+4. **Model licenses.** BSIM4 (CC-BY-NC Verilog-A port) and HICUM/L2 (no license statement) are
+   not in `benchmark/`, so their decks run only from a local `external/`. `nand/hisim2.net`
+   fails on every platform (a NaN on Newton's first iteration).
+5. **`.nodeset`'s held phase** (SPICE solves with the nodes clamped first). Worth doing only if a
+   circuit with several operating points needs it; ISCAS'85 does not (initial-guess.md §4).
+6. **Keeping 2.0's reproducibility.** CI's `repro-compare` gate (Linux = macOS = Windows, 68
+   decks) now fails on any divergence. A change that moves answers moves them on every platform
+   or the gate says so. It covers the committed decks only, and the slow ISCAS'85 decks except
+   c432 `.op` and c17's transient are not in it.
+
+Also still open from before 2.0, in `docs/future_development.md`: a results file, `absdelay` in
+transient, Interface β changes (seeded RNG, sensitivities), GPU, PSS/HB, a Python binding.
+
 ## How to keep this document honest
 
 - Update a phase's status when its gate goes green; link the proving `va-harness` run or test.
