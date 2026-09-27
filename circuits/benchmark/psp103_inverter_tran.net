@@ -4,7 +4,7 @@
 * differences from the OpenVAF deck it came from.
 *
 *   cargo run -p va-cli -- sim circuits/benchmark/psp103_inverter_tran.net \
-*       --model external/code/psp103/vacode/psp103.va --tran --report in,out
+*       --model benchmark/models/psp103/psp103.va --tran --report in,out
 *
 * This deck could not be integrated at all before 1.2.5, for two independent reasons that had
 * to be fixed in turn: `.tran` always cold-started from the zero vector, where a compact

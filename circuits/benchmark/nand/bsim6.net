@@ -20,7 +20,7 @@
 * node -- which is the part a single transistor never exercises.
 *
 *   cargo run -p va-cli -- sim circuits/benchmark/nand/bsim6.net \
-*       --model external/code/bsim6/vacode/bsim6.0.va --report out
+*       --model benchmark/models/bsim6/bsim6.0.va --report out
 *
 * The sweep holds B high and walks A, which drives the NAND through its worst case: the
 * pull-down is two devices in series and N001 floats between them.

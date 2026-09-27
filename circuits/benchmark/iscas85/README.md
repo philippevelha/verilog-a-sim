@@ -51,12 +51,12 @@ the check is the logic function, not a waveform comparison.
 
 ```
 cargo run --release -p va-cli -- sim circuits/benchmark/iscas85/c17.net \
-    --model external/code/psp103/vacode/psp103.va
+    --model benchmark/models/psp103/psp103.va
 python circuits/benchmark/iscas85/check_c17.py truth target/release/va-cli.exe
 ```
 
-Needs `external/code/psp103/vacode/psp103.va` and the c7552 drop's `Modelcards/`, which are not
-in the repository.
+Needs `benchmark/models/psp103/psp103.va` and the c7552 drop's model cards, both committed under
+`benchmark/` since 1.28.0+1 (their origin and licenses: `benchmark/README.md`).
 
 ## c432 (1.12.0)
 

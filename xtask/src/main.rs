@@ -2473,15 +2473,15 @@ fn bench_linsolve() -> Result<()> {
 /// rather than failing the subcommand — the point of the default list is convenience, not a gate.
 const BENCH_MODELS: &[(&str, &str)] = &[
     ("BSIM4", "external/code/bsim4/vacode/bsim4.va"),
-    ("PSP103", "external/code/psp103/vacode/psp103.va"),
+    ("PSP103", "benchmark/models/psp103/psp103.va"),
     (
         "BSIM-BULK107",
-        "external/code/bsimbulk/vacode/bsimbulk107.va",
+        "benchmark/models/bsimbulk/bsimbulk107.va",
     ),
-    ("BSIM-SOI", "external/code/bsimsoi/vacode/bsimsoi.va"),
+    ("BSIM-SOI", "benchmark/models/bsimsoi/bsimsoi.va"),
     ("HICUM/L2v3", "external/code/hicum2/vacode/hicumL2V3p0p0.va"),
     ("EKV2.6", "external/code/ekv/vacode/ekv26.va"),
-    ("JUNCAP200", "external/code/psp103/vacode/juncap200.va"),
+    ("JUNCAP200", "benchmark/models/psp103/juncap200.va"),
 ];
 
 /// The model files `bench-model` and `tape-check` run on: the paths given, or

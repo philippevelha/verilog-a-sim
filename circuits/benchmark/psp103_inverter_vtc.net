@@ -4,7 +4,7 @@
 * is gitignored, so this deck is not part of `xtask validate`:
 *
 *   cargo run -p va-cli -- sim circuits/benchmark/psp103_inverter_vtc.net \
-*       --model external/code/psp103/vacode/psp103.va --report out,Vmeas
+*       --model benchmark/models/psp103/psp103.va --report out,Vmeas
 *
 * Differences from the original deck, all forced by what this netlist parser did not have when
 * it was converted (since 1.11.0 it reads `.subckt`, `.model` and `+`):

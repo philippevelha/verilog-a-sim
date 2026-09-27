@@ -33,7 +33,7 @@ import sys
 
 C7552 = os.path.join('external', 'benchmarkExt', 'iscas85_benchmark_circuit',
                      'iscas85_benchmark_circuit.sp')
-CARDS = '../../../external/benchmarkExt/iscas85_benchmark_circuit/Modelcards'
+CARDS = '../../../benchmark/modelcards'
 VDD = 1.8
 R_WIRE, C_PIN = '2.224404', '2.080806f'
 
@@ -164,7 +164,7 @@ def write_deck(bench, out, mode, vector=None, tstop='12n', seq=None):
          "* Cells are c7552's, verbatim; gates it lacks are composed from them (gen_iscas.py).",
          '*', '*   cargo run --release -p va-cli -- sim ' +
          f'circuits/benchmark/iscas85/{os.path.basename(out)} \\',
-         '*       --model external/code/psp103/vacode/psp103.va' +
+         '*       --model benchmark/models/psp103/psp103.va' +
          (' --tran' if mode in ('tran', 'seq') else ''),
          '', f'.include {CARDS}/psp103_nmos.mod', f'.include {CARDS}/psp103_pmos.mod', '',
          f'Vdd vdd gnd DC {VDD}']

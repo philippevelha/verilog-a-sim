@@ -7,8 +7,8 @@
       Check a `sim c17_tran.net --tran --report g1_0,g2_0,g3_0,g6_0,g7_0,g22_0,g23_0` output:
       both outputs against NAND logic wherever the inputs have been still for >= 0.5 ns.
 
-Needs external/code/psp103/vacode/psp103.va and the c7552 drop's model cards, which are not in
-the repository (external/ is not tracked).
+Needs benchmark/models/psp103/psp103.va and the c7552 drop's model cards, both committed under
+benchmark/ (origin and licenses: benchmark/README.md).
 """
 import os
 import re
@@ -31,7 +31,7 @@ def truth(exe):
         subprocess.run([sys.executable, os.path.join(HERE, 'gen_c17.py'), deck, 'op', bits],
                        check=True)
         t0 = time.time()
-        r = subprocess.run([exe, 'sim', deck, '--model', 'external/code/psp103/vacode/psp103.va',
+        r = subprocess.run([exe, 'sim', deck, '--model', 'benchmark/models/psp103/psp103.va',
                             '--report', ','.join(f'g{g}_0' for g, _, _ in GATES)],
                            capture_output=True, text=True)
         times.append(time.time() - t0)

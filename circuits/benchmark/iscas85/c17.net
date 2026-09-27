@@ -6,10 +6,10 @@
 * c17.bench: 10=NAND(1,3) 11=NAND(3,6) 16=NAND(2,11) 19=NAND(11,7) 22=NAND(10,16) 23=NAND(16,19)
 *
 *   cargo run --release -p va-cli -- sim circuits/benchmark/iscas85/c17.net \
-*       --model external/code/psp103/vacode/psp103.va
+*       --model benchmark/models/psp103/psp103.va
 
-.include ../../../external/benchmarkExt/iscas85_benchmark_circuit/Modelcards/psp103_nmos.mod
-.include ../../../external/benchmarkExt/iscas85_benchmark_circuit/Modelcards/psp103_pmos.mod
+.include ../../../benchmark/modelcards/psp103_nmos.mod
+.include ../../../benchmark/modelcards/psp103_pmos.mod
 
 Vdd vdd gnd DC 1.8
 V1 g1_0 gnd DC 1.8

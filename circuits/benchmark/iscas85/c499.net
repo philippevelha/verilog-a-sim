@@ -4,10 +4,10 @@
 * Cells are c7552's, verbatim; gates it lacks are composed from them (gen_iscas.py).
 *
 *   cargo run --release -p va-cli -- sim circuits/benchmark/iscas85/c499.net \
-*       --model external/code/psp103/vacode/psp103.va
+*       --model benchmark/models/psp103/psp103.va
 
-.include ../../../external/benchmarkExt/iscas85_benchmark_circuit/Modelcards/psp103_nmos.mod
-.include ../../../external/benchmarkExt/iscas85_benchmark_circuit/Modelcards/psp103_pmos.mod
+.include ../../../benchmark/modelcards/psp103_nmos.mod
+.include ../../../benchmark/modelcards/psp103_pmos.mod
 
 Vdd vdd gnd DC 1.8
 Vgid0 gid0_0 gnd DC 0.0

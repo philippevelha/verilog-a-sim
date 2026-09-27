@@ -17,7 +17,7 @@
 * the conversion described here is no longer forced; the deck is kept as converted.)
 *
 *   cargo run -p va-cli -- sim circuits/benchmark/psp103_inverter_card_vtc.net \
-*       --model external/code/psp103/vacode/psp103.va --report out,Vmeas
+*       --model benchmark/models/psp103/psp103.va --report out,Vmeas
 Vdd   vdd gnd DC 1.2
 Vmeas vss gnd DC 0
 V1    in  gnd DC 0

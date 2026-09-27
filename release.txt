@@ -20,6 +20,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.28.0+1 - 2026-09-27
+---------------------
+**Third-party models committed under `benchmark/`, so the benchmark decks run from a fresh clone**
+(and on CI — Road to 2.0 item 3 needs them there). No simulator change.
+
+  * `benchmark/models/`: PSP 102/103/104, HiSIM2, BSIM-SOI, BSIM6, BSIM-BULK, BSIM-CMG 111,
+    BSIM-IMG, L-UTSOI — each model's whole directory, byte for byte as it was in the untracked
+    `external/code/`, with its license and notice files. `benchmark/modelcards/`: the two PSP103
+    cards from the c7552 drop, under a disclaimer on their origin (the PSP reference-data example
+    cards; they describe no real process). `benchmark/README.md` states each model's owners and
+    license, and that this repository's license does not apply to anything under `benchmark/`.
+  * **Left out:** EKV 2.6 and `psp_inverter.sp` (the user's decision); **BSIM4**, whose Verilog-A
+    port states CC-BY-NC 4.0, and **HICUM/L2**, whose file carries a copyright and no license
+    statement — both pending a decision. Their decks (`nand/bsim4.net`, `nand/ekv26.net`,
+    `hicum_output_family.net`) still point at `external/` and fail on a fresh clone.
+  * Every deck, generator (`gen_iscas.py`, `gen_c17.py`, `check_c17.py`) and `xtask bench-model`
+    entry that named one of these files now names its `benchmark/` copy.
+
+Checked: the copies are byte-identical (`diff -r`); 16 decks that use them (10 NAND decks, 4
+PSP103 inverters, c17 and c432 `.op`) give identical stdout and exit code from either location.
+
+Measured at this version: no simulator change; 1.28.0's figures stand (`xtask` tests 39 passed).
+
+
 1.28.0 - 2026-09-27
 -------------------
 **Road to 2.0 item 2 closed: a c432 transient matches its logic.** `c432_seq.net` (five seeded
