@@ -47,13 +47,13 @@ from inside the unpacked directory. Nothing to install, no Rust toolchain, no ch
 
 | Platform | Archive |
 |---|---|
-| Linux, x86-64 | `va-cli-v1.4.0-x86_64-unknown-linux-gnu.tar.gz` |
-| Windows, x86-64 | `va-cli-v1.4.0-x86_64-pc-windows-msvc.zip` |
-| macOS, Apple silicon | `va-cli-v1.4.0-aarch64-apple-darwin.tar.gz` |
+| Linux, x86-64 | `va-cli-v2.0.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows, x86-64 | `va-cli-v2.0.0-x86_64-pc-windows-msvc.zip` |
+| macOS, Apple silicon | `va-cli-v2.0.0-aarch64-apple-darwin.tar.gz` |
 
 ```bash
-tar xzf va-cli-v1.4.0-x86_64-unknown-linux-gnu.tar.gz
-cd va-cli-v1.4.0-x86_64-unknown-linux-gnu
+tar xzf va-cli-v2.0.0-x86_64-unknown-linux-gnu.tar.gz
+cd va-cli-v2.0.0-x86_64-unknown-linux-gnu
 ./va-cli sim circuits/rectifier.net --model models/diode.va --tran
 ```
 

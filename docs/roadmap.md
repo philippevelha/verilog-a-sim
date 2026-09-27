@@ -4938,7 +4938,9 @@ is 85% evaluation and scales only 2.3× on 8 threads at ~30 instances; c432's tr
 evaluation before 1.26.0 cut its solve. `docs/proposals/transient-solve.md` options (C)–(E) are
 the open levers.
 
-## Road to 2.0 — ratified 2026-09-26
+## Road to 2.0 — ratified 2026-09-26, closed at 2.0.0 (2026-09-27)
+
+**Closed.** All three items green; 2.0.0 released 2026-09-27 at the user's word (release.txt, 2.0.0).
 
 `release.txt`'s versioning rule makes 2.0 a milestone, not a count: 1.0 was reached when its
 "Road to 1.0" list closed, and 2.0 is reached when this one does. Proposed the same day and
@@ -4989,8 +4991,7 @@ its gate is green, recorded here and in a release entry.
    kernel). CI run for 1.31.0: Linux vs macOS 68/68, Linux vs Windows 68/68, and a golden-bits
    unit test passes on macOS arm64. The speed cost was measured: faster than faer on MNA-shaped
    matrices, up to 1.9x on a fully dense one below the 100-unknown threshold, and no measurable
-   change end to end (release.txt 1.31.0). **The gate is met in its strict form (identical).**
-   Ticking it makes 2.0.0 due, which is the user's call.
+   change end to end (release.txt 1.31.0). **The gate is met in its strict form (identical).** **✅ Closed 2.0.0 (2026-09-27).**
 
 **Not blockers for 2.0** (kept in `docs/future_development.md`, to be done when a user needs
 them): a machine-readable results file (its item 2), `absdelay` in transient (item 3), Interface β

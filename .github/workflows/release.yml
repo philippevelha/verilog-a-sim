@@ -56,7 +56,9 @@ jobs:
           bin=va-cli
           [[ "${{ matrix.os }}" == windows-latest ]] && bin=va-cli.exe
           cp "target/${{ matrix.target }}/release/${bin}" "dist/${name}/"
-          cp -r models circuits "dist/${name}/"
+          # benchmark/ holds the third-party models the ISCAS'85 and NAND decks use (2.0.0), each
+          # with its own license files (benchmark/README.md).
+          cp -r models circuits benchmark "dist/${name}/"
           cp README.md LICENSE release.txt docs/workflow.md "dist/${name}/"
           cd dist
           if [[ "${{ matrix.archive }}" == zip ]]; then
