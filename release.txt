@@ -20,6 +20,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.30.0+4 - 2026-09-27
+---------------------
+**Road to 2.0 item 3: the macOS difference's cause, isolated.** No code change. 1.30.0+3's CI run:
+
+  * The three decks macOS arm64 differed on, rerun with `--solver sparse`: **Linux vs macOS 3
+    identical, 0 different.** The difference is the dense solve, faer's dense LU, whose kernels
+    on arm64 (NEON) round differently from x86-64's. Model evaluation, the sparse/BTF solve and
+    the integrator give the same bits on both.
+  * The full set: Linux vs Windows 68 identical again, and this time the Windows runner had
+    AVX-512 (EPYC 9V45, `avx512f` reported) while Linux did not (EPYC 7763). On x86 the dense
+    kernels agree with and without AVX-512. Linux vs macOS: the same 3 bounded differences as
+    1.30.0+2.
+
+Item 3's gate, "identical, or every difference explained and bounded, in writing", is met on this
+evidence. It is **not ticked here**: all three items closed makes 2.0.0 due, and releasing 2.0
+is the user's decision. The option that would make macOS identical too: route the dense path
+through a platform-independent scalar LU, as the BTF blocks already are. That moves every
+dense-path answer in its last digits and has a speed cost to measure (docs/roadmap.md, item 3).
+
+Measured at this version: no code change; 1.30.0+3's figures stand.
+
+
 1.30.0+3 - 2026-09-27
 ---------------------
 **Road to 2.0 item 3: a CI check of the macOS difference's cause.** Tooling and CI only; no
@@ -3657,8 +3679,10 @@ risks are in docs/roadmap.md, "Road to 2.0". 2.0.0 is released when all three ar
          three and a deck-diff of their outputs is identical, or every difference is explained
          and bounded in writing. **Measured at 1.30.0+2:** Linux = Windows on all 68 comparable
          decks (also across CPU generations); macOS arm64 differs on 3, bounded (round-off at
-         zero on two; at most 1.0e-12 absolute, 1.03e-5 relative on the third), cause not
-         established — awaiting the user's decision on whether that closes it.
+         zero on two; at most 1.0e-12 absolute, 1.03e-5 relative on the third). **Cause
+         isolated at 1.30.0+4:** the dense solve (faer's dense LU on arm64); on the sparse path
+         the same decks are identical. The gate's letter is met; ticking it makes 2.0.0 due, which
+         is the user's call.
 
   Not blockers (docs/future_development.md): a results file, `absdelay` in transient,
   Interface beta changes (RNG, sensitivities), GPU, PSS/HB, a Python binding.

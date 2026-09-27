@@ -4979,11 +4979,16 @@ its gate is green, recorded here and in a release entry.
    CPU generations (AMD EPYC 9V74 Zen 4 vs 7763 Zen 3). macOS (Apple M1, arm64): 65 identical,
    3 different, bounded:** `psp103_inverter_tran` and `nand/bsimsoi` differ only in round-off at
    zero (largest 1.9e-29 and 3.9e-35; no value above 1e-15 differs); `psp103_inverter_card_tran`
-   differs by at most 1.0e-12 absolute, 1.03e-5 relative (internal PSP103 branch rows). **Cause
-   not established.** The three are small circuits on the dense solve (faer's dense LU, whose SIMD
-   kernels differ between x86-64 and NEON), which fits, but no run has isolated it. Whether a
-   bound without a proven cause closes the item is the user's decision; the check that would
-   establish the cause is the same comparison with those decks forced onto the sparse or BTF path.
+   differs by at most 1.0e-12 absolute, 1.03e-5 relative (internal PSP103 branch rows).
+   **Cause isolated (1.30.0+3's CI run):** rerun with `--solver sparse`, the same three decks are
+   identical on Linux and macOS. The difference is the dense solve, faer's dense LU on arm64
+   (NEON); model evaluation and everything else give the same bits. The same run had
+   AVX-512 on one x86 runner and not on the other (EPYC 9V45 against 7763) and was still identical
+   on all 68 decks, so on x86 the dense kernels agree with and without AVX-512.
+   **The gate's letter is met** (identical, or explained and bounded). Ticking it makes 2.0.0 due,
+   so that is left to the user. The option that would make macOS identical too: route the dense
+   path through a platform-independent scalar LU, as the BTF blocks already are. That moves every
+   dense-path answer in its last digits and has a speed cost to measure first.
 
 **Not blockers for 2.0** (kept in `docs/future_development.md`, to be done when a user needs
 them): a machine-readable results file (its item 2), `absdelay` in transient (item 3), Interface β
