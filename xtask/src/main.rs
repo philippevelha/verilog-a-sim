@@ -19,6 +19,7 @@ use va_abi::ModelInstance;
 
 mod btf;
 mod ladder;
+mod repro;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -32,6 +33,8 @@ fn main() -> Result<()> {
         Some("bench-scale") => bench_scale(&rest),
         Some("bench-model") => bench_model(&rest),
         Some("deck-diff") => deck_diff(&rest),
+        Some("deck-run") => repro::deck_run(&rest),
+        Some("deck-compare") => repro::deck_compare(&rest),
         Some("tape-check") => tape_check(&rest),
         Some("btf") => btf::btf(&rest),
         Some("ladder") => ladder::ladder_cmd(&rest),
@@ -80,7 +83,11 @@ fn print_usage() {
                                  Every deck under circuits/ through two va-cli binaries\n                                 \
                                  (or one, under two environments); any difference in\n                                 \
                                  output or exit code fails\n    \
-         tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
+         deck-run <va-cli> <out-dir> [--all] [--include <deck>]... [--skip <deck>]...
+                                                                  deck-diff's deck set through one va-cli, one result
+                                                                  file per deck (for comparing platforms)
+             deck-compare <dir-a> <dir-b>  Two deck-run trees, deck by deck; any difference fails
+             tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
                                  at many bias points; any bit that differs fails
              btf <deck> [--model <m>]  How far the deck's Jacobian splits into block
                                                                   triangular form: blocks, sizes, dependency depth
@@ -2474,10 +2481,7 @@ fn bench_linsolve() -> Result<()> {
 const BENCH_MODELS: &[(&str, &str)] = &[
     ("BSIM4", "external/code/bsim4/vacode/bsim4.va"),
     ("PSP103", "benchmark/models/psp103/psp103.va"),
-    (
-        "BSIM-BULK107",
-        "benchmark/models/bsimbulk/bsimbulk107.va",
-    ),
+    ("BSIM-BULK107", "benchmark/models/bsimbulk/bsimbulk107.va"),
     ("BSIM-SOI", "benchmark/models/bsimsoi/bsimsoi.va"),
     ("HICUM/L2v3", "external/code/hicum2/vacode/hicumL2V3p0p0.va"),
     ("EKV2.6", "external/code/ekv/vacode/ekv26.va"),

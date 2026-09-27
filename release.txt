@@ -20,6 +20,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+1.29.0 - 2026-09-27
+-------------------
+**Road to 2.0 item 3, the tooling: platforms compared deck by deck, on CI.** No simulator change.
+
+  * `cargo xtask deck-run <va-cli> <out-dir> [--all] [--include <deck>]... [--skip <deck>]...`
+    runs deck-diff's deck set through one binary and writes one file per deck (exit code, stdout,
+    stderr without the timing `estimate:` lines) — deck-diff's comparison, split so the halves
+    can run on different machines. Output is streamed to disk as it is produced: holding c432's
+    transient output in memory is what a local `deck-diff --all` was killed for.
+  * `cargo xtask deck-compare <dir-a> <dir-b>` compares two such trees and fails on any
+    difference or any deck present on one side only. A deck that **fails on both sides** is
+    listed as such and not counted as a match (1.26.1's lesson: four never-run decks compared
+    "identical" all day); its stderr is not compared, since an OS error message differs by
+    platform. Unit-tested on each case.
+  * CI: job `repro` runs `deck-run` on Linux, Windows and macOS with its own release `va-cli`
+    (deck-diff's default set plus c432 `.op` and c17's transient), uploads the tree and the
+    host's `rustc -vV`/`uname -a`; job `repro-compare` compares Linux with Windows and with macOS.
+    Decks whose model is not committed (BSIM4, EKV, HICUM — `benchmark/README.md`) fail on every
+    side and show up as such.
+
+Item 3 stays open until CI has run and every difference is either gone or explained in writing.
+Expected risk, stated before the first run: faer dispatches SIMD kernels at run time by CPU
+(AVX2, AVX-512, NEON lane widths), which can change a summation order between runners.
+
+Measured at this version: locally, `deck-run` over the CI set takes 120 s for 72 decks (71 exit 0;
+`nand/hisim2.net` is the known failure), and a tree compared with itself is 71 identical, 1 failed
+on both sides; `xtask` tests 40 passed.
+
+
 1.28.0+1 - 2026-09-27
 ---------------------
 **Third-party models committed under `benchmark/`, so the benchmark decks run from a fresh clone**

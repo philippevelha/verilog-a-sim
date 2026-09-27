@@ -53,6 +53,61 @@ jobs:
           echo "workspace version: $v"
           grep -q "^$v - " release.txt || { echo "release.txt has no entry for $v"; exit 1; }
 
+  # Road to 2.0 item 3: the same decks give the same bits on every platform. Each runner runs
+  # deck-diff's deck set (plus c432's `.op` and c17's transient, the ISCAS'85 decks small enough
+  # for CI) through its own release `va-cli`, one result file per deck (`cargo xtask deck-run`);
+  # `repro-compare` then diffs the three trees (`cargo xtask deck-compare`). Decks whose model
+  # is not committed (benchmark/README.md, "Deliberately left out") fail on every side and are
+  # reported as such, not counted as matches.
+  repro:
+    name: repro run (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build va-cli (release)
+        run: cargo build --release -p va-cli
+      - name: run every deck
+        shell: bash
+        run: |
+          exe=target/release/va-cli; [ -f "$exe.exe" ] && exe="$exe.exe"
+          cargo xtask deck-run "$exe" repro-out             --include circuits/benchmark/iscas85/c432.net             --include circuits/benchmark/iscas85/c17_tran.net
+          # What the runner was, for explaining a difference later.
+          rustc -vV > repro-out/host.info; uname -a >> repro-out/host.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repro-${{ matrix.os }}
+          path: repro-out
+
+  repro-compare:
+    name: repro compare (Linux vs Windows, Linux vs macOS)
+    needs: repro
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          path: repro
+      - name: host info
+        run: head -n 20 repro/*/host.info
+      - name: Linux vs Windows
+        if: always()
+        run: cargo xtask deck-compare repro/repro-ubuntu-latest repro/repro-windows-latest
+      - name: Linux vs macOS
+        if: always()
+        run: cargo xtask deck-compare repro/repro-ubuntu-latest repro/repro-macos-latest
+
   deny:
     name: cargo deny (no native-link deps)
     runs-on: ubuntu-latest
