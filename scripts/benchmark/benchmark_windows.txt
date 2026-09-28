@@ -1,0 +1,29 @@
+﻿verilog-a-sim platform benchmark - Windows
+date (UTC):   2026-09-28 15:50:44
+archive dir:  va-cli-v2.0.0-x86_64-pc-windows-msvc
+va-cli sha256: 11e7078fc65b7a6f8a6e21e056c3ee2a2143f8411ebd57ff59b78eb4bf2b0ca5
+
+== machine
+os:           Microsoft Windows 11 Pro 10.0.26200 (build 26200)
+cpu:          11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz
+cores:        4
+logical cpus: 8
+max MHz:      2995
+memory:       15.7 GiB
+power:        BATTERY (timings not a baseline)
+power plan:   Bilanciato
+cpu load:     11 % (before the run)
+
+== decks (wall time, one run each)
+deck                                              seconds  exit  sha256(stdout)
+rectifier (.tran, diode)                             0.36     0  b151e59ad91150d89c0c68d0684a9077fc2a462be33503e1f247e5762391fae2
+ring_osc (.tran, reference BJTs)                     0.09     0  6ebe545e0925aa85abace8bc7da9b505b88b71de195cce5c7704c88fa6702b68
+nand/psp103 (.op)                                    0.30     0  1a2cc6595a26e715ac87d0bb21d261894ad9c16ff1b2f9a7941d761669ed6129
+psp103_inverter_tran (.tran)                         2.52     0  5e0ae5834a6a2421fe6d6030126c9f4531946aa0d812d124aa7319fa7aa68df8
+iscas85/c17 (.op)                                    0.35     0  7eab2536eec12e953f404be5103f7559702a7ce8fed8c6ea4547972ad0cc1187
+iscas85/c432 (.op)                                  11.96     0  57514c1575823e0775f44a3dcae56e3634d4c563ba88fca93ae48adf673bd443
+iscas85/c432 (.op, --threads 1)                     30.59     0  57514c1575823e0775f44a3dcae56e3634d4c563ba88fca93ae48adf673bd443
+iscas85/c499 (.op)                                  21.20     0  320a9f6f78b732b8af5d6ac7877410dd12cab0b41662146ba0a4b6409117bbae
+iscas85/c880 (.op)                                  23.35     0  97c2d5ea8632de0b401c8705ef1a7155d24b0aaeba5c450b55215feefa83fd72
+iscas85/c17_tran (.tran 12 ns)                     109.31     0  3305deac9d56510f5978b69a8c04b5ad05e84f7d6a46c10c5e92fa1e7677b446
+== end 15:54:08 UTC

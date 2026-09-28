@@ -22,6 +22,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.0.0+2 - 2026-09-28
+--------------------
+**First benchmark results from real machines: Linux and Windows give identical outputs; and a
+full ISCAS'85 suite script.** No simulator change.
+
+  * `scripts/benchmark/benchmark_linux.txt` (AMD Ryzen 9 9950X, 32 threads, Ubuntu 26.04) and
+    `benchmark_windows.txt` (i7-1185G7, 8 threads, Windows 11), both from the v2.0.0 release
+    archives: **all ten decks exit 0 and all ten SHA-256 hashes agree between the two**, c432 at
+    32, 8 and 1 threads included. Linux total ~42 s; c432 `.op` 1.75 s (15.76 s on one thread,
+    9x), c17_tran 15.97 s.
+  * The Windows timings are **not a baseline**: the laptop was on battery with the balanced
+    plan, and a test run of the new script (c17, c432, c499) overlapped its c17_tran (109 s
+    against 81 s measured at 1.28.0). The hashes are unaffected. Single-threaded c432 puts one
+    9950X core at ~1.9x one i7-1185G7 core; the rest of the gap is thread count.
+  * `scripts/benchmark/bench_iscas_linux.sh`: all eleven ISCAS'85 circuits (`.op`) plus
+    c17_tran, `LONG=1` adding c432_seq and c432_tran; per deck the wall time, exit code, output
+    hash and a `check_iscas.py` logic check, the vector read back from the deck's DC sources.
+    Tested here on c17, c432 and c499 (hashes equal to the Linux run's; c432 196/196 signals
+    correct). Not tested through the script: c880 ... c7552 and the LONG decks (c432_seq was
+    only seen to start with the `--report` list accepted).
+  * macOS: not yet run.
+
+
 2.0.0+1 - 2026-09-27
 --------------------
 **A benchmark to paste on each platform, and the roadmap after 2.0.** No simulator change.

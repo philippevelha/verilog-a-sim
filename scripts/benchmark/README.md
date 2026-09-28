@@ -40,3 +40,19 @@ Each run writes **`benchmark.txt`** in the archive directory:
   differing hash on a deck with exit code 0 is worth reporting. The two outputs are in each
   machine's `bench-out/` and can be diffed.
 - A nonzero exit code on any deck is a failure to report, with that deck's `bench-out/*.err`.
+
+## The full ISCAS'85 suite (Linux)
+
+`bench_iscas_linux.sh`, pasted the same way, runs all eleven circuits (c17, c432 ... c7552 as
+`.op`, plus c17's transient; `LONG=1` adds `c432_seq` and `c432_tran`) and writes
+`iscas_suite.txt`: wall time, exit code, output hash, and a logic check of every reported gate
+output with `check_iscas.py` (needs `python3`). ~19 min of operating points on an i7-1185G7.
+
+## Results received
+
+| File | Machine | Notes |
+|---|---|---|
+| `benchmark_linux.txt` | AMD Ryzen 9 9950X, 32 threads, Ubuntu 26.04 | desktop, `performance` governor |
+| `benchmark_windows.txt` | Intel i7-1185G7, 8 threads, Windows 11 | **on battery**, balanced plan, and a test run overlapped c17_tran: timings not a baseline |
+
+All ten hashes agree between the two. macOS: not yet run.
