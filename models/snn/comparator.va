@@ -1,0 +1,17 @@
+// Comparator of the analog spiking neuron in Xuan et al., IJCNN 2026 (references/, Fig. 2 block C):
+// V(out) goes to `vdd` when V(inp) > V(inn), to 0 otherwise, through a logistic (written with tanh,
+// which saturates where exp would overflow) of width `vw` so Newton sees a continuous derivative.
+//
+// Limitations: memoryless, so it has no hysteresis. The paper uses a tunable Schmitt trigger, but
+// its output is only read at the flip-flop's latch edge, where V_m is settled. It has no delay and
+// no offset. The threshold is the voltage on `inn`, not the paper's V_bias1.
+`include "../disciplines.vams"
+
+module comparator(inp, inn, out);
+    input inp, inn;
+    output out;
+    electrical inp, inn, out;
+    parameter real vdd = 3.3 from (0:inf);
+    parameter real vw = 0.002 from (0:inf);
+    analog V(out) <+ 0.5 * vdd * (1.0 + tanh(0.5 * (V(inp) - V(inn)) / vw));
+endmodule

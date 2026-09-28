@@ -5843,6 +5843,122 @@ endmodule
         assert_eq!(slots, vec![0, 1], "the second instance's guard is remapped");
     }
 
+    /// A variable assigned only inside an event body keeps its value until the next event
+    /// (`va_codegen::lower::PersistentVar`): an edge counter counts.
+    ///
+    /// Before persistence, `n` had no binding at the timepoints between events, its read failed,
+    /// and `load` stopped before the contribution, so `V(o)` stayed 0 for the whole run with no
+    /// diagnostic. The clock falls at 249 ns into each 250 ns cycle, so after 1 us the counter
+    /// must read exactly 4, and between edges it must hold its value rather than fall back to 0.
+    #[test]
+    fn a_variable_assigned_in_an_event_body_keeps_its_value() {
+        let design = va_frontend::compile(
+            "
+module counter(clk, o);
+  input clk; output o;
+  electrical clk, o;
+  integer n;
+  analog begin
+    @(cross(V(clk) - 1.65, -1)) n = n + 1;
+    V(o) <+ n;
+  end
+endmodule
+",
+        )
+        .expect("compiles");
+        let net = va_netlist::parser::parse(
+            "Vclk clk gnd PULSE(0 3.3 125n 1n 1n 122n 250n)
+X1 clk o counter
+.tran 5n 1u
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let o = net.node_order.iter().position(|n| n == "o").unwrap();
+        let at = |t: f64| {
+            let i = wf.t.iter().position(|&ti| ti >= t).unwrap();
+            wf.x[i][o]
+        };
+        // Mid-cycle, between edges: 0 before the first edge, then 1, 2, 3 held.
+        for (k, t) in [0.1e-6, 0.3e-6, 0.55e-6, 0.8e-6].iter().enumerate() {
+            assert!(
+                (at(*t) - k as f64).abs() < 1e-9,
+                "at t = {t:e} the counter must hold {k}, reads {}",
+                at(*t)
+            );
+        }
+        let last = wf.x.last().unwrap()[o];
+        assert!(
+            (last - 4.0).abs() < 1e-9,
+            "4 falling edges in 1 us, counter reads {last}"
+        );
+    }
+
+    /// An `@(initial_step)` assignment survives past the first timepoint. The body runs once
+    /// (the transient seed), so without persistence the variable is unbound from then on.
+    #[test]
+    fn an_initial_step_assignment_persists_through_a_transient() {
+        let design = va_frontend::compile(
+            "
+module holder(o);
+  output o; electrical o;
+  integer s;
+  analog begin
+    @(initial_step) s = 3;
+    V(o) <+ s;
+  end
+endmodule
+",
+        )
+        .expect("compiles");
+        let net = va_netlist::parser::parse("X1 o holder\nR1 o gnd 1k\n.tran 10n 1u\n.end\n")
+            .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let o = net.node_order.iter().position(|n| n == "o").unwrap();
+        for (t, row) in wf.t.iter().zip(&wf.x) {
+            assert!(
+                (row[o] - 3.0).abs() < 1e-9,
+                "V(o) at t = {t:e} is {}, want 3",
+                row[o]
+            );
+        }
+    }
+
+    /// Which variables the definite-assignment pass marks persistent — and, as important,
+    /// which it leaves alone: a variable every path assigns before reading costs nothing and
+    /// evaluates exactly as before.
+    #[test]
+    fn persistence_is_given_only_to_variables_read_before_assignment() {
+        let design = va_frontend::compile(
+            "
+module m(p, n);
+  inout p, n; electrical p, n;
+  real every, both, one_arm, in_loop, evt, reads_self;
+  integer i;
+  analog begin
+    every = 1.0;
+    if (V(p, n) > 0.0) both = 1.0; else both = 2.0;
+    if (V(p, n) > 0.0) one_arm = 1.0;
+    for (i = 0; i < 2; i = i + 1) in_loop = i;
+    @(cross(V(p, n), 1)) evt = 1.0;
+    reads_self = reads_self + 1.0;
+    I(p, n) <+ (every + both + one_arm + in_loop + evt + reads_self) * V(p, n);
+  end
+endmodule
+",
+        )
+        .expect("compiles");
+        let module = &design.modules[0];
+        let marked: Vec<&str> = va_codegen::lower::persistent_vars(module)
+            .iter()
+            .map(|&v| module.vars[v as usize].name.as_str())
+            .collect();
+        assert_eq!(marked, vec!["one_arm", "in_loop", "evt", "reads_self"]);
+    }
+
     /// The end of the chain: an `@(cross(...))` body fires during a **real transient run**,
     /// through the deck → frontend → codegen → Interface β → integrator path.
     ///

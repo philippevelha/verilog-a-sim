@@ -718,6 +718,30 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   is already `f64` — a complete no-op); `integer(x)` rounds to nearest (`Builtin::Round`),
   matching Verilog's real-to-integer *assignment* conversion rule — not `int()`'s
   truncate-toward-zero.
+
+  **Lifetime across timepoints (2.1.0).** The LRM makes these variables static: one holds its
+  value until assigned again, across evaluations. A variable that some path reads before
+  assigning — the shape of every event-driven variable (`@(cross(...)) n = n + 1;` read on
+  every step, an `@(initial_step)` setting, a flip-flop's stored bit) — is now carried on
+  Interface β's state channel: each evaluation starts from its value **at the last accepted
+  timepoint** (0 before the first, the LRM's initial value) and proposes its final value,
+  committed only if the timepoint is accepted (`va_codegen::lower::PersistentVar`). The lifetime
+  is "last accepted timepoint", not "last Newton iteration", so `load` stays pure; for a
+  variable that only changes at event timepoints the two are the same. DC, AC and noise never
+  commit, so there such a variable starts every evaluation at 0 (and an `@(initial_step)` body,
+  true in every static solve, runs in the same evaluation). Which variables: a
+  definite-assignment pass marks every variable assigned somewhere and read before assignment
+  on some path; one assigned before every read is untouched. The pass is path-insensitive, so
+  compact models get slots they never use (PSP103 9 of 1644 variables, BSIM4 7 of 1446) with
+  unchanged answers — measured bit-identical on the ten benchmark decks and all 28 golden gates.
+  **Before 2.1.0 this was a silent wrong answer**: the variable had no binding between events,
+  its read failed, the statement walk stopped there by design, and every contribution after it
+  went unstamped, so a counter never counted and a flip-flop never held, with no diagnostic
+  (build-time validation walks both arms of the `if` an event desugars to, so it saw the
+  assignment). A variable read but **never assigned anywhere** is still a build error.
+  Stated limitation: a persistent variable assigned only parameter expressions still counts as
+  parameter-only to the charge recognizer, so if an event switches it inside
+  `ddt(c * V(p, n))` the `V * dc/dt` impulse at the switching instant is not stamped.
 - **Structural and Analog Usage**: Module-level (`real x;`, `real out_val[0:15];`) and
   analog-block-local (`real x;` inside `begin...end`) *scalar* declarations are both legal.
   **Since 2026-08-30 block scoping is real**: each `begin ... end` gets its own

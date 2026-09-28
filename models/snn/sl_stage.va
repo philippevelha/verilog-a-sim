@@ -1,0 +1,29 @@
+// Input stage of the analog spiking neuron in Xuan et al., IJCNN 2026 (references/, Fig. 2 block A,
+// Fig. 3): the op-amp holds the source line at V_ref, the attenuator scales the collected synaptic
+// current by 1/K, and the clk switch lets it into the membrane only in the high (integration)
+// phase.
+//
+// `sl` is the source line and `vr` the V_ref node; the branch between them is a 0 V source, so its
+// current I(sense) is I_in, the sum of every active synapse's (G_p - G_n) * V_s. The node `out`
+// receives I_inj = I_in / K while V(clk) is high.
+//
+// Limitations: ideal. The op-amp has infinite gain and bandwidth and no offset, the attenuator is
+// exactly linear, and the clk gate is a logistic (written with tanh, which saturates where exp
+// would overflow) in V(clk) (width `vw`), not a transistor, so it has no charge injection. Outside
+// the high phase the current is simply not delivered; in the paper's circuit it flows elsewhere
+// (Fig. 2), with no effect on V_m either way.
+`include "../disciplines.vams"
+
+module sl_stage(sl, vr, out, clk);
+    inout sl, vr, out;
+    input clk;
+    electrical sl, vr, out, clk;
+    parameter real k = 1.0 from (0:inf);
+    parameter real vdd = 3.3 from (0:inf);
+    parameter real vw = 0.05 from (0:inf);
+    branch (sl, vr) sense;
+    analog begin
+        V(sense) <+ 0.0;
+        I(out) <+ -I(sense) / k * 0.5 * (1.0 + tanh(0.5 * (V(clk) - vdd / 2) / vw));
+    end
+endmodule

@@ -922,12 +922,16 @@ pub struct Lowered {
     /// [`StatefulCall`]. Maps a call site to its base offset in Interface β's per-instance
     /// state channel (`va_abi::ModelState`).
     pub stateful_calls: Vec<StatefulCall>,
+    /// Variables that keep their value from one accepted timepoint to the next, ascending by
+    /// `VarId`, each with its state slot past every [`Self::stateful_calls`] entry's — see
+    /// [`PersistentVar`].
+    pub persistent_vars: Vec<PersistentVar>,
     /// Whether any contribution carries a [`LaplaceTerm`] — what
     /// `crate::GeneratedModel::is_frequency_dependent` reports, and hence whether an AC sweep
     /// pays for per-frequency re-linearization.
     pub has_laplace: bool,
     /// Total `f64` slots this model needs on the state channel — the sum of every
-    /// [`StatefulCall`]'s width, and what `crate::GeneratedModel::state_len` reports.
+    /// [`StatefulCall`]'s width plus one per [`PersistentVar`], and what `crate::GeneratedModel::state_len` reports.
     pub state_len: usize,
     /// How many leading [`Self::stmts`] are the model's **setup** rather than its per-iteration
     /// **eval** — see [`static_prefix_len`], which computes it and explains the rule.
@@ -1099,6 +1103,9 @@ fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
 /// arguments).
 pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let (flow_branches, potential_branches) = branch_kinds(&module.analog);
+    // Variables read before they are assigned on some path keep their value across accepted
+    // timepoints (`PersistentVar`).
+    let persistent = persistent_vars(module);
     let param_only = param_only_vars(module, &module.analog);
 
     let mut branch_currents = Vec::new();
@@ -1267,7 +1274,18 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             &mut stmts,
         )?;
     }
-    let (stateful_calls, state_len) = collect_stateful_calls(module);
+    let (stateful_calls, mut state_len) = collect_stateful_calls(module);
+    let persistent_vars: Vec<PersistentVar> = persistent
+        .iter()
+        .map(|&v| {
+            let slot = state_len;
+            state_len += 1;
+            PersistentVar {
+                var: VarId(v),
+                slot,
+            }
+        })
+        .collect();
     let has_laplace = stmts_contain_laplace(&stmts);
     let mut laplace_terms = Vec::new();
     allocate_laplace_states(&mut stmts, &mut next_slot, &mut laplace_terms);
@@ -1275,7 +1293,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     collect_zi_terms(&stmts, &mut zi_terms);
 
     let static_prefix = static_prefix_len(module, &stmts);
-    let invariance = invariance(module, &stmts);
+    let invariance = invariance(module, &stmts, &persistent);
     Ok(Lowered {
         n_unknowns: next_slot,
         taint: Taint::of(module, &module.analog),
@@ -1287,6 +1305,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         laplace_terms,
         zi_terms,
         stateful_calls,
+        persistent_vars,
         state_len,
         has_laplace,
         static_prefix,
@@ -2770,6 +2789,242 @@ fn collect_assigns_one(stmt: &Stmt, out: &mut Vec<(u32, ExprId)>) {
     }
 }
 
+/// A local variable that keeps its value from one accepted timepoint to the next, and the
+/// state-channel slot that carries it (Interface β's `va_abi::ModelState`).
+///
+/// # Why some variables need this
+///
+/// The LRM makes analog-block variables **static**: a variable holds its value until it is
+/// assigned again, including across evaluations. Most variables never show it, because every
+/// evaluation assigns them before reading them. The ones that do are written under a condition
+/// and read unconditionally, and the canonical case is an event body:
+///
+/// ```verilog
+/// integer n;
+/// analog begin
+///     @(cross(V(clk) - 0.5, -1)) n = n + 1;   // runs at one timepoint per edge
+///     V(out) <+ n;                              // read at every timepoint
+/// end
+/// ```
+///
+/// Before this existed, `n` had no binding at the start of an evaluation. Its read failed as
+/// "read before assignment", `load` stopped its statement walk there (by design, rather than
+/// stamp from a corrupt environment), and every contribution after the read went unstamped,
+/// with no diagnostic. So a counter never counted and a flip-flop never held; build-time
+/// validation could not see it, because it walks both arms of the `if` an event desugars to.
+///
+/// # How it is carried
+///
+/// Every evaluation seeds the variable from its slot **as committed at the last accepted
+/// timepoint** and proposes its final value (`crate::GeneratedModel::load`). The consumer
+/// commits the proposal only for an accepted timepoint, so a rejected step, the LTE
+/// controller's second solve, or another Newton iteration never sees a value it should not:
+/// `load` stays a pure function of `(x, ctx, committed state)`. A slot that was never committed
+/// reads 0, the LRM's initial value for a variable.
+///
+/// That makes the lifetime "the last accepted timepoint", not "the last evaluation". Some
+/// simulators carry a variable across Newton iterations too; that would make a model's equations
+/// change under the solver within one timepoint, which is exactly what the state channel exists
+/// to prevent (`va_abi::state`). For the event-driven variables this is for, the two agree:
+/// they only change at event timepoints.
+///
+/// DC, AC and noise never commit, so there a persistent variable starts every evaluation at 0,
+/// and an `@(initial_step)` body (true in every static solve) runs in the same evaluation.
+///
+/// # What else sees it
+///
+/// - **The setup cache** ([`static_prefix_len`]) is unchanged: a variable the setup binds keeps
+///   that binding, and is not seeded (`crate::GeneratedModel::ctx`). A bias-free prefix does the
+///   same thing on every evaluation, so its value is already the one the LRM would carry.
+/// - **[`invariance`]** strikes every persistent variable: it carries a value from the previous
+///   timepoint, so it is never the same on every evaluation.
+/// - **The charge recognizer's parameter-only set** ([`param_only_vars`]) does not look at
+///   persistence. A persistent variable that is only ever assigned parameter expressions counts
+///   as parameter-only, which is right for its values, but if an event switches it between two
+///   of them, `ddt(c * V(p, n))` is stamped as `c * ddt(V(p, n))`, without the `V * dc/dt`
+///   impulse at the switching instant.
+///
+/// # Cost
+///
+/// The pass cannot tell that a guard is always true at run time, so compact models get a few
+/// slots they never need (measured 2026-09-28: PSP103 9 of 1644 variables, BSIM4 7 of 1446,
+/// HICUM/L2 up to 56, DIODE_CMC 122 of 431). Each is one `f64` per instance on the state
+/// channel plus a copy per evaluation, and the answer is unchanged, because the seeded value is
+/// overwritten before it is read on the path that runs.
+#[derive(Clone, Copy, Debug)]
+pub struct PersistentVar {
+    /// The variable.
+    pub var: VarId,
+    /// Its slot on the state channel, past every [`StatefulCall`]'s.
+    pub slot: usize,
+}
+
+/// Every analog-block variable that may be read before it is assigned on some path through one
+/// evaluation — the ones that need [`PersistentVar`] carrying, by `VarId.0`, ascending.
+///
+/// A definite-assignment pass in execution order: an `if` or `case` assigns a variable only if
+/// every arm does; a loop body may not run, so it assigns nothing its surroundings can rely on;
+/// a read of a variable not definitely assigned at that point marks it. A variable every path
+/// assigns before reading is not marked, and costs nothing: a compact model written that way
+/// gets no state slots and evaluates exactly as before.
+///
+/// Conservative in one direction only: a guard that is always true at run time (`if (1)`) is
+/// still treated as a branch, so its variable may be marked when it need not be. The cost is a
+/// state slot and a copy, never a different answer, since the seeded value is overwritten before
+/// it is read on every path that actually runs. A variable passed to a user function counts as
+/// read (its direction is not consulted), for the same reason.
+///
+/// User-function bodies are not analysed: their locals are fresh on every call.
+///
+/// A variable that is **never assigned anywhere** is not marked, and its read stays the build
+/// error it was ("read before assignment"): there is no value for it to keep, and such a read is
+/// far more likely a misspelt name than a variable waiting for its first event. "Assigned" here
+/// includes being passed to a user function, whose `output` argument may write it.
+pub fn persistent_vars(module: &Module) -> BTreeSet<u32> {
+    let mut assigned = vec![false; module.vars.len()];
+    let mut marked = BTreeSet::new();
+    let mut memo = HashMap::new();
+    da_stmts(
+        module,
+        &module.analog,
+        &mut assigned,
+        &mut marked,
+        &mut memo,
+    );
+    let mut written = Vec::new();
+    collect_assigns(&module.analog, &mut written);
+    let mut ever_assigned: BTreeSet<u32> = written.into_iter().map(|(v, _)| v).collect();
+    for e in &module.exprs {
+        if let Expr::CallUser(_, args) = e {
+            for a in args {
+                if let Expr::Var(v) = module.expr(*a) {
+                    ever_assigned.insert(v.0);
+                }
+            }
+        }
+    }
+    marked.retain(|v| ever_assigned.contains(v));
+    marked
+}
+
+/// The variables expression `e` reads, memoized per node (the arena is a DAG, and a compact
+/// model shares subexpressions heavily).
+fn da_expr_vars(module: &Module, e: ExprId, memo: &mut HashMap<u32, Vec<u32>>) -> Vec<u32> {
+    if let Some(hit) = memo.get(&e.0) {
+        return hit.clone();
+    }
+    let node = module.expr(e);
+    let mut out = match node {
+        Expr::Var(v) => vec![v.0],
+        _ => Vec::new(),
+    };
+    for child in expr_operands(node) {
+        out.extend(da_expr_vars(module, child, memo));
+    }
+    out.sort_unstable();
+    out.dedup();
+    memo.insert(e.0, out.clone());
+    out
+}
+
+fn da_read(
+    module: &Module,
+    e: ExprId,
+    assigned: &[bool],
+    marked: &mut BTreeSet<u32>,
+    memo: &mut HashMap<u32, Vec<u32>>,
+) {
+    for v in da_expr_vars(module, e, memo) {
+        if !assigned.get(v as usize).copied().unwrap_or(false) {
+            marked.insert(v);
+        }
+    }
+}
+
+fn da_stmts(
+    module: &Module,
+    stmts: &[Stmt],
+    assigned: &mut Vec<bool>,
+    marked: &mut BTreeSet<u32>,
+    memo: &mut HashMap<u32, Vec<u32>>,
+) {
+    for s in stmts {
+        da_stmt(module, s, assigned, marked, memo);
+    }
+}
+
+fn da_intersect(into: &mut [bool], other: &[bool]) {
+    for (a, b) in into.iter_mut().zip(other) {
+        *a &= *b;
+    }
+}
+
+fn da_stmt(
+    module: &Module,
+    stmt: &Stmt,
+    assigned: &mut Vec<bool>,
+    marked: &mut BTreeSet<u32>,
+    memo: &mut HashMap<u32, Vec<u32>>,
+) {
+    match stmt {
+        Stmt::Assign { lhs, rhs } => {
+            da_read(module, *rhs, assigned, marked, memo);
+            if let Some(slot) = assigned.get_mut(lhs.0 as usize) {
+                *slot = true;
+            }
+        }
+        Stmt::Contribute { value, .. } => da_read(module, *value, assigned, marked, memo),
+        Stmt::BoundStep(e) => da_read(module, *e, assigned, marked, memo),
+        Stmt::Block(body) => da_stmts(module, body, assigned, marked, memo),
+        Stmt::If { cond, then_, else_ } => {
+            da_read(module, *cond, assigned, marked, memo);
+            let mut t = assigned.clone();
+            da_stmts(module, then_, &mut t, marked, memo);
+            da_stmts(module, else_, assigned, marked, memo);
+            da_intersect(assigned, &t);
+        }
+        Stmt::Case {
+            selector,
+            arms,
+            default,
+        } => {
+            da_read(module, *selector, assigned, marked, memo);
+            for arm in arms {
+                for l in &arm.labels {
+                    da_read(module, *l, assigned, marked, memo);
+                }
+            }
+            let entry = assigned.clone();
+            da_stmts(module, default, assigned, marked, memo);
+            for arm in arms {
+                let mut a = entry.clone();
+                da_stmts(module, &arm.body, &mut a, marked, memo);
+                da_intersect(assigned, &a);
+            }
+        }
+        Stmt::While { cond, body } => {
+            da_read(module, *cond, assigned, marked, memo);
+            da_stmts(module, body, &mut assigned.clone(), marked, memo);
+        }
+        Stmt::Repeat { count, body } => {
+            da_read(module, *count, assigned, marked, memo);
+            da_stmts(module, body, &mut assigned.clone(), marked, memo);
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            da_stmt(module, init, assigned, marked, memo);
+            da_read(module, *cond, assigned, marked, memo);
+            let mut b = assigned.clone();
+            da_stmts(module, body, &mut b, marked, memo);
+            da_stmt(module, step, &mut b, marked, memo);
+        }
+    }
+}
+
 fn unsupported(msg: &str) -> CodegenError {
     CodegenError::Unsupported(msg.to_string())
 }
@@ -3019,7 +3274,11 @@ pub struct Invariance {
 /// freeze a value that should move — a silently wrong answer. Stage 1 only counts, and the
 /// stage that hoists must be defended by a differential test against the plain evaluator
 /// (the proposal's §3, Stage 2).
-pub fn invariance(module: &Module, stmts: &[LoweredStmt]) -> Invariance {
+pub fn invariance(
+    module: &Module,
+    stmts: &[LoweredStmt],
+    persistent: &BTreeSet<u32>,
+) -> Invariance {
     let n_vars = module.vars.len();
     let mut var = vec![true; n_vars];
     let strike = |var: &mut Vec<bool>, v: VarId| {
@@ -3027,6 +3286,12 @@ pub fn invariance(module: &Module, stmts: &[LoweredStmt]) -> Invariance {
             *slot = false;
         }
     };
+
+    // A persistent variable carries a value from the previous accepted timepoint
+    // (`PersistentVar`), so it is never the same on every evaluation, whatever its assignments.
+    for &v in persistent {
+        strike(&mut var, VarId(v));
+    }
 
     // Writes the fixpoint does not model.
     for f in &module.functions {

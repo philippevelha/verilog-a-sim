@@ -1,0 +1,63 @@
+* Xuan et al., IJCNN 2026 (references/, hal-05590496), Fig. 4: one analog spiking neuron driven by
+* five presynaptic neurons through 2T2R memristor synapses, 20 clock cycles, refractory on.
+*
+*   va-cli sim circuits/snn/fig4_neuron.net --model models/snn --tran --report clk,wl,vm,spk
+*   python circuits/snn/check_snn.py fig4 <that output>
+*
+* Paper values (Sec. II-D): T = 0.25 us, duty 50 % (dt = 0.125 us); V_th = 2.4 V; beta = 0.6 from
+* C_M = 998 fF, C_L = 660 fF; V_reset = 1 V; V_ref = 1.65 V, V_P = 1.75 V, V_N = 1.55 V (V_s = 0.1 V);
+* T_ref = 1 us = 4 cycles; every synapse G_p - G_n = 0.0583 mS (8 kOhm and 15 kOhm cells); input
+* spike train S_i = 0,1,1,0,1,1,... on all five; V_m initialized to V_reset.
+*
+* Not in the paper: the attenuator factor K. K = 3 is the value its Fig. 4 implies (the spike times
+* 1.50 us and 3.75 us need K in [2.872, 3.047]; circuits/snn/README.md).
+*
+* Built at the level of the paper's functional diagram (Fig. 3), not its transistors (the IHP
+* SG13S/MEMRES process is not public, and the paper gives no sizes): circuits/snn/neuron.inc.
+
+.include dff.inc
+.include neuron.inc
+
+* --- bias
+Vvp   vp   gnd  DC 1.75
+Vvn   vn   gnd  DC 1.55
+Vref  vref gnd  DC 1.65
+Vres  vres gnd  DC 1.0
+* --- two-phase clock: clk high (integrate) for exactly 125 ns at the end of each 250 ns cycle,
+*     qclk high (leak) at its start; non-overlapping by 1.5-2 ns
+Vclk  clk  gnd  PULSE(0 3.3 124.5n 1n 1n 124n 250n)
+Vqclk qclk gnd  PULSE(0 3.3 2n 1n 1n 119n 250n)
+* --- power-on reset: V_m to V_reset in the first low phase
+Vpor  por  gnd  PWL(0 3.3 120n 3.3 121n 0)
+* --- presynaptic spike train on the word line: S_i = 0,1,1,0,1,1,... (a spike fills its cycle)
+Vwl   wl   gnd  PWL(0 0 250n 0 251n 3.3 750n 3.3 751n 0 1000n 0 1001n 3.3 1500n 3.3 1501n 0 1750n 0 1751n 3.3 2250n 3.3 2251n 0 2500n 0 2501n 3.3 3000n 3.3 3001n 0 3250n 0 3251n 3.3 3750n 3.3 3751n 0 4000n 0 4001n 3.3 4500n 3.3 4501n 0 4750n 0 4751n 3.3 5000n 3.3)
+
+* --- five 2T2R synapses: V_P -[G_p]-[access]- SL -[access]-[G_n]- V_N, the access pair on the WL
+XGp1 vp p1 rram level=0
+XAp1 p1 sl wl vswitch ron=10
+XGn1 vn n1 rram level=2
+XAn1 n1 sl wl vswitch ron=10
+XGp2 vp p2 rram level=0
+XAp2 p2 sl wl vswitch ron=10
+XGn2 vn n2 rram level=2
+XAn2 n2 sl wl vswitch ron=10
+XGp3 vp p3 rram level=0
+XAp3 p3 sl wl vswitch ron=10
+XGn3 vn n3 rram level=2
+XAn3 n3 sl wl vswitch ron=10
+XGp4 vp p4 rram level=0
+XAp4 p4 sl wl vswitch ron=10
+XGn4 vn n4 rram level=2
+XAn4 n4 sl wl vswitch ron=10
+XGp5 vp p5 rram level=0
+XAp5 p5 sl wl vswitch ron=10
+XGn5 vn n5 rram level=2
+XAn5 n5 sl wl vswitch ron=10
+
+* --- the neuron's per-deck settings: K = 3, refractory on
+Xin   sl vref vm clk sl_stage k=3
+Xlog  q0 q1 q2 q3 q4 m0 m5 clk por rs hz neuron_logic refr=1
+
+* No UIC: the DC operating point, with the power-on reset closed, starts V_m at V_reset.
+.tran 0.5n 5u
+.end

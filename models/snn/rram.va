@@ -1,0 +1,31 @@
+// A programmed RRAM cell of IHP's SG13S MEMRES module (TiN/HfO2-x/TiN), as used for inference
+// in Xuan et al., "Automated Model-to-Transistor Design Framework for Memristor Crossbar-Based
+// Spiking Neural Network Architectures", IJCNN 2026 (references/, hal-05590496), Sec. II-C.
+//
+// The cell is programmed once (ISPVA) to one of four stable levels, from the paper's
+// characterization data: 8 kOhm (LRS1), 10.5 kOhm (LRS2), 15 kOhm (LRS3), 210 kOhm (HRS).
+// `level` selects one: 0 = LRS1 ... 3 = HRS; `level = -1` uses `r` directly.
+//
+// Limitations: during inference the cell is read at Vs = 0.1 V, below the read-disturb limit the
+// paper keeps it under (0.5 V), so the model is a fixed, linear conductance. It has no switching
+// dynamics, no drift, no read disturb, no variability, and no I-V nonlinearity. It is not a
+// model for programming the cell.
+`include "../disciplines.vams"
+
+module rram(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter integer level = 0 from [-1:3];
+    parameter real r = 8e3 from (0:inf);
+    real rcell;
+    analog begin
+        case (level)
+            0: rcell = 8e3;
+            1: rcell = 10.5e3;
+            2: rcell = 15e3;
+            3: rcell = 210e3;
+            default: rcell = r;
+        endcase
+        I(p, n) <+ V(p, n) / rcell;
+    end
+endmodule

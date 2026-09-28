@@ -1,0 +1,46 @@
+// Reset and refractory gating of the analog spiking neuron in Xuan et al., IJCNN 2026 (references/,
+// Fig. 3: the OR gate driving rs_act, the refractory hold, End_RePe). Memoryless: every bit of
+// state lives in the flip-flops of the deck (circuits/snn/dff.inc), as in the paper's circuit,
+// where it lives on capacitors.
+//
+// Inputs are logic voltages (0 / vdd). From the flip-flop chain: `q0` is the spike, high for the
+// whole cycle after V_m crossed V_th; `q1`..`q4` are q0 delayed by 1..4 cycles; `m0` is high in the
+// low phase of the spike cycle, `m5` in the low phase 5 cycles later (both are master latches: they
+// hold from the falling clk edge, but are transparent while clk is high, so they are used gated by
+// clk low -- ungated, the hold switch closes a loop through the comparator and V_m settles at V_th,
+// which is what the first build did). `por` is a power-on reset request.
+//   refr = 0 (refractory disabled): rs = por OR (m0 AND clk low) OR (q0 AND clk)
+//            -- V_m held at V_reset for the whole spike cycle, released at its last clk edge,
+//            before the next leak phase.
+//   refr = 1 (T_ref = 4 cycles): hz = (m0 AND clk low) OR q0 .. q4
+//            -- V_m held at 0 for the spike cycle and the 4 refractory cycles;
+//            rs = por OR (m5 AND clk low)
+//            -- V_m restarts from V_reset in the low phase after them (End_RePe).
+//
+// Limitations: T_ref is fixed at 4 cycles by the deck's flip-flop chain, where the paper sets it
+// continuously with V_bias2 through an analog countdown. The outputs are smooth "gates" (tanh), not
+// transistors.
+`include "../disciplines.vams"
+
+module neuron_logic(q0, q1, q2, q3, q4, m0, m5, clk, por, rs, hz);
+    input q0, q1, q2, q3, q4, m0, m5, clk, por;
+    output rs, hz;
+    electrical q0, q1, q2, q3, q4, m0, m5, clk, por, rs, hz;
+    parameter integer refr = 0 from [0:1];
+    parameter real vdd = 3.3 from (0:inf);
+    parameter real vw = 0.05 from (0:inf);
+    real a, b, lo;
+    analog begin
+        // a master latch is transparent while clk is high, so it may only gate while clk is low
+        lo = 1.0 - V(clk) / vdd;
+        if (refr == 1) begin
+            a = V(por) + V(m5) * lo;
+            b = V(m0) * lo + V(q0) + V(q1) + V(q2) + V(q3) + V(q4);
+        end else begin
+            a = V(por) + V(m0) * lo + V(q0) * (1.0 - lo);
+            b = 0.0;
+        end
+        V(rs) <+ 0.5 * vdd * (1.0 + tanh(0.5 * (a - vdd / 2) / vw));
+        V(hz) <+ 0.5 * vdd * (1.0 + tanh(0.5 * (b - vdd / 2) / vw));
+    end
+endmodule

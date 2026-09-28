@@ -381,3 +381,21 @@ python $D/traffic_figures.py
 
 SVG only, and deliberately: `plotters`' bitmap backend pulls in font-rasterization dependencies
 with native-link components, which CLAUDE.md §5 forbids.
+
+---
+
+## Memristor-crossbar spiking neuron (Xuan et al., IJCNN 2026)
+
+```bash
+python circuits/snn/make_examples.py target/release/va-cli
+```
+
+The neuron-level results of the paper in `references/` (a 2T2R RRAM crossbar feeding a clocked
+analog leaky-integrate-and-fire neuron): its Fig. 4 (refractory period) and Fig. 5 (circuit vs
+snnTorch model). Output spikes land on the paper's timesteps, and the membrane voltage follows
+the paper's equations to 12 mV. The plots, the complete flattened netlists and every Verilog-A
+model are on one review page, [`examples/snn_memristor/README.md`](examples/snn_memristor/README.md);
+the reasoning and the open points are in `circuits/snn/README.md`.
+
+![Fig. 4 reproduced](examples/snn_memristor/fig4_vs_paper.png)
+

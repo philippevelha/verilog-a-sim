@@ -1,0 +1,30 @@
+// A voltage-controlled switch: the access transistors of the 2T2R synapse and the clocked switches
+// of the spiking neuron in Xuan et al., IJCNN 2026 (references/, Figs. 2-3).
+//
+// The conductance moves smoothly (a logistic (written with tanh, which saturates where exp would
+// overflow) in the control voltage) from 1/roff to 1/ron around `vt`, over a width `vw`, so Newton
+// sees a continuous derivative. `pol = -1` closes the switch when the control is LOW, which gives a
+// complementary pair from one clock, so a current steered between two switches never finds both
+// open.
+//
+// Limitations: a switch, not a transistor. There is no charge injection, no clock feedthrough, no
+// body effect, and `ron` does not depend on the terminal voltages. The paper's transistor-level
+// circuit has all of these, which is part of why its traces differ slightly from its model.
+`include "../disciplines.vams"
+
+module vswitch(p, n, c);
+    inout p, n;
+    input c;
+    electrical p, n, c;
+    parameter real ron = 50 from (0:inf);
+    parameter real roff = 1e12 from (0:inf);
+    parameter real vt = 1.65;
+    parameter real vw = 0.05 from (0:inf);
+    parameter integer pol = 1 from [-1:1] exclude 0;
+    real g;
+    analog begin
+        g = 1.0 / roff
+            + (1.0 / ron - 1.0 / roff) * 0.5 * (1.0 + tanh(0.5 * pol * (V(c) - vt) / vw));
+        I(p, n) <+ g * V(p, n);
+    end
+endmodule

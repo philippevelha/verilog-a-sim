@@ -489,6 +489,27 @@ impl GeneratedModel {
             .iter()
             .map(|acc| (acc.expr_id, acc.local_slot))
             .collect();
+        // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
+        // but doing it once here keeps a 1400-variable model from reallocating its way up.
+        let mut vars = vec![None; self.shared.module.vars.len()];
+        // A persistent variable starts from its value at the last accepted timepoint (0 if none
+        // was ever committed, the LRM's initial value), `lower::PersistentVar`. A constant: what
+        // it was then does not move with this evaluation's unknowns.
+        //
+        // Not over a variable the setup bound, whose value is the same on every evaluation
+        // (`static_vars` is read only where `vars` is unbound, so seeding it would hide the
+        // setup's value). `Self::setup` clears these seeds from its own context, so the cached
+        // setup holds only what the setup really assigned.
+        for pv in &self.shared.lowered.persistent_vars {
+            let i = pv.var.0 as usize;
+            if static_vars.get(i).is_some_and(|b| b.is_some()) {
+                continue;
+            }
+            if let Some(slot) = vars.get_mut(i) {
+                let seed = state_prev.get(pv.slot).copied().unwrap_or(0.0);
+                *slot = Some(crate::ad::Dual::constant(seed));
+            }
+        }
         Ctx {
             module: &self.shared.module,
             params: &self.shared.params,
@@ -511,9 +532,7 @@ impl GeneratedModel {
                 .map(|c| (c.expr_id, (c.kind, c.base)))
                 .collect(),
             bound_step: std::cell::Cell::new(None),
-            // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
-            // but doing it once here keeps a 1400-variable model from reallocating its way up.
-            vars: RefCell::new(vec![None; self.shared.module.vars.len()]),
+            vars: RefCell::new(vars),
             static_vars,
             hoistable: &self.shared.lowered.invariance.hoistable,
             tapes: &self.shared.tapes,
@@ -580,6 +599,15 @@ impl GeneratedModel {
         }
         Some(self.shared.setup.get_or_init(|| {
             let ctx = self.ctx(&[], &va_abi::ANALYSIS_DC, &[], &[], false, &[]);
+            // The setup starts from nothing: no persistent variable is seeded into what it caches.
+            {
+                let mut vars = ctx.vars.borrow_mut();
+                for pv in &self.shared.lowered.persistent_vars {
+                    if let Some(slot) = vars.get_mut(pv.var.0 as usize) {
+                        *slot = None;
+                    }
+                }
+            }
             let outcome = self.walk(
                 &ctx,
                 &self.shared.lowered.stmts[..self.shared.lowered.static_prefix],
@@ -2305,6 +2333,9 @@ impl ModelInstance for GeneratedModel {
                 sink.bound_step(dt);
             }
         }
+        // Each persistent variable proposes the value it ended this evaluation with
+        // (`lower::PersistentVar`).
+        self.propose_persistent_vars(&ctx);
         // Publish this evaluation's state proposal. Only committed if the consumer decides this
         // was an accepted timepoint (§ `va_abi::state`).
         for (slot, v) in ctx.state_next.borrow().iter().enumerate() {
@@ -2326,6 +2357,21 @@ impl ModelInstance for GeneratedModel {
 }
 
 impl GeneratedModel {
+    /// Write every persistent variable's final value into the state proposal
+    /// (`lower::PersistentVar`). A variable the walk left unbound keeps its seeded value, which
+    /// the proposal already holds (it is pre-seeded from the committed state).
+    fn propose_persistent_vars(&self, ctx: &Ctx) {
+        let vars = ctx.vars.borrow();
+        let mut next = ctx.state_next.borrow_mut();
+        for pv in &self.shared.lowered.persistent_vars {
+            if let (Some(Some(d)), Some(cell)) =
+                (vars.get(pv.var.0 as usize), next.get_mut(pv.slot))
+            {
+                *cell = d.value;
+            }
+        }
+    }
+
     /// The tightest step bound any **in-flight** `transition` wants, or `None` if none is
     /// ramping right now.
     ///
