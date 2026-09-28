@@ -1,0 +1,44 @@
+\section{Architecture}
+\label{sec:arch}
+
+\begin{figure}[t]
+  \centering
+  \input{figures/pipeline.tikz}
+  \caption{The pipeline. Interface~$\alpha$ (the elaborated IR) joins the front end to the code
+  generator; Interface~$\beta$ (the model-instance ABI) joins every model, compiled or
+  hand-written, to the numerical core, which depends on nothing else.}
+  \label{fig:pipeline}
+\end{figure}
+
+\vas{} is a Cargo workspace of crates with fixed dependencies (Fig.~\ref{fig:pipeline}). The
+front end lexes, parses and elaborates Verilog-A into an intermediate representation (IR); the
+code generator lowers the IR and differentiates it into model instances; a netlist parser wires
+instances to global unknowns; the core assembles and solves the MNA system~\cite{ho1975mna}; the
+transient and AC/noise analyses build on the core.
+
+\subsection{Two frozen interfaces}
+Interface~$\alpha$ is the elaborated IR: modules, nodes, branches, parameters, and an expression
+arena referenced by \texttt{Copy} index types. Interface~$\beta$ is the contract a model offers
+the solver:
+\todo{listing: \texttt{StampSink} (residual, Jacobian, charge, dcharge) and
+\texttt{ModelInstance} (unknowns, unknown\_kind, load), from docs/interfaces.md}.
+The DC solve ignores the charge channel; the transient integrator consumes it through a companion
+model. Changing either interface is a coordinated event with its own change record, not a
+feature edit.
+
+\subsection{The load-bearing invariant}
+The core depends only on Interface~$\beta$. It was therefore built and validated against
+hand-written resistor, capacitor and diode models before the compiler could produce a single
+model. \todo{One sentence on why this matters for a multi-author (thesis-based) project.}
+
+\subsection{House rules}
+\begin{itemize}
+  \item Everything graph-shaped (AST, IR, expression DAGs) is an arena with index newtypes: no
+  reference-counted or borrowed graphs.
+  \item Pure-Rust numerics (\texttt{faer}~\cite{faer}); no BLAS, LAPACK, KLU or other native
+  library, enforced by \texttt{cargo-deny}. The result is one self-contained executable per
+  platform.
+  \item Libraries never panic on bad input. A construct the implementation recognizes but
+  declines is a \emph{refusal}, reported with what was refused, why an approximation would be
+  wrong, and what to write instead: distinct from a malformed model and from a numerical failure.
+\end{itemize}

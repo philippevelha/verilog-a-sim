@@ -1,0 +1,12 @@
+\section{Limitations}
+\label{sec:limitations}
+
+\todo{State plainly, from release.txt 2.0.0:
+every ISCAS'85 circuit from c432 up needs the $g_\text{min}$ rescue (175--365 Newton iterations
+where a clean solve takes about 20), and the rows that go singular are not yet identified;
+the 320-stage PSP103 inverter chain (\num{10566} unknowns) fails, undiagnosed;
+HiSIM2 produces a NaN on the first Newton iteration;
+\texttt{.nodeset} implements only the starting-guess phase;
+transient cost is evaluation-dominated (1\,ns of c432 in about 15\,min);
+no golden reference for PSP103 circuits, so ISCAS'85 is checked against logic, not waveforms;
+language coverage is incomplete (token-reference numbers).}

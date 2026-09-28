@@ -1,0 +1,35 @@
+\section{Validation}
+\label{sec:validation}
+
+Three kinds of oracle are used, and every result says which one it was checked against: QSPICE
+golden outputs~\cite{qspice}, committed and gated in continuous integration; closed-form
+expressions where no SPICE primitive exists (photonics, sampled systems); and, at scale, the
+circuit's Boolean function (Section~\ref{sec:scale}). No golden file is computed by hand.
+
+\begin{table}[t]
+  \centering
+  \caption{QSPICE golden validation, 28 circuits \src{cargo xtask validate at 2.0.0+2, 2026-09-28}}
+  \label{tab:golden}
+  \begin{tabular}{@{}llrr@{}}
+    \toprule
+    Analysis & Metric & Tolerance & Worst error \\
+    \midrule
+    DC (8)        & max rel.\ I--V error       & $10^{-4}$ & $6.8\times10^{-5}$ \\
+    Transient (10)& waveform RMS error         & $10^{-3}$ & $8.3\times10^{-4}$ \\
+    AC (5)        & max rel.\ magnitude error  & $10^{-4}$ & $1.3\times10^{-5}$ \\
+                  & max abs.\ phase error (rad)& $10^{-4}$ & $6.4\times10^{-6}$ \\
+    Noise (5)     & max rel.\ PSD error        & $10^{-3}$ & $2.6\times10^{-5}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\todo{Per-circuit table in an appendix or supplementary material (the 28 rows from
+\texttt{xtask validate}). The worst transient case is the diode rectifier, $8.3\times10^{-4}$ against
+$10^{-3}$: explain.}
+
+\todo{Jacobian validation against finite differences; count of tests; the workspace test suite
+(920 tests at 2.0.0).}
+
+\todo{Closed-form and paper-figure validations outside electronics (photonic noise, thermal,
+traffic), from the repository's validation registry, as a short multi-physics subsection or
+dropped for length.}

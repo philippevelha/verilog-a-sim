@@ -1,0 +1,25 @@
+\begin{abstract}
+Verilog-A is the standard language for compact device models, yet the open tools that compile
+it either target native code through LLVM or are tied to a host simulator. We present
+\vas{}, a circuit simulator written from scratch in pure Rust that compiles Verilog-A source
+into automatically differentiated model instances and solves them with a modified-nodal-analysis
+Newton core: DC operating point and sweep, transient, AC and noise analyses. Two frozen internal
+interfaces, an arena-based intermediate representation and a model-instance ABI, separate the
+language front end from the numerical core. As a result the core is validated against
+hand-written reference models, independently of the compiler.
+Every analysis is checked against QSPICE golden outputs on 28 circuits to stated tolerances
+($10^{-4}$ DC and AC, $10^{-3}$ transient and noise), and every differentiated operator against
+finite differences. On the transistor-level ISCAS'85 suite built from PSP103 devices, all eleven
+circuits, up to \num{268676} unknowns and \num{15882} PSP103 instances, reach operating
+points whose every gate output matches the Boolean logic, and a c432 vector-sequence transient
+matches on \num{1196800} settled samples. The simulator produces bit-identical output on Linux,
+macOS and Windows and at any thread count. We describe the design choices that make this
+determinism possible, the DC rescue strategy that makes the large circuits converge, and the
+limitations that remain.
+\todo{250-word limit; re-count after the numbers settle.}
+\end{abstract}
+
+\begin{IEEEkeywords}
+Verilog-A, compact modeling, circuit simulation, automatic differentiation, modified nodal
+analysis, reproducibility, Rust.
+\end{IEEEkeywords}

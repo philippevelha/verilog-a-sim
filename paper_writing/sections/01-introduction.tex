@@ -1,0 +1,38 @@
+\section{Introduction}
+\label{sec:intro}
+
+\IEEEPARstart{C}{ompact} models, the equations a circuit simulator evaluates for every
+transistor, diode or photonic element at every Newton iteration, are distributed as Verilog-A
+source~\cite{accellera-vams-lrm}. Industrial models such as PSP~\cite{gildenblat2006psp} and
+BSIM are standardized by the Compact Model Coalition and released in this form. Running one
+requires a compiler that turns the source into code a simulator can evaluate, together with the
+partial derivatives Newton's method needs.
+
+\todo{Motivation paragraph: why another Verilog-A tool. Candidate angles: (i) a permissively
+licensed (Apache-2.0), clean-room implementation that other projects can embed; (ii) no native
+toolchain, so a single static binary with nothing to install; (iii) bit-for-bit reproducibility
+across operating systems, CPUs and thread counts, which general-purpose simulators do not claim;
+(iv) multi-physics through Verilog-A disciplines (thermal, optical, mechanical) in one system.
+Pick the one or two the paper leads with; (iii) is the most novel measured result.}
+
+This paper makes the following contributions:
+\begin{itemize}
+  \item An architecture that splits a Verilog-A simulator along two frozen interfaces, so that
+  the numerical core is developed and validated against hand-written models independently of the
+  language compiler (Section~\ref{sec:arch}).
+  \item A forward-mode automatic-differentiation back end whose every operator is checked against
+  central finite differences, together with the numerical pitfalls met on production compact
+  models (Section~\ref{sec:codegen}).
+  \item A DC rescue sequence (plain Newton, adaptive $g_\text{min}$ stepping, damping, per-node
+  step capping) and a block-triangular sparse solve that bring transistor-level ISCAS'85
+  circuits of up to \num{268676} unknowns to verified operating points (Sections~\ref{sec:dc}
+  and~\ref{sec:scale}).
+  \item A set of design rules that make the output bit-identical across Linux, macOS and Windows,
+  x86-64 with and without AVX-512 and Apple arm64, and any thread count, with measurements that
+  show it holds (Section~\ref{sec:determinism}).
+  \item A validation methodology in which every analysis is gated against committed QSPICE
+  reference outputs, and results at scale are checked against an independent oracle, the Boolean
+  function of the circuit (Sections~\ref{sec:validation} and~\ref{sec:scale}).
+\end{itemize}
+
+\todo{Roadmap paragraph for the rest of the paper, once the section order is fixed.}

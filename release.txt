@@ -22,6 +22,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.1.0+1 - 2026-09-28
+--------------------
+**`paper_writing/`: the skeleton of a manuscript presenting verilog-a-sim** (IEEE TCAD regular
+paper, `IEEEtran`, LaTeX + BibTeX). No simulator change.
+
+  * `main.tex` plus one file per section (abstract, introduction, related work, architecture,
+    front end, code generation/AD, DC at scale, transient/AC/noise, cross-platform determinism,
+    validation, ISCAS'85, limitations, conclusion), Fig. 1 (the pipeline, TikZ), and two tables:
+    the 28 QSPICE golden gates by analysis (worst errors from `validate` at 2.0.0+2) and ISCAS'85
+    per-vector times (from 1.27.0+5). The abstract and introduction are drafted; every other
+    section is `	odo{}` notes naming the facts to write up and where they come from.
+  * `README.md` holds a claims ledger: every number in the draft with the version or file it was
+    measured at, and the rule that nothing enters the paper unmeasured. **Every `refs.bib` entry
+    was written from memory and is marked VERIFY**; the ADMS and OpenVAF entries are placeholders.
+  * Builds clean with `latexmk` in place (4 pages, no undefined references); build products are
+    gitignored. An `out_dir` is avoided on purpose: MiKTeX's bibtex then cannot find `refs.bib`.
+  * Not yet in the draft: the 2.1.0 variable-persistence fix, and the SNN reproduction.
+
+Measured at this version: no code change; 2.1.0's figures stand.
+
+
 2.1.0 - 2026-09-28
 ------------------
 **Variables keep their values across timepoints, as the LRM's static variables do; and the

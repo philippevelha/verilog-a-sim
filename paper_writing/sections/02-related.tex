@@ -1,0 +1,19 @@
+\section{Related Work}
+\label{sec:related}
+
+\todo{Survey, each with what it does and how \vas{} differs. Verify every claim against the
+tool's own documentation before submission.}
+\begin{itemize}
+  \item \textbf{ADMS}~\cite{lemaitre2002adms}: XML-template translation of Verilog-A into
+  simulator-specific C; derivatives generated symbolically.
+  \item \textbf{OpenVAF}~\cite{openvaf}: Rust compiler from Verilog-A to native code via LLVM,
+  exposing models through the OSDI interface to ngspice and others. GPL-3.0; \vas{} is a
+  clean-room implementation and does not use its code (repository \texttt{docs/prior-art.md}).
+  Compile-time comparison: model preparation 5--50\,ms here against 0.23--6.7\,s reported for
+  OpenVAF, but OpenVAF emits optimized machine code while \vas{} evaluates a tape; the
+  comparison is of different trade-offs \src{release.txt 1.1.1; roadmap.md}.
+  \item \textbf{Host simulators with Verilog-A support}: ngspice (via OSDI), Xyce~\cite{xyce},
+  Gnucap, and commercial tools (Spectre, ADS, QSPICE~\cite{qspice}).
+  \item \textbf{Reproducibility} in numerical software: floating-point non-associativity in
+  parallel reductions, vendor math libraries \todo{cite}.
+\end{itemize}

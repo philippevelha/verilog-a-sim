@@ -1,0 +1,26 @@
+% The pipeline of Fig. 1 (from docs/architecture.md). Single-column width.
+\begin{tikzpicture}[
+    font=\scriptsize,
+    box/.style={draw, rounded corners=2pt, minimum height=5mm, inner sep=2pt, align=center},
+    io/.style={align=center, text=black!70},
+    arr/.style={-{Latex[length=1.6mm]}},
+    node distance=4mm and 3mm]
+  \node[io] (va) {Verilog-A\\source};
+  \node[box, below=of va] (fe) {va-frontend\\lex / parse / elaborate};
+  \node[box, right=6mm of fe] (cg) {va-codegen\\IR $\to$ AD tape};
+  \node[box, right=3mm of cg] (nl) {va-netlist};
+  \node[io, above=of nl] (net) {circuit\\netlist};
+  \node[box, below=7mm of cg, minimum width=40mm] (core)
+      {va-core\\MNA $\cdot$ Newton $\cdot$ LU/BTF $\cdot$ DC rescue};
+  \node[box, below=5mm of core] (ac) {va-acnoise};
+  \node[box, left=3mm of ac] (tr) {va-transient};
+  \node[box, right=3mm of ac] (cli) {va-cli};
+  \draw[arr] (va) -- (fe);
+  \draw[arr] (fe) -- node[above] {$\alpha$} (cg);
+  \draw[arr] (net) -- (nl);
+  \draw[arr] (cg) -- node[right] {$\beta$} (core);
+  \draw[arr] (nl) |- (core);
+  \draw[arr] (core) -- (tr);
+  \draw[arr] (core) -- (ac);
+  \draw[arr] (core) -- (cli);
+\end{tikzpicture}

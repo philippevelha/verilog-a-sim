@@ -1,0 +1,18 @@
+\section{Language Front End}
+\label{sec:frontend}
+
+\todo{Scope: the full Verilog-A language of the LRM's Annex C, pursued construct by construct;
+docs/token-reference.md records the status of every token and construct. Give the coverage as a
+number (implemented / partial / refused) from that document.}
+
+\todo{Elaboration: multi-module hierarchy, discipline/nature system beyond electrical, genvar and
+generate, vector nets, analog functions, ranged parameters; what is folded at elaboration time and
+what is kept for simulation time.}
+
+\todo{Corpus: \texttt{va-cli check external --codegen} passes 200 of 224 third-party files, 182
+of 191 self-contained ones \src{release.txt 1.26.0}; the CMC vendor trees (BSIM4, PSP103,
+BSIM-BULK, \ldots) compile and solve \src{release.txt 1.1.1}. Re-measure at the paper's version and
+classify the failures: missing include, refusal, or bug.}
+
+\todo{The refusal policy as a design principle: a refusal names the construct, the location, why
+approximating it would give a wrong answer, and what to write instead.}

@@ -1,0 +1,26 @@
+\section{DC Solution at Scale}
+\label{sec:dc}
+
+\subsection{Newton on the MNA system}
+\todo{Residual form, node vs branch unknowns (the \texttt{UnknownKind} contract: a $g_\text{min}$
+shunt never goes on a constraint row), convergence criteria per nature.}
+
+\subsection{Linear solve}
+\todo{Dense LU below 100 unknowns, sparse LU above (threshold measured). Block-triangular
+form~\cite{tarjan1972,duff1978btf} in front of the sparse DC solve: c432's linear-solve time
+\SI{22.7}{s} $\to$ \SI{1.2}{s} \src{release.txt 2.0.0; docs/proposals/btf-solver.md}. BTF also in
+the transient.}
+
+\subsection{The rescue sequence}
+\todo{Try plain Newton; on failure, in order: $g_\text{min}$ stepping with an adaptive ramp that
+starts from a cap (cap-first, 1.24.0; c432 \texttt{.op} \SI{87.5}{s} $\to$ \SI{11}{s}), damping,
+and a per-node Newton step cap of \SI{0.5}{V} (1.12.0), needed by the leakage-set internal nodes of
+4-high NMOS stacks. Design principle: an expensive aid runs only when the cheap solve fails, so
+circuits that converge plainly are bit-identical with and without it. Table: tiers vs which
+ISCAS circuits each one solves, iterations.}
+
+\subsection{Parallel evaluation}
+\todo{Device evaluation in parallel; assembly in a recorded order and replayed, so the sum is the
+same at any thread count (1.18.0). Speed-up: c432 \texttt{.op} 15.76\,s on 1 thread vs 1.75\,s on
+32 (Ryzen 9 9950X); 30.59\,s vs 11.96\,s on 8 (i7-1185G7, on battery)
+\src{scripts/benchmark/benchmark\_*.txt, 2.0.0+2}.}

@@ -1,0 +1,19 @@
+\section{Code Generation and Automatic Differentiation}
+\label{sec:codegen}
+
+\todo{Lowering: IR to a flat evaluation tape (1.16.0); the IR is shared across instances of the
+same model (1.4.0); per-instance state.}
+
+\todo{Forward-mode AD~\cite{griewank2008evaluating}: the gradient carried per value, with respect
+to the instance's unknowns; derivative rules per operator, including $\mathtt{ddt}$ (charge channel)
+and $\mathtt{idt}$.}
+
+\todo{Validation contract: every differentiated operator and model has a test comparing the
+analytic Jacobian with central finite differences. Give the count of such tests.}
+
+\subsection{Pitfalls met on production models}
+\todo{(1) $0\cdot\infty$: multiplying a zero derivative channel by a singular slope yields NaN
+where the true derivative is finite, at $x=0$, which is where every Newton solve starts; this was
+what kept BSIM4, PSP103 and BSIM-BULK from solving (1.1.1). (2) Allocation: most early evaluation
+time was allocating zero gradients, not arithmetic (profile before optimizing). (3) Noise
+contributions on potential sources go on the constraint row.}

@@ -1,0 +1,47 @@
+\section{Transistor-Level ISCAS'85}
+\label{sec:scale}
+
+The ISCAS'85 combinational benchmarks~\cite{brglez1985iscas} were turned into transistor-level
+decks: every gate a subcircuit of PSP103~\cite{gildenblat2006psp} devices from a published
+c7552 cell library, every net an RC subcircuit, $V_{DD}=\SI{1.8}{V}$. Gates the library lacks
+are composed from its cells, so the logic is exact but the timing is not a single cell's. Each
+netlist was cross-checked gate for gate against an independent copy on \num{4096} random
+vectors. \todo{Cite the c7552 deck's source (spicegen.pl, UIC VLSI group) and the PSP103 card
+provenance.}
+
+\begin{table}[t]
+  \centering
+  \caption{ISCAS'85 at transistor level: \texttt{.op} per input vector
+  \src{release.txt 1.27.0+2..+5; i7-1185G7, 8 threads}}
+  \label{tab:iscas}
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    Circuit & Gates & Unknowns & Time / vector (s) \\
+    \midrule
+    c17   &    6 &     420 & \todo{} \\
+    c432  &  160 &  15\,416 &   9.7 \\
+    c499  &  202 &  28\,492 &  17.9 \\
+    c880  &  383 &  32\,366 &  21.7 \\
+    c1355 &  546 &  39\,892 &  28.2 \\
+    c1908 &  880 &  62\,055 &  39.7 \\
+    c2670 & 1193 &  93\,252 &  80.8 \\
+    c3540 & 1669 & 134\,246 & 181.5 \\
+    c5315 & 2307 & 197\,274 & 237.0 \\
+    c6288 & 2416 & 171\,714 & 132.4 \\
+    c7552 & 3512 & 268\,676 & 403.8 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\todo{Correctness: c17 on all 32 vectors, the others on five seeded vectors each; every reported
+gate output and every primary output within 10\,\% of the correct rail; highs $\ge$
+\SI{1.799989}{V}, lows $\le$ \SI{25.3}{\micro V} on c432. Gate counts above are after composition?
+Check: the table uses the .bench gate counts.}
+
+\todo{Transient: c432 vector sequence, five vectors $\times$ \SI{2}{ns}, 36 inputs switching
+through \SI{50}{ps} edges, \num{11570} points, \num{1196800} settled samples correct, 46.8\,min on
+8 threads \src{1.28.0}. c17 transient.}
+
+\todo{Figure: time per vector vs unknowns (log--log), both machines once the Linux full-suite run
+is in (scripts/benchmark/bench\_iscas\_linux.sh). Where the time goes: device evaluation vs linear
+solve.}

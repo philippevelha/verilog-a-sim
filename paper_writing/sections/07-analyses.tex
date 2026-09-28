@@ -1,0 +1,19 @@
+\section{Transient, AC and Noise Analyses}
+\label{sec:analyses}
+
+\subsection{Transient}
+\todo{Trapezoidal integration with a backward-Euler first step (ring oscillator error 40$\times$
+lower); divided-difference local-truncation-error control and power-law step selection; BDF2
+implemented and measured against. Breakpoints at source corners restart the integration with a
+BE step; breakpoints closer than $t_\text{step,min}$ merge (1.28.0). Analog events
+(\texttt{cross}, \texttt{timer}, \texttt{above}), \texttt{transition}, \texttt{laplace\_*} as
+state space, \texttt{zi\_*} as sampled recurrences.}
+
+\subsection{AC}
+\todo{Linearization at the operating point: the same Jacobian plus $j\omega$ times the charge
+Jacobian; \texttt{absdelay} exact in AC.}
+
+\subsection{Noise}
+\todo{Adjoint method: one transposed solve per frequency gives every source's transfer to the
+output; white, flicker and table noise; noise on potential contributions placed on the constraint
+row.}

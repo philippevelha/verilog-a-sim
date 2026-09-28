@@ -1,0 +1,62 @@
+% verilog-a-sim manuscript — target: IEEE Transactions on Computer-Aided Design (TCAD), full paper.
+% Build: latexmk (see README.md). Sections live in sections/, bibliography in refs.bib.
+\documentclass[journal]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit}
+\usepackage{cite}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+% Drafting aids. \todo{...} marks an open point; \src{...} names where a number comes from
+% (a release.txt version or a doc) and prints nothing in the final build.
+\newif\ifdraft \drafttrue
+\newcommand{\todo}[1]{\ifdraft\textcolor{red}{[TODO: #1]}\fi}
+\newcommand{\src}[1]{}
+\newcommand{\vas}{\texttt{verilog-a-sim}}
+
+\sisetup{group-separator={\,}, group-minimum-digits=4}
+
+\begin{document}
+
+\title{verilog-a-sim: A Clean-Room, Deterministic Verilog-A Circuit Simulator in Pure Rust,
+Validated from Single Devices to Transistor-Level ISCAS'85}
+
+\author{Philippe~Velha%
+\thanks{P. Velha is with the University of Trento, Italy \todo{department, address}.}%
+\thanks{Manuscript received \todo{date}.}}
+
+\markboth{IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems}%
+{Velha: verilog-a-sim}
+
+\maketitle
+
+\input{sections/00-abstract}
+\input{sections/01-introduction}
+\input{sections/02-related}
+\input{sections/03-architecture}
+\input{sections/04-frontend}
+\input{sections/05-codegen}
+\input{sections/06-dc}
+\input{sections/07-analyses}
+\input{sections/08-determinism}
+\input{sections/09-validation}
+\input{sections/10-scale}
+\input{sections/11-limitations}
+\input{sections/12-conclusion}
+
+\section*{Acknowledgment}
+\todo{Funding (ARCHYTAS WP4?). IEEE policy: disclose the use of AI tools in preparing the
+software and/or the manuscript here.}
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

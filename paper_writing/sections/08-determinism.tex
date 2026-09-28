@@ -1,0 +1,25 @@
+\section{Bit-Identical Results Across Platforms and Thread Counts}
+\label{sec:determinism}
+
+A simulator's output usually differs in its last digits between machines: a parallel reduction
+sums in a different order, a vendor math library rounds \texttt{exp} differently, a BLAS kernel
+fuses a multiply-add on one CPU and not another. \vas{} removes each source.
+
+\todo{The rules, each with the version that introduced it and the difference it removed:
+(1) the linear algebra library is pinned to sequential execution, because its default
+parallelism made answers depend on the core count (found 2026-09-25);
+(2) every transcendental function comes from \texttt{libm}, a pure-Rust port of musl's, rather
+than the platform C library;
+(3) device evaluation runs in parallel but its stamps are recorded and replayed in a fixed order;
+(4) a scalar dense LU (1.31.0) instead of a SIMD kernel, which removed the last macOS difference;
+(5) Rust neither fuses $a - f b$ into an FMA nor reorders a floating-point reduction unless asked.}
+
+\subsection{Measurement}
+\todo{CI: 68 comparable decks, including c432 \texttt{.op} and c17's transient, run on Linux,
+macOS and Windows runners and compared with \texttt{deck-compare}: identical \src{1.31.0+1}.
+Independent machines: the ten-deck benchmark on a Ryzen 9 9950X (Ubuntu 26.04, AVX-512) and an
+i7-1185G7 (Windows 11) gives ten equal SHA-256 hashes \src{2.0.0+2}; macOS pending. Thread
+count: c432 at 1, 8 and 32 threads, same hash.}
+
+\todo{What the identity does not cover: decks whose models are not committed (BSIM4, HICUM/L2,
+EKV).}
