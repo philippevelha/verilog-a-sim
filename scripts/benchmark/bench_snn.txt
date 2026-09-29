@@ -1,0 +1,122 @@
+verilog-a-sim — MNIST SNN benchmark (Xuan et al., IJCNN 2026) — Linux
+date (UTC):    2026-09-29 06:12:18
+checkout:      08a9772 2.2.0 — MNIST through the memristor-crossbar SNN at circui
+va-cli:        /home/philippe/Downloads/va-cli-v2.0.0-x86_64-unknown-linux-gnu/va-cli
+va-cli sha256: 7eac3716e64e6b74f3e37b51b09a9779d3c11ea7a6e8ea03f9677a11f9837e33
+threads:       default (one per logical CPU)
+
+== machine
+os:           Ubuntu 26.04 LTS
+kernel:       Linux 7.0.0-29-generic x86_64
+cpu:          AMD Ryzen 9 9950X 16-Core Processor
+cores/socket: 16  threads/core: 2
+logical cpus: 32
+memory:       89.7 GiB
+governor:     performance
+power:        n/a (desktop or VM)
+load avg:     1.33 0.52 0.42 (before the run)
+
+== samples (wall time = the va-cli run alone)
+--- digit 0: va-cli wall 746.5 s, exit 0, 63214 timepoints
+    sha256(stdout) 5ef5944e7330245045e9d39ffdc9f6b5c5338fbcd942e890b536349b0a67ba25
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 0 (sample 50018): 63214 timepoints, 746.5 s
+      h2: 1856/1856 spike slots agree; spikes model 165, circuit 165
+      h3: 1855/1856 spike slots agree; spikes model 201, circuit 200
+      o: 290/290 spike slots agree; spikes model 25, circuit 25
+      output counts, circuit: [12, 0, 2, 1, 1, 3, 5, 0, 1, 0]
+      output counts, model:   [12, 0, 2, 1, 1, 3, 5, 0, 1, 0]
+      predicted: circuit 0, model 0, label 0
+--- digit 1: va-cli wall 727.6 s, exit 0, 61745 timepoints
+    sha256(stdout) ffb5d4e160123e0d68f88a9dca94d6b507e00d227fe696678943799e5c3577ca
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 1 (sample 50016): 61745 timepoints, 727.6 s
+      h2: 1856/1856 spike slots agree; spikes model 164, circuit 164
+      h3: 1856/1856 spike slots agree; spikes model 193, circuit 193
+      o: 290/290 spike slots agree; spikes model 28, circuit 28
+      output counts, circuit: [0, 11, 0, 7, 2, 1, 0, 0, 7, 0]
+      output counts, model:   [0, 11, 0, 7, 2, 1, 0, 0, 7, 0]
+      predicted: circuit 1, model 1, label 1
+--- digit 2: va-cli wall 823.1 s, exit 0, 68604 timepoints
+    sha256(stdout) ec5c7012bdd36e505d3eeaa3da2e433268c86246bcc9c3c64925c242383c48df
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 2 (sample 50011): 68604 timepoints, 823.1 s
+      h2: 1856/1856 spike slots agree; spikes model 252, circuit 252
+      h3: 1856/1856 spike slots agree; spikes model 168, circuit 168
+      o: 290/290 spike slots agree; spikes model 19, circuit 19
+      output counts, circuit: [1, 0, 13, 5, 0, 0, 0, 0, 0, 0]
+      output counts, model:   [1, 0, 13, 5, 0, 0, 0, 0, 0, 0]
+      predicted: circuit 2, model 2, label 2
+--- digit 3: va-cli wall 796.5 s, exit 0, 67482 timepoints
+    sha256(stdout) 039beafa2b71c0842e88c36aea9cc9a554947cdd3ebed5a1769b21d5ab413033
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 3 (sample 50000): 67482 timepoints, 796.5 s
+      h2: 1856/1856 spike slots agree; spikes model 235, circuit 235
+      h3: 1856/1856 spike slots agree; spikes model 178, circuit 178
+      o: 290/290 spike slots agree; spikes model 21, circuit 21
+      output counts, circuit: [0, 3, 6, 10, 0, 0, 0, 0, 2, 0]
+      output counts, model:   [0, 3, 6, 10, 0, 0, 0, 0, 2, 0]
+      predicted: circuit 3, model 3, label 3
+--- digit 4: va-cli wall 673.7 s, exit 0, 57880 timepoints
+    sha256(stdout) f51d55f0bc515e45043ae9fa11b794c4b55143483b3a6f0613ae5c24106cbd9f
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 4 (sample 50005): 57880 timepoints, 673.7 s
+      h2: 1856/1856 spike slots agree; spikes model 167, circuit 167
+      h3: 1856/1856 spike slots agree; spikes model 149, circuit 149
+      o: 290/290 spike slots agree; spikes model 23, circuit 23
+      output counts, circuit: [1, 0, 0, 0, 7, 0, 0, 6, 0, 9]
+      output counts, model:   [1, 0, 0, 0, 7, 0, 0, 6, 0, 9]
+      predicted: circuit 9, model 9, label 4
+--- digit 5: va-cli wall 830.7 s, exit 0, 69527 timepoints
+    sha256(stdout) 0b50ccd927e4eb8652e94726e38b5571793c555e42f00cae7eed5969eba69b1c
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 5 (sample 50006): 69527 timepoints, 830.7 s
+      h2: 1856/1856 spike slots agree; spikes model 201, circuit 201
+      h3: 1856/1856 spike slots agree; spikes model 250, circuit 250
+      o: 290/290 spike slots agree; spikes model 13, circuit 13
+      output counts, circuit: [0, 0, 0, 0, 0, 13, 0, 0, 0, 0]
+      output counts, model:   [0, 0, 0, 0, 0, 13, 0, 0, 0, 0]
+      predicted: circuit 5, model 5, label 5
+--- digit 6: va-cli wall 825.8 s, exit 0, 68077 timepoints
+    sha256(stdout) c1e9e3553fd7f6a364cfdc32d6a672789acb96382e198878e1d7b58d154e7d38
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 6 (sample 50002): 68077 timepoints, 825.8 s
+      h2: 1856/1856 spike slots agree; spikes model 218, circuit 218
+      h3: 1856/1856 spike slots agree; spikes model 192, circuit 192
+      o: 290/290 spike slots agree; spikes model 19, circuit 19
+      output counts, circuit: [2, 0, 2, 0, 4, 0, 11, 0, 0, 0]
+      output counts, model:   [2, 0, 2, 0, 4, 0, 11, 0, 0, 0]
+      predicted: circuit 6, model 6, label 6
+--- digit 7: va-cli wall 751.3 s, exit 0, 62219 timepoints
+    sha256(stdout) 7c7f84b1f71460dd14b9d0f346b1973e09b8ac03870b3edf4dfc909e5f498897
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 7 (sample 50021): 62219 timepoints, 751.3 s
+      h2: 1854/1856 spike slots agree; spikes model 184, circuit 184
+      h3: 1851/1856 spike slots agree; spikes model 179, circuit 178
+      o: 289/290 spike slots agree; spikes model 15, circuit 14
+      output counts, circuit: [0, 1, 0, 1, 0, 0, 0, 9, 0, 3]
+      output counts, model:   [0, 1, 0, 1, 1, 0, 0, 9, 0, 3]
+      predicted: circuit 7, model 7, label 7
+--- digit 8: va-cli wall 663.7 s, exit 0, 56642 timepoints
+    sha256(stdout) f015bccd88abcc21b0df3034095efae13f0f96f216de3815de5be15298d67c36
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 8 (sample 50001): 56642 timepoints, 663.7 s
+      h2: 1856/1856 spike slots agree; spikes model 169, circuit 169
+      h3: 1856/1856 spike slots agree; spikes model 142, circuit 142
+      o: 290/290 spike slots agree; spikes model 15, circuit 15
+      output counts, circuit: [0, 0, 0, 3, 0, 0, 0, 0, 12, 0]
+      output counts, model:   [0, 0, 0, 3, 0, 0, 0, 0, 12, 0]
+      predicted: circuit 8, model 8, label 8
+--- digit 9: va-cli wall 740.7 s, exit 0, 63066 timepoints
+    sha256(stdout) 0f0cb85a8248bba25e3f73fc81f386a59614d78c68c72f6e7db13d4cb800e28a
+    circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+    digit 9 (sample 50003): 63066 timepoints, 740.7 s
+      h2: 1856/1856 spike slots agree; spikes model 179, circuit 179
+      h3: 1856/1856 spike slots agree; spikes model 189, circuit 189
+      o: 290/290 spike slots agree; spikes model 30, circuit 30
+      output counts, circuit: [0, 0, 0, 2, 12, 0, 0, 4, 0, 12]
+      output counts, model:   [0, 0, 0, 2, 12, 0, 0, 4, 0, 12]
+      predicted: circuit 4 (tie [4, 9]), model 4, label 9
+
+== total va-cli wall time: 7579.6 s
+== end 08:18:56 UTC

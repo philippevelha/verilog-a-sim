@@ -22,6 +22,23 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.2.0+2 - 2026-09-29
+--------------------
+**The MNIST SNN benchmark on Linux: the same answers as Windows on all ten images, 4.6x faster.**
+No simulator change.
+
+  * `scripts/benchmark/bench_snn.txt` (AMD Ryzen 9 9950X, 32 threads, Ubuntu 26.04, idle,
+    `performance` governor), run by `bench_snn_linux.sh` with the **v2.0.0** release `va-cli`:
+    every sample exits 0, and against 2.2.0's Windows run (2.1.0 build) every digit has the same
+    timepoint count, per-layer spike-slot agreement, output counts and class (40 011 / 40 020
+    slots, the same nine mismatches). So the 2.1.0 persistence fix does not affect these decks.
+  * va-cli wall time **7 579.6 s (2.1 h) for the ten**, mean 758 s, range 663.7-830.7 s, against
+    35 145 s on the i7-1185G7 (4.64x; 4.5-5.0x per digit).
+  * Limitation: the Windows run recorded no output hashes, so the comparison is on the checked
+    quantities, not bytes; the Linux SHA-256s are the first, for the next machine to match.
+    `circuits/snn/mnist/LOG.md` Step 12.
+
+
 2.2.0+1 - 2026-09-29
 --------------------
 **macOS benchmark received: Linux, Windows and macOS give identical outputs on all ten decks.**

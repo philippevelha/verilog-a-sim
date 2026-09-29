@@ -341,3 +341,17 @@ for spike; it does not establish that a 3.3 V implementation of these weights cl
 Not addressed here. The fix would bound V_m to [0, V_DD] in both places: a clamp in the circuit's
 membrane (or a saturating current source in `sl_stage.va`) and the same clip in the training model,
 then retraining so the network learns within the rails.
+
+## Step 12 — Linux benchmark result (2026-09-29)
+
+`scripts/benchmark/bench_snn.txt`: all ten samples on an AMD Ryzen 9 9950X (32 threads, Ubuntu
+26.04, `performance` governor, load average 1.33 before the run) with the **v2.0.0** release
+`va-cli` (sha256 `7eac3716…`) on checkout 08a9772. Every sample exits 0, and against the Windows
+run of Step 10 (`results.jsonl`, a 2.1.0 build) **every digit has the same timepoint count, the same
+per-layer spike-slot agreement, the same output spike counts and the same class** (40 011 / 40 020
+slots; the same nine mismatches). So the 2.1.0 persistence fix does not touch these decks, as the
+script's header claims, and the result holds across x86-64 Linux and Windows.
+
+va-cli wall time: **7 579.6 s (2.1 h) for the ten**, mean 758 s, range 663.7–830.7 s, against
+35 145 s on the i7-1185G7 — 4.64x overall, 4.5–5.0x per digit. The Windows run recorded no output
+hashes, so the Linux SHA-256s in `bench_snn.txt` are the first ones, for the next machine to match.

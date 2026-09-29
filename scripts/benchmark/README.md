@@ -57,3 +57,9 @@ output with `check_iscas.py` (needs `python3`). ~19 min of operating points on a
 | `benchmark_macos.txt` | Apple M2 Pro (6P+4E), 10 cores, macOS 26.6.2 | on mains, but load average 4.09/9.11/8.27 before the run: timings indicative, not a baseline |
 
 All ten hashes agree across all three (x86_64 Linux, x86_64 Windows, aarch64 macOS).
+
+MNIST SNN (`bench_snn_linux.sh`):
+
+| File | Machine | Notes |
+|---|---|---|
+| `bench_snn.txt` | AMD Ryzen 9 9950X, 32 threads, Ubuntu 26.04 | MNIST SNN (`bench_snn_linux.sh`), v2.0.0 binary: 7 580 s for the ten (Windows i7-1185G7: 35 145 s); timepoints, spikes and classes identical to the Windows run on every digit; its hashes are the first recorded |
