@@ -1,0 +1,27 @@
+C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\train_mnist.py:175: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\torch\csrc\autograd\generated\python_variable_methods.cpp:837.)
+  total += float(loss) * len(idx)
+float epoch 1/15: loss 1.7146 (29 s)
+float epoch 2/15: loss 0.8134 (23 s)
+float epoch 3/15: loss 0.4500 (24 s)
+float epoch 4/15: loss 0.3518 (28 s)
+float epoch 5/15: loss 0.3137 (26 s)
+float epoch 6/15: loss 0.2854 (22 s)
+float epoch 7/15: loss 0.2734 (22 s)
+float epoch 8/15: loss 0.2530 (42 s)
+float epoch 9/15: loss 0.2418 (23 s)
+float epoch 10/15: loss 0.2336 (22 s)
+float epoch 11/15: loss 0.2256 (22 s)
+float epoch 12/15: loss 0.2169 (23 s)
+float epoch 13/15: loss 0.2105 (22 s)
+float epoch 14/15: loss 0.2049 (22 s)
+float epoch 15/15: loss 0.2019 (22 s)
+held-out accuracy, float weights: 0.9398
+held-out accuracy, post-training quantized: 0.9287  lambda (V/mS) [11.798, 11.338, 10.776]
+quantization-aware epoch 1/5: loss 0.2049 (22 s)
+quantization-aware epoch 2/5: loss 0.1932 (22 s)
+quantization-aware epoch 3/5: loss 0.1860 (22 s)
+quantization-aware epoch 4/5: loss 0.1839 (22 s)
+quantization-aware epoch 5/5: loss 0.1799 (22 s)
+held-out accuracy, after quantization-aware fine-tuning: 0.9404
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\model.json

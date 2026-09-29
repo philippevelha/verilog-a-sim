@@ -399,3 +399,19 @@ the reasoning and the open points are in `circuits/snn/README.md`.
 
 ![Fig. 4 reproduced](examples/snn_memristor/fig4_vs_paper.png)
 
+---
+
+## MNIST through the memristor-crossbar SNN (Xuan et al., IJCNN 2026, Sec. IV-B)
+
+```bash
+bash circuits/snn/mnist/run_all.sh target/release/va-cli && python circuits/snn/mnist/summarize.py
+```
+
+Ten held-out MNIST images through three circuit layers (8 832 2T2R synapses, 138 neurons, 2 626
+unknowns). The circuit's class equals the trained model's on all ten, and 99.978 % of spike slots
+agree; about an hour of wall time per image. Plots and the full netlist of one image:
+[`examples/snn_mnist/README.md`](examples/snn_mnist/README.md); the step-by-step record:
+`circuits/snn/mnist/LOG.md`.
+
+![MNIST summary](examples/snn_mnist/summary.png)
+

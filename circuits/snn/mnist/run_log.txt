@@ -1,0 +1,120 @@
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit0.net
+digit 0 (sample 50018): 63214 timepoints, 3761.7 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 165, circuit 165
+  h3: 1855/1856 spike slots agree; spikes model 201, circuit 200
+  o: 290/290 spike slots agree; spikes model 25, circuit 25
+  output counts, circuit: [12, 0, 2, 1, 1, 3, 5, 0, 1, 0]
+  output counts, model:   [12, 0, 2, 1, 1, 3, 5, 0, 1, 0]
+  predicted: circuit 0, model 0, label 0
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit1.net
+digit 1 (sample 50016): 61745 timepoints, 3367.2 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 164, circuit 164
+  h3: 1856/1856 spike slots agree; spikes model 193, circuit 193
+  o: 290/290 spike slots agree; spikes model 28, circuit 28
+  output counts, circuit: [0, 11, 0, 7, 2, 1, 0, 0, 7, 0]
+  output counts, model:   [0, 11, 0, 7, 2, 1, 0, 0, 7, 0]
+  predicted: circuit 1, model 1, label 1
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit2.net
+digit 2 (sample 50011): 68604 timepoints, 3795.1 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 252, circuit 252
+  h3: 1856/1856 spike slots agree; spikes model 168, circuit 168
+  o: 290/290 spike slots agree; spikes model 19, circuit 19
+  output counts, circuit: [1, 0, 13, 5, 0, 0, 0, 0, 0, 0]
+  output counts, model:   [1, 0, 13, 5, 0, 0, 0, 0, 0, 0]
+  predicted: circuit 2, model 2, label 2
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit3.net
+2026-09-29 00:28:13 digit 0: already done, skipped
+2026-09-29 00:28:14 digit 1: already done, skipped
+2026-09-29 00:28:14 digit 2: already done, skipped
+2026-09-29 00:28:14 digit 3: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit3.net
+digit 3 (sample 50000): 67482 timepoints, 3675.5 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 235, circuit 235
+  h3: 1856/1856 spike slots agree; spikes model 178, circuit 178
+  o: 290/290 spike slots agree; spikes model 21, circuit 21
+  output counts, circuit: [0, 3, 6, 10, 0, 0, 0, 0, 2, 0]
+  output counts, model:   [0, 3, 6, 10, 0, 0, 0, 0, 2, 0]
+  predicted: circuit 3, model 3, label 3
+2026-09-29 01:29:35 digit 3: attempt 1 finished
+2026-09-29 01:29:35 digit 4: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit4.net
+digit 4 (sample 50005): 57880 timepoints, 3093.1 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 167, circuit 167
+  h3: 1856/1856 spike slots agree; spikes model 149, circuit 149
+  o: 290/290 spike slots agree; spikes model 23, circuit 23
+  output counts, circuit: [1, 0, 0, 0, 7, 0, 0, 6, 0, 9]
+  output counts, model:   [1, 0, 0, 0, 7, 0, 0, 6, 0, 9]
+  predicted: circuit 9, model 9, label 4
+2026-09-29 02:21:14 digit 4: attempt 1 finished
+2026-09-29 02:21:14 digit 5: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit5.net
+digit 5 (sample 50006): 69527 timepoints, 3820.6 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 201, circuit 201
+  h3: 1856/1856 spike slots agree; spikes model 250, circuit 250
+  o: 290/290 spike slots agree; spikes model 13, circuit 13
+  output counts, circuit: [0, 0, 0, 0, 0, 13, 0, 0, 0, 0]
+  output counts, model:   [0, 0, 0, 0, 0, 13, 0, 0, 0, 0]
+  predicted: circuit 5, model 5, label 5
+2026-09-29 03:25:00 digit 5: attempt 1 finished
+2026-09-29 03:25:01 digit 6: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit6.net
+digit 6 (sample 50002): 68077 timepoints, 3765.0 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 218, circuit 218
+  h3: 1856/1856 spike slots agree; spikes model 192, circuit 192
+  o: 290/290 spike slots agree; spikes model 19, circuit 19
+  output counts, circuit: [2, 0, 2, 0, 4, 0, 11, 0, 0, 0]
+  output counts, model:   [2, 0, 2, 0, 4, 0, 11, 0, 0, 0]
+  predicted: circuit 6, model 6, label 6
+2026-09-29 04:27:52 digit 6: attempt 1 finished
+2026-09-29 04:27:52 digit 7: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit7.net
+digit 7 (sample 50021): 62219 timepoints, 3385.0 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1854/1856 spike slots agree; spikes model 184, circuit 184
+  h3: 1851/1856 spike slots agree; spikes model 179, circuit 178
+  o: 289/290 spike slots agree; spikes model 15, circuit 14
+  output counts, circuit: [0, 1, 0, 1, 0, 0, 0, 9, 0, 3]
+  output counts, model:   [0, 1, 0, 1, 1, 0, 0, 9, 0, 3]
+  predicted: circuit 7, model 7, label 7
+2026-09-29 05:24:22 digit 7: attempt 1 finished
+2026-09-29 05:24:22 digit 8: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit8.net
+digit 8 (sample 50001): 56642 timepoints, 3061.8 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 169, circuit 169
+  h3: 1856/1856 spike slots agree; spikes model 142, circuit 142
+  o: 290/290 spike slots agree; spikes model 15, circuit 15
+  output counts, circuit: [0, 0, 0, 3, 0, 0, 0, 0, 12, 0]
+  output counts, model:   [0, 0, 0, 3, 0, 0, 0, 0, 12, 0]
+  predicted: circuit 8, model 8, label 8
+2026-09-29 06:15:29 digit 8: attempt 1 finished
+2026-09-29 06:15:29 digit 9: attempt 1 started
+written C:\Users\heltz\Documents\Research\ARCHYTAS_research\WPs\WP4\VASimile\circuits\snn\mnist\decks\digit9.net
+digit 9 (sample 50003): 63066 timepoints, 3420.2 s
+  [va-cli] circuit: 10973 device(s) (9936 compiled), 2626 unknown(s) (1589 net(s) + 1037 auxiliary row(s)), ~14501 points (adaptive, 14501 is the card's floor)
+  [va-cli] linear solve: sparse LU (2626 >= 100 unknowns), for the whole run
+  h2: 1856/1856 spike slots agree; spikes model 179, circuit 179
+  h3: 1856/1856 spike slots agree; spikes model 189, circuit 189
+  o: 290/290 spike slots agree; spikes model 30, circuit 30
+  output counts, circuit: [0, 0, 0, 2, 12, 0, 0, 4, 0, 12]
+  output counts, model:   [0, 0, 0, 2, 12, 0, 0, 4, 0, 12]
+  predicted: circuit 4 (tie [4, 9]), model 4, label 9
+2026-09-29 07:12:35 digit 9: attempt 1 finished
+2026-09-29 07:12:35 run_all: done; digits recorded: 0 1 2 3 4 5 6 7 8 9
+2026-09-29 07:14:58 keep-awake: released (no MNIST run left)

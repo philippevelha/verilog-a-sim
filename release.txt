@@ -22,6 +22,56 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.2.0 - 2026-09-29
+------------------
+**MNIST through the memristor-crossbar SNN of Xuan et al. (IJCNN 2026, Sec. IV-B), at circuit
+level: ten held-out images, the circuit's class equal to the trained model's on all ten, 99.978 %
+of spike slots agreeing, about an hour of wall time per image.** No Rust change.
+
+  * `circuits/snn/mnist/`: `train_mnist.py` trains the paper's 64-64-64-64-10 network (PCA to 64,
+    Adam at 1e-3, V_th 2.4 V, beta 0.6, V_reset 1 V, refractory off, 25 timesteps) with the
+    **circuit's own neuron cycle for cycle** in plain PyTorch, not snnTorch's, and quantizes the
+    three crossbar layers to the 9-value RRAM codebook. Held-out accuracy (the last 10 000 of the
+    60 000 training images, never trained on): 93.98 % float, 92.87 % post-training quantized,
+    **94.04 %** after 5 epochs of quantization-aware fine-tuning (a departure from the paper's
+    plain post-training quantization). The paper reports 97.46 %; not chased (input encoding,
+    epochs and surrogate slope are the untested suspects; the encoding is our choice, the paper
+    does not give one).
+  * `gen_mnist_deck.py` writes one image's circuit: hidden 1's spike trains (software, as in the
+    paper) as word lines; three crossbars of 8 832 2T2R cells; 138 neurons, K per layer from lambda.
+    10 973 devices, 2 626 unknowns. `check_mnist.py` compares every cycle x neuron spike slot with
+    the model; `run_all.sh` runs the ten resumably with retries; `summarize.py` tabulates.
+  * **Results** (one held-out image per digit): circuit class = model class **10/10**; = label 8/10,
+    the model's own two errors (a 4 read as 9 by both; a 9 tied 12-12 between 4 and 9 in both).
+    Spike slots agreeing: **40 011 / 40 020**; eight images agree on every slot. Every mismatch is
+    on an image whose model membrane passes within ~2 mV of V_th, measured by recomputing the
+    model's V_m (digit 7, closest at 0.69 mV, has 8 of the 9).
+  * **Wall time (va-cli alone, i7-1185G7, 8 threads, mains): 35 145 s for the ten (9.76 h), mean
+    3 514.5 s, range 3 061.8-3 820.6 s**, mean 63 846 timepoints (~2 200 per 250 ns cycle, set by
+    the network's switching activity, not the matrix size); >1.2 GB of memory per run (the
+    waveform is held in memory).
+  * **Stated limitation: V_m is not bounded by the supply.** Output membranes swing from about
+    -6.7 V to +8.7 V: the input stage and attenuator are ideal, and so is the model's linear
+    equation, which is why they agree. A 3.3 V circuit would clip at the rails, so this shows the
+    circuit computes the trained model's equations, not that a 3.3 V implementation of these
+    weights classifies the same. Bounding V_m in circuit and training, then retraining, is the
+    follow-up (`circuits/snn/mnist/LOG.md`, Step 11).
+  * `models/snn/synapse_2t2r.va`: a 2T2R cell as one device (two cell + access-switch paths, no
+    internal node), identical to the two-part form on the Fig. 5 deck at the printed resolution;
+    it saves 2 unknowns per synapse (17 664 on this network).
+  * The first overnight run was stopped by the host for low memory after 3 images; the cause was
+    the checker holding each image's ~0.25 GB of output and a parsed copy in memory. It now streams
+    the output from a file, validated identical to the old reader, and the run resumed.
+  * `scripts/benchmark/bench_snn_linux.sh /path/to/va-cli [digits]`: runs the samples from a
+    checkout with a given executable (the v2.0.0 one suffices), timing va-cli alone per image and
+    hashing its output. Not yet run on Linux.
+  * `circuits/snn/mnist/LOG.md` records every step, command, figure and dead end in order;
+    `docs/examples/snn_mnist/` has the plots and image 0's complete netlist.
+
+Measured at this version: no Rust change, so 2.1.0's figures stand (923 tests; `validate` 28/28);
+zoo `check models --codegen` 42/42 (+ synapse_2t2r).
+
+
 2.1.0+1 - 2026-09-28
 --------------------
 **`paper_writing/`: the skeleton of a manuscript presenting verilog-a-sim** (IEEE TCAD regular

@@ -1,0 +1,47 @@
+// One 2T2R synapse of the memristor crossbar in Xuan et al., IJCNN 2026 (references/, Fig. 1):
+// V_P -[G_p cell]-[access]- SL -[access]-[G_n cell]- V_N, both access transistors on the word line
+// `wl`. Electrically the same as two `rram` cells in series with two `vswitch` access devices
+// (circuits/snn/fig5_neuron.net), folded into one device so the cell has no internal nodes: a
+// 64x64 crossbar built from separate parts costs 2 extra unknowns per cell, 8 192 per layer.
+//
+// Current into `sl`: gate(wl) * [ (V(vp) - V(sl)) / (R_p + ron) + (V(vn) - V(sl)) / (R_n + ron) ],
+// with R_p, R_n the paper's RRAM levels (`levp`, `levn`: 0 = 8 kOhm LRS1, 1 = 10.5 kOhm LRS2,
+// 2 = 15 kOhm LRS3, 3 = 210 kOhm HRS) and gate(wl) the same smooth switch as vswitch.va.
+//
+// Limitations: those of rram.va (a fixed, linear conductance: no drift, read disturb or
+// variability) and vswitch.va (an ideal switch). With the switch off, each path is `roff` in series
+// with its cell, not an open circuit, exactly as the two-part form.
+`include "../disciplines.vams"
+
+module synapse_2t2r(vp, vn, sl, wl);
+    inout vp, vn, sl;
+    input wl;
+    electrical vp, vn, sl, wl;
+    parameter integer levp = 3 from [0:3];
+    parameter integer levn = 3 from [0:3];
+    parameter real ron = 10 from (0:inf);
+    parameter real roff = 1e12 from (0:inf);
+    parameter real vt = 1.65;
+    parameter real vw = 0.05 from (0:inf);
+    real rp, rn, g, gp, gn;
+    analog begin
+        case (levp)
+            0: rp = 8e3;
+            1: rp = 10.5e3;
+            2: rp = 15e3;
+            default: rp = 210e3;
+        endcase
+        case (levn)
+            0: rn = 8e3;
+            1: rn = 10.5e3;
+            2: rn = 15e3;
+            default: rn = 210e3;
+        endcase
+        // switch conductance, as vswitch.va; each path is the switch in series with its cell
+        g = 1.0 / roff + (1.0 / ron - 1.0 / roff) * 0.5 * (1.0 + tanh(0.5 * (V(wl) - vt) / vw));
+        gp = 1.0 / (rp + 1.0 / g);
+        gn = 1.0 / (rn + 1.0 / g);
+        I(vp, sl) <+ gp * V(vp, sl);
+        I(vn, sl) <+ gn * V(vn, sl);
+    end
+endmodule
