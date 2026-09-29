@@ -22,6 +22,20 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.2.0+1 - 2026-09-29
+--------------------
+**macOS benchmark received: Linux, Windows and macOS give identical outputs on all ten decks.**
+No simulator change.
+
+  * `scripts/benchmark/benchmark_macos.txt` (Apple M2 Pro, 6P+4E cores, macOS 26.6.2), from the
+    v2.0.0 `aarch64-apple-darwin` archive: all ten decks exit 0 and **all ten SHA-256 hashes
+    equal the Linux and Windows ones** -- two ISAs, three separately built binaries.
+  * Timings are indicative, not a baseline: on mains, but the load average before the run was
+    4.09 / 9.11 / 8.27. c432 `.op` 4.06 s (14.73 s on one thread, 3.6x on 10 cores; Linux
+    15.76 s single-threaded), c17_tran 33.79 s (Linux 15.97 s).
+  * The macOS script prints three decimals where the other two print two; cosmetic.
+
+
 2.2.0 - 2026-09-29
 ------------------
 **MNIST through the memristor-crossbar SNN of Xuan et al. (IJCNN 2026, Sec. IV-B), at circuit

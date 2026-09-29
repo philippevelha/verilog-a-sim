@@ -1,0 +1,31 @@
+verilog-a-sim platform benchmark — macOS
+date (UTC):   2026-09-29 06:58:57
+archive dir:  va-cli-v2.0.0-aarch64-apple-darwin
+va-cli sha256: 7bf3c01738d0705c331e920a6067a5842a33df2254341aa89295f027f5b171bc
+
+== machine
+os:           macOS 26.6.2 (25G83)
+kernel:       Darwin 25.6.0 arm64
+model:        Mac14,9
+chip:         Apple M2 Pro
+p-cores:      6
+e-cores:      4
+logical cpus: 10
+memory:       16.0 GiB
+power:        mains
+low power:    off
+load avg:      4.09 9.11 8.27  (before the run)
+
+== decks (wall time, one run each)
+deck                                              seconds  exit  sha256(stdout)
+rectifier (.tran, diode)                            0.012     0  b151e59ad91150d89c0c68d0684a9077fc2a462be33503e1f247e5762391fae2
+ring_osc (.tran, reference BJTs)                    0.027     0  6ebe545e0925aa85abace8bc7da9b505b88b71de195cce5c7704c88fa6702b68
+nand/psp103 (.op)                                   0.140     0  1a2cc6595a26e715ac87d0bb21d261894ad9c16ff1b2f9a7941d761669ed6129
+psp103_inverter_tran (.tran)                        1.171     0  5e0ae5834a6a2421fe6d6030126c9f4531946aa0d812d124aa7319fa7aa68df8
+iscas85/c17 (.op)                                   0.163     0  7eab2536eec12e953f404be5103f7559702a7ce8fed8c6ea4547972ad0cc1187
+iscas85/c432 (.op)                                  4.062     0  57514c1575823e0775f44a3dcae56e3634d4c563ba88fca93ae48adf673bd443
+iscas85/c432 (.op, --threads 1)                    14.728     0  57514c1575823e0775f44a3dcae56e3634d4c563ba88fca93ae48adf673bd443
+iscas85/c499 (.op)                                  5.561     0  320a9f6f78b732b8af5d6ac7877410dd12cab0b41662146ba0a4b6409117bbae
+iscas85/c880 (.op)                                  6.177     0  97c2d5ea8632de0b401c8705ef1a7155d24b0aaeba5c450b55215feefa83fd72
+iscas85/c17_tran (.tran 12 ns)                     33.791     0  3305deac9d56510f5978b69a8c04b5ad05e84f7d6a46c10c5e92fa1e7677b446
+== end 07:00:04 UTC

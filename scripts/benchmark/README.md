@@ -54,5 +54,6 @@ output with `check_iscas.py` (needs `python3`). ~19 min of operating points on a
 |---|---|---|
 | `benchmark_linux.txt` | AMD Ryzen 9 9950X, 32 threads, Ubuntu 26.04 | desktop, `performance` governor |
 | `benchmark_windows.txt` | Intel i7-1185G7, 8 threads, Windows 11 | **on battery**, balanced plan, and a test run overlapped c17_tran: timings not a baseline |
+| `benchmark_macos.txt` | Apple M2 Pro (6P+4E), 10 cores, macOS 26.6.2 | on mains, but load average 4.09/9.11/8.27 before the run: timings indicative, not a baseline |
 
-All ten hashes agree between the two. macOS: not yet run.
+All ten hashes agree across all three (x86_64 Linux, x86_64 Windows, aarch64 macOS).
