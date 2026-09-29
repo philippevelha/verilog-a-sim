@@ -22,6 +22,12 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.2.0+3 - 2026-09-29
+--------------------
+**`/slides/` ignored by git.** A local Quarto presentation of the simulator lives there and is kept
+out of the repository by choice, as `/perf-logs/` is. No simulator change.
+
+
 2.2.0+2 - 2026-09-29
 --------------------
 **The MNIST SNN benchmark on Linux: the same answers as Windows on all ten images, 4.6x faster.**

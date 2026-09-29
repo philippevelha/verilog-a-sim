@@ -36,3 +36,6 @@ Thumbs.db
 
 # Python bytecode from the benchmark scripts (circuits/benchmark/**)
 __pycache__/
+
+# Quarto presentation (local only)
+/slides/
