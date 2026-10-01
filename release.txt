@@ -22,6 +22,16 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.3.0+1 - 2026-10-01
+--------------------
+**`scripts/benchmark/bench_transistor_linux.sh`: the ideal-switch vs access-transistor comparison
+for a Linux machine.** Runs `fig5_neuron.net` and `fig5_access.net` (default threads, and the
+transistor deck on one), recording wall time, unknowns, timepoints, output hash and check_snn's
+verdict in `bench_transistor.txt`. `EXTRA_ENV` passes a simulator switch to every run. Checked in
+Git Bash here: the outputs reproduce 2.3.0's (10 707 and 13 645 timepoints, steps 6/10/14). No
+simulator change.
+
+
 2.3.0 - 2026-10-01
 ------------------
 **The SNN gets real transistors: an IHP SG13G2 technology layer, two model libraries in one run,
