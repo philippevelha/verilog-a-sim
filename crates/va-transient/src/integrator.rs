@@ -1638,6 +1638,21 @@ pub fn run_with_events(
             } else {
                 err_ratio
             };
+            // **The seed rule** (2.3.0). The first step from the seed is judged against `x0`,
+            // and a `UIC` seed is not a solution: every unknown without an initial condition is
+            // zero while the sources are already at their `t = 0` values. A row that carries
+            // state but is pinned to a source through a compact model's internal resistance
+            // (PSP103's internal source node, tied to a 1.65 V source line through its
+            // terminal) must then jump, at every step size, and so must the source's own row —
+            // the floor rule above cannot forgive it, because it is a row *with* state that
+            // complains. The step at the floor is exactly the `t = 0+` solution that `UIC`
+            // means: every charge held at its initial value, everything else settled. So at
+            // the floor, on the run's first step only, accept it and restart there as after a
+            // breakpoint (backward Euler, history cut to this point), so the seed's jump is
+            // never differenced again. Only steps about to end the run reach this, which keeps
+            // every run that integrated before bit-identical.
+            let seed_jump = at_floor && waveform.t.len() == 1 && stateful_ratio > 1.0;
+            let err_ratio = if seed_jump { 0.0 } else { err_ratio };
             let err_ratio = if at_floor && stateful_ratio <= 1.0 {
                 // Proven: shrinking is not a remedy here, and what is complaining has no
                 // truncation error to complain about. Latch, so the rest of the run does not
@@ -1865,15 +1880,16 @@ pub fn run_with_events(
                 // the same ringing (`I(V6)` alternating ±25% per step) without dying of it.
                 // Backward Euler is L-stable and damps it in one step; SPICE restarts the same
                 // way.
-                first_step = lands_on_breakpoint;
-                after_breakpoint = lands_on_breakpoint;
+                let restart = lands_on_breakpoint || seed_jump;
+                first_step = restart;
+                after_breakpoint = restart;
                 stateless_reject_h = None;
 
                 t = t_next;
                 waveform.t.push(t);
                 waveform.x.push(x.clone());
                 history.insert(0, (t, x.clone()));
-                history.truncate(if lands_on_breakpoint { 1 } else { history_cap });
+                history.truncate(if restart { 1 } else { history_cap });
 
                 waveform.model_crossings.extend(crossings);
                 model_breakpoints.extend(poll.breakpoints.iter().copied().filter(|&bp| bp > t));

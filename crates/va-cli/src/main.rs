@@ -56,6 +56,7 @@ fn print_usage() {
          va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
+         --model <model.va|dir>  A Verilog-A library; repeat it to compile several as one\n                                 (each file's `include resolves in its own library)\n    \
          --plot <out.svg>        Write an SVG plot: transient waveform, .dc sweep, or AC Bode
     \n         --integration be|trap|gear  Integration method for a transient run.
                                  Default trapezoidal (second order)
@@ -141,7 +142,16 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     }
     // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
     // models, so a Verilog-A model is only needed for custom devices.
-    let model = parse_flag(args, "--model");
+    // `--model` may be repeated: every library given is compiled as one unit, each file
+    // resolving its own `` `include ``s against its own library (a technology's transistor
+    // model beside a circuit's behavioural blocks).
+    let models: Vec<String> = args
+        .windows(2)
+        .filter(|w| w[0] == "--model")
+        .map(|w| w[1].clone())
+        .collect();
+    let model =
+        (!models.is_empty()).then(|| models.join(&va_cli::MODEL_PATH_SEPARATOR.to_string()));
     let plot = parse_flag(args, "--plot");
     let analysis = if args.iter().any(|a| a == "--tran") {
         Analysis::Transient

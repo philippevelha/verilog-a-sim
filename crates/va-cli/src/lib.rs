@@ -269,24 +269,10 @@ fn model_sources(model: Option<&str>) -> Vec<(String, String)> {
     let Some(path) = model else {
         return Vec::new();
     };
-    let p = std::path::Path::new(path);
-    let files: Vec<std::path::PathBuf> = if p.is_dir() {
-        let Ok(rd) = std::fs::read_dir(p) else {
-            return Vec::new();
-        };
-        rd.filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|f| {
-                matches!(
-                    f.extension().and_then(|e| e.to_str()),
-                    Some("va") | Some("vams")
-                )
-            })
-            .collect()
-    } else {
-        vec![p.to_path_buf()]
-    };
-    files
-        .into_iter()
+    path.split(MODEL_PATH_SEPARATOR)
+        .filter(|e| !e.is_empty())
+        .filter_map(|e| library_entry_files(e).ok())
+        .flat_map(|(files, _)| files)
         .filter_map(|f| {
             std::fs::read_to_string(&f)
                 .ok()
@@ -401,10 +387,15 @@ fn files_reached_by(net: &Netlist, files: &[LibraryFile]) -> Vec<String> {
     reached
 }
 
-/// [`compile_model_path`], also returning which modules each file declared and instantiated.
-fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> {
+/// The separator between libraries in a `--model` value: `--model a --model b` reaches the
+/// library loader as `a;b`. Not `:`, which is part of every absolute Windows path.
+pub const MODEL_PATH_SEPARATOR: char = ';';
+
+/// The model files one `--model` entry names — a single file, or every `.va`/`.vams` in a
+/// directory, sorted — with the directory that file's `` `include ``s resolve against.
+fn library_entry_files(path: &str) -> Result<(Vec<std::path::PathBuf>, std::path::PathBuf)> {
     let p = std::path::Path::new(path);
-    let files: Vec<std::path::PathBuf> = if p.is_dir() {
+    if p.is_dir() {
         let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(p)
             .with_context(|| format!("reading model directory {path}"))?
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -418,21 +409,36 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
         // Sorted so a library compiles identically on every platform and every run: the
         // elaborated module order reaches `build_instance` and, through it, unknown indices.
         v.sort();
-        v
+        Ok((v, p.to_path_buf()))
     } else {
-        vec![p.to_path_buf()]
-    };
+        let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        Ok((vec![p.to_path_buf()], dir))
+    }
+}
+
+/// [`compile_model_path`], also returning which modules each file declared and instantiated.
+///
+/// `path` may name several libraries separated by [`MODEL_PATH_SEPARATOR`] (a technology's
+/// transistor model beside a circuit's behavioural blocks, say). Each file's `` `include ``s
+/// resolve against its own library's directory only, so two libraries that each ship a
+/// `disciplines.vams` do not pick up each other's; the modules of all of them then elaborate
+/// as one unit, in the order the libraries were given.
+fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> {
+    let mut files: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut include_dirs: Vec<std::path::PathBuf> = Vec::new();
+    for entry in path.split(MODEL_PATH_SEPARATOR).filter(|e| !e.is_empty()) {
+        let (entry_files, dir) = library_entry_files(entry)?;
+        if entry_files.is_empty() {
+            bail!("no `.va`/`.vams` model files found in {entry}");
+        }
+        files.extend(entry_files.into_iter().map(|f| (f, dir.clone())));
+        if !include_dirs.contains(&dir) {
+            include_dirs.push(dir);
+        }
+    }
     if files.is_empty() {
         bail!("no `.va`/`.vams` model files found in {path}");
     }
-
-    let include_dirs: Vec<std::path::PathBuf> = if p.is_dir() {
-        vec![p.to_path_buf()]
-    } else {
-        p.parent()
-            .map(|d| vec![d.to_path_buf()])
-            .unwrap_or_default()
-    };
 
     // Pass 1: parse every file, accumulating modules and the discipline/nature tables their
     // own includes brought in. Later files do not override earlier definitions -- a library
@@ -441,10 +447,10 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
     let mut library_files: Vec<LibraryFile> = Vec::new();
     let mut disciplines = std::collections::HashMap::new();
     let mut natures = std::collections::HashMap::new();
-    for f in &files {
+    for (f, dir) in &files {
         let name = f.display().to_string();
         let src = std::fs::read_to_string(f).with_context(|| format!("reading model {name}"))?;
-        let pre = va_frontend::preprocess::preprocess_named(&src, &include_dirs, &name)
+        let pre = va_frontend::preprocess::preprocess_named(&src, std::slice::from_ref(dir), &name)
             .0
             .with_context(|| format!("preprocessing {name}"))?;
         // A directive the LRM gives no Verilog-A meaning is accepted and said so, once.
@@ -5388,6 +5394,11 @@ R2 out gnd 10k
     /// The fixture is a hand-written stand-in rather than one of those files, because
     /// `external/` is gitignored and a test may not depend on it. What it reproduces is the
     /// property that matters: charge on a node that is *not* zero at `x = 0`.
+    ///
+    /// Since 2.3.0 the `UIC` half integrates too: va-transient's seed rule accepts the first
+    /// step at the floor as the `t = 0+` solution, which is what this test's second assertion
+    /// was kept to announce. It now checks that the start from rest is the *right* one: the
+    /// capacitor holds 0 V and charges along `0.909·(1 − e^(−t/90.9 ns))`.
     #[test]
     fn a_model_whose_charge_is_nonzero_at_the_origin_needs_the_operating_point() {
         const SRC: &str = "
@@ -5419,17 +5430,34 @@ endmodule
             "from the operating point this must integrate: {from_op:?}"
         );
 
-        // And the old behaviour, still reachable through `UIC`, is the one that could not.
-        // Kept as an assertion rather than a comment so that if the integrator ever learns to
-        // start from rest here, this test says so instead of quietly passing.
-        let net_uic = va_netlist::parser::parse(&deck(" UIC")).expect("parses");
-        let from_rest = solve_transient(&net_uic, &design.modules, Integration::Trapezoidal);
-        assert!(
-            from_rest.is_err(),
-            "starting from rest was expected to fail on a charge that is non-zero at the \
-             origin; if that stopped being true, this test no longer shows why the default \
-             had to change"
-        );
+        // From rest (`UIC`): until 2.3.0 this underflowed at `t = 0`; now it must start at 0 V
+        // and follow the RC curve -- R1 = 100 ohm into 1 nF with the model's own 1 kOhm shunt:
+        // V_final = 1000/1100, tau = (100 || 1000) * 1 nF.
+        let net_uic = va_netlist::parser::parse(
+            "V1 in gnd DC 1
+R1 in out 100
+X1 out gnd offsetcap
+.tran 10n 1u UIC
+.end
+",
+        )
+        .expect("parses");
+        let wf = solve_transient(&net_uic, &design.modules, Integration::Trapezoidal)
+            .expect("starts from rest since the seed rule");
+        let out = net_uic
+            .node_order
+            .iter()
+            .position(|n| n == "out")
+            .expect("out");
+        assert!(wf.x[1][out].abs() < 1e-3, "V(out) at 0+ = {}", wf.x[1][out]);
+        let (v_final, tau) = (1000.0 / 1100.0, 1e-9 * 100.0 * 1000.0 / 1100.0);
+        for (t, v) in wf.t.iter().zip(wf.x.iter().map(|x| x[out])) {
+            let want = v_final * (1.0 - libm::exp(-t / tau));
+            assert!(
+                (v - want).abs() < 2e-3,
+                "V(out) at t = {t:e} = {v}, want {want}"
+            );
+        }
     }
 
     /// End-to-end DC sweep (ladder rung 2): compile `models/diode.va` and sweep
@@ -7500,6 +7528,36 @@ endmodule
     /// The fixture mirrors the shape the photonic corpus is written in: a parent driving an
     /// internal net by potential contribution, a child instanced through a *slice* of a wider
     /// vector net, and the child driving its own output the same way.
+    /// Two libraries as one (`--model a --model b`, 2.3.0): the SNN's behavioural blocks and
+    /// IHP's PSP103, each resolving its own `` `include ``s (`../disciplines.vams` and
+    /// `discipline.h`) in its own directory. And the run that motivated va-transient's seed
+    /// rule: a cold start with a PSP103 internal node pinned to a driven source line, which
+    /// ended in `TimestepUnderflow` at `t = 0` before it (discriminating, checked by disabling
+    /// the rule).
+    #[test]
+    fn two_model_libraries_compile_as_one_and_a_cold_psp103_start_integrates() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let libs =
+            format!("{root}/models/snn{MODEL_PATH_SEPARATOR}{root}/models/sg13g2/psp103/psp103.va");
+        let (net, compiled) = load(
+            &format!("{root}/circuits/snn/transistor/uic_access.net"),
+            Some(&libs),
+        )
+        .expect("both libraries compile");
+        assert!(compiled.iter().any(|m| m.name == "rram"));
+        assert!(compiled.iter().any(|m| m.name == "PSP103VA"));
+
+        let wf = solve_transient(&net, &compiled, Integration::Trapezoidal).expect("integrates");
+        let p1 = net.node_order.iter().position(|n| n == "p1").expect("p1");
+        // Word line high (0..250 ns): the RRAM/R_on divider above V_ref, R_on ~ 377 ohm.
+        let i = wf.t.iter().position(|&t| t >= 200e-9).expect("200 ns");
+        let v = wf.x[i][p1];
+        assert!(
+            (v - 1.6545).abs() < 1e-3,
+            "V(p1) with the word line high = {v}"
+        );
+    }
+
     #[test]
     fn a_models_implicit_ground_is_the_circuits_ground() {
         let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/veclib2");

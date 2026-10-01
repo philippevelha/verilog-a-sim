@@ -22,6 +22,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.3.0 - 2026-10-01
+------------------
+**The SNN gets real transistors: an IHP SG13G2 technology layer, two model libraries in one run,
+and a cold start that PSP103 survives.** The first step toward a transistor-level SNN, built so
+that the foundry's SG13S models can replace the stand-in without touching the decks.
+
+  * `models/sg13g2/`: IHP's open-PDK PSP 103.8.2 (unchanged, plus `discipline.h`) and
+    `sg13g2_cards.py`, which evaluates the PDK's ngspice libraries (typical corner, pre-layout,
+    non-RF) into flat cards, one per geometry. SG13G2 is the public sibling of the paper's
+    SG13S, not the same process. **Not validated against a reference simulator** (QSPICE
+    cannot run PSP103 Verilog-A; ngspice declined for now: these devices are a stand-in).
+  * `circuits/snn/transistor/`: `tech.py`, the swappable technology layer every MOS device goes
+    through, and `fig5_access.net`, the Fig. 5 deck with its 8 access switches as
+    W/L = 10/0.45 µm HV NMOS.
+  * `va-cli sim --model` can repeat. The libraries compile as one, and each file resolves its
+    `` `include ``s in its own library only (the SNN blocks' `../disciplines.vams` beside
+    PSP103's `discipline.h`).
+  * **va-transient's seed rule.** From a cold (`UIC`) seed, a row with state pinned to a driven
+    source through a compact model's terminal resistance (PSP103's internal source node on a
+    1.65 V source line) has to jump at every step size. The controller shrank to the floor and
+    the run died at t = 0. The floor-sized first step is the t = 0+ solution UIC means, so it
+    is now accepted and followed by a restart. This is a behaviour change, but only for runs
+    that used to fail: `xtask validate` output, Fig. 4, Fig. 5, the PSP103 inverter and
+    c17_tran are bit-identical before and after. One existing test asserted that a model with
+    charge non-zero at the origin *cannot* start from rest, and said it was kept to announce
+    the day that changed. It now integrates, so the test checks that it starts correctly
+    instead: within 2 mV of the closed-form RC curve.
+
+  Measured (i7-1185G7): the access transistor's R_on in place is **377 Ω at W = 10 µm and
+  3.7 kΩ at 1 µm**, against the ideal switch's 10 Ω and LRS1's 8 kΩ. So the weight codebook
+  shifts. Fig. 5's output spikes stay at steps 6, 10, 14, but V_m departs from the paper's
+  equations by 0.131 V (ideal switches: 0.012 V). **Cost: 4.0 s → 64.3 s** for the Fig. 5
+  deck (8 threads; 115.5 s on 1). Timepoints grow 1.3×, and the cost per timepoint grows 12×,
+  which puts one PSP103 evaluation at about 200 µs. That is the figure to bring down before
+  the MNIST network (17 664 access transistors) is attempted at transistor level.
+  `cargo test --workspace` 924 passed, 0 failed; `xtask validate` 28/28.
+
+
 2.2.0+3 - 2026-09-29
 --------------------
 **`/slides/` ignored by git.** A local Quarto presentation of the simulator lives there and is kept

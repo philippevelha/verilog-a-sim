@@ -18,7 +18,8 @@ neuron matches the snnTorch neuron it was trained as.
 Plots: `fig4_reproduced.png` and `fig5_reproduced.png` (clock, input spikes, V_m and the output
 spike in continuous time, then V_m per timestep against the references).
 
-**Not reproduced:** the transistor-level circuit itself, the ECG and MNIST networks (Figs. 7–10),
+**Not reproduced:** the transistor-level circuit itself (in progress in `transistor/`, with IHP's
+open SG13G2 devices standing in for SG13S), the ECG and MNIST networks (Figs. 7–10),
 the process corners (Fig. 11), and the power figures (Tables I–II). The circuit is built at the
 level of the paper's functional diagram (Fig. 3), because the IHP SG13S process with its MEMRES
 module is not public and the paper gives no device sizes. What that level keeps and drops:
