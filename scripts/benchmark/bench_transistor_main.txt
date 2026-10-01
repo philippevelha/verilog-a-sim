@@ -1,0 +1,27 @@
+verilog-a-sim — SNN Fig. 5 neuron: ideal switches vs SG13G2 access transistors — Linux
+date (UTC):    2026-10-01 13:50:08
+checkout:      n/a 
+va-cli:        target/release/va-cli
+va-cli sha256: 53c57054c92a1aacc4d82e203fc2a68949faf53af163acc29288e642b4c73d8e
+extra env:     none
+
+== machine
+os:           Ubuntu 26.04.1 LTS
+kernel:       Linux 7.0.0-29-generic x86_64
+cpu:          AMD Ryzen 9 9950X 16-Core Processor
+logical cpus: 32
+memory:       89.7 GiB
+governor:     performance
+load avg:     1.67 0.96 0.69 (before the runs)
+
+== runs (wall time = the va-cli run alone)
+beh  deck=circuits/snn/fig5_neuron.net threads=default
+    exit=0 wall=1.22s unknowns=80 timepoints=10707 sha256=bcbc334594e21623
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.0117 V (tolerance 0.05 V);PASS;
+acc  deck=circuits/snn/transistor/fig5_access.net threads=default
+    exit=0 wall=18.19s unknowns=208 timepoints=13645 sha256=6681705b2247eea9
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.1305 V (tolerance 0.05 V);FAIL;
+acc1  deck=circuits/snn/transistor/fig5_access.net threads=--threads 1
+    exit=0 wall=64.53s unknowns=208 timepoints=13645 sha256=6681705b2247eea9
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.1305 V (tolerance 0.05 V);FAIL;
+

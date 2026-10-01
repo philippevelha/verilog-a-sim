@@ -1,0 +1,35 @@
+verilog-a-sim — SNN Fig. 5 neuron: ideal switches vs SG13G2 access transistors — Linux
+date (UTC):    2026-10-01 13:54:23
+checkout:      n/a 
+va-cli:        target/release/va-cli
+va-cli sha256: f6cf5b1a127ba8c4da4c7163dcd1cdf5437a9eb4fc89c60547431880567b7374
+extra env:     none
+
+== machine
+os:           Ubuntu 26.04.1 LTS
+kernel:       Linux 7.0.0-29-generic x86_64
+cpu:          AMD Ryzen 9 9950X 16-Core Processor
+logical cpus: 32
+memory:       89.7 GiB
+governor:     performance
+load avg:     2.54 1.79 1.12 (before the runs)
+
+== runs (wall time = the va-cli run alone)
+beh  deck=circuits/snn/fig5_neuron.net threads=default
+    exit=0 wall=1.24s unknowns=80 timepoints=10707 sha256=bcbc334594e21623
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.0117 V (tolerance 0.05 V);PASS;
+acc  deck=circuits/snn/transistor/fig5_access.net threads=default
+    exit=0 wall=17.85s unknowns=208 timepoints=13645 sha256=6681705b2247eea9
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.1305 V (tolerance 0.05 V);FAIL;
+acc1  deck=circuits/snn/transistor/fig5_access.net threads=--threads 1
+    exit=0 wall=64.40s unknowns=208 timepoints=13645 sha256=6681705b2247eea9
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.1305 V (tolerance 0.05 V);FAIL;
+acc_bp  deck=circuits/snn/transistor/fig5_access.net threads=default
+    exit=0 wall=9.71s unknowns=208 timepoints=13645 sha256=a0c313221464c3a6
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.1305 V (tolerance 0.05 V);FAIL;
+    bypass: 35 of 74 instances eligible; 1800043 of 2078720 eligible loads replayed (86.6%)
+acc1_bp  deck=circuits/snn/transistor/fig5_access.net threads=--threads 1
+    exit=0 wall=9.89s unknowns=208 timepoints=13645 sha256=a0c313221464c3a6
+    check: output spikes, equations: steps [6, 10, 14];circuit vs equations: worst |dV| = 0.1305 V (tolerance 0.05 V);FAIL;
+    bypass: 35 of 74 instances eligible; 1800043 of 2078720 eligible loads replayed (86.6%)
+

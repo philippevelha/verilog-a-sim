@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.3.0+3 - 2026-10-01
+--------------------
+**The transistor-deck benchmark on Linux, with and without device bypass.** `scripts/benchmark/
+bench_transistor_main.txt` (`main` at 2.3.0+1) and `bench_transistor_bypass.txt` (branch
+`proto/device-bypass`), both run by `bench_transistor_linux.sh` on an AMD Ryzen 9 9950X (32
+threads, Ubuntu 26.04, `performance` governor). No simulator change.
+
+  * Same answers as Windows: every output hash matches the i7-1185G7 runs. That is `bcbc3345…`
+    ideal switches, `6681705b…` access transistors, and `a0c31322…` with bypass. The bypass run
+    is identical on 32 threads and on 1. Both branches give the same hash without bypass.
+  * Access transistors without bypass: 18.2 s on 32 threads, 64.5 s on 1 (Windows i7: 56–61 s
+    and 116 s). The ideal-switch deck takes 1.2 s.
+  * **With bypass: 9.7 s on 32 threads, 9.9 s on 1 thread**, against 17.9 s and 64.4 s without.
+    That is 1.8× on 32 threads and **6.5× on one**. Threads stop helping once bypass is on: each
+    assembly has few devices left to evaluate, too few to be worth spreading across threads.
+  * The scripts' `checkout:` line reads `n/a` on that machine (git could not report the commit);
+    the branch is identified by the bypass runs and the binary hashes instead.
+
+
 2.3.0+2 - 2026-10-01
 --------------------
 **PSP103 profiled on the SG13G2 card: allocation and zeros, not maths.** Adds `cargo xtask
