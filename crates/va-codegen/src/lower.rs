@@ -930,6 +930,21 @@ pub struct Lowered {
     /// `crate::GeneratedModel::is_frequency_dependent` reports, and hence whether an AC sweep
     /// pays for per-frequency re-linearization.
     pub has_laplace: bool,
+    /// Whether the module reads nothing but its unknowns: no analysis context (`$abstime`,
+    /// `analysis()`, `$simparam`, initial/final step), no state-carrying operator other than a
+    /// top-level `ddt` (which goes to the charge channel as a pure `q(x)`), no event, and no
+    /// `$bound_step`. With [`Self::state_len`] zero this makes `load` a pure function of `x`,
+    /// what `crate::GeneratedModel::is_pure_in_x` reports for device bypass. Conservative: an
+    /// expression anywhere in the arena counts, used or not.
+    pub reads_only_x: bool,
+    /// Whether any `ddt` is evaluated as part of an expression — inside a resistive term, an
+    /// assignment, a condition, or a charge coefficient — rather than being a whole charge
+    /// term. Such a `ddt` reconstructs its rate from committed history
+    /// (`ad::eval`'s `Builtin::Ddt` arm), so its load is not a function of `x` alone. A whole
+    /// charge term is: its `q(x)` goes to the charge channel and the integrator supplies
+    /// `d/dt`. (Every `ddt` site is allocated state slots either way, so `state_len` cannot
+    /// tell the two apart.)
+    pub evaluates_ddt: bool,
     /// Total `f64` slots this model needs on the state channel — the sum of every
     /// [`StatefulCall`]'s width plus one per [`PersistentVar`], and what `crate::GeneratedModel::state_len` reports.
     pub state_len: usize,
@@ -1292,6 +1307,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
     let mut zi_terms = Vec::new();
     collect_zi_terms(&stmts, &mut zi_terms);
 
+    let evaluates_ddt = evaluates_ddt(module, &stmts);
     let static_prefix = static_prefix_len(module, &stmts);
     let invariance = invariance(module, &stmts, &persistent);
     Ok(Lowered {
@@ -1308,6 +1324,8 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         persistent_vars,
         state_len,
         has_laplace,
+        reads_only_x: reads_only_x(module),
+        evaluates_ddt,
         static_prefix,
         invariance,
     })
@@ -3506,6 +3524,119 @@ fn expr_is_invariant(
     };
     memo.insert(expr.0, answer);
     answer
+}
+
+/// [`Lowered::evaluates_ddt`].
+fn evaluates_ddt(module: &Module, stmts: &[LoweredStmt]) -> bool {
+    fn expr(module: &Module, e: ExprId, memo: &mut HashMap<u32, bool>) -> bool {
+        if let Some(&hit) = memo.get(&e.0) {
+            return hit;
+        }
+        let answer = match module.expr(e) {
+            Expr::Call(Builtin::Ddt, _) => true,
+            Expr::Call(_, args) | Expr::CallUser(_, args) => {
+                args.iter().any(|&a| expr(module, a, memo))
+            }
+            Expr::Unary(_, a) | Expr::Ddx(a, _) => expr(module, *a, memo),
+            Expr::Binary(_, a, b) => expr(module, *a, memo) || expr(module, *b, memo),
+            Expr::Select(c, a, b) => {
+                expr(module, *c, memo) || expr(module, *a, memo) || expr(module, *b, memo)
+            }
+            _ => false,
+        };
+        memo.insert(e.0, answer);
+        answer
+    }
+    fn walk(module: &Module, stmts: &[LoweredStmt], memo: &mut HashMap<u32, bool>) -> bool {
+        stmts.iter().any(|s| match s {
+            LoweredStmt::Assign { rhs, .. } => expr(module, *rhs, memo),
+            LoweredStmt::BoundStep(e) => expr(module, *e, memo),
+            LoweredStmt::Contribute(c) => {
+                c.resistive.iter().any(|t| expr(module, t.expr, memo))
+                    || c.charge.iter().any(|t| {
+                        expr(module, t.expr, memo)
+                            || t.coeffs.iter().any(|&(k, _)| expr(module, k, memo))
+                    })
+            }
+            LoweredStmt::If { cond, then_, else_ } => {
+                expr(module, *cond, memo) || walk(module, then_, memo) || walk(module, else_, memo)
+            }
+            LoweredStmt::Case {
+                selector,
+                arms,
+                default,
+            } => {
+                expr(module, *selector, memo)
+                    || arms.iter().any(|a| {
+                        a.labels.iter().any(|&l| expr(module, l, memo))
+                            || walk(module, &a.body, memo)
+                    })
+                    || walk(module, default, memo)
+            }
+            LoweredStmt::While { cond, body } => {
+                expr(module, *cond, memo) || walk(module, body, memo)
+            }
+            LoweredStmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                walk(module, init, memo)
+                    || expr(module, *cond, memo)
+                    || walk(module, step, memo)
+                    || walk(module, body, memo)
+            }
+            LoweredStmt::Repeat { count, body } => {
+                expr(module, *count, memo) || walk(module, body, memo)
+            }
+        })
+    }
+    walk(module, stmts, &mut HashMap::new())
+}
+
+/// [`Lowered::reads_only_x`].
+fn reads_only_x(module: &Module) -> bool {
+    fn has_bound_step(stmts: &[va_ir::Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            va_ir::Stmt::BoundStep(_) => true,
+            va_ir::Stmt::Assign { .. } | va_ir::Stmt::Contribute { .. } => false,
+            va_ir::Stmt::If { then_, else_, .. } => has_bound_step(then_) || has_bound_step(else_),
+            va_ir::Stmt::Block(b)
+            | va_ir::Stmt::While { body: b, .. }
+            | va_ir::Stmt::Repeat { body: b, .. } => has_bound_step(b),
+            va_ir::Stmt::For {
+                init, step, body, ..
+            } => {
+                has_bound_step(std::slice::from_ref(init.as_ref()))
+                    || has_bound_step(std::slice::from_ref(step.as_ref()))
+                    || has_bound_step(body)
+            }
+            va_ir::Stmt::Case { arms, default, .. } => {
+                arms.iter().any(|a| has_bound_step(&a.body)) || has_bound_step(default)
+            }
+        })
+    }
+    let exprs_pure = module.exprs.iter().all(|e| match e {
+        // A top-level `ddt` is a pure `q(x)` on the charge channel (a nested one allocates
+        // state, which `state_len` excludes). A noise source is `0.0` in `load` -- its
+        // stamps go to the noise channel, which bypass never touches.
+        Expr::Call(
+            Builtin::Ddt
+            | Builtin::WhiteNoise
+            | Builtin::FlickerNoise
+            | Builtin::NoiseTable
+            | Builtin::NoiseTableLog,
+            _,
+        ) => true,
+        Expr::Call(b, _) => builtin_is_bias_free(*b),
+        Expr::EventFired(_) => false,
+        _ => true,
+    });
+    exprs_pure
+        && module.event_sites.is_empty()
+        && !has_bound_step(&module.analog)
+        && !module.functions.iter().any(|f| has_bound_step(&f.body))
 }
 
 fn builtin_is_bias_free(builtin: Builtin) -> bool {

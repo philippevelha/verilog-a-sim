@@ -23,14 +23,15 @@
 #     bash scripts/benchmark/bench_transistor_linux.sh target/release/va-cli
 # python3 (standard library only) for the check. The SG13G2 cards are committed
 # (circuits/snn/transistor/tech.inc); the PDK checkout is not needed.
-# Environment: RUNS="beh acc acc1" picks runs (acc1 = transistor deck on one thread);
+# Environment: RUNS="beh acc acc1" picks runs (acc1 = transistor deck on one thread; on the
+#              proto/device-bypass branch also acc_bp, acc1_bp = the same with VA_BYPASS=on);
 #              EXTRA_ENV="VAR=value ..." is passed to every va-cli run (e.g. a simulator switch).
 # Send back bench_transistor.txt.
 # =============================================================================================
 set -u
 VA=${1:?usage: bench_transistor_linux.sh /path/to/va-cli}
 OUT=bench_transistor.txt
-RUNS=${RUNS:-beh acc acc1}
+RUNS=${RUNS:-beh acc acc1 acc_bp acc1_bp}
 [ -x "$VA" ] || { echo "not an executable: $VA"; exit 1; }
 [ -f circuits/snn/transistor/fig5_access.net ] || {
   echo "Run this from the root of a verilog-a-sim checkout at or after 2.3.0."; exit 1; }
@@ -65,23 +66,32 @@ for r in $RUNS; do
           models=(--model models/snn --model models/sg13g2/psp103/psp103.va); thr=() ;;
     acc1) deck=circuits/snn/transistor/fig5_access.net
           models=(--model models/snn --model models/sg13g2/psp103/psp103.va); thr=(--threads 1) ;;
+    # device bypass (branch proto/device-bypass only; another va-cli ignores VA_BYPASS and
+    # just repeats the run, so check bench_transistor.txt's 'bypass:' line)
+    acc_bp|acc1_bp)
+          deck=circuits/snn/transistor/fig5_access.net
+          models=(--model models/snn --model models/sg13g2/psp103/psp103.va)
+          thr=(); [ "$r" = acc1_bp ] && thr=(--threads 1) ;;
     *) echo "unknown run $r" | tee -a "$OUT"; continue ;;
   esac
   f=transistor-out/$r.out
   echo "$r: simulating $deck ${thr[*]:-} ..."
   t0=$(date +%s.%N)
-  env ${EXTRA_ENV:-} "$VA" sim "$deck" "${models[@]}" "${thr[@]}" --tran \
+  bp=(); case $r in *_bp) bp=(VA_BYPASS=on) ;; esac
+  env ${EXTRA_ENV:-} "${bp[@]}" "$VA" sim "$deck" "${models[@]}" "${thr[@]}" --tran \
       --report clk,wl1,vm,spk > "$f" 2> "$f.err"
   rc=$?
   t1=$(date +%s.%N)
   wall=$("$PY" -c "print(f'{$t1-$t0:.2f}')")
   pts=$(sed -n 's/^Transient analysis (\([0-9]*\) points.*/\1/p' "$f")
   unk=$(sed -n 's/.*circuit: .* \([0-9]*\) unknown(s).*/\1/p' "$f.err" | head -1)
+  bpl=$(grep -o 'bypass: .*' "$f.err" | head -1)
   chk=$("$PY" circuits/snn/check_snn.py fig5 "$f" 2>&1 | grep -E "output spikes, equations|circuit vs equations|PASS|FAIL" | tr '\n' ';')
   {
     echo "$r  deck=$deck threads=${thr[*]:-default}"
     echo "    exit=$rc wall=${wall}s unknowns=${unk:-?} timepoints=${pts:-?} sha256=$(sha256sum "$f" | cut -c1-16)"
     echo "    check: $chk"
+    [ -n "$bpl" ] && echo "    $bpl"
   } >> "$OUT"
   echo "$r: exit $rc, ${wall} s"
 done
