@@ -920,7 +920,12 @@ fn assemble(
     match linear {
         Linear::Dense => {
             let mut sink = DenseStamp::new(dim);
-            va_core::par::load_all(instances, x, &ctx, state.states(fired), &mut sink);
+            match state.states_and_bypass(fired) {
+                (states, Some(bp)) => {
+                    va_core::par::load_all_bypass(instances, x, &ctx, states, &mut sink, bp)
+                }
+                (states, None) => va_core::par::load_all(instances, x, &ctx, states, &mut sink),
+            }
             Assembled {
                 residual: sink.residual,
                 charge: sink.charge,
@@ -931,7 +936,12 @@ fn assemble(
         }
         Linear::Sparse { sys, .. } => {
             sys.clear();
-            va_core::par::load_all(instances, x, &ctx, state.states(fired), sys.as_mut());
+            match state.states_and_bypass(fired) {
+                (states, Some(bp)) => {
+                    va_core::par::load_all_bypass(instances, x, &ctx, states, sys.as_mut(), bp)
+                }
+                (states, None) => va_core::par::load_all(instances, x, &ctx, states, sys.as_mut()),
+            }
             sys.finish();
             Assembled {
                 residual: sys.residual_values().to_vec(),
@@ -942,6 +952,28 @@ fn assemble(
             }
         }
     }
+}
+
+/// The bypass cache `VA_BYPASS=on` asks for, with `VA_BYPASS_RELTOL`/`VA_BYPASS_ABSTOL`
+/// (defaults 1e-6 and 1e-9 V). Read from the environment because this is a prototype
+/// (branch `proto/device-bypass`): a kept version would be a `TranConfig` field set by
+/// `va-cli`, as `btf` is.
+fn bypass_from_env(instances: &[&dyn ModelInstance]) -> Option<va_core::par::Bypass> {
+    let on = std::env::var("VA_BYPASS").is_ok_and(|v| v == "on" || v == "1");
+    if !on {
+        return None;
+    }
+    let num = |k: &str, d: f64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(d)
+    };
+    Some(va_core::par::Bypass::new(
+        instances,
+        num("VA_BYPASS_RELTOL", 1e-6),
+        num("VA_BYPASS_ABSTOL", 1e-9),
+    ))
 }
 
 /// The consumer half of Interface β's state channel: one flat `committed` buffer holding state
@@ -959,6 +991,9 @@ struct StateBuffers {
     offsets: Vec<usize>,
     committed: Vec<f64>,
     scratch: Vec<f64>,
+    /// Device bypass (`va_core::par::Bypass`), when `VA_BYPASS=on` (prototype, 2026-10-01).
+    /// Kept here because every assembly already carries this struct.
+    bypass: Option<va_core::par::Bypass>,
 }
 
 impl StateBuffers {
@@ -975,6 +1010,7 @@ impl StateBuffers {
             offsets,
             committed: vec![0.0; total],
             scratch: vec![0.0; total],
+            bypass: bypass_from_env(instances),
         }
     }
 
@@ -997,7 +1033,15 @@ impl StateBuffers {
     /// (`va_core::par::load_all`). Committed and proposal are two different buffers, so the
     /// borrow checker permits the simultaneous `&`/`&mut` — which is also exactly the
     /// read-old/write-new invariant the contract requires.
-    fn states<'a>(&'a mut self, fired: &'a FiredEvents) -> Vec<va_abi::ModelState<'a>> {
+    ///
+    /// Returned with the bypass cache beside them (a disjoint borrow).
+    fn states_and_bypass<'a>(
+        &'a mut self,
+        fired: &'a FiredEvents,
+    ) -> (
+        Vec<va_abi::ModelState<'a>>,
+        Option<&'a mut va_core::par::Bypass>,
+    ) {
         let mut out = Vec::with_capacity(self.offsets.len().saturating_sub(1));
         let mut rest: &mut [f64] = &mut self.scratch;
         for (i, w) in self.offsets.windows(2).enumerate() {
@@ -1010,7 +1054,7 @@ impl StateBuffers {
             ));
             rest = tail;
         }
-        out
+        (out, self.bypass.as_mut())
     }
 
     /// Promote the last evaluation's proposal to history. Called only from an **accepted**
@@ -1940,6 +1984,18 @@ pub fn run_with_events(
     }
 
     waveform.unresolved_events = unresolved_events;
+    // Prototype diagnostics (`VA_BYPASS=on` only): how much the bypass saved.
+    if let Some(bp) = &state.bypass {
+        let total = bp.hits + bp.misses;
+        eprintln!(
+            "[va-transient] bypass: {} of {} instances eligible; {} of {} eligible loads replayed ({:.1}%)",
+            bp.eligible_count(),
+            instances.len(),
+            bp.hits,
+            total,
+            100.0 * bp.hits as f64 / (total.max(1) as f64)
+        );
+    }
     Ok(waveform)
 }
 

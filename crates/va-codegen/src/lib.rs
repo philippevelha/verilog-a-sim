@@ -2428,6 +2428,21 @@ impl ModelInstance for GeneratedModel {
     fn is_frequency_dependent(&self) -> bool {
         self.shared.lowered.has_laplace
     }
+
+    /// Pure in `x` when the module reads nothing but its unknowns (`lower::Lowered::
+    /// reads_only_x`) and keeps no history: no `ddt` evaluated inside an expression (a whole
+    /// charge term is pure — `lower::Lowered::evaluates_ddt`), no persistent variable, no
+    /// `idt`/`laplace_*`/`zi_*` state. Then two loads at the same `x` stamp the same values
+    /// whatever the time, the step or the history, which is what device bypass relies on.
+    fn is_pure_in_x(&self) -> bool {
+        let l = &self.shared.lowered;
+        l.reads_only_x
+            && !l.evaluates_ddt
+            && l.persistent_vars.is_empty()
+            && l.idt_accumulators.is_empty()
+            && l.laplace_terms.is_empty()
+            && l.zi_terms.is_empty()
+    }
 }
 
 impl GeneratedModel {

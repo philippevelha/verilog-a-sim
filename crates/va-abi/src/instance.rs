@@ -178,6 +178,19 @@ pub trait ModelInstance: Send + Sync {
         false
     }
 
+    /// Whether [`Self::load`]'s stamps are a **pure function of `x`**: two calls at the same
+    /// `x` emit the same values whatever the analysis context (time, step, phase, `gmin`) and
+    /// whatever the state. A consumer may then reuse an earlier load's stamps when `x` has not
+    /// moved on this instance's unknowns — SPICE's device bypass.
+    ///
+    /// **Proposed §6 change (prototype, branch `proto/device-bypass`, 2026-10-01), not
+    /// ratified.** Default `false`, so every existing implementor keeps compiling and is never
+    /// bypassed. Answering `true` wrongly gives silently stale answers, so an implementor says
+    /// it only when it is provable. Must be constant for the lifetime of the instance.
+    fn is_pure_in_x(&self) -> bool {
+        false
+    }
+
     /// Emit this instance's own **noise sources** at operating point `x` into `sink` —
     /// Interface β's noise channel (§4/§6 additive change, 2026-08-01; see [`crate::noise`] for
     /// what a source means and what this channel deliberately cannot express).

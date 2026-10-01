@@ -7558,6 +7558,60 @@ endmodule
         );
     }
 
+    /// `is_pure_in_x` (device-bypass prototype): asserted as the property bypass relies on, not
+    /// only as flags. Every module that claims purity must stamp the same values at the same
+    /// `x` under a different time, step coefficients and committed state; the ones that read
+    /// time or carry a `ddt` inside an expression must not claim it.
+    #[test]
+    fn a_pure_in_x_model_stamps_the_same_at_the_same_x_whatever_the_context() {
+        let module = |body: &str| {
+            format!(
+                "module m(p, n); inout p, n; electrical p, n;\n\
+                 parameter real r = 1e3; parameter real c = 1e-12;\n\
+                 analog begin {body} end\nendmodule\n"
+            )
+        };
+        let cases = [
+            ("I(p,n) <+ V(p,n)/r;", true),
+            ("I(p,n) <+ V(p,n)/r + ddt(c*V(p,n)*V(p,n));", true),
+            (
+                "I(p,n) <+ V(p,n)/r + ddt(c*V(p,n)) + white_noise(4e-21, \"thermal\");",
+                true,
+            ),
+            ("I(p,n) <+ V(p,n)/r + 1e-3*$abstime;", false),
+            ("I(p,n) <+ V(p,n)/r + 1e-15*exp(ddt(V(p,n)));", false),
+            ("I(p,n) <+ V(p,n)/r + c*idt(V(p,n));", false),
+            // A bias-dependent coefficient times `ddt`: the codegen reconstructs the rate from
+            // history for the product rule's other half, so this is not pure.
+            ("I(p,n) <+ V(p,n)/r + V(p,n)*ddt(c*V(p,n));", false),
+        ];
+        for (body, want) in cases {
+            let design = va_frontend::compile(&module(body)).expect("compiles");
+            let inst =
+                va_codegen::build_instance(&design.modules[0], &[0, 1], &mut 2).expect("builds");
+            assert_eq!(inst.is_pure_in_x(), want, "is_pure_in_x for `{body}`");
+            if !want {
+                continue;
+            }
+            let x = vec![0.7, 0.1, 0.0, 0.0];
+            let n = inst.state_len();
+            let stamp = |ctx: va_abi::AnalysisCtx, committed: f64| {
+                let prev = vec![committed; n];
+                let mut next = vec![0.0; n];
+                let mut st = va_abi::ModelState::new(&prev, &mut next);
+                let mut d = va_abi::stamps::DenseStamp::new(4);
+                inst.load(&x, &ctx, &mut st, &mut d);
+                (d.residual, d.jacobian, d.charge, d.dcharge)
+            };
+            let a = stamp(va_abi::AnalysisCtx::transient(1e-9).with_ddt(2e9, 1.0), 0.0);
+            let b = stamp(
+                va_abi::AnalysisCtx::transient(7e-6).with_ddt(5e10, 0.0),
+                0.37,
+            );
+            assert_eq!(a, b, "a pure-in-x model stamped differently for `{body}`");
+        }
+    }
+
     #[test]
     fn a_models_implicit_ground_is_the_circuits_ground() {
         let lib = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/veclib2");
