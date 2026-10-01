@@ -34,6 +34,7 @@ fn main() -> Result<()> {
         Some("bench-dense") => bench_dense::bench_dense(),
         Some("bench-scale") => bench_scale(&rest),
         Some("bench-model") => bench_model(&rest),
+        Some("bench-instance") => bench_instance(&rest),
         Some("deck-diff") => deck_diff(&rest),
         Some("deck-run") => repro::deck_run(&rest),
         Some("deck-compare") => repro::deck_compare(&rest),
@@ -2698,6 +2699,99 @@ fn bench_one_model(path: &Path) -> Result<ModelBenchRow> {
         visited,
         hoistable,
     })
+}
+
+/// `bench-instance <deck> --model <lib> [--model <lib> ...] [--dc] [--reps N]`: one `load()` of every compiled
+/// instance of a real deck, at the deck's own DC operating point, under a transient context —
+/// the cost the transient pays per device per Newton iteration, with the deck's model cards and
+/// bias rather than [`bench_model`]'s `.va` defaults at `x = 0.1`.
+///
+/// Prints, per compiled instance: unknowns, state slots, best-of-batches µs per `load`, and the
+/// evaluator's per-load counters (expressions visited, gradient allocations/clones/in-place).
+/// Instances are numbered in assembly order; the deck's device lines are listed beside them only
+/// when the counts agree, since a device can build more than one instance.
+fn bench_instance(args: &[String]) -> Result<()> {
+    let deck = args
+        .first()
+        .filter(|a| !a.starts_with("--"))
+        .context("usage: bench-instance <deck> --model <lib> [--model <lib> ...]")?;
+    let libs: Vec<String> = args
+        .windows(2)
+        .filter(|w| w[0] == "--model")
+        .map(|w| w[1].clone())
+        .collect();
+    let model = (!libs.is_empty()).then(|| libs.join(&va_cli::MODEL_PATH_SEPARATOR.to_string()));
+    let (net, compiled) = va_cli::load(deck, model.as_deref())?;
+    let op = va_cli::solve_dc(&net, &compiled).context("operating point")?;
+    let (instances, dim) = va_cli::instances(&net, &compiled)?;
+    let x = op.x.clone();
+    anyhow::ensure!(
+        x.len() == dim,
+        "operating point has {} rows, circuit {dim}",
+        x.len()
+    );
+    let dc = args.iter().any(|a| a == "--dc");
+    // `--reps N`: loads per timed batch (default MODEL_BENCH_REPS) — raise it to give a
+    // sampling profiler something to sample.
+    let reps: u32 = args
+        .windows(2)
+        .find(|w| w[0] == "--reps")
+        .and_then(|w| w[1].parse().ok())
+        .unwrap_or(MODEL_BENCH_REPS);
+    let actx = if dc {
+        va_abi::AnalysisCtx::dc()
+    } else {
+        va_abi::AnalysisCtx::transient(1e-9).with_ddt(2e9, 1.0)
+    };
+    let mut sink = va_abi::stamps::DenseStamp::new(dim);
+    eprintln!(
+        "[xtask] bench-instance {deck}: {} instances, {dim} unknowns; load() at the operating point, {} context",
+        instances.len(),
+        if dc { "DC" } else { "transient" }
+    );
+    eprintln!(
+        "[xtask]   {:>4} {:>6} {:>6} {:>10} {:>9} {:>10} {:>10} {:>10}",
+        "inst", "unkns", "state", "load_us", "visited", "grad_alloc", "grad_clone", "grad_inpl"
+    );
+    for (i, inst) in instances.iter().enumerate() {
+        let n = inst.state_len();
+        let prev = vec![0.0; n];
+        let mut next = vec![0.0; n];
+        let mut one = |reps: u32| {
+            for _ in 0..reps {
+                let mut st = va_abi::ModelState::new(&prev, &mut next);
+                inst.load(&x, &actx, &mut st, &mut sink);
+            }
+        };
+        one(MODEL_BENCH_WARMUP);
+        va_codegen::counters::enable(true);
+        let before = va_codegen::counters::snapshot();
+        one(MODEL_BENCH_COUNTED);
+        let after = va_codegen::counters::snapshot();
+        va_codegen::counters::enable(false);
+        let per = |a: u64, b: u64| (a - b) as f64 / f64::from(MODEL_BENCH_COUNTED);
+        let mut best = Duration::MAX;
+        for _ in 0..MODEL_BENCH_BATCHES {
+            let t = Instant::now();
+            one(reps);
+            best = best.min(t.elapsed() / reps);
+        }
+        if best.as_secs_f64() < 1e-6 {
+            continue; // a reference device: not what this is for
+        }
+        eprintln!(
+            "[xtask]   {:>4} {:>6} {:>6} {:>10.1} {:>9.0} {:>10.0} {:>10.0} {:>10.0}",
+            i,
+            inst.unknowns().len(),
+            n,
+            best.as_secs_f64() * 1e6,
+            per(after.exprs_visited, before.exprs_visited),
+            per(after.grad_allocs, before.grad_allocs),
+            per(after.grad_clones, before.grad_clones),
+            per(after.grad_in_place, before.grad_in_place),
+        );
+    }
+    Ok(())
 }
 
 /// Untimed `load`s whose tree-walk counters are read (`ModelBenchRow::visited`).

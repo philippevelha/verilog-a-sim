@@ -1,0 +1,15 @@
+* One SG13G2 HV NMOS access transistor (W/L = 10/0.45 um, tech.inc) at the two biases it lives
+* at in the crossbar: on (word line 3.3 V) and off (0 V), source on the 1.65 V source line,
+* drain on the cell node, bulk at ground. For `cargo xtask bench-instance` (an operating point
+* to time `load` at), not a validation deck.
+*
+*   cargo run --release -p xtask -- bench-instance circuits/snn/transistor/bench_access_bias.net *       --model models/snn --model models/sg13g2/psp103/psp103.va
+.include tech.inc
+Vd   d   gnd DC 1.75
+Vs   sl  gnd DC 1.65
+Von  gon gnd DC 3.3
+Voff gof gnd DC 0
+XON  d gon sl gnd hvn_w10000n_l450n_ng1 w=1e-05 l=4.5e-07 nf=1 mult=1 as=3.4e-12 ad=3.4e-12 ps=2.068e-05 pd=2.068e-05 ngcon=2 delvto=0 factuo=1
+XOFF d gof sl gnd hvn_w10000n_l450n_ng1 w=1e-05 l=4.5e-07 nf=1 mult=1 as=3.4e-12 ad=3.4e-12 ps=2.068e-05 pd=2.068e-05 ngcon=2 delvto=0 factuo=1
+.op
+.end

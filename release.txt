@@ -22,6 +22,22 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.3.0+2 - 2026-10-01
+--------------------
+**PSP103 profiled on the SG13G2 card: allocation and zeros, not maths.** Adds `cargo xtask
+bench-instance <deck> --model ... [--dc] [--reps N]`, which times each compiled instance's `load()` at
+the deck's own operating point, and `circuits/snn/transistor/bench_access_bias.net` (one access
+transistor on, one off). No simulator change.
+
+  Measured (i7-1185G7): one PSP103 `load()` with the SG13G2 card costs 195–237 µs, against 106–111 µs
+  with the `.va` defaults at the same bias. The analysis context and the bias make no difference, and
+  the card's full JUNCAP (`swjuncap=3`) accounts for the doubling. A samply profile puts the maths
+  library at ~2 %, gradient heap traffic at ~25–30 %, the tape interpreter at 26 % self, `Dual`
+  arithmetic at ~20 % and the variable table at ~11 %. A load visits 6 186 nodes, and **a gradient
+  holds 2.9 non-zero entries out of 21**. `docs/proposals/gradient-storage.md` §0 records this and
+  moves its option D (sparse, inline gradients) first. Nothing is decided.
+
+
 2.3.0+1 - 2026-10-01
 --------------------
 **`scripts/benchmark/bench_transistor_linux.sh`: the ideal-switch vs access-transistor comparison

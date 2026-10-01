@@ -1,6 +1,6 @@
 # Proposal: stop paying the system heap for every gradient
 
-**Status:** proposed, 2026-09-24. Nothing decided.
+**Status:** proposed, 2026-09-24; re-profiled 2026-10-01 (§0: option D now first). Nothing decided.
 **Affects:** option A — the three binaries (`va-cli`, `xtask`, `va-harness`'s test runner), not the
 library crates; option B — `va-codegen` (`ad.rs`, `tape.rs`, `lib.rs`). **`va-ir` (Interface α)
 and `va-abi` (Interface β) are not touched** by either. Option A needs `unsafe` and therefore
@@ -9,6 +9,57 @@ CLAUDE.md §5's written justification and owner sign-off; option B is T2's crate
 `release.txt` 1.14.0+1 to 1.16.0.
 
 This is a decision document. No Rust code changes are part of this proposal.
+
+---
+
+## 0. Update, 2026-10-01: re-profiled on a real process card, and option D moves up
+
+The transistor-level SNN (`circuits/snn/transistor/`) runs PSP103 with IHP's SG13G2 thick-oxide card
+(`models/sg13g2/`), and a `load()` there costs **~200–240 µs**, not the ~100–110 µs the `.va`
+defaults give. Measured with the new `cargo xtask bench-instance` (a deck's instances at its own
+operating point; `circuits/snn/transistor/bench_access_bias.net`), i7-1185G7, release, 3 rounds:
+
+| what changes | load (µs) | gradient allocs / clones per load |
+|---|---:|---:|
+| SG13G2 card, transient context | 195–237 | 870 / 1 669 |
+| SG13G2 card, DC context | 189–205 | 870 / 1 669 |
+| `.va` defaults, same bias, transient | 106–111 | 407 / 857 |
+| card with `swjuncap=0` (JUNCAP off) | 107 | 461 / 968 |
+
+Bias and analysis context make no difference. **The card's full JUNCAP (`swjuncap=3`) doubles the
+work**: it is real physics (junction charge and leakage on both junctions), so the remedy is a
+cheaper evaluator, not a different card. No other card switch measurably changed the cost (`swigate`,
+`swimpact`, `swgeo`, the gate, bulk and well resistances, `qmc`; this laptop's ±20 % noise makes
+that a statement about large effects only).
+
+**Where the time goes** (samply, 10 695 samples, release build as shipped, inclusive unless noted):
+
+| activity | share |
+|---|---:|
+| heap: `Arc<[f64]>` gradient allocate/free (`from_iter_exact`, ntdll heap, `drop_slow`) | ~25–30 % |
+| tape interpreter, `eval_root` **self** (with `Dual` construction inlined) | 26 % |
+| `Dual` arithmetic (`mul`/`add`/`sub`/`div`, excluding their allocations) | ~20 % |
+| variable table (`get_var`/`set_var`: cloning `Option<Dual>`, atomic refcounts) | ~11 % |
+| maths library (`exp`, `log`, `pow`) | **~2 %** |
+
+6 186 expression nodes are visited per `load()` (≈ 37 ns each), and **a dense gradient carries
+2.9 non-zero entries out of 21 on average** (530 000 gradients counted at `zip_owned`'s output,
+scratch build). So about 86 % of the gradient storage, copying and arithmetic is spent on zeros.
+
+**What that changes in §2.** Option D was deferred because its gain looked limited to "some of the
+10 % arithmetic". At 2.9 of 21 it is the option that removes the most:
+- an **inline sparse gradient** (a few `(slot, value)` pairs held in the `Dual`, spilling to the heap
+  only past a small fixed count) removes most allocations, as A does but without `unsafe`;
+- it removes the atomic refcount on every variable read, which A does not touch;
+- it cuts each derivative loop from 21 entries to about 3.
+
+It also keeps bit-identity in reach: each slot's arithmetic is unchanged, and only slots that are
+zero in both operands are skipped. The one exception to check is a rule whose `f(0, 0)` is `-0.0`.
+**Proposed order now: D first** (in `va-codegen`, safe Rust, checked by `tape-check`, `deck-diff`
+and the finite-difference tests), then re-profile; A only if allocation still shows; native code
+generation (OpenVAF-class, 20–40×) as the separate, larger step after that. With the device-bypass
+prototype (`docs/proposals/device-bypass.md`) already removing the idle loads, D speeds up the loads
+that remain. An estimate, not a measurement: 2–3× on PSP103 with this card.
 
 ---
 
