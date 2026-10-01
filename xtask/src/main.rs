@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         Some("deck-run") => repro::deck_run(&rest),
         Some("deck-compare") => repro::deck_compare(&rest),
         Some("tape-check") => tape_check(&rest),
+        Some("sched-check") => sched_check(&rest),
         Some("btf") => btf::btf(&rest),
         Some("ladder") => ladder::ladder_cmd(&rest),
         Some("--help") | Some("-h") | None => {
@@ -2889,6 +2890,147 @@ fn tape_check(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `cargo xtask sched-check [model.va ...]` — every stamp of the statically scheduled path
+/// (`va_codegen::sched`) against the tree walk, at the same bias points as `tape-check`, in a DC
+/// and a transient context; reports, per model, whether it compiles for the static path at all
+/// and why not. The check behind "the static path changes no answer".
+fn sched_check(args: &[String]) -> Result<()> {
+    let paths = model_paths(args)?;
+    let mut failed = 0;
+    let mut on_path = 0;
+    for (name, path) in &paths {
+        let src =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let design = match va_frontend::compile_with_includes(&src, &[dir]) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[xtask] sched-check {name:>14}: frontend: {e}");
+                continue;
+            }
+        };
+        let Some(module) = design.modules.first().cloned() else {
+            continue;
+        };
+        let compiled = match va_codegen::CompiledModel::new(&module) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[xtask] sched-check {name:>14}: codegen: {e}");
+                continue;
+            }
+        };
+        let terminals: Vec<usize> = (0..module.nodes.len()).collect();
+        let (mut n1, mut n2) = (module.nodes.len(), module.nodes.len());
+        let a = compiled
+            .instantiate(&terminals, &mut n1)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let b = compiled
+            .instantiate(&terminals, &mut n2)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let dim = n1.max(1);
+        let mut seed: u64 = 0x5eed_7a9e;
+        let mut points = vec![vec![0.0; dim], vec![0.1; dim]];
+        for _ in 0..TAPE_CHECK_POINTS {
+            points.push(
+                (0..dim)
+                    .map(|_| {
+                        seed = seed
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        ((seed >> 11) as f64 / (1u64 << 53) as f64) * 3.0 - 1.5
+                    })
+                    .collect(),
+            );
+        }
+        let ctxs = [
+            va_abi::AnalysisCtx::dc(),
+            va_abi::AnalysisCtx::transient(1e-9).with_ddt(2e9, 1.0),
+        ];
+        let mut mismatches = 0;
+        let mut non_finite = 0;
+        for actx in &ctxs {
+            for x in &points {
+                let mut sa = va_abi::stamps::DenseStamp::new(dim);
+                let mut sb = va_abi::stamps::DenseStamp::new(dim);
+                let n = a.state_len();
+                let prev = vec![0.0; n];
+                let (mut na, mut nb) = (vec![0.0; n], vec![0.0; n]);
+                va_codegen::set_sched_enabled(false);
+                a.load(
+                    x,
+                    actx,
+                    &mut va_abi::ModelState::new(&prev, &mut na),
+                    &mut sa,
+                );
+                va_codegen::set_sched_enabled(true);
+                b.load(
+                    x,
+                    actx,
+                    &mut va_abi::ModelState::new(&prev, &mut nb),
+                    &mut sb,
+                );
+                // An evaluation the tree walk itself makes non-finite (a NaN residual or charge)
+                // is one the solver rejects on either path; there the static path's partials
+                // stay 0 where the tree walk spreads the NaN into slots the value does not
+                // depend on (`va_codegen::sched`'s module doc). Counted, not compared.
+                let tree_finite = sa.residual.iter().chain(&sa.charge).all(|v| v.is_finite());
+                if !tree_finite {
+                    let static_finite = sb.residual.iter().chain(&sb.charge).all(|v| v.is_finite());
+                    if !static_finite {
+                        non_finite += 1;
+                    } else {
+                        mismatches += 1;
+                    }
+                    continue;
+                }
+                if format!("{sa:?}") != format!("{sb:?}") || na != nb {
+                    if mismatches == 0 && std::env::var("SCHED_CHECK_VERBOSE").is_ok() {
+                        let show = |what: &str, u: &[f64], v: &[f64]| {
+                            for (i, (p, q)) in u.iter().zip(v).enumerate() {
+                                if p.to_bits() != q.to_bits() {
+                                    eprintln!("    {what}[{i}]: tree {p:e}  static {q:e}");
+                                }
+                            }
+                        };
+                        eprintln!("  first differing evaluation ({:?}):", actx.kind);
+                        show("residual", &sa.residual, &sb.residual);
+                        show("jacobian", &sa.jacobian, &sb.jacobian);
+                        show("charge", &sa.charge, &sb.charge);
+                        show("dcharge", &sa.dcharge, &sb.dcharge);
+                    }
+                    mismatches += 1;
+                }
+            }
+        }
+        let status = match compiled.sched_status() {
+            Some(Ok(())) => {
+                on_path += 1;
+                "static".to_string()
+            }
+            Some(Err(why)) => format!("tree walk ({why})"),
+            None => "tree walk (not compiled)".to_string(),
+        };
+        eprintln!(
+            "[xtask] sched-check {name:>14}: {} evaluations, {mismatches} differing, {non_finite} non-finite in both — {status}",
+            points.len() * ctxs.len()
+        );
+        if mismatches > 0 {
+            failed += 1;
+        }
+    }
+    eprintln!(
+        "[xtask] sched-check: {on_path} of {} model(s) on the static path",
+        paths.len()
+    );
+    if failed > 0 {
+        bail!("{failed} model(s) evaluate differently on the static path");
+    }
+    Ok(())
+}
+
 /// Pseudo-random bias points per model in `tape-check`, besides all-zero and all-0.1.
 const TAPE_CHECK_POINTS: usize = 40;
 
@@ -3098,18 +3240,26 @@ fn deck_model(text: &str, rel: &str, root: &Path) -> Option<String> {
             lines.push(std::mem::take(&mut pending));
         }
     }
-    let usage: Vec<&String> = lines.iter().filter(|l| l.contains("-- sim ")).collect();
+    // `cargo run ... -- sim <deck>` or a bare `va-cli sim <deck>`.
+    let usage: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("-- sim ") || l.contains("va-cli sim "))
+        .collect();
     let chosen = usage
         .iter()
         .find(|l| l.split_whitespace().any(|t| t == rel))
         .or_else(|| usage.first());
     if let Some(line) = chosen {
+        // Every `--model` on the line (2.3.0's `--model` repeats), joined the way `va-cli`
+        // joins repeated flags, which its library loader splits again.
         let toks: Vec<&str> = line.split_whitespace().collect();
-        return toks
-            .iter()
-            .position(|t| *t == "--model")
-            .and_then(|i| toks.get(i + 1))
-            .map(|m| (*m).to_string());
+        let models: Vec<&str> = toks
+            .windows(2)
+            .filter(|w| w[0] == "--model")
+            .map(|w| w[1])
+            .collect();
+        return (!models.is_empty())
+            .then(|| models.join(&va_cli::MODEL_PATH_SEPARATOR.to_string()));
     }
     let clean = |t: &str| {
         t.trim_matches(|c: char| "`'\"(),.;:".contains(c))
@@ -3163,6 +3313,14 @@ mod tests {
         assert_eq!(
             m("*   cargo run -- sim circuits/x.net \\\n*       --model models/b.va --tran\n"),
             Some("models/b.va".into())
+        );
+        // Repeated `--model`s: every library, joined as `va-cli` joins them.
+        assert_eq!(
+            m(concat!(
+                "*   va-cli sim circuits/x.net --model models/snn \\\n",
+                "*       --model models/sg/p.va --tran\n"
+            )),
+            Some("models/snn;models/sg/p.va".into())
         );
         // A usage line without one means: no `--model` (diode_noise.net's case).
         assert_eq!(

@@ -113,10 +113,27 @@ impl Tapes {
 ///
 /// Whatever `ad::eval` would return for the same expression, in the same order.
 pub fn eval_root(ctx: &Ctx, root: ExprId) -> Result<Dual, CodegenError> {
+    if let Some(run) = &ctx.sched {
+        if run.prog.has_root(root) {
+            return run.dual(ctx, root);
+        }
+    }
     match ctx.tapes.get(root) {
         Some(tape) => run(ctx, tape),
         None => ad::eval(ctx, root),
     }
+}
+
+/// [`eval_root`]'s value alone — what a condition, a selector, a loop count and a bound step
+/// need. On the statically scheduled path this reads the result register without building a
+/// [`Dual`] (`crate::sched::Run::value`).
+pub fn eval_value(ctx: &Ctx, root: ExprId) -> Result<f64, CodegenError> {
+    if let Some(run) = &ctx.sched {
+        if run.prog.has_root(root) {
+            return run.value(ctx, root);
+        }
+    }
+    Ok(eval_root(ctx, root)?.value)
 }
 
 /// Whether `builtin` is one of the one-argument pure maths built-ins — asked of

@@ -207,6 +207,31 @@ impl Dual {
         }
     }
 
+    /// A value with partials given as `(slot, partial)` over `n` slots: the bridge from
+    /// `crate::sched`'s registers back to a `Dual` for the stamping code. No entries is a
+    /// constant (`Grad::Zero`).
+    pub(crate) fn from_entries(
+        value: f64,
+        n: usize,
+        entries: impl ExactSizeIterator<Item = (usize, f64)>,
+    ) -> Self {
+        if entries.len() == 0 {
+            return Dual::constant(value);
+        }
+        crate::counters::grad_alloc();
+        let mut grad = vec![0.0; n];
+        for (s, g) in entries {
+            if let Some(slot) = grad.get_mut(s) {
+                *slot = g;
+            }
+        }
+        Self {
+            value,
+            grad: Grad::Dense(Arc::from(grad)),
+            grad_ddt: Grad::Zero,
+        }
+    }
+
     /// The **non-zero** instantaneous partials, as `(slot, value)` — the Jacobian channel.
     ///
     /// Only non-zero entries are yielded, which is what every consumer wants: a stamp of `0.0`
@@ -838,6 +863,9 @@ pub struct Ctx<'a> {
     /// particular call doesn't happen to reach could still be the one a different real
     /// operating point's arguments select).
     pub validating: bool,
+    /// The statically scheduled path (`crate::sched`), when this evaluation runs on it: then an
+    /// assignment writes a register instead of `vars`, and a root expression is read from one.
+    pub(crate) sched: Option<crate::sched::Run<'a>>,
 }
 
 impl Ctx<'_> {
@@ -2281,6 +2309,7 @@ mod tests {
         let mut m = Module::new("vt");
         let vt = m.push_expr(Expr::Call(Builtin::Vt, vec![]));
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &[],
@@ -2346,6 +2375,7 @@ mod tests {
         let x = [xv];
         let terminals = [0usize, usize::MAX];
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &x,
@@ -2498,6 +2528,7 @@ mod tests {
         let x = [350.0];
         let terminals = [0usize, usize::MAX];
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &x,
@@ -2591,6 +2622,7 @@ mod tests {
         let terminals = [0usize, 1, 2, 3, 4];
         let x = [0.0, 0.0, 3.0, 1.0, 0.0]; // pin=3V, nin=1V (so vin=2V), everything else 0
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &x,
@@ -2681,6 +2713,7 @@ mod tests {
         let terminals = [0usize, 1];
         let x = [0.6, 0.0]; // V(a,c) = 0.6 V
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &x,
@@ -2726,6 +2759,7 @@ mod tests {
         let bad = m.push_expr(Expr::Var(va_ir::VarId(0))); // eval() would Err on this
         let sel = m.push_expr(Expr::Select(cond, then, bad));
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &[],
@@ -2758,6 +2792,7 @@ mod tests {
         let els = m.push_expr(Expr::Const(3.0));
         let sel = m.push_expr(Expr::Select(cond, then, els));
         let ctx = Ctx {
+            sched: None,
             module: &m,
             params: &[],
             x: &[],

@@ -4,6 +4,7 @@
 * to time `load` at), not a validation deck.
 *
 *   cargo run --release -p xtask -- bench-instance circuits/snn/transistor/bench_access_bias.net *       --model models/snn --model models/sg13g2/psp103/psp103.va
+*   va-cli sim circuits/snn/transistor/bench_access_bias.net --model models/snn *       --model models/sg13g2/psp103/psp103.va
 .include tech.inc
 Vd   d   gnd DC 1.75
 Vs   sl  gnd DC 1.65

@@ -23,14 +23,16 @@
 #     bash scripts/benchmark/bench_transistor_linux.sh target/release/va-cli
 # python3 (standard library only) for the check. The SG13G2 cards are committed
 # (circuits/snn/transistor/tech.inc); the PDK checkout is not needed.
-# Environment: RUNS="beh acc acc1" picks runs (acc1 = transistor deck on one thread);
+# Environment: RUNS="beh acc acc1 ..." picks runs: acc1 = transistor deck on one thread; suffix
+#              _old = tree-walk evaluator (VA_SCHED=off), _bp = device bypass (VA_BYPASS=on),
+#              e.g. acc1_old_bp. Default: all nine;
 #              EXTRA_ENV="VAR=value ..." is passed to every va-cli run (e.g. a simulator switch).
 # Send back bench_transistor.txt.
 # =============================================================================================
 set -u
 VA=${1:?usage: bench_transistor_linux.sh /path/to/va-cli}
 OUT=bench_transistor.txt
-RUNS=${RUNS:-beh acc acc1}
+RUNS=${RUNS:-beh acc acc1 acc_old acc1_old acc_bp acc1_bp acc_old_bp acc1_old_bp}
 [ -x "$VA" ] || { echo "not an executable: $VA"; exit 1; }
 [ -f circuits/snn/transistor/fig5_access.net ] || {
   echo "Run this from the root of a verilog-a-sim checkout at or after 2.3.0."; exit 1; }
@@ -59,18 +61,26 @@ mkdir -p transistor-out
 } > "$OUT"
 
 for r in $RUNS; do
+  # A run name says what it is: `beh` is the ideal-switch deck; `acc` the access-transistor
+  # deck, `acc1` the same on one thread; a `_old` suffix runs the tree-walk evaluator
+  # (VA_SCHED=off, before 2.4.0's static schedule) and a `_bp` suffix turns on device bypass
+  # (VA_BYPASS=on, branch proto/device-bypass). A va-cli that does not know a switch ignores it
+  # and repeats the run -- the `bypass:` line and the output hashes show which was which.
+  sw=(); thr=()
   case $r in
-    beh)  deck=circuits/snn/fig5_neuron.net; models=(--model models/snn); thr=() ;;
-    acc)  deck=circuits/snn/transistor/fig5_access.net
-          models=(--model models/snn --model models/sg13g2/psp103/psp103.va); thr=() ;;
-    acc1) deck=circuits/snn/transistor/fig5_access.net
-          models=(--model models/snn --model models/sg13g2/psp103/psp103.va); thr=(--threads 1) ;;
+    beh) deck=circuits/snn/fig5_neuron.net; models=(--model models/snn) ;;
+    acc|acc1|acc_*|acc1_*)
+      deck=circuits/snn/transistor/fig5_access.net
+      models=(--model models/snn --model models/sg13g2/psp103/psp103.va)
+      case $r in acc1*) thr=(--threads 1) ;; esac
+      case $r in *_old*) sw+=(VA_SCHED=off) ;; esac
+      case $r in *_bp*) sw+=(VA_BYPASS=on) ;; esac ;;
     *) echo "unknown run $r" | tee -a "$OUT"; continue ;;
   esac
   f=transistor-out/$r.out
   echo "$r: simulating $deck ${thr[*]:-} ..."
   t0=$(date +%s.%N)
-  env ${EXTRA_ENV:-} "$VA" sim "$deck" "${models[@]}" "${thr[@]}" --tran \
+  env ${EXTRA_ENV:-} "${sw[@]}" "$VA" sim "$deck" "${models[@]}" "${thr[@]}" --tran \
       --report clk,wl1,vm,spk > "$f" 2> "$f.err"
   rc=$?
   t1=$(date +%s.%N)
@@ -82,6 +92,8 @@ for r in $RUNS; do
     echo "$r  deck=$deck threads=${thr[*]:-default}"
     echo "    exit=$rc wall=${wall}s unknowns=${unk:-?} timepoints=${pts:-?} sha256=$(sha256sum "$f" | cut -c1-16)"
     echo "    check: $chk"
+    bpl=$(grep -o 'bypass: .*' "$f.err" | head -1)
+    [ -n "$bpl" ] && echo "    $bpl"
   } >> "$OUT"
   echo "$r: exit $rc, ${wall} s"
 done

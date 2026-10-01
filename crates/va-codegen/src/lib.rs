@@ -42,6 +42,7 @@
 pub mod ad;
 pub mod counters;
 pub mod lower;
+mod sched;
 pub mod tape;
 
 use ad::{eval, Ctx, Dual};
@@ -207,6 +208,7 @@ impl CompiledModel {
             node_is_junction,
             setup: OnceLock::new(),
             tapes,
+            sched: OnceLock::new(),
         });
 
         // Validate that every term is evaluable, so `load` never hits an `Unsupported` arm. The
@@ -217,10 +219,21 @@ impl CompiledModel {
             terminals: (0..shared.lowered.n_unknowns).collect(),
             shared: Arc::clone(&shared),
             pinned: Vec::new(),
+            sched_regs: std::sync::Mutex::new(None),
         };
         prototype.validate()?;
 
         Ok(Self { shared })
+    }
+
+    /// Whether this model runs on the statically scheduled path (`crate::sched`): `None` until
+    /// an instance of it has been evaluated once with the path enabled, then `Ok` or the reason
+    /// it falls back to the tree walk.
+    pub fn sched_status(&self) -> Option<Result<(), &'static str>> {
+        self.shared
+            .sched
+            .get()
+            .map(|r| r.as_ref().map(|_| ()).map_err(|e| *e))
     }
 
     /// The elaborated module this was compiled from.
@@ -307,6 +320,7 @@ impl CompiledModel {
             shared: Arc::clone(&self.shared),
             terminals: full,
             pinned,
+            sched_regs: std::sync::Mutex::new(None),
         }))
     }
 }
@@ -344,6 +358,10 @@ struct GeneratedModel {
     /// already holds the same two nodes equal (see [`CompiledModel::instantiate_with_shorts`]).
     /// Empty for every instance except a redundant one.
     pinned: Vec<usize>,
+    /// This instance's register file for the statically scheduled path (`crate::sched`), built
+    /// on first use. Behind a `Mutex` because `load` takes `&self`; uncontended — one instance
+    /// is never evaluated on two threads at once.
+    sched_regs: std::sync::Mutex<Option<sched::Regs>>,
 }
 
 /// A model compiled once: the arena, the lowered plan, the resolved parameters, and everything
@@ -390,6 +408,8 @@ struct SharedModel {
     /// ([`tape::Tapes::compile`]) — evaluated by [`tape::eval_root`] instead of walking the
     /// tree, with bit-identical results.
     tapes: tape::Tapes,
+    /// The statically scheduled program (`crate::sched`), compiled on first use, or why not.
+    sched: OnceLock<Result<sched::Program, &'static str>>,
 }
 
 /// The result of evaluating a model's setup once — see [`GeneratedModel::setup`].
@@ -541,6 +561,7 @@ impl GeneratedModel {
             idt_slots,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
+            sched: None,
             validating,
         }
     }
@@ -645,19 +666,20 @@ impl GeneratedModel {
     {
         for stmt in stmts {
             match stmt {
-                LoweredStmt::Assign { lhs, rhs } => {
-                    let d = tape::eval_root(ctx, *rhs)?;
-                    ctx.set_var(*lhs, d);
-                }
+                LoweredStmt::Assign { lhs, rhs } => match &ctx.sched {
+                    Some(run) => run.assign(ctx, *rhs)?,
+                    None => {
+                        let d = tape::eval_root(ctx, *rhs)?;
+                        ctx.set_var(*lhs, d);
+                    }
+                },
                 LoweredStmt::Contribute(c) => on_contribute(self, ctx, c),
                 // Recorded on the context rather than handed to the callback: `walk` is shared
                 // with the noise channel, which has no stamp sink to emit into. `load` drains
                 // it once the walk is done (see `Ctx::request_bound_step`).
-                LoweredStmt::BoundStep(e) => {
-                    ctx.request_bound_step(tape::eval_root(ctx, *e)?.value)
-                }
+                LoweredStmt::BoundStep(e) => ctx.request_bound_step(tape::eval_value(ctx, *e)?),
                 LoweredStmt::If { cond, then_, else_ } => {
-                    let taken = if tape::eval_root(ctx, *cond)?.value != 0.0 {
+                    let taken = if tape::eval_value(ctx, *cond)? != 0.0 {
                         then_
                     } else {
                         else_
@@ -669,11 +691,11 @@ impl GeneratedModel {
                     arms,
                     default,
                 } => {
-                    let sel = tape::eval_root(ctx, *selector)?;
+                    let sel = tape::eval_value(ctx, *selector)?;
                     let mut taken = default;
                     'arms: for arm in arms {
                         for &label in &arm.labels {
-                            if tape::eval_root(ctx, label)?.value == sel.value {
+                            if tape::eval_value(ctx, label)? == sel {
                                 taken = &arm.body;
                                 break 'arms;
                             }
@@ -683,7 +705,7 @@ impl GeneratedModel {
                 }
                 LoweredStmt::While { cond, body } => {
                     let mut iters = 0usize;
-                    while tape::eval_root(ctx, *cond)?.value != 0.0 {
+                    while tape::eval_value(ctx, *cond)? != 0.0 {
                         self.walk(ctx, body, on_contribute)?;
                         iters += 1;
                         if iters > MAX_LOOP_ITERATIONS {
@@ -699,7 +721,7 @@ impl GeneratedModel {
                 } => {
                     self.walk(ctx, init, on_contribute)?;
                     let mut iters = 0usize;
-                    while tape::eval_root(ctx, *cond)?.value != 0.0 {
+                    while tape::eval_value(ctx, *cond)? != 0.0 {
                         self.walk(ctx, body, on_contribute)?;
                         self.walk(ctx, step, on_contribute)?;
                         iters += 1;
@@ -709,7 +731,7 @@ impl GeneratedModel {
                     }
                 }
                 LoweredStmt::Repeat { count, body } => {
-                    let n = tape::eval_root(ctx, *count)?.value;
+                    let n = tape::eval_value(ctx, *count)?;
                     if n > MAX_LOOP_ITERATIONS as f64 {
                         return Err(loop_iteration_cap_exceeded());
                     }
@@ -2053,6 +2075,31 @@ fn next_fire_after(start: f64, period: f64, now: f64) -> Option<f64> {
     next.is_finite().then_some(next)
 }
 
+/// Whether the statically scheduled path (`crate::sched`) may be used: on unless `VA_SCHED=off`
+/// or [`set_sched_enabled`] says otherwise (prototype switch, for A/B measurement and
+/// `cargo xtask sched-check`).
+fn sched_enabled() -> bool {
+    use std::sync::atomic::Ordering;
+    match SCHED.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("VA_SCHED").map_or(true, |v| v != "off");
+            SCHED.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+static SCHED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Switch the statically scheduled evaluation path (`crate::sched`) on or off for the whole
+/// process, overriding `VA_SCHED`. Results are meant to be bit-identical either way; this exists
+/// so `cargo xtask sched-check` can compare the two in one process.
+pub fn set_sched_enabled(on: bool) {
+    SCHED.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl ModelInstance for GeneratedModel {
     fn unknowns(&self) -> &[usize] {
         &self.terminals
@@ -2273,7 +2320,15 @@ impl ModelInstance for GeneratedModel {
         let setup = self.setup();
         let static_vars: &[Option<crate::ad::Dual>] = setup.map_or(&[], |s| &s.vars);
         let setup_completed = setup.is_none_or(|s| s.completed);
-        let ctx = self.ctx(
+        // The statically scheduled path (`crate::sched`) when the model compiles for it; the
+        // register file is locked for the whole evaluation (uncontended: one instance is never
+        // evaluated on two threads at once).
+        let mut regs_guard = if sched_enabled() {
+            self.sched_regs.lock().ok()
+        } else {
+            None
+        };
+        let mut ctx = self.ctx(
             x,
             actx,
             state.committed(),
@@ -2281,6 +2336,25 @@ impl ModelInstance for GeneratedModel {
             false,
             static_vars,
         );
+        if let Some(guard) = regs_guard.as_mut() {
+            let prog = self.shared.sched.get_or_init(|| {
+                sched::Program::compile(
+                    &self.shared.module,
+                    &self.shared.lowered,
+                    &self.shared.params,
+                    static_vars,
+                    self.terminals.len(),
+                )
+            });
+            if let Ok(prog) = prog {
+                let regs = guard.get_or_insert_with(|| prog.regs());
+                prog.begin(regs);
+                ctx.sched = Some(sched::Run {
+                    prog,
+                    regs: RefCell::new(regs),
+                });
+            }
+        }
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
         // from a corrupted variable environment if it somehow does (see `run`'s doc comment).

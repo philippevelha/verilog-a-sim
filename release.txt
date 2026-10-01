@@ -22,6 +22,46 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.4.0 - 2026-10-01
+--------------------
+**A statically scheduled evaluator for compiled models: PSP103 with IHP's SG13G2 card goes from
+~245 µs to 76 µs per `load()`, bit-identical.** `va-codegen/src/sched.rs`. Which unknowns an
+expression can depend on is fixed by the model's structure, not the bias. So each model is
+compiled once into instructions over fixed registers: every variable, intermediate and probe gets
+one value and one partial per slot it can depend on. Variable reads and constants then cost
+nothing, and nothing is pushed, copied or allocated per node. Contributions are handed to the
+unchanged stamping code as `Dual`s at the end. A model the compiler cannot take whole stays on the
+tree walk (`docs/proposals/gradient-storage.md` §0.2 lists what is refused).
+`VA_SCHED=off` turns the path off.
+
+  * Why this and not sparse gradients (§0.1, branch `sparse-gradients`, not merged): those were
+    bit-identical and removed 97 % of the allocations, but were no faster on one thread. The
+    cost was the interpreter's per-node overhead (~6 100 instructions per load, 57 % of them
+    pushes of a variable or a constant), not the storage.
+  * Correctness. `cargo xtask sched-check` (new) compares every stamp and state proposal of the
+    two paths at 42 bias points, in DC and transient, for every model. Over 167 model files:
+    0 differing finite evaluations, 66 models on the static path. Some random bias points are
+    NaN on both paths; there the tree walk spreads the NaN into partials the value cannot
+    depend on, the one designed difference. `deck-diff` with `VA_SCHED=off` against on:
+    85 identical, 0 different. The slow ISCAS'85 decks, one at a time: 9 of 13 identical so far
+    (c17_tran, c432, c499, c880, c1355, c1908, c2670, c3540, c432_tran), every run exiting 0.
+    c432_seq, c5315, c6288 and c7552 are still running. `cargo test --workspace` 924 passed.
+  * Speed, i7-1185G7, `fig5_access`: 8 threads 60.8–61.5 → 31.9–33.2 s; 1 thread 115.9 →
+    41.0 s. ISCAS'85 decks roughly halve: c432_tran 1116 → 549 s, c3540 218 → 124 s. With
+    device bypass (branch `proto/device-bypass`, merged with this on `proto/static-bypass` for
+    measurement): 14.9 s on 8 threads and **9.3 s on 1**. That is 12.5× against today on one
+    thread, and bit-identical to bypass alone.
+  * Also: `deck-diff`/`deck-run` read every `--model` of a deck's documented command line, and
+    accept `va-cli sim` lines as well as `cargo run -- sim`. Before, the transistor decks ran
+    with only their first library and failed identically on both sides, which counted as
+    "identical". `bench-instance` prints the hoistable count. `bench_transistor_linux.sh`
+    names its runs by setting (`acc1_old_bp` = one thread, tree walk, bypass).
+  * Limitations: each instance keeps a register file behind an uncontended `Mutex`. A
+    tree-walked call inside a compiled expression gets the full support. The
+    definite-assignment check is conservative. With bypass on, one thread beats eight: the
+    parallel threshold does not know that most loads are replayed.
+
+
 2.3.0+3 - 2026-10-01
 --------------------
 **The transistor-deck benchmark on Linux, with and without device bypass.** `scripts/benchmark/

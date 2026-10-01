@@ -1,6 +1,6 @@
 # Proposal: stop paying the system heap for every gradient
 
-**Status:** proposed, 2026-09-24; re-profiled 2026-10-01 (§0: option D now first). Nothing decided.
+**Status:** proposed, 2026-09-24; re-profiled 2026-10-01; option D tried and set aside (§0.1); a statically scheduled tape implemented in 2.4.0 (§0.2).
 **Affects:** option A — the three binaries (`va-cli`, `xtask`, `va-harness`'s test runner), not the
 library crates; option B — `va-codegen` (`ad.rs`, `tape.rs`, `lib.rs`). **`va-ir` (Interface α)
 and `va-abi` (Interface β) are not touched** by either. Option A needs `unsafe` and therefore
@@ -60,6 +60,73 @@ and the finite-difference tests), then re-profile; A only if allocation still sh
 generation (OpenVAF-class, 20–40×) as the separate, larger step after that. With the device-bypass
 prototype (`docs/proposals/device-bypass.md`) already removing the idle loads, D speeds up the loads
 that remain. An estimate, not a measurement: 2–3× on PSP103 with this card.
+
+### 0.1 Option D tried: the estimate was wrong (branch `sparse-gradients`, not merged)
+
+Sparse inline gradients were bit-identical and cut allocations from 870 to 25 per `load()`, but the
+`load()` itself was no faster on one thread. The first version was 15–20 % slower: the `Dual`
+grew, and the tape copies one per node. In circuit, 8 threads ran 12–17 % faster (no shared
+allocator) and 1 thread 5–8 % slower. The cost was never the storage. It is the interpreter's
+**per-node overhead**: a `load()` runs ~6 100 tape instructions over ~1 225 assignments, and 57 % of
+them only push a variable (2 551) or a constant (939). Only 788 of the nodes are hoistable.
+
+### 0.2 What was done instead: a statically scheduled tape (2.4.0, `va-codegen/src/sched.rs`)
+
+Which unknowns an expression can depend on is fixed by the model's structure. So, once per model:
+
+- **Support:** compute each expression's support: a probe's slots, the union of an operator's
+  operands, and for a variable the union over all of its assignments (a fixpoint).
+- **Registers:** give every variable, intermediate and probe a register (one value, one partial per
+  support slot).
+- **Compile:** turn each statement's expression into instructions that read operands in place and
+  write in place. An assignment's last operation writes the variable's register directly; a
+  variable read or a constant is no instruction at all.
+
+A contribution's terms become `Dual`s only at the end, for the unchanged stamping code. Everything
+around the statement walk (accumulators, state, `bound_step`) is untouched.
+
+**Fallback.** A model the compiler cannot take whole runs on the tree walk exactly as before.
+Refused:
+- persistent variables;
+- `idt`/`laplace_*`/`zi_*` state;
+- a `ddt` inside an expression;
+- a non-maths call whose arguments read a variable;
+- a variable that may be read before it is assigned (a definite-assignment check).
+
+**Correctness: bit-identical**, checked three ways:
+- **Model corpus:** `cargo xtask sched-check` compares every stamp and state proposal of the two
+  paths at 42 bias points in DC and in transient, for every model. Over 167 model files (the
+  benchmarks, `models/`, `external/`, `benchmark/models/`) there were **0 differing finite
+  evaluations**. 66 models run on the static path; the rest fall back, each with its reason
+  reported. Some random bias points make a model non-finite on both paths. There the tree walk
+  spreads the NaN into partials the value cannot depend on and the static path leaves them `0.0`
+  (the one designed difference); the solver rejects such a point on either path.
+- **Decks:** `cargo xtask deck-diff`, with one binary and `VA_SCHED=off` against on, gave 85
+  identical and 0 different (74 decks run, 11 fail the same way as on `main`).
+- **Tests:** 924 workspace tests pass with the static path on by default.
+
+The 13 slow ISCAS decks: see the release entry.
+
+**Speed** (i7-1185G7, `fig5_access`, 8 SG13G2 PSP103):
+
+| | 8 threads | 1 thread |
+|---|---:|---:|
+| tree walk | 60.8–61.5 s | 115.9 s |
+| **static schedule** | **31.9–33.2 s** | **41.0 s** |
+| tree walk + bypass (branch `proto/device-bypass`) | 22.4 s | 18.4 s |
+| **static schedule + bypass** | **14.9 s** | **9.3 s** |
+
+One PSP103 `load()` costs 76 µs instead of ~245 µs (`bench-instance`). With bypass, one thread beats
+eight: the parallel-evaluation threshold (`va_core::par`, a cost estimate per instance) does not yet
+know that most instances are replayed.
+
+**Limitations, stated.**
+- Each instance keeps a register file (~one `f64` per register and per support entry), behind an
+  uncontended `Mutex`.
+- A tree-walked call inside a compiled expression gets the full support.
+- The definite-assignment check is conservative: an untaken `?:` arm, or a loop body that reads a
+  variable before assigning it, sends the model to the tree walk.
+- `VA_SCHED=off` turns the path off (for A/B measurement and `sched-check`).
 
 ---
 
