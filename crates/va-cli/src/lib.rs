@@ -763,6 +763,16 @@ pub fn run_sim(
                 wf.unresolved_events
             );
         }
+        // Said only when the stall rule was used (va-transient's `newton_step`): those points
+        // are accepted to SPICE's default tolerances, not to this engine's strict ones.
+        if wf.stalled_steps > 0 {
+            eprintln!(
+                "[va-cli] note: {} Newton solve(s) accepted by the stall rule: the strict tolerance \
+                 was not met, but the last iterates moved by less than 1e-6 relative / 1e6 x the \
+                 per-unknown absolute tolerance, with the residual under 1e-6.",
+                wf.stalled_steps
+            );
+        }
         let shown = select_quantities(&all_quantities, report_only)?;
         report_transient(&shown, &wf);
         if let Some(path) = plot {

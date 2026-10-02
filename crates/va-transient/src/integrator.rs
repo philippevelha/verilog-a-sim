@@ -156,6 +156,10 @@ pub struct Waveform {
     /// permits a tolerance finer than the tool's time precision to be ignored, but not ignored
     /// in silence.
     pub unresolved_events: usize,
+    /// How many Newton solves were accepted by the **stall rule** (2.5.0) rather than by the
+    /// strict test: Newton ran out of iterations bouncing between points closer than SPICE's own
+    /// tolerances would ask for (see `newton_step`). Normally `0`; a non-zero count is reported.
+    pub stalled_steps: usize,
 }
 
 /// How many times one step may be re-taken to resolve a crossing before the run gives up and
@@ -959,6 +963,8 @@ struct StateBuffers {
     offsets: Vec<usize>,
     committed: Vec<f64>,
     scratch: Vec<f64>,
+    /// Newton solves accepted by the stall rule (`newton_step`), for `Waveform::stalled_steps`.
+    stalled: usize,
 }
 
 impl StateBuffers {
@@ -975,6 +981,7 @@ impl StateBuffers {
             offsets,
             committed: vec![0.0; total],
             scratch: vec![0.0; total],
+            stalled: 0,
         }
     }
 
@@ -1057,10 +1064,15 @@ fn newton_step(
     junction: &[bool],
     per_abstol: &[f64],
     linear: &mut Linear,
+    allow_stall: bool,
 ) -> Result<Solved, TransientError> {
     const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
     const RELTOL: f64 = 1e-9;
+    // The stall rule's tolerances (see the end of the iteration loop).
+    const STALL_RELTOL: f64 = 1e-6;
+    const STALL_ABSTOL_FACTOR: f64 = 1e6;
+    const STALL_RESIDUAL: f64 = 1e-6;
 
     let vt = convergence::VT_NOMINAL;
     let vcrit = convergence::default_vcrit(vt);
@@ -1071,6 +1083,8 @@ fn newton_step(
     // is the honest answer rather than a nominal floor it does not apply.
     let sim = va_abi::SimParams::new().with_tolerances(ABSTOL, RELTOL);
     let mut last_residual = f64::INFINITY;
+    // Consecutive iterations that met the stall rule's tolerances (see the end of this loop).
+    let mut stalled_for = 0usize;
     for iteration in 0..MAX_ITERS {
         // Every iteration re-evaluates at the same candidate landing time `t`: the *timepoint*
         // context is a property of the point being solved for, not of how many iterations it
@@ -1121,6 +1135,7 @@ fn newton_step(
         let dx = linear.solve(&j, &neg_f, dim)?;
 
         let mut update_small = true;
+        let mut update_stalled = true;
         for i in 0..dim {
             let vold = x[i];
             // Only unknowns that actually sit across an exponential junction are step-limited
@@ -1149,6 +1164,9 @@ fn newton_step(
             if applied.abs() > RELTOL * vnew.abs() + per_abstol[i] {
                 update_small = false;
             }
+            if applied.abs() > STALL_RELTOL * vnew.abs() + STALL_ABSTOL_FACTOR * per_abstol[i] {
+                update_stalled = false;
+            }
         }
 
         if residual_norm <= ABSTOL || update_small {
@@ -1157,7 +1175,31 @@ fn newton_step(
                 iterations: iteration,
             });
         }
+        stalled_for = if update_stalled && residual_norm <= STALL_RESIDUAL {
+            stalled_for + 1
+        } else {
+            0
+        };
         last_residual = residual_norm;
+    }
+    // **The stall rule** (2.5.0). Out of iterations, but the last ones moved nothing by more than
+    // SPICE's own default tolerances would allow (1e-6 relative, and a millionfold the strict
+    // per-row absolute tolerance: 1 uV / 1 uA where that is 1e-12), with the residual under
+    // 1e-6: Newton is bouncing between two points nanovolts apart, not diverging. The case that
+    // found it: a pass transistor turning off with both terminals at the same voltage (V_DS = 0,
+    // where a compact model swaps source and drain), whose internal branch rows alternated by
+    // +-1.4 nA forever, so every step size failed and the run ended in a timestep underflow.
+    // Accepting the last iterate there costs nanovolts. **Only at the minimum step**
+    // (`allow_stall`, set by the caller when one more halving would underflow): above it a
+    // failed solve still halves the step as before, so a run that used to recover at a smaller
+    // step takes exactly the same path; the rule only touches a run that was about to end. Each
+    // use is counted (`Waveform::stalled_steps`) and reported.
+    if allow_stall && stalled_for >= 2 {
+        state.stalled += 1;
+        return Ok(Solved {
+            x,
+            iterations: MAX_ITERS - 1,
+        });
     }
 
     Err(va_core::CoreError::NoConvergence {
@@ -1221,6 +1263,7 @@ pub fn run_with_events(
         crossings: Vec::new(),
         model_crossings: Vec::new(),
         unresolved_events: 0,
+        stalled_steps: 0,
     };
     if dim == 0 {
         return Ok(waveform);
@@ -1468,6 +1511,7 @@ pub fn run_with_events(
                 &junction,
                 &per_abstol,
                 &mut linear,
+                h * 0.5 < cfg.tstep_min,
             ) {
                 Ok(solved) => solved,
                 // A step Newton cannot converge on is a step that was too long, the same
@@ -1566,7 +1610,7 @@ pub fn run_with_events(
                         h_prev,
                         &is_dynamic,
                     );
-                    let x_reference = newton_step(
+                    let x_reference = match newton_step(
                         instances,
                         dim,
                         &x,
@@ -1579,8 +1623,23 @@ pub fn run_with_events(
                         &junction,
                         &per_abstol,
                         &mut linear,
-                    )?
-                    .x;
+                        h * 0.5 < cfg.tstep_min,
+                    ) {
+                        Ok(solved) => solved.x,
+                        // The reference solve failing is the step being too long, exactly as
+                        // the primary's failing is (2.5.0): halve and retry, down to the
+                        // minimum step. Until 2.5.0 it ended the run instead, so no run that
+                        // integrated before reaches this arm, and every such run is unchanged.
+                        Err(TransientError::Core(va_core::CoreError::NoConvergence { .. })) => {
+                            let shrunk = h * 0.5;
+                            if shrunk < cfg.tstep_min {
+                                return Err(TransientError::TimestepUnderflow { t });
+                            }
+                            h = shrunk;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    };
                     (
                         lte_error_ratio(
                             &x_primary,
@@ -1832,6 +1891,7 @@ pub fn run_with_events(
                         &junction,
                         &per_abstol,
                         &mut linear,
+                        h * 0.5 < cfg.tstep_min,
                     )?;
                     x = resolved.x;
                     converged_at = resolved.iterations;
@@ -1940,6 +2000,7 @@ pub fn run_with_events(
     }
 
     waveform.unresolved_events = unresolved_events;
+    waveform.stalled_steps = state.stalled;
     Ok(waveform)
 }
 
@@ -3160,6 +3221,52 @@ mod tests {
     /// controller having to reject anything. Checked as a property of the accepted grid — no
     /// gap may exceed the bound — rather than by counting steps, which would just restate the
     /// arithmetic.
+    /// The stall rule (2.5.0): a device whose current has a square-root kink at its root,
+    /// `I = k·sign(v − 1)·√|v − 1|`, which Newton maps `x → −x` around the root exactly — the
+    /// shape of a pass transistor turning off at V_DS = 0 in the transistor-level neuron, whose
+    /// internal rows bounced by ±1.4 nA forever. Started 1 nV off the root, Newton bounces ±1 nV:
+    /// above the strict tolerance (1e-12 + 1e-9·|v|), under the stall rule's. Before the rule
+    /// every step size failed and the run ended in a timestep underflow; with it the run
+    /// integrates, sits at the root to a nanovolt, and reports how many solves the rule took.
+    /// Discriminating, checked: with the rule disabled this is `TimestepUnderflow { t: 0 }`.
+    #[test]
+    fn newton_bouncing_on_a_kink_by_nanovolts_is_accepted_by_the_stall_rule() {
+        struct SqrtKink {
+            node: [usize; 1],
+            k: f64,
+        }
+        impl ModelInstance for SqrtKink {
+            fn unknowns(&self) -> &[usize] {
+                &self.node
+            }
+            fn load(
+                &self,
+                x: &[f64],
+                _: &AnalysisCtx,
+                _: &mut va_abi::ModelState,
+                sink: &mut dyn va_abi::StampSink,
+            ) {
+                let d = x[self.node[0]] - 1.0;
+                let r = d.abs().sqrt();
+                sink.residual(self.node[0], self.k * d.signum() * r);
+                // d/dv of k·sign(d)·√|d| = k / (2√|d|); finite at the iterates (never exactly 0)
+                sink.jacobian(self.node[0], self.node[0], self.k / (2.0 * r.max(1e-300)));
+            }
+        }
+        let dev = SqrtKink { node: [0], k: 0.01 };
+        let insts: [&dyn ModelInstance; 1] = [&dev];
+        // The kink is everywhere in time here (in the neuron it lasts one clock edge), and the
+        // rule only acts at the minimum step: so a run a few minimum steps long.
+        let cfg = default_cfg(3e-15, 1e-9, Method::BackwardEuler);
+        let wf = run(&insts, 1, vec![1.0 + 1e-9], cfg).expect("integrates with the stall rule");
+        assert!(wf.stalled_steps > 0, "the stall rule was what converged it");
+        let last = wf.x.last().expect("points")[0];
+        assert!(
+            (last - 1.0).abs() < 1e-8,
+            "at the root to a nanovolt: {last}"
+        );
+    }
+
     #[test]
     fn a_bound_step_request_caps_every_accepted_step() {
         /// A plain 1 kΩ resistor that additionally requests a 1 µs ceiling every time it is
