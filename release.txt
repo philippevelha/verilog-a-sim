@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.4.0+1 - 2026-10-02
+--------------------
+**2.4.0's static schedule verified on every deck, the slow ISCAS'85 ones included: no output
+changes.** An overnight run of the 2.4.0 binary (`perf-logs/2026-10-01-static/`, local), one deck
+at a time with `VA_SCHED=off` and then on, each run writing straight to a file. No simulator
+change.
+
+  * The 85 regular decks: `deck-diff` 85 identical, 0 different.
+  * All 13 slow ISCAS'85 decks byte-identical, every run exiting 0. Old evaluator → static
+    schedule:
+    c432 14 → 8 s, c499 20 → 11 s, c880 22 → 12 s, c1355 30 → 15 s, c1908 44 → 24 s,
+    c2670 88 → 49 s, c17_tran 90 → 46 s, c3540 202 → 115 s, c5315 273 → 170 s,
+    c6288 164 → 92 s, c432_tran 995 → 552 s, c7552 (268k unknowns) 403 → 251 s,
+    c432_seq 3050 → 2157 s.
+  * This replaces 2.4.0's "9 of 13 so far". Those nine had run on a build from before the last
+    change, in which conditions read a register's value directly; all thirteen were rerun here
+    on the final binary.
+
+
 2.4.0 - 2026-10-01
 --------------------
 **A statically scheduled evaluator for compiled models: PSP103 with IHP's SG13G2 card goes from

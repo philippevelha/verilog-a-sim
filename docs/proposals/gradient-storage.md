@@ -105,7 +105,7 @@ Refused:
   identical and 0 different (74 decks run, 11 fail the same way as on `main`).
 - **Tests:** 924 workspace tests pass with the static path on by default.
 
-The 13 slow ISCAS decks: see the release entry.
+The 13 slow ISCAS'85 decks, overnight, one at a time: all byte-identical, every run exiting 0 (release 2.4.0+1).
 
 **Speed** (i7-1185G7, `fig5_access`, 8 SG13G2 PSP103):
 
