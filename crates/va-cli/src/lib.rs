@@ -97,6 +97,51 @@ pub fn set_btf(on: bool) {
 
 static BTF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Loosen (or tighten) the transient tolerances for every `.tran` this process runs from here on:
+/// `lte_reltol` and `lte_abstol`, the step controller's truncation-error budget
+/// `lte_reltol·|x| + lte_abstol` per unknown (defaults [`TRAN_LTE_RELTOL_DEFAULT`],
+/// [`TRAN_LTE_ABSTOL_DEFAULT`]), and `newton_reltol`, each timestep's Newton convergence
+/// tolerance (default [`va_transient::integrator::NEWTON_RELTOL_DEFAULT`]). `va-cli sim
+/// --reltol` / `--abstol` / `--newton-reltol` call it. **Accuracy is the caller's to judge**: the defaults
+/// are what every committed golden was validated with, and a looser run is not re-validated --
+/// `circuits/snn/transistor/tolerance_study.py` measures what loosening costs on one deck.
+pub fn set_tran_tolerances(lte_reltol: f64, lte_abstol: f64, newton_reltol: f64) {
+    LTE_RELTOL.store(lte_reltol.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    LTE_ABSTOL.store(lte_abstol.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    NEWTON_RELTOL.store(
+        newton_reltol.to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The transient step controller's relative tolerance unless [`set_tran_tolerances`] says
+/// otherwise.
+pub const TRAN_LTE_RELTOL_DEFAULT: f64 = 1e-3;
+
+/// The transient step controller's absolute tolerance (in each unknown's own units, one value for
+/// every unknown) unless [`set_tran_tolerances`] says otherwise.
+pub const TRAN_LTE_ABSTOL_DEFAULT: f64 = 1e-6;
+
+static LTE_ABSTOL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(TRAN_LTE_ABSTOL_DEFAULT.to_bits());
+
+static LTE_RELTOL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(TRAN_LTE_RELTOL_DEFAULT.to_bits());
+static NEWTON_RELTOL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(va_transient::integrator::NEWTON_RELTOL_DEFAULT.to_bits());
+
+fn tran_lte_reltol() -> f64 {
+    f64::from_bits(LTE_RELTOL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn tran_lte_abstol() -> f64 {
+    f64::from_bits(LTE_ABSTOL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn tran_newton_reltol() -> f64 {
+    f64::from_bits(NEWTON_RELTOL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Switch on (or off) the `[logfull]` trace for every DC Newton solve this process runs from
 /// here on: per iteration, the assembly time, linear-solve time, line-search trial time,
 /// residual and largest applied step; per `gmin` stage, the iteration count and totals (see
@@ -2366,14 +2411,15 @@ fn solve_transient_impl(
         tstep,
         tstep_min: tstep * 1e-6,
         method,
-        lte_reltol: 1e-3,
-        lte_abstol: 1e-6,
+        lte_reltol: tran_lte_reltol(),
+        lte_abstol: tran_lte_abstol(),
         // Divided differences, the rigorous estimator: it reads the local truncation error
         // off a divided difference of past accepted points instead of buying a second Newton
         // solve on every step attempt (~2.5x fewer model evaluations). The transient gates
         // were re-validated under it on 2026-08-31 against the same, unchanged QSPICE golden
         // -- see `va_transient::integrator::LteEstimator` and docs/roadmap.md's T4.2 entry.
         lte_estimator: LteEstimator::DividedDifference,
+        newton_reltol: tran_newton_reltol(),
         solver,
         btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
     };
@@ -3813,6 +3859,7 @@ mod tests {
             lte_reltol: 1e-6,
             lte_abstol: 1e-12,
             lte_estimator: LteEstimator::DividedDifference,
+            newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         };
@@ -3951,6 +3998,7 @@ mod tests {
             lte_reltol: 1e-6,
             lte_abstol: 1e-9,
             lte_estimator: LteEstimator::DividedDifference,
+            newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         };
@@ -4014,6 +4062,7 @@ mod tests {
             lte_reltol: 1e-6,
             lte_abstol: 1e-9,
             lte_estimator: LteEstimator::DividedDifference,
+            newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         };

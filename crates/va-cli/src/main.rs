@@ -75,6 +75,14 @@ fn print_usage() {
                                  VA_BTF=off solves DC and transient steps with faer's
                                  sparse LU alone instead of trying the block-triangular
                                  solver first.
+         --reltol <x>            Transient step control's relative truncation-error
+                                 tolerance. Default 1e-3. Looser = fewer timepoints,
+                                 and results NOT re-validated against golden.
+         --abstol <x>            The same budget's absolute floor, in each unknown's
+                                 own units (V, A, ...). Default 1e-6.
+         --newton-reltol <x>     Each transient step's Newton convergence tolerance.
+                                 Default 1e-9 (strict). Looser = fewer iterations;
+                                 same caveat.
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per
@@ -108,6 +116,26 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // `--threads <n>`: how many threads evaluate device instances (`va_core::par`). Without it,
     // rayon's default — `RAYON_NUM_THREADS`, else one per logical core. Speed only: every
     // thread count gives the same bits.
+    // `--reltol <x>` / `--abstol <x>` / `--newton-reltol <x>`: the transient tolerances (`va_cli::set_tran_tolerances`).
+    // Defaults are what every golden was validated with; looser is faster and unvalidated.
+    let tol = |flag: &str, default: f64| -> Result<f64> {
+        match parse_flag(args, flag) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<f64>()
+                .ok()
+                .filter(|x| x.is_finite() && *x > 0.0)
+                .with_context(|| format!("{flag} expects a positive number, got `{v}`")),
+        }
+    };
+    va_cli::set_tran_tolerances(
+        tol("--reltol", va_cli::TRAN_LTE_RELTOL_DEFAULT)?,
+        tol("--abstol", va_cli::TRAN_LTE_ABSTOL_DEFAULT)?,
+        tol(
+            "--newton-reltol",
+            va_transient::integrator::NEWTON_RELTOL_DEFAULT,
+        )?,
+    );
     if let Some(n) = parse_flag(args, "--threads") {
         let n: usize = n
             .parse()

@@ -22,6 +22,36 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.6.0 - 2026-10-02
+--------------------
+**Transient tolerances settable from the command line, and what loosening them and scaling the
+crossbar cost on the transistor SNN.** `va-cli sim --reltol <x>` (step control's relative
+truncation-error budget, default 1e-3), `--abstol <x>` (its absolute floor, default 1e-6) and
+`--newton-reltol <x>` (each step's Newton tolerance, default 1e-9, until now a constant in
+va-transient: `TranConfig::newton_reltol`, `NEWTON_RELTOL_DEFAULT`). Without the flags every
+run is unchanged. A loosened run is not re-validated against golden; the help text says so.
+
+  * Tolerance study (`circuits/snn/transistor/tolerance_study.py`, figure `tolerance_study.png`):
+    on `fig5_tx.net`, `--reltol` from 1e-3 to 1 moves V_m at the 15 latch samples by at most
+    0.003 % and never changes a spike, and **no looser run is faster** (445.6 s reference;
+    454-587 s, with 5-38 % fewer timepoints). The 10 % limit the study searched for is never
+    reached. `--newton-reltol 1e-7`: identical, 508 s. The rest of the Newton sweep and the
+    `--abstol` sweep were not run (stopped by choice).
+  * Crossbar timing (`gen_mnist_tx.py`: the MNIST decks with SG13G2 access devices, neurons as
+    transistors or behavioural, any subset of layers and neurons). The hidden-2 crossbar at
+    8/16/32/64 neurons, 2 cycles: plain 255/445/883/1909 s, linear at ~160 us per access
+    transistor per timepoint, 140 574 unknowns and 3.4 GB at 64. With the `proto/static-bypass`
+    prototype (not on main): 70/157/407/1289 s, the gain falling 3.6x -> 1.5x with 90 % of loads
+    replayed throughout, so something besides device evaluation grows superlinearly (not yet
+    profiled). The whole network with transistor neurons is 437 480 unknowns; 5 ns had not
+    finished in 10 min. Extrapolated, and labelled so in the README: ~16-52 h per image for the
+    crossbars alone with behavioural neurons.
+  * Output changes: none. `xtask deck-diff` against the 2.5.0 binary, flags not given: 85
+    identical, 0 different (the new transistor and crossbar decks and the slow ISCAS set skipped).
+  * Measured at this version: `cargo test --workspace` 926 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.5.0 - 2026-10-02
 --------------------
 **The Fig. 5 neuron runs with every block as transistors, and three transient fixes it needed.**

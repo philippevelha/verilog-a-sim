@@ -2,3 +2,7 @@ bench_tech.inc
 bench_input_stage.net
 scan_input_stage.net
 __pycache__/
+mnist_tx_digit*.net
+tolerance/*.out
+xbar_*.net
+tolerance_run.log

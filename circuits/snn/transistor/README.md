@@ -155,3 +155,59 @@ less than the step floor after the current time is now treated as the instant al
 Three existing decks took such slivers: `fig4_neuron`, `fig5_neuron` and `fig5_access` lose 2–4
 timepoints each, all sub-floor duplicates of a corner, and every V_m sample their checks read is
 unchanged at the printed precision (`check_snn.py` PASS with identical numbers for Figs. 4 and 5).
+
+## Tolerance study (2026-10-02, 2.6.0)
+
+`tolerance_study.py` reruns `fig5_tx.net` (68 PSP103) with one transient tolerance loosened at
+a time (`va-cli --reltol`, `--newton-reltol`, new in 2.6.0) and compares V_m at the 15 latch
+samples, and the output spikes, with the default-tolerance run. Figure: `tolerance_study.png`;
+data: `tolerance/results.jsonl`.
+
+![result and wall time vs tolerance](tolerance_study.png)
+
+- **`--reltol` from 1e-3 to 1: V_m moves by at most 0.003 %, the spikes never change, and no run
+  is faster.** The reference takes 445.6 s; every looser run takes 454–587 s, with 5–38 % fewer
+  timepoints. Longer steps cost more Newton work than the timepoints they save, and the 10 %
+  limit the study was to search for is never approached. On this deck, step-control tolerance
+  is not where the time goes.
+- `--newton-reltol 1e-7`: identical V_m, 508 s. The study was stopped there, by choice, before the
+  rest of the Newton sweep and the `--abstol` sweep (which the script also carries) ran.
+
+## Crossbar timing (2026-10-02, 2.6.0)
+
+`gen_mnist_tx.py` turns an MNIST digit deck (`circuits/snn/mnist/decks/`) into a transistor-level
+one: each 2T2R cell's access devices as SG13G2 NMOS, the neurons as transistors or kept
+behavioural (`--neurons`), any subset of the layers and neurons (`--layers`, `--per-layer`).
+**It measures cost, not classification:** the network was trained with an unbounded V_m
+(`circuits/snn/mnist/README.md`), so a transistor-level run is not expected to classify the same.
+
+**The whole network** (digit 0, every synapse and neuron as transistors): 25 944 PSP103, 44 515
+devices, **437 480 unknowns**. A 5 ns run had not finished after 10 min and was stopped.
+
+**The hidden-2 crossbar, scaled** (digit 0's real h1 input spike trains, behavioural neurons,
+2 cycles = 500 ns, i7-1185G7, 8 threads, run one at a time). Plain is this release; bypass is the
+`proto/static-bypass` prototype (2.4.0 + device bypass, `VA_BYPASS=on`, not on main):
+
+| Neurons | Access NMOS | Unknowns | Timepoints | Plain | Bypass (loads replayed) | Plain µs / device / point | Bypass µs / device / point |
+|---|---|---|---|---|---|---|---|
+| 8 | 1 024 | 17 710 | 1 383 | 255 s | 70 s (90.2 %) | 180 | 49 |
+| 16 | 2 048 | 35 262 | 1 385 | 445 s | 157 s (90.0 %) | 157 | 55 |
+| 32 | 4 096 | 70 366 | 1 399 | 883 s | 407 s (90.0 %) | 154 | 71 |
+| 64 | 8 192 | 140 574 | 1 411 | 1 909 s | 1 289 s (90.1 %) | 165 | 111 |
+
+- **Plain cost is linear in the device count**, ~160 µs per access transistor per timepoint, and
+  the timepoint count hardly changes with size. The 64-neuron run peaked at 3.4 GB.
+- **Bypass is exact here and its gain shrinks with size**: 3.6× → 2.8× → 2.2× → 1.5×. V_m of the
+  8 neurons at the end of each cycle is identical to the plain run's to 4 decimals. With 90 % of
+  the loads replayed at every size, what is left grows ~3.2× per doubling at the top: the part
+  of each step that is not device evaluation scales superlinearly. **Which part has not been
+  measured** (the sparse factorisation is the obvious suspect, but that is unproven); profiling
+  the 64-neuron bypass run is the next step.
+
+**Projection, an extrapolation and labelled as one.** The network's three crossbars hold 17 664
+access transistors, 2.16× the 64-neuron crossbar. At the plain rate that is ~2.9 s per timepoint;
+the behavioural MNIST run took ~2 200 timepoints per cycle (here ~700 in the first two cycles),
+so 29 cycles are 20 000–64 000 timepoints, **~16–52 h per image for the crossbars alone with
+behavioural neurons**, on the condition that the superlinear part seen under bypass stays small
+beyond 140k unknowns, which nothing here shows. The transistor neurons would add 8 280 devices,
+and on the single-neuron deck they multiplied the timepoints by 2.2.

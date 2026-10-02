@@ -89,6 +89,10 @@ pub enum Method {
     Gear,
 }
 
+/// [`TranConfig::newton_reltol`]'s default: strict, 1e6 x tighter than SPICE's `reltol`, and
+/// what every transient result before 2.6.0 was computed with.
+pub const NEWTON_RELTOL_DEFAULT: f64 = 1e-9;
+
 /// Transient run controls.
 #[derive(Clone, Copy, Debug)]
 pub struct TranConfig {
@@ -114,6 +118,11 @@ pub struct TranConfig {
     pub lte_abstol: f64,
     /// Which LTE estimator drives step accept/reject. See [`LteEstimator`].
     pub lte_estimator: LteEstimator,
+    /// Newton's relative tolerance on every timestep's solve: an iteration has converged when
+    /// each unknown's update is within `newton_reltol·|x|` plus its absolute tolerance.
+    /// [`NEWTON_RELTOL_DEFAULT`] (1e-9, the value hard-coded until 2.6.0) unless a caller loosens
+    /// it to trade accuracy for iterations -- `va-cli --newton-reltol`.
+    pub newton_reltol: f64,
     /// Dense or sparse linear algebra for every timestep's Newton solve — see [`Solver`].
     /// [`Solver::Auto`] is dense below `va_core::sparse::SPARSE_THRESHOLD` unknowns and sparse
     /// from it (`docs/proposals/sparse-solve.md`, Step 3). The trajectory does not depend on it
@@ -1065,10 +1074,10 @@ fn newton_step(
     per_abstol: &[f64],
     linear: &mut Linear,
     allow_stall: bool,
+    reltol: f64,
 ) -> Result<Solved, TransientError> {
     const MAX_ITERS: usize = 100;
     const ABSTOL: f64 = 1e-12;
-    const RELTOL: f64 = 1e-9;
     // The stall rule's tolerances (see the end of the iteration loop).
     const STALL_RELTOL: f64 = 1e-6;
     const STALL_ABSTOL_FACTOR: f64 = 1e6;
@@ -1081,7 +1090,7 @@ fn newton_step(
     // The simulator parameters `$simparam` reports during this step's solve. This engine runs no
     // homotopy in transient, so `gmin` is `0.0` -- the conductance actually in the circuit, which
     // is the honest answer rather than a nominal floor it does not apply.
-    let sim = va_abi::SimParams::new().with_tolerances(ABSTOL, RELTOL);
+    let sim = va_abi::SimParams::new().with_tolerances(ABSTOL, reltol);
     let mut last_residual = f64::INFINITY;
     // Consecutive iterations that met the stall rule's tolerances (see the end of this loop).
     let mut stalled_for = 0usize;
@@ -1161,7 +1170,7 @@ fn newton_step(
             // of vehicles per hour the last representable digits of the step are ~1e-9, and
             // Newton stalled at a residual of 1e-9 with the answer in hand — measured on
             // `circuits/motorway_ramp.net`).
-            if applied.abs() > RELTOL * vnew.abs() + per_abstol[i] {
+            if applied.abs() > reltol * vnew.abs() + per_abstol[i] {
                 update_small = false;
             }
             if applied.abs() > STALL_RELTOL * vnew.abs() + STALL_ABSTOL_FACTOR * per_abstol[i] {
@@ -1527,6 +1536,7 @@ pub fn run_with_events(
                 &per_abstol,
                 &mut linear,
                 h * 0.5 < cfg.tstep_min,
+                cfg.newton_reltol,
             ) {
                 Ok(solved) => solved,
                 // A step Newton cannot converge on is a step that was too long, the same
@@ -1639,6 +1649,7 @@ pub fn run_with_events(
                         &per_abstol,
                         &mut linear,
                         h * 0.5 < cfg.tstep_min,
+                        cfg.newton_reltol,
                     ) {
                         Ok(solved) => solved.x,
                         // The reference solve failing is the step being too long, exactly as
@@ -1907,6 +1918,7 @@ pub fn run_with_events(
                         &per_abstol,
                         &mut linear,
                         h * 0.5 < cfg.tstep_min,
+                        cfg.newton_reltol,
                     )?;
                     x = resolved.x;
                     converged_at = resolved.iterations;
@@ -2441,6 +2453,7 @@ mod tests {
             lte_reltol: 1e-3,
             lte_abstol: 1e-6,
             lte_estimator: LteEstimator::EmbeddedPair,
+            newton_reltol: NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: true,
         }
@@ -3566,6 +3579,7 @@ mod tests {
             lte_reltol: 5e-2,
             lte_abstol: 2e-3,
             lte_estimator: LteEstimator::EmbeddedPair,
+            newton_reltol: NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: true,
         };
