@@ -22,6 +22,49 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.5.0 - 2026-10-02
+--------------------
+**The Fig. 5 neuron runs with every block as transistors, and three transient fixes it needed.**
+`circuits/snn/transistor/gen_neuron.py` writes the Fig. 5 deck with any of the neuron's four
+blocks (switches, comparator, flip-flop + reset logic, input stage) as SG13G2 PSP103 devices;
+`fig5_tx.net` has all four: 68 devices, 1169 unknowns, 23 786 timepoints, 443.9 s (i7-1185G7,
+8 threads), output spikes at steps 6, 10, 14 as in the paper. Every design and size is ours (the
+paper gives none), and the input stage is not Fig. 2's push-pull conveyor (dead zone at
+I_in = 0): a biased conveyor, 1/K mirrors, a trimmed sink, and output steering onto V_m or a
+follower of V_m. The rung-by-rung ladder and the input stage's measured accuracy are in
+`circuits/snn/transistor/README.md`.
+
+  * Cost, stated plainly: V_m departs from the paper's ideal-switch equations by up to 0.173 V,
+    of which 0.131 V is the access transistors' R_on (2.3.0) and ~43 mV the neuron's blocks; the
+    deck's 0.05 V check reports FAIL, as it has since 2.3.0, for that reason. The wall time is
+    18x the access-only deck's for 8.5x the devices.
+  * va-transient, **breakpoint slivers**: a breakpoint less than `tstep_min` after the current
+    time is now the instant already landed on. A model registered one a single ulp after a
+    source corner the run had just landed on, and every attempt was clamped to a 2.1e-22 s step
+    (companion coefficient 4.7e21, residual stuck at 2^-20 A) until the run underflowed. Test
+    `a_breakpoint_registered_one_ulp_after_a_landing_is_not_stepped_to` (discriminating: without
+    the fix the shortest step is a 2e-25 s sliver).
+  * va-transient, **stall rule**: at the minimum step only, a Newton solve whose last two
+    iterations moved by less than 1e-6 relative / 1e6 x the per-unknown abstol with the residual
+    under 1e-6 is accepted and counted (`Waveform::stalled_steps`; va-cli prints a note). Found on
+    a pass gate turning off at V_DS = 0. No deck in the ladder above invokes it at this version.
+  * va-transient: an LTE reference solve that does not converge now halves the step, as the
+    primary solve's failure does, instead of ending the run.
+  * va-codegen: `counters_count_evaluations_only_while_enabled` had failed since 2.4.0: its
+    probe-allocation bound assumed the tree-walking evaluator, and the static schedule reads
+    probes from slots. The bound now applies with `VA_SCHED=off` only. A test fix. It fails
+    deterministically on a clean 2.4.0+1 checkout, so 2.4.0's "924 passed" either missed it or
+    was measured before the final schedule change; which one is not known.
+  * Output changes: `xtask deck-diff` against the 2.4.0+1 binary, 82 identical, 3 different, all
+    from the sliver fix: `fig4_neuron`, `fig5_neuron`, `fig5_access` lose 2-4 timepoints each
+    (sub-floor duplicates of a corner; fig4_neuron and fig5_access then take a different step
+    sequence), and every V_m sample `check_snn.py` reads is identical at the printed precision
+    (Figs. 4 and 5 PASS with the same numbers). The six new transistor-neuron decks and the slow ISCAS'85 set
+    were not diffed.
+  * Measured at this version: `cargo test --workspace` 926 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.4.0+1 - 2026-10-02
 --------------------
 **2.4.0's static schedule verified on every deck, the slow ISCAS'85 ones included: no output

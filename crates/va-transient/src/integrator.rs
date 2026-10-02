@@ -1438,6 +1438,17 @@ pub fn run_with_events(
             //   floor, and after a restart the error controller underflowed on it;
             // - a step that would stop less than `tstep_min` short of a breakpoint goes to the
             //   breakpoint instead, so the step after it is never a sub-floor sliver either.
+            // - a breakpoint less than `tstep_min` *after `t` itself* is the instant already
+            //   landed on (2.5.0). The rule above merges what is ahead of `t` when the step is
+            //   planned, but a model-requested breakpoint can be registered only after the
+            //   landing, at the same corner computed a different way. In the transistor neuron
+            //   deck (circuits/snn/transistor/) the run landed on a source corner at
+            //   1.3720000000000002e-6, and a model breakpoint one ulp later, at
+            //   1.3720000000000004e-6, then asked for a 2.1e-22 s step: a companion coefficient
+            //   of 4.7e21, charge terms of 5.7e7 in PSP103's internal rows, a residual
+            //   quantised at 2^-20 that no Newton iteration could bring under 1e-12, and every
+            //   halving of `h` re-planned the same clamped sliver until the run underflowed.
+            //   Only a run that had a breakpoint that close is affected.
             //
             // SPICE merges breakpoints closer than its minimum break the same way.
             let after = |from: f64| -> Option<f64> {
@@ -1453,7 +1464,11 @@ pub fn run_with_events(
                 }
             };
             let mut next_bp = f64::INFINITY;
-            if let Some(first) = after(t) {
+            let mut first = after(t);
+            while let Some(bp) = first.filter(|&bp| bp - t < cfg.tstep_min) {
+                first = after(bp);
+            }
+            if let Some(first) = first {
                 next_bp = first;
                 while let Some(bp) = after(next_bp) {
                     if bp - next_bp >= cfg.tstep_min {
@@ -3139,6 +3154,72 @@ mod tests {
         cfg.lte_estimator = LteEstimator::DividedDifference;
         let floor = cfg.tstep_min;
         let wf = run(&insts, 4, vec![0.0; 4], cfg).expect("integrates past coincident corners");
+        assert!(
+            shortest_step(&wf) >= floor,
+            "sliver: {:e}",
+            shortest_step(&wf)
+        );
+    }
+
+    /// Electrically 1 MΩ from its node to ground; asks for a breakpoint at `late` only once the
+    /// run has reached `seen` -- a model that registers a corner after the landing it belongs to.
+    struct LateBreakpoint {
+        unknowns: [usize; 1],
+        seen: f64,
+        late: f64,
+    }
+
+    impl ModelInstance for LateBreakpoint {
+        fn unknowns(&self) -> &[usize] {
+            &self.unknowns
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            _ctx: &AnalysisCtx,
+            _state: &mut va_abi::ModelState,
+            sink: &mut dyn va_abi::StampSink,
+        ) {
+            let g = 1e-6;
+            let a = self.unknowns[0];
+            sink.residual(a, g * x[a]);
+            sink.jacobian(a, a, g);
+        }
+        fn events(&self, _x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+            if ctx.time >= self.seen && ctx.time < self.late {
+                sink.breakpoint(self.late);
+            }
+        }
+    }
+
+    /// **A breakpoint less than `tstep_min` after the current time is the instant already landed
+    /// on** (2.5.0). The merge above only sees breakpoints known when the step is planned; here
+    /// a model registers one a single ulp after a source corner, and only once the run has
+    /// landed on that corner -- the transistor neuron deck's shape, where the 2e-22 s step it
+    /// asked for ended the run in a timestep underflow.
+    ///
+    /// Discriminating, checked: with `after(t)` used as it was (no sliver skip), the shortest
+    /// step is the one-ulp sliver and this fails.
+    #[test]
+    fn a_breakpoint_registered_one_ulp_after_a_landing_is_not_stepped_to() {
+        let (corner, slope, c) = (1e-9, 1e9, 1e-12);
+        let src = RampSource {
+            terminals: [0, va_abi::reference::GROUND, 1],
+            corner,
+            slope,
+        };
+        let cap = va_abi::reference::Capacitor::new(0, va_abi::reference::GROUND, c);
+        let late = LateBreakpoint {
+            unknowns: [0],
+            seen: corner,
+            late: f64::from_bits(corner.to_bits() + 1),
+        };
+        let insts: [&dyn ModelInstance; 3] = [&src, &cap, &late];
+        let mut cfg = default_cfg(3.0 * corner, 1e-11, Method::Trapezoidal);
+        cfg.lte_estimator = LteEstimator::DividedDifference;
+        let floor = cfg.tstep_min;
+        let wf = run(&insts, 2, vec![0.0, 0.0], cfg).expect("integrates past the late corner");
+        assert!(wf.t.contains(&corner), "lands on the source's corner");
         assert!(
             shortest_step(&wf) >= floor,
             "sliver: {:e}",

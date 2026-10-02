@@ -6,7 +6,7 @@ def deck(sweep, vt=1.65, vbs=0.9, vout=1.5, k=0.696, vbpc=2.1, vbnc=1.05):
        "Vdd vdd gnd DC 3.3", "Vref vref gnd DC 1.65", "Vbn vbn gnd DC 0.8", "Vbp vbp gnd DC 1.8",
        f"Vbs vbs gnd DC {vbs}", f"Vbpc vbpc gnd DC {vbpc}", f"Vbnc vbnc gnd DC {vbnc}", "Vclk clk gnd DC 3.3", "Vclkb clkb gnd DC 0",
        f"Vt vt gnd DC {vt}", "Rin vt sl 50k", f"Vout out gnd DC {vout}", "Vdump dump gnd DC 1.65"]
-    L+=ist.lines(t, k)
+    L+=ist.lines(t, k, dump="dump")
     L+=[sweep, ".end"]
     t.write_inc('bench_tech.inc')
     return "\n".join(L)+"\n"

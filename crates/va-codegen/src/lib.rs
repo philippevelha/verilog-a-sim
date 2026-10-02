@@ -3331,7 +3331,12 @@ mod tests {
         let after = crate::counters::snapshot();
         crate::counters::enable(false);
         assert!(after.ctx_maps_built - before.ctx_maps_built >= 3 * loads);
-        assert!(after.probe_allocs - before.probe_allocs >= loads);
+        // Only the tree-walking evaluator allocates a probe: the static schedule (2.4.0, the
+        // default) reads it from a slot. The bound was written before the schedule existed, and
+        // went red with it -- run with `VA_SCHED=off` to exercise it.
+        if !sched_enabled() {
+            assert!(after.probe_allocs - before.probe_allocs >= loads);
+        }
         // The charge is non-linear in `V`, so each load does dual arithmetic on a value that
         // depends on an unknown: at least one gradient allocation per load.
         assert!(after.grad_allocs - before.grad_allocs >= loads);

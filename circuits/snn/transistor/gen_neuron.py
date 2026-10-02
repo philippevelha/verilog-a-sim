@@ -24,23 +24,37 @@ in the technology `tech.py` names; `--blocks` picks which are transistors:
             refractory off; its power-on term is dropped (por is 0 in these decks) -- as one CMOS
             AND-OR-INVERT gate and an inverter, with clkb as "clk low".
 
+  input     the input stage (block A): holds the source line at V_ref and delivers I_in / K into
+            V_m while clk is high. Our design, not Fig. 2's push-pull conveyor (dead zone at
+            I_in = 0): a biased PMOS conveyor under a two-stage op-amp, mirrors scaled by 1/K,
+            cascoded outputs, a trimmed bias sink, steering onto V_m or a follower of V_m -- see
+            input_stage.py, whose module docstring and constants carry the reasoning and the
+            measured DC accuracy. Its biases (vbp, vbpc, vbnc, vbs) are global sources.
+
 The sizes are ours: the paper gives none. The synapses are the access-transistor 2T2R cells of
 `fig5_access.net` (same W/L). Complementary clocks clkb/qclkb are global sources (clock generation
 is outside the neuron).
 
-    python circuits/snn/transistor/gen_neuron.py --blocks switches
+    python circuits/snn/transistor/gen_neuron.py                 # every block: fig5_tx.net
+    python circuits/snn/transistor/gen_neuron.py --blocks switches,comparator \\
+        --out circuits/snn/transistor/fig5_tx_cmp.net               # a rung of the ladder
     va-cli sim circuits/snn/transistor/fig5_tx.net --model models/snn \\
         --model models/sg13g2/psp103/psp103.va --tran --report clk,wl1,vm,spk
+
+The committed decks are the ladder the README's table measures: fig5_tx_none (no block),
+fig5_tx_sw, fig5_tx_cmp, fig5_tx_dff (each adding one block), fig5_tx_in (the input stage
+alone) and fig5_tx (all four).
 """
 import argparse
 import os
 import re
 
+import input_stage
 import tech
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "fig5_neuron.net")
-BLOCKS = ["switches", "comparator", "dff"]
+BLOCKS = ["input", "switches", "comparator", "dff"]
 
 # Device sizes (m). Ours: the paper gives none.
 SW_N = (2e-6, 0.45e-6)  # NMOS switch
@@ -68,6 +82,18 @@ def power_up(line):
     return f"{m.group(1)}PWL(0 0 1n {m.group(2)})"
 
 
+def complement(name, node, delay, width, period, tstop, vdd=3.3, edge=1e-9):
+    """The complement of PULSE(0 vdd delay edge edge width period) as a PWL source that starts at
+    0 V and powers up to vdd over the first `edge` (see power_up), then falls when the pulse rises
+    and rises when it falls, until `tstop`."""
+    pts = [(0.0, 0.0), (edge, vdd)]
+    t = delay
+    while t < tstop:
+        pts += [(t, vdd), (t + edge, 0.0), (t + edge + width, 0.0), (t + 2 * edge + width, vdd)]
+        t += period
+    return f"{name} {node} gnd PWL(" + " ".join(f"{a * 1e9:.6g}n {v:g}" for a, v in pts) + ")"
+
+
 def inverter(t, name, a, y):
     """A CMOS inverter `a` -> `y` on the vdd/gnd rails."""
     return [t.nmos(name + "n", y, a, "gnd", "gnd", *INV_N),
@@ -77,8 +103,11 @@ def inverter(t, name, a, y):
 def neuron(t, blocks, k):
     """The neuron's lines, inline (so `vm` and `spk` keep their names)."""
     out = ["* ===== neuron, blocks as transistors: " + (", ".join(sorted(blocks)) or "none")]
-    out.append("* input stage (block A + clk gate): behavioural")
-    out.append(f"Xin   sl vref vm clk sl_stage k={k}")
+    if "input" in blocks:
+        out.extend(input_stage.lines(t, float(k), out="vm"))
+    else:
+        out.append("* input stage (block A + clk gate): behavioural")
+        out.append(f"Xin   sl vref vm clk sl_stage k={k}")
     out.append("* membrane and leak (block B): beta = C_M / (C_M + C_L) from charge sharing")
     out.append("CM    vm  gnd 998f IC=0")
     out.append("CL    cl  gnd 660f IC=0")
@@ -143,7 +172,7 @@ def neuron(t, blocks, k):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--blocks", default="switches",
+    ap.add_argument("--blocks", default=",".join(BLOCKS),
                     help="comma-separated transistor blocks: " + ", ".join(BLOCKS) + " (or none)")
     ap.add_argument("--tech", default="sg13g2_hv")
     ap.add_argument("--out", default=os.path.join(HERE, "fig5_tx.net"))
@@ -189,14 +218,20 @@ def main():
             # bulk nodes from the cold (UIC) start through tens of ohms into femtofarads: a real
             # transient faster than the step controller's floor, which ended the run at
             # t = 5e-16 s. So the supply ramps up over 1 ns, as a real one does, and the
-            # complements are written as pulses that start low: qclkb is high exactly when qclk
-            # is low from the first falling edge of qclk on (low before it, for the first 122 ns,
-            # with V_m and C_L both still at 0); clkb likewise from the first edge of clk.
+            # complements are written to start low: qclkb is a pulse, high exactly when qclk is
+            # low from the first falling edge of qclk on (low before it, for the first 122 ns,
+            # with V_m and C_L both still at 0). clkb is the exact complement of clk after a 1 ns
+            # power-up (complement()): written as a pulse starting low too, it left clk and clkb
+            # both low for the first 124 ns, which turned on the PMOS half of every gate switched
+            # by clk -- the input stage's steering put 0.26 V onto V_m before the first window.
             out.append("Vqclkb qclkb gnd PULSE(0 3.3 122n 1n 1n 129n 250n)")
-            out.append("Vclkb clkb gnd  PULSE(0 3.3 249.5n 1n 1n 124n 250n)")
+            out.append(complement("Vclkb", "clkb", 124.5e-9, 124e-9, 250e-9, 3.75e-6))
             out.append(power_up("Vdd   vdd  gnd  DC 3.3"))
             out.append(power_up("Vth   vth  gnd  DC 2.4"))
             out.append(power_up("Vbn   vbn  gnd  DC 0.8"))
+            if "input" in blocks:
+                for name, v in input_stage.BIAS.items():
+                    out.append(power_up(f"V{name:<5} {name:<5} gnd DC {v}"))
             continue
         if line.startswith(".tran"):
             out.extend(neuron(t, blocks, k))
