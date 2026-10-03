@@ -249,7 +249,9 @@ impl Bypass {
             // A task is a side effect a replay would repeat or skip at the wrong time; a module
             // with one does not claim purity (`va_codegen`), and this keeps a hand-written one
             // that did from being bypassed.
-            Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) => false,
+            Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) | Stamp::File(..) => {
+                false
+            }
             _ => true,
         });
         if covered {
@@ -326,6 +328,7 @@ impl BypassEntry {
                 Stamp::Excitation(r, re, im) => sys.excitation(r, re, im),
                 Stamp::BoundStep(dt) => StampSink::bound_step(sys, dt),
                 Stamp::Task(kind, ref text) => sys.task(kind, text),
+                Stamp::File(op, ref path, ref text) => sys.file(op, path.as_deref(), text),
             }
         }
     }
@@ -358,6 +361,7 @@ impl BypassEntry {
                 Stamp::Excitation(r, re, im) => sink.excitation(r, re, im),
                 Stamp::BoundStep(dt) => sink.bound_step(dt),
                 Stamp::Task(kind, ref text) => sink.task(kind, text),
+                Stamp::File(op, ref path, ref text) => sink.file(op, path.as_deref(), text),
             }
         }
     }
@@ -504,6 +508,7 @@ impl SlotCache {
                 Stamp::Excitation(r, re, im) => sys.excitation(r, re, im),
                 Stamp::BoundStep(dt) => StampSink::bound_step(sys, dt),
                 Stamp::Task(kind, ref text) => sys.task(kind, text),
+                Stamp::File(op, ref path, ref text) => sys.file(op, path.as_deref(), text),
             }
         }
         layout.truncate(k);
@@ -592,12 +597,13 @@ enum Stamp {
     Excitation(usize, f64, f64),
     BoundStep(f64),
     Task(va_abi::TaskKind, Box<str>),
+    File(va_abi::FileOp, Option<Box<str>>, Box<str>),
 }
 
 /// A [`StampSink`] that stores every call, in order, for [`Recorder::replay`].
 ///
-/// It overrides **every** `StampSink` method, including the three with default bodies
-/// (`excitation`, `bound_step`, `task`): a method left to its default would be silently dropped from
+/// It overrides **every** `StampSink` method, including the four with default bodies
+/// (`excitation`, `bound_step`, `task`, `file`): a method left to its default would be silently dropped from
 /// the parallel path while the serial path honoured it. A method added to `StampSink` must be
 /// added here too.
 #[derive(Default, Debug)]
@@ -615,6 +621,7 @@ impl Recorder {
                 Stamp::Excitation(r, re, im) => sink.excitation(r, re, im),
                 Stamp::BoundStep(dt) => sink.bound_step(dt),
                 Stamp::Task(kind, ref text) => sink.task(kind, text),
+                Stamp::File(op, ref path, ref text) => sink.file(op, path.as_deref(), text),
             }
         }
     }
@@ -641,6 +648,10 @@ impl StampSink for Recorder {
     }
     fn task(&mut self, kind: va_abi::TaskKind, text: &str) {
         self.0.push(Stamp::Task(kind, text.into()));
+    }
+    fn file(&mut self, op: va_abi::FileOp, path: Option<&str>, text: &str) {
+        self.0
+            .push(Stamp::File(op, path.map(Into::into), text.into()));
     }
 }
 

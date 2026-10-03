@@ -713,6 +713,12 @@ pub enum LoweredStmt {
         kind: va_ir::TaskKind,
         /// Its arguments, in source order.
         args: Vec<va_ir::TaskArg>,
+        /// The variable it assigns (`var = $fopen(...)`), `None` otherwise.
+        target: Option<VarId>,
+        /// For `$monitor`/`$fmonitor`: the first of its state slots — a "has printed" flag, then
+        /// one per compared argument ([`monitor_compared`]) — holding what it saw at the last
+        /// accepted step. Allocated by [`allocate_monitor_slots`]; `None` for every other task.
+        monitor: Option<usize>,
     },
     /// `if (cond) { then_ } else { else_ }`. `crate::GeneratedModel::run` walks only the arm
     /// `cond` selects at the current operating point; `crate::GeneratedModel::validate` walks
@@ -1310,6 +1316,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             }
         })
         .collect();
+    allocate_monitor_slots(module, &mut stmts, &mut state_len);
     let has_laplace = stmts_contain_laplace(&stmts);
     let mut laplace_terms = Vec::new();
     allocate_laplace_states(&mut stmts, &mut next_slot, &mut laplace_terms);
@@ -2015,10 +2022,12 @@ fn lower_stmt(
             out.push(LoweredStmt::BoundStep(*expr));
             Ok(())
         }
-        Stmt::Task { kind, args } => {
+        Stmt::Task { kind, args, target } => {
             out.push(LoweredStmt::Task {
                 kind: *kind,
                 args: args.clone(),
+                target: *target,
+                monitor: None,
             });
             Ok(())
         }
@@ -2940,6 +2949,12 @@ pub fn persistent_vars(module: &Module) -> BTreeSet<u32> {
     let mut written = Vec::new();
     collect_assigns(&module.analog, &mut written);
     let mut ever_assigned: BTreeSet<u32> = written.into_iter().map(|(v, _)| v).collect();
+    // A `$fopen`'s descriptor is assigned by a task, not an `Assign`; without this a descriptor
+    // opened in `@(initial_step)` was dropped here, read as unassigned on the next evaluation,
+    // and that error ended the walk before every later statement (found 2026-10-03).
+    let mut by_task = Vec::new();
+    ir_assigned_vars(&module.analog, &mut by_task);
+    ever_assigned.extend(by_task.into_iter().map(|v| v.0));
     for e in &module.exprs {
         if let Expr::CallUser(_, args) = e {
             for a in args {
@@ -3021,9 +3036,12 @@ fn da_stmt(
         }
         Stmt::Contribute { value, .. } => da_read(module, *value, assigned, marked, memo),
         Stmt::BoundStep(e) => da_read(module, *e, assigned, marked, memo),
-        Stmt::Task { args, .. } => {
+        Stmt::Task { args, target, .. } => {
             for e in args.iter().filter_map(va_ir::TaskArg::expr) {
                 da_read(module, e, assigned, marked, memo);
+            }
+            if let Some(slot) = target.and_then(|v| assigned.get_mut(v.0 as usize)) {
+                *slot = true;
             }
         }
         Stmt::Block(body) => da_stmts(module, body, assigned, marked, memo),
@@ -3499,6 +3517,9 @@ fn ir_assigned_vars(stmts: &[va_ir::Stmt], out: &mut Vec<VarId>) {
     for s in stmts {
         match s {
             va_ir::Stmt::Assign { lhs, .. } => out.push(*lhs),
+            va_ir::Stmt::Task {
+                target: Some(v), ..
+            } => out.push(*v),
             va_ir::Stmt::Contribute { .. }
             | va_ir::Stmt::BoundStep(_)
             | va_ir::Stmt::Task { .. } => {}
@@ -3632,6 +3653,68 @@ fn evaluates_ddt(module: &Module, stmts: &[LoweredStmt]) -> bool {
         })
     }
     walk(module, stmts, &mut HashMap::new())
+}
+
+/// The arguments a `$monitor` (`$fmonitor`) compares between accepted steps, by position in its
+/// argument list: every expression except `$abstime` (LRM §9.4.1 exempts it, and `$realtime`,
+/// which this engine spells the same) and, for `$fmonitor`, the descriptor.
+pub fn monitor_compared(
+    module: &Module,
+    kind: va_ir::TaskKind,
+    args: &[va_ir::TaskArg],
+) -> Vec<usize> {
+    let skip = usize::from(kind == va_ir::TaskKind::Fmonitor);
+    args.iter()
+        .enumerate()
+        .skip(skip)
+        .filter_map(|(i, a)| {
+            let e = a.expr()?;
+            (!matches!(module.expr(e), Expr::Call(Builtin::Abstime, _))).then_some(i)
+        })
+        .collect()
+}
+
+/// Give every `$monitor`/`$fmonitor` in `stmts` its state slots, past `*state_len`: a flag and
+/// one slot per compared argument. The state channel commits only at accepted steps, which is
+/// exactly the LRM's "compared with the last accepted step".
+fn allocate_monitor_slots(module: &Module, stmts: &mut [LoweredStmt], state_len: &mut usize) {
+    for stmt in stmts {
+        match stmt {
+            LoweredStmt::Task {
+                kind: kind @ (va_ir::TaskKind::Monitor | va_ir::TaskKind::Fmonitor),
+                args,
+                monitor,
+                ..
+            } => {
+                *monitor = Some(*state_len);
+                *state_len += 1 + monitor_compared(module, *kind, args).len();
+            }
+            LoweredStmt::If { then_, else_, .. } => {
+                allocate_monitor_slots(module, then_, state_len);
+                allocate_monitor_slots(module, else_, state_len);
+            }
+            LoweredStmt::Case { arms, default, .. } => {
+                for arm in arms {
+                    allocate_monitor_slots(module, &mut arm.body, state_len);
+                }
+                allocate_monitor_slots(module, default, state_len);
+            }
+            LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => {
+                allocate_monitor_slots(module, body, state_len);
+            }
+            LoweredStmt::For {
+                init, step, body, ..
+            } => {
+                allocate_monitor_slots(module, init, state_len);
+                allocate_monitor_slots(module, step, state_len);
+                allocate_monitor_slots(module, body, state_len);
+            }
+            LoweredStmt::Assign { .. }
+            | LoweredStmt::Contribute(_)
+            | LoweredStmt::BoundStep(_)
+            | LoweredStmt::Task { .. } => {}
+        }
+    }
 }
 
 /// Whether a system task can run in `stmts` under the parameter values `params` — the

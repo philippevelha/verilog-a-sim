@@ -246,6 +246,8 @@ pub struct SparseSystem {
     bound_step: Option<f64>,
     /// Every `StampSink::task` call since the last [`Self::clear`], in order.
     tasks: Vec<(va_abi::TaskKind, String)>,
+    /// Every `StampSink::file` call since the last [`Self::clear`], in order.
+    files: Vec<(va_abi::FileOp, Option<String>, String)>,
 }
 
 impl SparseSystem {
@@ -263,6 +265,7 @@ impl SparseSystem {
             overflow: HashMap::new(),
             bound_step: None,
             tasks: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -285,11 +288,17 @@ impl SparseSystem {
         self.overflow.clear();
         self.bound_step = None;
         self.tasks.clear();
+        self.files.clear();
     }
 
     /// The system tasks the last assembly's models executed, in order, leaving none behind.
     pub fn take_tasks(&mut self) -> Vec<(va_abi::TaskKind, String)> {
         std::mem::take(&mut self.tasks)
+    }
+
+    /// The file operations the last assembly's models executed, in order, leaving none behind.
+    pub fn take_files(&mut self) -> Vec<(va_abi::FileOp, Option<String>, String)> {
+        std::mem::take(&mut self.files)
     }
 
     /// Fold any stamps that fell outside the pattern into it, growing the pattern to the union.
@@ -442,6 +451,11 @@ impl StampSink for SparseSystem {
 
     fn task(&mut self, kind: va_abi::TaskKind, text: &str) {
         self.tasks.push((kind, text.to_string()));
+    }
+
+    fn file(&mut self, op: va_abi::FileOp, path: Option<&str>, text: &str) {
+        self.files
+            .push((op, path.map(str::to_string), text.to_string()));
     }
 }
 

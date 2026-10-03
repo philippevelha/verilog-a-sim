@@ -1363,7 +1363,11 @@ impl Elaborator<'_> {
                         _ => va_ir::TaskArg::Expr(self.lower_expr(a)?),
                     });
                 }
-                Ok(va_ir::Stmt::Task { kind, args: out })
+                Ok(va_ir::Stmt::Task {
+                    kind,
+                    args: out,
+                    target: None,
+                })
             }
             // Every other task: `$discontinuity` (a convergence hint this engine does not need)
             // and the ones `crate::unimplemented_task_warnings` reports at compile time —
@@ -1409,6 +1413,13 @@ impl Elaborator<'_> {
                     let id = self
                         .lookup_var(lhs)
                         .ok_or_else(|| elab(format!("assignment to unknown variable `{lhs}`")))?;
+                    // `var = $fopen(name[, type])` (LRM §9.5.1, 2.12.0): the one system function
+                    // with a side effect, so it lowers to a task that assigns the descriptor.
+                    if let ExprAst::SysFunc { name, args } = self.ast.expr(*rhs) {
+                        if name == "fopen" {
+                            return self.lower_fopen(id, args);
+                        }
+                    }
                     let rhs = self.lower_expr(*rhs)?;
                     Ok(va_ir::Stmt::Assign { lhs: id, rhs })
                 } else {
@@ -1570,6 +1581,63 @@ impl Elaborator<'_> {
             value = self.const_eval_int(step_rhs, "genvar step value")?;
         }
         Ok(va_ir::Stmt::Block(out))
+    }
+
+    /// `target = $fopen(name[, type])` (LRM §9.5.1) as `va_ir::Stmt::Task` of kind `Fopen`:
+    /// the name and the type must be string literals, and only the write and append types are
+    /// accepted — nothing in this engine reads a file a model opened.
+    fn lower_fopen(
+        &mut self,
+        target: VarId,
+        args: &[ExprRef],
+    ) -> Result<va_ir::Stmt, FrontendError> {
+        let string = |r: &ExprRef| match self.ast.expr(*r) {
+            ExprAst::Str(s) => Some(s.clone()),
+            _ => None,
+        };
+        let name = args.first().and_then(string).ok_or_else(|| {
+            elab("`$fopen` takes a file name as a string literal: `$fopen(\"name\")`".to_string())
+        })?;
+        let mode = match args.get(1) {
+            None => None,
+            Some(r) => Some(string(r).ok_or_else(|| {
+                elab(
+                    "`$fopen`'s second argument is the type, a string literal such as \"w\""
+                        .to_string(),
+                )
+            })?),
+        };
+        if args.len() > 2 {
+            return Err(elab("`$fopen` takes a name and at most a type".to_string()));
+        }
+        if let Some(m) = &mode {
+            let m = m.replace('b', "");
+            if m.starts_with('r') || m.contains('+') {
+                return Err(FrontendError::Refused(
+                    crate::Refusal::new(
+                        format!("`$fopen(\"{name}\", \"{m}\")`, a file opened for reading"),
+                        "no file-reading task or function ($fscanf, $fgets, ...) is \
+                         implemented, and the LRM (§9.5.9) asks a read rejected with its \
+                         iteration to be rewound; opening the file would only pretend to \
+                         support the reads that follow",
+                    )
+                    .instead("open it for writing (\"w\") or appending (\"a\")")
+                    .tracking("docs/token-reference.md, system tasks"),
+                ));
+            }
+            if !(m.starts_with('w') || m.starts_with('a')) {
+                return Err(elab(format!(
+                    "`$fopen` type \"{m}\" is not one of the LRM's (Table 9-24): \"w\", \"a\", \"r\" and their \"b\"/\"+\" forms"
+                )));
+            }
+        }
+        let mut out = vec![va_ir::TaskArg::Str(name)];
+        out.extend(mode.map(va_ir::TaskArg::Str));
+        Ok(va_ir::Stmt::Task {
+            kind: va_ir::TaskKind::Fopen,
+            args: out,
+            target: Some(target),
+        })
     }
 
     fn lower_expr(&mut self, r: ExprRef) -> Result<ExprId, FrontendError> {
@@ -1767,6 +1835,21 @@ impl Elaborator<'_> {
             // IR and reads the time from the analysis context at load (§ `va_ir::Builtin::
             // Abstime`) — which still yields exactly `0.0` in a static solve, but as an answer
             // rather than an assumption.
+            // `$fopen` inside a larger expression: its descriptor is produced by a side effect,
+            // which this lowering only performs as `var = $fopen(...)`.
+            ExprAst::SysFunc { name, .. } if name == "fopen" => {
+                return Err(FrontendError::Refused(
+                    crate::Refusal::new(
+                        "`$fopen(...)` used inside an expression",
+                        "opening a file is a side effect that has to happen once, at an \
+                         accepted point, and hand back a descriptor; this engine performs it \
+                         as a statement, so a `$fopen` nested in an expression would either be \
+                         repeated on every evaluation or yield no descriptor at all",
+                    )
+                    .instead("assign it on its own first: `fd = $fopen(\"name\");`, then use `fd`")
+                    .tracking("docs/token-reference.md, system tasks"),
+                ));
+            }
             ExprAst::SysFunc { name, args } if name == "abstime" => {
                 if !args.is_empty() {
                     return Err(elab("`$abstime` takes no arguments".to_string()));
@@ -4491,8 +4574,9 @@ fn remap_stmt(
             rhs: expr_off[rhs.0 as usize],
         },
         va_ir::Stmt::BoundStep(e) => va_ir::Stmt::BoundStep(expr_off[e.0 as usize]),
-        va_ir::Stmt::Task { kind, args } => va_ir::Stmt::Task {
+        va_ir::Stmt::Task { kind, args, target } => va_ir::Stmt::Task {
             kind: *kind,
+            target: target.map(|v| var_off[v.0 as usize]),
             args: args
                 .iter()
                 .map(|a| match a {
@@ -5030,6 +5114,14 @@ fn task_kind(name: &str) -> Option<va_ir::TaskKind> {
         "error" => K::Error,
         "warning" => K::Warning,
         "info" => K::Info,
+        "monitor" => K::Monitor,
+        "fclose" => K::Fclose,
+        "fflush" => K::Fflush,
+        "fdisplay" => K::Fdisplay,
+        "fwrite" => K::Fwrite,
+        "fstrobe" => K::Fstrobe,
+        "fmonitor" => K::Fmonitor,
+        "fdebug" => K::Fdebug,
         _ => return None,
     })
 }

@@ -150,10 +150,20 @@ pub struct TranConfig {
     /// step) - LRM §9.4.6. `None` prints nothing; `$finish`/`$stop` still end the run and
     /// `$fatal` still fails it. Since 2.8.0.
     pub on_task: Option<TaskHook>,
+    /// Where a model's **file operations** go (`va_abi::StampSink::file`: `$fopen`,
+    /// `$fdisplay`, `$fclose`, ...): called with the operation, the path (`None` for standard
+    /// error), the text and the time. `$fdebug` from every evaluation; everything else only from
+    /// an accepted timepoint, as [`Self::on_task`]'s display tasks (LRM §9.5.9). `None` writes
+    /// nothing. Since 2.12.0.
+    pub on_file: Option<FileHook>,
 }
 
 /// [`TranConfig::on_task`]'s callback: the task, its text, and the time it ran at.
 pub type TaskHook = fn(va_abi::TaskKind, &str, f64);
+
+/// [`TranConfig::on_file`]'s callback: the operation, the path (`None`: standard error), the
+/// text, and the time it ran at.
+pub type FileHook = fn(va_abi::FileOp, Option<&str>, &str, f64);
 
 /// Why a run ended before `tstop`, when a model asked it to ([`Waveform::finished`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -938,6 +948,8 @@ struct Assembled {
     bound_step: Option<f64>,
     /// The system tasks this evaluation ran, `$debug` and `$fatal` already acted on.
     tasks: Vec<(va_abi::TaskKind, String)>,
+    /// The file operations this evaluation ran, `$fdebug`'s already acted on.
+    files: Vec<(va_abi::FileOp, Option<String>, String)>,
 }
 
 /// The linear algebra a transient run uses, held for the whole run: nothing for the dense path;
@@ -1027,6 +1039,7 @@ fn assemble(
                 (states, None, _) => va_core::par::load_all(instances, x, &ctx, states, &mut sink),
             }
             let tasks = state.iteration_tasks(sink.tasks, t)?;
+            let files = state.iteration_files(sink.files, t);
             Ok(Assembled {
                 residual: sink.residual,
                 charge: sink.charge,
@@ -1034,6 +1047,7 @@ fn assemble(
                 dcharge: sink.dcharge,
                 bound_step: sink.bound_step,
                 tasks,
+                files,
             })
         }
         Linear::Sparse { sys, .. } => {
@@ -1050,6 +1064,7 @@ fn assemble(
             }
             sys.finish();
             let tasks = state.iteration_tasks(sys.take_tasks(), t)?;
+            let files = state.iteration_files(sys.take_files(), t);
             Ok(Assembled {
                 residual: sys.residual_values().to_vec(),
                 charge: sys.charge_values().to_vec(),
@@ -1057,6 +1072,7 @@ fn assemble(
                 dcharge: sys.dcharge().values().to_vec(),
                 bound_step: sys.bound_step(),
                 tasks,
+                files,
             })
         }
     }
@@ -1099,6 +1115,8 @@ struct StateBuffers {
     bypass: Option<va_core::par::Bypass>,
     /// [`TranConfig::on_task`], here for the same reason.
     on_task: Option<TaskHook>,
+    /// [`TranConfig::on_file`], here for the same reason.
+    on_file: Option<FileHook>,
     /// Each instance's stamp layout for the sparse path (`va_core::par::SlotCache`), here for the
     /// same reason. Unused on the dense path.
     slots: va_core::par::SlotCache,
@@ -1110,6 +1128,7 @@ impl StateBuffers {
         instances: &[&dyn ModelInstance],
         bypass: Option<va_core::par::Bypass>,
         on_task: Option<TaskHook>,
+        on_file: Option<FileHook>,
     ) -> Self {
         let mut offsets = Vec::with_capacity(instances.len() + 1);
         let mut total = 0usize;
@@ -1125,6 +1144,7 @@ impl StateBuffers {
             stalled: 0,
             bypass,
             on_task,
+            on_file,
             slots: va_core::par::SlotCache::new(),
         }
     }
@@ -1159,6 +1179,36 @@ impl StateBuffers {
             }
         }
         Ok(rest)
+    }
+
+    /// The file operations every evaluation acts on at once — `$fdebug`'s writes (LRM §9.5.9) —
+    /// and the rest, for [`Self::accepted_files`].
+    fn iteration_files(
+        &self,
+        files: Vec<(va_abi::FileOp, Option<String>, String)>,
+        t: f64,
+    ) -> Vec<(va_abi::FileOp, Option<String>, String)> {
+        if files.is_empty() {
+            return files;
+        }
+        let (now, rest): (Vec<_>, Vec<_>) = files
+            .into_iter()
+            .partition(|(op, _, _)| !op.waits_for_acceptance());
+        if let Some(hook) = self.on_file {
+            for (op, path, text) in &now {
+                hook(*op, path.as_deref(), text, t);
+            }
+        }
+        rest
+    }
+
+    /// Act on an **accepted** evaluation's file operations, in order.
+    fn accepted_files(&self, files: &[(va_abi::FileOp, Option<String>, String)], t: f64) {
+        if let Some(hook) = self.on_file {
+            for (op, path, text) in files {
+                hook(*op, path.as_deref(), text, t);
+            }
+        }
     }
 
     /// Act on an **accepted** evaluation's tasks (what [`Self::iteration_tasks`] left): report
@@ -1486,6 +1536,7 @@ pub fn run_with_events(
         instances,
         bypass_cache(instances, dim, cfg.bypass),
         cfg.on_task,
+        cfg.on_file,
     );
     // One for the whole run: the pattern is found on the first evaluation and the symbolic
     // factorization reused by every Newton iteration of every timestep after it.
@@ -1514,6 +1565,7 @@ pub fn run_with_events(
     state.commit();
     // The seed is the analysis's first accepted point (it is `x0`, recorded as-is), so its
     // `$strobe`s print at `tstart` and a `$finish` here ends the run on its first point.
+    state.accepted_files(&initial.files, cfg.tstart);
     let mut finish = state.accepted_tasks(&initial.tasks, cfg.tstart);
     // Seed the event channel's history at the initial condition. A crossing is a change of
     // sign between two *accepted* points, so the first accepted point establishes the baseline
@@ -2100,10 +2152,15 @@ pub fn run_with_events(
                     // On the sparse path a pattern that grew between the two evaluations makes
                     // the matrices differ in length, which counts as a change: the flag is then
                     // honoured with a re-solve, the conservative reading.
+                    // A body that only prints or closes a file (`@(final_step) $fclose(fd);`)
+                    // changes no stamp but still has to run, so its tasks and file operations
+                    // count as a difference too (2.12.0; until then such a body was skipped).
                     if last.residual == ordinary.residual
                         && last.jacobian == ordinary.jacobian
                         && last.charge == ordinary.charge
                         && last.dcharge == ordinary.dcharge
+                        && last.tasks == ordinary.tasks
+                        && last.files == ordinary.files
                     {
                         Phase::MIDDLE
                     } else {
@@ -2162,6 +2219,7 @@ pub fn run_with_events(
                 state.commit();
                 // This is the accepted solution's own evaluation, so its tasks act now: printed
                 // at `t_next`, and a `$finish` ends the run once this point is recorded below.
+                state.accepted_files(&sink.files, t_next);
                 finish = state.accepted_tasks(&sink.tasks, t_next);
                 // Shift the charge history before overwriting it: what was `q_prev` becomes
                 // the charge two steps back for the next step's BDF2 difference.
@@ -2713,6 +2771,7 @@ mod tests {
             btf: true,
             bypass: None,
             on_task: None,
+            on_file: None,
         }
     }
 
@@ -3841,6 +3900,7 @@ mod tests {
             btf: true,
             bypass: None,
             on_task: None,
+            on_file: None,
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage

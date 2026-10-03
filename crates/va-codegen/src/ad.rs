@@ -800,6 +800,12 @@ pub struct Ctx<'a> {
     pub tasks: RefCell<Vec<(va_abi::TaskKind, String)>>,
     /// What `%m` prints: the instance's name.
     pub instance_name: &'a str,
+    /// The file operations this evaluation ran (`$fopen`, `$fdisplay`, ...), in order, queued
+    /// for `load` to hand to `va_abi::StampSink::file`.
+    pub file_ops: RefCell<Vec<(va_abi::FileOp, Option<String>, String)>>,
+    /// The instance's file table: the path behind each descriptor its `$fopen`s returned, by
+    /// channel. Lives on the instance, so a descriptor stays valid across evaluations.
+    pub files: &'a std::sync::Mutex<Vec<String>>,
     /// Local-variable bindings accumulated by sequential `Stmt::Assign` execution (the
     /// statement walk in `crate::GeneratedModel::load`/`validate`), keyed by `VarId`.
     /// Interior-mutable so it can be populated through a shared `&Ctx`: every recursive `eval`
@@ -2002,14 +2008,17 @@ fn exec_stmt(ctx: &Ctx, stmt: &Stmt) -> Result<(), CodegenError> {
         // A system task inside a function body runs as it would in the analog block: a model's
         // parameter checks often live in a function, and an `$error` there must not vanish.
         // Queued on the same context, so it reaches the sink with the block's own tasks.
-        Stmt::Task { kind, args } => {
+        // A `$monitor` here has no state slots, so it reports at every accepted step.
+        Stmt::Task { kind, args, target } => {
             if ctx.validating {
                 for e in args.iter().filter_map(va_ir::TaskArg::expr) {
                     eval(ctx, e)?;
                 }
+                if let Some(v) = target {
+                    ctx.set_var(*v, Dual::constant(0.0));
+                }
             } else {
-                let t = crate::tasks::run(ctx, *kind, args, ctx.instance_name, &ctx.module.name)?;
-                ctx.tasks.borrow_mut().push(t);
+                crate::tasks::run(ctx, *kind, args, *target, None)?;
             }
             Ok(())
         }
@@ -2144,6 +2153,9 @@ fn bool_to_f64(b: bool) -> f64 {
 fn to_i64(v: f64) -> i64 {
     v.trunc() as i64
 }
+
+#[cfg(test)]
+static TEST_FILES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 mod tests {
@@ -2343,6 +2355,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2411,6 +2425,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2566,6 +2582,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2662,6 +2680,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2755,6 +2775,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2803,6 +2825,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2838,6 +2862,8 @@ mod tests {
             bound_step: Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: "test",
+            file_ops: RefCell::new(Vec::new()),
+            files: &TEST_FILES,
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],

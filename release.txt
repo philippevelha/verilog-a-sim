@@ -22,6 +22,48 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.12.0 - 2026-10-03
+--------------------
+**`$monitor` and file output work.** `var = $fopen(name[, type])` returns the LRM's descriptors
+(multichannel without a type, `mcd | 1` reaching the screen too; file descriptors with one) from a
+per-instance file table; `$fdisplay`, `$fwrite`, `$fstrobe`, `$fmonitor`, `$fdebug`, `$fclose`
+and `$fflush` write, flush and close through them. `$monitor`/`$fmonitor` print at an accepted
+step only when an argument (other than `$abstime`) changed since the last accepted one, kept on
+the instance's state channel, which commits only at accepted steps. File operations act only
+from accepted evaluations, `$fdebug`'s on every iteration (LRM §9.5.9). `va-cli` opens paths
+relative to the working directory, creates or truncates a path the first time it is opened in
+the run and appends on every later open, and flushes and closes everything when it ends. Until
+now `$monitor` and the writes were dropped (with a warning since 2.8.0) and `$fopen` was an
+elaboration error.
+
+  * Interface change (§6, both, additive, at the project owner's request): `Stmt::Task` gained
+    `target` and nine task kinds; `StampSink` gained `file` and `va_abi::FileOp`
+    (`docs/interfaces.md`, 2026-10-03c). Recorded and replayed on the plain, bypass and
+    slot-cache paths.
+  * Two existing faults found on the way, both fixed here: a `$fopen` target in
+    `@(initial_step)` was not kept as a persistent variable, and reading it later failed
+    silently — the model's statement walk discards its errors, so every statement after the
+    read stopped running, tasks included (`persistent_vars` now counts task targets; the
+    discarded walk error itself is unchanged, and is raised with the project owner); and a
+    `@(final_step)` body that only prints or closes a file never ran, because the final-step
+    probe compared stamps only (it now compares tasks and file operations too).
+  * Refused, with reasons: `$fopen` for reading (`"r"`, `"+"`) — no read is implemented, and the
+    LRM's rewind-on-rejection would have to be; `$fopen` nested in an expression. Stated
+    limitations: a file opened in `@(initial_step)` is never opened in `.op`/`.dc` (that event
+    fires only on the transient seed here); `$monitor` in a static analysis or a function body
+    prints at every point; 30 multichannel files per instance.
+  * New example: `circuits/tasks/rc_logger.net` with `models/tasks/rc_logger.va` — 47 lines to
+    `target/rc_logger_points.txt` (one per accepted point), four level changes to
+    `target/rc_logger_levels.txt` and the screen; `docs/examples.md` shows the output.
+  * Output changes (`xtask deck-diff` against the 2.11.0 binary: 86 identical, 3 different, 25
+    skipped): the three decks in `circuits/tasks/`, because the old binary cannot compile
+    `models/tasks/rc_logger.va` and so fails the whole library; with each deck given only its own
+    model file, `rc_watch` and `current_limit` are identical between the two. Corpus 256/280,
+    unchanged file by file.
+  * Measured at this version: `cargo test --workspace` 944 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.11.0 - 2026-10-03
 --------------------
 **Fresh evaluations add into the sparse matrix by position too, with or without `--bypass`.**

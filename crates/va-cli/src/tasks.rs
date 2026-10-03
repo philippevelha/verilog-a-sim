@@ -20,7 +20,7 @@
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use va_abi::{ModelInstance, TaskKind};
+use va_abi::{FileOp, ModelInstance, TaskKind};
 use va_ir::Module;
 
 static PRINT: AtomicBool = AtomicBool::new(false);
@@ -91,6 +91,125 @@ pub(crate) fn transient_hook() -> Option<va_transient::integrator::TaskHook> {
 
 fn on_transient_task(kind: TaskKind, text: &str, t: f64) {
     emit(kind, text, &format!("t={t:e}"));
+}
+
+/// The transient run's [`va_transient::integrator::TranConfig::on_file`], on with task output.
+pub(crate) fn file_hook() -> Option<va_transient::integrator::FileHook> {
+    PRINT
+        .load(Ordering::Relaxed)
+        .then_some(on_transient_file as va_transient::integrator::FileHook)
+}
+
+fn on_transient_file(op: FileOp, path: Option<&str>, text: &str, _t: f64) {
+    file_op(op, path, text);
+}
+
+/// Files a model has written to in this process: open handles, and every path opened so far.
+#[derive(Default)]
+struct FileTable {
+    open: std::collections::HashMap<String, std::io::BufWriter<std::fs::File>>,
+    seen: std::collections::HashSet<String>,
+}
+
+static FILES: std::sync::Mutex<Option<FileTable>> = std::sync::Mutex::new(None);
+
+/// Carry out one file operation (`va_abi::StampSink::file`, LRM §9.5). A path is created (or
+/// truncated) the **first** time any instance opens it in this process; every later open of
+/// the same path, by another instance or after a `$fclose`, appends — so two devices logging to
+/// one file do not erase each other. Relative paths are relative to the working directory. A
+/// file that cannot be opened is reported once on stderr and its output dropped.
+pub(crate) fn file_op(op: FileOp, path: Option<&str>, text: &str) {
+    if !PRINT.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(path) = path else {
+        match op {
+            FileOp::Write { newline: false } => eprint!("{text}"),
+            FileOp::Write { newline: true } | FileOp::Debug => eprintln!("{text}"),
+            FileOp::Flush => {
+                let mut files = FILES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for w in files
+                    .get_or_insert_with(FileTable::default)
+                    .open
+                    .values_mut()
+                {
+                    let _ = w.flush();
+                }
+            }
+            FileOp::Open { .. } | FileOp::Close => {}
+        }
+        return;
+    };
+    let mut files = FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let table = files.get_or_insert_with(FileTable::default);
+    let ensure_open = |table: &mut FileTable, append: bool| -> bool {
+        if table.open.contains_key(path) {
+            return true;
+        }
+        let truncate = !append && !table.seen.contains(path);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(truncate)
+            .append(!truncate)
+            .open(path);
+        match file {
+            Ok(f) => {
+                table.seen.insert(path.to_string());
+                table
+                    .open
+                    .insert(path.to_string(), std::io::BufWriter::new(f));
+                true
+            }
+            Err(e) => {
+                if table.seen.insert(path.to_string()) {
+                    eprintln!("[va-cli] warning: a model's $fopen of `{path}` failed ({e}); its output is dropped");
+                }
+                false
+            }
+        }
+    };
+    match op {
+        FileOp::Open { append } => {
+            ensure_open(table, append);
+        }
+        FileOp::Write { .. } | FileOp::Debug if ensure_open(table, true) => {
+            if let Some(w) = table.open.get_mut(path) {
+                let _ = w.write_all(text.as_bytes());
+                if op != (FileOp::Write { newline: false }) {
+                    let _ = w.write_all(b"\n");
+                }
+            }
+        }
+        FileOp::Write { .. } | FileOp::Debug => {}
+        FileOp::Flush => {
+            if let Some(w) = table.open.get_mut(path) {
+                let _ = w.flush();
+            }
+        }
+        FileOp::Close => {
+            if let Some(mut w) = table.open.remove(path) {
+                let _ = w.flush();
+            }
+        }
+    }
+}
+
+/// Flush and close every file a model left open; `va-cli sim` calls it when the run ends,
+/// whatever its outcome (a process-wide table is never dropped on its own).
+pub fn close_task_files() {
+    let mut files = FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(table) = files.as_mut() {
+        for (_, mut w) in table.open.drain() {
+            let _ = w.flush();
+        }
+    }
 }
 
 /// The task's name as the model wrote it.
@@ -220,6 +339,9 @@ pub(crate) fn at_static_point(
     let mut sys = va_core::sparse::SparseSystem::new(dim);
     let fired = va_abi::FiredEvents::new(instances);
     va_core::sparse::assemble_into(instances, x, &va_abi::ANALYSIS_DC, &fired, &mut sys);
+    for (op, path, text) in sys.take_files() {
+        file_op(op, path.as_deref(), &text);
+    }
     let mut finish = None;
     for (kind, text) in sys.take_tasks() {
         emit(kind, &text, when);

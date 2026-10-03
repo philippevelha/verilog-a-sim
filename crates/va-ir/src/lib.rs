@@ -1131,6 +1131,9 @@ pub enum Stmt {
         kind: TaskKind,
         /// Its arguments, in source order.
         args: Vec<TaskArg>,
+        /// The variable the task assigns: the descriptor `var = $fopen(...)` returns, `None`
+        /// for every other task (2.12.0).
+        target: Option<VarId>,
     },
 }
 
@@ -1159,6 +1162,28 @@ pub enum TaskKind {
     Warning,
     /// `$info(msg...)`: a message with no severity.
     Info,
+    /// `$monitor(args...)`: as `$strobe`, but printed at an accepted step only when an argument
+    /// other than `$abstime` changed since the last accepted step (LRM §9.4.1).
+    Monitor,
+    /// `var = $fopen(name[, type])` (LRM §9.5.1): opens a file and assigns its descriptor to the
+    /// statement's `target` — a multichannel descriptor without `type`, a file descriptor with
+    /// one. Arguments: the name, then the type, both strings.
+    Fopen,
+    /// `$fclose(descriptor)`.
+    Fclose,
+    /// `$fflush[(descriptor)]` (LRM §9.5.6); every open file when no descriptor is given.
+    Fflush,
+    /// `$fdisplay(descriptor, args...)`: `$display` into the descriptor's file(s) (LRM §9.5.2).
+    Fdisplay,
+    /// `$fwrite(descriptor, args...)`: as `$fdisplay`, without the newline.
+    Fwrite,
+    /// `$fstrobe(descriptor, args...)`: as `$fdisplay`.
+    Fstrobe,
+    /// `$fmonitor(descriptor, args...)`: `$monitor` into the descriptor's file(s).
+    Fmonitor,
+    /// `$fdebug(descriptor, args...)`: `$debug` into the descriptor's file(s), written on every
+    /// iteration, accepted or not (LRM §9.5.9).
+    Fdebug,
 }
 
 /// One argument of a [`Stmt::Task`].

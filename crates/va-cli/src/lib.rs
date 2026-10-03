@@ -33,7 +33,9 @@ pub mod estimate;
 pub mod plot;
 pub mod tasks;
 
-pub use tasks::{set_task_output, set_tasks_once, suppressed_task_lines, task_errors};
+pub use tasks::{
+    close_task_files, set_task_output, set_tasks_once, suppressed_task_lines, task_errors,
+};
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
@@ -2519,6 +2521,7 @@ fn solve_transient_impl(
         btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         bypass: tran_bypass(),
         on_task: tasks::transient_hook(),
+        on_file: tasks::file_hook(),
     };
 
     let BuiltInstances {
@@ -3974,6 +3977,7 @@ mod tests {
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
             bypass: None,
             on_task: None,
+            on_file: None,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4115,6 +4119,7 @@ mod tests {
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
             bypass: None,
             on_task: None,
+            on_file: None,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4181,6 +4186,7 @@ mod tests {
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
             bypass: None,
             on_task: None,
+            on_file: None,
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");
@@ -7879,7 +7885,7 @@ endmodule
         body: &str,
     ) -> Result<va_transient::integrator::Waveform, va_transient::TransientError> {
         let src = format!(
-            "module m(p); inout p; electrical p; analog begin I(p) <+ (V(p) - 1.0)/1e3 + ddt(1e-9*V(p)); {body} end endmodule"
+            "module m(p); inout p; electrical p; integer fd, mcd, level; analog begin I(p) <+ (V(p) - 1.0)/1e3 + ddt(1e-9*V(p)); {body} end endmodule"
         );
         let design = va_frontend::compile(&src).expect("compiles");
         let inst =
@@ -7899,6 +7905,7 @@ endmodule
             btf: true,
             bypass: None,
             on_task: Some(record_task),
+            on_file: Some(record_file),
         };
         SEEN_TASKS.with(|s| s.borrow_mut().clear());
         va_transient::integrator::run(&[inst.as_ref()], 1, vec![0.0], cfg)
@@ -7980,6 +7987,126 @@ endmodule
             }
             other => panic!("expected $fatal, got {other}"),
         }
+    }
+
+    /// One recorded file operation: the operation, path, text and time.
+    type FileRecord = (va_abi::FileOp, Option<String>, String, f64);
+
+    thread_local! {
+        /// What `record_file` saw on this test's thread.
+        static SEEN_FILES: std::cell::RefCell<Vec<FileRecord>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_file(op: va_abi::FileOp, path: Option<&str>, text: &str, t: f64) {
+        SEEN_FILES.with(|s| {
+            s.borrow_mut()
+                .push((op, path.map(str::to_string), text.to_string(), t))
+        });
+    }
+
+    fn seen_files() -> Vec<FileRecord> {
+        SEEN_FILES.with(|s| s.borrow().clone())
+    }
+
+    /// LRM §9.5.9: a file write happens only from an accepted iteration, `$fdebug`'s on every
+    /// one. A file opened in `@(initial_step)` is opened once, at `tstart`, and its descriptor
+    /// stays valid at every later point (it is a persistent variable); `$fstrobe` writes one line
+    /// per point of the waveform with that point's value; `mcd | 1` reaches standard output and
+    /// the file both; `$fclose` at `@(final_step)` closes it last.
+    #[test]
+    fn file_writes_follow_accepted_points_and_fdebug_every_iteration() {
+        SEEN_FILES.with(|s| s.borrow_mut().clear());
+        let wf = run_task_model(
+            r#"@(initial_step) begin fd = $fopen("log.txt", "w"); mcd = $fopen("m.txt"); end
+               $fstrobe(fd, "v=%.9e", V(p)); $fdebug(fd, "d"); $fdisplay(mcd | 1, "both");
+               @(final_step) $fclose(fd);"#,
+        )
+        .expect("runs");
+        let files = seen_files();
+        let opens: Vec<_> = files
+            .iter()
+            .filter(|f| matches!(f.0, va_abi::FileOp::Open { .. }))
+            .collect();
+        assert_eq!(opens.len(), 2, "each file opened once: {opens:?}");
+        assert_eq!(opens[0].0, va_abi::FileOp::Open { append: false });
+        assert_eq!(opens[0].1.as_deref(), Some("log.txt"));
+        assert_eq!(opens[0].3, 0.0, "opened at tstart");
+        let writes: Vec<_> = files
+            .iter()
+            .filter(|f| {
+                f.0 == (va_abi::FileOp::Write { newline: true })
+                    && f.1.as_deref() == Some("log.txt")
+            })
+            .collect();
+        assert_eq!(
+            writes.len(),
+            wf.t.len(),
+            "one $fstrobe line per accepted point"
+        );
+        for (k, w) in writes.iter().enumerate() {
+            assert_eq!(w.3, wf.t[k]);
+            let v: f64 = w.2.trim_start_matches("v=").parse().expect("a number");
+            assert!((v - wf.x[k][0]).abs() <= 1e-9 * wf.x[k][0].abs().max(1e-12));
+        }
+        let debugs = files
+            .iter()
+            .filter(|f| f.0 == va_abi::FileOp::Debug)
+            .count();
+        assert!(
+            debugs > writes.len(),
+            "$fdebug {debugs} vs $fstrobe {}",
+            writes.len()
+        );
+        let both_file = files
+            .iter()
+            .filter(|f| f.1.as_deref() == Some("m.txt") && f.2 == "both")
+            .count();
+        let both_stdout = seen(va_abi::TaskKind::Display).len();
+        assert_eq!(
+            (both_file, both_stdout),
+            (wf.t.len(), wf.t.len()),
+            "mcd | 1"
+        );
+        let last = files.last().expect("operations");
+        assert_eq!(
+            (last.0, last.1.as_deref()),
+            (va_abi::FileOp::Close, Some("log.txt"))
+        );
+    }
+
+    /// LRM §9.4.1: `$monitor` prints at an accepted step only when an argument other than
+    /// `$abstime` changed since the last accepted step. Here it watches a quantised level: one
+    /// line per level the waveform enters, at the first point in it, and none in between.
+    #[test]
+    fn monitor_prints_exactly_when_a_value_changes() {
+        let wf = run_task_model(
+            r#"level = floor(V(p) * 4.0); $monitor("level=%d t=%g", level, $abstime);"#,
+        )
+        .expect("runs");
+        let level = |v: f64| (v * 4.0).floor();
+        let expected: Vec<f64> = (0..wf.t.len())
+            .filter(|&k| k == 0 || level(wf.x[k][0]) != level(wf.x[k - 1][0]))
+            .map(|k| wf.t[k])
+            .collect();
+        let got: Vec<f64> = seen(va_abi::TaskKind::Strobe).iter().map(|s| s.1).collect();
+        assert!(expected.len() >= 3, "the run crosses levels: {expected:?}");
+        assert_eq!(got, expected);
+    }
+
+    /// Writing to a descriptor no `$fopen` of the instance returned loses the output, and says
+    /// so instead of dropping it in silence.
+    #[test]
+    fn a_write_to_an_unopened_descriptor_is_reported() {
+        run_task_model(r#"$fdisplay(2147483655, "x");"#).expect("runs");
+        let warnings = seen(va_abi::TaskKind::Warning);
+        assert!(!warnings.is_empty());
+        assert!(
+            warnings[0]
+                .0
+                .contains("no $fopen of this instance returned"),
+            "{warnings:?}"
+        );
     }
 
     /// A static analysis's accepted solution is its converged one: the `.dc` sweep of

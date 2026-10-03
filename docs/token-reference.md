@@ -211,8 +211,8 @@ class of lexemes.
   `flicker_noise`/`noise_table` have); `seed` (always first) and an optional trailing
   `type_string` (`"global"`/`"instance"`, LRM Table 9-2) are both parsed but never evaluated
   (`Elaborator::fold_rdist`); a `Stmt::Task` (`$strobe`, `$finish`, …) lowers to
-  `va_ir::Stmt::Task` since 2.8.0 (see "System tasks"), except `$monitor`, the file family and
-  `$discontinuity`, which are parsed and have no effect (the first two reported as warnings). `$simparam` gets its default-argument fold in *two* places,
+  `va_ir::Stmt::Task` since 2.8.0 (see "System tasks"; `$monitor` and the file family since
+  2.12.0), except `$discontinuity`, which is parsed and has no effect. `$simparam` gets its default-argument fold in *two* places,
   not one: `lower_expr` (the dynamic analog-block path) and the separate, non-mutating
   `const_eval` (the parameter-default/range/genvar-bound constant-folding path) — a real model
   can default a parameter directly from `$simparam` (`external/bsim6.0.va`:
@@ -1475,14 +1475,72 @@ including the ones with no implemented behavior at all.
   - `$finish` does **not** trigger `@(final_step)` blocks (the LRM expects it to).
   - A task inside `@(cross(...))` runs at the accepted point where the crossing was detected, not
     at the interpolated crossing time; `$abstime` in it reads that point's time.
-  - `$monitor` and the file family (`$fopen`, `$fclose`, `$fdisplay`, `$fstrobe`, `$fwrite`,
-    `$fmonitor`, `$fdebug`, `$fflush`) still have **no effect**; each one a source uses is now
-    reported once as a compile warning instead of being dropped in silence. `$discontinuity` is a
-    convergence hint this engine does not need and stays a no-op.
+  - `$monitor` and file output are implemented since 2.12.0 — see "`$monitor` and file
+    output" below. `$discontinuity` is a convergence hint this engine does not need and stays a
+    no-op.
   - `%l` prints `work.<module>`: there is no library binding to report.
 - **Comparison with Traditional Constructs**: C's `printf`/`exit`, with the difference that the
   call sits inside an iterative solve: what a model "printed" during an iteration that was then
   rejected never happened, which is why every task but `$debug` waits for acceptance.
+
+### `$monitor` and file output (2.12.0, 2026-10-03)
+
+- **Purpose and Static Nature**: Simulation-time side effects, like the display tasks above.
+  `$monitor(args...)` prints like `$strobe`, but at an accepted step only when an argument
+  changed since the last accepted step (LRM §9.4.1). The file family (LRM §9.5): `fd =
+  $fopen(name[, type])`, `$fclose(fd)`, `$fflush[(fd)]`, and `$fdisplay`/`$fwrite`/`$fstrobe`/
+  `$fmonitor`/`$fdebug(fd, args...)`, the display tasks' counterparts writing through a
+  descriptor. Until 2.12.0 `$monitor` and the writes were dropped (with a compile warning since
+  2.8.0) and `$fopen` was an elaboration error ("unknown system function").
+- **Declaration and Assignment**: `$fopen` only as a whole assignment, `var = $fopen("name")`
+  or `var = $fopen("name", "w")`, name and type string literals; it lowers to `va_ir::Stmt::
+  Task { kind: Fopen, target: Some(var), .. }` (the target is Interface α's 2026-10-03b
+  addition). The rest are statements.
+- **Expressions and Evaluation** (`va_codegen::tasks`):
+  - **Descriptors** are the LRM's: without a type, a multichannel descriptor — channel `k` is
+    bit `k + 1`, bit 0 standard output, so `mcd | 1` writes to a file and the screen at once;
+    with a type, a file descriptor `32'h8000_0003 + k`, and `32'h8000_0001`/`32'h8000_0002` are
+    standard output and error. `k` indexes the **instance's** file table: `$fopen` of a path the
+    instance already opened returns the same descriptor. A descriptor held in a signed integer
+    (reads negative) decodes the same.
+  - Writes are formatted as the display tasks are, and reach the consumer through Interface β's
+    `StampSink::file` (2026-10-03b) — standard output through `StampSink::task`, as the matching
+    display task. A write to a descriptor no `$fopen` of the instance returned is lost and
+    reported as a `$warning`.
+  - **When** (LRM §9.5.9): every file operation acts only from an accepted evaluation (the
+    transient seed and each accepted step; one evaluation at the converged solution in a static
+    analysis), except `$fdebug`, which writes on every iteration
+    (`file_writes_follow_accepted_points_and_fdebug_every_iteration`).
+  - `$monitor`/`$fmonitor` keep what they last saw on the instance's **state channel** — a flag
+    and one slot per compared argument (`lower::monitor_compared`: every expression but
+    `$abstime` and, for `$fmonitor`, the descriptor). The state channel commits only at accepted
+    steps, which is the LRM's "compared with the last accepted step"
+    (`monitor_prints_exactly_when_a_value_changes`).
+  - `va-cli` opens files relative to the working directory. A path is **created or truncated the
+    first time any instance opens it** in the process and appended to by every later open (a
+    second instance, or a reopen after `$fclose`), so two devices logging to one file do not
+    erase each other. Every file is flushed and closed when `va-cli sim` ends, whatever the
+    outcome. A file that cannot be opened is reported once on stderr.
+  - A `@(final_step)` body that only does tasks or file operations (`@(final_step) $fclose(fd);`)
+    now runs: the integrator's final-step probe counts tasks and file operations as a change, not
+    stamps alone (until 2.12.0 such a body was skipped, `$strobe`s included).
+- **Structural and Analog Usage**: Analog-block statements and analog function bodies. A model
+  with a reachable file task or `$monitor` is not `is_pure_in_x`; one with a `$fopen` stays off
+  the statically scheduled evaluator (its descriptor is assigned outside the schedule's
+  registers).
+- **Stated limitations**:
+  - **No reading**: `$fopen` with an `"r"` or `"+"` type is a **refusal**, and `$fscanf`,
+    `$fgets`, ... are unknown functions. The LRM asks a read rejected with its iteration to be
+    rewound; nothing in the corpus reads a file.
+  - `$fopen` nested in an expression is a refusal (assign it on its own first).
+  - `@(initial_step)` fires only on the transient seed in this engine, so a file opened there is
+    never opened in a `.op`/`.dc` run, and that run's writes to it are lost.
+  - In a static analysis, and in an analog function body, `$monitor` has no state slots and
+    prints at every point, like `$strobe`.
+  - At most 30 files per instance through multichannel descriptors (the LRM's 31 bits less
+    standard output); a further `$fopen(name)` returns 0 with a warning.
+- **Comparison with Traditional Constructs**: C's `fopen`/`fprintf`/`fclose`, with descriptors
+  that are integers and writes that wait for the solver to accept the point they describe.
 
 ### `$limit` — its value folds; its junction declaration does not (2026-09-09)
 

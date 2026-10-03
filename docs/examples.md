@@ -446,3 +446,25 @@ A vendor model can be noisier than these: BSIM4's parameter checks are plain ana
 `circuits/benchmark/nand/bsim4.net` prints its `RECALCULATION for no K1 or K2` at every sweep
 point of every instance, 404 times. `--tasks-once` prints each distinct line once and says how
 many it held back.
+
+### Files and `$monitor` (2.12.0)
+
+```bash
+va-cli sim circuits/tasks/rc_logger.net --model models/tasks --tran --report out
+```
+
+`models/tasks/rc_logger.va` opens two files in `@(initial_step)`: a table of every accepted point
+through a file descriptor (`$fstrobe`), and a log of level changes through a multichannel
+descriptor OR'd with standard output (`$fmonitor(mcd | 1, ...)`), closed at `@(final_step)`. On
+the RC above it writes 47 lines to `target/rc_logger_points.txt` (one per point of the
+waveform) and four to `target/rc_logger_levels.txt` and the screen:
+
+```text
+X1: level 0 from t=0.0000e+00 s
+X1: level 1 from t=3.2151e-04 s
+X1: level 2 from t=7.2151e-04 s
+X1: level 3 from t=1.4215e-03 s
+```
+
+Each is the first accepted point past RC·ln(4/3), RC·ln 2 and RC·ln 4 (0.288, 0.693 and 1.386 ms)
+at the deck's 100 µs maximum step; the points in between print nothing.

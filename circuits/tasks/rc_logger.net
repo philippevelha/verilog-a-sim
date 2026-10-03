@@ -1,0 +1,15 @@
+* File output and $monitor-type tasks in a transient run (2.12.0).
+* A 1 V step charges C1 through R1 (RC = 1 ms); models/tasks/rc_logger.va watches `out`.
+* Expected, from V(out) = 1 - exp(-t/RC) and level = floor(4 V(out)):
+*   - target/rc_logger_points.txt: one line per accepted timepoint, `t V(out)`;
+*   - target/rc_logger_levels.txt and stdout: one line per level entered, at the first accepted
+*     point in it -- level 0 at t=0, then 1, 2, 3 near RC*ln(4/3)=0.288 ms, RC*ln 2=0.693 ms,
+*     RC*ln 4=1.386 ms (the first accepted point at or past each);
+*   - nothing at the points in between: $fmonitor prints only on a change.
+* Run: va-cli sim circuits/tasks/rc_logger.net --model models/tasks --tran --report out
+V1 in gnd 1.0
+R1 in out 1000
+C1 out gnd 1e-6
+X1 out rc_logger
+.tran 100u 3m UIC
+.end

@@ -94,6 +94,51 @@ pub trait StampSink {
     fn task(&mut self, kind: TaskKind, text: &str) {
         let _ = (kind, text);
     }
+
+    /// A **file operation** the model executed during this `load` (LRM §9.5, 2.12.0): open,
+    /// write, flush or close the file at `path`, or write to the standard error stream when
+    /// `path` is `None`. `text` is the formatted line for a write and empty otherwise. Output to
+    /// standard output through a descriptor arrives as an ordinary [`Self::task`] instead.
+    ///
+    /// As with `task`, **when** it takes effect is the consumer's: every operation except
+    /// [`FileOp::Debug`] acts only from an evaluation whose solution is accepted (LRM §9.5.9:
+    /// "the file write operations shall not be performed unless the iteration is accepted");
+    /// `$fdebug`'s writes happen on every iteration. Interface β change, 2026-10-03b.
+    ///
+    /// Default: ignored. A sink that wraps another must forward it.
+    fn file(&mut self, op: FileOp, path: Option<&str>, text: &str) {
+        let _ = (op, path, text);
+    }
+}
+
+/// What a [`StampSink::file`] call does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileOp {
+    /// `$fopen`: create or truncate the file (`append: false`), or create it and write at its
+    /// end (`append: true`). Opening the same path again in one run does not truncate it again.
+    Open {
+        /// Opened with an `"a"` type.
+        append: bool,
+    },
+    /// `$fdisplay`/`$fstrobe`/`$fmonitor` (`newline: true`) or `$fwrite` (`newline: false`).
+    Write {
+        /// Whether a newline follows the text.
+        newline: bool,
+    },
+    /// `$fdebug`: a line written on every iteration, accepted or not.
+    Debug,
+    /// `$fflush`: flush the file (every open file when the path is `None`).
+    Flush,
+    /// `$fclose`.
+    Close,
+}
+
+impl FileOp {
+    /// Whether this operation acts only from an evaluation whose solution is accepted — every
+    /// one but [`FileOp::Debug`].
+    pub fn waits_for_acceptance(self) -> bool {
+        !matches!(self, FileOp::Debug)
+    }
 }
 
 /// Which system task a [`StampSink::task`] call reports. The `u8` on `Finish`, `Stop` and
@@ -164,6 +209,8 @@ pub struct DenseStamp {
     pub bound_step: Option<f64>,
     /// Every [`StampSink::task`] call received, in order.
     pub tasks: Vec<(TaskKind, String)>,
+    /// Every [`StampSink::file`] call received, in order.
+    pub files: Vec<(FileOp, Option<String>, String)>,
 }
 
 impl DenseStamp {
@@ -178,6 +225,7 @@ impl DenseStamp {
             excitation: vec![(0.0, 0.0); dim],
             bound_step: None,
             tasks: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -236,6 +284,11 @@ impl StampSink for DenseStamp {
 
     fn task(&mut self, kind: TaskKind, text: &str) {
         self.tasks.push((kind, text.to_string()));
+    }
+
+    fn file(&mut self, op: FileOp, path: Option<&str>, text: &str) {
+        self.files
+            .push((op, path.map(str::to_string), text.to_string()));
     }
 }
 

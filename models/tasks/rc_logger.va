@@ -1,0 +1,32 @@
+// A logger on a node: the file-output and monitor tasks in one model (2.12.0,
+// circuits/tasks/rc_logger.net).
+//
+// It draws no current (`I(p) <+ 0`). What it does:
+//   - `$fopen` twice in `@(initial_step)`: a file descriptor (`"w"`) for a table of every
+//     accepted point, and a multichannel descriptor for a log of level changes;
+//   - `$fstrobe(fd, ...)`: one line per accepted timepoint, time and V(p);
+//   - `$fmonitor(mcd | 1, ...)`: a line when the quantised level of V(p) changes, to the log
+//     file and (bit 0 of the multichannel descriptor) to standard output at once;
+//   - `$fclose(fd)` in `@(final_step)`.
+// The files go to `target/`, which every build creates and git ignores, so running the deck from
+// the repository root (as `cargo xtask deck-diff` does) leaves the checkout clean.
+`include "disciplines.vams"
+
+module rc_logger(p);
+    inout p;
+    electrical p;
+    parameter real levels = 4;  // the level is floor(V(p) * levels)
+    integer fd, mcd, level;
+
+    analog begin
+        I(p) <+ 0.0;
+        @(initial_step) begin
+            fd = $fopen("target/rc_logger_points.txt", "w");
+            mcd = $fopen("target/rc_logger_levels.txt");
+        end
+        level = floor(V(p) * levels);
+        $fstrobe(fd, "%.6e %.6f", $abstime, V(p));
+        $fmonitor(mcd | 1, "%m: level %d from t=%.4e s", level, $abstime);
+        @(final_step) $fclose(fd);
+    end
+endmodule

@@ -219,6 +219,7 @@ impl CompiledModel {
         let prototype = GeneratedModel {
             terminals: (0..shared.lowered.n_unknowns).collect(),
             name: Arc::from(shared.module.name.as_str()),
+            files: std::sync::Mutex::new(Vec::new()),
             shared: Arc::clone(&shared),
             pinned: Vec::new(),
             sched_regs: std::sync::Mutex::new(None),
@@ -338,6 +339,7 @@ impl CompiledModel {
         Ok(Box::new(GeneratedModel {
             shared: Arc::clone(&self.shared),
             name: Arc::from(name),
+            files: std::sync::Mutex::new(Vec::new()),
             terminals: full,
             pinned,
             sched_regs: std::sync::Mutex::new(None),
@@ -377,6 +379,9 @@ struct GeneratedModel {
     /// What a system task's `%m` prints: the deck's instance name, or the module's
     /// ([`CompiledModel::instantiate_named`]).
     name: Arc<str>,
+    /// The path behind each file descriptor this instance's `$fopen`s returned
+    /// (`crate::tasks`); per instance, as the LRM's descriptors are per `$fopen` call.
+    files: std::sync::Mutex<Vec<String>>,
     /// Local slots of the ideal shorts this instance does **not** stamp, because another short
     /// already holds the same two nodes equal (see [`CompiledModel::instantiate_with_shorts`]).
     /// Empty for every instance except a redundant one.
@@ -577,6 +582,8 @@ impl GeneratedModel {
             bound_step: std::cell::Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: &self.name,
+            file_ops: RefCell::new(Vec::new()),
+            files: &self.files,
             vars: RefCell::new(vars),
             static_vars,
             hoistable: &self.shared.lowered.invariance.hoistable,
@@ -704,10 +711,12 @@ impl GeneratedModel {
                 // it once the walk is done (see `Ctx::request_bound_step`).
                 LoweredStmt::BoundStep(e) => ctx.request_bound_step(tape::eval_value(ctx, *e)?),
                 // Queued like `bound_step`, for the same reason, and drained by `load`.
-                LoweredStmt::Task { kind, args } => {
-                    let t = tasks::run(ctx, *kind, args, ctx.instance_name, &ctx.module.name)?;
-                    ctx.tasks.borrow_mut().push(t);
-                }
+                LoweredStmt::Task {
+                    kind,
+                    args,
+                    target,
+                    monitor,
+                } => tasks::run(ctx, *kind, args, *target, *monitor)?,
                 LoweredStmt::If { cond, then_, else_ } => {
                     let taken = if tape::eval_value(ctx, *cond)? != 0.0 {
                         then_
@@ -951,10 +960,15 @@ impl GeneratedModel {
                 LoweredStmt::BoundStep(e) => {
                     eval(ctx, *e)?;
                 }
-                // Each argument validated by evaluation; nothing is printed by a dry run.
-                LoweredStmt::Task { args, .. } => {
+                // Each argument validated by evaluation; nothing is printed or opened by a dry
+                // run. A `$fopen`'s variable is bound to 0 (the LRM's "not opened"), so what
+                // reads it later validates as it will run.
+                LoweredStmt::Task { args, target, .. } => {
                     for e in args.iter().filter_map(va_ir::TaskArg::expr) {
                         eval(ctx, e)?;
+                    }
+                    if let Some(v) = target {
+                        ctx.set_var(*v, crate::ad::Dual::constant(0.0));
                     }
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
@@ -2447,6 +2461,9 @@ impl ModelInstance for GeneratedModel {
         // each takes effect is the consumer's decision (`va_abi::StampSink::task`).
         for (kind, text) in ctx.tasks.take() {
             sink.task(kind, &text);
+        }
+        for (op, path, text) in ctx.file_ops.take() {
+            sink.file(op, path.as_deref(), &text);
         }
         // Each persistent variable proposes the value it ended this evaluation with
         // (`lower::PersistentVar`).

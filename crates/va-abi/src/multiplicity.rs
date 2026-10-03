@@ -118,6 +118,11 @@ impl StampSink for ScaledSink<'_> {
     fn task(&mut self, kind: crate::stamps::TaskKind, text: &str) {
         self.inner.task(kind, text);
     }
+
+    /// Forwarded once, like `task`.
+    fn file(&mut self, op: crate::stamps::FileOp, path: Option<&str>, text: &str) {
+        self.inner.file(op, path, text);
+    }
 }
 
 /// A [`NoiseSink`] scaling every source's **power** by `m` (LRM §6.3.6 rule 3).

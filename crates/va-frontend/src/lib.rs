@@ -203,37 +203,10 @@ pub fn compile_named(
             include_dirs,
         )?);
     }
-    let mut warnings = pre.warnings;
-    warnings.extend(unimplemented_task_warnings(&tokens));
-    Ok(CompiledDesign { modules, warnings })
-}
-
-/// One warning per system task the source uses that **parses but has no effect** in this
-/// version, so the user learns it was seen and ignored rather than finding out from a missing
-/// line of output: `$monitor` and the file-I/O family (LRM §9.4.1, §9.5). The display and
-/// simulation-control tasks are implemented (`va_ir::Stmt::Task`, 2.8.0).
-fn unimplemented_task_warnings(tokens: &[lexer::Token]) -> Vec<String> {
-    const NO_EFFECT: &[&str] = &[
-        "monitor", "fopen", "fclose", "fdisplay", "fstrobe", "fwrite", "fmonitor", "fdebug",
-        "fflush",
-    ];
-    let mut seen: Vec<&str> = Vec::new();
-    for t in tokens {
-        if let lexer::Token::SysFunc(name) = t {
-            if let Some(&n) = NO_EFFECT.iter().find(|&&n| n == name) {
-                if !seen.contains(&n) {
-                    seen.push(n);
-                }
-            }
-        }
-    }
-    seen.into_iter()
-        .map(|n| {
-            format!(
-                "`${n}` has no effect in this version: `$monitor` and file output are not implemented yet (docs/token-reference.md, system tasks)"
-            )
-        })
-        .collect()
+    Ok(CompiledDesign {
+        modules,
+        warnings: pre.warnings,
+    })
 }
 
 #[cfg(test)]
@@ -391,7 +364,7 @@ endmodule
             .analog
             .iter()
             .filter_map(|s| match s {
-                va_ir::Stmt::Task { kind, args } => Some((*kind, args.clone())),
+                va_ir::Stmt::Task { kind, args, .. } => Some((*kind, args.clone())),
                 _ => None,
             })
             .collect();
@@ -408,17 +381,76 @@ endmodule
         assert!(design.warnings.is_empty(), "{:?}", design.warnings);
     }
 
-    /// A task that parses but has no effect in this version is reported once, not dropped in
-    /// silence (`unimplemented_task_warnings`).
+    /// `var = $fopen(name[, type])` lowers to a `Fopen` task whose target is the variable, with
+    /// the name and type as strings, and the file-output tasks to their own kinds (2.12.0). Read
+    /// modes and a `$fopen` nested in an expression are refused, each saying why.
     #[test]
-    fn tasks_without_an_effect_are_reported_as_warnings() {
-        let src = "module m(p); inout p; electrical p; analog begin \
-                   $monitor(V(p)); $monitor(V(p)); $fdisplay(1, \"x\"); \
-                   I(p) <+ V(p); end endmodule";
+    fn fopen_lowers_to_a_task_assigning_its_descriptor() {
+        let src = r#"module m(p); inout p; electrical p; integer fd, mcd;
+            analog begin
+                @(initial_step) begin mcd = $fopen("a.txt"); fd = $fopen("b.txt", "w"); end
+                $fdisplay(fd, "v=%g", V(p)); $fmonitor(mcd, V(p)); $monitor(V(p));
+                $fclose(fd); $fflush;
+                I(p) <+ V(p);
+            end endmodule"#;
         let design = super::compile(src).expect("compiles");
-        assert_eq!(design.warnings.len(), 2, "{:?}", design.warnings);
-        assert!(design.warnings[0].starts_with("`$monitor` has no effect"));
-        assert!(design.warnings[1].starts_with("`$fdisplay` has no effect"));
+        fn walk(
+            stmts: &[va_ir::Stmt],
+            out: &mut Vec<(va_ir::TaskKind, Vec<va_ir::TaskArg>, bool)>,
+        ) {
+            for s in stmts {
+                match s {
+                    va_ir::Stmt::Task { kind, args, target } => {
+                        out.push((*kind, args.clone(), target.is_some()))
+                    }
+                    va_ir::Stmt::If { then_, else_, .. } => {
+                        walk(then_, out);
+                        walk(else_, out);
+                    }
+                    va_ir::Stmt::Block(b) => walk(b, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut tasks = Vec::new();
+        walk(&design.modules[0].analog, &mut tasks);
+        let kinds: Vec<_> = tasks.iter().map(|t| t.0).collect();
+        use va_ir::TaskKind as K;
+        assert_eq!(
+            kinds,
+            [
+                K::Fopen,
+                K::Fopen,
+                K::Fdisplay,
+                K::Fmonitor,
+                K::Monitor,
+                K::Fclose,
+                K::Fflush
+            ]
+        );
+        assert_eq!(tasks[0].1, vec![va_ir::TaskArg::Str("a.txt".into())]);
+        assert_eq!(
+            tasks[1].1,
+            vec![
+                va_ir::TaskArg::Str("b.txt".into()),
+                va_ir::TaskArg::Str("w".into())
+            ]
+        );
+        assert!(tasks[0].2 && tasks[1].2, "a $fopen assigns its variable");
+        assert!(tasks[2..].iter().all(|t| !t.2), "no other task assigns one");
+
+        let refused = |body: &str| {
+            let src = format!(
+                "module m(p); inout p; electrical p; integer fd; analog begin {body} I(p) <+ V(p); end endmodule"
+            );
+            match super::compile(&src) {
+                Err(crate::FrontendError::Refused(r)) => r.what,
+                Err(e) => panic!("`{body}`: refused expected, got {e}"),
+                Ok(_) => panic!("`{body}` compiled"),
+            }
+        };
+        assert!(refused(r#"fd = $fopen("in.txt", "r");"#).contains("reading"));
+        assert!(refused(r#"fd = 1 + $fopen("x.txt");"#).contains("inside an expression"));
     }
 
     /// The no-effect directives reach the caller as warnings, not as silence.

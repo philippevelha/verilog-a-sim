@@ -281,6 +281,8 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     if let Some(totals) = va_cli::log_full_run_totals() {
         eprintln!("{totals}");
     }
+    // Whatever the outcome: a model's files hold what it wrote up to here.
+    va_cli::close_task_files();
     // Said on both streams, like the lines it stands for, so neither a report nor a log can
     // be read as if the model printed only what is there.
     let suppressed = va_cli::suppressed_task_lines();

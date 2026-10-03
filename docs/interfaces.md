@@ -1059,3 +1059,22 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > The consumers' rules — transient through `TranConfig::on_task`, static analyses through one
 > evaluation at the converged solution in `va-cli` — and every stated limitation are in
 > `docs/token-reference.md`, "System tasks".
+
+> **Revision (§6 change, 2026-10-03c, both interfaces, additive — at the project owner's request
+> to implement `$monitor` and file I/O):**
+>
+> - **Interface α**: `TaskKind` gained `Monitor`, `Fopen`, `Fclose`, `Fflush`, `Fdisplay`,
+>   `Fwrite`, `Fstrobe`, `Fmonitor`, `Fdebug`; `Stmt::Task` gained `target: Option<VarId>`, the
+>   variable `var = $fopen(...)` assigns its descriptor to (`None` for every other task). The
+>   passes that ask which variables a statement list assigns count it (definite assignment,
+>   persistent variables, function-body assignment), so a descriptor opened in
+>   `@(initial_step)` persists across evaluations like any variable assigned there.
+> - **Interface β**: `StampSink` gained a defaulted `file(op: FileOp, path: Option<&str>, text:
+>   &str)` and `va_abi::FileOp` (`Open { append }`, `Write { newline }`, `Debug`, `Flush`,
+>   `Close`), `path` `None` meaning standard error. Like `task`, the consumer decides when it acts
+>   (`FileOp::waits_for_acceptance`: everything but `$fdebug` waits for an accepted solution, LRM
+>   §9.5.9). Defaults to nothing; `Multiplied`'s `ScaledSink` forwards it once, and
+>   `va_core::par::Recorder` records and replays it on every path (plain, bypass, slot cache).
+>
+> `$monitor` needed no interface: its "last accepted step" lives on the instance's existing state
+> channel. Rules and limitations: `docs/token-reference.md`, "`$monitor` and file output".

@@ -1064,6 +1064,10 @@ fn check_da(module: &Module, stmts: &[LoweredStmt], da: &mut Vec<bool>) -> Resul
                 da[lhs.0 as usize] = true;
             }
             LoweredStmt::BoundStep(e) => reads_ok(*e, da)?,
+            // `$fopen` assigns its variable outside the schedule's registers.
+            LoweredStmt::Task {
+                target: Some(_), ..
+            } => return Err("a $fopen descriptor"),
             LoweredStmt::Task { args, .. } => {
                 for e in args.iter().filter_map(va_ir::TaskArg::expr) {
                     reads_ok(e, da)?;
