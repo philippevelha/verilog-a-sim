@@ -22,6 +22,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.14.0 - 2026-10-03
+--------------------
+**An event on a variable fires.** `e = Temp(s) - tset; @(cross(e - band, -1)) ...` — the
+ordinary way to write an event on a computed quantity — never fired: a generated model evaluates
+its event sites (`GeneratedModel::events`) outside the statement walk, where no variable was
+bound, so `e` read as 0.0, the site registered a constant, and nothing said so (the stated
+limitation claimed validation would reject such a module; it does not, since the variable is
+assigned before the event in the block). Now the block's variables are bound first by one
+statement walk at that point, with nothing stamped, printed or written. Found by the new TEC
+example, whose settling report never appeared.
+
+  * Still stated: that walk has no committed state and no fired events, so a variable set only
+    inside an event body, or only by an operator's history, reads its persistent seed (0) at
+    registration.
+  * Gated by `an_event_on_a_variable_fires` (`r = V(p) - 0.5; @(cross(r, +1))` fires once, at
+    the first point past tau*ln 2).
+  * Output changes: `xtask deck-diff` against the 2.13.0 binary: 90 identical, 1 different, 25
+    skipped — the different one is the new `circuits/multiphysics/tec_pid.net`, whose
+    `@(cross)` report now prints; no existing deck had an event on a variable.
+  * Measured at this version: `cargo test --workspace` 946 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.13.0+1 - 2026-10-03
 --------------------
 **CI made cheap enough to fit the account's GitHub Actions minutes**, which ran out on

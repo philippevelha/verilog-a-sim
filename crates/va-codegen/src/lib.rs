@@ -2248,11 +2248,15 @@ impl ModelInstance for GeneratedModel {
     /// next fires. Both are evaluated **outside** the statement walk, because a registration is
     /// a property of the site rather than of whichever control-flow path this timepoint happens
     /// to take: an event inside an `if` arm must keep being registered while the arm is untaken,
-    /// or the very firing that would re-enter the arm is the one missed. The consequence,
-    /// stated rather than hidden: a site's expressions may read probes and parameters but not a
-    /// local variable the analog block assigns, since no variable is bound at this point. Such
-    /// a site reads as `0.0`, registering nothing rather than something wrong — and `validate`
-    /// rejects a read-before-assignment anyway, so the module would not build.
+    /// or the very firing that would re-enter the arm is the one missed.
+    ///
+    /// The analog block's variables are bound first, by one statement walk at this point with
+    /// nothing stamped and nothing printed (2.14.0), so a site may read them:
+    /// `e = Temp(s) - tset; @(cross(e - band, -1)) ...` is the ordinary way to write an event, and
+    /// until 2.14.0 such a site read every variable as `0.0` and **never fired**, with no error
+    /// (the module built, because the variable is assigned before the event in the block). The
+    /// walk has no committed state and no fired events: a variable that only an event body, or
+    /// only an operator's history, sets reads its persistent seed (0) here.
     ///
     /// No state and no fired-event input: this runs after the timepoint is accepted, and asks
     /// only "where is this site now".
@@ -2260,7 +2264,18 @@ impl ModelInstance for GeneratedModel {
         if self.shared.module.event_sites.is_empty() && self.shared.lowered.zi_terms.is_empty() {
             return;
         }
-        let ctx = self.ctx(x, actx, &[], &[], false, &[]);
+        let setup = self.setup();
+        let static_vars: &[Option<crate::ad::Dual>] = setup.map_or(&[], |s| &s.vars);
+        let ctx = self.ctx(x, actx, &[], &[], false, static_vars);
+        // Bind the block's variables at this point: a walk whose contributions, tasks and file
+        // operations all go nowhere (its queues are dropped with `ctx`).
+        if setup.is_none_or(|s| s.completed) {
+            let _ = self.walk(
+                &ctx,
+                &self.shared.lowered.stmts[self.shared.lowered.static_prefix..],
+                &mut |_, _, _| {},
+            );
+        }
         let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
         // A `zi_*` filter's next sample instant, `t0 + k·T` — pure arithmetic on `(t0, T,
         // now)`, the way a periodic `timer` stays stateless about its own schedule — asked for

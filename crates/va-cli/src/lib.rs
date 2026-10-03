@@ -7894,7 +7894,7 @@ endmodule
         tstop: f64,
     ) -> Result<va_transient::integrator::Waveform, va_transient::TransientError> {
         let src = format!(
-            "module m(p); inout p; electrical p; integer fd, mcd, level; analog begin I(p) <+ (V(p) - 1.0)/1e3 + ddt(1e-9*V(p)); {body} end endmodule"
+            "module m(p); inout p; electrical p; integer fd, mcd, level; real r; analog begin I(p) <+ (V(p) - 1.0)/1e3 + ddt(1e-9*V(p)); {body} end endmodule"
         );
         let design = va_frontend::compile(&src).expect("compiles");
         let inst =
@@ -8101,6 +8101,26 @@ endmodule
         let got: Vec<f64> = seen(va_abi::TaskKind::Strobe).iter().map(|s| s.1).collect();
         assert!(expected.len() >= 3, "the run crosses levels: {expected:?}");
         assert_eq!(got, expected);
+    }
+
+    /// An event on a **variable** fires (2.14.0). `r = V(p) - 0.5; @(cross(r, +1)) ...` is the
+    /// ordinary way to write it, and until 2.14.0 the site read `r` as 0.0 when it was polled
+    /// (no variable was bound there), so it never fired and nothing said so. The node charges
+    /// toward 1 V and passes 0.5 V once, at tau*ln 2 = 0.693 us.
+    #[test]
+    fn an_event_on_a_variable_fires() {
+        let wf = run_task_model(
+            r#"r = V(p) - 0.5; @(cross(r, +1)) $strobe("crossed at %g", $abstime);"#,
+        )
+        .expect("runs");
+        let crossings = seen(va_abi::TaskKind::Strobe);
+        assert_eq!(crossings.len(), 1, "{crossings:?}");
+        let t = crossings[0].1;
+        assert!(
+            t > 0.69e-6 && t < 0.9e-6,
+            "fired at the point after 0.693 us: {t}"
+        );
+        assert!(wf.t.contains(&t));
     }
 
     /// A statement walk that stops at run time is reported, not swallowed (2.13.0): a loop that
