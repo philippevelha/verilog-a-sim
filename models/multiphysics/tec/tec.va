@@ -1,0 +1,83 @@
+// Thermoelectric (Peltier) module: Seebeck, Peltier, Joule and Thomson effects in one lumped
+// device, with a cold face `c` and a hot face `h` on an absolute-temperature discipline.
+//
+// # Equations (N couples lumped: alpha, R, K are the module's totals)
+//
+// The Seebeck coefficient depends on temperature, alpha(T) = alpha0 + alpha1*(T - 300 K),
+// which is what makes a Thomson effect exist at all (Thomson coefficient tau = T dalpha/dT).
+//
+//   Seebeck EMF     Vs = integral_{Tc}^{Th} alpha(T) dT
+//   electrical      I  = (V(p,n) - Vs) / R(Tm),   R(Tm) = R0 (1 + tcr (Tm - 300)),  Tm = (Tc+Th)/2
+//   Peltier         Pi(T) = alpha(T) * T  at each junction
+//   Thomson heat    Q_th = I*(Pi(Th) - Pi(Tc)) - I*Vs = I * integral T dalpha/dT dT, absorbed in
+//                   the legs and drawn equally from both faces
+//   cold face       Qc = I*Pi(Tc) - I^2 R/2 - K (Th - Tc) + Q_th/2   (heat taken from `c`)
+//   hot face        Qh = I*Pi(Th) + I^2 R/2 - K (Th - Tc) - Q_th/2   (heat delivered to `h`)
+//
+// Energy is conserved exactly: Qh - Qc = I*Vs + I^2 R, the electrical power in. The test bench
+// `circuits/multiphysics/tec_cooler.net` checks that balance to the solver's tolerance.
+//
+// # Sign conventions
+//
+// `Pwr(c) <+ Qc` takes Qc watts out of the cold face (into the module); `Pwr(h) <+ -Qh`
+// delivers Qh into the hot face. Positive current p -> n through the module cools `c`.
+//
+// # Verilog-A shown here
+//
+// A user `nature`/`discipline` pair (`tec_natures.vams`, with an include guard), analog
+// functions (`seebeck`, `seebeck_integral`) called from several contributions, ranged
+// parameters with `from`/`exclude`, and three ports on two disciplines in one module.
+//
+// # Limitations
+//
+// Lumped: one temperature per face, no temperature profile along the legs (the Thomson heat
+// is split half and half, which is exact for a linear alpha(T) only to first order). Contact
+// resistances are part of R0; K is temperature-independent.
+`include "disciplines.vams"
+`include "tec_natures.vams"
+
+module tec(p, n, c, h);
+    inout p, n, c, h;
+    electrical p, n;
+    thermal_abs c, h;
+
+    parameter real alpha0 = 0.05    from (0:inf);     // Seebeck coefficient at 300 K (V/K)
+    parameter real alpha1 = 1.0e-4;                   // its slope (V/K^2): the Thomson effect
+    parameter real R0     = 2.0     from (0:inf);     // electrical resistance at 300 K (Ohm)
+    parameter real tcr    = 0.0     from [0:0.05);    // resistance temperature coefficient (1/K)
+    parameter real K      = 0.5     from (0:inf);     // thermal conductance between faces (W/K)
+
+    real tc, th, tm, i, r, vs, pic, pih, qth, cond;
+
+    // alpha(T)
+    analog function real seebeck;
+        input t;
+        real t;
+        seebeck = alpha0 + alpha1 * (t - 300.0);
+    endfunction
+
+    // integral of alpha(T) from t1 to t2
+    analog function real seebeck_integral;
+        input t1, t2;
+        real t1, t2;
+        seebeck_integral = alpha0 * (t2 - t1)
+                         + 0.5 * alpha1 * ((t2 - 300.0) * (t2 - 300.0) - (t1 - 300.0) * (t1 - 300.0));
+    endfunction
+
+    analog begin
+        tc = Temp(c);
+        th = Temp(h);
+        tm = 0.5 * (tc + th);
+        r  = R0 * (1.0 + tcr * (tm - 300.0));
+        vs = seebeck_integral(tc, th);
+        i  = (V(p, n) - vs) / r;
+        pic = seebeck(tc) * tc;
+        pih = seebeck(th) * th;
+        qth = i * (pih - pic) - i * vs;
+        cond = K * (th - tc);
+
+        I(p, n) <+ i;
+        Pwr(c)  <+ i * pic - 0.5 * i * i * r - cond + 0.5 * qth;
+        Pwr(h)  <+ -(i * pih + 0.5 * i * i * r - cond - 0.5 * qth);
+    end
+endmodule

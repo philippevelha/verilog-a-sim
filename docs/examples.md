@@ -468,3 +468,9 @@ X1: level 3 from t=1.4215e-03 s
 
 Each is the first accepted point past RC·ln(4/3), RC·ln 2 and RC·ln 4 (0.288, 0.693 and 1.386 ms)
 at the deck's 100 µs maximum step; the points in between print nothing.
+
+## Multiphysics examples
+
+A separate page, [`multiphysics.md`](multiphysics.md), collects examples that couple several
+physical domains through Verilog-A models written for them — thermoelectric cooling under PID
+control first — with a table of which Verilog-A constructs each one exercises.

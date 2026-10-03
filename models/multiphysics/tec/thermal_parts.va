@@ -1,0 +1,50 @@
+// Thermal network parts for the TEC example, on the absolute-temperature discipline of
+// `tec_natures.vams`: a heat capacity, a thermal resistance, an ambient (a temperature source)
+// and a heat load that steps up at a set time.
+`include "disciplines.vams"
+`include "tec_natures.vams"
+
+// Heat capacity C (J/K) of a body at temperature Temp(t): stores C * dT/dt.
+module thermal_mass(t);
+    inout t;
+    thermal_abs t;
+    parameter real C = 10.0 from (0:inf);    // J/K
+    analog Pwr(t) <+ C * ddt(Temp(t));
+endmodule
+
+// Thermal resistance Rth (K/W) between two bodies.
+module thermal_res(a, b);
+    inout a, b;
+    thermal_abs a, b;
+    parameter real Rth = 1.0 from (0:inf);   // K/W
+    analog Pwr(a, b) <+ Temp(a, b) / Rth;
+endmodule
+
+// The surroundings: a body held at `tamb` whatever heat it takes.
+module ambient(t);
+    inout t;
+    thermal_abs t;
+    parameter real tamb = 298.15 from (0:inf);   // K
+    analog Temp(t) <+ tamb;
+endmodule
+
+// A heat load `p0` on a body, stepping to `p0 + dp` at `tstep` over `trise` (a component that
+// switches on). `@(timer)` schedules the step as an event, so the integrator lands on it, and
+// `transition` gives the rise its finite slope; `$strobe` reports it when it happens.
+module heat_load(t);
+    inout t;
+    thermal_abs t;
+    parameter real p0    = 1.0  from [0:inf);    // W before the step
+    parameter real dp    = 2.0;                  // W added at the step
+    parameter real tstep = 60.0 from [0:inf);    // s
+    parameter real trise = 0.5  from (0:inf);    // s
+    integer on;
+    analog begin
+        @(initial_step) on = 0;
+        @(timer(tstep)) begin
+            on = 1;
+            $strobe("%m: heat load steps from %g W to %g W at t=%g s", p0, p0 + dp, $abstime);
+        end
+        Pwr(t) <+ -(p0 + dp * transition(on, 0, trise));
+    end
+endmodule

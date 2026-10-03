@@ -1,0 +1,17 @@
+* Peltier cooler, open loop: the maximum temperature difference against the closed form.
+*
+* models/multiphysics/tec/tec.va with a constant Seebeck coefficient (alpha1=0) and resistance
+* (tcr=0), hot face held at 300 K, cold face insulated (nothing but the module touches it), drive
+* voltage swept 0..20 V. At every point the cold face settles where the heat pumped equals the
+* Joule heat returned plus the heat conducted back:
+*     alpha*I*Tc - I^2*R/2 - K*(Th - Tc) = 0,   I = (V - alpha*(Th - Tc))/R
+* Closed form (alpha = 0.05 V/K, R = 2 Ohm, K = 0.5 W/K, Th = 300 K): Tc is lowest at
+* I = alpha*Tc/R, where alpha^2*Tc^2/(2R) = K*(Th - Tc):
+*     Tc,min = 232.455 K (dT,max = 67.545 K) at I = 5.811 A, V = alpha*dT + I*R = 15.00 V.
+* Past that point more current only adds Joule heat and the cold face warms again.
+* Run: va-cli sim circuits/multiphysics/tec_dtmax.net --model models/multiphysics/tec --report cold,V1 --plot docs/examples/multiphysics/tec_dtmax.svg
+V1 drv gnd DC 0
+X1 drv gnd cold hot tec alpha1=0 tcr=0
+XA hot ambient tamb=300
+.dc V1 0 20 0.25
+.end

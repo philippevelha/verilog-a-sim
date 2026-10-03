@@ -1,0 +1,24 @@
+* Peltier module energy audit: heat out of the hot face = heat pumped from the cold face +
+* electrical power, with the Thomson effect and the resistance tempco on.
+*
+* 5 V across the module of models/multiphysics/tec/tec.va (alpha(T) = 0.05 V/K + 1e-4 V/K^2 *
+* (T - 300 K), tcr = 0.4 %/K); cold face to a 298.15 K ambient through 2 K/W, hot face through
+* 0.25 K/W. At the operating point:
+*     Qc = (298.15 - Temp(cold)) / 2      heat drawn through the cold face's resistance
+*     Qh = (Temp(hot) - 298.15) / 0.25    heat leaving through the hot face's resistance
+*     Pe = 5 * (-I(V1))                   electrical power in
+* and Qh - Qc - Pe must vanish to the solver's tolerance: the Thomson heat of a temperature-
+* dependent Seebeck coefficient is exactly what reconciles the Peltier heats at two different
+* junction temperatures with the integrated Seebeck EMF the electrical side sees. (Drop the
+* Thomson term from tec.va and the balance is off by the Thomson heat,
+* I*alpha1*(Th^2 - Tc^2)/2 = 1.951 A * 1e-4 * (303.144^2 - 277.705^2)/2 = 1.44 W here.)
+* Measured (2.14.0): Qc = 10.2223 W, Qh = 19.9769 W, Pe = 9.7547 W, Qh - Qc - Pe = -2.5e-6 W,
+* which is the print precision (temperatures to 1e-6 K, divided by 0.25 K/W).
+* Run: va-cli sim circuits/multiphysics/tec_energy.net --model models/multiphysics/tec
+V1 drv gnd DC 5
+X1 drv gnd cold hot tec alpha0=0.05 alpha1=1e-4 R0=2 tcr=0.004 K=0.5
+XRC cold amb thermal_res Rth=2
+XRH hot amb thermal_res Rth=0.25
+XA amb ambient tamb=298.15
+.op
+.end

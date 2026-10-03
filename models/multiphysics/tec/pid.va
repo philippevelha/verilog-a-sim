@@ -1,0 +1,64 @@
+// PID temperature controller driving a voltage: senses Temp(sense), drives V(out).
+//
+//   e      = Temp(sense) - tset                  (positive when too warm: more cooling)
+//   u      = kp*e + x + kd * D(e),   D(s) = s / (1 + s*tf)   (filtered derivative)
+//   v      = clamp(u, vmin, vmax)                (the supply's limits)
+//   dx/dt  = ki*e + kb*(v - u)                   (integrator with back-calculation anti-windup)
+//
+// While the output is saturated, `v - u` is non-zero and bleeds the integrator back toward the
+// limit, so the controller comes out of saturation without the overshoot a free-running
+// integrator would build up (`kb = 0` turns anti-windup off, for comparison).
+//
+// # Verilog-A shown here
+//
+// An internal node `xi` holding the integrator state as an implicit equation (the
+// back-calculation term reads the output, which reads the state; an internal unknown solves that
+// loop exactly at each step instead of lagging it by one), `laplace_nd` as a filtered
+// differentiator on a node of its own, `min`/`max` saturation, and `@(cross)` with a direction timing the first
+// entry into a settling band, `@(timer)` closing the loop at `ton` (before it, and in the DC
+// operating point the run starts from, the output is 0 and the integrator held), and `$strobe`.
+`include "disciplines.vams"
+`include "tec_natures.vams"
+
+module pid(sense, out);
+    inout sense, out;
+    thermal_abs sense;
+    electrical out;
+
+    parameter real tset = 278.15 from (0:inf);   // setpoint (K)
+    parameter real kp   = 2.0;                   // V/K
+    parameter real ki   = 0.2;                   // V/(K s)
+    parameter real kd   = 2.0;                   // V s/K
+    parameter real tf   = 0.5   from (0:inf);    // derivative filter time constant (s)
+    parameter real kb   = 1.0   from [0:inf);    // anti-windup back-calculation gain (1/s)
+    parameter real vmin = 0.0;                   // V
+    parameter real vmax = 12.0;                  // V
+    parameter real band = 0.1   from (0:inf);    // settling band reported (K)
+    parameter real ton  = 5.0   from [0:inf);    // the loop closes at this time (s)
+
+    electrical xi;      // integrator state, in volts
+    electrical dn;      // filtered derivative of the error, K/s
+    real e, u, v, g;
+    integer en;     // 0 until `ton` (and in the DC operating point), then 1
+
+    analog begin
+        @(timer(ton)) begin
+            en = 1;
+            $strobe("%m: loop closed at t=%g s", $abstime);
+        end
+        e = Temp(sense) - tset;
+        // A `laplace_*` filter is a whole contribution, so the derivative gets its own node.
+        V(dn) <+ laplace_nd(e, {0, 1}, {1, tf});
+        u = kp * e + V(xi) + kd * V(dn);
+        // The loop closes over 0.2 s rather than in zero time: `g` ramps 0 -> 1.
+        g = transition(en, 0, 0.2);
+        v = g * min(max(u, vmin), vmax);
+        V(out) <+ v;
+        // KCL at `xi`, which nothing else touches: d V(xi)/dt = ki*e + kb*(v - u) once the loop
+        // is closed; before, a leak (1 - g) holds it at 0, which also gives the DC operating
+        // point a well-posed row.
+        I(xi) <+ ddt(V(xi)) - g * (ki * e + kb * (v - u)) + (1 - g) * V(xi);
+        @(cross(e - band, -1))
+            $strobe("%m: within %g K of the setpoint at t=%.2f s (drive %.3f V)", band, $abstime, v);
+    end
+endmodule

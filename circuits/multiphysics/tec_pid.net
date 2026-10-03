@@ -1,0 +1,27 @@
+* Peltier cooler under PID control: a cold plate held at 5 C through a load step.
+*
+* A 20 J/K cold plate carrying a 1 W heat load (stepping to 3 W at t = 60 s) is cooled by the
+* Peltier module of models/multiphysics/tec/tec.va, whose hot face sits on a 50 J/K heat sink
+* with 0.5 K/W to a 298.15 K ambient. The PID of pid.va reads the plate and drives the module's
+* voltage (0..12 V) to hold 278.15 K. The module here is the full one: Seebeck coefficient
+* alpha(T) = 0.05 V/K + 1e-4 V/K^2 * (T - 300 K) (so a Thomson effect), resistance tempco 0.4 %/K.
+*
+* What to look for:
+*   1. Start-up from ambient: the controller saturates at 12 V, the plate cools, and the
+*      back-calculation anti-windup lets it leave saturation without a large undershoot; the
+*      `@(cross)` in pid.va reports when the plate first comes within 0.1 K of the setpoint.
+*   2. The hot sink warms (it carries the pumped heat plus all the electrical power), which
+*      raises the temperature difference the module must hold; the drive creeps up to follow.
+*   3. At t = 60 s the load steps to 3 W (`@(timer)` + `transition` in heat_load): the plate
+*      dips warm, the drive rises, and the integrator returns the plate to 278.15 K.
+*   4. Steady state is an energy balance: heat into the sink = plate load + electrical power.
+* Run: va-cli sim circuits/multiphysics/tec_pid.net --model models/multiphysics/tec --tran --report cold,hot,drv --plot docs/examples/multiphysics/tec_pid.svg
+XC  drv gnd plate sink tec alpha0=0.05 alpha1=1e-4 R0=2 tcr=0.004 K=0.5
+XP  plate drv pid tset=278.15 kp=2 ki=0.2 kd=2 tf=0.5 kb=1 vmin=0 vmax=12 ton=5
+XM1 plate thermal_mass C=20
+XL  plate heat_load p0=1 dp=2 tstep=60 trise=0.5
+XM2 sink thermal_mass C=50
+XR  sink amb thermal_res Rth=0.5
+XA  amb ambient tamb=298.15
+.tran 0.5 150
+.end

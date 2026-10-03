@@ -1,0 +1,27 @@
+// Natures for the Peltier/TEC example: absolute temperature (kelvin) and heat flow (watts).
+//
+// Absolute, not a rise above ambient: the Peltier heat is alpha * I * T with T the junction's
+// absolute temperature, so the thermal potential here is kelvin above 0 K and ambient is a
+// source of 298.15 K (`ambient.va`). Declared with an include guard so every model of the
+// library can include it.
+`ifndef TEC_NATURES_VAMS
+`define TEC_NATURES_VAMS
+
+nature Temperature_abs
+    units  = "K";
+    access = Temp;
+    abstol = 1e-6;
+endnature
+
+nature Heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-9;
+endnature
+
+discipline thermal_abs
+    potential Temperature_abs;
+    flow      Heat_flow;
+enddiscipline
+
+`endif
