@@ -2483,6 +2483,7 @@ impl ModelInstance for GeneratedModel {
             && l.idt_accumulators.is_empty()
             && l.laplace_terms.is_empty()
             && l.zi_terms.is_empty()
+            && !lower::task_reachable(&self.shared.module, &self.shared.params, &l.stmts)
     }
 }
 

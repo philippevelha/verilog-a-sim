@@ -7798,7 +7798,7 @@ endmodule
     /// and this test caught it: a module with a task now prints from its evaluations, which a
     /// replayed recording would skip, so such a module is never pure.
     #[test]
-    fn bypass_purity_rests_on_two_folds_and_a_task_is_never_pure() {
+    fn bypass_purity_rests_on_two_folds_and_on_no_reachable_task() {
         let module = |body: &str| {
             format!(
                 "module m(p, n); inout p, n; electrical p, n; parameter real r = 1e3; analog begin {body} end endmodule"
@@ -7841,6 +7841,22 @@ endmodule
                 "a module with `{task}` claims purity"
             );
         }
+        // A task that cannot run under the instance's parameters does not count: PSP103's
+        // safe-operating-area `$strobe`s sit under `if (SWSOA > 0)` with SWSOA = 0 by default,
+        // and counting them made every PSP103 ineligible in 2.8.0. Turned on, it counts.
+        let gated = |swsoa: f64| {
+            format!(
+                "module m(p, n); inout p, n; electrical p, n; parameter real r = 1e3; parameter integer SWSOA = {swsoa}; analog begin if (SWSOA > 0) begin if (V(p,n) > 1.0) $strobe(\"over\"); end I(p,n) <+ V(p,n)/r; end endmodule"
+            )
+        };
+        let pure = |src: String| {
+            let design = va_frontend::compile(&src).expect("compiles");
+            va_codegen::build_instance(&design.modules[0], &[0, 1], &mut 2)
+                .expect("builds")
+                .is_pure_in_x()
+        };
+        assert!(pure(gated(0.0)), "an unreachable task made the model impure");
+        assert!(!pure(gated(1.0)), "a reachable task left the model pure");
     }
 
     thread_local! {

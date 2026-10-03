@@ -22,6 +22,26 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.9.1 - 2026-10-03
+--------------------
+**Fix: 2.8.0 took device bypass away from every PSP103.** 2.8.0 made any module containing a
+system task impure for bypass, judged from the source. PSP103 compiles in its safe-operating-area
+`$strobe`s (`` `define SOAcheck ``) but runs them only `if (SWSOA > 0)`, and SWSOA defaults to 0,
+so no PSP103 was ever bypassed again: `fig5_access.net` with `--bypass` went from 35 to 27
+eligible instances and from 12.4 s to ~25 s. Found while measuring the slot cache. A task now
+counts only if it can run under the instance's parameters (`va_codegen::lower::task_reachable`:
+a condition that folds from parameters to the other arm hides it; a task in an analog function
+body always counts). The guard test is renamed
+`bypass_purity_rests_on_two_folds_and_on_no_reachable_task` and pins both halves (SWSOA = 0 pure,
+SWSOA = 1 impure); `docs/interfaces.md` carries the correction under the 2.8.0 revision.
+
+  * Output with `--bypass` is bit-identical to 2.7.0 again, on `fig5_access`, Fig. 4, Fig. 5,
+    `ring_osc`, `rectifier` and the c17 transient (stdout and stderr hashed, eligibility and
+    replay counts equal). Without `--bypass` nothing changes: purity is read only by bypass.
+  * Measured at this version: `cargo test --workspace` 939 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.9.0 - 2026-10-03
 --------------------
 **`va-cli sim --tasks-once`: print each distinct system-task line once.** A `$strobe`/`$display`/

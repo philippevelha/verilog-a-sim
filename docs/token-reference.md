@@ -1460,8 +1460,11 @@ including the ones with no implemented behavior at all.
     closing line: **not** the LRM's behaviour, an opt-in for vendor models whose parameter checks
     are plain analog code and so repeat at every point (`benchmark/nand/bsim4.net`: 404 -> 1).
     Lines are told apart by text alone, so instances stay distinct only through `%m`.
-  - **Device bypass**: a module with any task is never `is_pure_in_x`, because a replayed
-    recording would skip its output (`bypass_purity_rests_on_two_folds_and_a_task_is_never_pure`).
+  - **Device bypass**: an instance with a task that can run is never `is_pure_in_x`, because a
+    replayed recording would skip its output. "Can run" is decided under the instance's
+    parameters (`lower::task_reachable`, 2.9.1): a task under a condition that folds to false —
+    PSP103's `if (SWSOA > 0)` checks at the default SWSOA = 0 — does not count; a task in an
+    analog function body always does (`bypass_purity_rests_on_two_folds_and_on_no_reachable_task`).
 - **Structural and Analog Usage**: Analog-block statements, and statements in analog function
   bodies (a task there is queued with the block's own and acts on the same rules).
 - **Stated limitations**:

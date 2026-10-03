@@ -3634,15 +3634,89 @@ fn evaluates_ddt(module: &Module, stmts: &[LoweredStmt]) -> bool {
     walk(module, stmts, &mut HashMap::new())
 }
 
+/// Whether a system task can run in `stmts` under the parameter values `params` — the
+/// task half of `crate::GeneratedModel::is_pure_in_x` (a task prints or ends the run, which a
+/// replayed recording would skip).
+///
+/// A task under an `if` or `case` whose condition folds from literals and parameters to the
+/// other arm cannot run, the same rule `walk_short_facts` uses and with the same truth test as
+/// `GeneratedModel::run`. That case is not rare: PSP103's safe-operating-area `$strobe`s sit
+/// under `if (SWSOA > 0)`, a parameter that defaults to 0, and counting them made every PSP103
+/// ineligible for bypass in 2.8.0 (fig5_access 12.4 -> 25 s). A loop body counts whenever the
+/// loop is reachable; a task in any analog function body counts conservatively, whether or not
+/// the function is called.
+pub fn task_reachable(module: &Module, params: &[f64], stmts: &[LoweredStmt]) -> bool {
+    fn walk(module: &Module, params: &[f64], stmts: &[LoweredStmt]) -> bool {
+        let fold = |e: ExprId| fold_param_expr(module, params, e);
+        stmts.iter().any(|stmt| match stmt {
+            LoweredStmt::Task { .. } => true,
+            LoweredStmt::Assign { .. } | LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) => {
+                false
+            }
+            LoweredStmt::If { cond, then_, else_ } => match fold(*cond) {
+                Some(v) if v != 0.0 => walk(module, params, then_),
+                Some(_) => walk(module, params, else_),
+                None => walk(module, params, then_) || walk(module, params, else_),
+            },
+            LoweredStmt::Case {
+                selector,
+                arms,
+                default,
+            } => match case_arm_taken(module, params, *selector, arms) {
+                Some(Some(i)) => walk(module, params, &arms[i].body),
+                Some(None) => walk(module, params, default),
+                None => {
+                    arms.iter().any(|a| walk(module, params, &a.body))
+                        || walk(module, params, default)
+                }
+            },
+            LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => {
+                walk(module, params, body)
+            }
+            LoweredStmt::For {
+                init, step, body, ..
+            } => {
+                walk(module, params, init)
+                    || walk(module, params, step)
+                    || walk(module, params, body)
+            }
+        })
+    }
+    fn ir_has_task(stmts: &[va_ir::Stmt]) -> bool {
+        stmts.iter().any(|s| match s {
+            va_ir::Stmt::Task { .. } => true,
+            va_ir::Stmt::Assign { .. }
+            | va_ir::Stmt::Contribute { .. }
+            | va_ir::Stmt::BoundStep(_) => false,
+            va_ir::Stmt::If { then_, else_, .. } => ir_has_task(then_) || ir_has_task(else_),
+            va_ir::Stmt::Block(b)
+            | va_ir::Stmt::While { body: b, .. }
+            | va_ir::Stmt::Repeat { body: b, .. } => ir_has_task(b),
+            va_ir::Stmt::For {
+                init, step, body, ..
+            } => {
+                ir_has_task(std::slice::from_ref(init.as_ref()))
+                    || ir_has_task(std::slice::from_ref(step.as_ref()))
+                    || ir_has_task(body)
+            }
+            va_ir::Stmt::Case { arms, default, .. } => {
+                arms.iter().any(|a| ir_has_task(&a.body)) || ir_has_task(default)
+            }
+        })
+    }
+    walk(module, params, stmts) || module.functions.iter().any(|f| ir_has_task(&f.body))
+}
+
 /// [`Lowered::reads_only_x`].
 fn reads_only_x(module: &Module) -> bool {
     fn has_bound_step(stmts: &[va_ir::Stmt]) -> bool {
         stmts.iter().any(|s| match s {
-            // A system task prints or ends the run: a side effect a replayed recording would
-            // skip, so a module with one is never pure (2.8.0; until then tasks lowered to
-            // nothing and were pure by construction).
-            va_ir::Stmt::BoundStep(_) | va_ir::Stmt::Task { .. } => true,
-            va_ir::Stmt::Assign { .. } | va_ir::Stmt::Contribute { .. } => false,
+            va_ir::Stmt::BoundStep(_) => true,
+            // A system task makes a module impure only if it can run under the instance's
+            // parameters, which this per-module test cannot see: [`task_reachable`] decides it.
+            va_ir::Stmt::Assign { .. }
+            | va_ir::Stmt::Contribute { .. }
+            | va_ir::Stmt::Task { .. } => false,
             va_ir::Stmt::If { then_, else_, .. } => has_bound_step(then_) || has_bound_step(else_),
             va_ir::Stmt::Block(b)
             | va_ir::Stmt::While { body: b, .. }

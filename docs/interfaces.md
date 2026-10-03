@@ -1050,6 +1050,11 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 >   `bypass_purity_rests_on_three_folds_and_this_test_catches_a_change` failed on this change,
 >   as it was written to, and became `bypass_purity_rests_on_two_folds_and_a_task_is_never_pure`:
 >   `$limit` and `$rdist_*` remain the two folds the answer rests on.
+>   *(Corrected in 2.9.1: "a module with a task" was too broad. Counting every task in the
+>   source made every PSP103 impure, because its safe-operating-area `$strobe`s are compiled in
+>   but sit under `if (SWSOA > 0)` with SWSOA = 0. The rule is now a task **reachable under the
+>   instance's parameters** (`va_codegen::lower::task_reachable`), and the test is
+>   `bypass_purity_rests_on_two_folds_and_on_no_reachable_task`.)*
 >
 > The consumers' rules — transient through `TranConfig::on_task`, static analyses through one
 > evaluation at the converged solution in `va-cli` — and every stated limitation are in
