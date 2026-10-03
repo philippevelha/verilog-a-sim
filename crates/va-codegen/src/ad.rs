@@ -795,6 +795,11 @@ pub struct Ctx<'a> {
     /// land here during the walk and `crate::GeneratedModel::load` drains them afterwards.
     /// `Cell` rather than `RefCell` — an `Option<f64>` is `Copy`, so no borrow is needed.
     pub bound_step: Cell<Option<f64>>,
+    /// The system tasks this evaluation ran, formatted, in order (`crate::tasks`) - queued for
+    /// `crate::GeneratedModel::load` to hand to the stamp sink, as [`Self::bound_step`] is.
+    pub tasks: RefCell<Vec<(va_abi::TaskKind, String)>>,
+    /// What `%m` prints: the instance's name.
+    pub instance_name: &'a str,
     /// Local-variable bindings accumulated by sequential `Stmt::Assign` execution (the
     /// statement walk in `crate::GeneratedModel::load`/`validate`), keyed by `VarId`.
     /// Interior-mutable so it can be populated through a shared `&Ctx`: every recursive `eval`
@@ -1994,6 +1999,20 @@ fn exec_stmt(ctx: &Ctx, stmt: &Stmt) -> Result<(), CodegenError> {
             "bound_step is not allowed inside an analog function body (a function is pure; \
              write it in the analog block instead)",
         )),
+        // A system task inside a function body runs as it would in the analog block: a model's
+        // parameter checks often live in a function, and an `$error` there must not vanish.
+        // Queued on the same context, so it reaches the sink with the block's own tasks.
+        Stmt::Task { kind, args } => {
+            if ctx.validating {
+                for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                    eval(ctx, e)?;
+                }
+            } else {
+                let t = crate::tasks::run(ctx, *kind, args, ctx.instance_name, &ctx.module.name)?;
+                ctx.tasks.borrow_mut().push(t);
+            }
+            Ok(())
+        }
         Stmt::If { cond, then_, else_ } => {
             if ctx.validating {
                 eval(ctx, *cond)?;
@@ -2322,6 +2341,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2388,6 +2409,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2541,6 +2564,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2635,6 +2660,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2726,6 +2753,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2772,6 +2801,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],
@@ -2805,6 +2836,8 @@ mod tests {
             state_next: RefCell::new(Vec::new()),
             state_slots: HashMap::new(),
             bound_step: Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: "test",
             vars: RefCell::new(Vec::new()),
             static_vars: &[],
             hoistable: &[],

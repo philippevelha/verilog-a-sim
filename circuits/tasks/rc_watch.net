@@ -1,0 +1,15 @@
+* The display and simulation-control tasks in a transient run (2.8.0).
+* A 1 V step charges C1 through R1 (RC = 1 ms); models/tasks/rc_watch.va watches `out`.
+* Expected, from V(out) = 1 - exp(-t/RC):
+*   - one $strobe line when V(out) rises through 0.9 V, at t = RC*ln(10) = 2.3026e-3 s
+*     (to the step control's resolution: the crossing is interpolated between accepted points);
+*   - one $display line and the run ending at the first accepted point past 0.95 V,
+*     t >= RC*ln(20) = 2.9957e-3 s, well before the deck's 10 ms stop time;
+*   - va-cli's note that $finish ended the analysis there.
+* Run: va-cli sim circuits/tasks/rc_watch.net --model models/tasks --tran --report out
+V1 in gnd 1.0
+R1 in out 1000
+C1 out gnd 1e-6
+X1 out rc_watch
+.tran 20u 10m UIC
+.end

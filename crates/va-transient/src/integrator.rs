@@ -143,6 +143,27 @@ pub struct TranConfig {
     /// bypassed transistor. `va-cli sim --bypass` sets it. Since 2.7.0
     /// (`docs/proposals/device-bypass.md`).
     pub bypass: Option<BypassConfig>,
+    /// Where a model's **system task** output goes (`va_abi::StampSink::task`): called with the
+    /// task, its formatted text and the time. `$debug` is reported from every Newton
+    /// iteration; `$strobe`, `$display`, `$write`, `$info`, `$warning`, `$error`, `$finish` and
+    /// `$stop` only from an accepted timepoint (the run's seed at `tstart`, then each accepted
+    /// step) - LRM §9.4.6. `None` prints nothing; `$finish`/`$stop` still end the run and
+    /// `$fatal` still fails it. Since 2.8.0.
+    pub on_task: Option<TaskHook>,
+}
+
+/// [`TranConfig::on_task`]'s callback: the task, its text, and the time it ran at.
+pub type TaskHook = fn(va_abi::TaskKind, &str, f64);
+
+/// Why a run ended before `tstop`, when a model asked it to ([`Waveform::finished`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Finished {
+    /// The accepted timepoint the request came from: the last point of the waveform.
+    pub t: f64,
+    /// `$finish(n)` or `$stop(n)`.
+    pub kind: va_abi::TaskKind,
+    /// Who asked: the instance name the model formatted (`%m`).
+    pub by: String,
 }
 
 /// [`TranConfig::bypass`]'s tolerances. An instance is replayed while every one of its unknowns
@@ -230,6 +251,9 @@ pub struct Waveform {
     /// Device bypass statistics when [`TranConfig::bypass`] was on, `None` otherwise — so a
     /// report can say, every time, that the run was bypassed.
     pub bypass: Option<BypassStats>,
+    /// `Some` when a model's `$finish` or `$stop` ended the run at an accepted timepoint before
+    /// `tstop` (LRM §9.7.1); the waveform ends at that point.
+    pub finished: Option<Finished>,
 }
 
 /// How many times one step may be re-taken to resolve a crossing before the run gives up and
@@ -912,6 +936,8 @@ struct Assembled {
     jacobian: Vec<f64>,
     dcharge: Vec<f64>,
     bound_step: Option<f64>,
+    /// The system tasks this evaluation ran, `$debug` and `$fatal` already acted on.
+    tasks: Vec<(va_abi::TaskKind, String)>,
 }
 
 /// The linear algebra a transient run uses, held for the whole run: nothing for the dense path;
@@ -980,7 +1006,7 @@ fn assemble(
     ddt: (f64, f64, f64),
     sim: va_abi::SimParams,
     linear: &mut Linear,
-) -> Assembled {
+) -> Result<Assembled, TransientError> {
     let ctx = AnalysisCtx::transient(t)
         .with_tstep(tstep)
         .with_initial_step(phase.initial)
@@ -1000,13 +1026,15 @@ fn assemble(
                 }
                 (states, None) => va_core::par::load_all(instances, x, &ctx, states, &mut sink),
             }
-            Assembled {
+            let tasks = state.iteration_tasks(sink.tasks, t)?;
+            Ok(Assembled {
                 residual: sink.residual,
                 charge: sink.charge,
                 jacobian: sink.jacobian,
                 dcharge: sink.dcharge,
                 bound_step: sink.bound_step,
-            }
+                tasks,
+            })
         }
         Linear::Sparse { sys, .. } => {
             sys.clear();
@@ -1017,13 +1045,15 @@ fn assemble(
                 (states, None) => va_core::par::load_all(instances, x, &ctx, states, sys.as_mut()),
             }
             sys.finish();
-            Assembled {
+            let tasks = state.iteration_tasks(sys.take_tasks(), t)?;
+            Ok(Assembled {
                 residual: sys.residual_values().to_vec(),
                 charge: sys.charge_values().to_vec(),
                 jacobian: sys.jacobian().values().to_vec(),
                 dcharge: sys.dcharge().values().to_vec(),
                 bound_step: sys.bound_step(),
-            }
+                tasks,
+            })
         }
     }
 }
@@ -1063,11 +1093,17 @@ struct StateBuffers {
     /// Device bypass (`va_core::par::Bypass`), when [`TranConfig::bypass`] is on. Kept here
     /// because every assembly already carries this struct.
     bypass: Option<va_core::par::Bypass>,
+    /// [`TranConfig::on_task`], here for the same reason.
+    on_task: Option<TaskHook>,
 }
 
 impl StateBuffers {
     /// Allocate from each instance's declared `state_len()`, read once here and never again.
-    fn new(instances: &[&dyn ModelInstance], bypass: Option<va_core::par::Bypass>) -> Self {
+    fn new(
+        instances: &[&dyn ModelInstance],
+        bypass: Option<va_core::par::Bypass>,
+        on_task: Option<TaskHook>,
+    ) -> Self {
         let mut offsets = Vec::with_capacity(instances.len() + 1);
         let mut total = 0usize;
         offsets.push(0);
@@ -1081,7 +1117,65 @@ impl StateBuffers {
             scratch: vec![0.0; total],
             stalled: 0,
             bypass,
+            on_task,
         }
+    }
+
+    /// The system tasks every evaluation acts on at once, whether or not its solution is
+    /// accepted (LRM §9.4.6, §9.7.3): `$debug` is reported, `$fatal` is reported and ends the
+    /// run. Returns the rest, for [`Self::accepted_tasks`] to act on if this evaluation is the
+    /// accepted one.
+    fn iteration_tasks(
+        &self,
+        tasks: Vec<(va_abi::TaskKind, String)>,
+        t: f64,
+    ) -> Result<Vec<(va_abi::TaskKind, String)>, TransientError> {
+        if tasks.is_empty() {
+            return Ok(tasks);
+        }
+        let mut rest = Vec::new();
+        for (kind, text) in tasks {
+            match kind {
+                va_abi::TaskKind::Debug => {
+                    if let Some(hook) = self.on_task {
+                        hook(kind, &text, t);
+                    }
+                }
+                va_abi::TaskKind::Fatal(_) => {
+                    if let Some(hook) = self.on_task {
+                        hook(kind, &text, t);
+                    }
+                    return Err(TransientError::Fatal { t, message: text });
+                }
+                _ => rest.push((kind, text)),
+            }
+        }
+        Ok(rest)
+    }
+
+    /// Act on an **accepted** evaluation's tasks (what [`Self::iteration_tasks`] left): report
+    /// each in order, and return the first `$finish`/`$stop` among them, which ends the run
+    /// once this point is recorded (LRM §9.7.1).
+    fn accepted_tasks(&self, tasks: &[(va_abi::TaskKind, String)], t: f64) -> Option<Finished> {
+        let mut finished = None;
+        for (kind, text) in tasks {
+            if let Some(hook) = self.on_task {
+                hook(*kind, text, t);
+            }
+            if finished.is_none()
+                && matches!(
+                    kind,
+                    va_abi::TaskKind::Finish(_) | va_abi::TaskKind::Stop(_)
+                )
+            {
+                finished = Some(Finished {
+                    t,
+                    kind: *kind,
+                    by: text.clone(),
+                });
+            }
+        }
+        finished
     }
 
     /// Whether any instance declared state at all — lets a run of ordinary devices skip the
@@ -1213,7 +1307,7 @@ fn newton_step(
             ),
             sim.at_iteration(iteration, 0.0),
             linear,
-        );
+        )?;
         let mut f = sink.residual.clone();
         let mut j = sink.jacobian.clone();
         for ((fi, qi), oi) in f.iter_mut().zip(&sink.charge).zip(&companion.offset) {
@@ -1372,13 +1466,18 @@ pub fn run_with_events(
         unresolved_events: 0,
         stalled_steps: 0,
         bypass: None,
+        finished: None,
     };
     if dim == 0 {
         return Ok(waveform);
     }
 
     let mut x = x0;
-    let mut state = StateBuffers::new(instances, bypass_cache(instances, dim, cfg.bypass));
+    let mut state = StateBuffers::new(
+        instances,
+        bypass_cache(instances, dim, cfg.bypass),
+        cfg.on_task,
+    );
     // One for the whole run: the pattern is found on the first evaluation and the symbolic
     // factorization reused by every Newton iteration of every timestep after it.
     let mut linear = Linear::new(cfg.solver, cfg.btf, dim);
@@ -1402,8 +1501,11 @@ pub fn run_with_events(
         (0.0, 0.0, 0.0),
         sim,
         &mut linear,
-    );
+    )?;
     state.commit();
+    // The seed is the analysis's first accepted point (it is `x0`, recorded as-is), so its
+    // `$strobe`s print at `tstart` and a `$finish` here ends the run on its first point.
+    let mut finish = state.accepted_tasks(&initial.tasks, cfg.tstart);
     // Seed the event channel's history at the initial condition. A crossing is a change of
     // sign between two *accepted* points, so the first accepted point establishes the baseline
     // and can never itself be a crossing — there is nothing before it to have crossed from.
@@ -1516,7 +1618,7 @@ pub fn run_with_events(
     let mut history: Vec<(f64, Vec<f64>)> = Vec::new();
     let history_cap = divided_difference_history(Method::Trapezoidal);
 
-    while t < cfg.tstop {
+    while t < cfg.tstop && finish.is_none() {
         loop {
             // The LTE controller owns `h`; a model's `bound_step` caps how far this particular
             // step may land without shrinking `h` itself, so the controller can still grow back
@@ -1972,7 +2074,7 @@ pub fn run_with_events(
                         ddt,
                         probe_sim,
                         &mut linear,
-                    );
+                    )?;
                     let ordinary = assemble(
                         instances,
                         &x,
@@ -1985,7 +2087,7 @@ pub fn run_with_events(
                         ddt,
                         probe_sim,
                         &mut linear,
-                    );
+                    )?;
                     // On the sparse path a pattern that grew between the two evaluations makes
                     // the matrices differ in length, which counts as a change: the flag is then
                     // honoured with a re-solve, the conservative reading.
@@ -2047,8 +2149,11 @@ pub fn run_with_events(
                     ),
                     commit_sim,
                     &mut linear,
-                );
+                )?;
                 state.commit();
+                // This is the accepted solution's own evaluation, so its tasks act now: printed
+                // at `t_next`, and a `$finish` ends the run once this point is recorded below.
+                finish = state.accepted_tasks(&sink.tasks, t_next);
                 // Shift the charge history before overwriting it: what was `q_prev` becomes
                 // the charge two steps back for the next step's BDF2 difference.
                 q_prev2 = std::mem::replace(&mut q_prev, sink.charge);
@@ -2127,6 +2232,7 @@ pub fn run_with_events(
 
     waveform.unresolved_events = unresolved_events;
     waveform.stalled_steps = state.stalled;
+    waveform.finished = finish;
     waveform.bypass = state.bypass.as_ref().map(|bp| BypassStats {
         eligible: bp.eligible_count(),
         instances: instances.len(),
@@ -2597,6 +2703,7 @@ mod tests {
             solver: Solver::Auto,
             btf: true,
             bypass: None,
+            on_task: None,
         }
     }
 
@@ -3724,6 +3831,7 @@ mod tests {
             solver: Solver::Auto,
             btf: true,
             bypass: None,
+            on_task: None,
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage

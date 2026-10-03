@@ -1810,7 +1810,7 @@ impl Parser<'_> {
                 let name = name.clone();
                 self.pos += 1;
                 let args = if self.at(&Token::LParen) {
-                    self.parse_call_args()?
+                    self.parse_task_args()?
                 } else {
                     Vec::new()
                 };
@@ -2240,6 +2240,32 @@ impl Parser<'_> {
 
     /// Parse a parenthesised, comma-separated argument list `( [expr {, expr}] )`. The cursor
     /// must be on the opening `(`.
+    /// A system task's argument list, which unlike a function call's may leave an argument
+    /// empty: `$strobe("a",,"b")` (LRM §9.4.1, "a null argument ... produces a single space").
+    /// An empty argument is kept as the one-space string it prints as.
+    fn parse_task_args(&mut self) -> Result<Vec<ExprRef>, FrontendError> {
+        self.eat(&Token::LParen)?;
+        let mut args = Vec::new();
+        if self.at(&Token::RParen) {
+            self.pos += 1;
+            return Ok(args);
+        }
+        loop {
+            if self.at(&Token::Comma) || self.at(&Token::RParen) {
+                args.push(self.push(ExprAst::Str(" ".to_string())));
+            } else {
+                args.push(self.parse_expr()?);
+            }
+            if self.at(&Token::Comma) {
+                self.pos += 1;
+                continue;
+            }
+            break;
+        }
+        self.eat(&Token::RParen)?;
+        Ok(args)
+    }
+
     fn parse_call_args(&mut self) -> Result<Vec<ExprRef>, FrontendError> {
         self.eat(&Token::LParen)?;
         let mut args = Vec::new();

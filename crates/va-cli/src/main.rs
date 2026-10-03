@@ -256,6 +256,8 @@ fn cmd_sim(args: &[String]) -> Result<()> {
 
     // `--logfull` switches on the per-iteration Newton trace for every DC solve this run does.
     va_cli::set_log_full(args.iter().any(|a| a == "--logfull"));
+    // A model's `$strobe`/`$display`/... print on this command's output (`va_cli::tasks`).
+    va_cli::set_task_output(true);
 
     let result = run_sim(
         netlist,
@@ -270,6 +272,12 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // worth having.
     if let Some(totals) = va_cli::log_full_run_totals() {
         eprintln!("{totals}");
+    }
+    // `$error` is a run-time error (LRM §9.7.3): the results are printed, and the exit status
+    // says the run was not clean.
+    let errors = va_cli::task_errors();
+    if result.is_ok() && errors > 0 {
+        bail!("{errors} $error message(s) reported by the model(s) during the run");
     }
     result
 }

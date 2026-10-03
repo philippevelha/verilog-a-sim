@@ -31,6 +31,9 @@
 
 pub mod estimate;
 pub mod plot;
+pub mod tasks;
+
+pub use tasks::{set_task_output, task_errors};
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
@@ -872,6 +875,9 @@ pub fn run_sim(
         }
         let shown = select_quantities(&all_quantities, report_only)?;
         report_transient(&shown, &wf);
+        if let Some(f) = &wf.finished {
+            tasks::report_finish(f.kind, &f.by, &format!("t={:e}", f.t));
+        }
         if let Some(summary) = bypass_summary(&wf) {
             println!("{summary}");
             eprintln!("{summary}");
@@ -1948,10 +1954,37 @@ fn solve_dc_impl(
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
     let start = nodeset_start(net, dim)?;
-    va_core::dc::operating_point_continued(&refs, dim, newton_cfg(solver), None, start.as_deref())
-        .map(|(op, _)| op)
-        .map_err(|e| name_non_finite_row(e.into(), &quantities))
-        .context("DC operating-point solve failed")
+    let op = va_core::dc::operating_point_continued(
+        &refs,
+        dim,
+        newton_cfg(solver),
+        None,
+        start.as_deref(),
+    )
+    .map(|(op, _)| op)
+    .map_err(|e| name_non_finite_row(e.into(), &quantities))
+    .context("DC operating-point solve failed")?;
+    static_point_tasks(compiled, &refs, &op.x, dim, "the operating point")?;
+    Ok(op)
+}
+
+/// A static analysis's system tasks at its converged solution (`tasks::at_static_point`), when
+/// any compiled module has one; a `$finish`/`$stop` among them is noted and returned.
+fn static_point_tasks(
+    compiled: &[Module],
+    refs: &[&dyn ModelInstance],
+    x: &[f64],
+    dim: usize,
+    when: &str,
+) -> Result<Option<(va_abi::TaskKind, String)>> {
+    if !tasks::any_module_has_tasks(compiled) {
+        return Ok(None);
+    }
+    let finish = tasks::at_static_point(refs, x, dim, when)?;
+    if let Some((kind, by)) = &finish {
+        tasks::report_finish(*kind, by, when);
+    }
+    Ok(finish)
 }
 
 /// Newton's starting point from the deck's `.nodeset` cards (1.30.0): each named net at its
@@ -2191,7 +2224,13 @@ fn solve_dc_sweep_impl(
             .with_context(|| format!("`.dc` sweep at {}={value}", sweep.source))?;
         previous = Some(op.x.clone());
         previous_above = Some(above);
+        let when = format!("{}={value}", sweep.source);
+        let finish = static_point_tasks(compiled, &refs, &op.x, built.dim, &when)?;
         out.push((value, op));
+        // `$finish` ends the sweep after the point it was called at (LRM §9.7.1).
+        if finish.is_some() {
+            break;
+        }
     }
     Ok(out)
 }
@@ -2479,6 +2518,7 @@ fn solve_transient_impl(
         solver,
         btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
         bypass: tran_bypass(),
+        on_task: tasks::transient_hook(),
     };
 
     let BuiltInstances {
@@ -2675,6 +2715,11 @@ fn solve_ac_impl(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
+    if static_point_tasks(compiled, &refs, &op.x, dim, "the operating point")?.is_some() {
+        bail!(
+            "the AC sweep was not run: a model's $finish ended the analysis at its operating point"
+        );
+    }
     let excitation = ac_excitation(net, &currents, dim)?;
 
     let sweep = va_acnoise::ac::AcSweep {
@@ -2871,6 +2916,11 @@ fn solve_noise_impl(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
+    if static_point_tasks(compiled, &refs, &op.x, dim, "the operating point")?.is_some() {
+        bail!(
+            "the noise analysis was not run: a model's $finish ended the analysis at its operating point"
+        );
+    }
 
     if !has_noise_sources(&refs, &op.x) {
         // The trailing note used to say Verilog-A's noise functions "are not lowered yet, so a
@@ -3047,6 +3097,7 @@ fn build_instance(
             dev.params.clone()
         };
         let (inst, assignment) = build_from_model(
+            &dev.name,
             module,
             dev.value,
             &params,
@@ -3415,7 +3466,9 @@ fn unconnected_ports(module: &Module, terminals: &[usize]) -> Result<Vec<usize>>
     Ok(unconnected)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_from_model(
+    name: &str,
     module: &Module,
     value: Option<f64>,
     overrides: &[(String, f64)],
@@ -3481,7 +3534,7 @@ fn build_from_model(
         .collect();
 
     let inst = compiled
-        .instantiate_with_shorts(&full, next_unknown, |p, n| shorts.join(p, n))
+        .instantiate_named(&full, next_unknown, |p, n| shorts.join(p, n), name)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
     // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
@@ -3920,6 +3973,7 @@ mod tests {
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
             bypass: None,
+            on_task: None,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4060,6 +4114,7 @@ mod tests {
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
             bypass: None,
+            on_task: None,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4125,6 +4180,7 @@ mod tests {
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
             bypass: None,
+            on_task: None,
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");
@@ -7731,32 +7787,34 @@ endmodule
         }
     }
 
-    /// The guard on `is_pure_in_x`'s soundness that the 2.7.0 ratification asked for. Three
-    /// constructs are pure today **only because of how they are lowered**: `$limit` folds to its
-    /// first argument, `$rdist_*` to their mean, and a system task such as `$strobe` to nothing.
-    /// A model using them must therefore stamp exactly what the same model without them stamps,
-    /// and claim purity. The day one of them gains an effect of its own -- a per-iterate limiter
-    /// state, a real random draw, a printed line -- this test fails, and `lower::reads_only_x`
-    /// must learn the construct before bypass is allowed to skip it.
+    /// The guard on `is_pure_in_x`'s soundness that the 2.7.0 ratification asked for. Two
+    /// constructs are pure **only because of how they are lowered**: `$limit` folds to its first
+    /// argument and `$rdist_*` to their mean. A model using them must therefore stamp exactly
+    /// what the same model without them stamps, and claim purity. The day one of them gains an
+    /// effect of its own -- a per-iterate limiter state, a real random draw -- this test fails,
+    /// and `lower::reads_only_x` must learn the construct before bypass may skip it.
+    ///
+    /// The third construct the 2.7.0 version guarded, the system task, gained its effect in 2.8.0
+    /// and this test caught it: a module with a task now prints from its evaluations, which a
+    /// replayed recording would skip, so such a module is never pure.
     #[test]
-    fn bypass_purity_rests_on_three_folds_and_this_test_catches_a_change() {
+    fn bypass_purity_rests_on_two_folds_and_a_task_is_never_pure() {
         let module = |body: &str| {
             format!(
-                "module m(p, n); inout p, n; electrical p, n;\n\
-                 parameter real r = 1e3;\n\
-                 analog begin {body} end\nendmodule\n"
+                "module m(p, n); inout p, n; electrical p, n; parameter real r = 1e3; analog begin {body} end endmodule"
             )
         };
         let plain = "I(p,n) <+ V(p,n)/r;";
         let folded = [
             "I(p,n) <+ $limit(V(p,n), \"pnjlim\", 0.025, 0.6)/r;",
             "I(p,n) <+ V(p,n)/r + 0.0*$rdist_normal(1, 0.0, 1.0);",
-            "$strobe(\"v=%g\", V(p,n)); I(p,n) <+ V(p,n)/r;",
         ];
-        let stamp = |body: &str| {
+        let build = |body: &str| {
             let design = va_frontend::compile(&module(body)).expect("compiles");
-            let inst =
-                va_codegen::build_instance(&design.modules[0], &[0, 1], &mut 2).expect("builds");
+            va_codegen::build_instance(&design.modules[0], &[0, 1], &mut 2).expect("builds")
+        };
+        let stamp = |body: &str| {
+            let inst = build(body);
             let mut d = va_abi::stamps::DenseStamp::new(2);
             let mut st = va_abi::ModelState::stateless();
             inst.load(
@@ -7772,6 +7830,154 @@ endmodule
         for body in folded {
             assert_eq!(stamp(body), reference, "`{body}` no longer folds");
         }
+        for task in [
+            "$strobe(\"v=%g\", V(p,n));",
+            "$debug(\"x\");",
+            "if (V(p,n) > 10) $finish;",
+            "$warning(\"w\");",
+        ] {
+            assert!(
+                !build(&format!("{task} {plain}")).is_pure_in_x(),
+                "a module with `{task}` claims purity"
+            );
+        }
+    }
+
+    thread_local! {
+        /// What `record_task` saw on this test's thread (the integrator calls its hook on the
+        /// thread that runs it, so tests in parallel do not see each other's output).
+        static SEEN_TASKS: std::cell::RefCell<Vec<(va_abi::TaskKind, String, f64)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_task(kind: va_abi::TaskKind, text: &str, t: f64) {
+        SEEN_TASKS.with(|s| s.borrow_mut().push((kind, text.to_string(), t)));
+    }
+
+    /// A one-node model charging toward 1 V through 1 kOhm into 1 nF (tau = 1 us), with `body`
+    /// added to its analog block, run for 5 us with `record_task` as the task hook.
+    fn run_task_model(
+        body: &str,
+    ) -> Result<va_transient::integrator::Waveform, va_transient::TransientError> {
+        let src = format!(
+            "module m(p); inout p; electrical p; analog begin I(p) <+ (V(p) - 1.0)/1e3 + ddt(1e-9*V(p)); {body} end endmodule"
+        );
+        let design = va_frontend::compile(&src).expect("compiles");
+        let inst =
+            va_codegen::build_instance(&design.modules[0], &[0, va_abi::reference::GROUND], &mut 1)
+                .expect("builds");
+        let cfg = TranConfig {
+            tstart: 0.0,
+            tstop: 5e-6,
+            tstep: 1e-7,
+            tstep_min: 1e-13,
+            method: Method::Trapezoidal,
+            lte_reltol: 1e-3,
+            lte_abstol: 1e-6,
+            lte_estimator: LteEstimator::DividedDifference,
+            newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
+            solver: Solver::Auto,
+            btf: true,
+            bypass: None,
+            on_task: Some(record_task),
+        };
+        SEEN_TASKS.with(|s| s.borrow_mut().clear());
+        va_transient::integrator::run(&[inst.as_ref()], 1, vec![0.0], cfg)
+    }
+
+    fn seen(kind: va_abi::TaskKind) -> Vec<(String, f64)> {
+        SEEN_TASKS.with(|s| {
+            s.borrow()
+                .iter()
+                .filter(|(k, _, _)| *k == kind)
+                .map(|(_, text, t)| (text.clone(), *t))
+                .collect()
+        })
+    }
+
+    /// LRM §9.4.6: "all the display tasks, except $debug, shall not display output unless an
+    /// iteration has been accepted". An unconditional `$strobe` therefore prints exactly once per
+    /// point of the waveform (the seed at `tstart`, then every accepted step), at that point's
+    /// time and with that point's value; `$debug` prints from every evaluation, Newton
+    /// iterations and rejected steps included, so strictly more often.
+    #[test]
+    fn a_strobe_prints_once_per_accepted_point_and_debug_from_every_iteration() {
+        let wf = run_task_model(r#"$strobe("v=%.9e", V(p)); $debug("d");"#).expect("runs");
+        let strobes = seen(va_abi::TaskKind::Strobe);
+        assert_eq!(strobes.len(), wf.t.len(), "one $strobe per accepted point");
+        for (k, (text, t)) in strobes.iter().enumerate() {
+            assert_eq!(
+                *t, wf.t[k],
+                "the strobe of point {k} is reported at its time"
+            );
+            let v: f64 = text.trim_start_matches("v=").parse().expect("a number");
+            assert!(
+                (v - wf.x[k][0]).abs() <= 1e-9 * wf.x[k][0].abs().max(1e-12),
+                "point {k}: $strobe printed {v}, the waveform holds {}",
+                wf.x[k][0]
+            );
+        }
+        let debugs = seen(va_abi::TaskKind::Debug).len();
+        assert!(
+            debugs > strobes.len(),
+            "$debug {debugs} vs $strobe {}",
+            strobes.len()
+        );
+        assert!(wf.finished.is_none());
+    }
+
+    /// LRM §9.7.1: `$finish` from an accepted iteration ends the simulation after that solution.
+    /// The waveform stops at the first accepted point past the condition, long before `tstop`;
+    /// the `$finish` is not acted on from the rejected steps and iterations that also saw it.
+    #[test]
+    fn finish_ends_the_run_at_the_first_accepted_point_that_asks() {
+        let wf = run_task_model("if (V(p) > 0.5) $finish(0);").expect("runs");
+        let f = wf
+            .finished
+            .as_ref()
+            .expect("the run was finished by the model");
+        assert_eq!(f.kind, va_abi::TaskKind::Finish(0));
+        assert_eq!(f.by, "m", "%m of an unnamed instance is its module's name");
+        let n = wf.t.len();
+        assert_eq!(f.t, wf.t[n - 1], "the waveform ends at the finishing point");
+        assert!(
+            wf.x[n - 1][0] > 0.5 && wf.x[n - 2][0] <= 0.5,
+            "the first point past 0.5 V"
+        );
+        // V = 1 - exp(-t/tau) passes 0.5 V at tau*ln 2 = 0.693 us.
+        assert!(f.t > 0.69e-6 && f.t < 1.5e-6, "finished at {}", f.t);
+    }
+
+    /// LRM §9.7.3: `$fatal` ends the simulation at once, without waiting for the iteration to be
+    /// accepted, and the run fails with its message.
+    #[test]
+    fn fatal_fails_the_run_with_its_message() {
+        let err = run_task_model(r#"if (V(p) > 0.5) $fatal(1, "boom at %.1f", 0.5);"#)
+            .expect_err("$fatal fails the run");
+        match err {
+            va_transient::TransientError::Fatal { message, t } => {
+                assert_eq!(message, "boom at 0.5");
+                assert!(t > 0.0 && t < 5e-6);
+            }
+            other => panic!("expected $fatal, got {other}"),
+        }
+    }
+
+    /// A static analysis's accepted solution is its converged one: the `.dc` sweep of
+    /// `circuits/tasks/current_limit.net` stops after the point where the model's `$finish` ran
+    /// (3 mA > 2.5 mA at V1 = 3.0 V), 7 of the 11 points.
+    #[test]
+    fn finish_ends_a_dc_sweep_after_the_point_that_asks() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let text = std::fs::read_to_string(format!("{root}/circuits/tasks/current_limit.net"))
+            .expect("deck");
+        let net = va_netlist::parser::parse(&text).expect("parses");
+        let compiled = compile_model_path(&format!("{root}/models/tasks")).expect("compiles");
+        let sweep = net.dc.clone().expect("a .dc card");
+        let points = solve_dc_sweep(&net, &compiled, &sweep).expect("sweeps");
+        let values: Vec<f64> = points.iter().map(|(v, _)| *v).collect();
+        assert_eq!(values.len(), 7, "{values:?}");
+        assert!((values[6] - 3.0).abs() < 1e-12);
     }
 
     #[test]

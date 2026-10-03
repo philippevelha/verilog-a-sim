@@ -1025,3 +1025,32 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > of its own, `reads_only_x` must learn it before bypass may skip it.
 > `va-cli`'s `bypass_purity_rests_on_three_folds_and_this_test_catches_a_change` fails the day
 > one of them stops folding.
+
+> **Revision (§6 change, 2026-10-03b, both interfaces — at the project owner's request that
+> system tasks "must have an effect"):** the display and simulation-control system tasks reach
+> the simulator (2.8.0). Until now the frontend lowered `$strobe`, `$display`, `$finish`, … to an
+> empty block, so nothing downstream could see them. Both additions are purely additive.
+>
+> - **Interface α** gained `Stmt::Task { kind: TaskKind, args: Vec<TaskArg> }`, with `TaskKind`
+>   (`Strobe`, `Display`, `Write`, `Debug`, `Finish`, `Stop`, `Fatal`, `Error`, `Warning`,
+>   `Info`) and `TaskArg` (`Str`, `Expr`, `Null`). A statement, like `Stmt::BoundStep`, because
+>   it produces no value and may sit inside an `if`. Every exhaustive match on `Stmt` gained an
+>   arm; the expression-walking passes (probe collection, `idt` collection, definite assignment,
+>   the static schedule's roots) treat a task's expression arguments as ordinary reads.
+> - **Interface β** gained a defaulted `StampSink::task(kind: TaskKind, text: &str)` and
+>   `va_abi::TaskKind` (whose `Finish`/`Stop`/`Fatal` carry LRM Table 9-25's diagnostic level).
+>   A model emits each task it ran, formatted, in order; **when** it takes effect is the
+>   consumer's decision, because the LRM ties it to the solver (§9.4.6: only `$debug` prints from
+>   an iteration that is not accepted; §9.7.3: `$fatal` acts at once). The default ignores it, so
+>   no implementor breaks; a sink that **wraps** another must forward it (`Multiplied`'s
+>   `ScaledSink` does, once rather than `m` times), and `va_core::par::Recorder` records and
+>   replays it like every other call.
+> - **What it changed for `is_pure_in_x`** (the 2026-10-03 revision above): a module with a task
+>   is no longer pure, since a replayed recording would skip its output.
+>   `bypass_purity_rests_on_three_folds_and_this_test_catches_a_change` failed on this change,
+>   as it was written to, and became `bypass_purity_rests_on_two_folds_and_a_task_is_never_pure`:
+>   `$limit` and `$rdist_*` remain the two folds the answer rests on.
+>
+> The consumers' rules — transient through `TranConfig::on_task`, static analyses through one
+> evaluation at the converged solution in `va-cli` — and every stated limitation are in
+> `docs/token-reference.md`, "System tasks".

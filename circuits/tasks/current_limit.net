@@ -1,0 +1,10 @@
+* The system tasks in a static analysis (2.8.0): a .dc sweep that a model stops.
+* models/tasks/current_limit.va (r = 1 kOhm, imax = 2.5 mA) across V1, swept 0 to 5 V in 0.5 V.
+* Expected: one $strobe line per sweep point from the converged solution (I = V/1k), then at
+* V1 = 3.0 V (I = 3 mA > 2.5 mA) an $info line and $finish: the sweep ends there, with 7 points
+* (0.0 ... 3.0 V) instead of 11.
+* Run: va-cli sim circuits/tasks/current_limit.net --model models/tasks
+V1 a gnd 0.0
+X1 a gnd current_limit
+.dc V1 0.0 5.0 0.5
+.end

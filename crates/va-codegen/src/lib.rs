@@ -44,6 +44,7 @@ pub mod counters;
 pub mod lower;
 mod sched;
 pub mod tape;
+mod tasks;
 
 use ad::{eval, Ctx, Dual};
 use lower::{Contribution, Lowered, LoweredStmt, NoiseTerm};
@@ -217,6 +218,7 @@ impl CompiledModel {
         // is what lets this happen once instead of per instance.
         let prototype = GeneratedModel {
             terminals: (0..shared.lowered.n_unknowns).collect(),
+            name: Arc::from(shared.module.name.as_str()),
             shared: Arc::clone(&shared),
             pinned: Vec::new(),
             sched_regs: std::sync::Mutex::new(None),
@@ -291,7 +293,24 @@ impl CompiledModel {
         &self,
         terminals: &[usize],
         next_unknown: &mut usize,
+        keep: impl FnMut(usize, usize) -> bool,
+    ) -> Result<Box<dyn ModelInstance>, CodegenError> {
+        self.instantiate_named(terminals, next_unknown, keep, &self.shared.module.name)
+    }
+
+    /// [`Self::instantiate_with_shorts`], naming the instance: `name` is what a system task's
+    /// `%m` prints (LRM §9.4.4) — the deck's hierarchical instance name, as `va-cli` passes it.
+    /// The other constructors name an instance after its module.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::instantiate`].
+    pub fn instantiate_named(
+        &self,
+        terminals: &[usize],
+        next_unknown: &mut usize,
         mut keep: impl FnMut(usize, usize) -> bool,
+        name: &str,
     ) -> Result<Box<dyn ModelInstance>, CodegenError> {
         let nodes = self.shared.module.nodes.len();
         if terminals.len() != nodes {
@@ -318,6 +337,7 @@ impl CompiledModel {
             .collect();
         Ok(Box::new(GeneratedModel {
             shared: Arc::clone(&self.shared),
+            name: Arc::from(name),
             terminals: full,
             pinned,
             sched_regs: std::sync::Mutex::new(None),
@@ -354,6 +374,9 @@ struct GeneratedModel {
     /// This instance's local-slot → global-unknown map. The only genuinely per-instance thing:
     /// two instances of one model differ in where they are wired and in nothing else.
     terminals: Vec<usize>,
+    /// What a system task's `%m` prints: the deck's instance name, or the module's
+    /// ([`CompiledModel::instantiate_named`]).
+    name: Arc<str>,
     /// Local slots of the ideal shorts this instance does **not** stamp, because another short
     /// already holds the same two nodes equal (see [`CompiledModel::instantiate_with_shorts`]).
     /// Empty for every instance except a redundant one.
@@ -552,6 +575,8 @@ impl GeneratedModel {
                 .map(|c| (c.expr_id, (c.kind, c.base)))
                 .collect(),
             bound_step: std::cell::Cell::new(None),
+            tasks: RefCell::new(Vec::new()),
+            instance_name: &self.name,
             vars: RefCell::new(vars),
             static_vars,
             hoistable: &self.shared.lowered.invariance.hoistable,
@@ -678,6 +703,11 @@ impl GeneratedModel {
                 // with the noise channel, which has no stamp sink to emit into. `load` drains
                 // it once the walk is done (see `Ctx::request_bound_step`).
                 LoweredStmt::BoundStep(e) => ctx.request_bound_step(tape::eval_value(ctx, *e)?),
+                // Queued like `bound_step`, for the same reason, and drained by `load`.
+                LoweredStmt::Task { kind, args } => {
+                    let t = tasks::run(ctx, *kind, args, ctx.instance_name, &ctx.module.name)?;
+                    ctx.tasks.borrow_mut().push(t);
+                }
                 LoweredStmt::If { cond, then_, else_ } => {
                     let taken = if tape::eval_value(ctx, *cond)? != 0.0 {
                         then_
@@ -920,6 +950,12 @@ impl GeneratedModel {
                 // mid-transient. Its *value* is discarded here — this dry run is not a timestep.
                 LoweredStmt::BoundStep(e) => {
                     eval(ctx, *e)?;
+                }
+                // Each argument validated by evaluation; nothing is printed by a dry run.
+                LoweredStmt::Task { args, .. } => {
+                    for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                        eval(ctx, e)?;
+                    }
                 }
                 LoweredStmt::If { cond, then_, else_ } => {
                     eval(ctx, *cond)?;
@@ -2406,6 +2442,11 @@ impl ModelInstance for GeneratedModel {
             if let Some(dt) = self.zi_step_bound(&ctx) {
                 sink.bound_step(dt);
             }
+        }
+        // Every system task the walk reached, in every analysis and in the order they ran: when
+        // each takes effect is the consumer's decision (`va_abi::StampSink::task`).
+        for (kind, text) in ctx.tasks.take() {
+            sink.task(kind, &text);
         }
         // Each persistent variable proposes the value it ended this evaluation with
         // (`lower::PersistentVar`).

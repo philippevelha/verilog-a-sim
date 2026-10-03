@@ -415,3 +415,29 @@ agree; about an hour of wall time per image. Plots and the full netlist of one i
 
 ![MNIST summary](examples/snn_mnist/summary.png)
 
+
+## System tasks: a model that prints and stops the run (2.8.0)
+
+```bash
+va-cli sim circuits/tasks/rc_watch.net --model models/tasks --tran --report out
+va-cli sim circuits/tasks/current_limit.net --model models/tasks
+```
+
+No plot: what these show is text. `models/tasks/rc_watch.va` watches the charging node of an
+RC (1 kΩ, 1 µF). It prints one `$strobe` line when the node rises through 0.9 V (closed form
+2.3026 ms; printed at the accepted point just past it, 2.3112 ms), then a `$display` line and a
+`$finish` at the first accepted point past 0.95 V (closed form 2.9957 ms; 3.0112 ms), so the
+waveform ends there instead of at the deck's 10 ms:
+
+```text
+X1: V(p) rose through 0.9 V at t=2.3112e-03 s
+X1: V(p)=0.95077 V passed vstop=0.95 V at t=3.0112e-03 s, ending the run
+Transient analysis (165 points, t=0 to t=3.0111760675087173e-3s):
+...
+[va-cli] $finish by X1 at t=3.0111760675087173e-3: the analysis ended at that point
+```
+
+`models/tasks/current_limit.va` is a 1 kΩ resistor that `$strobe`s its operating point and
+calls `$info` and `$finish` above 2.5 mA. Its `.dc` sweep prints one line per point, from the
+converged solution, and stops after V1 = 3.0 V: 7 points of the card's 11. The rules (what
+waits for an accepted point, what does not) are in `docs/token-reference.md`, "System tasks".

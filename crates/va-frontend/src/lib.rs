@@ -203,10 +203,37 @@ pub fn compile_named(
             include_dirs,
         )?);
     }
-    Ok(CompiledDesign {
-        modules,
-        warnings: pre.warnings,
-    })
+    let mut warnings = pre.warnings;
+    warnings.extend(unimplemented_task_warnings(&tokens));
+    Ok(CompiledDesign { modules, warnings })
+}
+
+/// One warning per system task the source uses that **parses but has no effect** in this
+/// version, so the user learns it was seen and ignored rather than finding out from a missing
+/// line of output: `$monitor` and the file-I/O family (LRM §9.4.1, §9.5). The display and
+/// simulation-control tasks are implemented (`va_ir::Stmt::Task`, 2.8.0).
+fn unimplemented_task_warnings(tokens: &[lexer::Token]) -> Vec<String> {
+    const NO_EFFECT: &[&str] = &[
+        "monitor", "fopen", "fclose", "fdisplay", "fstrobe", "fwrite", "fmonitor", "fdebug",
+        "fflush",
+    ];
+    let mut seen: Vec<&str> = Vec::new();
+    for t in tokens {
+        if let lexer::Token::SysFunc(name) = t {
+            if let Some(&n) = NO_EFFECT.iter().find(|&&n| n == name) {
+                if !seen.contains(&n) {
+                    seen.push(n);
+                }
+            }
+        }
+    }
+    seen.into_iter()
+        .map(|n| {
+            format!(
+                "`${n}` has no effect in this version: `$monitor` and file output are not implemented yet (docs/token-reference.md, system tasks)"
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -348,6 +375,50 @@ endmodule
             .replace("`begin_keywords \"1364-2005\"\n", "")
             .replace("`end_keywords\n", "");
         assert!(super::compile(&plain).is_err());
+    }
+
+    /// The display and simulation-control tasks lower to `va_ir::Stmt::Task` with their
+    /// arguments (2.8.0; every task used to elaborate to an empty block): a string literal as
+    /// text with its escapes resolved, an expression as an expression, and an empty argument
+    /// as the one space it prints.
+    #[test]
+    fn system_tasks_lower_with_their_arguments() {
+        let src = "module m(p); inout p; electrical p; analog begin \
+                   $strobe(\"v=%g\\n\", V(p),, \"x\"); $finish; $fatal(0, \"f\"); \
+                   I(p) <+ V(p); end endmodule";
+        let design = super::compile(src).expect("compiles");
+        let tasks: Vec<_> = design.modules[0]
+            .analog
+            .iter()
+            .filter_map(|s| match s {
+                va_ir::Stmt::Task { kind, args } => Some((*kind, args.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tasks.len(), 3);
+        let (kind, args) = &tasks[0];
+        assert_eq!(*kind, va_ir::TaskKind::Strobe);
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], va_ir::TaskArg::Str("v=%g\n".into()));
+        assert!(args[1].expr().is_some());
+        assert_eq!(args[2], va_ir::TaskArg::Str(" ".into()));
+        assert_eq!(args[3], va_ir::TaskArg::Str("x".into()));
+        assert_eq!(tasks[1], (va_ir::TaskKind::Finish, vec![]));
+        assert_eq!(tasks[2].0, va_ir::TaskKind::Fatal);
+        assert!(design.warnings.is_empty(), "{:?}", design.warnings);
+    }
+
+    /// A task that parses but has no effect in this version is reported once, not dropped in
+    /// silence (`unimplemented_task_warnings`).
+    #[test]
+    fn tasks_without_an_effect_are_reported_as_warnings() {
+        let src = "module m(p); inout p; electrical p; analog begin \
+                   $monitor(V(p)); $monitor(V(p)); $fdisplay(1, \"x\"); \
+                   I(p) <+ V(p); end endmodule";
+        let design = super::compile(src).expect("compiles");
+        assert_eq!(design.warnings.len(), 2, "{:?}", design.warnings);
+        assert!(design.warnings[0].starts_with("`$monitor` has no effect"));
+        assert!(design.warnings[1].starts_with("`$fdisplay` has no effect"));
     }
 
     /// The no-effect directives reach the caller as warnings, not as silence.

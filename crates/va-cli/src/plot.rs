@@ -509,6 +509,7 @@ mod tests {
             unresolved_events: 0,
             stalled_steps: 0,
             bypass: None,
+            finished: None,
         };
 
         let dir = std::env::temp_dir().join("va-cli-plot-test");
@@ -538,6 +539,7 @@ mod tests {
             unresolved_events: 0,
             stalled_steps: 0,
             bypass: None,
+            finished: None,
         };
         let path = std::env::temp_dir()
             .join("va-cli-plot-test-empty.svg")

@@ -47,7 +47,7 @@ pub use events::{CrossDir, CrossSpec, CrossTol, EventSink, FiredEvents};
 pub use instance::{ModelInstance, UnknownKind};
 pub use multiplicity::Multiplied;
 pub use noise::NoiseSink;
-pub use stamps::StampSink;
+pub use stamps::{StampSink, TaskKind};
 pub use state::ModelState;
 
 #[cfg(test)]

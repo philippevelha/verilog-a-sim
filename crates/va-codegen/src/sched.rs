@@ -942,7 +942,7 @@ fn collect_assigns(stmts: &[LoweredStmt], out: &mut Vec<(VarId, ExprId)>) {
     for s in stmts {
         match s {
             LoweredStmt::Assign { lhs, rhs } => out.push((*lhs, *rhs)),
-            LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) => {}
+            LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => {}
             LoweredStmt::If { then_, else_, .. } => {
                 collect_assigns(then_, out);
                 collect_assigns(else_, out);
@@ -973,6 +973,9 @@ fn collect_roots(stmts: &[LoweredStmt], out: &mut Vec<ExprId>) {
         match s {
             LoweredStmt::Assign { rhs, .. } => out.push(*rhs),
             LoweredStmt::BoundStep(e) => out.push(*e),
+            LoweredStmt::Task { args, .. } => {
+                out.extend(args.iter().filter_map(va_ir::TaskArg::expr));
+            }
             LoweredStmt::Contribute(c) => {
                 out.extend(c.resistive.iter().map(|t| t.expr));
                 for t in &c.charge {
@@ -1061,6 +1064,11 @@ fn check_da(module: &Module, stmts: &[LoweredStmt], da: &mut Vec<bool>) -> Resul
                 da[lhs.0 as usize] = true;
             }
             LoweredStmt::BoundStep(e) => reads_ok(*e, da)?,
+            LoweredStmt::Task { args, .. } => {
+                for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                    reads_ok(e, da)?;
+                }
+            }
             LoweredStmt::Contribute(c) => {
                 for t in &c.resistive {
                     reads_ok(t.expr, da)?;

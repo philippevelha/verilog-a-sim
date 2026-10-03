@@ -24,4 +24,8 @@ pub enum TransientError {
     /// The requested integration method has no companion-model implementation yet.
     #[error("integration method {method:?} is not yet implemented")]
     UnsupportedMethod { method: integrator::Method },
+    /// A model executed `$fatal` (LRM §9.7.3), which ends the simulation at once, whether or not
+    /// the iteration it ran in would have been accepted.
+    #[error("$fatal at t={t:e}: {message}")]
+    Fatal { t: f64, message: String },
 }

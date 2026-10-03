@@ -112,6 +112,12 @@ impl StampSink for ScaledSink<'_> {
     fn bound_step(&mut self, dt: f64) {
         self.inner.bound_step(dt);
     }
+
+    /// Forwarded once, not `m` times: `m` parallel copies are one instance with one line of
+    /// output, as `bound_step` is one request.
+    fn task(&mut self, kind: crate::stamps::TaskKind, text: &str) {
+        self.inner.task(kind, text);
+    }
 }
 
 /// A [`NoiseSink`] scaling every source's **power** by `m` (LRM §6.3.6 rule 3).

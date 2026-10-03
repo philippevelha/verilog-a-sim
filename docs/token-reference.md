@@ -145,9 +145,9 @@ class of lexemes.
 
 - **Purpose and Static Nature**: A system function/task name with the leading `$` stripped.
   Split roughly evenly between elaboration-time (`$vt`, `$temperature`) and would-be
-  simulation-time (`$strobe`, `$display`, `$finish`, … — parsed as `Stmt::Task` and lowered to
-  an empty block: they have no effect on a solve in any analysis, which is a stated limitation,
-  not an approximation — nothing numerical depends on them).
+  simulation-time (`$strobe`, `$display`, `$finish`, … — parsed as `Stmt::Task`; since 2.8.0 the
+  display and simulation-control family lower to `va_ir::Stmt::Task` and act, see "System tasks"
+  below; until then all of them elaborated to an empty block).
 - **Declaration and Assignment**: Never declared — the `$`-prefixed namespace is entirely
   predefined by the LRM (Clause 9, "System tasks and functions").
 - **Expressions and Evaluation**: `$vt`/`$vt(T)`, `$temperature` and — **since 2026-08-06
@@ -210,8 +210,9 @@ class of lexemes.
   to actually draw a sample from at all (the same "no meaningful DC value" gap `white_noise`/
   `flicker_noise`/`noise_table` have); `seed` (always first) and an optional trailing
   `type_string` (`"global"`/`"instance"`, LRM Table 9-2) are both parsed but never evaluated
-  (`Elaborator::fold_rdist`); anything else reachable as a `Stmt::Task` (`$strobe`, `$finish`, …)
-  is parsed but elaborates to a no-op. `$simparam` gets its default-argument fold in *two* places,
+  (`Elaborator::fold_rdist`); a `Stmt::Task` (`$strobe`, `$finish`, …) lowers to
+  `va_ir::Stmt::Task` since 2.8.0 (see "System tasks"), except `$monitor`, the file family and
+  `$discontinuity`, which are parsed and have no effect (the first two reported as warnings). `$simparam` gets its default-argument fold in *two* places,
   not one: `lower_expr` (the dynamic analog-block path) and the separate, non-mutating
   `const_eval` (the parameter-default/range/genvar-bound constant-folding path) — a real model
   can default a parameter directly from `$simparam` (`external/bsim6.0.va`:
@@ -1419,6 +1420,63 @@ including the ones with no implemented behavior at all.
   `value` at elaboration while DC was the only analysis — correct then, and the silent wrong
   answer in AC and transient that stage 1 and the refusal respectively replaced.
 
+### System tasks — display and simulation control (2.8.0, 2026-10-03)
+
+- **Purpose and Static Nature**: Simulation-time side effects. `$strobe`, `$display`, `$write`,
+  `$debug` print (LRM §9.4); `$finish`, `$stop` end the analysis; `$fatal`, `$error`,
+  `$warning`, `$info` report with a severity (LRM §9.7). Until 2.8.0 every one of them
+  elaborated to an empty block, so a model's parameter checks, its `$finish` on a bad operating
+  point, and every line it meant to print were silently discarded.
+- **Declaration and Assignment**: Statements, anywhere a statement may stand — the analog block
+  or an analog function body — written `$name;` or `$name(arg, ...)`. An argument is a string
+  literal (escapes resolved by the lexer), any analog expression, or empty (`,,`, printed as one
+  space).
+- **Expressions and Evaluation**: Elaboration lowers each to `va_ir::Stmt::Task { kind, args }`
+  (Interface α, 2026-10-03). Codegen evaluates the arguments when the statement runs and formats
+  them (`va_codegen::tasks`, LRM §9.4.3): `%d %h %x %o %b %c %s %e %f %g %r %m %l %%`, `-`/`0`
+  flags, width and precision, C's rules for the real formats; an expression no specification
+  consumed prints in the default format (an integral value as an integer, else `%g`). The
+  formatted text reaches the consumer through `va_abi::StampSink::task` (Interface β,
+  2026-10-03). **When it takes effect is the consumer's decision**, following LRM §9.4.6 and
+  §9.7:
+  - **transient** (`va_transient::integrator::TranConfig::on_task`): `$debug` prints from every
+    evaluation, Newton iterations and rejected steps included; `$fatal` fails the run at once
+    (`TransientError::Fatal`); every other task acts only from an **accepted** timepoint — the
+    seed at `tstart`, then each accepted step's own evaluation — and `$finish`/`$stop` end the
+    run once that point is recorded (`Waveform::finished`). Gated by
+    `a_strobe_prints_once_per_accepted_point_and_debug_from_every_iteration`,
+    `finish_ends_the_run_at_the_first_accepted_point_that_asks`,
+    `fatal_fails_the_run_with_its_message`.
+  - **static analyses** (`.op`, each `.dc` point, the operating point of `.ac`/`.noise`):
+    `va-cli` evaluates every instance once more at the converged solution and acts on what that
+    evaluation reports; a `$finish` ends a `.dc` sweep after its point
+    (`finish_ends_a_dc_sweep_after_the_point_that_asks`) and stops `.ac`/`.noise` before their
+    sweep, with an error saying so. Skipped entirely when no compiled module contains a task.
+  - `va-cli sim` prints the display tasks on stdout; the severity tasks as `$<task> at <when>:
+    <text>` on stdout **and** stderr; and a note when `$finish`/`$stop` ended the analysis (none
+    at level 0, LRM Table 9-25). Any `$error` makes `va-cli sim` exit with status 1 after its
+    results are printed. `%m` is the deck's instance name.
+  - **Device bypass**: a module with any task is never `is_pure_in_x`, because a replayed
+    recording would skip its output (`bypass_purity_rests_on_two_folds_and_a_task_is_never_pure`).
+- **Structural and Analog Usage**: Analog-block statements, and statements in analog function
+  bodies (a task there is queued with the block's own and acts on the same rules).
+- **Stated limitations**:
+  - In a **static** analysis `$debug` prints once, from the evaluation at the converged solution,
+    not on every Newton iteration: the DC solver does not report its iterations' tasks.
+  - `$stop` ends the analysis as `$finish` does — there is no interactive mode to suspend into —
+    and the note says so.
+  - `$finish` does **not** trigger `@(final_step)` blocks (the LRM expects it to).
+  - A task inside `@(cross(...))` runs at the accepted point where the crossing was detected, not
+    at the interpolated crossing time; `$abstime` in it reads that point's time.
+  - `$monitor` and the file family (`$fopen`, `$fclose`, `$fdisplay`, `$fstrobe`, `$fwrite`,
+    `$fmonitor`, `$fdebug`, `$fflush`) still have **no effect**; each one a source uses is now
+    reported once as a compile warning instead of being dropped in silence. `$discontinuity` is a
+    convergence hint this engine does not need and stays a no-op.
+  - `%l` prints `work.<module>`: there is no library binding to report.
+- **Comparison with Traditional Constructs**: C's `printf`/`exit`, with the difference that the
+  call sits inside an iterative solve: what a model "printed" during an iteration that was then
+  rejected never happened, which is why every task but `$debug` waits for acceptance.
+
 ### `$limit` — its value folds; its junction declaration does not (2026-09-09)
 
 - **Purpose and Static Nature**: **Both.** `$limit(V(a,b), "pnjlim", vt, vcrit)` (LRM §4.5.14)
@@ -1438,6 +1496,17 @@ including the ones with no implemented behavior at all.
   which is never committed across accepted steps and never rolled back — so Interface β's state
   channel (`va_abi::state`) is the wrong shape for it by construction, and the value fold is a
   considered decision rather than a gap. See `docs/proposals/model-state.md` §1.1.
+
+  **Re-checked against LRM §9.17.3 on 2026-10-03** (asked: is the fold what `$limit` should do?).
+  Yes. The LRM gives the decision to the simulator — "the simulator is responsible for
+  determining if limiting should be applied and what the return value is on a given iteration",
+  and an unknown or unsupported algorithm name leaves the simulator to choose "just as if no
+  string had been supplied" — and fixes only the converged value: "when the simulator has
+  converged, the return value of the `$limit()` function is the value of the access function
+  reference". The fold returns exactly that value, and the limiting itself happens where this
+  engine does it, on the declared junction's Newton step. What is not honoured is listed under
+  *Stated limitations* below: the algorithm name and its `vte`/`vcrit`, and a user-defined
+  limiting function, which is never called.
 
   What is **no longer** discarded is the access argument. It names a junction
   *authoritatively*, where the consumer would otherwise have to guess:

@@ -1,0 +1,33 @@
+// A watch on a node: prints when it crosses a threshold and ends the transient once it has
+// settled. The example for the display and simulation-control tasks (2.8.0,
+// circuits/tasks/rc_watch.net).
+//
+// It draws no current (`I(p) <+ 0`), so it observes the circuit without changing it; its
+// tasks are its whole job:
+//   - `$strobe` inside `@(cross(...))`: one line at the accepted timepoint where V(p) rises
+//     through `vth` -- not one per Newton iteration, and not one per rejected step;
+//   - `$display` and `$finish` when V(p) passes `vstop`: the run ends at that accepted point
+//     instead of at the deck's `.tran` stop time;
+//   - `$warning` once, at the first accepted point, if the thresholds are out of order.
+`include "disciplines.vams"
+
+module rc_watch(p);
+    inout p;
+    electrical p;
+    parameter real vth = 0.9;     // the crossing reported with $strobe (V)
+    parameter real vstop = 0.95;  // the level that ends the run (V)
+
+    analog begin
+        I(p) <+ 0.0;
+        @(initial_step) begin
+            if (vstop <= vth)
+                $warning("%m: vstop=%g is not above vth=%g", vstop, vth);
+        end
+        @(cross(V(p) - vth, +1))
+            $strobe("%m: V(p) rose through %g V at t=%.4e s", vth, $abstime);
+        if (V(p) > vstop) begin
+            $display("%m: V(p)=%.5f V passed vstop=%g V at t=%.4e s, ending the run", V(p), vstop, $abstime);
+            $finish(1);
+        end
+    end
+endmodule

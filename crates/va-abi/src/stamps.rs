@@ -75,6 +75,69 @@ pub trait StampSink {
     fn bound_step(&mut self, dt: f64) {
         let _ = dt;
     }
+
+    /// A **system task** the model executed during this `load` — `$strobe`, `$display`,
+    /// `$write`, `$debug`, `$finish`, `$stop`, `$fatal`, `$error`, `$warning` or `$info`
+    /// (LRM §9.4, §9.7) — with its text already formatted (`%m` included). Emitted in the order
+    /// the statements ran.
+    ///
+    /// **When it takes effect is the consumer's decision**, because the LRM ties it to the
+    /// solver: every task except `$debug` and `$fatal` acts only from an evaluation whose
+    /// solution is **accepted** (§9.4.6, §9.7.1), so an assembler collects these and acts on the
+    /// ones from the accepted point, the way it reads [`Self::bound_step`]. `$debug` prints from
+    /// every iteration and `$fatal` ends the simulation at once. Interface β change, 2026-10-03
+    /// (`docs/interfaces.md`).
+    ///
+    /// Default: ignored — a sink that never reports output (a linearisation, a test double)
+    /// needs nothing. A sink that **wraps** another must forward it, or the wrapped instance's
+    /// tasks are lost.
+    fn task(&mut self, kind: TaskKind, text: &str) {
+        let _ = (kind, text);
+    }
+}
+
+/// Which system task a [`StampSink::task`] call reports. The `u8` on `Finish`, `Stop` and
+/// `Fatal` is the diagnostic level of LRM Table 9-25 (0 nothing, 1 time and location, 2 also
+/// statistics; 1 when the model gave none).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TaskKind {
+    /// `$strobe`: a line, printed once the solution is accepted.
+    Strobe,
+    /// `$display`: as `$strobe` (LRM §9.4.1).
+    Display,
+    /// `$write`: as `$strobe`, without the trailing newline.
+    Write,
+    /// `$debug`: a line printed on every solver iteration, accepted or not.
+    Debug,
+    /// `$finish(n)`: end the analysis after the accepted solution.
+    Finish(u8),
+    /// `$stop(n)`: suspend at the accepted solution; with no interactive mode, a consumer ends
+    /// the analysis and says so.
+    Stop(u8),
+    /// `$fatal(n, ...)`: end the simulation now, accepted or not.
+    Fatal(u8),
+    /// `$error(...)`: a run-time error message.
+    Error,
+    /// `$warning(...)`: a run-time warning.
+    Warning,
+    /// `$info(...)`: a message with no severity.
+    Info,
+}
+
+impl TaskKind {
+    /// Whether this task acts only from an evaluation whose solution is accepted — every task
+    /// but `$debug` and `$fatal` (LRM §9.4.6, §9.7.3).
+    pub fn waits_for_acceptance(self) -> bool {
+        !matches!(self, TaskKind::Debug | TaskKind::Fatal(_))
+    }
+
+    /// Whether this task ends the analysis (`$finish`, `$stop`, `$fatal`).
+    pub fn ends_analysis(self) -> bool {
+        matches!(
+            self,
+            TaskKind::Finish(_) | TaskKind::Stop(_) | TaskKind::Fatal(_)
+        )
+    }
 }
 
 /// A minimal in-memory [`StampSink`] backed by dense vectors. Intended for tests and for
@@ -99,6 +162,8 @@ pub struct DenseStamp {
     /// The tightest [`StampSink::bound_step`] request received, or `None` if no model asked
     /// for one. Non-positive and non-finite requests are discarded on the way in.
     pub bound_step: Option<f64>,
+    /// Every [`StampSink::task`] call received, in order.
+    pub tasks: Vec<(TaskKind, String)>,
 }
 
 impl DenseStamp {
@@ -112,6 +177,7 @@ impl DenseStamp {
             dcharge: vec![0.0; dim * dim],
             excitation: vec![(0.0, 0.0); dim],
             bound_step: None,
+            tasks: Vec::new(),
         }
     }
 
@@ -166,6 +232,10 @@ impl StampSink for DenseStamp {
         if dt.is_finite() && dt > 0.0 {
             self.bound_step = Some(self.bound_step.map_or(dt, |cur| cur.min(dt)));
         }
+    }
+
+    fn task(&mut self, kind: TaskKind, text: &str) {
+        self.tasks.push((kind, text.to_string()));
     }
 }
 

@@ -263,6 +263,9 @@ fn collect_roots(stmts: &[LoweredStmt], out: &mut Vec<ExprId>) {
         match s {
             LoweredStmt::Assign { rhs, .. } => out.push(*rhs),
             LoweredStmt::BoundStep(e) => out.push(*e),
+            LoweredStmt::Task { args, .. } => {
+                out.extend(args.iter().filter_map(va_ir::TaskArg::expr))
+            }
             LoweredStmt::Contribute(c) => contribution_roots(c, out),
             LoweredStmt::If { cond, then_, else_ } => {
                 out.push(*cond);

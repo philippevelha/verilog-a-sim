@@ -225,7 +225,10 @@ impl Bypass {
             Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => {
                 c >= x.len() || x0.iter().any(|&(u, _)| u == c)
             }
-            Stamp::Excitation(..) | Stamp::BoundStep(_) => false,
+            // A task is a side effect a replay would repeat or skip at the wrong time; a module
+            // with one does not claim purity (`va_codegen`), and this keeps a hand-written one
+            // that did from being bypassed.
+            Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) => false,
             _ => true,
         });
         if covered {
@@ -265,6 +268,7 @@ impl BypassEntry {
                 }
                 Stamp::Excitation(r, re, im) => sink.excitation(r, re, im),
                 Stamp::BoundStep(dt) => sink.bound_step(dt),
+                Stamp::Task(kind, ref text) => sink.task(kind, text),
             }
         }
     }
@@ -344,7 +348,7 @@ fn serial(
 }
 
 /// One [`StampSink`] call, as recorded.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Stamp {
     Residual(usize, f64),
     Jacobian(usize, usize, f64),
@@ -352,12 +356,13 @@ enum Stamp {
     Dcharge(usize, usize, f64),
     Excitation(usize, f64, f64),
     BoundStep(f64),
+    Task(va_abi::TaskKind, Box<str>),
 }
 
 /// A [`StampSink`] that stores every call, in order, for [`Recorder::replay`].
 ///
-/// It overrides **every** `StampSink` method, including the two with default bodies
-/// (`excitation`, `bound_step`): a method left to its default would be silently dropped from
+/// It overrides **every** `StampSink` method, including the three with default bodies
+/// (`excitation`, `bound_step`, `task`): a method left to its default would be silently dropped from
 /// the parallel path while the serial path honoured it. A method added to `StampSink` must be
 /// added here too.
 #[derive(Default, Debug)]
@@ -374,6 +379,7 @@ impl Recorder {
                 Stamp::Dcharge(r, c, v) => sink.dcharge(r, c, v),
                 Stamp::Excitation(r, re, im) => sink.excitation(r, re, im),
                 Stamp::BoundStep(dt) => sink.bound_step(dt),
+                Stamp::Task(kind, ref text) => sink.task(kind, text),
             }
         }
     }
@@ -397,6 +403,9 @@ impl StampSink for Recorder {
     }
     fn bound_step(&mut self, dt: f64) {
         self.0.push(Stamp::BoundStep(dt));
+    }
+    fn task(&mut self, kind: va_abi::TaskKind, text: &str) {
+        self.0.push(Stamp::Task(kind, text.into()));
     }
 }
 

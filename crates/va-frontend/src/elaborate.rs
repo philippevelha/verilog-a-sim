@@ -30,7 +30,8 @@
 //!   distinction; an infinite bound becomes `None` (unbounded).
 //! - `analysis("…")` is folded to a constant under v0's DC-only model (`1.0` for the
 //!   `static`/`dc`/`ic`/`nodeset` phases, else `0.0`); the same IR is not reusable for other
-//!   analyses. System tasks (`$strobe`, …) are no-ops. Both drop their string arguments.
+//!   analyses. System tasks: the display and simulation-control family lower to
+//!   `va_ir::Stmt::Task` (2.8.0); `$monitor` and file output are no-ops reported as warnings.
 //! - `while`/`for`/`repeat`/`case` control flow and `analog function` definitions are lowered
 //!   into the corresponding [`va_ir`] nodes. Functions are lowered in source order against
 //!   their own variable scope (arguments + return variable + locals) and may read module
@@ -1350,7 +1351,23 @@ impl Elaborator<'_> {
                 }
                 Ok(va_ir::Stmt::BoundStep(self.lower_expr(arg)?))
             }
-            // Other system tasks (`$strobe`, `$finish`, …) have no effect on a solve.
+            // The display and simulation-control tasks (LRM §9.4, §9.7) lower to
+            // `va_ir::Stmt::Task` (2.8.0); until then every task was dropped here. Their
+            // arguments are kept: a string literal as text, anything else as an expression.
+            Stmt::Task { name, args } if task_kind(name).is_some() => {
+                let kind = task_kind(name).unwrap_or(va_ir::TaskKind::Strobe);
+                let mut out = Vec::with_capacity(args.len());
+                for &a in args {
+                    out.push(match self.ast.expr(a) {
+                        ExprAst::Str(text) => va_ir::TaskArg::Str(text.clone()),
+                        _ => va_ir::TaskArg::Expr(self.lower_expr(a)?),
+                    });
+                }
+                Ok(va_ir::Stmt::Task { kind, args: out })
+            }
+            // Every other task: `$discontinuity` (a convergence hint this engine does not need)
+            // and the ones `crate::unimplemented_task_warnings` reports at compile time —
+            // `$monitor` and file output — have no effect.
             Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
             Stmt::Contribute { target, value } => {
                 // Constant/genvar-indexed terminals (or none at all) resolve straight to a
@@ -3412,7 +3429,7 @@ impl Elaborator<'_> {
                     }
                 }
                 // `bound_step` makes no contribution to any branch, so it adds no term here.
-                va_ir::Stmt::BoundStep(_) => {}
+                va_ir::Stmt::BoundStep(_) | va_ir::Stmt::Task { .. } => {}
             }
         }
         Ok(())
@@ -3430,7 +3447,8 @@ impl Elaborator<'_> {
             }
             va_ir::Stmt::Contribute { .. }
             | va_ir::Stmt::Assign { .. }
-            | va_ir::Stmt::BoundStep(_) => false,
+            | va_ir::Stmt::BoundStep(_)
+            | va_ir::Stmt::Task { .. } => false,
             va_ir::Stmt::Block(body) => self.branch_flow_touches(node, body),
             va_ir::Stmt::If { then_, else_, .. } => {
                 self.branch_flow_touches(node, then_) || self.branch_flow_touches(node, else_)
@@ -3521,6 +3539,10 @@ impl Elaborator<'_> {
             va_ir::Stmt::Contribute { value, .. } => self.call_site_state_in_expr(*value),
             va_ir::Stmt::Assign { rhs, .. } => self.call_site_state_in_expr(*rhs),
             va_ir::Stmt::BoundStep(e) => self.call_site_state_in_expr(*e),
+            va_ir::Stmt::Task { args, .. } => args
+                .iter()
+                .filter_map(va_ir::TaskArg::expr)
+                .find_map(|e| self.call_site_state_in_expr(e)),
             va_ir::Stmt::Block(body) => self.call_site_state_in(body),
             va_ir::Stmt::If { cond, then_, else_ } => self
                 .call_site_state_in_expr(*cond)
@@ -4469,6 +4491,16 @@ fn remap_stmt(
             rhs: expr_off[rhs.0 as usize],
         },
         va_ir::Stmt::BoundStep(e) => va_ir::Stmt::BoundStep(expr_off[e.0 as usize]),
+        va_ir::Stmt::Task { kind, args } => va_ir::Stmt::Task {
+            kind: *kind,
+            args: args
+                .iter()
+                .map(|a| match a {
+                    va_ir::TaskArg::Expr(e) => va_ir::TaskArg::Expr(expr_off[e.0 as usize]),
+                    other => other.clone(),
+                })
+                .collect(),
+        },
         va_ir::Stmt::Block(body) => va_ir::Stmt::Block(recurse(body)),
         va_ir::Stmt::While { cond, body } => va_ir::Stmt::While {
             cond: expr_off[cond.0 as usize],
@@ -4575,7 +4607,9 @@ fn collect_var_assigns(stmts: &[va_ir::Stmt], out: &mut Vec<(u32, ExprId)>) {
                 }
                 collect_var_assigns(default, out);
             }
-            va_ir::Stmt::Contribute { .. } | va_ir::Stmt::BoundStep(_) => {}
+            va_ir::Stmt::Contribute { .. }
+            | va_ir::Stmt::BoundStep(_)
+            | va_ir::Stmt::Task { .. } => {}
         }
     }
 }
@@ -4978,6 +5012,25 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
             x.max(y)
         }
         other => return Err(elab(format!("`{other}` is not constant-evaluable"))),
+    })
+}
+
+/// The IR task a system-task name lowers to, `None` for a task with no effect here
+/// (`Stmt::Task`'s elaboration).
+fn task_kind(name: &str) -> Option<va_ir::TaskKind> {
+    use va_ir::TaskKind as K;
+    Some(match name {
+        "strobe" => K::Strobe,
+        "display" => K::Display,
+        "write" => K::Write,
+        "debug" => K::Debug,
+        "finish" => K::Finish,
+        "stop" => K::Stop,
+        "fatal" => K::Fatal,
+        "error" => K::Error,
+        "warning" => K::Warning,
+        "info" => K::Info,
+        _ => return None,
     })
 }
 

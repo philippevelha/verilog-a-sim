@@ -530,7 +530,7 @@ fn collect_zi_terms(stmts: &[LoweredStmt], out: &mut Vec<ZiTerm>) {
                 }
                 collect_zi_terms(default, out);
             }
-            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => {}
+            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => {}
         }
     }
 }
@@ -584,7 +584,7 @@ fn allocate_laplace_states(
                 }
                 allocate_laplace_states(default, next_slot, out);
             }
-            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => {}
+            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => {}
         }
     }
 }
@@ -705,6 +705,15 @@ pub enum LoweredStmt {
     /// because it may sit inside an `if`: whether the bound applies can depend on the operating
     /// point, so it has to be reached by the same control-flow walk everything else is.
     BoundStep(ExprId),
+    /// A display or simulation-control system task (`va_ir::Stmt::Task`), formatted when
+    /// `crate::GeneratedModel::run` reaches it and handed to `va_abi::StampSink::task` at the
+    /// end of `load`, exactly as [`Self::BoundStep`]'s request is.
+    Task {
+        /// Which task.
+        kind: va_ir::TaskKind,
+        /// Its arguments, in source order.
+        args: Vec<va_ir::TaskArg>,
+    },
     /// `if (cond) { then_ } else { else_ }`. `crate::GeneratedModel::run` walks only the arm
     /// `cond` selects at the current operating point; `crate::GeneratedModel::validate` walks
     /// both (see this module's doc comment).
@@ -1054,7 +1063,7 @@ fn stmts_contain_laplace(stmts: &[LoweredStmt]) -> bool {
         LoweredStmt::Case { arms, default, .. } => {
             arms.iter().any(|a| stmts_contain_laplace(&a.body)) || stmts_contain_laplace(default)
         }
-        LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => false,
+        LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => false,
     })
 }
 
@@ -1488,7 +1497,7 @@ fn walk_short_facts(
                 walk_short_facts(module, params, step, false, facts);
                 walk_short_facts(module, params, body, false, facts);
             }
-            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) => {}
+            LoweredStmt::Assign { .. } | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => {}
         }
     }
 }
@@ -1582,6 +1591,12 @@ fn collect_flow_probe_branches_in_stmt(module: &Module, stmt: &Stmt, out: &mut B
         Stmt::Assign { rhs, .. } => collect_flow_probe_branches_in_expr(module, *rhs, out),
         // A `bound_step` argument is an ordinary expression and may probe like any other.
         Stmt::BoundStep(e) => collect_flow_probe_branches_in_expr(module, *e, out),
+        // So may a system task's arguments.
+        Stmt::Task { args, .. } => {
+            for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                collect_flow_probe_branches_in_expr(module, e, out);
+            }
+        }
         Stmt::Block(body) => collect_flow_probe_branches_in_stmts(module, body, out),
         Stmt::If { cond, then_, else_ } => {
             collect_flow_probe_branches_in_expr(module, *cond, out);
@@ -1670,6 +1685,11 @@ fn collect_idt_calls_in_stmt(module: &Module, stmt: &Stmt, out: &mut Vec<ExprId>
         Stmt::Contribute { value, .. } => collect_idt_calls_in_expr(module, *value, out),
         Stmt::Assign { rhs, .. } => collect_idt_calls_in_expr(module, *rhs, out),
         Stmt::BoundStep(e) => collect_idt_calls_in_expr(module, *e, out),
+        Stmt::Task { args, .. } => {
+            for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                collect_idt_calls_in_expr(module, e, out);
+            }
+        }
         Stmt::Block(body) => collect_idt_calls_in_stmts(module, body, out),
         Stmt::If { cond, then_, else_ } => {
             collect_idt_calls_in_expr(module, *cond, out);
@@ -1778,8 +1798,8 @@ fn collect_branch_kinds_one(stmt: &Stmt, flow: &mut BTreeSet<u32>, potential: &m
                 potential.insert(target.branch.0);
             }
         },
-        // `bound_step` targets no branch, so it classifies none.
-        Stmt::BoundStep(_) => {}
+        // `bound_step` and a system task target no branch, so they classify none.
+        Stmt::BoundStep(_) | Stmt::Task { .. } => {}
         Stmt::Block(body) => collect_branch_kinds(body, flow, potential),
         Stmt::If { then_, else_, .. } => {
             collect_branch_kinds(then_, flow, potential);
@@ -1993,6 +2013,13 @@ fn lower_stmt(
         }
         Stmt::BoundStep(expr) => {
             out.push(LoweredStmt::BoundStep(*expr));
+            Ok(())
+        }
+        Stmt::Task { kind, args } => {
+            out.push(LoweredStmt::Task {
+                kind: *kind,
+                args: args.clone(),
+            });
             Ok(())
         }
         Stmt::Block(body) => {
@@ -2782,8 +2809,9 @@ fn invalidate_ddt_vars(
 fn collect_assigns_one(stmt: &Stmt, out: &mut Vec<(u32, ExprId)>) {
     match stmt {
         Stmt::Assign { lhs, rhs } => out.push((lhs.0, *rhs)),
-        // `bound_step` assigns nothing, so it invalidates no `ddt`-shape binding.
-        Stmt::BoundStep(_) => {}
+        // `bound_step` and a system task assign nothing, so they invalidate no `ddt`-shape
+        // binding.
+        Stmt::BoundStep(_) | Stmt::Task { .. } => {}
         Stmt::Block(body) => collect_assigns(body, out),
         Stmt::If { then_, else_, .. } => {
             collect_assigns(then_, out);
@@ -2993,6 +3021,11 @@ fn da_stmt(
         }
         Stmt::Contribute { value, .. } => da_read(module, *value, assigned, marked, memo),
         Stmt::BoundStep(e) => da_read(module, *e, assigned, marked, memo),
+        Stmt::Task { args, .. } => {
+            for e in args.iter().filter_map(va_ir::TaskArg::expr) {
+                da_read(module, e, assigned, marked, memo);
+            }
+        }
         Stmt::Block(body) => da_stmts(module, body, assigned, marked, memo),
         Stmt::If { cond, then_, else_ } => {
             da_read(module, *cond, assigned, marked, memo);
@@ -3126,7 +3159,7 @@ fn stmt_is_bias_free(
         }
         // A contribution stamps into the sink, so it has to run on every call whatever its
         // value does; `bound_step` likewise reports into the sink's step channel.
-        LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) => None,
+        LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => None,
         LoweredStmt::If { cond, then_, else_ } => {
             expr_is_bias_free(module, *cond, known, memo).then_some(())?;
             let mut defines = block_is_bias_free(module, then_, known, memo)?;
@@ -3410,7 +3443,7 @@ fn collect_guarded_assigns(
     for s in stmts {
         match s {
             LoweredStmt::Assign { lhs, rhs } => out.push((*lhs, *rhs, conds.clone())),
-            LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) => {}
+            LoweredStmt::Contribute(_) | LoweredStmt::BoundStep(_) | LoweredStmt::Task { .. } => {}
             LoweredStmt::If { cond, then_, else_ } => {
                 conds.push(*cond);
                 collect_guarded_assigns(then_, conds, out);
@@ -3466,7 +3499,9 @@ fn ir_assigned_vars(stmts: &[va_ir::Stmt], out: &mut Vec<VarId>) {
     for s in stmts {
         match s {
             va_ir::Stmt::Assign { lhs, .. } => out.push(*lhs),
-            va_ir::Stmt::Contribute { .. } | va_ir::Stmt::BoundStep(_) => {}
+            va_ir::Stmt::Contribute { .. }
+            | va_ir::Stmt::BoundStep(_)
+            | va_ir::Stmt::Task { .. } => {}
             va_ir::Stmt::If { then_, else_, .. } => {
                 ir_assigned_vars(then_, out);
                 ir_assigned_vars(else_, out);
@@ -3551,6 +3586,10 @@ fn evaluates_ddt(module: &Module, stmts: &[LoweredStmt]) -> bool {
         stmts.iter().any(|s| match s {
             LoweredStmt::Assign { rhs, .. } => expr(module, *rhs, memo),
             LoweredStmt::BoundStep(e) => expr(module, *e, memo),
+            LoweredStmt::Task { args, .. } => args
+                .iter()
+                .filter_map(va_ir::TaskArg::expr)
+                .any(|e| expr(module, e, memo)),
             LoweredStmt::Contribute(c) => {
                 c.resistive.iter().any(|t| expr(module, t.expr, memo))
                     || c.charge.iter().any(|t| {
@@ -3599,7 +3638,10 @@ fn evaluates_ddt(module: &Module, stmts: &[LoweredStmt]) -> bool {
 fn reads_only_x(module: &Module) -> bool {
     fn has_bound_step(stmts: &[va_ir::Stmt]) -> bool {
         stmts.iter().any(|s| match s {
-            va_ir::Stmt::BoundStep(_) => true,
+            // A system task prints or ends the run: a side effect a replayed recording would
+            // skip, so a module with one is never pure (2.8.0; until then tasks lowered to
+            // nothing and were pure by construction).
+            va_ir::Stmt::BoundStep(_) | va_ir::Stmt::Task { .. } => true,
             va_ir::Stmt::Assign { .. } | va_ir::Stmt::Contribute { .. } => false,
             va_ir::Stmt::If { then_, else_, .. } => has_bound_step(then_) || has_bound_step(else_),
             va_ir::Stmt::Block(b)

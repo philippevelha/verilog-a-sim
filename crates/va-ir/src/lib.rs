@@ -1117,6 +1117,71 @@ pub enum Stmt {
     /// evaluates the argument for its side effects and discards the bound, since there is no
     /// timestep to bound.
     BoundStep(ExprId),
+    /// A display or simulation-control **system task** (LRM §9.4, §9.7): `$strobe`,
+    /// `$display`, `$write`, `$debug`, `$finish`, `$stop`, `$fatal`, `$error`, `$warning`,
+    /// `$info`. Like [`Self::BoundStep`] it produces no value and asks the simulator for
+    /// something — here, to print a line or to end the analysis — through `va_abi::StampSink`'s
+    /// task channel during `load`; and like it, it is a statement because it may sit inside an
+    /// `if`. **When** the request takes effect is the consumer's business, because the LRM ties it
+    /// to the solver's iteration (§9.4.6: only `$debug` prints from an iteration that was not
+    /// accepted). Interface α change, 2026-10-03; until 2.8.0 the frontend lowered every task to
+    /// an empty block.
+    Task {
+        /// Which task.
+        kind: TaskKind,
+        /// Its arguments, in source order.
+        args: Vec<TaskArg>,
+    },
+}
+
+/// Which system task a [`Stmt::Task`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TaskKind {
+    /// `$strobe`: one line, printed once the solution is accepted.
+    Strobe,
+    /// `$display`: the same as `$strobe` in the analog context (LRM §9.4.1).
+    Display,
+    /// `$write`: as `$strobe`, without the newline.
+    Write,
+    /// `$debug`: one line on **every** solver iteration, accepted or not.
+    Debug,
+    /// `$finish[(n)]`: end the analysis after the current solution (`n`, default 1, is the
+    /// diagnostic level of LRM Table 9-25).
+    Finish,
+    /// `$stop[(n)]`: suspend at a converged point. This engine has no interactive mode, so a
+    /// consumer treats it as `$finish` and says so.
+    Stop,
+    /// `$fatal[(n, msg...)]`: end the simulation now, whether or not the iteration is accepted.
+    Fatal,
+    /// `$error(msg...)`: a run-time error message.
+    Error,
+    /// `$warning(msg...)`: a run-time warning.
+    Warning,
+    /// `$info(msg...)`: a message with no severity.
+    Info,
+}
+
+/// One argument of a [`Stmt::Task`].
+#[derive(Clone, PartialEq, Debug)]
+pub enum TaskArg {
+    /// A string, escapes already resolved: printed literally, except that `%` starts a format
+    /// specification consuming the following [`Self::Expr`] arguments (LRM §9.4.3).
+    Str(String),
+    /// An expression; its value is printed by the preceding string's format specification, or in
+    /// the default decimal format when none is left to consume it.
+    Expr(ExprId),
+    /// An empty argument (`,,`), printed as one space (LRM §9.4.1).
+    Null,
+}
+
+impl TaskArg {
+    /// The expression this argument evaluates, if it is one.
+    pub fn expr(&self) -> Option<ExprId> {
+        match self {
+            TaskArg::Expr(e) => Some(*e),
+            TaskArg::Str(_) | TaskArg::Null => None,
+        }
+    }
 }
 
 /// One arm of a [`Stmt::Case`]: a set of label expressions and the body they select.

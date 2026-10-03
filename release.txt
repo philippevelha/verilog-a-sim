@@ -22,6 +22,47 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.8.0 - 2026-10-03
+--------------------
+**System tasks have an effect.** `$strobe`, `$display`, `$write`, `$debug`, `$finish`, `$stop`,
+`$fatal`, `$error`, `$warning` and `$info` now run, where until now the frontend dropped every
+one of them. Their arguments are evaluated and formatted (LRM §9.4.3: `%d %h %o %b %c %s %e %f %g
+%r %m %l`, widths, precisions, empty arguments), and they act when the LRM says: in transient,
+`$debug` from every iteration, `$fatal` at once (the run fails), everything else only from an
+accepted timepoint, and `$finish`/`$stop` end the run after it. In `.op`/`.dc`/`.ac`/`.noise`,
+from one evaluation at the converged solution (a `$finish` stops a `.dc` sweep after its
+point). `va-cli sim` prints display tasks on stdout, severity tasks on stdout and stderr with
+the time, a note when `$finish` ended the analysis, and exits 1 after its results if any
+`$error` ran. `%m` is the deck's instance name.
+
+  * Interface change (§6, both, additive, at the project owner's request): `va_ir::Stmt::Task`
+    and `va_abi::StampSink::task`, recorded in `docs/interfaces.md`. A module with a task is no
+    longer `is_pure_in_x` (bypass would skip its output) — the 2.7.0 guard test failed on this,
+    as written to, and now pins the two folds left: `$limit` and `$rdist_*`.
+  * `$limit` was re-checked against LRM §9.17.3 as asked: folding to the access value is what
+    the LRM allows (the simulator decides whether and how to limit; at convergence the value is
+    the access value), and the declared junction is limited on its Newton step. The algorithm
+    name and its `vte`/`vcrit` are still not honoured (`docs/token-reference.md`).
+  * New examples: `circuits/tasks/rc_watch.net` (transient: one `$strobe` at the 0.9 V crossing,
+    `$finish` past 0.95 V ends the run at 3.011 ms of 10 ms) and `circuits/tasks/current_limit.net`
+    (`.dc`: a `$strobe` per point, `$info` + `$finish` at 3 mA, 7 points of 11), with
+    `models/tasks/`; `docs/examples.md` shows the output.
+  * Not implemented, and no longer silent: `$monitor` and the file family (`$fopen`,
+    `$fdisplay`, `$fstrobe`, ...) are reported once each as a compile warning. Stated limitations:
+    `$debug` in a static analysis prints once, not per Newton iteration; `$stop` acts as
+    `$finish`; `$finish` does not trigger `@(final_step)`; a task in `@(cross(...))` runs at the
+    accepted point after the crossing.
+  * Output changes, and why (`xtask deck-diff` against the 2.7.0 binary: 84 identical, 4
+    different, 25 skipped): the two new decks, and `benchmark/nand/bsim4.net` and `bsimimg.net`,
+    whose vendor models now print their parameter-check messages — 404 lines each (4 instances x
+    101 sweep points), because those checks are plain analog code, not `@(initial_step)`, so by
+    the LRM they run at every accepted point. Correct and noisy; numbers unchanged.
+  * Corpus: 256/280 files through frontend + codegen, unchanged and identical file by file
+    against 2.6.0 — no model stopped compiling because its task arguments are now elaborated.
+  * Measured at this version: `cargo test --workspace` 938 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.7.0 - 2026-10-03
 --------------------
 **Device bypass is on main, opt-in: `va-cli sim --bypass`.** A device whose stamps are a pure

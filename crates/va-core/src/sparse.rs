@@ -237,6 +237,8 @@ pub struct SparseSystem {
     /// The tightest `bound_step` request since the last [`Self::clear`], as
     /// `va_abi::stamps::DenseStamp::bound_step` keeps it.
     bound_step: Option<f64>,
+    /// Every `StampSink::task` call since the last [`Self::clear`], in order.
+    tasks: Vec<(va_abi::TaskKind, String)>,
 }
 
 impl SparseSystem {
@@ -253,6 +255,7 @@ impl SparseSystem {
             dcharge: vec![0.0; nnz],
             overflow: HashMap::new(),
             bound_step: None,
+            tasks: Vec::new(),
         }
     }
 
@@ -274,6 +277,12 @@ impl SparseSystem {
         self.dcharge.iter_mut().for_each(|v| *v = 0.0);
         self.overflow.clear();
         self.bound_step = None;
+        self.tasks.clear();
+    }
+
+    /// The system tasks the last assembly's models executed, in order, leaving none behind.
+    pub fn take_tasks(&mut self) -> Vec<(va_abi::TaskKind, String)> {
+        std::mem::take(&mut self.tasks)
     }
 
     /// Fold any stamps that fell outside the pattern into it, growing the pattern to the union.
@@ -405,6 +414,10 @@ impl StampSink for SparseSystem {
         if dt.is_finite() && dt > 0.0 {
             self.bound_step = Some(self.bound_step.map_or(dt, |cur| cur.min(dt)));
         }
+    }
+
+    fn task(&mut self, kind: va_abi::TaskKind, text: &str) {
+        self.tasks.push((kind, text.to_string()));
     }
 }
 

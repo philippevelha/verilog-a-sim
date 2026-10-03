@@ -1,0 +1,24 @@
+// A resistor that reports its operating point and stops a `.dc` sweep when its current passes a
+// limit. The static-analysis example for the system tasks (2.8.0,
+// circuits/tasks/current_limit.net).
+//
+// In a static analysis the accepted solution is the converged one, so `$strobe` prints once per
+// operating point (once per sweep point), from an evaluation at that solution, and `$finish`
+// ends the sweep after the point it was called at.
+`include "disciplines.vams"
+
+module current_limit(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1k from (0:inf);
+    parameter real imax = 2.5m from (0:inf);  // the current that ends the sweep (A)
+
+    analog begin
+        I(p, n) <+ V(p, n) / r;
+        $strobe("%m: V=%.3f V  I=%.4e A", V(p, n), V(p, n) / r);
+        if (V(p, n) / r > imax) begin
+            $info("%m: current %.4e A is above imax=%g A", V(p, n) / r, imax);
+            $finish(1);
+        end
+    end
+endmodule
