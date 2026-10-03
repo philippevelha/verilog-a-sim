@@ -1001,3 +1001,27 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > `load` already had — pure in `x`, state through `ModelState`, stamps through the sink — is
 > what makes parallel evaluation give serial evaluation's bits once the stamps are replayed in
 > instance order.
+
+> **Revision (§6 change, ratified 2026-10-03):** `ModelInstance` gained a defaulted
+> **`is_pure_in_x() -> bool`** (default `false`), for **device bypass** (`va-cli sim --bypass`,
+> 2.7.0; `docs/proposals/device-bypass.md`). `true` promises that two `load` calls at the same
+> `x` emit the same stamps whatever the analysis context (time, step coefficients, phase,
+> `gmin`) and whatever the committed state — which lets `va_core::par::Bypass` replay an
+> instance's last recording, corrected to first order, while its unknowns have not moved past
+> tolerance. Additive in the same way as `is_frequency_dependent`: every implementation that does
+> not override it keeps compiling and is simply never bypassed. A **wrong `true` gives stale
+> answers silently**, so only a provable claim may be made, and it must be constant for the
+> instance's lifetime. In this workspace: `va-codegen`'s generated model answers it from the
+> lowering (`lower::Lowered::reads_only_x` and `evaluates_ddt`, no persistent variables, no
+> `idt`/`laplace_*`/`zi_*` state); `va_abi::Multiplied` forwards it; every reference model and
+> `va-cli`'s `WaveformSource` keep `false`. A wrapper that does not forward it loses bypass for
+> what it wraps — the safe direction.
+>
+> **What the generated model's answer rests on, stated because it is not enforced by the type
+> system:** the exhaustive match over `va_ir::Builtin` (`lower::builtin_is_bias_free`) makes a
+> new builtin impossible to forget, but three constructs are pure today only because of how
+> they are lowered — `$limit` folds to its first argument, `$rdist_*` fold to their mean, and a
+> system task (`$strobe`, `$display`, `$finish`, …) to nothing. If any of them gains an effect
+> of its own, `reads_only_x` must learn it before bypass may skip it.
+> `va-cli`'s `bypass_purity_rests_on_three_folds_and_this_test_catches_a_change` fails the day
+> one of them stops folding.

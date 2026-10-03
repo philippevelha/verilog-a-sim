@@ -186,7 +186,8 @@ devices, **437 480 unknowns**. A 5 ns run had not finished after 10 min and was 
 
 **The hidden-2 crossbar, scaled** (digit 0's real h1 input spike trains, behavioural neurons,
 2 cycles = 500 ns, i7-1185G7, 8 threads, run one at a time). Plain is this release; bypass is the
-`proto/static-bypass` prototype (2.4.0 + device bypass, `VA_BYPASS=on`, not on main):
+`proto/static-bypass` prototype (2.4.0 + device bypass, `VA_BYPASS=on`; on main as `--bypass` since
+2.7.0, where `docs/proposals/device-bypass.md` §6 breaks the 64-neuron bypass run down by phase):
 
 | Neurons | Access NMOS | Unknowns | Timepoints | Plain | Bypass (loads replayed) | Plain µs / device / point | Bypass µs / device / point |
 |---|---|---|---|---|---|---|---|
@@ -200,9 +201,10 @@ devices, **437 480 unknowns**. A 5 ns run had not finished after 10 min and was 
 - **Bypass is exact here and its gain shrinks with size**: 3.6× → 2.8× → 2.2× → 1.5×. V_m of the
   8 neurons at the end of each cycle is identical to the plain run's to 4 decimals. With 90 % of
   the loads replayed at every size, what is left grows ~3.2× per doubling at the top: the part
-  of each step that is not device evaluation scales superlinearly. **Which part has not been
-  measured** (the sparse factorisation is the obvious suspect, but that is unproven); profiling
-  the 64-neuron bypass run is the next step.
+  of each step that is not device evaluation scales superlinearly. *(Measured 2026-10-03, 2.7.0:
+  **not the sparse factorisation**, which is 5 % of the 64-neuron run. Stamping into the matrix,
+  serial and hash-based, grows 12× for 8× the devices, and a fresh device evaluation 7.8 → 60 µs,
+  the larger part and not yet explained — `docs/proposals/device-bypass.md` §6.)*
 
 **Projection, an extrapolation and labelled as one.** The network's three crossbars hold 17 664
 access transistors, 2.16× the 64-neuron crossbar. At the plain rate that is ~2.9 s per timepoint;

@@ -138,6 +138,199 @@ pub fn load_all(
     }
 }
 
+/// **Device bypass** (prototype, branch `proto/device-bypass`, 2026-10-01): reuse an instance's
+/// last stamps while its unknowns have not moved, as SPICE's `BYPASS` does.
+///
+/// Only instances that report [`ModelInstance::is_pure_in_x`] are bypassed — their stamps are a
+/// function of `x` alone, so a recording taken at `x0` is a faithful one for any `x` close to
+/// it. A recording is replayed **with a first-order correction**: every Jacobian entry
+/// `(r, c, g)` adds `g·(x[c] − x0[c])` to residual row `r`, and every `dcharge` entry the same
+/// to charge row `r`. The device is then linearised at `x0` rather than frozen there, so the
+/// error a bypass leaves is second order in the drift, and the drift is bounded because `x0`
+/// is not advanced while an instance is being bypassed: it is re-evaluated, and `x0` reset, as
+/// soon as any one of its unknowns leaves `|x − x0| ≤ abstol + reltol·max(|x|, |x0|)`.
+///
+/// Deterministic: whether an instance is bypassed depends only on `x` and the cache, never on
+/// timing or thread count, and the stamps reach the sink in instance order as in
+/// [`load_all`]. A run with bypass gives the same bits on every thread count, but **not** the
+/// same bits as a run without it.
+///
+/// **Limitations, stated:** a recording is kept per instance (memory: one stamp list each);
+/// the tolerance is one pair for every unknown regardless of its nature; an instance whose
+/// Jacobian names a row of `x` outside its own `unknowns()` is never bypassed.
+pub struct Bypass {
+    reltol: f64,
+    /// Per global unknown, in that unknown's own units.
+    abstol: Vec<f64>,
+    eligible: Vec<bool>,
+    entries: Vec<Option<BypassEntry>>,
+    /// Loads replayed from a recording.
+    pub hits: u64,
+    /// Loads of eligible instances that had to be evaluated.
+    pub misses: u64,
+}
+
+struct BypassEntry {
+    /// `(global unknown, x0)` for every unknown of the instance that is a row of `x`.
+    x0: Vec<(usize, f64)>,
+    rec: Recorder,
+}
+
+impl Bypass {
+    /// A cache for `instances`, bypassing within `abstol[u] + reltol·max(|x|, |x0|)` on every
+    /// unknown `u`. `abstol` has one entry per row of `x`, each in that unknown's own units; an
+    /// unknown it does not cover is never treated as unmoved.
+    pub fn new(instances: &[&dyn ModelInstance], reltol: f64, abstol: Vec<f64>) -> Self {
+        Bypass {
+            reltol,
+            abstol,
+            eligible: instances.iter().map(|i| i.is_pure_in_x()).collect(),
+            entries: instances.iter().map(|_| None).collect(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// The absolute tolerance on each global unknown, in that unknown's own units.
+    pub fn abstol(&self) -> &[f64] {
+        &self.abstol
+    }
+
+    /// How many instances can be bypassed at all.
+    pub fn eligible_count(&self) -> usize {
+        self.eligible.iter().filter(|&&e| e).count()
+    }
+
+    fn fresh(&self, i: usize, x: &[f64]) -> bool {
+        let Some(e) = self.entries.get(i).and_then(|e| e.as_ref()) else {
+            return false;
+        };
+        e.x0.iter().all(|&(u, v0)| {
+            let v = x[u];
+            self.abstol
+                .get(u)
+                .is_some_and(|&a| (v - v0).abs() <= a + self.reltol * v.abs().max(v0.abs()))
+        })
+    }
+
+    fn store(&mut self, i: usize, inst: &dyn ModelInstance, x: &[f64], rec: Recorder) {
+        let x0: Vec<(usize, f64)> = inst
+            .unknowns()
+            .iter()
+            .filter(|&&u| u < x.len())
+            .map(|&u| (u, x[u]))
+            .collect();
+        let covered = rec.0.iter().all(|s| match *s {
+            // A column outside `x` is ground: it never moves, so it needs no correction.
+            Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => {
+                c >= x.len() || x0.iter().any(|&(u, _)| u == c)
+            }
+            Stamp::Excitation(..) | Stamp::BoundStep(_) => false,
+            _ => true,
+        });
+        if covered {
+            self.entries[i] = Some(BypassEntry { x0, rec });
+        } else {
+            self.eligible[i] = false;
+            self.entries[i] = None;
+        }
+    }
+}
+
+impl BypassEntry {
+    fn replay_corrected(&self, x: &[f64], sink: &mut dyn StampSink) {
+        let dx = |c: usize| {
+            self.x0
+                .iter()
+                .find(|&&(u, _)| u == c)
+                .map_or(0.0, |&(u, v0)| x[u] - v0)
+        };
+        for s in &self.rec.0 {
+            match *s {
+                Stamp::Residual(r, v) => sink.residual(r, v),
+                Stamp::Jacobian(r, c, g) => {
+                    sink.jacobian(r, c, g);
+                    let d = dx(c);
+                    if d != 0.0 {
+                        sink.residual(r, g * d);
+                    }
+                }
+                Stamp::Charge(r, v) => sink.charge(r, v),
+                Stamp::Dcharge(r, c, g) => {
+                    sink.dcharge(r, c, g);
+                    let d = dx(c);
+                    if d != 0.0 {
+                        sink.charge(r, g * d);
+                    }
+                }
+                Stamp::Excitation(r, re, im) => sink.excitation(r, re, im),
+                Stamp::BoundStep(dt) => sink.bound_step(dt),
+            }
+        }
+    }
+}
+
+/// [`load_all`] with device bypass: every [`Bypass`]-eligible instance whose unknowns are within
+/// tolerance of its recording is replayed from it (corrected to first order); every other
+/// instance is evaluated, in parallel when the pool has threads and there is enough to do, and
+/// an eligible one's fresh recording replaces its old one.
+pub fn load_all_bypass(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    states: Vec<ModelState<'_>>,
+    sink: &mut dyn StampSink,
+    bypass: &mut Bypass,
+) {
+    let n = instances.len().min(states.len());
+    let hit: Vec<bool> = (0..n)
+        .map(|i| bypass.eligible[i] && bypass.fresh(i, x))
+        .collect();
+    let work: Vec<(usize, ModelState<'_>)> = states
+        .into_iter()
+        .take(n)
+        .enumerate()
+        .filter(|(i, _)| !hit[*i])
+        .collect();
+    let est = NS_PER_INSTANCE.load(Ordering::Relaxed);
+    let parallel = work.len() >= 2
+        && rayon::current_num_threads() > 1
+        && match mode() {
+            Mode::Never => false,
+            Mode::Always => true,
+            Mode::Auto => est == 0 || est.saturating_mul(work.len() as u64) >= PARALLEL_MIN_WORK_NS,
+        };
+    let eval = |(i, mut st): (usize, ModelState<'_>)| {
+        let mut rec = Recorder::default();
+        instances[i].load(x, ctx, &mut st, &mut rec);
+        (i, rec)
+    };
+    let recorded: Vec<(usize, Recorder)> = if parallel {
+        work.into_par_iter().map(eval).collect()
+    } else {
+        work.into_iter().map(eval).collect()
+    };
+    let mut recorded = recorded.into_iter().peekable();
+    for (i, &is_hit) in hit.iter().enumerate() {
+        if is_hit {
+            bypass.hits += 1;
+            if let Some(e) = bypass.entries[i].as_ref() {
+                e.replay_corrected(x, sink);
+            }
+            continue;
+        }
+        let Some((j, rec)) = recorded.next_if(|(j, _)| *j == i) else {
+            continue;
+        };
+        debug_assert_eq!(i, j);
+        rec.replay(sink);
+        if bypass.eligible[i] {
+            bypass.misses += 1;
+            bypass.store(i, instances[i], x, rec);
+        }
+    }
+}
+
 fn serial(
     instances: &[&dyn ModelInstance],
     x: &[f64],
@@ -328,5 +521,81 @@ mod tests {
             });
             assert_eq!(got.0, serial.0, "{threads} threads");
         }
+    }
+
+    /// A reference diode that declares itself pure in `x` (it is: Shockley, no state), so the
+    /// bypass has something to bypass without a compiled model.
+    struct PureDiode(Diode);
+    impl ModelInstance for PureDiode {
+        fn unknowns(&self) -> &[usize] {
+            self.0.unknowns()
+        }
+        fn load(
+            &self,
+            x: &[f64],
+            ctx: &AnalysisCtx,
+            st: &mut ModelState,
+            sink: &mut dyn StampSink,
+        ) {
+            self.0.load(x, ctx, st, sink)
+        }
+        fn is_pure_in_x(&self) -> bool {
+            true
+        }
+    }
+
+    /// Dense residual and Jacobian of one load through `f`.
+    fn dense(dim: usize, f: impl FnOnce(&mut va_abi::stamps::DenseStamp)) -> (Vec<f64>, Vec<f64>) {
+        let mut d = va_abi::stamps::DenseStamp::new(dim);
+        f(&mut d);
+        (d.residual, d.jacobian)
+    }
+
+    /// Device bypass: at the recorded `x` the replay is the evaluation, bit for bit; within
+    /// tolerance it is the evaluation linearised at the recording, so its residual error is
+    /// second order in the drift; past tolerance the instance is evaluated again; and an
+    /// instance that does not declare itself pure is never bypassed.
+    #[test]
+    fn bypass_replays_exactly_corrects_to_first_order_and_reevaluates_past_tolerance() {
+        let pure = PureDiode(Diode::new(0, 1, 1e-14, 1.0, 0.025_852));
+        let plain = Diode::new(1, GROUND, 1e-14, 1.0, 0.025_852);
+        let insts: [&dyn ModelInstance; 2] = [&pure, &plain];
+        let st = || vec![ModelState::stateless(), ModelState::stateless()];
+        let fresh = |x: &[f64]| dense(2, |d| load_all(&insts, x, &ANALYSIS_DC, st(), d));
+        let mut bp = Bypass::new(&insts, 1e-3, vec![1e-6; 2]);
+        assert_eq!(bp.eligible_count(), 1);
+        let bypassed = |x: &[f64], bp: &mut Bypass| {
+            dense(2, |d| load_all_bypass(&insts, x, &ANALYSIS_DC, st(), d, bp))
+        };
+
+        let x0 = [0.65, 0.0];
+        assert_eq!(bypassed(&x0, &mut bp), fresh(&x0), "the recording load");
+        assert_eq!((bp.hits, bp.misses), (0, 1));
+        assert_eq!(
+            bypassed(&x0, &mut bp),
+            fresh(&x0),
+            "a replay at x0 is exact"
+        );
+        assert_eq!((bp.hits, bp.misses), (1, 1));
+
+        // Within tolerance (0.4 mV on 0.65 V): replayed, linearised at x0.
+        let dv = 4e-4;
+        let x1 = [0.65 + dv, 0.0];
+        let (r_bp, j_bp) = bypassed(&x1, &mut bp);
+        assert_eq!(bp.hits, 2, "replayed");
+        let (r_fresh, _) = fresh(&x1);
+        let (r0, _) = fresh(&x0);
+        let err = (r_bp[0] - r_fresh[0]).abs();
+        let first_order = (r_fresh[0] - r0[0]).abs();
+        assert!(
+            err < 1e-2 * first_order,
+            "error {err:e} vs first-order change {first_order:e}"
+        );
+        assert_eq!(j_bp, fresh(&x0).1, "the Jacobian is the recording's");
+
+        // Past tolerance: evaluated again, and exact.
+        let x2 = [0.70, 0.0];
+        assert_eq!(bypassed(&x2, &mut bp), fresh(&x2));
+        assert_eq!(bp.misses, 2);
     }
 }

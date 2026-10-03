@@ -134,6 +134,64 @@ pub struct TranConfig {
     /// 33 ms to 4.1 ms (`docs/proposals/transient-solve.md`). Answers differ only in rounding.
     /// `va-cli` sets it from `VA_BTF` (default on). Since 1.25.0.
     pub btf: bool,
+    /// **Device bypass** (SPICE's `BYPASS`), off when `None`: an instance whose stamps are a
+    /// pure function of `x` (`va_abi::ModelInstance::is_pure_in_x`) and whose unknowns have
+    /// moved less than the tolerance since its last evaluation replays that evaluation's stamps,
+    /// corrected to first order, instead of being evaluated again (`va_core::par::Bypass`).
+    /// **Not bit-identical** to a run without it — the linearisation error is second order in
+    /// the drift, but it moves where timepoints land — and no committed golden exercises a
+    /// bypassed transistor. `va-cli sim --bypass` sets it. Since 2.7.0
+    /// (`docs/proposals/device-bypass.md`).
+    pub bypass: Option<BypassConfig>,
+}
+
+/// [`TranConfig::bypass`]'s tolerances. An instance is replayed while every one of its unknowns
+/// satisfies `|x − x0| ≤ abstol_u + reltol·max(|x|, |x0|)`, where `abstol_u` is
+/// [`Self::abstol_factor`] times the unknown's own nature `abstol` (`va_core::mna::
+/// classify_abstol`; an unknown with no declared nature counts as 1e-6, a volt's). So a voltage
+/// node gets 1e-9 V and a current 1e-15 A at the defaults: one tolerance in each unknown's own
+/// units, rather than a voltage-shaped number applied to every nature.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BypassConfig {
+    /// Relative drift allowed before re-evaluating ([`BYPASS_RELTOL_DEFAULT`]).
+    pub reltol: f64,
+    /// Multiplier on each unknown's nature `abstol` ([`BYPASS_ABSTOL_FACTOR_DEFAULT`]).
+    pub abstol_factor: f64,
+}
+
+/// [`BypassConfig::reltol`]'s default, 1e-6: three decades inside the step controller's 1e-3.
+/// The prototype measured looser values as no faster on `fig5_access.net`
+/// (`docs/proposals/device-bypass.md` §2).
+pub const BYPASS_RELTOL_DEFAULT: f64 = 1e-6;
+
+/// [`BypassConfig::abstol_factor`]'s default, 1e-3 — 1e-9 V on a voltage node, which is what the
+/// prototype measured with as one flat value.
+pub const BYPASS_ABSTOL_FACTOR_DEFAULT: f64 = 1e-3;
+
+/// The nature `abstol` [`BypassConfig::abstol_factor`] scales for an unknown that declares none.
+const BYPASS_UNDECLARED_ABSTOL: f64 = 1e-6;
+
+impl Default for BypassConfig {
+    fn default() -> Self {
+        Self {
+            reltol: BYPASS_RELTOL_DEFAULT,
+            abstol_factor: BYPASS_ABSTOL_FACTOR_DEFAULT,
+        }
+    }
+}
+
+/// What device bypass did over one run ([`Waveform::bypass`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BypassStats {
+    /// Instances that could be bypassed at all (`is_pure_in_x`, and every Jacobian column one of
+    /// their own unknowns).
+    pub eligible: usize,
+    /// Instances in the run.
+    pub instances: usize,
+    /// Loads replayed from a recording.
+    pub replayed: u64,
+    /// Loads of eligible instances that were evaluated.
+    pub evaluated: u64,
 }
 
 /// A sampled transient waveform: aligned time and solution-vector columns.
@@ -169,6 +227,9 @@ pub struct Waveform {
     /// strict test: Newton ran out of iterations bouncing between points closer than SPICE's own
     /// tolerances would ask for (see `newton_step`). Normally `0`; a non-zero count is reported.
     pub stalled_steps: usize,
+    /// Device bypass statistics when [`TranConfig::bypass`] was on, `None` otherwise — so a
+    /// report can say, every time, that the run was bypassed.
+    pub bypass: Option<BypassStats>,
 }
 
 /// How many times one step may be re-taken to resolve a crossing before the run gives up and
@@ -933,7 +994,12 @@ fn assemble(
     match linear {
         Linear::Dense => {
             let mut sink = DenseStamp::new(dim);
-            va_core::par::load_all(instances, x, &ctx, state.states(fired), &mut sink);
+            match state.states_and_bypass(fired) {
+                (states, Some(bp)) => {
+                    va_core::par::load_all_bypass(instances, x, &ctx, states, &mut sink, bp)
+                }
+                (states, None) => va_core::par::load_all(instances, x, &ctx, states, &mut sink),
+            }
             Assembled {
                 residual: sink.residual,
                 charge: sink.charge,
@@ -944,7 +1010,12 @@ fn assemble(
         }
         Linear::Sparse { sys, .. } => {
             sys.clear();
-            va_core::par::load_all(instances, x, &ctx, state.states(fired), sys.as_mut());
+            match state.states_and_bypass(fired) {
+                (states, Some(bp)) => {
+                    va_core::par::load_all_bypass(instances, x, &ctx, states, sys.as_mut(), bp)
+                }
+                (states, None) => va_core::par::load_all(instances, x, &ctx, states, sys.as_mut()),
+            }
             sys.finish();
             Assembled {
                 residual: sys.residual_values().to_vec(),
@@ -955,6 +1026,21 @@ fn assemble(
             }
         }
     }
+}
+
+/// The bypass cache [`TranConfig::bypass`] asks for, with each unknown's absolute tolerance
+/// scaled from its nature's ([`BypassConfig`]).
+fn bypass_cache(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: Option<BypassConfig>,
+) -> Option<va_core::par::Bypass> {
+    let cfg = cfg?;
+    let abstol = va_core::mna::classify_abstol(instances, dim, BYPASS_UNDECLARED_ABSTOL)
+        .into_iter()
+        .map(|a| a * cfg.abstol_factor)
+        .collect();
+    Some(va_core::par::Bypass::new(instances, cfg.reltol, abstol))
 }
 
 /// The consumer half of Interface β's state channel: one flat `committed` buffer holding state
@@ -974,11 +1060,14 @@ struct StateBuffers {
     scratch: Vec<f64>,
     /// Newton solves accepted by the stall rule (`newton_step`), for `Waveform::stalled_steps`.
     stalled: usize,
+    /// Device bypass (`va_core::par::Bypass`), when [`TranConfig::bypass`] is on. Kept here
+    /// because every assembly already carries this struct.
+    bypass: Option<va_core::par::Bypass>,
 }
 
 impl StateBuffers {
     /// Allocate from each instance's declared `state_len()`, read once here and never again.
-    fn new(instances: &[&dyn ModelInstance]) -> Self {
+    fn new(instances: &[&dyn ModelInstance], bypass: Option<va_core::par::Bypass>) -> Self {
         let mut offsets = Vec::with_capacity(instances.len() + 1);
         let mut total = 0usize;
         offsets.push(0);
@@ -991,6 +1080,7 @@ impl StateBuffers {
             committed: vec![0.0; total],
             scratch: vec![0.0; total],
             stalled: 0,
+            bypass,
         }
     }
 
@@ -1013,7 +1103,15 @@ impl StateBuffers {
     /// (`va_core::par::load_all`). Committed and proposal are two different buffers, so the
     /// borrow checker permits the simultaneous `&`/`&mut` — which is also exactly the
     /// read-old/write-new invariant the contract requires.
-    fn states<'a>(&'a mut self, fired: &'a FiredEvents) -> Vec<va_abi::ModelState<'a>> {
+    ///
+    /// Returned with the bypass cache beside them (a disjoint borrow).
+    fn states_and_bypass<'a>(
+        &'a mut self,
+        fired: &'a FiredEvents,
+    ) -> (
+        Vec<va_abi::ModelState<'a>>,
+        Option<&'a mut va_core::par::Bypass>,
+    ) {
         let mut out = Vec::with_capacity(self.offsets.len().saturating_sub(1));
         let mut rest: &mut [f64] = &mut self.scratch;
         for (i, w) in self.offsets.windows(2).enumerate() {
@@ -1026,7 +1124,7 @@ impl StateBuffers {
             ));
             rest = tail;
         }
-        out
+        (out, self.bypass.as_mut())
     }
 
     /// Promote the last evaluation's proposal to history. Called only from an **accepted**
@@ -1273,13 +1371,14 @@ pub fn run_with_events(
         model_crossings: Vec::new(),
         unresolved_events: 0,
         stalled_steps: 0,
+        bypass: None,
     };
     if dim == 0 {
         return Ok(waveform);
     }
 
     let mut x = x0;
-    let mut state = StateBuffers::new(instances);
+    let mut state = StateBuffers::new(instances, bypass_cache(instances, dim, cfg.bypass));
     // One for the whole run: the pattern is found on the first evaluation and the symbolic
     // factorization reused by every Newton iteration of every timestep after it.
     let mut linear = Linear::new(cfg.solver, cfg.btf, dim);
@@ -2028,6 +2127,12 @@ pub fn run_with_events(
 
     waveform.unresolved_events = unresolved_events;
     waveform.stalled_steps = state.stalled;
+    waveform.bypass = state.bypass.as_ref().map(|bp| BypassStats {
+        eligible: bp.eligible_count(),
+        instances: instances.len(),
+        replayed: bp.hits,
+        evaluated: bp.misses,
+    });
     Ok(waveform)
 }
 
@@ -2035,6 +2140,41 @@ pub fn run_with_events(
 mod tests {
     use super::*;
     use va_core::CoreError;
+
+    /// `--bypass`'s absolute tolerance is per unknown, in that unknown's own units: 1e-3 of the
+    /// nature `abstol` the instance declares for it (a volt's 1e-6 gives 1e-9 V, an ampere's
+    /// 1e-12 gives 1e-15 A), and a volt's when it declares none. The prototype used one flat
+    /// 1e-9 for every nature, which is a loose 1 nA on a current unknown.
+    #[test]
+    fn bypass_tolerance_follows_each_unknowns_nature() {
+        struct Declares;
+        impl ModelInstance for Declares {
+            fn unknowns(&self) -> &[usize] {
+                &[0, 1]
+            }
+            fn unknown_abstol(&self, i: usize) -> Option<f64> {
+                [Some(1e-6), Some(1e-12)][i]
+            }
+            fn load(
+                &self,
+                _: &[f64],
+                _: &AnalysisCtx,
+                _: &mut va_abi::ModelState,
+                _: &mut dyn va_abi::StampSink,
+            ) {
+            }
+        }
+        let insts: [&dyn ModelInstance; 1] = [&Declares];
+        assert!(
+            bypass_cache(&insts, 3, None).is_none(),
+            "off unless asked for"
+        );
+        let bp = bypass_cache(&insts, 3, Some(BypassConfig::default())).expect("on");
+        let want = [1e-9, 1e-15, 1e-9];
+        for (got, want) in bp.abstol().iter().zip(want) {
+            assert!((got - want).abs() <= 1e-12 * want, "{:?}", bp.abstol());
+        }
+    }
 
     /// R (1 kΩ) from an ideal `vs_val` V source (node 0) to node 1; C (1 µF) from node 1 to
     /// ground. `RC = 1 ms`.
@@ -2456,6 +2596,7 @@ mod tests {
             newton_reltol: NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: true,
+            bypass: None,
         }
     }
 
@@ -3582,6 +3723,7 @@ mod tests {
             newton_reltol: NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: true,
+            bypass: None,
         };
         let mut events = crate::events::EventQueue::new();
         events.push_watch(3, op.x[3]); // stage 1's collector, crossing its own DC bias voltage

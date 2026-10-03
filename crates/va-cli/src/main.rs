@@ -83,6 +83,17 @@ fn print_usage() {
          --newton-reltol <x>     Each transient step's Newton convergence tolerance.
                                  Default 1e-9 (strict). Looser = fewer iterations;
                                  same caveat.
+         --bypass                Device bypass in a transient run (SPICE's BYPASS): a
+                                 device whose stamps depend only on its own unknowns
+                                 reuses its last evaluation while they move less than
+                                 the tolerance. Off by default. Faster on large
+                                 transistor circuits, slower on cheap ones; results are
+                                 NOT bit-identical and not validated against golden.
+                                 Every bypassed run is marked ***** BYPASS [ACTIVE] *****
+                                 on stdout and stderr. Transient only.
+         --bypass-reltol <x>     Relative drift before a bypassed device is evaluated
+                                 again. Default 1e-6 (absolute: 1e-3 x the unknown's
+                                 nature abstol, e.g. 1e-9 V). Implies --bypass.
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per
@@ -136,6 +147,23 @@ fn cmd_sim(args: &[String]) -> Result<()> {
             va_transient::integrator::NEWTON_RELTOL_DEFAULT,
         )?,
     );
+    // `--bypass` / `--bypass-reltol <x>`: device bypass (`va_cli::set_bypass`), transient only.
+    let bypass_reltol = parse_flag(args, "--bypass-reltol");
+    if bypass_reltol.is_some() || args.iter().any(|a| a == "--bypass") {
+        let mut cfg = va_transient::integrator::BypassConfig::default();
+        if bypass_reltol.is_some() {
+            cfg.reltol = tol(
+                "--bypass-reltol",
+                va_transient::integrator::BYPASS_RELTOL_DEFAULT,
+            )?;
+        }
+        if !args.iter().any(|a| a == "--tran") {
+            eprintln!(
+                "[va-cli] note: --bypass applies to a transient run (--tran) only; this analysis runs without it."
+            );
+        }
+        va_cli::set_bypass(Some(cfg));
+    }
     if let Some(n) = parse_flag(args, "--threads") {
         let n: usize = n
             .parse()

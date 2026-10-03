@@ -172,6 +172,11 @@ impl ModelInstance for Multiplied {
         self.inner.is_frequency_dependent()
     }
 
+    fn is_pure_in_x(&self) -> bool {
+        // Scaling by a constant keeps a pure function pure.
+        self.inner.is_pure_in_x()
+    }
+
     fn noise(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn NoiseSink) {
         let mut scaled = ScaledNoise {
             inner: sink,

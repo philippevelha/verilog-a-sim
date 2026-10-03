@@ -97,6 +97,52 @@ pub fn set_btf(on: bool) {
 
 static BTF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Switch device bypass on (`Some`) or off (`None`) for every `.tran` this process runs from
+/// here on (`va_transient::integrator::TranConfig::bypass`). `va-cli sim --bypass` calls it.
+/// Off by default: a bypassed run is not bit-identical to a plain one and no committed golden
+/// exercises a bypassed transistor, so [`bypass_banner`] marks every bypassed run's output.
+pub fn set_bypass(cfg: Option<va_transient::integrator::BypassConfig>) {
+    *BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
+}
+
+static BYPASS: std::sync::Mutex<Option<va_transient::integrator::BypassConfig>> =
+    std::sync::Mutex::new(None);
+
+fn tran_bypass() -> Option<va_transient::integrator::BypassConfig> {
+    *BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The marker every line about an active bypass starts with, on stdout and stderr alike, so a
+/// bypassed result cannot be mistaken for a plain one in either a saved report or a log.
+pub const BYPASS_MARKER: &str = "***** BYPASS [ACTIVE] *****";
+
+/// The warning printed before a bypassed transient run, `None` when bypass is off.
+pub fn bypass_banner() -> Option<String> {
+    let cfg = tran_bypass()?;
+    Some(format!(
+        "{BYPASS_MARKER} be aware: device bypass is ON (--bypass). A device whose stamps depend only on its own unknowns reuses its last evaluation, corrected to first order, while those unknowns move less than {:e} relative plus {:e} x their nature's abstol. Results are NOT bit-identical to a run without --bypass, and are not validated against golden.",
+        cfg.reltol, cfg.abstol_factor
+    ))
+}
+
+/// The closing line of a bypassed transient run: what bypass did. `None` when it was off.
+pub fn bypass_summary(wf: &Waveform) -> Option<String> {
+    let b = wf.bypass?;
+    let loads = b.replayed + b.evaluated;
+    Some(format!(
+        "{BYPASS_MARKER} {} of {} instances eligible; {} of {} eligible loads replayed ({:.1}%)",
+        b.eligible,
+        b.instances,
+        b.replayed,
+        loads,
+        100.0 * b.replayed as f64 / loads.max(1) as f64
+    ))
+}
+
 /// Loosen (or tighten) the transient tolerances for every `.tran` this process runs from here on:
 /// `lte_reltol` and `lte_abstol`, the step controller's truncation-error budget
 /// `lte_reltol·|x| + lte_abstol` per unknown (defaults [`TRAN_LTE_RELTOL_DEFAULT`],
@@ -798,13 +844,19 @@ pub fn run_sim(
             .filter(|(path, _)| reached.contains(path))
             .collect();
         refuse_transient_approximations(&sources)?;
+        // Said on both streams, before anything else the run prints: a bypassed result must
+        // not be mistakable for a plain one in a saved report or in a log.
+        if let Some(banner) = bypass_banner() {
+            println!("{banner}");
+            eprintln!("{banner}");
+        }
         let wf = solve_transient_impl(&net, &compiled, integration, solver, Some(built))?;
         // Said only when a request actually went unmet, rather than whenever a tolerance is
         // written: the bracketing step control (§ `cross`) normally honours it, and a blanket
         // warning would cry wolf on every model that asks for one.
         if wf.unresolved_events > 0 {
             eprintln!(
-                "[va-cli] warning: {} crossing(s) fired without meeting the time_tol/expr_tol                  their `cross(...)` site asked for — the step control hit its retry limit or                  the minimum timestep. Loosen the tolerance, or lower `.tran`'s step.",
+                "[va-cli] warning: {} crossing(s) fired without meeting the time_tol/expr_tol their `cross(...)` site asked for — the step control hit its retry limit or the minimum timestep. Loosen the tolerance, or lower `.tran`'s step.",
                 wf.unresolved_events
             );
         }
@@ -820,6 +872,10 @@ pub fn run_sim(
         }
         let shown = select_quantities(&all_quantities, report_only)?;
         report_transient(&shown, &wf);
+        if let Some(summary) = bypass_summary(&wf) {
+            println!("{summary}");
+            eprintln!("{summary}");
+        }
         if let Some(path) = plot {
             // The plot shows exactly what the report shows, `--report` included: a chart and a
             // table of the same run disagreeing about which series exist would be worse than
@@ -2422,6 +2478,7 @@ fn solve_transient_impl(
         newton_reltol: tran_newton_reltol(),
         solver,
         btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
+        bypass: tran_bypass(),
     };
 
     let BuiltInstances {
@@ -3862,6 +3919,7 @@ mod tests {
             newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
+            bypass: None,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4001,6 +4059,7 @@ mod tests {
             newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
+            bypass: None,
         };
         let wf = va_transient::integrator::run(&insts, 1, vec![0.0], cfg).expect("integrates");
         assert!(wf.t.len() > 10, "expected many points: {}", wf.t.len());
@@ -4065,6 +4124,7 @@ mod tests {
             newton_reltol: va_transient::integrator::NEWTON_RELTOL_DEFAULT,
             solver: Solver::Auto,
             btf: BTF.load(std::sync::atomic::Ordering::Relaxed),
+            bypass: None,
         };
         let wf =
             va_transient::integrator::run(&insts, dim, vec![0.0, 0.0], cfg).expect("integrates");
@@ -7615,6 +7675,103 @@ endmodule
             (v - 1.6545).abs() < 1e-3,
             "V(p1) with the word line high = {v}"
         );
+    }
+
+    /// `is_pure_in_x` (device-bypass prototype): asserted as the property bypass relies on, not
+    /// only as flags. Every module that claims purity must stamp the same values at the same
+    /// `x` under a different time, step coefficients and committed state; the ones that read
+    /// time or carry a `ddt` inside an expression must not claim it.
+    #[test]
+    fn a_pure_in_x_model_stamps_the_same_at_the_same_x_whatever_the_context() {
+        let module = |body: &str| {
+            format!(
+                "module m(p, n); inout p, n; electrical p, n;\n\
+                 parameter real r = 1e3; parameter real c = 1e-12;\n\
+                 analog begin {body} end\nendmodule\n"
+            )
+        };
+        let cases = [
+            ("I(p,n) <+ V(p,n)/r;", true),
+            ("I(p,n) <+ V(p,n)/r + ddt(c*V(p,n)*V(p,n));", true),
+            (
+                "I(p,n) <+ V(p,n)/r + ddt(c*V(p,n)) + white_noise(4e-21, \"thermal\");",
+                true,
+            ),
+            ("I(p,n) <+ V(p,n)/r + 1e-3*$abstime;", false),
+            ("I(p,n) <+ V(p,n)/r + 1e-15*exp(ddt(V(p,n)));", false),
+            ("I(p,n) <+ V(p,n)/r + c*idt(V(p,n));", false),
+            // A bias-dependent coefficient times `ddt`: the codegen reconstructs the rate from
+            // history for the product rule's other half, so this is not pure.
+            ("I(p,n) <+ V(p,n)/r + V(p,n)*ddt(c*V(p,n));", false),
+        ];
+        for (body, want) in cases {
+            let design = va_frontend::compile(&module(body)).expect("compiles");
+            let inst =
+                va_codegen::build_instance(&design.modules[0], &[0, 1], &mut 2).expect("builds");
+            assert_eq!(inst.is_pure_in_x(), want, "is_pure_in_x for `{body}`");
+            if !want {
+                continue;
+            }
+            let x = vec![0.7, 0.1, 0.0, 0.0];
+            let n = inst.state_len();
+            let stamp = |ctx: va_abi::AnalysisCtx, committed: f64| {
+                let prev = vec![committed; n];
+                let mut next = vec![0.0; n];
+                let mut st = va_abi::ModelState::new(&prev, &mut next);
+                let mut d = va_abi::stamps::DenseStamp::new(4);
+                inst.load(&x, &ctx, &mut st, &mut d);
+                (d.residual, d.jacobian, d.charge, d.dcharge)
+            };
+            let a = stamp(va_abi::AnalysisCtx::transient(1e-9).with_ddt(2e9, 1.0), 0.0);
+            let b = stamp(
+                va_abi::AnalysisCtx::transient(7e-6).with_ddt(5e10, 0.0),
+                0.37,
+            );
+            assert_eq!(a, b, "a pure-in-x model stamped differently for `{body}`");
+        }
+    }
+
+    /// The guard on `is_pure_in_x`'s soundness that the 2.7.0 ratification asked for. Three
+    /// constructs are pure today **only because of how they are lowered**: `$limit` folds to its
+    /// first argument, `$rdist_*` to their mean, and a system task such as `$strobe` to nothing.
+    /// A model using them must therefore stamp exactly what the same model without them stamps,
+    /// and claim purity. The day one of them gains an effect of its own -- a per-iterate limiter
+    /// state, a real random draw, a printed line -- this test fails, and `lower::reads_only_x`
+    /// must learn the construct before bypass is allowed to skip it.
+    #[test]
+    fn bypass_purity_rests_on_three_folds_and_this_test_catches_a_change() {
+        let module = |body: &str| {
+            format!(
+                "module m(p, n); inout p, n; electrical p, n;\n\
+                 parameter real r = 1e3;\n\
+                 analog begin {body} end\nendmodule\n"
+            )
+        };
+        let plain = "I(p,n) <+ V(p,n)/r;";
+        let folded = [
+            "I(p,n) <+ $limit(V(p,n), \"pnjlim\", 0.025, 0.6)/r;",
+            "I(p,n) <+ V(p,n)/r + 0.0*$rdist_normal(1, 0.0, 1.0);",
+            "$strobe(\"v=%g\", V(p,n)); I(p,n) <+ V(p,n)/r;",
+        ];
+        let stamp = |body: &str| {
+            let design = va_frontend::compile(&module(body)).expect("compiles");
+            let inst =
+                va_codegen::build_instance(&design.modules[0], &[0, 1], &mut 2).expect("builds");
+            let mut d = va_abi::stamps::DenseStamp::new(2);
+            let mut st = va_abi::ModelState::stateless();
+            inst.load(
+                &[0.7, 0.1],
+                &va_abi::AnalysisCtx::transient(1e-9),
+                &mut st,
+                &mut d,
+            );
+            (inst.is_pure_in_x(), d.residual, d.jacobian)
+        };
+        let reference = stamp(plain);
+        assert!(reference.0);
+        for body in folded {
+            assert_eq!(stamp(body), reference, "`{body}` no longer folds");
+        }
     }
 
     #[test]

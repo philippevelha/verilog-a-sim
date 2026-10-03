@@ -22,6 +22,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.7.0 - 2026-10-03
+--------------------
+**Device bypass is on main, opt-in: `va-cli sim --bypass`.** A device whose stamps are a pure
+function of its own unknowns (`ModelInstance::is_pure_in_x`, Interface β, **§6 change ratified
+today**) reuses its last evaluation, corrected to first order, while those unknowns move less
+than `--bypass-reltol` (default 1e-6) plus 1e-3 x their nature's `abstol` — 1e-9 V on a voltage
+node, 1e-15 A on a current (the prototype's flat 1e-9 was 1 nA on a current). Transient only.
+**Off by default**, because a bypassed run is not bit-identical to a plain one, cheap circuits
+get slower (`ring_osc` 0.1 -> 0.4 s, `fig5_neuron` 3.0 -> 5.6 s on the prototype) and no
+committed golden covers a bypassed transistor. Every bypassed run says so on stdout and stderr
+alike, before and after: lines starting `***** BYPASS [ACTIVE] *****` (the warning, then what
+it replayed). `VA_BYPASS` is gone; `bench_transistor_linux.sh`'s `_bp` runs pass `--bypass`.
+
+  * Why: the transistor SNN. `fig5_access.net` (8 PSP103): 24.0 s -> 12.4 s, 86.6 % of eligible
+    loads replayed, every one of 12 837 timepoints shared with the plain run, worst difference
+    1e-6 V (print precision). The prototype's c17 transient: 84.6 -> 37.5 s.
+  * Its gain shrinks with size, now located (`docs/proposals/device-bypass.md` §6): on the
+    64-neuron crossbar (140 574 unknowns) the LU solve is 5 % of a bypassed run; serial stamping
+    (a SipHash lookup per stamp) grows 12x for 8x the devices, and a fresh evaluation 7.8 -> 60 µs,
+    the larger part and unexplained. Both are next, before bypass could ever default on.
+  * `is_pure_in_x` rests on three folds — `$limit`, `$rdist_*`, and system tasks lowered to
+    nothing — stated in `docs/interfaces.md` and gated by
+    `bypass_purity_rests_on_three_folds_and_this_test_catches_a_change`, which fails the day one
+    of them gains an effect.
+  * Also fixed: va-cli's `crossing(s) fired without meeting the time_tol/expr_tol` warning
+    printed a run of spaces mid-sentence (a lost line continuation, since 2.5.0 or earlier).
+  * Output changes without the flag: none. `xtask deck-diff` against the 2.6.0 binary: 86
+    identical, 0 different, 25 skipped (the slow ISCAS set, and the transistor-neuron, crossbar
+    and MNIST transistor decks).
+  * Measured at this version: `cargo test --workspace` 930 passed, 0 failed; `cargo xtask
+    validate` 28/28 (and 28/28 with bypass on, on the prototype — only one instance in the
+    suite is eligible, so that proves little); clippy clean.
+
+
 2.6.0 - 2026-10-02
 --------------------
 **Transient tolerances settable from the command line, and what loosening them and scaling the
