@@ -102,6 +102,16 @@ pub fn load_all(
     states: Vec<ModelState<'_>>,
     sink: &mut dyn StampSink,
 ) {
+    load_all_into(instances, x, ctx, states, Target::Any(sink));
+}
+
+fn load_all_into(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    states: Vec<ModelState<'_>>,
+    mut target: Target<'_>,
+) {
     let n = instances.len().min(states.len());
     let parallel = n >= 2
         && rayon::current_num_threads() > 1
@@ -113,7 +123,7 @@ pub fn load_all(
                 let est = NS_PER_INSTANCE.load(Ordering::Relaxed);
                 if est == 0 || call.is_multiple_of(REMEASURE_EVERY) {
                     let t0 = Instant::now();
-                    serial(instances, x, ctx, states, sink);
+                    serial(instances, x, ctx, states, target.sink());
                     let per = (t0.elapsed().as_nanos() / n as u128).max(1);
                     NS_PER_INSTANCE
                         .store(u64::try_from(per).unwrap_or(u64::MAX), Ordering::Relaxed);
@@ -132,11 +142,11 @@ pub fn load_all(
                 rec
             })
             .collect();
-        for rec in &recorded {
-            rec.replay(sink);
+        for (i, rec) in recorded.iter().enumerate() {
+            target.replay_fresh(i, rec);
         }
     } else {
-        serial(instances, x, ctx, states, sink);
+        serial(instances, x, ctx, states, target.sink());
     }
 }
 
@@ -369,9 +379,10 @@ pub fn load_all_bypass(
 }
 
 /// [`load_all_bypass`] into a sparse system: identical stamps in identical order, with every
-/// replayed recording added through its cached slots (`BypassEntry::replay_corrected_sparse`)
-/// instead of a hash lookup per stamp — the serial part of a bypassed assembly that grew
-/// fastest with circuit size (`docs/proposals/device-bypass.md` §6).
+/// replayed recording added through its cached slots (`BypassEntry::replay_corrected_sparse`,
+/// 2.10.0) and every fresh evaluation through `cache` ([`SlotCache`], 2.11.0) instead of a hash
+/// lookup per stamp — the serial part of a bypassed assembly that grew fastest with circuit size
+/// (`docs/proposals/device-bypass.md` §6).
 pub fn load_all_bypass_sparse(
     instances: &[&dyn ModelInstance],
     x: &[f64],
@@ -379,22 +390,123 @@ pub fn load_all_bypass_sparse(
     states: Vec<ModelState<'_>>,
     sys: &mut SparseSystem,
     bypass: &mut Bypass,
+    cache: &mut SlotCache,
 ) {
-    bypass_into(instances, x, ctx, states, Target::Sparse(sys), bypass);
+    bypass_into(
+        instances,
+        x,
+        ctx,
+        states,
+        Target::Sparse(sys, cache),
+        bypass,
+    );
 }
 
-/// Where a bypassed assembly's stamps go.
+/// [`load_all`] into a sparse system, with every parallel evaluation's recording added through
+/// `cache` ([`SlotCache`]): the same additions in the same order, so the same bits, without a
+/// hash lookup per Jacobian and charge-Jacobian stamp. The serial path (a circuit too cheap to
+/// evaluate in parallel) stamps directly, as [`load_all`] does.
+pub fn load_all_sparse(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    states: Vec<ModelState<'_>>,
+    sys: &mut SparseSystem,
+    cache: &mut SlotCache,
+) {
+    load_all_into(instances, x, ctx, states, Target::Sparse(sys, cache));
+}
+
+/// Where an assembly's stamps go: any sink, or a sparse system with the slot cache that lets a
+/// recording be added without a hash lookup per stamp.
 enum Target<'a> {
     Any(&'a mut dyn StampSink),
-    Sparse(&'a mut SparseSystem),
+    Sparse(&'a mut SparseSystem, &'a mut SlotCache),
 }
 
 impl Target<'_> {
     fn sink(&mut self) -> &mut dyn StampSink {
         match self {
             Target::Any(s) => &mut **s,
-            Target::Sparse(s) => &mut **s,
+            Target::Sparse(s, _) => &mut **s,
         }
+    }
+
+    /// Add instance `i`'s fresh recording.
+    fn replay_fresh(&mut self, i: usize, rec: &Recorder) {
+        match self {
+            Target::Any(s) => rec.replay(&mut **s),
+            Target::Sparse(sys, cache) => cache.replay(i, rec, sys),
+        }
+    }
+}
+
+/// Each instance's stamp layout from its last fresh evaluation — `(row, col, slot)` for every
+/// Jacobian and charge-Jacobian stamp, in the order it made them — so the next recording of the
+/// same instance is added into a sparse system by position instead of by a hash lookup (2.11.0).
+///
+/// A model usually stamps the same entries in the same order every time; where it does not (a
+/// branch taken differently), the first stamp that differs from the layout is looked up and the
+/// layout is rewritten from there on, so the cache is never wrong, only less useful. Valid for one
+/// sparse pattern ([`crate::sparse::Pattern::id`]); a new pattern clears it.
+#[derive(Default, Debug)]
+pub struct SlotCache {
+    pattern: u64,
+    layouts: Vec<Vec<(usize, usize, u32)>>,
+}
+
+impl SlotCache {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add instance `i`'s recording `rec` into `sys`: exactly what [`Recorder::replay`] does,
+    /// through the layout instead of a hash lookup wherever the layout still matches.
+    fn replay(&mut self, i: usize, rec: &Recorder, sys: &mut SparseSystem) {
+        let id = sys.pattern().id();
+        if id != self.pattern {
+            self.layouts.iter_mut().for_each(Vec::clear);
+            self.pattern = id;
+        }
+        if self.layouts.len() <= i {
+            self.layouts.resize_with(i + 1, Vec::new);
+        }
+        let layout = &mut self.layouts[i];
+        let mut k = 0;
+        for s in &rec.0 {
+            match *s {
+                Stamp::Jacobian(r, c, v) | Stamp::Dcharge(r, c, v) => {
+                    let slot = match layout.get(k) {
+                        Some(&(lr, lc, slot)) if lr == r && lc == c => slot,
+                        _ => {
+                            let slot = sys
+                                .pattern()
+                                .slot(r, c)
+                                .and_then(|x| u32::try_from(x).ok())
+                                .unwrap_or(NO_SLOT);
+                            layout.truncate(k);
+                            layout.push((r, c, slot));
+                            slot
+                        }
+                    };
+                    k += 1;
+                    let jacobian = matches!(s, Stamp::Jacobian(..));
+                    match (slot == NO_SLOT, jacobian) {
+                        (true, true) => StampSink::jacobian(sys, r, c, v),
+                        (true, false) => StampSink::dcharge(sys, r, c, v),
+                        (false, true) => sys.add_jacobian_at(slot as usize, v),
+                        (false, false) => sys.add_dcharge_at(slot as usize, v),
+                    }
+                }
+                Stamp::Residual(r, v) => StampSink::residual(sys, r, v),
+                Stamp::Charge(r, v) => StampSink::charge(sys, r, v),
+                Stamp::Excitation(r, re, im) => sys.excitation(r, re, im),
+                Stamp::BoundStep(dt) => StampSink::bound_step(sys, dt),
+                Stamp::Task(kind, ref text) => sys.task(kind, text),
+            }
+        }
+        layout.truncate(k);
     }
 }
 
@@ -440,7 +552,7 @@ fn bypass_into(
             bypass.hits += 1;
             if let Some(e) = bypass.entries[i].as_mut() {
                 match &mut target {
-                    Target::Sparse(sys) => e.replay_corrected_sparse(x, sys),
+                    Target::Sparse(sys, _) => e.replay_corrected_sparse(x, sys),
                     Target::Any(sink) => e.replay_corrected(x, &mut **sink),
                 }
             }
@@ -450,7 +562,7 @@ fn bypass_into(
             continue;
         };
         debug_assert_eq!(i, j);
-        rec.replay(target.sink());
+        target.replay_fresh(i, &rec);
         if bypass.eligible[i] {
             bypass.misses += 1;
             bypass.store(i, instances[i], x, rec);
@@ -731,6 +843,69 @@ mod tests {
         assert_eq!(bp.misses, 2);
     }
 
+    /// A device whose stamp layout depends on its operating point: above 0.5 V it adds a
+    /// coupling entry `(0, 1)` in the middle of its stamps, below it does not — the case where a
+    /// cached layout stops matching part-way through a recording.
+    struct Shifty;
+    impl ModelInstance for Shifty {
+        fn unknowns(&self) -> &[usize] {
+            &[0, 1]
+        }
+        fn load(&self, x: &[f64], _: &AnalysisCtx, _: &mut ModelState, sink: &mut dyn StampSink) {
+            sink.jacobian(0, 0, 1.0 + x[0]);
+            if x[0] > 0.5 {
+                sink.jacobian(0, 1, -0.25 * x[0]);
+            }
+            sink.dcharge(1, 1, 1e-12 * (1.0 + x[1]));
+            sink.jacobian(1, 1, 2.0 + x[1]);
+            sink.residual(0, x[0] * x[0]);
+        }
+    }
+
+    /// `SlotCache` (2.11.0) adds a recording exactly as `Recorder::replay` does: equal bits
+    /// whether the layout matches, stops matching part-way (a branch taken differently), comes
+    /// back, or the pattern is a new one (every cached slot stale, an entry in overflow).
+    #[test]
+    fn slot_cache_replays_a_recording_bit_for_bit_whatever_its_layout_does() {
+        let shifty = Shifty;
+        let diode = Diode::new(1, GROUND, 1e-14, 1.0, 0.025_852);
+        let insts: [&dyn ModelInstance; 2] = [&shifty, &diode];
+        let mut cache = SlotCache::new();
+        let mut cached = SparseSystem::new(2);
+        let mut plain = SparseSystem::new(2);
+        let mut check = |x: &[f64], cached: &mut SparseSystem, plain: &mut SparseSystem| {
+            cached.clear();
+            plain.clear();
+            for (i, inst) in insts.iter().enumerate() {
+                let mut rec = Recorder::default();
+                inst.load(x, &ANALYSIS_DC, &mut ModelState::stateless(), &mut rec);
+                cache.replay(i, &rec, cached);
+                rec.replay(plain);
+            }
+            cached.finish();
+            plain.finish();
+            assert_eq!(cached.residual_values(), plain.residual_values(), "x={x:?}");
+            assert_eq!(
+                SparseSystem::jacobian(cached).values(),
+                SparseSystem::jacobian(plain).values(),
+                "x={x:?}"
+            );
+            assert_eq!(
+                SparseSystem::dcharge(cached).values(),
+                SparseSystem::dcharge(plain).values(),
+                "x={x:?}"
+            );
+        };
+        check(&[0.2, 0.6], &mut cached, &mut plain); // grows the pattern (no coupling)
+        check(&[0.2, 0.6], &mut cached, &mut plain); // layout matches throughout
+        check(&[0.8, 0.6], &mut cached, &mut plain); // coupling appears mid-recording
+        check(&[0.8, 0.65], &mut cached, &mut plain); // the rewritten layout matches
+        check(&[0.3, 0.65], &mut cached, &mut plain); // and disappears again
+        let mut fresh_cached = SparseSystem::new(2);
+        let mut fresh_plain = SparseSystem::new(2);
+        check(&[0.9, 0.7], &mut fresh_cached, &mut fresh_plain); // a new pattern: stale slots
+    }
+
     /// The slot cache (`BypassEntry::replay_corrected_sparse`, 2.10.0) is an implementation of
     /// the same replay, not an approximation of it: through `load_all_bypass_sparse` every
     /// assembly gives the bits `load_all_bypass` gives through the sink, at the recorded `x`,
@@ -746,10 +921,19 @@ mod tests {
         let mut bp_sink = Bypass::new(&insts, 1e-3, vec![1e-6; 2]);
         let mut sys_slot = SparseSystem::new(2);
         let mut sys_sink = SparseSystem::new(2);
+        let mut slot_cache = SlotCache::new();
         let mut assemble = |x: &[f64], bp_slot: &mut Bypass, bp_sink: &mut Bypass| {
             let before = sys_slot.pattern().id();
             sys_slot.clear();
-            load_all_bypass_sparse(&insts, x, &ANALYSIS_DC, st(), &mut sys_slot, bp_slot);
+            load_all_bypass_sparse(
+                &insts,
+                x,
+                &ANALYSIS_DC,
+                st(),
+                &mut sys_slot,
+                bp_slot,
+                &mut slot_cache,
+            );
             sys_slot.finish();
             sys_sink.clear();
             load_all_bypass(&insts, x, &ANALYSIS_DC, st(), &mut sys_sink, bp_sink);
@@ -798,6 +982,7 @@ mod tests {
             st(),
             &mut fresh_slot,
             &mut bp_slot,
+            &mut slot_cache,
         );
         load_all_bypass(
             &insts,

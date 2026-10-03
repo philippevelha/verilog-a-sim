@@ -1021,10 +1021,10 @@ fn assemble(
         Linear::Dense => {
             let mut sink = DenseStamp::new(dim);
             match state.states_and_bypass(fired) {
-                (states, Some(bp)) => {
+                (states, Some(bp), _) => {
                     va_core::par::load_all_bypass(instances, x, &ctx, states, &mut sink, bp)
                 }
-                (states, None) => va_core::par::load_all(instances, x, &ctx, states, &mut sink),
+                (states, None, _) => va_core::par::load_all(instances, x, &ctx, states, &mut sink),
             }
             let tasks = state.iteration_tasks(sink.tasks, t)?;
             Ok(Assembled {
@@ -1038,11 +1038,15 @@ fn assemble(
         }
         Linear::Sparse { sys, .. } => {
             sys.clear();
+            // Through the slot cache: every recording is added by position rather than by a hash
+            // lookup per stamp (`va_core::par::SlotCache`, 2.11.0) — the same bits.
             match state.states_and_bypass(fired) {
-                (states, Some(bp)) => {
-                    va_core::par::load_all_bypass_sparse(instances, x, &ctx, states, sys, bp)
+                (states, Some(bp), cache) => {
+                    va_core::par::load_all_bypass_sparse(instances, x, &ctx, states, sys, bp, cache)
                 }
-                (states, None) => va_core::par::load_all(instances, x, &ctx, states, sys.as_mut()),
+                (states, None, cache) => {
+                    va_core::par::load_all_sparse(instances, x, &ctx, states, sys, cache)
+                }
             }
             sys.finish();
             let tasks = state.iteration_tasks(sys.take_tasks(), t)?;
@@ -1095,6 +1099,9 @@ struct StateBuffers {
     bypass: Option<va_core::par::Bypass>,
     /// [`TranConfig::on_task`], here for the same reason.
     on_task: Option<TaskHook>,
+    /// Each instance's stamp layout for the sparse path (`va_core::par::SlotCache`), here for the
+    /// same reason. Unused on the dense path.
+    slots: va_core::par::SlotCache,
 }
 
 impl StateBuffers {
@@ -1118,6 +1125,7 @@ impl StateBuffers {
             stalled: 0,
             bypass,
             on_task,
+            slots: va_core::par::SlotCache::new(),
         }
     }
 
@@ -1198,13 +1206,14 @@ impl StateBuffers {
     /// borrow checker permits the simultaneous `&`/`&mut` — which is also exactly the
     /// read-old/write-new invariant the contract requires.
     ///
-    /// Returned with the bypass cache beside them (a disjoint borrow).
+    /// Returned with the bypass cache and the slot cache beside them (disjoint borrows).
     fn states_and_bypass<'a>(
         &'a mut self,
         fired: &'a FiredEvents,
     ) -> (
         Vec<va_abi::ModelState<'a>>,
         Option<&'a mut va_core::par::Bypass>,
+        &'a mut va_core::par::SlotCache,
     ) {
         let mut out = Vec::with_capacity(self.offsets.len().saturating_sub(1));
         let mut rest: &mut [f64] = &mut self.scratch;
@@ -1218,7 +1227,7 @@ impl StateBuffers {
             ));
             rest = tail;
         }
-        (out, self.bypass.as_mut())
+        (out, self.bypass.as_mut(), &mut self.slots)
     }
 
     /// Promote the last evaluation's proposal to history. Called only from an **accepted**

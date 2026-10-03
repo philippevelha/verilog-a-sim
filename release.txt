@@ -22,6 +22,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.11.0 - 2026-10-03
+--------------------
+**Fresh evaluations add into the sparse matrix by position too, with or without `--bypass`.**
+`va_core::par::SlotCache` keeps each instance's stamp layout — `(row, col, slot)` per Jacobian and
+charge-Jacobian stamp, in the order its last fresh evaluation made them — and the next recording
+of that instance is added by comparing each stamp with the layout (two integers) instead of
+hashing `(row, col)`. A stamp that differs (a branch taken differently) is looked up and the
+layout rewritten from there, so a wrong slot is impossible; a new sparse pattern clears it. Used
+by the transient's sparse path for every parallel evaluation (`load_all_sparse`) and every bypass
+miss (`load_all_bypass_sparse`). The serial path for cheap circuits, the dense path and DC are
+unchanged. Same additions in the same order: **bit-identical**.
+
+  * Measured, interleaved against 2.10.0 on the hidden-2 crossbar, i7-1185G7 on mains: without
+    bypass, 8 neurons 201.1 -> 179.7 s (1.12x, two pairs); with `--bypass`, 8 neurons 41.6 ->
+    37.8 s (1.10x, three pairs), 16 neurons 86.3 -> 79.9 s (1.08x, two pairs). Modest, as it
+    should be: a fresh evaluation costs far more than its stamping, and under bypass only ~10 %
+    of loads are fresh. Not measured at 64 neurons.
+  * Identity: stdout + stderr equal to 2.10.0 with and without `--bypass` on `fig5_access`,
+    Fig. 4, Fig. 5, the c17 transient and the 8-neuron crossbar;
+    `slot_cache_replays_a_recording_bit_for_bit_whatever_its_layout_does` covers a layout that
+    changes mid-recording and a new pattern. `xtask deck-diff` against 2.10.0: 88 identical, 0 different, 25 skipped.
+  * Measured at this version: `cargo test --workspace` 941 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.10.0 - 2026-10-03
 --------------------
 **Bypass replays add into the sparse matrix through cached slots.** Each bypassed device's
