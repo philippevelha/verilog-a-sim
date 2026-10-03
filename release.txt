@@ -22,6 +22,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.13.0+1 - 2026-10-03
+--------------------
+**CI made cheap enough to fit the account's GitHub Actions minutes**, which ran out on
+2026-10-03 after six pushes in a day: every push ran eight jobs, the gate and the cross-platform
+repro check each on Linux, Windows and macOS, with macOS billed at 10x and Windows at 2x. Now:
+
+  * push to `main` or a pull request: the gate on **Linux only**, plus `cargo deny`;
+  * documentation-only changes (`docs/`, `*.md`, `paper_writing/`, `perf-logs/`, `references/`,
+    `LICENSE`): nothing;
+  * a `v*` tag (a release): **macOS and Windows** — the gate in `release.yml` (unchanged, already
+    on all three platforms) and the repro check in `ci.yml`, which no longer repeats the gate;
+  * "Run workflow" on `ci` with `full`: everything, on all three platforms, on demand;
+  * a newer push cancels the run still going for the same ref; every job has a timeout, so a
+    hang cannot burn the quota; the gate's separate `cargo build` step is gone (the test step
+    builds the same code).
+  * What it costs in checking: Windows and macOS are no longer seen between releases. Windows is
+    covered by the development machine, where every release entry's figures are measured;
+    macOS, and cross-platform bit-identity, by the release tag or a manual run.
+  * No code change. Measured at this version: `cargo test --workspace` 945 passed, 0 failed;
+    `cargo xtask validate` 28/28. The workflows were checked to parse; they have not run on
+    GitHub yet, since the quota is exhausted.
+
+
 2.13.0 - 2026-10-03
 --------------------
 **A model's statement walk that stops at run time is reported, not swallowed.** Validation at

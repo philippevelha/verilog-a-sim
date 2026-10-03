@@ -252,4 +252,7 @@ rustup override set 1.92.0-x86_64-pc-windows-gnu      # inside the checkout
 
 `.cargo/config.toml` already forces the GNU toolchain's self-contained linker for that target.
 CI (`.github/workflows/ci.yml`) runs the full gate — fmt, clippy, tests, `xtask validate`,
-`cargo deny` — on Windows (MSVC), Linux and macOS on every push.
+`cargo deny` — on Linux on every push, and on Windows (MSVC), Linux and macOS for a release tag
+(through `release.yml`) or by hand ("Run workflow", `full`); the cross-platform bit-identity
+check runs for a release tag or by hand (2.13.0+1: the account's Actions minutes ran out with
+eight jobs per push, macOS billed at 10x).

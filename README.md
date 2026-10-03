@@ -222,9 +222,11 @@ cargo run -p va-cli -- sim circuits/rectifier.net --model models/diode.va --tran
 The toolchain is pinned in `rust-toolchain.toml` (1.92.0, with `rustfmt` and `clippy`).
 CI runs the whole gate — fmt, clippy with warnings denied, the workspace tests, `cargo xtask
 validate` against committed golden (no QSPICE needed, the golden files are committed), and
-`cargo deny` for the no-native-link rule — on Ubuntu, Windows and macOS for every push to
-`main` and every pull request. Pushing a `v*` tag builds and publishes the three release
-archives.
+`cargo deny` for the no-native-link rule — on Ubuntu for every push to `main` and every pull
+request (documentation-only changes run nothing). Pushing a `v*` tag runs the gate on Ubuntu,
+Windows and macOS, checks that all three give the same bits on every deck, and builds and
+publishes the three release archives; the full three-platform run can also be started by hand
+("Run workflow" on the ci workflow). Since 2.13.0+1, to fit the account's Actions minutes.
 
 ### Crates
 
