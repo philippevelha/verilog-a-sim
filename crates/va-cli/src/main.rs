@@ -94,6 +94,12 @@ fn print_usage() {
          --bypass-reltol <x>     Relative drift before a bypassed device is evaluated
                                  again. Default 1e-6 (absolute: 1e-3 x the unknown's
                                  nature abstol, e.g. 1e-9 V). Implies --bypass.
+         --tasks-once            Print each distinct $strobe/$display/$warning/...
+                                 line once (by its text: per instance only if the
+                                 model prints %m). The
+                                 LRM prints a task every time it runs; this is for
+                                 models whose parameter checks repeat at every point.
+                                 A closing line counts what was held back.
          --logfull               Trace every DC Newton iteration on stderr (lines
                                  start `[logfull]`): assembly vs linear-solve time,
                                  line-search time, residual, largest step; and per
@@ -256,8 +262,10 @@ fn cmd_sim(args: &[String]) -> Result<()> {
 
     // `--logfull` switches on the per-iteration Newton trace for every DC solve this run does.
     va_cli::set_log_full(args.iter().any(|a| a == "--logfull"));
-    // A model's `$strobe`/`$display`/... print on this command's output (`va_cli::tasks`).
+    // A model's `$strobe`/`$display`/... print on this command's output (`va_cli::tasks`);
+    // `--tasks-once` prints each distinct line once (`va_cli::set_tasks_once`).
     va_cli::set_task_output(true);
+    va_cli::set_tasks_once(args.iter().any(|a| a == "--tasks-once"));
 
     let result = run_sim(
         netlist,
@@ -272,6 +280,15 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // worth having.
     if let Some(totals) = va_cli::log_full_run_totals() {
         eprintln!("{totals}");
+    }
+    // Said on both streams, like the lines it stands for, so neither a report nor a log can
+    // be read as if the model printed only what is there.
+    let suppressed = va_cli::suppressed_task_lines();
+    if suppressed > 0 {
+        let note =
+            format!("[va-cli] --tasks-once: {suppressed} repeated system-task line(s) not printed");
+        println!("{note}");
+        eprintln!("{note}");
     }
     // `$error` is a run-time error (LRM §9.7.3): the results are printed, and the exit status
     // says the run was not clean.

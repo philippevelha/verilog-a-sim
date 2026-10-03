@@ -441,3 +441,8 @@ Transient analysis (165 points, t=0 to t=3.0111760675087173e-3s):
 calls `$info` and `$finish` above 2.5 mA. Its `.dc` sweep prints one line per point, from the
 converged solution, and stops after V1 = 3.0 V: 7 points of the card's 11. The rules (what
 waits for an accepted point, what does not) are in `docs/token-reference.md`, "System tasks".
+
+A vendor model can be noisier than these: BSIM4's parameter checks are plain analog code, so
+`circuits/benchmark/nand/bsim4.net` prints its `RECALCULATION for no K1 or K2` at every sweep
+point of every instance, 404 times. `--tasks-once` prints each distinct line once and says how
+many it held back.

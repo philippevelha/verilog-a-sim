@@ -38,6 +38,50 @@ pub fn task_errors() -> usize {
     ERRORS.load(Ordering::Relaxed)
 }
 
+static ONCE: std::sync::Mutex<Option<OnceFilter>> = std::sync::Mutex::new(None);
+
+/// Print each distinct task line once (`va-cli sim --tasks-once`, 2.9.0): a line identical to
+/// one already printed — same task, same text — is counted instead of printed. Lines are told
+/// apart by their text alone, so two instances stay distinct only if the model writes `%m`
+/// (BSIM4's checks do not: its four NAND instances share one line). **Not the LRM's behaviour**, which prints a task every time it
+/// runs at an accepted point; it exists for vendor models whose parameter checks sit in plain
+/// analog code and so repeat at every point (`benchmark/nand/bsim4.net`: 404 identical lines).
+/// A line whose values change (a `$strobe` of a node voltage) still prints every time, and every
+/// `$error` still counts toward the exit status.
+pub fn set_tasks_once(on: bool) {
+    *ONCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = on.then(OnceFilter::default);
+}
+
+/// How many task lines [`set_tasks_once`] has kept from printing; 0 when it is off.
+pub fn suppressed_task_lines() -> usize {
+    ONCE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, |f| f.suppressed)
+}
+
+/// [`set_tasks_once`]'s memory: every line printed so far, and how many repeats it held back.
+#[derive(Default, Debug)]
+pub(crate) struct OnceFilter {
+    seen: std::collections::HashSet<(&'static str, String)>,
+    suppressed: usize,
+}
+
+impl OnceFilter {
+    /// Whether this line should print: `true` the first time `(kind, text)` is seen, `false`
+    /// (and counted) on every repeat.
+    pub(crate) fn admit(&mut self, kind: TaskKind, text: &str) -> bool {
+        if self.seen.insert((name(kind), text.to_string())) {
+            true
+        } else {
+            self.suppressed += 1;
+            false
+        }
+    }
+}
+
 /// The transient run's [`va_transient::integrator::TranConfig::on_task`].
 pub(crate) fn transient_hook() -> Option<va_transient::integrator::TaskHook> {
     PRINT
@@ -72,6 +116,18 @@ pub(crate) fn emit(kind: TaskKind, text: &str, when: &str) {
     }
     if !PRINT.load(Ordering::Relaxed) {
         return;
+    }
+    // `$finish`/`$stop` print nothing here, so they are left out of the filter's count.
+    if !matches!(kind, TaskKind::Finish(_) | TaskKind::Stop(_)) {
+        if let Some(filter) = ONCE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            if !filter.admit(kind, text) {
+                return;
+            }
+        }
     }
     match kind {
         TaskKind::Strobe | TaskKind::Display | TaskKind::Debug => println!("{text}"),
@@ -176,4 +232,24 @@ pub(crate) fn at_static_point(
         }
     }
     Ok(finish)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--tasks-once` holds back exact repeats only: the same line from another instance (its
+    /// `%m` differs), the same text from another task, and a line whose value changed all print.
+    #[test]
+    fn the_once_filter_holds_back_exact_repeats_only() {
+        let mut f = OnceFilter::default();
+        assert!(f.admit(TaskKind::Strobe, "X1: RECALCULATION for no K1 or K2"));
+        assert!(!f.admit(TaskKind::Strobe, "X1: RECALCULATION for no K1 or K2"));
+        assert!(f.admit(TaskKind::Strobe, "X2: RECALCULATION for no K1 or K2"));
+        assert!(f.admit(TaskKind::Warning, "X1: RECALCULATION for no K1 or K2"));
+        assert!(f.admit(TaskKind::Strobe, "X1: V=0.500"));
+        assert!(f.admit(TaskKind::Strobe, "X1: V=0.501"));
+        assert!(!f.admit(TaskKind::Strobe, "X1: V=0.500"));
+        assert_eq!(f.suppressed, 2);
+    }
 }

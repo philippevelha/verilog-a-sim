@@ -1456,6 +1456,10 @@ including the ones with no implemented behavior at all.
     <text>` on stdout **and** stderr; and a note when `$finish`/`$stop` ended the analysis (none
     at level 0, LRM Table 9-25). Any `$error` makes `va-cli sim` exit with status 1 after its
     results are printed. `%m` is the deck's instance name.
+    `va-cli sim --tasks-once` (2.9.0) prints each distinct line once and counts the repeats in a
+    closing line: **not** the LRM's behaviour, an opt-in for vendor models whose parameter checks
+    are plain analog code and so repeat at every point (`benchmark/nand/bsim4.net`: 404 -> 1).
+    Lines are told apart by text alone, so instances stay distinct only through `%m`.
   - **Device bypass**: a module with any task is never `is_pure_in_x`, because a replayed
     recording would skip its output (`bypass_purity_rests_on_two_folds_and_a_task_is_never_pure`).
 - **Structural and Analog Usage**: Analog-block statements, and statements in analog function

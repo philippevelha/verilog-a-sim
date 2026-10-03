@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.9.0 - 2026-10-03
+--------------------
+**`va-cli sim --tasks-once`: print each distinct system-task line once.** A `$strobe`/`$display`/
+`$warning`/... line identical to one already printed is counted instead, and a closing line on
+stdout and stderr says how many were held back. Off by default, because it is not the LRM's
+behaviour (a task prints every time it runs at an accepted point); it exists for vendor models
+whose parameter checks are plain analog code and repeat at every point, which 2.8.0 made visible:
+`benchmark/nand/bsim4.net` prints its `RECALCULATION for no K1 or K2` 404 times, once with the
+flag ("403 repeated system-task line(s) not printed").
+
+  * Lines are told apart by their text alone: two instances stay distinct only if the model
+    prints `%m` (BSIM4's checks do not, so its four instances share one line). A line whose
+    values change still prints every time; every `$error` still counts toward the exit status.
+  * Output changes without the flag: none. `xtask deck-diff` against the 2.8.0 binary: 88
+    identical, 0 different, 25 skipped.
+  * Measured at this version: `cargo test --workspace` 939 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.8.0 - 2026-10-03
 --------------------
 **System tasks have an effect.** `$strobe`, `$display`, `$write`, `$debug`, `$finish`, `$stop`,

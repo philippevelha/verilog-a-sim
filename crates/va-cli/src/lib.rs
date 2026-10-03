@@ -33,7 +33,7 @@ pub mod estimate;
 pub mod plot;
 pub mod tasks;
 
-pub use tasks::{set_task_output, task_errors};
+pub use tasks::{set_task_output, set_tasks_once, suppressed_task_lines, task_errors};
 
 use anyhow::{bail, Context, Result};
 use std::f64::consts::PI;
