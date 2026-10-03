@@ -1,0 +1,42 @@
+// Natures for the ReRAM example: the filament gap as a state (nanometres) and the filament's
+// temperature rise above ambient. Include-guarded.
+`ifndef RERAM_NATURES_VAMS
+`define RERAM_NATURES_VAMS
+
+nature Gap_length
+    units  = "nm";
+    access = Gap;
+    abstol = 1e-6;
+endnature
+
+// The flow of the gap discipline is never a physical quantity here: the state node's one
+// branch carries its equation's residual. Units are given for completeness.
+nature Gap_rate
+    units  = "nm";
+    access = Len;
+    abstol = 1e-9;
+endnature
+
+nature Temperature_rise
+    units  = "K";
+    access = Temp;
+    abstol = 1e-6;
+endnature
+
+nature Heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-15;
+endnature
+
+discipline gap_disc
+    potential Gap_length;
+    flow      Gap_rate;
+enddiscipline
+
+discipline thermal_rise
+    potential Temperature_rise;
+    flow      Heat_flow;
+enddiscipline
+
+`endif

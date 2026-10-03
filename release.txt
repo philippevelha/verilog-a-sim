@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.14.0+3 - 2026-10-03
+--------------------
+**Multiphysics example 3: a filamentary ReRAM cell** — ionic filament gap, Joule heating and
+Arrhenius-activated drift (`models/multiphysics/reram/`; `docs/multiphysics.md`). The gap is a state
+node on a user discipline, pinned to its initial value at the DC point with `analysis("static")`;
+SET/RESET are reported by `@(above)`/`@(cross)`; a fast gap asks for steps through `$bound_step`.
+
+  * `reram_sweep.net` (10 ms triangle, two ambients): SET at 0.641 V (300 K) / 0.507 V (400 K),
+    self-limited by the 2 kOhm compliance (gap closes over 0.58 ms); RESET at -0.830 / -0.696 V with
+    the filament at ~610 / 553 K, abrupt (gap reopens in 10.5 us); the pinched loop drawn by
+    `docs/examples/multiphysics/reram_iv.py`. Converged in step size (switching voltages agree to
+    0.5 mV between 1 us and 0.2 us maximum steps).
+  * `reram_freq_{5k,500k,5meg}.net` + `reram_loops.py`: the memristor fingerprint, lobe areas
+    6.4e-4 -> 4.4e-4 -> 1.2e-4 V*A and gap swing 1.46 -> 0.93 -> 0.36 nm as the drive outruns the drift.
+  * What it cost to get there, stated: my first header had SET and RESET's character backwards
+    (SET is the self-limiting one with a series resistor); a field factor twice this one switched
+    below a picosecond and could not be integrated; a single deck with three frequencies took over
+    20 min (the fastest cell's switching sets every step), so the frequencies are separate decks of
+    two periods, ~10 s each; and a signed loop integral cancels a pinched loop's two lobes, so each
+    lobe is integrated alone.
+  * Docs and decks only; no code change. Measured at this version: `cargo test --workspace` 946
+    passed, 0 failed; `cargo xtask validate` 28/28.
+
+
 2.14.0+2 - 2026-10-03
 --------------------
 **Multiphysics example 2: an electrostatic MEMS actuator** — pull-in, squeeze-film and

@@ -1,0 +1,107 @@
+// Filamentary ReRAM cell: ionic filament growth, Joule heating and Arrhenius-activated drift.
+//
+// The state is the gap g between the filament tip and the top electrode (Stanford-PKU-type
+// model: Guan, Yu, Wong, IEEE EDL 33, 2012, simplified):
+//
+//   current     I = i0 * exp(-g/g0) * sinh(V/v0)                     (tunnelling across the gap)
+//   gap         dg/dt = -nu0 * exp(-Ea/(kB T)) * sinh(gam * a0 * V / (tox * kB T)) * window(g)
+//   temperature T = tamb + Temp(th),  Cth dTemp/dt + Temp/Rth = V * I  (the filament's own heat)
+//
+// The positive feedback is the point. A SET voltage starts the gap closing; a smaller gap
+// passes more current; more current heats the filament; the Arrhenius factor and the kB*T in the
+// field term both grow; the gap closes faster. Switching is abrupt and runaway-like, limited
+// only by the gap's floor and the series resistance outside. RESET (negative voltage) opens the
+// gap from the low-resistance state, where the current, hence the heat, is already large: it is
+// gradual instead.
+//
+// `window` keeps g in [gmin, gmax] smoothly: the drift toward a bound fades within `gw` of it.
+//
+// # Verilog-A shown here
+//
+// A user `nature` for the gap (nanometres, its own abstol) as the potential of an internal state
+// node, pinned to its initial value in the DC operating point with `analysis("static")`; a
+// thermal internal node; `@(above(...))` reporting SET and `@(cross(..., +1))` RESET as the gap
+// passes the middle of its range; `$bound_step` asking for steps short enough to
+// resolve the gap's motion while it is fast; `analog function`s; `exp`/`sinh` with arguments
+// kept finite by construction.
+//
+// # Limitations
+//
+// One lumped filament (no filament radius, no variability, no random telegraph noise); the
+// field-enhancement factor is constant; the thermal node is the filament's alone (no heating of
+// neighbours).
+`include "disciplines.vams"
+`include "reram_natures.vams"
+
+module reram(te, be);
+    inout te, be;
+    electrical te, be;
+
+    parameter real i0     = 1e-3   from (0:inf);    // A
+    parameter real g0     = 0.25   from (0:inf);    // nm, tunnelling decay length
+    parameter real v0     = 0.25   from (0:inf);    // V
+    parameter real nu0    = 10.0   from (0:inf);    // m/s, attempt velocity
+    parameter real ea     = 0.75   from (0:inf);    // eV, activation energy
+    parameter real gam    = 8.0    from (0:inf);    // field enhancement
+    parameter real a0     = 0.25   from (0:inf);    // nm, hopping distance
+    parameter real tox    = 5.0    from (0:inf);    // nm, oxide thickness
+    parameter real gmin   = 0.1    from (0:inf);    // nm
+    parameter real gmax   = 1.7    from (0:inf);    // nm
+    parameter real gw     = 0.02   from (0:inf);    // nm, window softness
+    parameter real g_init = 1.7    from (0:inf);    // nm, starting gap (HRS)
+    parameter real rth    = 1e6    from (0:inf);    // K/W, filament to ambient
+    parameter real cth    = 1e-16  from (0:inf);    // J/K, so tau = 0.1 ns
+    parameter real tamb   = 300.0  from (0:inf);    // K
+
+    gap_disc g;            // the gap, in nm
+    thermal_rise th;       // the filament's temperature rise, in K
+
+    real v, i, t, kt, rate, drift;
+
+    // eV per kelvin
+    analog function real kb_ev;
+        input dummy;
+        real dummy;
+        kb_ev = 8.617333262e-5;
+    endfunction
+
+    // Fades a drift toward a bound to zero within `w` of it: 1 far from the bound, 0 at it.
+    analog function real fade;
+        input dist, w;
+        real dist, w;
+        fade = (dist <= 0.0) ? 0.0 : 1.0 - exp(-dist / w);
+    endfunction
+
+    analog begin
+        v  = V(te, be);
+        i  = i0 * exp(-Gap(g) / g0) * sinh(v / v0);
+        t  = tamb + Temp(th);
+        kt = kb_ev(0) * t;
+        // Drift of the gap, nm/s (nu0 in m/s -> 1e9 nm/m): negative closes it (SET).
+        rate = -1e9 * nu0 * exp(-ea / kt) * sinh(gam * a0 * v / (tox * kt));
+        drift = rate * ((rate < 0.0) ? fade(Gap(g) - gmin, gw) : fade(gmax - Gap(g), gw));
+
+        I(te, be) <+ i;
+        // The gap as a state: d Gap/dt = drift. At a DC point the drift vanishes at zero bias
+        // for every gap, so the state needs its initial value there instead: `g_init`.
+        if (analysis("static"))
+            Len(g) <+ Gap(g) - g_init;
+        else
+            Len(g) <+ ddt(Gap(g)) - drift;
+        Pwr(th) <+ cth * ddt(Temp(th)) + Temp(th) / rth - v * i;
+
+        // A fast-moving gap asks for steps that move it by at most ~2 % of its range.
+        if (abs(drift) > 1.0)
+            $bound_step(0.02 * (gmax - gmin) / abs(drift));
+
+        // SET and RESET are the gap passing the middle of its range, closing and opening.
+        // `above` for SET: it fires when its expression turns positive (not at initialization,
+        // where the cell starts open and the expression is negative).
+        @(above(0.5 * (gmin + gmax) - Gap(g)))
+            $strobe("%m: SET   at t=%.6e s: V=%.4f V, I=%.3e A, gap=%.3f nm, T=%.1f K",
+                    $abstime, v, i, Gap(g), t);
+        @(cross(Gap(g) - 0.5 * (gmin + gmax), +1))
+            $strobe("%m: RESET at t=%.6e s: V=%.4f V, I=%.3e A, gap=%.3f nm, T=%.1f K",
+                    $abstime, v, i, Gap(g), t);
+    end
+endmodule

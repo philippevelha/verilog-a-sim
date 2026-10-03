@@ -1,0 +1,30 @@
+* Filamentary ReRAM: SET and RESET in a triangular sweep, at two ambient temperatures.
+*
+* Two cells of models/multiphysics/reram/reram.va, each behind a 2 kOhm series resistor (the
+* current compliance), driven by the same 0 -> +1.6 -> 0 -> -1.6 -> 0 V triangle over 10 ms.
+* X1 sits at 300 K, X2 at 400 K. Each cell's gap starts open (1.7 nm, high resistance).
+*
+* What to look for (the cells report SET/RESET with V, I, gap and filament temperature; the
+* figures are measured on X1 at 2.14.0+3):
+*   1. SET starts abruptly but is self-limiting: once the gap starts closing, more current
+*      heats the filament and speeds the drift, but the 2 kOhm resistor takes a growing share of
+*      the voltage, so the cell's own voltage falls -- negative feedback, the current compliance.
+*      The gap closes from 1.5 to 0.3 nm over 0.58 ms of the ramp (SET reported at 0.641 V cell
+*      voltage, filament at 413 K).
+*   2. RESET is the abrupt one: it starts only once the low-resistance cell carries enough
+*      current to heat its filament to ~610 K (reported at -0.830 V), and as the gap opens the
+*      voltage moves from the resistor onto the cell -- positive feedback. The gap reopens from
+*      0.3 to 1.5 nm in 10.5 us, 1/700 of the ramp.
+*   3. The hotter cell switches earlier: X2 (400 K ambient) SETs at 0.507 V and RESETs at
+*      -0.696 V, because exp(-Ea/kT) at its starting temperature is 1,412 times the 300 K value
+*      (Ea = 0.75 eV).
+*   4. The I-V loop is pinched: I = 0 whenever V = 0, whatever the state (I ~ sinh(V/v0)), the
+*      memristor fingerprint (docs/examples/multiphysics/reram_iv.py draws it).
+* Run: va-cli sim circuits/multiphysics/reram_sweep.net --model models/multiphysics/reram --tran --report X1.g,X2.g --plot docs/examples/multiphysics/reram_gap.svg
+V1 in gnd PWL(0 0 2.5m 1.6 5m 0 7.5m -1.6 10m 0)
+R1 in te1 2k
+X1 te1 gnd reram tamb=300
+R2 in te2 2k
+X2 te2 gnd reram tamb=400
+.tran 1u 10m
+.end

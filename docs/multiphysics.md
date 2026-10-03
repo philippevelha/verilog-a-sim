@@ -21,22 +21,26 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `@(timer)` | [TEC](#peltier-cooler-under-pid-control) |
-| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 
 ---
 
@@ -179,3 +183,76 @@ count the bounces, and report the release.
 **Limitations.** One rigid plate (no plate bending, no fringing fields), the squeeze film at low
 squeeze number (no gas spring), a lumped single-mode thermoelastic coupling, an ideal voltage
 drive.
+
+---
+
+## Filamentary ReRAM: filament growth, Joule heating, Arrhenius drift
+
+**Domains:** electrical, thermal (the filament's temperature rise), and the filament itself — a
+user `gap_disc` discipline whose potential is the gap in nanometres. **Models:**
+`models/multiphysics/reram/reram.va`, `reram_natures.vams`.
+
+The cell's state is the gap g between the filament tip and the electrode (a Stanford–PKU-type
+model): the current tunnels across it, I = i₀·e^(−g/g₀)·sinh(V/v₀), and the gap moves by
+thermally activated, field-driven ion drift,
+dg/dt = −ν₀·e^(−Eₐ/kT)·sinh(γa₀V/(t_ox·kT)), with T the filament's own temperature: ambient
+plus the rise its Joule heat V·I drives through a 1 MK/W thermal resistance. The gap is a state
+node pinned to its initial value at the DC point (`analysis("static")`), the switching events
+are reported by `@(above)` and `@(cross)`, and a fast-moving gap asks for short steps through
+`$bound_step`.
+
+### 1. SET, RESET and temperature — triangular sweep at two ambients
+
+```bash
+va-cli sim circuits/multiphysics/reram_sweep.net --model models/multiphysics/reram --tran --report X1.g,X2.g --plot docs/examples/multiphysics/reram_gap.svg
+va-cli sim circuits/multiphysics/reram_sweep.net --model models/multiphysics/reram --tran --report X1.th,X2.th --plot docs/examples/multiphysics/reram_temp.svg
+python docs/examples/multiphysics/reram_iv.py target/release/va-cli
+```
+
+![ReRAM I-V loops](examples/multiphysics/reram_iv.svg)
+![ReRAM filament gap](examples/multiphysics/reram_gap.svg)
+![ReRAM filament temperature](examples/multiphysics/reram_temp.svg)
+
+Two cells behind 2 kΩ, swept 0 → +1.6 → −1.6 → 0 V in 10 ms, one at 300 K and one at 400 K.
+
+- **SET is self-limiting.** The gap starts closing at 0.641 V (filament at 413 K) but the
+  series resistor takes a growing share of the voltage as the cell conducts — the current
+  compliance — and the gap closes from 1.5 to 0.3 nm over 0.58 ms of the ramp.
+- **RESET is abrupt and thermal.** It waits until the low-resistance cell carries enough current
+  to heat its filament to ~610 K (at −0.830 V), and then the opening cell takes the voltage back
+  from the resistor: the gap reopens from 0.3 to 1.5 nm in **10.5 µs**, 1/700 of the ramp.
+- **Arrhenius.** The 400 K cell switches at 0.507 V / −0.696 V: e^(−Eₐ/kT) is 1,412 times
+  larger at its starting temperature (Eₐ = 0.75 eV).
+- **The loop is pinched**: I = 0 whenever V = 0, whatever the state.
+
+A model with the field-enhancement factor twice as large (γ = 16) switched in under a
+picosecond at the end of RESET, and no time step could follow it; the value used here (γ = 8)
+keeps the physics and the time scales resolvable. The run is converged in its step size: SET and
+RESET voltages agree to 0.5 mV between 1 µs and 0.2 µs maximum steps.
+
+### 2. The frequency fingerprint — the loop shrinks as the drive outruns the drift
+
+```bash
+python docs/examples/multiphysics/reram_loops.py target/release/va-cli
+```
+
+![ReRAM loops at 5 kHz, 500 kHz, 5 MHz](examples/multiphysics/reram_loops.svg)
+
+The same cell on ±1.6 V sinusoids (decks `reram_freq_5k`, `_500k`, `_5meg`, two periods each;
+the second is kept). A memristor's defining signature (Chua) is a pinched loop whose lobes
+shrink as the frequency grows, because the state cannot follow a fast drive. Measured, with the
+two lobes integrated separately (they are traversed in opposite directions, so one signed
+∮I dV would cancel them):
+
+| Drive | Gap range over a cycle | Lobe areas (V·A) |
+|---|---|---|
+| 5 kHz | 0.238 – 1.697 nm | 3.19·10⁻⁴ + 3.20·10⁻⁴ |
+| 500 kHz | 0.759 – 1.687 nm | 2.19·10⁻⁴ + 2.18·10⁻⁴ |
+| 5 MHz | 1.326 – 1.688 nm | 5.8·10⁻⁵ + 5.8·10⁻⁵ |
+
+Below ~5 kHz the cell still switches completely every cycle (at 50 Hz and 500 Hz the gap spans
+the full 0.1 – 1.7 nm); exponential kinetics only move the switching to a higher voltage. The
+loop starts to collapse once a half period is comparable with the SET time.
+
+**Limitations.** One lumped filament: no variability, no filament radius, no read noise; a
+constant field-enhancement factor; the thermal node is the filament's own.

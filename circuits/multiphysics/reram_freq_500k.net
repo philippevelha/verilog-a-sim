@@ -1,0 +1,12 @@
+* Filamentary ReRAM driven by a +-1.6 V, 500k Hz sinusoid for two periods: one point of the
+* frequency fingerprint (decks reram_freq_5k, _500k, _5meg; numbers in
+* docs/multiphysics.md and docs/examples/multiphysics/reram_loops.py, which draws the loops).
+* A memristor's pinched loop shrinks as the drive outruns its state: the gap is moved by
+* thermally activated ion drift, which completes within a half period at 5 kHz, only partly at
+* 500 kHz, and hardly at all at 5 MHz.
+* Run: va-cli sim circuits/multiphysics/reram_freq_500k.net --model models/multiphysics/reram --tran --report in,te,X1.g
+V1 in gnd SIN(0 1.6 500k)
+R1 in te 2k
+X1 te gnd reram
+.tran 0.1n 4u
+.end
