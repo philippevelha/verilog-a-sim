@@ -22,6 +22,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.10.0 - 2026-10-03
+--------------------
+**Bypass replays add into the sparse matrix through cached slots.** Each bypassed device's
+recording keeps the matrix slot of every Jacobian and charge-Jacobian stamp, resolved once
+against the sparsity pattern (`Pattern::id`) and recomputed only when the pattern changes, so a
+replay no longer hashes `(row, col)` per stamp (`va_core::par::load_all_bypass_sparse`,
+`SparseSystem::add_jacobian_at`/`add_dcharge_at`). The transient's sparse path uses it; the dense
+path and runs without `--bypass` are untouched. Same additions in the same order: **bit-identical**.
+
+  * Measured, `--bypass`, hidden-2 crossbar (`xbar_h2_<N>.net`), the two builds interleaved
+    (2.9.1 vs this), i7-1185G7 on mains: 8 neurons 59.4 -> 41.7 s (1.42x, three pairs, spread
+    <= 2 s); 16 neurons 131.0 -> 88.3 s (1.48x, two pairs); 64 neurons 1315 -> 1035 s (1.27x, one
+    pair; an earlier non-interleaved pair gave the same ratio, 1188 -> 947 s). The gain falls at
+    64 because device evaluation, which this does not touch, is the larger part there (683 s of
+    a profiled 1153 s); why each evaluation costs ~8x more at 64 than at 8 neurons is still open.
+  * Methodology note, because it cost a wrong first table: a sequential run that always timed
+    the old build first showed 1.78x at 8 neurons; the old build's own repeat was 59 s, not
+    115 s. Only the interleaved figures above are kept.
+  * Identity: stdout + stderr hashes equal to the 2.9.1 build on the 8/16/32/64-neuron crossbars,
+    and to 2.7.0 on `fig5_access`, Fig. 4, Fig. 5, `ring_osc`, `rectifier`, c17 transient;
+    `slot_cached_replay_gives_the_sinks_bits_and_survives_a_grown_pattern` pins it, a pattern
+    change (stale slots, overflow stamps) included. `xtask deck-diff` against 2.9.0 without the
+    flag: 88 identical, 0 different, 25 skipped.
+  * Measured at this version: `cargo test --workspace` 940 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.9.1 - 2026-10-03
 --------------------
 **Fix: 2.8.0 took device bypass away from every PSP103.** 2.8.0 made any module containing a

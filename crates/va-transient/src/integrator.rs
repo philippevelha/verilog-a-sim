@@ -1040,7 +1040,7 @@ fn assemble(
             sys.clear();
             match state.states_and_bypass(fired) {
                 (states, Some(bp)) => {
-                    va_core::par::load_all_bypass(instances, x, &ctx, states, sys.as_mut(), bp)
+                    va_core::par::load_all_bypass_sparse(instances, x, &ctx, states, sys, bp)
                 }
                 (states, None) => va_core::par::load_all(instances, x, &ctx, states, sys.as_mut()),
             }

@@ -161,8 +161,10 @@ and the source lines are held at V_ref. This is a reasoned expectation, not a me
 
 **Still open, in order:**
 
-1. Resolve each recording's stamp slots once per sparse pattern (`Pattern` already carries an
-   `id`) instead of hashing every stamp — a `va-core` change that helps runs without bypass too.
+1. ~~Resolve each recording's stamp slots once per sparse pattern~~ **done in 2.10.0** for
+   replayed recordings (`load_all_bypass_sparse`): 1.42x at 8 neurons, 1.48x at 16, 1.27x at 64,
+   bit-identical. Fresh evaluations, and runs without bypass, still hash every stamp; caching a
+   device's stamp structure across evaluations would extend it to them.
 2. Find out why a fresh evaluation costs 8× more in the 64-neuron crossbar (a sampling profile).
 3. A cost gate — bypass only instances whose evaluation costs more than a replay — before bypass
    could ever be on by default.

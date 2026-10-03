@@ -36,6 +36,8 @@ use std::time::Instant;
 use va_abi::stamps::StampSink;
 use va_abi::{AnalysisCtx, ModelInstance, ModelState};
 
+use crate::sparse::SparseSystem;
+
 /// When [`load_all`] evaluates in parallel. Process-wide; set with [`set_mode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -174,7 +176,16 @@ struct BypassEntry {
     /// `(global unknown, x0)` for every unknown of the instance that is a row of `x`.
     x0: Vec<(usize, f64)>,
     rec: Recorder,
+    /// The sparse slot of each of `rec`'s stamps, resolved against the pattern whose
+    /// [`crate::sparse::Pattern::id`] it carries ([`NO_SLOT`] for a stamp that is not a stored
+    /// matrix entry). Filled on the first sparse replay and kept until the pattern changes, so a
+    /// replay adds into the matrix directly instead of hashing every `(row, col)` again.
+    slots: Option<(u64, Vec<u32>)>,
 }
+
+/// A stamp with no cached slot: a residual or charge entry, a stamp outside the system, or one
+/// the pattern does not (yet) hold. Replayed through the sink as before.
+const NO_SLOT: u32 = u32::MAX;
 
 impl Bypass {
     /// A cache for `instances`, bypassing within `abstol[u] + reltol·max(|x|, |x0|)` on every
@@ -232,7 +243,11 @@ impl Bypass {
             _ => true,
         });
         if covered {
-            self.entries[i] = Some(BypassEntry { x0, rec });
+            self.entries[i] = Some(BypassEntry {
+                x0,
+                rec,
+                slots: None,
+            });
         } else {
             self.eligible[i] = false;
             self.entries[i] = None;
@@ -241,6 +256,70 @@ impl Bypass {
 }
 
 impl BypassEntry {
+    /// [`Self::replay_corrected`] into a sparse system through the cached slots: the same
+    /// additions, in the same order, with the same values — so the same bits — without a hash
+    /// lookup per Jacobian and charge-Jacobian stamp. The slots are resolved on the first
+    /// replay against a pattern and again whenever the pattern has changed since.
+    fn replay_corrected_sparse(&mut self, x: &[f64], sys: &mut SparseSystem) {
+        let id = sys.pattern().id();
+        if self.slots.as_ref().map(|(pid, _)| *pid) != Some(id) {
+            let pattern = sys.pattern();
+            let slots = self
+                .rec
+                .0
+                .iter()
+                .map(|s| match *s {
+                    Stamp::Jacobian(r, c, _) | Stamp::Dcharge(r, c, _) => pattern
+                        .slot(r, c)
+                        .and_then(|k| u32::try_from(k).ok())
+                        .unwrap_or(NO_SLOT),
+                    _ => NO_SLOT,
+                })
+                .collect();
+            self.slots = Some((id, slots));
+        }
+        let Some((_, slots)) = self.slots.as_ref() else {
+            return;
+        };
+        let dx = |c: usize| {
+            self.x0
+                .iter()
+                .find(|&&(u, _)| u == c)
+                .map_or(0.0, |&(u, v0)| x[u] - v0)
+        };
+        for (s, &slot) in self.rec.0.iter().zip(slots) {
+            match *s {
+                Stamp::Jacobian(r, c, g) => {
+                    if slot == NO_SLOT {
+                        StampSink::jacobian(sys, r, c, g);
+                    } else {
+                        sys.add_jacobian_at(slot as usize, g);
+                    }
+                    let d = dx(c);
+                    if d != 0.0 {
+                        StampSink::residual(sys, r, g * d);
+                    }
+                }
+                Stamp::Dcharge(r, c, g) => {
+                    if slot == NO_SLOT {
+                        StampSink::dcharge(sys, r, c, g);
+                    } else {
+                        sys.add_dcharge_at(slot as usize, g);
+                    }
+                    let d = dx(c);
+                    if d != 0.0 {
+                        StampSink::charge(sys, r, g * d);
+                    }
+                }
+                Stamp::Residual(r, v) => StampSink::residual(sys, r, v),
+                Stamp::Charge(r, v) => StampSink::charge(sys, r, v),
+                Stamp::Excitation(r, re, im) => sys.excitation(r, re, im),
+                Stamp::BoundStep(dt) => StampSink::bound_step(sys, dt),
+                Stamp::Task(kind, ref text) => sys.task(kind, text),
+            }
+        }
+    }
+
     fn replay_corrected(&self, x: &[f64], sink: &mut dyn StampSink) {
         let dx = |c: usize| {
             self.x0
@@ -286,6 +365,47 @@ pub fn load_all_bypass(
     sink: &mut dyn StampSink,
     bypass: &mut Bypass,
 ) {
+    bypass_into(instances, x, ctx, states, Target::Any(sink), bypass);
+}
+
+/// [`load_all_bypass`] into a sparse system: identical stamps in identical order, with every
+/// replayed recording added through its cached slots (`BypassEntry::replay_corrected_sparse`)
+/// instead of a hash lookup per stamp — the serial part of a bypassed assembly that grew
+/// fastest with circuit size (`docs/proposals/device-bypass.md` §6).
+pub fn load_all_bypass_sparse(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    states: Vec<ModelState<'_>>,
+    sys: &mut SparseSystem,
+    bypass: &mut Bypass,
+) {
+    bypass_into(instances, x, ctx, states, Target::Sparse(sys), bypass);
+}
+
+/// Where a bypassed assembly's stamps go.
+enum Target<'a> {
+    Any(&'a mut dyn StampSink),
+    Sparse(&'a mut SparseSystem),
+}
+
+impl Target<'_> {
+    fn sink(&mut self) -> &mut dyn StampSink {
+        match self {
+            Target::Any(s) => &mut **s,
+            Target::Sparse(s) => &mut **s,
+        }
+    }
+}
+
+fn bypass_into(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    states: Vec<ModelState<'_>>,
+    mut target: Target<'_>,
+    bypass: &mut Bypass,
+) {
     let n = instances.len().min(states.len());
     let hit: Vec<bool> = (0..n)
         .map(|i| bypass.eligible[i] && bypass.fresh(i, x))
@@ -318,8 +438,11 @@ pub fn load_all_bypass(
     for (i, &is_hit) in hit.iter().enumerate() {
         if is_hit {
             bypass.hits += 1;
-            if let Some(e) = bypass.entries[i].as_ref() {
-                e.replay_corrected(x, sink);
+            if let Some(e) = bypass.entries[i].as_mut() {
+                match &mut target {
+                    Target::Sparse(sys) => e.replay_corrected_sparse(x, sys),
+                    Target::Any(sink) => e.replay_corrected(x, &mut **sink),
+                }
             }
             continue;
         }
@@ -327,7 +450,7 @@ pub fn load_all_bypass(
             continue;
         };
         debug_assert_eq!(i, j);
-        rec.replay(sink);
+        rec.replay(target.sink());
         if bypass.eligible[i] {
             bypass.misses += 1;
             bypass.store(i, instances[i], x, rec);
@@ -606,5 +729,91 @@ mod tests {
         let x2 = [0.70, 0.0];
         assert_eq!(bypassed(&x2, &mut bp), fresh(&x2));
         assert_eq!(bp.misses, 2);
+    }
+
+    /// The slot cache (`BypassEntry::replay_corrected_sparse`, 2.10.0) is an implementation of
+    /// the same replay, not an approximation of it: through `load_all_bypass_sparse` every
+    /// assembly gives the bits `load_all_bypass` gives through the sink, at the recorded `x`,
+    /// within tolerance and past it — and still after the pattern grows, which changes its id
+    /// and so every cached slot, the case a stale cache would get wrong.
+    #[test]
+    fn slot_cached_replay_gives_the_sinks_bits_and_survives_a_grown_pattern() {
+        let pure = PureDiode(Diode::new(0, 1, 1e-14, 1.0, 0.025_852));
+        let plain = Diode::new(1, GROUND, 1e-14, 1.0, 0.025_852);
+        let insts: [&dyn ModelInstance; 2] = [&pure, &plain];
+        let st = || vec![ModelState::stateless(), ModelState::stateless()];
+        let mut bp_slot = Bypass::new(&insts, 1e-3, vec![1e-6; 2]);
+        let mut bp_sink = Bypass::new(&insts, 1e-3, vec![1e-6; 2]);
+        let mut sys_slot = SparseSystem::new(2);
+        let mut sys_sink = SparseSystem::new(2);
+        let mut assemble = |x: &[f64], bp_slot: &mut Bypass, bp_sink: &mut Bypass| {
+            let before = sys_slot.pattern().id();
+            sys_slot.clear();
+            load_all_bypass_sparse(&insts, x, &ANALYSIS_DC, st(), &mut sys_slot, bp_slot);
+            sys_slot.finish();
+            sys_sink.clear();
+            load_all_bypass(&insts, x, &ANALYSIS_DC, st(), &mut sys_sink, bp_sink);
+            sys_sink.finish();
+            assert_eq!(
+                sys_slot.residual_values(),
+                sys_sink.residual_values(),
+                "x={x:?}"
+            );
+            assert_eq!(
+                sys_slot.jacobian().values(),
+                sys_sink.jacobian().values(),
+                "x={x:?}"
+            );
+            (before, sys_slot.pattern().id())
+        };
+        // The first assembly grows the pattern from the diagonal; the next ones replay against
+        // the grown one, whose id differs from the pattern the recording was taken under.
+        let (diagonal, grown) = assemble(&[0.65, 0.0], &mut bp_slot, &mut bp_sink);
+        assert_ne!(diagonal, grown, "the first finish grew the pattern");
+        assemble(&[0.65, 0.0], &mut bp_slot, &mut bp_sink);
+        assemble(&[0.65 + 4e-4, 0.0], &mut bp_slot, &mut bp_sink);
+        assemble(&[0.70, 0.0], &mut bp_slot, &mut bp_sink);
+        assemble(&[0.70 + 1e-4, 0.0], &mut bp_slot, &mut bp_sink);
+        assert_eq!(
+            (bp_slot.hits, bp_slot.misses),
+            (bp_sink.hits, bp_sink.misses)
+        );
+        assert!(
+            bp_slot.hits >= 3,
+            "the cached path ran: {} hits",
+            bp_slot.hits
+        );
+
+        // Slots cached against that pattern, then a different system: a new id and a
+        // diagonal-only pattern, so every cached slot is stale and the off-diagonal stamps must
+        // go through the sink's overflow. Replayed (a hit) into both, still the same bits.
+        let hits_before = bp_slot.hits;
+        let x = [0.70 + 1e-4, 0.0];
+        let mut fresh_slot = SparseSystem::new(2);
+        let mut fresh_sink = SparseSystem::new(2);
+        load_all_bypass_sparse(
+            &insts,
+            &x,
+            &ANALYSIS_DC,
+            st(),
+            &mut fresh_slot,
+            &mut bp_slot,
+        );
+        load_all_bypass(
+            &insts,
+            &x,
+            &ANALYSIS_DC,
+            st(),
+            &mut fresh_sink,
+            &mut bp_sink,
+        );
+        assert_eq!(bp_slot.hits, hits_before + 1, "replayed, not re-evaluated");
+        fresh_slot.finish();
+        fresh_sink.finish();
+        assert_eq!(fresh_slot.residual_values(), fresh_sink.residual_values());
+        assert_eq!(
+            fresh_slot.jacobian().values(),
+            fresh_sink.jacobian().values()
+        );
     }
 }

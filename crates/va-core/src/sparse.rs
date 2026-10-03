@@ -142,6 +142,13 @@ impl Pattern {
         self.dim
     }
 
+    /// This pattern's identity: unique per pattern built in the process, so a slot index
+    /// resolved against it can be cached and recognised as stale once the pattern grows
+    /// (`crate::par::Bypass`'s slot cache).
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// The number of stored entries, structural zeros included.
     pub fn nnz(&self) -> usize {
         self.row_idx.len()
@@ -329,6 +336,23 @@ impl SparseSystem {
     /// The tightest `bound_step` a model asked for since the last [`Self::clear`], if any.
     pub fn bound_step(&self) -> Option<f64> {
         self.bound_step
+    }
+
+    /// Add `value` to the Jacobian entry at `slot` of the current pattern — what
+    /// `StampSink::jacobian` does once it has found the slot, for a caller that already holds
+    /// it ([`Pattern::slot`], [`Pattern::id`]). An out-of-range slot is ignored, as a stamp
+    /// outside the system is.
+    pub fn add_jacobian_at(&mut self, slot: usize, value: f64) {
+        if let Some(v) = self.jacobian.get_mut(slot) {
+            *v += value;
+        }
+    }
+
+    /// [`Self::add_jacobian_at`] for the charge Jacobian.
+    pub fn add_dcharge_at(&mut self, slot: usize, value: f64) {
+        if let Some(v) = self.dcharge.get_mut(slot) {
+            *v += value;
+        }
     }
 
     /// The Jacobian `∂f/∂x`. Call after [`Self::finish`]: a stamp still in overflow is not in it.

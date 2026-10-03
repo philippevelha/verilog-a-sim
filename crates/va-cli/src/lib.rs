@@ -7855,7 +7855,10 @@ endmodule
                 .expect("builds")
                 .is_pure_in_x()
         };
-        assert!(pure(gated(0.0)), "an unreachable task made the model impure");
+        assert!(
+            pure(gated(0.0)),
+            "an unreachable task made the model impure"
+        );
         assert!(!pure(gated(1.0)), "a reachable task left the model pure");
     }
 
