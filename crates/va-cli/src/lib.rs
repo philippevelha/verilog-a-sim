@@ -34,7 +34,8 @@ pub mod plot;
 pub mod tasks;
 
 pub use tasks::{
-    close_task_files, set_task_output, set_tasks_once, suppressed_task_lines, task_errors,
+    close_task_files, set_task_output, set_tasks_once, suppressed_task_lines,
+    suppressed_walk_warnings, task_errors,
 };
 
 use anyhow::{bail, Context, Result};
@@ -1966,22 +1967,22 @@ fn solve_dc_impl(
     .map(|(op, _)| op)
     .map_err(|e| name_non_finite_row(e.into(), &quantities))
     .context("DC operating-point solve failed")?;
-    static_point_tasks(compiled, &refs, &op.x, dim, "the operating point")?;
+    static_point_tasks(&refs, &op.x, dim, "the operating point")?;
     Ok(op)
 }
 
-/// A static analysis's system tasks at its converged solution (`tasks::at_static_point`), when
-/// any compiled module has one; a `$finish`/`$stop` among them is noted and returned.
+/// A static analysis's system tasks at its converged solution (`tasks::at_static_point`), for
+/// every circuit — the evaluation is also how a stopped statement walk (`va_codegen::
+/// WALK_STOPPED`) is reported there; a `$finish`/`$stop` among them is noted and returned.
 fn static_point_tasks(
-    compiled: &[Module],
     refs: &[&dyn ModelInstance],
     x: &[f64],
     dim: usize,
     when: &str,
 ) -> Result<Option<(va_abi::TaskKind, String)>> {
-    if !tasks::any_module_has_tasks(compiled) {
-        return Ok(None);
-    }
+    // Run for every circuit, not only one with tasks (2.13.0): a model whose statement walk
+    // stops reports it through this evaluation (`va_codegen::WALK_STOPPED`), which a static
+    // analysis would otherwise never surface. One extra load per operating point.
     let finish = tasks::at_static_point(refs, x, dim, when)?;
     if let Some((kind, by)) = &finish {
         tasks::report_finish(*kind, by, when);
@@ -2227,7 +2228,7 @@ fn solve_dc_sweep_impl(
         previous = Some(op.x.clone());
         previous_above = Some(above);
         let when = format!("{}={value}", sweep.source);
-        let finish = static_point_tasks(compiled, &refs, &op.x, built.dim, &when)?;
+        let finish = static_point_tasks(&refs, &op.x, built.dim, &when)?;
         out.push((value, op));
         // `$finish` ends the sweep after the point it was called at (LRM §9.7.1).
         if finish.is_some() {
@@ -2718,7 +2719,7 @@ fn solve_ac_impl(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
-    if static_point_tasks(compiled, &refs, &op.x, dim, "the operating point")?.is_some() {
+    if static_point_tasks(&refs, &op.x, dim, "the operating point")?.is_some() {
         bail!(
             "the AC sweep was not run: a model's $finish ended the analysis at its operating point"
         );
@@ -2919,7 +2920,7 @@ fn solve_noise_impl(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
-    if static_point_tasks(compiled, &refs, &op.x, dim, "the operating point")?.is_some() {
+    if static_point_tasks(&refs, &op.x, dim, "the operating point")?.is_some() {
         bail!(
             "the noise analysis was not run: a model's $finish ended the analysis at its operating point"
         );
@@ -7884,6 +7885,14 @@ endmodule
     fn run_task_model(
         body: &str,
     ) -> Result<va_transient::integrator::Waveform, va_transient::TransientError> {
+        run_task_model_until(body, 5e-6)
+    }
+
+    /// [`run_task_model`] stopping at `tstop`.
+    fn run_task_model_until(
+        body: &str,
+        tstop: f64,
+    ) -> Result<va_transient::integrator::Waveform, va_transient::TransientError> {
         let src = format!(
             "module m(p); inout p; electrical p; integer fd, mcd, level; analog begin I(p) <+ (V(p) - 1.0)/1e3 + ddt(1e-9*V(p)); {body} end endmodule"
         );
@@ -7893,7 +7902,7 @@ endmodule
                 .expect("builds");
         let cfg = TranConfig {
             tstart: 0.0,
-            tstop: 5e-6,
+            tstop,
             tstep: 1e-7,
             tstep_min: 1e-13,
             method: Method::Trapezoidal,
@@ -8092,6 +8101,26 @@ endmodule
         let got: Vec<f64> = seen(va_abi::TaskKind::Strobe).iter().map(|s| s.1).collect();
         assert!(expected.len() >= 3, "the run crosses levels: {expected:?}");
         assert_eq!(got, expected);
+    }
+
+    /// A statement walk that stops at run time is reported, not swallowed (2.13.0): a loop that
+    /// runs into the iteration cap after the contribution leaves the solve intact, but every
+    /// accepted point carries a warning naming the instance and why, and `va-cli` prints each
+    /// distinct one once.
+    #[test]
+    fn a_stopped_statement_walk_is_reported_at_every_accepted_point() {
+        // Two steps: every load runs the loop to its cap, which is slow on purpose.
+        let wf = run_task_model_until("level = 0; while (level >= 0) level = level + 1;", 2e-7)
+            .expect("runs");
+        let warnings = seen(va_abi::TaskKind::Warning);
+        assert_eq!(warnings.len(), wf.t.len(), "one per accepted point");
+        assert!(
+            warnings[0]
+                .0
+                .starts_with(&format!("m: {}: ", va_codegen::WALK_STOPPED)),
+            "{}",
+            warnings[0].0
+        );
     }
 
     /// Writing to a descriptor no `$fopen` of the instance returned loses the output, and says

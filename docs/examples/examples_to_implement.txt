@@ -1,0 +1,20 @@
+# Thermo-optic ring-resonator bank: optical field, Joule heating due to self-heating , thermal crosstalk between neighbouring rings, and a locking feedback loop. 
+The stiffness comes from ps optical dynamics against ms thermal time constants.
+# Li-ion cell with aging: Butler-Volmer kinetics, solid-state diffusion (ladder network), heat generation, and SEI growth. 
+Run it up to thermal runaway for a hard convergence test.
+# Electrostatic MEMS: pull-in instability, squeeze-film damping, thermoelastic damping, and contact/stiction at closure.
+# Relay or solenoid actuator: Jiles-Atherton magnetic hysteresis, eddy currents, coil heating, and mechanical contact bounce.
+# Piezoelectric harvester: a Duffing-type nonlinear beam feeding a rectifier and storage capacitor, under broadband random vibration.
+# ReRAM/memristor: ionic filament growth, Joule heating, and Arrhenius-activated drift. Switching is abrupt and temperature-runaway-like.
+# Peltier/TEC stack: Seebeck, Peltier, Joule, and Thomson effects with a transient thermal network and a PID controller.
+# Hodgkin-Huxley axon with electrodiffusion: Nernst-Planck ion concentrations that actually change, temperature-dependent gating, 
+and a cable discretized into segments.
+# Switching arc in a circuit breaker: Mayr/Cassie arc models coupled to gas flow, thermal dynamics, and the external LC network.
+# Reaction-diffusion on a grid: Gray-Scott or Belousov-Zhabotinsky, where concentrations are potentials and reactions are nonlinear conductances. 
+It is a good pattern-formation test.
+# Power-grid swing dynamics: synchronous machines (rotor mechanics plus electrical network) as Kuramoto-like coupled oscillators, 
+with cascading line trips.
+# Cavity optomechanical oscillator: radiation pressure, photothermal bistability, and a mechanical mode, giving self-sustained oscillation and chaos.
+# Loudspeaker or acoustic horn: acoustic transmission line with a nonlinear suspension and voice-coil heating that shifts the 
+parameters (thermal compression).
+# Single-event transient in SRAM: radiation-generated carrier pulse, a diffusion/collection model, and the circuit's upset response.

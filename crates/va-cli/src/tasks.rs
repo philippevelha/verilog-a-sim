@@ -21,7 +21,6 @@ use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use va_abi::{FileOp, ModelInstance, TaskKind};
-use va_ir::Module;
 
 static PRINT: AtomicBool = AtomicBool::new(false);
 static ERRORS: AtomicUsize = AtomicUsize::new(0);
@@ -39,6 +38,19 @@ pub fn task_errors() -> usize {
 }
 
 static ONCE: std::sync::Mutex<Option<OnceFilter>> = std::sync::Mutex::new(None);
+
+/// The "statement walk stopped" warnings (`va_codegen::WALK_STOPPED`) already printed: each
+/// distinct one prints once whatever `--tasks-once` says, because a model that hits one usually
+/// hits it at every point, and one line says everything the next thousand would.
+static WALK: std::sync::Mutex<Option<OnceFilter>> = std::sync::Mutex::new(None);
+
+/// How many repeats of an already-printed "evaluation stopped early" warning were held back.
+pub fn suppressed_walk_warnings() -> usize {
+    WALK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, |f| f.suppressed)
+}
 
 /// Print each distinct task line once (`va-cli sim --tasks-once`, 2.9.0): a line identical to
 /// one already printed — same task, same text — is counted instead of printed. Lines are told
@@ -236,6 +248,17 @@ pub(crate) fn emit(kind: TaskKind, text: &str, when: &str) {
     if !PRINT.load(Ordering::Relaxed) {
         return;
     }
+    if kind == TaskKind::Warning && text.contains(va_codegen::WALK_STOPPED) {
+        let mut walk = WALK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !walk
+            .get_or_insert_with(OnceFilter::default)
+            .admit(kind, text)
+        {
+            return;
+        }
+    }
     // `$finish`/`$stop` print nothing here, so they are left out of the filter's count.
     if !matches!(kind, TaskKind::Finish(_) | TaskKind::Stop(_)) {
         if let Some(filter) = ONCE
@@ -291,36 +314,6 @@ pub(crate) fn report_finish(kind: TaskKind, by: &str, when: &str) {
         println!("{note}");
         eprintln!("{note}");
     }
-}
-
-/// Whether any of `modules` contains a system task, in its analog block or in a function — the
-/// test for whether a static analysis needs [`at_static_point`] at all.
-pub(crate) fn any_module_has_tasks(modules: &[Module]) -> bool {
-    fn walk(stmts: &[va_ir::Stmt]) -> bool {
-        stmts.iter().any(|s| match s {
-            va_ir::Stmt::Task { .. } => true,
-            va_ir::Stmt::Assign { .. }
-            | va_ir::Stmt::Contribute { .. }
-            | va_ir::Stmt::BoundStep(_) => false,
-            va_ir::Stmt::If { then_, else_, .. } => walk(then_) || walk(else_),
-            va_ir::Stmt::Block(b)
-            | va_ir::Stmt::While { body: b, .. }
-            | va_ir::Stmt::Repeat { body: b, .. } => walk(b),
-            va_ir::Stmt::For {
-                init, step, body, ..
-            } => {
-                walk(std::slice::from_ref(init.as_ref()))
-                    || walk(std::slice::from_ref(step.as_ref()))
-                    || walk(body)
-            }
-            va_ir::Stmt::Case { arms, default, .. } => {
-                arms.iter().any(|a| walk(&a.body)) || walk(default)
-            }
-        })
-    }
-    modules
-        .iter()
-        .any(|m| walk(&m.analog) || m.functions.iter().any(|f| walk(&f.body)))
 }
 
 /// A static analysis's tasks: evaluate every instance once at its converged solution `x` and act

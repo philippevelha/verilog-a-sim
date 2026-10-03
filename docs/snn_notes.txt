@@ -1,0 +1,29 @@
+ A first transistor version is running: the Fig. 5 neuron deck with its eight crossbar access transistors as real devices. Everything is committed locally as 2.3.0 (1e7f6db, not pushed). All 924 tests and the
+  28/28 validation checks pass.
+
+  Swapping in your models later. Every transistor goes through one technology layer (circuits/snn/transistor/tech.py), and the decks never name a process. When your SG13S models arrive, we add them as a second
+  technology there and regenerate the decks; nothing else changes. Until then the stand-in is IHP's open SG13G2 PDK: its 3.3 V transistors with IHP's own PSP103 model, typical corner. As agreed, it isn't
+  checked against any external simulator, and the README says so.
+
+  Two simulator fixes were needed:
+  - --model can now be given more than once, so the SNN blocks and the transistor model load together.
+  - Every run that starts from rest (UIC, which the flip-flops need) used to die at t = 0 once a PSP103 sat on a driven line. That's fixed. Every run that worked before gives bit-identical output, and one old
+    test was updated because it asserted the old failure.
+
+  What the first round shows:
+  - The access transistor changes the weights. At the bias it sees in the crossbar (source at 1.65 V), its on-resistance is 377 Ω at W = 10 µm and 3.7 kΩ at 1 µm. The ideal switch was 10 Ω, and the lowest RRAM
+    level is 8 kΩ. Output spikes still land at steps 6, 10 and 14, but V_m now differs from the paper's equations by 131 mV instead of 12 mV. The deck's own check (0.05 V tolerance, written for ideal
+    switches) now reports FAIL. That's the on-resistance effect rather than an error, and the fix is to include it in the codebook used for training.
+  - Wall time is the real problem. The Fig. 5 deck went from 4.0 s to 64.3 s with just eight transistors. The number of time points barely changes (1.3×); the cost is about 200 µs per transistor evaluation. At
+    that rate the MNIST network, with 17,664 access transistors, would take days per image.
+
+  Two ways to cut the cost:
+  1. Device bypass. In a spiking network most word lines are idle most of the time, so most access transistors sit at a constant bias. Reusing their last result instead of re-evaluating them is a standard
+     SPICE technique, and should give large savings exactly for this circuit.
+  2. A faster transistor evaluation. 200 µs per evaluation is slow, and profiling it would show how much of that we can recover.
+
+  The other piece of work is the neuron itself, built from Fig. 2's topology. The paper gives no device sizes and draws the op-amp and flip-flop as boxes, so that sizing will be ours. It will also add roughly
+  45 more transistors per neuron, which makes the cost problem bigger.
+
+  My suggestion is to start with the optimisation (profile, then prototype device bypass on fig5_access.net), since it decides what is feasible, and then size the neuron. Do you want that order, or the neuron
+  first?

@@ -22,6 +22,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.13.0 - 2026-10-03
+--------------------
+**A model's statement walk that stops at run time is reported, not swallowed.** Validation at
+build time is meant to make it impossible, but when a walk fails while a model is evaluated — a
+`while` past its iteration cap, a read of a variable no path assigned — every statement after the
+failure is skipped at that point, and until now `GeneratedModel::load` discarded the error (`let _
+= self.run(...)`), as did a setup prefix that stopped. That is how 2.12.0's `$fopen` persistence
+bug hid: the run "succeeded" with a model that had silently stopped half-way. Now the instance
+reports a `$warning`-kind task, `<instance>: evaluation stopped early: <why>; the statements after
+it did not run at this point` (`va_codegen::WALK_STOPPED`), acted on like any warning — from
+accepted evaluations — and `va-cli` prints each distinct one once, with a closing count of the
+repeats it held back. The skipping itself is unchanged: a loop that runs away still must not stamp
+values from a half-finished environment.
+
+  * Static analyses now run their evaluation at the converged solution for every circuit, not
+    only those with tasks, so a stopped walk shows up in `.op`/`.dc`/`.ac`/`.noise` too. Cost
+    measured as within noise: a 101-point BSIM4 NAND sweep 0.38 s vs 0.36-0.39 s; ISCAS c432
+    `.op` 6.3-7.2 s vs 7.2 s.
+  * Gated by the codegen loop-cap test (now asserting the warning) and
+    `a_stopped_statement_walk_is_reported_at_every_accepted_point`.
+  * Output changes: none on any deck — `xtask deck-diff` against the 2.12.0 binary: 89
+    identical, 0 different, 25 skipped, i.e. no committed deck had a walk stopping in silence.
+  * Measured at this version: `cargo test --workspace` 945 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean. **Not pushed**: the account's GitHub Actions minutes ran out
+    today (every push runs eight CI jobs, macOS counted 10x), so CI has not checked this.
+
+
 2.12.0 - 2026-10-03
 --------------------
 **`$monitor` and file output work.** `var = $fopen(name[, type])` returns the LRM's descriptors

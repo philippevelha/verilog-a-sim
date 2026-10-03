@@ -285,6 +285,14 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     va_cli::close_task_files();
     // Said on both streams, like the lines it stands for, so neither a report nor a log can
     // be read as if the model printed only what is there.
+    let walk = va_cli::suppressed_walk_warnings();
+    if walk > 0 {
+        let note = format!(
+            "[va-cli] {walk} repeat(s) of an already-printed \"evaluation stopped early\" warning not printed"
+        );
+        println!("{note}");
+        eprintln!("{note}");
+    }
     let suppressed = va_cli::suppressed_task_lines();
     if suppressed > 0 {
         let note =

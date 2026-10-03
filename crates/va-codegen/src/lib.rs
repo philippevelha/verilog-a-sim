@@ -453,7 +453,17 @@ struct Setup {
     /// half-finished environment. Recording the outcome is what lets [`GeneratedModel::load`]
     /// preserve that, instead of the failure vanishing into a phase nobody checks.
     completed: bool,
+    /// Why it did not complete, for the warning `load` raises ([`WALK_STOPPED`]).
+    error: Option<String>,
 }
+
+/// The words every "the statement walk stopped" warning carries (2.13.0): a model's statement
+/// walk that fails at run time — a `while` past its iteration cap, a read of a variable no path
+/// assigned — skips every statement after the failure at that point, and `load` reports it as a
+/// `$warning`-kind task rather than letting it pass in silence. Validation at build time is meant
+/// to make this impossible; when it is not, the user must hear about it. `va-cli` prints each
+/// distinct such warning once.
+pub const WALK_STOPPED: &str = "evaluation stopped early";
 
 /// Which of `module`'s nodes are junction potentials, for
 /// [`ModelInstance::unknown_is_junction`].
@@ -670,6 +680,7 @@ impl GeneratedModel {
             Setup {
                 vars,
                 completed: outcome.is_ok(),
+                error: outcome.err().map(|e| e.to_string()),
             }
         }))
     }
@@ -2418,11 +2429,27 @@ impl ModelInstance for GeneratedModel {
         // different slice. Without the guard, a contribution downstream of a runaway loop would
         // start stamping values it never used to (`a_runaway_while_loop_is_bounded_by_the_
         // iteration_cap_not_a_hang`).
-        if setup_completed {
-            let _ = self.run(
+        //
+        // A walk that stops is reported, not swallowed (2.13.0): the statements after the
+        // failure did not run at this point, and until now nothing said so.
+        let stopped = if setup_completed {
+            self.run(
                 &ctx,
                 &self.shared.lowered.stmts[self.shared.lowered.static_prefix..],
                 sink,
+            )
+            .err()
+            .map(|e| e.to_string())
+        } else {
+            setup.and_then(|s| s.error.clone())
+        };
+        if let Some(why) = stopped {
+            sink.task(
+                va_abi::TaskKind::Warning,
+                &format!(
+                    "{}: {WALK_STOPPED}: {why}; the statements after it did not run at this point",
+                    self.name
+                ),
             );
         }
         self.finalize_mixed_branch_currents(&ctx, sink);
@@ -5250,6 +5277,16 @@ mod tests {
         );
         // The post-loop contribution never ran, so the residual is untouched.
         assert_eq!(sink.residual[0], 0.0);
+        // And it says so (2.13.0): one warning naming the instance and why the walk stopped.
+        assert_eq!(sink.tasks.len(), 1, "{:?}", sink.tasks);
+        assert_eq!(sink.tasks[0].0, va_abi::TaskKind::Warning);
+        assert!(
+            sink.tasks[0]
+                .1
+                .starts_with("runaway: evaluation stopped early: "),
+            "{}",
+            sink.tasks[0].1
+        );
     }
 
     /// `real function sq(x); sq = x*x; endfunction`, called from `I(p,n) <+ sq(V(p,n))*g;` --

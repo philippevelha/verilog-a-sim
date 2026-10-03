@@ -1451,7 +1451,8 @@ including the ones with no implemented behavior at all.
     `va-cli` evaluates every instance once more at the converged solution and acts on what that
     evaluation reports; a `$finish` ends a `.dc` sweep after its point
     (`finish_ends_a_dc_sweep_after_the_point_that_asks`) and stops `.ac`/`.noise` before their
-    sweep, with an error saying so. Skipped entirely when no compiled module contains a task.
+    sweep, with an error saying so. Run for every circuit since 2.13.0, so a model whose statement walk stops is reported in a
+    static analysis too (one extra load per operating point).
   - `va-cli sim` prints the display tasks on stdout; the severity tasks as `$<task> at <when>:
     <text>` on stdout **and** stderr; and a note when `$finish`/`$stop` ended the analysis (none
     at level 0, LRM Table 9-25). Any `$error` makes `va-cli sim` exit with status 1 after its
