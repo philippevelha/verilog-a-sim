@@ -1,0 +1,36 @@
+* Electrostatic MEMS actuator: small-signal resonance at a DC bias, at two gas pressures.
+*
+* Two copies of the actuator of mems_pullin.net, biased at 3 V with a 1 V AC drive, one in a
+* 1 Pa package and one at 100 Pa (squeeze_film's `pressure`). Each also carries thermoelastic
+* damping (thermoelastic.va: a thermal mode with tau = 15.9 us, coupled to the motion).
+* The AC solution linearises everything about the 3 V operating point. Expected, from the
+* models' own equations:
+*   - static deflection 0.10998 um; electrostatic spring softening eps0 A V^2/g^3 = 0.11557 N/m,
+*     which alone moves the resonance from 10006.0 Hz (unbiased) to 9410.06 Hz;
+*   - the thermoelastic coupling also stiffens: its in-phase part is
+*     gamma^2 T0 Rth w^2 tau / (1 + (w tau)^2) = 4.69e-4 N/m, so the resonance is 9412.55 Hz,
+*     the same for both packages;
+*   - low-frequency compliance |Pos(x)| = 82.90 nm per volt of drive;
+*   - damping: squeeze film b = 8.80e-10 N s/m at 1 Pa and 1.827e-7 at 100 Pa (rarefied gas:
+*     the effective viscosity falls ~ 1/(1 + 9.638 Kn^1.159)); thermoelastic b = 8.44e-9 at
+*     the resonance (Zener's peak sits near it by design). Hence
+*         1 Pa:   Q = 1605  (thermoelastic-limited: Q_TED = 1772, Q_squeeze = 17000)
+*         100 Pa: Q = 78.2  (squeeze-film-limited)
+* Measured (2.14.0+2): peaks at 9412.5 Hz for both; Q = 1603.6 (1 Pa) and 78.2 (100 Pa) on this
+* 0.5 Hz grid (1605.2 on a 2.5 mHz grid around the peak).
+* Run: va-cli sim circuits/multiphysics/mems_resonance.net --model models/multiphysics/mems --ac --report xlo,xhi --plot docs/examples/multiphysics/mems_resonance.svg
+V1 drv gnd DC 3 AC 1
+* 1 Pa package
+XE1 drv gnd xlo es_gap area=1e-8 g0=2e-6 td=0.1e-6 er=7.5
+XK1 xlo spring k=1
+XM1 xlo proof_mass m=2.53e-10
+XS1 xlo squeeze_film pressure=1
+XT1 xlo thermoelastic
+* 100 Pa package
+XE2 drv gnd xhi es_gap area=1e-8 g0=2e-6 td=0.1e-6 er=7.5
+XK2 xhi spring k=1
+XM2 xhi proof_mass m=2.53e-10
+XS2 xhi squeeze_film pressure=100
+XT2 xhi thermoelastic
+.ac lin 4001 8410 10410
+.end

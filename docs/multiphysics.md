@@ -21,18 +21,22 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control) |
-| `analog function` | [TEC](#peltier-cooler-under-pid-control) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `@(timer)` | [TEC](#peltier-cooler-under-pid-control) |
-| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control) |
-| `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control) |
+| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 
 ---
 
@@ -107,3 +111,71 @@ on a 50 J/K sink, 0.5 K/W to a 298.15 K ambient. The run starts from the uncoole
 
 **Limitations.** Lumped faces (no temperature profile in the legs; the Thomson heat is split
 half and half), temperature-independent K, an ideal voltage-driven supply.
+
+---
+
+## Electrostatic MEMS: pull-in, damping, contact and stiction
+
+**Domains:** electrical, mechanical (position-as-potential: force is the flow, so a node's
+Kirchhoff sum is Newton's law), thermal (a thermoelastic mode). **Models:**
+`models/multiphysics/mems/mems_parts.va` — composable parts on one mechanical node: `proof_mass`
+(inertia, velocity as an internal node), `spring`, `es_gap` (parallel-plate transducer over a
+dielectric layer: charge `d/dt[C(x) V]` and force εAV²/2g²), `squeeze_film` (gap-cubed gas
+damping with rarefaction), `thermoelastic`, `contact` (Hertzian landing plus adhesion) —
+and `mems_natures.vams`.
+
+A 100 µm square plate, 2 µm over an electrode covered by 0.1 µm of dielectric, on a 1 N/m
+spring (10 kHz). Thermoelastic damping is not a fitted Q: the plate is coupled to a thermal mode
+(force −γθ on the plate, heat γT₀ẋ into the mode, relaxing with τ = 15.9 µs), and Zener's
+frequency-dependent damping comes out of the circuit.
+
+### 1. Pull-in — DC sweep against the closed form
+
+```bash
+va-cli sim circuits/multiphysics/mems_pullin.net --model models/multiphysics/mems --report x --plot docs/examples/multiphysics/mems_pullin.svg
+```
+
+![MEMS static deflection and pull-in](examples/multiphysics/mems_pullin.svg)
+
+The static balance kx = εAV²/2(g_e − x)² (g_e = 2.0133 µm, the dielectric included) has a
+stable branch only up to **V_PI = √(8k g_e³/27εA) = 5.2259 V** at x = g_e/3. The sweep matches the
+closed form at every point checked — 0.045741, 0.220332, 0.456840 µm at 2, 4, 5 V, to the
+printed digits — and jumps onto the dielectric stop between 5.20 and 5.25 V.
+
+### 2. Resonance under bias, at two pressures — AC
+
+```bash
+va-cli sim circuits/multiphysics/mems_resonance.net --model models/multiphysics/mems --ac --report xlo,xhi --plot docs/examples/multiphysics/mems_resonance.svg
+```
+
+![MEMS resonance at 1 Pa and 100 Pa](examples/multiphysics/mems_resonance.svg)
+
+Biased at 3 V, the electrostatic spring softens the plate by εAV²/g³ = 0.1156 N/m, and the
+thermoelastic coupling stiffens it by γ²T₀R·ω²τ/(1+ω²τ²) = 4.7·10⁻⁴ N/m: the resonance moves from
+10006 Hz to **9412.55 Hz**, which is where both packages peak. The damping differs: at 1 Pa the
+rarefied gas barely damps (Q_squeeze ≈ 17000) and thermoelastic loss limits **Q to 1605**; at
+100 Pa the squeeze film dominates, **Q = 78.2**. Both match the models' equations (1605.2 and
+78.2 measured).
+
+This check found a sign error in the first draft of `thermoelastic`: with the compression heat
+entered as a sink rather than a source, the coupling pumped energy into the motion, and Q came
+out 1973 instead of 1605 — exactly what negative thermoelastic damping predicts.
+
+### 3. Pull-in, bounce, stiction and release — transient
+
+```bash
+va-cli sim circuits/multiphysics/mems_hysteresis.net --model models/multiphysics/mems --tran --report x --plot docs/examples/multiphysics/mems_hysteresis.svg
+```
+
+![MEMS hysteresis](examples/multiphysics/mems_hysteresis.svg)
+
+A slow 0 → 7 → 0 V triangle at 100 Pa. The plate lands at 5.38 V (V_PI plus the ~0.1 ms snap),
+**bounces 48 times** on the Hertzian contact while it rings down, sticks, and releases only at
+**0.7038 V** — against the closed form √(2g_c²(kx_c − f_a)/εA) = 0.7023 V. In contact the gap
+is the 0.1 µm dielectric, so the same voltage pulls ~316 times harder, and the 0.2 µN adhesion
+moves release from 0.742 V down to 0.702 V. The `contact` model's events report the landing,
+count the bounces, and report the release.
+
+**Limitations.** One rigid plate (no plate bending, no fringing fields), the squeeze film at low
+squeeze number (no gas spring), a lumped single-mode thermoelastic coupling, an ideal voltage
+drive.

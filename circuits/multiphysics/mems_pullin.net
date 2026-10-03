@@ -1,0 +1,21 @@
+* Electrostatic MEMS actuator: static deflection and pull-in, against the closed form.
+*
+* A 100 um square plate (models/multiphysics/mems/mems_parts.va) on a 1 N/m spring, 2 um above
+* an electrode covered by 0.1 um of dielectric (er = 7.5), drive swept 0..8 V. With the
+* effective gap ge0 = g0 + td/er = 2.01333 um, the static balance
+*     k x = eps0 A V^2 / (2 (ge0 - x)^2)
+* has a stable solution only up to pull-in, at x = ge0/3 and
+*     V_PI = sqrt(8 k ge0^3 / (27 eps0 A)) = 5.2259 V,   x_PI = 0.67111 um.
+* Past V_PI the plate snaps onto the dielectric stop (x = 1.9 um), where contact and
+* adhesion (contact module) hold it. A DC sweep starts each point from the previous solution,
+* so the sweep follows the stable branch up to V_PI and then lands on the contact branch.
+* Points to check against the closed form below pull-in (x from k x = F_el):
+*     V = 2 V -> x = 0.04574 um;   V = 4 V -> x = 0.22033 um;   V = 5 V -> x = 0.45684 um.
+* Run: va-cli sim circuits/multiphysics/mems_pullin.net --model models/multiphysics/mems --report x --plot docs/examples/multiphysics/mems_pullin.svg
+V1 drv gnd DC 0
+XE drv gnd x es_gap area=1e-8 g0=2e-6 td=0.1e-6 er=7.5
+XK x spring k=1
+XM x proof_mass m=2.53e-10
+XC x drv gnd contact xc=1.9e-6 kc=1e9 fa=2e-7 delta=0.2e-9
+.dc V1 0 8 0.05
+.end

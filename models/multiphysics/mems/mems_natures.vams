@@ -1,0 +1,56 @@
+// Natures for the electrostatic MEMS example: position-as-potential mechanics (force is the
+// flow, so Kirchhoff's current law at a node is Newton's force balance), velocity for the
+// internal state of the mass, and a temperature-deviation thermal domain for thermoelastic
+// damping. Include-guarded so every model of the library can include it.
+`ifndef MEMS_NATURES_VAMS
+`define MEMS_NATURES_VAMS
+
+// Vacuum permittivity (F/m), CODATA 2018.
+`define MEMS_EPS0 8.8541878128e-12
+
+nature Position
+    units  = "m";
+    access = Pos;
+    abstol = 1e-12;
+endnature
+
+nature Velocity
+    units  = "m/s";
+    access = Vel;
+    abstol = 1e-9;
+endnature
+
+nature Force
+    units  = "N";
+    access = F;
+    abstol = 1e-15;
+endnature
+
+nature Temperature_dev
+    units  = "K";
+    access = Temp;
+    abstol = 1e-9;
+endnature
+
+nature Heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-15;
+endnature
+
+discipline kinematic
+    potential Position;
+    flow      Force;
+enddiscipline
+
+discipline kinematic_v
+    potential Velocity;
+    flow      Force;
+enddiscipline
+
+discipline thermal_dev
+    potential Temperature_dev;
+    flow      Heat_flow;
+enddiscipline
+
+`endif

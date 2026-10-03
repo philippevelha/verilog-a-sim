@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.14.0+2 - 2026-10-03
+--------------------
+**Multiphysics example 2: an electrostatic MEMS actuator** — pull-in, squeeze-film and
+thermoelastic damping, contact bounce and stiction (`models/multiphysics/mems/`, composable parts
+on a position-as-potential mechanical node; `docs/multiphysics.md`).
+
+  * `mems_pullin.net` (DC sweep): deflection 0.045741 / 0.220332 / 0.456840 um at 2 / 4 / 5 V, the
+    closed form to the printed digits; the jump to the stop between 5.20 and 5.25 V brackets
+    V_PI = 5.2259 V.
+  * `mems_resonance.net` (AC, 3 V bias, 1 Pa and 100 Pa): resonance 9412.55 Hz for both, Q = 1605.2
+    (thermoelastic-limited) and 78.2 (squeeze-film-limited), all as the models' equations predict.
+    Two errors this check caught, both mine and not the simulator's: the thermoelastic heat term's
+    sign (an active coupling: Q came out 1973, exactly the negative-damping prediction), and my own
+    expected frequency, which had dropped the thermoelastic stiffening (2.5 Hz).
+  * `mems_hysteresis.net` (transient triangle): landing at 5.38 V, 48 bounces on the Hertzian
+    contact, release at 0.7038 V against the closed form's 0.7023 V.
+  * Found on the way, kept in the models' comments: `limexp` folds to plain `exp` in this engine
+    (docs/token-reference.md), so a logistic with a large argument overflowed to inf and its
+    derivative to NaN; and `pow(max(d, 0), 1.5)` differentiates to 0*inf at d <= 0. Both models
+    are written around them (a two-branch logistic, an explicit `if`).
+  * Docs and decks only; no code change. Measured at this version: `cargo test --workspace` 946
+    passed, 0 failed; `cargo xtask validate` 28/28.
+
+
 2.14.0+1 - 2026-10-03
 --------------------
 **First multiphysics example: a Peltier cooler under PID control** (`docs/multiphysics.md`, a

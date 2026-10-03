@@ -1,0 +1,29 @@
+* Electrostatic MEMS actuator: pull-in, stiction and release in a slow voltage triangle.
+*
+* The actuator of mems_pullin.net at 100 Pa (squeeze-film Q ~ 80) with thermoelastic damping,
+* driven 0 -> 7 -> 0 V over 10 ms (1.4 V/ms, slow against its 0.1 ms period, so nearly
+* quasi-static). The `contact` model reports each landing and release with the voltage at that
+* moment. Expected:
+*   - landing at pull-in, V_PI = 5.226 V (closed form; the ramp adds a small dynamic delay), the
+*     plate snapping 1.3 um onto the dielectric stop and ringing;
+*   - release far lower: in contact the gap is only 0.1 um of dielectric, so the electrostatic
+*     force is ~ (2.0133/0.1133)^2 = 316 times stronger per volt^2, and the adhesion fa = 0.2 uN
+*     helps hold it. Release when contact force reaches zero:
+*         V_rel = sqrt(2 g_c^2 (k xc - fa) / (eps0 A)) = 0.702 V   (0.742 V without adhesion),
+*     g_c = 0.11333 um. Pull-in at 5.2 V, release at 0.7 V: a wide hysteresis loop, the
+*     electrostatic latch every RF-MEMS switch designer manages (and stiction, the 40 mV shift
+*     the adhesion causes, is what makes release unreliable in practice).
+* Measured (2.14.0+2): landed at t = 3.842 ms, V = 5.379 V (the plate crosses V_PI at 3.733 ms
+* and takes ~0.11 ms, about one period, to travel 1.3 um); bounced 48 times on the Hertzian
+* contact while ringing down; released at t = 9.497 ms, V = 0.7038 V (closed form 0.7023 V; the
+* 0.2 % is the adhesion's 95 % at first touch plus the ramp).
+* Run: va-cli sim circuits/multiphysics/mems_hysteresis.net --model models/multiphysics/mems --tran --report x --plot docs/examples/multiphysics/mems_hysteresis.svg
+V1 drv gnd PWL(0 0 5m 7 10m 0)
+XE drv gnd x es_gap area=1e-8 g0=2e-6 td=0.1e-6 er=7.5
+XK x spring k=1
+XM x proof_mass m=2.53e-10
+XS x squeeze_film pressure=100
+XT x thermoelastic
+XC x drv gnd contact xc=1.9e-6 kc=1e9 fa=2e-7 delta=0.2e-9
+.tran 2u 10m
+.end

@@ -1,0 +1,178 @@
+// Electrostatic MEMS parallel-plate actuator, as composable parts on one mechanical node.
+//
+// `x` is the plate's displacement toward the fixed electrode (Pos, metres); every part
+// contributes the force it *draws* from the node, so the node's Kirchhoff sum is Newton's law:
+//
+//     m x'' + k x + b(x) x' + F_TED + F_contact(x) - F_el(V, x) = 0
+//
+// Parts: `proof_mass` (inertia, with velocity as an internal node), `spring`, `es_gap` (the
+// electrostatic transducer: charge and force of a parallel-plate capacitor over a dielectric
+// layer), `squeeze_film` (gap-cubed gas damping with rarefaction), `thermoelastic` (Zener
+// thermoelastic damping as a real coupling to a thermal mode), `contact` (Hertzian landing on
+// the dielectric plus surface adhesion: stiction).
+//
+// # Verilog-A shown here
+//
+// A user `kinematic`/`thermal_dev` discipline set; internal nodes of other disciplines than the
+// ports'; `ddt` of a nonlinear charge (`es_gap`) and of a state (`proof_mass`); a coefficient
+// times `ddt` (`squeeze_film`, `thermoelastic`); `analog function`s with `if`/`else`;
+// `@(cross)` with both directions reporting landing and release; `$strobe`, `%m`; ranged
+// parameters.
+`include "disciplines.vams"
+`include "mems_natures.vams"
+
+// Inertia: F = m * dv/dt, v = dx/dt on an internal velocity node.
+module proof_mass(x);
+    inout x;
+    kinematic x;
+    parameter real m = 2.53e-10 from (0:inf);   // kg (100 x 100 x 10 um of silicon)
+    kinematic_v v;
+    analog begin
+        Vel(v) <+ ddt(Pos(x));
+        F(x)   <+ m * ddt(Vel(v));
+    end
+endmodule
+
+// Linear spring, with an optional cubic (Duffing) stiffening term.
+module spring(x);
+    inout x;
+    kinematic x;
+    parameter real k  = 1.0 from (0:inf);   // N/m
+    parameter real k3 = 0.0 from [0:inf);   // N/m^3
+    analog F(x) <+ k * Pos(x) + k3 * Pos(x) * Pos(x) * Pos(x);
+endmodule
+
+// Parallel-plate electrostatic transducer between electrical `p`, `n` and mechanical `x`.
+// The moving plate is `x` toward the fixed one, over a dielectric layer `td` thick:
+//     g(x)   = g0 - x + td/er            electrical gap
+//     C(x)   = eps0 * A / g(x)
+//     I(p,n) = d/dt [ C(x) V ]            (the motional current included)
+//     F_el   = eps0 * A * V^2 / (2 g(x)^2)   toward the electrode (+x)
+module es_gap(p, n, x);
+    inout p, n, x;
+    electrical p, n;
+    kinematic x;
+    parameter real area = 1e-8   from (0:inf);    // m^2 (100 um square)
+    parameter real g0   = 2e-6   from (0:inf);    // m, rest gap
+    parameter real td   = 0.1e-6 from [0:inf);    // m, dielectric on the fixed electrode
+    parameter real er   = 7.5    from [1:inf);    // relative permittivity of the dielectric
+    real g, v;
+    analog begin
+        g = g0 - Pos(x) + td / er;
+        v = V(p, n);
+        I(p, n) <+ ddt(`MEMS_EPS0 * area * v / g);
+        F(x)    <+ -`MEMS_EPS0 * area * v * v / (2.0 * g * g);
+    end
+endmodule
+
+// Squeeze-film damping of a square plate, side `w`, over gap h = g0 - x:
+//     b(h) = 0.42 * mu_eff * w^4 / h^3      (Blech, square plate, low squeeze number)
+//     mu_eff = mu / (1 + 9.638 * Kn^1.159), Kn = lambda / h, lambda = lambda0 * p0 / pressure
+// (Veijola's effective viscosity), so the damping falls with pressure.
+module squeeze_film(x);
+    inout x;
+    kinematic x;
+    parameter real w        = 100e-6  from (0:inf);   // m, plate side
+    parameter real g0       = 2e-6    from (0:inf);   // m
+    parameter real hmin     = 0.1e-6  from (0:inf);   // m, the gap never falls below this
+    parameter real mu       = 1.8e-5  from (0:inf);   // Pa s, air
+    parameter real pressure = 100.0   from (0:inf);   // Pa
+    parameter real lambda0  = 67e-9   from (0:inf);   // m, mean free path at 101325 Pa
+    real h, kn, mu_eff, b;
+    analog function real gap_floor;
+        input h, hmin;
+        real h, hmin;
+        // A smooth max(h, hmin): the film is never thinner than the dielectric stop.
+        gap_floor = 0.5 * (h + hmin + sqrt((h - hmin) * (h - hmin) + 1e-18));
+    endfunction
+    analog begin
+        h = gap_floor(g0 - Pos(x), hmin);
+        kn = lambda0 * 101325.0 / pressure / h;
+        mu_eff = mu / (1.0 + 9.638 * pow(kn, 1.159));
+        b = 0.42 * mu_eff * w * w * w * w / (h * h * h);
+        F(x) <+ b * ddt(Pos(x));
+    end
+endmodule
+
+// Thermoelastic damping (Zener) as a real thermo-mechanical coupling. Bending the plate heats
+// the compressed side and cools the other; the temperature difference relaxes through the
+// thickness with time constant tau = Rth*Cth, and it pushes back on the motion:
+//     force on the plate      F = -gamma * theta            (thermal stress)
+//     heat into the mode      P = gamma * T0 * dx/dt        (adiabatic compression heating)
+//     thermal mode            Cth * dtheta/dt + theta/Rth = P
+// The resulting damping is b(w) = gamma^2 T0 Rth / (1 + (w tau)^2): Zener's relaxation peak,
+// largest at w*tau = 1. Nothing here is a fitted Q; the frequency dependence comes out of the
+// circuit.
+module thermoelastic(x);
+    inout x;
+    kinematic x;
+    parameter real gamma = 7.28e-8  from [0:inf);   // N/K, thermal-stress coupling
+    parameter real t0    = 300.0    from (0:inf);   // K, operating temperature
+    parameter real rth   = 1e4      from (0:inf);   // K/W, through-thickness
+    parameter real cth   = 1.59e-9  from (0:inf);   // J/K, so tau = 15.9 us = 1/(2 pi 10 kHz)
+    thermal_dev th;
+    analog begin
+        F(x)    <+ gamma * Temp(th);
+        // Heat drawn from the node: storage, leak, and minus the source P (the compression heat
+        // is an injection). With the sign the other way the coupling is active, not passive:
+        // it pumps energy into the motion (negative damping) -- caught by the closed-form Q
+        // check in circuits/multiphysics/mems_resonance.net.
+        Pwr(th) <+ cth * ddt(Temp(th)) + Temp(th) / rth - gamma * t0 * ddt(Pos(x));
+    end
+endmodule
+
+// Landing on the dielectric stop at x = xc, with surface adhesion.
+//     contact   F_c = kc * (x - xc)^1.5 for x > xc   (Hertz), pushing the plate back
+//     adhesion  F_a = fa / (1 + exp(-(x - xc + 3 delta)/delta)) pulling the plate toward the
+//               stop: 95 % of `fa` at first touch and all of it in contact, vanishing a few
+//               `delta` before the surfaces meet
+// `@(cross)` events report the first landing and the real release, with the drive voltage, and
+// count the bounces in between: a release less than `tbounce` after a landing is a bounce.
+module contact(x, p, n);
+    inout x, p, n;
+    kinematic x;
+    electrical p, n;                               // sensed only, for the report
+    parameter real xc    = 1.9e-6  from (0:inf);   // m, contact position (g0 - td)
+    parameter real kc    = 1e9     from (0:inf);   // N/m^1.5 (~2.5 nm indentation at 1e-4 N)
+    parameter real fa    = 2e-7    from [0:inf);   // N, adhesion in contact
+    parameter real delta = 0.2e-9  from (0:inf);   // m, adhesion range
+    parameter real tbounce = 50e-6 from (0:inf);   // s, a shorter contact is a bounce
+    real d, fc, t_land;
+    integer landed, bounces;
+    // The logistic 1/(1 + exp(-z)) in the form that never overflows: exp of a large positive
+    // argument would be inf, and inf/inf in its derivative is NaN.
+    analog function real logistic;
+        input z;
+        real z;
+        if (z >= 0.0)
+            logistic = 1.0 / (1.0 + exp(-z));
+        else
+            logistic = exp(z) / (1.0 + exp(z));
+    endfunction
+    analog begin
+        d = Pos(x) - xc;
+        // An explicit branch, not pow(max(d, 0), 1.5): differentiating that at d <= 0 is a
+        // zero times an infinite slope, which is NaN where the true derivative is 0.
+        if (d > 0.0)
+            fc = kc * d * sqrt(d);
+        else
+            fc = 0.0;
+        F(x) <+ fc - fa * logistic((d + 3.0 * delta) / delta);
+        @(cross(d, +1)) begin
+            if (!landed)
+                $strobe("%m: landed   at t=%.4e s, V=%.4f V", $abstime, V(p, n));
+            landed = 1;
+            t_land = $abstime;
+        end
+        @(cross(d, -1)) begin
+            if ($abstime - t_land < tbounce)
+                bounces = bounces + 1;
+            else begin
+                $strobe("%m: released at t=%.4e s, V=%.4f V (the landing bounced %d times)",
+                        $abstime, V(p, n), bounces);
+                landed = 0;
+                bounces = 0;
+            end
+        end
+    end
+endmodule
