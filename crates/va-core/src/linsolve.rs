@@ -39,18 +39,53 @@ pub(crate) fn pin_sequential() {
     faer::set_global_parallelism(faer::Par::Seq);
 }
 
-/// Whether `x` solves `a · x = b` (dense row-major `a`, `n × n`) to within [`RESIDUAL_TOL`].
+/// Whether `x` solves `a · x = b` (dense row-major `a`, `n × n`) to within [`RESIDUAL_TOL`]:
+/// measured raw, or, failing that, on the **row-equilibrated** system (row `i` of `a` and `b[i]`
+/// divided by the row's largest `|a_ij|`). Either passing is enough.
+///
+/// **Why both.** Each is blind to one kind of scale. The raw test ignores the units a row is
+/// written in (below); the equilibrated one ignores the size of `x`: a Newton iterate with
+/// stage voltages of 1e11 (a 150-stage gain chain's first step) leaves 3e-8 of round-off in a
+/// row whose largest coefficient is 1.2e-3, which the raw test accepts and the scaled one would
+/// not. Taking the union keeps every solve the raw test accepted, bit for bit, and adds the
+/// ones only units made it reject.
 ///
 /// Shared by [`solve_dense`] and [`solve_sparse`] so both solvers apply *the same* singularity
 /// check to the same inputs — the whole point of comparing them is that they agree, including
 /// on what counts as "failed."
+///
+/// **Why equilibrated (2.16.1).** A row's scale is the units its equation is written in, which
+/// says nothing about whether the system is singular. Measured raw, a row whose entries are
+/// 1e11 (a microring's field equation: 1/τ and the detuning, in 1/s) leaves a round-off residual
+/// of ~1e11·|x|·ε ≈ 1e-4 after a perfectly good factorisation. Near Newton convergence, where
+/// `b` is tiny, that failed `1e-6·(1 + ‖b‖)`, and a well-posed 72-unknown thermo-optic system
+/// was reported "singular" on the dense path while the sparse path, rounding differently,
+/// passed. Dividing each row by its own scale makes the test independent of units and keeps its
+/// purpose: a near-singular factorisation still produces a solution whose residual, row by row
+/// against that row's own coefficients, is large. A row of zeros has no scale and is left as is
+/// (it cannot be satisfied unless `b[i]` is zero, which is what the test then checks).
 fn residual_ok(a: &[f64], b: &[f64], n: usize, x: &[f64]) -> bool {
-    let bmax = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let residual = |i: usize| -> f64 {
+        let ax: f64 = (0..n).map(|j| a[i * n + j] * x[j]).sum();
+        ax - b[i]
+    };
+    // The raw test first: a solve it accepts is accepted exactly as before 2.16.1.
+    let braw = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    if (0..n).map(|i| residual(i).abs()).fold(0.0_f64, f64::max) <= RESIDUAL_TOL * (1.0 + braw) {
+        return true;
+    }
+    let scale = |i: usize| {
+        let s = (0..n).fold(0.0_f64, |m, j| m.max(a[i * n + j].abs()));
+        if s > 0.0 && s.is_finite() {
+            s
+        } else {
+            1.0
+        }
+    };
+    let scales: Vec<f64> = (0..n).map(scale).collect();
+    let bmax = (0..n).fold(0.0_f64, |m, i| m.max((b[i] / scales[i]).abs()));
     let rmax = (0..n)
-        .map(|i| {
-            let ax: f64 = (0..n).map(|j| a[i * n + j] * x[j]).sum();
-            (ax - b[i]).abs()
-        })
+        .map(|i| (residual(i) / scales[i]).abs())
         .fold(0.0_f64, f64::max);
     rmax <= RESIDUAL_TOL * (1.0 + bmax)
 }
@@ -380,6 +415,62 @@ mod tests {
         let b = [7.0, -3.0];
         let x = solve_dense(&a, &b, 2).unwrap();
         assert_eq!(x, vec![7.0, -3.0]);
+    }
+
+    /// A well-posed system whose rows are written in wildly different units is not singular
+    /// (2.16.1). Row 0 has entries ~1e11 (a microring's field equation, in 1/s), row 2 ~1e-4
+    /// (a thermal conductance, in W/K), and the right-hand side is a Newton update's, tiny. The
+    /// raw residual of row 0 after a correct factorisation is ~1e11·|x|·ε, far above
+    /// `1e-6·(1 + ‖b‖)`, so the unscaled check rejected this system as singular. Measured on
+    /// each row's own scale it is ~ε.
+    #[test]
+    fn a_badly_scaled_well_posed_system_is_solved() {
+        let a = [
+            1.234_567_890_1e11,
+            -9.876_543_21e10,
+            3.3e10, //
+            0.7,
+            1.9,
+            -0.3, //
+            2.1e-4,
+            0.7e-4,
+            1.3e-4,
+        ];
+        // Chosen so row 0's large terms cancel to a small right-hand side, as they do at a
+        // converging Newton iterate: x[2] is the value that makes row 0 sum to ~zero.
+        let x_true = [
+            1.0,
+            0.5,
+            -(1.234_567_890_1e11 - 0.5 * 9.876_543_21e10) / 3.3e10 + 3.7e-13,
+        ];
+        let b: Vec<f64> = (0..3)
+            .map(|i| (0..3).map(|j| a[i * 3 + j] * x_true[j]).sum())
+            .collect();
+        let pat = crate::sparse::Pattern::new(3, (0..3).flat_map(|i| (0..3).map(move |j| (i, j))));
+        let vals: Vec<f64> = pat.entries().map(|(r, c)| a[r * 3 + c]).collect();
+        let m = crate::sparse::SparseMatrix::new(&pat, &vals).expect("one value per entry");
+        let sparse: Vec<f64> = crate::sparse::SparseLu::new()
+            .solve(m, &b)
+            .expect("well posed");
+        let dense_input_sparse = solve_sparse(&a, &b, 3).expect("well posed");
+        for x in [
+            solve_dense(&a, &b, 3).expect("well posed"),
+            sparse,
+            dense_input_sparse,
+        ] {
+            for (xi, ti) in x.iter().zip(x_true) {
+                assert!((xi - ti).abs() <= 1e-9 * ti.abs().max(1e-6), "{xi} vs {ti}");
+            }
+        }
+    }
+
+    /// Row scaling does not make a singular matrix pass: rows proportional at any scale stay
+    /// singular.
+    #[test]
+    fn proportional_rows_at_different_scales_are_still_singular() {
+        let a = [1e11, 2e11, 1e-4, 2e-4];
+        let b = [1.0, 1.0];
+        assert!(matches!(solve_dense(&a, &b, 2), Err(CoreError::Singular)));
     }
 
     #[test]

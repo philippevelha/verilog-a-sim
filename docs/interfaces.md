@@ -435,6 +435,9 @@ pub trait ModelInstance: Send + Sync {
     fn event_count(&self) -> usize { 0 }
     /// Report transient event registrations at an *accepted* timepoint. Default: none.
     fn events(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn EventSink) {}
+    /// `events`, with the instance's committed state at that point. Default: calls `events`.
+    fn events_with_state(&self, x: &[f64], ctx: &AnalysisCtx, state: &[f64],
+                         sink: &mut dyn EventSink) { self.events(x, ctx, sink) }
 }
 
 // va-abi/src/events.rs
@@ -913,6 +916,27 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 > and are unchanged). The DC path is two-phase and iterates to a fixed point, because which
 > events fire is a property of the solution while the bodies they guard change the equations
 > that produce it.
+
+> **Revision (§6 change, 2026-10-04):** added `ModelInstance::events_with_state(x, ctx, state,
+> sink)`, a default method that calls `events`. **Additive**: every implementor keeps compiling,
+> and one whose sites read no state needs nothing.
+>
+> **The defect it closes.** `events` had no state to read, so a generated model bound its
+> variables for the site walk against nothing: a variable an event body sets (persisted on the
+> state channel since 2.1.0) read its seed, and a `transition`/`slew` read no history. A site
+> whose expression reached either through a variable saw the world before its own event: a relay
+> written `open = 1; g = 1 - transition(open, 0, tsw); p = g*B*sin(d); @(cross(abs(p) - pmax, +1))`
+> went on seeing its line closed after it opened it, and "tripped" again every time the flow it
+> no longer carried would have crossed the setting. Found by the power-grid cascade example
+> (98 trip messages where 2 trips happened); the answer was right only because re-opening an
+> open line changes nothing.
+>
+> **What the consumer passes.** The instance's slice of the committed buffer at the accepted
+> point, the same `prev` its `load` at that point read: `va-transient` polls before committing
+> the candidate (so `prev` is the previous point's, exactly as the candidate's `load` saw it)
+> and re-polls after a body ran (after the commit). Static analyses keep calling `events`, as
+> they have no state buffer; their sites see seed state, which for a DC point is the state.
+> `Multiplied` forwards it.
 
 > **Revision (§6 change, ratified 2026-09-07):** added `AnalysisCtx::is_final_step` and the
 > `with_final_step` builder, so `@(final_step)` could be implemented (v0.9.8). Purely

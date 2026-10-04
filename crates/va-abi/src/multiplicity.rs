@@ -204,6 +204,16 @@ impl ModelInstance for Multiplied {
         // Unscaled, deliberately — see this module's documentation.
         self.inner.events(x, ctx, sink);
     }
+
+    fn events_with_state(
+        &self,
+        x: &[f64],
+        ctx: &AnalysisCtx,
+        state: &[f64],
+        sink: &mut dyn EventSink,
+    ) {
+        self.inner.events_with_state(x, ctx, state, sink);
+    }
 }
 
 #[cfg(test)]

@@ -595,14 +595,40 @@ impl SparseLu {
 }
 
 /// Whether `x` reproduces `b` to the dense path's tolerance — the check every sparse answer
-/// passes before it is returned, whichever factorization produced it.
+/// passes before it is returned, whichever factorization produced it: the raw residual test,
+/// or failing that the same test on the row-equilibrated system, exactly as the dense path's
+/// `linsolve::residual_ok` (2.16.1, where the two are explained).
 fn residual_ok(a: SparseMatrix<'_>, b: &[f64], x: &[f64]) -> bool {
     let ax = a.mul_vec(x);
-    let bmax = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-    let rmax = ax
+    // The raw test first: a solve it accepts is accepted exactly as before 2.16.1.
+    let braw = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let rraw = ax
         .iter()
         .zip(b)
         .map(|(l, r)| (l - r).abs())
+        .fold(0.0_f64, f64::max);
+    if rraw <= RESIDUAL_TOL * (1.0 + braw) {
+        return true;
+    }
+    let mut scale = vec![0.0_f64; b.len()];
+    for ((r, _), v) in a.pattern.entries().zip(a.values) {
+        if let Some(s) = scale.get_mut(r) {
+            *s = s.max(v.abs());
+        }
+    }
+    let scale: Vec<f64> = scale
+        .into_iter()
+        .map(|s| if s > 0.0 && s.is_finite() { s } else { 1.0 })
+        .collect();
+    let bmax = b
+        .iter()
+        .zip(&scale)
+        .fold(0.0_f64, |m, (v, s)| m.max((v / s).abs()));
+    let rmax = ax
+        .iter()
+        .zip(b)
+        .zip(&scale)
+        .map(|((l, r), s)| ((l - r) / s).abs())
         .fold(0.0_f64, f64::max);
     rmax <= RESIDUAL_TOL * (1.0 + bmax)
 }

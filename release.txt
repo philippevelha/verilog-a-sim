@@ -22,6 +22,67 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.1 - 2026-10-04
+-------------------
+**Three simulator fixes found by the multiphysics examples.** Each was found by an example that
+ran and printed numbers, wrong or refused, and each has its own deck-diff.
+
+  * **An event's expression reads the instance's committed state.** `ModelInstance::events` had
+    no state to read. A generated model therefore evaluated its `cross`/`above` sites with every
+    state-channel variable at its seed and every `transition` without history, so a site that
+    reached either through a variable saw the world before its own event fired.
+      - Found by the power-grid cascade: a relay that had opened its line through
+        `open = 1; g = 1 - transition(open, ...)` kept seeing it closed. It "tripped" again at
+        every swing, 98 trip messages for 2 trips. The answer was right only because opening an
+        open line changes nothing.
+      - Fix: Interface beta gains `events_with_state(x, ctx, state, sink)`, a default method
+        calling `events` (additive; `docs/interfaces.md`). va-transient passes each instance's
+        committed slice; `Multiplied` forwards it.
+      - Deck-diff against 2.16.0: 114 identical, 1 different (the cascade deck), 13 skipped.
+      - Test: `a_monitored_expression_sees_the_state_its_event_set`. It counts 1 trip in five
+        cycles; without the fix it counts 10.
+  * **The linear solvers' residual test is measured row by row, on each row's own scale.** It
+    compared the raw ‖Ax − b‖ with `1e-6 (1 + ‖b‖)`.
+      - Found by the thermo-optic ring bank: a microring's field row (entries ~1e11, in 1/s)
+        leaves ~1e-4 of round-off after a correct factorisation, and near Newton convergence b
+        is tiny. The dense path called a well-posed 72-unknown system singular; the sparse path,
+        rounding differently, solved it.
+      - Fix: a solve passes if the raw test passes **or** the same test passes with each row
+        divided by its largest |a_ij| (dense and sparse alike). Not the scaled test alone: that
+        one ignores the size of x, and rejected a 150-stage gain chain's first Newton step
+        (stage voltages ~1e11, 3e-8 of round-off in a row whose largest coefficient is 1.2e-3),
+        which the raw test passes. The union keeps every solve that passed before, with the same
+        bits, and adds the ones only units made it reject.
+      - Deck-diff against the previous fix: only the ring-bank deck differs; it failed before.
+        (That run was stopped by the machine's memory pressure before its last decks; the union
+        form cannot change a solve the raw test accepted, which is every deck that ran before.)
+      - Tests: `a_badly_scaled_well_posed_system_is_solved` fails with the old test and passes
+        with the new; `proportional_rows_at_different_scales_are_still_singular`.
+  * **The structural junction guess limits electrical nodes only.** A module with an `exp` and
+    no `$limit` used to have every node step-limited like a pn junction's voltage.
+      - Found by the Li-ion cell: an Arrhenius factor was enough, the cell's temperature moved
+        0.24 K per Newton iteration from its 0 K start, and the operating point failed.
+      - Fix: the guess now claims only `Discipline::Electrical` nodes. A module that declares
+        its junctions with `$limit` is unaffected.
+      - Cost, stated: decks whose models mix `exp` with non-electrical nodes take different
+        Newton paths and step sequences:
+          · ReRAM: the limiter had been forcing small steps. The sweep deck now takes 10,181
+            points in 0.5 s, where it took 23,327 in 21 s; the 5 MHz deck 40,001 where it took
+            49,748.
+          · That exposed a reporting artefact in the ReRAM model, fixed here too: its SET/RESET
+            strobes printed whichever accepted point first passed mid-gap, and RESET's voltage
+            moved with the step size (-0.830 V at a 1 us cap, -0.852 V at 0.2 us). The events
+            now carry a 1 ns time tolerance (`cross(expr, +1, 1e-9)`), and the reported values
+            agree to 0.1 mV between the two caps. They still round to the header's figures.
+          · HH axon: the thin fibre's ninth velocity report moves 0.568 -> 0.570 m/s; every figure
+            its headers quote (18.971 / 12.218 m/s; 0.577 / 0.531 m/s; 29.62 / 18.82 mV peaks)
+            re-measured unchanged.
+        Its deck-diff, too, was stopped by memory pressure before the last decks.
+      - Test: `a_declared_junction_overrides_the_structural_guess` gains a thermal node, which
+        is no longer claimed.
+  * Measured at this version: `cargo test --workspace` 951 passed, 0 failed, 0 ignored (3 new);
+    `cargo xtask validate` 28/28.
+
 2.16.0 - 2026-10-04
 -------------------
 **Event `or` lists** (LRM §5.10): `@(cross(...) or timer(...) or final_step)` and any mix of

@@ -6388,6 +6388,52 @@ X1 clk o counter
         );
     }
 
+    /// A monitored expression is evaluated against the instance's committed state (2.16.1): a
+    /// relay that opened its line through `transition` sees the line open afterwards. The
+    /// "line" carries 1 V peak at 1 kHz and the relay is set at 0.5; it trips on the first
+    /// rising quarter-cycle and the flow it watches is zero from then on, so the counter must
+    /// read exactly 1 after five cycles. Before 2.16.1 the event walk read `open` as its seed
+    /// (0) and `transition` without history, saw the line closed, and counted every later peak.
+    #[test]
+    fn a_monitored_expression_sees_the_state_its_event_set() {
+        let design = va_frontend::compile(
+            "
+module relay(a, o);
+  input a; output o;
+  electrical a, o;
+  integer open, n;
+  real g, p;
+  analog begin
+    g = 1.0 - transition(open, 0.0, 1u);
+    p = g * V(a);
+    @(cross(abs(p) - 0.5, +1)) begin
+      open = 1;
+      n = n + 1;
+    end
+    V(o) <+ n;
+  end
+endmodule
+",
+        )
+        .expect("compiles");
+        let net = va_netlist::parser::parse(
+            "Va a gnd SIN(0 1 1k)
+X1 a o relay
+.tran 2u 5m
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let o = net.node_order.iter().position(|n| n == "o").unwrap();
+        let last = wf.x.last().unwrap()[o];
+        assert!(
+            (last - 1.0).abs() < 1e-9,
+            "one trip, then nothing to see; counter reads {last}"
+        );
+    }
+
     /// An `or` list of events fires its body when either event fires, and once when both fire
     /// at the same point (LRM §5.10; 2.16.0). The clock falls at 249 ns into each 250 ns cycle
     /// (4 falling edges in 1 us); the timer fires at 100, 350, 600, 850 ns. Summed: 8 by the end,

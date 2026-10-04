@@ -433,7 +433,16 @@ struct EventPoll {
     timers: Vec<(usize, usize, f64)>,
 }
 
-fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -> EventPoll {
+/// `committed` is the integrator's committed-state buffer and `offsets` its per-instance bounds
+/// ([`StateBuffers`]): each instance's sites are evaluated against the state its accepted `load`
+/// read (`ModelInstance::events_with_state`).
+fn poll_events(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &AnalysisCtx,
+    committed: &[f64],
+    offsets: &[usize],
+) -> EventPoll {
     let mut values = Vec::with_capacity(instances.len());
     let mut breakpoints = Vec::new();
     let mut timers = Vec::new();
@@ -442,7 +451,12 @@ fn poll_events(instances: &[&dyn ModelInstance], x: &[f64], ctx: &AnalysisCtx) -
         // Polled even with no event sites: an instance may still ask for a breakpoint with
         // no event attached — a `zi_*` filter's next sample instant (2026-09-12).
         let mut sink = va_abi::events::RecordingEventSink::new();
-        inst.events(x, ctx, &mut sink);
+        let own = offsets
+            .get(i)
+            .zip(offsets.get(i + 1))
+            .and_then(|(&a, &b)| committed.get(a..b))
+            .unwrap_or(&[]);
+        inst.events_with_state(x, ctx, own, &mut sink);
         // Indexed by slot, so a model that reports out of order (or skips one) still lines up
         // with the previous timepoint's entry for the same slot. An unreported slot stays
         // `None` and takes part in no comparison at all.
@@ -1574,6 +1588,8 @@ pub fn run_with_events(
         instances,
         &x,
         &AnalysisCtx::transient(cfg.tstart).with_initial_step(true),
+        &state.committed,
+        &state.offsets,
     );
     let mut model_breakpoints: Vec<f64> = event_prev
         .breakpoints
@@ -2015,7 +2031,13 @@ pub fn run_with_events(
                 // point in the loop that is on the trajectory. Newton runs many times per
                 // timepoint and every rejected candidate is thrown away, so neither is a place
                 // to decide that something happened.
-                let poll = poll_events(instances, &x_primary, &AnalysisCtx::transient(t_next));
+                let poll = poll_events(
+                    instances,
+                    &x_primary,
+                    &AnalysisCtx::transient(t_next),
+                    &state.committed,
+                    &state.offsets,
+                );
 
                 // § bracketing. A step that reveals a crossing is generally past it by more
                 // than the source asked for, and the only way to land closer is to re-take the
@@ -2257,7 +2279,13 @@ pub fn run_with_events(
                 // body pushes its own monitored expression back across zero, that is exactly
                 // what would make it fire again immediately.
                 event_prev = if fired.any() {
-                    poll_events(instances, &x, &AnalysisCtx::transient(t))
+                    poll_events(
+                        instances,
+                        &x,
+                        &AnalysisCtx::transient(t),
+                        &state.committed,
+                        &state.offsets,
+                    )
                 } else {
                     poll
                 };

@@ -479,7 +479,8 @@ pub const WALK_STOPPED: &str = "evaluation stopped early";
 ///    exponential across them and all of which the guess below would throttle.
 /// 2. **The structural guess**, for the silent majority of models: a module whose source
 ///    contains an exponential (`exp`, or `limexp`, which the frontend lowers to the same
-///    [`Builtin::Exp`]) has *every* node treated as a junction; one without has none. Coarse on
+///    [`Builtin::Exp`]) has every **electrical** node treated as a junction (2.16.1: until then
+///    every node, temperatures and positions included); one without has none. Coarse on
 ///    purpose — the IR records where the `exp` is, not which node pair its argument ultimately
 ///    reads — and over-approximating within a model that genuinely has an exponential is the
 ///    safe direction, since the clamp exists to stop `exp(V/vt)` overflowing.
@@ -500,7 +501,17 @@ fn classify_nodes(module: &Module) -> Vec<bool> {
         .exprs
         .iter()
         .any(|e| matches!(e, Expr::Call(Builtin::Exp, _)));
-    vec![has_exponential; module.nodes.len()]
+    // Only electrical nodes (2.16.1). The limiter is a pn junction's: it clamps a step in volts
+    // against a thermal voltage and a critical voltage, which is meaningless for a node whose
+    // potential is a temperature, a position or a concentration. Guessing those junctions too
+    // throttled every non-electrical node of any module with an `exp` — an Arrhenius rate is
+    // enough — to ~0.24 units per Newton iteration: a Li-ion cell's temperature node, which
+    // starts at 0 and must reach 298 K, took ~1200 iterations and failed the operating point.
+    module
+        .nodes
+        .iter()
+        .map(|n| has_exponential && n.discipline == va_ir::Discipline::Electrical)
+        .collect()
 }
 
 impl GeneratedModel {
@@ -2254,19 +2265,32 @@ impl ModelInstance for GeneratedModel {
     /// nothing stamped and nothing printed (2.14.0), so a site may read them:
     /// `e = Temp(s) - tset; @(cross(e - band, -1)) ...` is the ordinary way to write an event, and
     /// until 2.14.0 such a site read every variable as `0.0` and **never fired**, with no error
-    /// (the module built, because the variable is assigned before the event in the block). The
-    /// walk has no committed state and no fired events: a variable that only an event body, or
-    /// only an operator's history, sets reads its persistent seed (0) here.
+    /// (the module built, because the variable is assigned before the event in the block).
     ///
-    /// No state and no fired-event input: this runs after the timepoint is accepted, and asks
-    /// only "where is this site now".
+    /// The walk reads the committed state the consumer passes ([`Self::events_with_state`],
+    /// 2.16.1), so a variable an event body set, or a `transition`'s output, has the value the
+    /// accepted point's `load` saw. Without it (this method) every such value reads its seed:
+    /// a relay whose body opened its line kept seeing the line closed.
+    ///
+    /// No fired-event input: this runs after the timepoint is accepted, and asks only "where is
+    /// this site now".
     fn events(&self, x: &[f64], actx: &va_abi::AnalysisCtx, sink: &mut dyn va_abi::EventSink) {
+        self.events_with_state(x, actx, &[], sink);
+    }
+
+    fn events_with_state(
+        &self,
+        x: &[f64],
+        actx: &va_abi::AnalysisCtx,
+        state: &[f64],
+        sink: &mut dyn va_abi::EventSink,
+    ) {
         if self.shared.module.event_sites.is_empty() && self.shared.lowered.zi_terms.is_empty() {
             return;
         }
         let setup = self.setup();
         let static_vars: &[Option<crate::ad::Dual>] = setup.map_or(&[], |s| &s.vars);
-        let ctx = self.ctx(x, actx, &[], &[], false, static_vars);
+        let ctx = self.ctx(x, actx, state, &[], false, static_vars);
         // Bind the block's variables at this point: a walk whose contributions, tasks and file
         // operations all go nowhere (its queues are dropped with `ctx`).
         if setup.is_none_or(|s| s.completed) {
@@ -4391,6 +4415,21 @@ mod tests {
         // linear circuit off the clamp.
         let linear = build_instance(&resistor_ir(), &[0, 1], &mut 2).unwrap();
         assert!(!linear.unknown_is_junction(0) && !linear.unknown_is_junction(1));
+
+        // The guess claims electrical nodes only (2.16.1). The same diode with its cathode
+        // re-declared thermal keeps the anode and drops the cathode: a pn limiter's volts and
+        // thermal voltage say nothing about a temperature.
+        let mut thermal_ir = diode_ir();
+        thermal_ir.nodes[1].discipline = va_ir::Discipline::Thermal;
+        let mixed = build_instance(&thermal_ir, &[0, 1], &mut 2).unwrap();
+        assert!(
+            mixed.unknown_is_junction(0),
+            "electrical node of an `exp` module"
+        );
+        assert!(
+            !mixed.unknown_is_junction(1),
+            "a thermal node is never a guessed junction"
+        );
     }
 
     #[test]

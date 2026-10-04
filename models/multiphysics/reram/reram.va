@@ -96,11 +96,15 @@ module reram(te, be);
 
         // SET and RESET are the gap passing the middle of its range, closing and opening.
         // `above` for SET: it fires when its expression turns positive (not at initialization,
-        // where the cell starts open and the expression is negative).
-        @(above(0.5 * (gmin + gmax) - Gap(g)))
+        // where the cell starts open and the expression is negative). Both carry a 1 ns time
+        // tolerance, so the step that reveals a crossing is re-taken to land within 1 ns of it:
+        // RESET opens the gap in ~10 us while the cell voltage moves by tens of mV, and without
+        // the bracket the values printed were those of whichever accepted point first fell past
+        // the middle, which moved with the step size.
+        @(above(0.5 * (gmin + gmax) - Gap(g), 1e-9))
             $strobe("%m: SET   at t=%.6e s: V=%.4f V, I=%.3e A, gap=%.3f nm, T=%.1f K",
                     $abstime, v, i, Gap(g), t);
-        @(cross(Gap(g) - 0.5 * (gmin + gmax), +1))
+        @(cross(Gap(g) - 0.5 * (gmin + gmax), +1, 1e-9))
             $strobe("%m: RESET at t=%.6e s: V=%.4f V, I=%.3e A, gap=%.3f nm, T=%.1f K",
                     $abstime, v, i, Gap(g), t);
     end

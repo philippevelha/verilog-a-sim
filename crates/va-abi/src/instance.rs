@@ -249,4 +249,28 @@ pub trait ModelInstance: Send + Sync {
     fn events(&self, x: &[f64], ctx: &AnalysisCtx, sink: &mut dyn EventSink) {
         let _ = (x, ctx, sink);
     }
+
+    /// [`Self::events`], with the instance's **committed state** at the accepted timepoint:
+    /// the same `prev` slice its last [`Self::load`] at this point read (§6 additive change,
+    /// 2026-10-04).
+    ///
+    /// An implementor whose monitored expressions can depend on its state — a variable an event
+    /// body set and the state channel persists, a `transition`'s output — must evaluate them
+    /// against it, or a site reads the seed values instead: a relay that opened its line
+    /// (`open = 1; g = 1 - transition(open, ...)`) went on seeing the line closed, and
+    /// "tripped" again every time the flow it no longer carries would have crossed its setting.
+    ///
+    /// `state` is the instance's own `state_len()` slice, or empty where the consumer has none
+    /// (a static analysis). Default: ignore it and call [`Self::events`], which is right for
+    /// every implementor whose sites read no state.
+    fn events_with_state(
+        &self,
+        x: &[f64],
+        ctx: &AnalysisCtx,
+        state: &[f64],
+        sink: &mut dyn EventSink,
+    ) {
+        let _ = state;
+        self.events(x, ctx, sink);
+    }
 }
