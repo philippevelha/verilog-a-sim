@@ -1,0 +1,34 @@
+* Horn-loaded loudspeaker, small signal: input impedance and radiated power at 2.83 V, and how
+* many sections the horn's ladder needs.
+*
+* The driver of models/multiphysics/speaker/ (Re 6 Ohm, Bl 15 T m, Mms 60 g, Kms 3 kN/m, Sd 500 cm^2,
+* a 100 l sealed back box), a 2 l front chamber, and an exponential horn from 200 cm^2 to 3 m^2
+* over 3.42 m (cutoff 40 Hz), radiating from its mouth. Two identical systems whose horns differ
+* only in their number of sections:
+*   X1/XH1  N = 64  (5.3 cm sections; the ladder's own cutoff, c / (pi dz), is ~2 kHz);
+*   X2/XH2  N = 256 (1.3 cm sections).
+* Reference: the same driver, chamber and mouth on the exact continuous exponential horn (the
+* Webster equation's transfer matrix), computed in docs/examples/multiphysics/speaker_plots.py.
+* What to look for (measured at 2.16.2+3): the input impedance peaks at 104 Ohm at 30 Hz (driver
+* on its box) and follows the exact horn within 0.011 % (N = 256). Radiated power against exact:
+*   N = 64:   -0.01 % at 100 Hz, +0.38 % at 251 Hz, +2.7 % at 501 Hz, -14 % at 1 kHz
+*             (mouth phase -2.1, -19 and -161 degrees off at the last three);
+*   N = 256:  within 0.21 % to 1 kHz (phase -9.2 degrees at 1 kHz, over ten wavelengths of horn).
+* About ten sections a wavelength holds the magnitude to 0.4 %; the phase needs more.
+* Plot: python docs/examples/multiphysics/speaker_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/speaker_ac.net --model models/multiphysics/speaker --ac --report V1,V2,m1,m2
+V1 p1 gnd DC 0 AC 2.83
+V2 p2 gnd DC 0 AC 2.83
+VA amb gnd DC 293.15
+X1 p1 gnd t1 th1 driver
+XC1 t1 chamber
+XH1 t1 m1 horn N=64
+XM1 m1 mouth
+XT1 th1 amb vc_thermal
+X2 p2 gnd t2 th2 driver
+XC2 t2 chamber
+XH2 t2 m2 horn N=256
+XM2 m2 mouth
+XT2 th2 amb vc_thermal
+.ac dec 40 10 1000
+.end

@@ -1,0 +1,34 @@
+* Horn-loaded loudspeaker, large signal: the nonlinear suspension and motor distort a 30 Hz tone.
+*
+* The system of speaker_ac.net (64-section horn), driven by 20 V at 30 Hz, below the horn's
+* 40 Hz cutoff where the cone moves most. Two copies:
+*   X1  nonlinear: the suspension stiffens (K doubles at 6 mm) and Bl falls (halves at 10 mm);
+*   X2  linear: the same driver with xk and xbl at 1 km.
+* Checks, in docs/examples/multiphysics/speaker_plots.py: the harmonic content of the mouth
+* pressure (odd harmonics only, the nonlinearities being symmetric), and an energy balance over
+* the last ten cycles: electrical power in = Joule heat + mechanical loss + radiated power.
+* What to look for (measured at 2.16.2+3), over the last ten cycles:
+*   X1: peak excursion 6.47 mm, its 3rd harmonic 2.3 %. But the mouth pressure's 3rd harmonic
+*       (7.39 Pa) nearly equals its fundamental (7.86 Pa): the horn radiates 90 Hz far better
+*       than 30 Hz, below its cutoff. And the coil takes 55 x the linear driver's Joule heat
+*       (2.10 J against 0.038 J): Bl falls with excursion, and the back-EMF that held the
+*       current down at the system's 30 Hz resonance goes with it.
+*   X2: 6.66 mm, the small-signal value exactly; no harmonics.
+*   Energy balance, in = Joule + mechanical + radiated: residual -0.002 % (X1), +0.001 % (X2).
+* Plot: python docs/examples/multiphysics/speaker_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/speaker_large.net --model models/multiphysics/speaker --tran --report m1,m2,X1.x,X2.x
+V1 p1 gnd SIN(0 20 30)
+V2 p2 gnd SIN(0 20 30)
+VA amb gnd DC 293.15
+X1 p1 gnd t1 th1 driver
+XC1 t1 chamber
+XH1 t1 m1 horn
+XM1 m1 mouth
+XT1 th1 amb vc_thermal
+X2 p2 gnd t2 th2 driver xk=1e3 xbl=1e3
+XC2 t2 chamber
+XH2 t2 m2 horn
+XM2 m2 mouth
+XT2 th2 amb vc_thermal
+.tran 50u 0.6
+.end

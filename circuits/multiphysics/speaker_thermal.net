@@ -1,0 +1,24 @@
+* Horn-loaded loudspeaker: thermal compression. A sustained 40 V, 200 Hz tone heats the voice
+* coil; its resistance rises 0.393 %/K and the radiated sound falls.
+*
+* The system of speaker_ac.net with a 32-section horn (16 sections a wavelength at 200 Hz), the
+* coil's thermal network at its defaults: 4 J/K, 1.5 K/W to a 400 J/K magnet, 0.8 K/W to a 20 C
+* ambient. 12 s of tone (two of the coil's 6 s time constants), 40 steps a cycle.
+* Check, in docs/examples/multiphysics/speaker_plots.py: the mouth pressure's amplitude against
+* the small-signal response computed with the coil's resistance at each moment (quasi-static: the
+* coil heats over seconds, the sound settles in milliseconds).
+* What to look for (measured at 2.16.2+3): the coil reaches 110.3 C at 12 s (R 6.00 -> 8.13 Ohm),
+* and the sound falls 2.032 dB from its level at 0.1 s; the small-signal response at the coil's
+* resistance predicts 2.028 dB. The transient sits 0.01-0.1 % above the prediction throughout
+* (the 32-section horn and the step), and stays in that band while the resistance rises 36 %.
+* Plot: python docs/examples/multiphysics/speaker_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/speaker_thermal.net --model models/multiphysics/speaker --tran --report m,th
+V1 p gnd SIN(0 40 200)
+VA amb gnd DC 293.15
+X1 p gnd t th driver tlog=2
+XC t chamber
+XH t m horn N=32
+XM m mouth
+XT th amb vc_thermal
+.tran 125u 12
+.end

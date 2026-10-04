@@ -1,0 +1,180 @@
+// Horn-loaded loudspeaker: a moving-coil driver with a nonlinear suspension and motor, an
+// exponential horn as an acoustic transmission line, its mouth's radiation load, and the voice
+// coil's heating, which raises its resistance and compresses the output.
+//
+// # Driver (`driver`)
+//
+//   electrical   V = R(T) i + Le di/dt + Bl(x) v,          R(T) = re20 (1 + 0.00393 (T − 293.15 K))
+//   mechanical   Mms dv/dt + Rms v + K(x) x + Kb x + Sd p_front = Bl(x) i
+//   suspension   K(x) = kms (1 + (x/xk)^2)                 (stiffening: a cubic restoring force)
+//   motor        Bl(x) = bl0 / (1 + (x/xbl)^2)            (the coil leaving the gap)
+//   back box     Kb = Sd^2 rho c^2 / vb                    (sealed: an air spring)
+//   acoustic     the cone pushes Sd v of volume velocity into `front`
+//   heat         R i^2 into the thermal port
+//
+// Bl(x) appears in the force and in the back-EMF alike, so the motor is lossless whatever x is:
+// the electrical power Bl(x) i v it takes is exactly the mechanical power it gives.
+//
+// # Horn (`horn`)
+//
+// Webster's horn equation for an exponential flare S(z) = st exp(m z), m = ln(sm/st) / len,
+// discretised as N sections: a pressure node per section boundary carrying the compliance of the
+// air around it, S dz / (rho c^2) (half at the two ends), and between neighbours an acoustic mass
+// rho dz / S(z_mid) carrying the volume velocity as the potential of an `acflow` state node. The
+// cutoff is f_c = m c / (4 pi); the ladder is accurate while dz is well under a wavelength.
+//
+// # Mouth (`mouth`)
+//
+// A rigid piston in a baffle, in the lumped approximation: the radiation resistance rho c / S in
+// parallel with the radiation mass 8 rho / (3 pi^2 a). Its resistance is where the acoustic power
+// leaves the circuit.
+//
+// # Verilog-A shown here
+//
+// An acoustic discipline whose Kirchhoff law is conservation of volume; a transmission line as a
+// `generate` ladder over vector nets of two user disciplines, with section values computed from
+// the genvar; a potential contribution reading its own branch current (the coil); position-
+// dependent coupling coefficients; a temperature-dependent resistance fed by the module's own
+// Joule heat through a thermal network; `@(timer)` and `@(cross)` reporting.
+//
+// # Limitations
+//
+// One-dimensional plane-wave horn (no higher modes, no wall losses), lumped radiation
+// impedance, a constant voice-coil inductance (no eddy-current semi-inductance), symmetric
+// nonlinearities, Bl and Kms independent of temperature.
+`include "disciplines.vams"
+`include "speaker_natures.vams"
+
+`define SP_PI 3.14159265358979323846
+
+module driver(p, n, front, th);
+    inout p, n, front, th;
+    electrical p, n;
+    acoustic front;
+    vc_heat th;
+
+    parameter real re20  = 6.0     from (0:inf);    // Ohm at 20 C
+    parameter real le    = 0.5e-3  from [0:inf);    // H
+    parameter real bl0   = 15.0    from (0:inf);    // T m
+    parameter real xbl   = 10e-3   from (0:inf);    // m: Bl halves at this excursion
+    parameter real mms   = 0.06    from (0:inf);    // kg, moving mass
+    parameter real rms   = 2.0     from [0:inf);    // kg/s, mechanical resistance
+    parameter real kms   = 3000    from (0:inf);    // N/m, suspension at rest
+    parameter real xk    = 6e-3    from (0:inf);    // m: the suspension stiffness doubles here
+    parameter real sd    = 0.05    from (0:inf);    // m^2, cone area
+    parameter real vb    = 0.1     from (0:inf);    // m^3, sealed back box
+    parameter real rho   = 1.2     from (0:inf);    // kg/m^3
+    parameter real c     = 343     from (0:inf);    // m/s
+    parameter real tlog  = 1e9     from (0:inf);    // s: report the coil every tlog
+    parameter integer every = 1000000 from [1:inf); // report every n-th excursion peak
+
+    mech x;
+    mech_v v;
+
+    real t, r, i, bl, fk, kb;
+    integer npk;
+
+    analog begin
+        t  = max(Temp(th), 200.0);
+        r  = re20 * (1.0 + 0.00393 * (t - 293.15));
+        i  = I(p, n);
+        bl = bl0 / (1.0 + (Pos(x) / xbl) * (Pos(x) / xbl));
+        fk = kms * Pos(x) * (1.0 + (Pos(x) / xk) * (Pos(x) / xk));
+        kb = sd * sd * rho * c * c / vb;
+
+        V(p, n) <+ r * i + le * ddt(i) + bl * Vel(v);
+        Frc(v) <+ Vel(v) - ddt(Pos(x));
+        Frc(x) <+ mms * ddt(Vel(v)) + rms * Vel(v) + fk + kb * Pos(x) + sd * Pac(front) - bl * i;
+        Uvol(front) <+ -sd * Vel(v);
+        Pwr(th) <+ -r * i * i;
+
+        @(timer(tlog, tlog))
+            $strobe("%m: t=%.1f s, coil %.2f K, R %.4f Ohm", $abstime, t, r);
+        @(cross(Vel(v), -1)) begin
+            npk = npk + 1;
+            if (npk % every == 0)
+                $strobe("%m: excursion peak %0d at t=%.6e s, x=%.6e m", npk, $abstime, Pos(x));
+        end
+    end
+endmodule
+
+// The air between the cone and the horn's throat: an acoustic compliance.
+module chamber(a);
+    inout a;
+    acoustic a;
+    parameter real vf  = 2e-3 from [0:inf);    // m^3
+    parameter real rho = 1.2  from (0:inf);
+    parameter real c   = 343  from (0:inf);
+    analog Uvol(a) <+ vf / (rho * c * c) * ddt(Pac(a));
+endmodule
+
+module horn(throat, mouth);
+    inout throat, mouth;
+    acoustic throat, mouth;
+
+    parameter integer N   = 64     from [1:inf);
+    parameter real st     = 0.02   from (0:inf);    // m^2, throat
+    parameter real sm     = 3.0    from (0:inf);    // m^2, mouth
+    parameter real len    = 3.42   from (0:inf);    // m
+    parameter real rho    = 1.2    from (0:inf);
+    parameter real c      = 343    from (0:inf);
+
+    acoustic [0:N] p;
+    acflow   [0:N-1] q;
+
+    genvar k;
+    real mf, dz;
+
+    analog begin
+        mf = ln(sm / st) / len;
+        dz = len / N;
+        Pac(throat, p[0]) <+ 0.0;
+        Pac(mouth, p[N]) <+ 0.0;
+        // The air's compliance around each boundary; half a section's at the two ends.
+        for (k = 0; k <= N; k = k + 1) begin : node
+            Uvol(p[k]) <+ ((k == 0 || k == N) ? 0.5 : 1.0) * st * exp(mf * k * dz) * dz
+                           / (rho * c * c) * ddt(Pac(p[k]));
+        end
+        // The air's mass in each section, driven by the pressure difference across it.
+        for (k = 0; k < N; k = k + 1) begin : section
+            Qres(q[k]) <+ rho * dz / (st * exp(mf * (k + 0.5) * dz)) * ddt(Qv(q[k]))
+                          - Pac(p[k], p[k + 1]);
+            Uvol(p[k])     <+ Qv(q[k]);
+            Uvol(p[k + 1]) <+ -Qv(q[k]);
+        end
+    end
+endmodule
+
+module mouth(m);
+    inout m;
+    acoustic m;
+    parameter real am  = 3.0  from (0:inf);    // m^2
+    parameter real rho = 1.2  from (0:inf);
+    parameter real c   = 343  from (0:inf);
+    acflow qr;                                   // volume velocity through the radiation mass
+    real rr, mr;
+    analog begin
+        rr = rho * c / am;
+        mr = 8.0 * rho / (3.0 * `SP_PI * `SP_PI * sqrt(am / `SP_PI));
+        Uvol(m) <+ Pac(m) / rr + Qv(qr);
+        Qres(qr) <+ mr * ddt(Qv(qr)) - Pac(m);
+    end
+endmodule
+
+// The coil's heat capacity, its thermal resistance to the magnet, and the magnet's to an ambient
+// (the volts of `amb` read as kelvin).
+module vc_thermal(th, amb);
+    inout th, amb;
+    vc_heat th;
+    electrical amb;
+    parameter real cvc  = 4.0   from (0:inf);    // J/K, voice coil
+    parameter real rvc  = 1.5   from (0:inf);    // K/W, coil to magnet
+    parameter real cmag = 400.0 from (0:inf);    // J/K, magnet and frame
+    parameter real rmag = 0.8   from (0:inf);    // K/W, magnet to ambient
+    vc_heat mg;
+    analog begin
+        Pwr(th) <+ cvc * ddt(Temp(th));
+        Pwr(th, mg) <+ Temp(th, mg) / rvc;
+        Pwr(mg) <+ cmag * ddt(Temp(mg)) + (Temp(mg) - V(amb)) / rmag;
+    end
+endmodule

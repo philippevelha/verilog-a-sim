@@ -22,6 +22,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2+3 - 2026-10-04
+---------------------
+**Multiphysics example 15: a horn loudspeaker** (`models/multiphysics/speaker/`;
+`speaker_plots.py`; `docs/multiphysics.md` and the tutorial). A moving-coil driver (stiffening
+suspension, Bl falling with excursion, sealed back box, temperature-dependent coil), an
+exponential horn as a `generate` ladder over an `acoustic` discipline, the mouth's radiation load,
+and a coil -> magnet -> ambient thermal network. Electrical, mechanical, acoustic and thermal.
+  * Small signal against the exact continuous horn (Webster transfer matrix): input impedance
+    within 0.011 % (N = 256); radiated power within 0.21 % to 1 kHz with 256 sections, while 64
+    sections are 2.7 % off at 501 Hz and 14 % at 1 kHz (the ladder's dispersion; its own cutoff,
+    c/(pi dz), is ~2 kHz).
+  * Large signal, 20 V at 30 Hz below the horn's cutoff: the cone's excursion carries 2.3 % third
+    harmonic, the mouth pressure 94 % (the horn passes 90 Hz, not 30 Hz); the nonlinear coil takes
+    55 x the linear one's Joule heat (the Bl drop removes the back-EMF at resonance). Energy
+    balance over ten cycles: residual -0.002 % and +0.001 %.
+  * Thermal compression, 40 V at 200 Hz for 12 s: coil to 110.3 C, output -2.032 dB against
+    -2.028 dB from the small-signal response at the coil's resistance.
+  * Cost, stated: the thermal deck was first 30 s with 64 sections and was on course for 45 min
+    (40 steps a cycle for 1200 cycles per coil time constant); cut to 12 s and 32 sections.
+  * Limitations: plane-wave horn without wall losses, lumped radiation impedance, constant Le,
+    symmetric nonlinearities, Bl and Kms independent of temperature.
+  * Measured at this version: the three decks 4 min 12 s together (`speaker_plots.py`); `cargo
+    test --workspace` 952 passed, `cargo xtask validate` 28/28 (as 2.16.2; no code changed).
+
+
 2.16.2+2 - 2026-10-04
 ---------------------
 **Multiphysics example 14: cavity optomechanics** (`models/multiphysics/optomech/`;

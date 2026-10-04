@@ -36,6 +36,7 @@ The examples, in the order they were built:
 | [12](#piezo) | Piezoelectric harvester | mechanical, electrical | a Duffing jump against harmonic balance, rectifiers, a broadband ensemble |
 | [13](#breaker) | Circuit-breaker arc | electrical, gas dynamics, mechanical | a state held as its logarithm, a linearly continued `exp`, current chopping against energy conservation |
 | [14](#optomech) | Cavity optomechanics | optical, mechanical, thermal | a complex field as two nodes, a delayed force, rates against the model's own eigenvalues, a limit cycle |
+| [15](#speaker) | Horn loudspeaker | electrical, mechanical, acoustic, thermal | an acoustic transmission line as a `generate` ladder, distortion through a horn, thermal compression |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -1868,6 +1869,184 @@ light heat the resonator and shift its resonance on the thermal time `cth`·`rth
 second, slow delay, a known route to self-pulsing. It is in the model but not in
 these decks.
 
+# Horn loudspeaker: transmission line, nonlinear driver, thermal compression {#speaker}
+
+**Library:** `models/multiphysics/speaker/`, which contains:
+
+- `speaker_parts.va`: `driver`, `chamber`, `horn`, `mouth`, `vc_thermal`;
+- `speaker_natures.vams`:
+  - `acoustic`: pressure in Pa, volume velocity in m³/s as flow;
+  - `acflow`: a volume velocity held as a state node's potential;
+  - `mech` and `mech_v`: the cone;
+  - `vc_heat`: temperatures.
+
+**A system assembled in the netlist.** Every deck builds the same chain from five modules:
+
+```text
+V1 p gnd ...                  the amplifier
+X1 p gnd t th driver          coil, cone, back box; pushes Sd*v into acoustic node t
+XC t chamber                  2 l of air between cone and throat
+XH t m horn N=...             the horn, throat t to mouth m
+XM m mouth                    radiation load
+XT th amb vc_thermal          coil -> magnet -> ambient (V(amb) = 293.15, read as kelvin)
+```
+
+The acoustic nets `t` and `m` are ordinary netlist nodes. Their discipline comes from the module
+ports they connect, so an acoustic node and an electrical node are written the same way.
+
+**The horn as a `generate` ladder.** Each section boundary is a pressure node, and each section
+is an acoustic mass whose volume velocity is the potential of an `acflow` node:
+
+```verilog
+for (k = 0; k <= N; k = k + 1) begin : node
+    Uvol(p[k]) <+ ((k == 0 || k == N) ? 0.5 : 1.0) * st * exp(mf * k * dz) * dz
+                   / (rho * c * c) * ddt(Pac(p[k]));
+end
+for (k = 0; k < N; k = k + 1) begin : section
+    Qres(q[k]) <+ rho * dz / (st * exp(mf * (k + 0.5) * dz)) * ddt(Qv(q[k]))
+                  - Pac(p[k], p[k + 1]);
+    Uvol(p[k])     <+ Qv(q[k]);
+    Uvol(p[k + 1]) <+ -Qv(q[k]);
+end
+```
+
+- The area, and with it every section's mass and compliance, is computed from the genvar `k`.
+- `N` sizes the vector nets `p[0:N]` and `q[0:N-1]`, so it is fixed at elaboration. A deck that
+  places two horns with different `N` gets two elaborations, and va-cli says so:
+  `elaborated 'horn' again for N=256`.
+- The ports are joined to the ladder's ends by ideal shorts, `Pac(throat, p[0]) <+ 0.0`.
+
+**Why the acoustic mass is a state node** rather than a potential contribution reading its own
+flow (`Pac(a, b) <+ M * ddt(Uvol(a, b))`, the inductor idiom). The state-node form is a plain
+ODE row, and it is the same idiom as the field quadratures and cone velocities of the other
+examples.
+
+**The coil.** `V(p, n) <+ r * i + le * ddt(i) + bl * Vel(v)` is a potential contribution reading
+its own branch current, `i = I(p, n)`. Its resistance `r` follows `Temp(th)`, and `Pwr(th) <+
+-r * i * i` sends the Joule heat into the thermal port. Bl(x) appears in both the back-EMF and
+the force, which makes the motor lossless at any excursion. The energy balance below depends on
+that.
+
+## Small signal, and how many sections a horn needs
+
+```bash
+python docs/examples/multiphysics/speaker_plots.py "$PWD/target/release/va-cli"
+```
+
+The script runs all three decks.
+
+![Input impedance and radiated power](examples/multiphysics/speaker_ac.svg)
+
+**The deck** (`speaker_ac.net`) holds two complete systems whose only difference is
+`XH1 ... horn N=64` against `XH2 ... horn N=256`.
+
+- `V1 p1 gnd DC 0 AC 2.83` is the conventional 1 W into 8 Ω drive.
+- `.ac dec 40 10 1000` gives forty points a decade.
+- `--report V1,V2,m1,m2` prints each source's current and each mouth's pressure, as magnitude
+  and phase. The impedance is 2.83/|I|, and the radiated power is |p_m|²/(2·R_rad).
+
+**The reference.** The script solves the same driver, chamber and mouth on the continuous horn.
+For S = S_t·e^{mz}, Webster's equation has the solutions p = e^{(−m/2 ± jβ)z} with
+β² = k² − m²/4. These give the horn's transfer matrix in closed form; below cutoff β is
+imaginary and the same formula holds.
+
+```text
+  f (Hz)  exact (W)     N=64    N=256   phase err 64    256
+   100.0    0.13528   -0.01%   -0.00%       -0.1 deg     -0.0 deg
+   251.2    0.08835   +0.38%   +0.02%       -2.1 deg     -0.1 deg
+   501.2    0.02632   +2.71%   +0.12%      -19.0 deg     -1.2 deg
+  1000.0    0.00211  -14.04%   -0.21%     -160.6 deg     -9.2 deg
+input impedance, N = 256: largest deviation from exact 0.011 %
+```
+
+**Choosing `N`.**
+
+- A lumped LC ladder is a low-pass filter, with its own cutoff near c/(π·dz): about 2 kHz for
+  64 sections of 5.3 cm. Above it, the ladder blocks everything. A run past 2 kHz with N = 64
+  returns 10⁻³⁹ Pa at the mouth.
+- Well below that cutoff, the ladder's wave travels slightly slower than sound. The phase error
+  accumulates along the horn, which is ten wavelengths long at 1 kHz.
+- Ten sections a wavelength hold the magnitude, but not the phase.
+
+## Large signal: distortion through a horn
+
+![Cone excursion and mouth harmonics](examples/multiphysics/speaker_large.svg)
+
+**The deck** (`speaker_large.net`) has two systems driven by `SIN(0 20 30)`:
+
+- `X1`, the nonlinear driver at its defaults;
+- `X2 ... driver xk=1e3 xbl=1e3`, which pushes both nonlinearities out to a kilometre.
+
+`.tran 50u 0.6` gives 667 steps a cycle. That is fine enough for the seventh harmonic, and the
+0.6 s lets the start-up transient die out.
+
+**Why 30 Hz.** In the horn's passband its load holds the cone to fractions of a millimetre: 0.05
+to 0.25 mm at 2.83 V. Below the 40 Hz cutoff the horn stops loading the cone, and the excursion,
+and with it the nonlinearity, grows. This is why horn systems need a high-pass filter.
+
+```text
+  nonlinear: peak excursion 6.47 mm; excursion 3rd/5th harmonic 2.31 % / 0.15 %; mouth pressure fundamental 7.858 Pa, 3rd 7.390 Pa, 5th 0.737 Pa
+             energy in 2.7324 J = Joule 2.1044 + mechanical 0.4860 + radiated 0.1420 J, residual -0.002 %
+  linear   : peak excursion 6.66 mm; excursion 3rd/5th harmonic 0.00 % / 0.00 %; mouth pressure fundamental 8.194 Pa, 3rd 0.000 Pa, 5th 0.000 Pa
+             energy in 0.6456 J = Joule 0.0382 + mechanical 0.5259 + radiated 0.0816 J, residual +0.001 %
+  linear small-signal excursion at 30 Hz: 6.66 mm
+```
+
+**Reading it.**
+
+- **The linear driver** matches its small-signal excursion exactly.
+- **The nonlinear driver's** excursion has only 2.3 % third harmonic. At the mouth, though, the
+  third harmonic is almost as strong as the fundamental: the horn passes 90 Hz and attenuates
+  30 Hz. A horn turns mild cone distortion into gross acoustic distortion below cutoff.
+- **The heat.** Bl falls with excursion (to 10.6 T·m at 6.5 mm), and with it the back-EMF that
+  held the current down at the 30 Hz resonance. The nonlinear coil takes 55× the Joule heat.
+
+**The energy balance.** The script integrates over the last ten cycles (trapezoid rule on the
+reported points):
+
+- the source's power, V·i;
+- the Joule heat, R(T)·i²;
+- the mechanical loss, Rms·v²;
+- the radiated power, p_m²/R_rad.
+
+The residual is 0.002 %. The stored energy (cone, suspension, coil, the air in the horn) returns
+to the same value after whole cycles, so it drops out.
+
+## Thermal compression
+
+![Coil temperature and output](examples/multiphysics/speaker_thermal.svg)
+
+**The deck** (`speaker_thermal.net`):
+
+- `SIN(0 40 200)` drives the system at 200 Hz, in the passband;
+- `XH ... horn N=32` gives 16 sections a wavelength at 200 Hz;
+- `.tran 125u 12` gives 40 steps a cycle for 12 s;
+- `X1 ... driver tlog=2` makes the driver's `@(timer(tlog, tlog))` print the coil every 2 s.
+
+**Why these choices.** The coil's thermal time constant (4 J/K × 1.5 K/W = 6 s) is 1200 cycles
+of the tone. Every cycle must be stepped through, so the run's cost is set by the thermal
+time, not the acoustic one.
+
+- A first version (30 s, 64 sections) was on course for 45 minutes and was stopped.
+- Twelve seconds, two time constants, show the compression developing. With half the sections,
+  the deck runs in about 3 minutes.
+- The magnet (400 J/K, 5 minutes) barely warms in that time.
+
+**The check.** The coil heats over seconds, while the sound settles in milliseconds. At every
+moment the output should therefore be the small-signal response computed with the coil's
+resistance at that moment. The script compares the two, each relative to its own value at
+0.1 s:
+
+```text
+  t =   0.1 s: coil   21.9 C, ... (ratio 1.0010); change +0.000 dB, predicted +0.000 dB
+  t =   4.0 s: coil   74.6 C, ... (ratio 1.0006); change -1.267 dB, predicted -1.264 dB
+  t =  11.9 s: coil  110.3 C, ... (ratio 1.0005); change -2.032 dB, predicted -2.028 dB
+```
+
+The ratio column is the transient's amplitude over the prediction's. It stays between 1.0001 and 1.0010
+throughout, an offset from the 32-section horn and the step, while the coil's resistance rises
+36 %. The compression itself agrees to 0.004 dB.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -1924,6 +2103,9 @@ python $F/breaker_plots.py "$VA"
 
 # Cavity optomechanics
 python $F/optomech_plots.py "$VA"
+
+# Horn loudspeaker
+python $F/speaker_plots.py "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -1942,6 +2124,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | the three piezo decks (`piezo_plots.py`) | about 4.5 min together (the storage ensemble is 4) |
 | the two breaker decks (`breaker_plots.py`) | about 3 s together |
 | the two optomechanics decks (`optomech_plots.py`, 2.3 million steps) | about 2 min together |
+| the three loudspeaker decks (`speaker_plots.py`) | about 4 min together (the thermal deck is most of it) |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

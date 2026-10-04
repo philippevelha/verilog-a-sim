@@ -1,0 +1,92 @@
+// Natures for the loudspeaker example. Include-guarded.
+//
+//   acoustic   sound pressure (Pa) as potential, volume velocity (m^3/s) as flow: Kirchhoff's
+//              current law at an acoustic node is conservation of volume;
+//   acflow     a volume velocity held as the potential of a state node (the flow through an
+//              acoustic mass), its flow the row's residual in Pa;
+//   mech       the cone's position (m) as potential, force (N) as flow (as in the MEMS example);
+//   mech_v     its velocity (m/s);
+//   vc_heat    a temperature (K) and heat flow (W).
+`ifndef SPEAKER_NATURES_VAMS
+`define SPEAKER_NATURES_VAMS
+
+nature Sound_pressure
+    units  = "Pa";
+    access = Pac;
+    abstol = 1e-6;
+endnature
+
+nature Volume_velocity
+    units  = "m^3/s";
+    access = Uvol;
+    abstol = 1e-12;
+endnature
+
+nature Mass_flow_state
+    units  = "m^3/s";
+    access = Qv;
+    abstol = 1e-12;
+endnature
+
+nature Mass_flow_residual
+    units  = "Pa";
+    access = Qres;
+    abstol = 1e-6;
+endnature
+
+nature Cone_position
+    units  = "m";
+    access = Pos;
+    abstol = 1e-12;
+endnature
+
+nature Cone_force
+    units  = "N";
+    access = Frc;
+    abstol = 1e-9;
+endnature
+
+nature Cone_velocity
+    units  = "m/s";
+    access = Vel;
+    abstol = 1e-9;
+endnature
+
+nature Coil_temperature
+    units  = "K";
+    access = Temp;
+    abstol = 1e-6;
+endnature
+
+nature Coil_heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-9;
+endnature
+
+discipline acoustic
+    potential Sound_pressure;
+    flow      Volume_velocity;
+enddiscipline
+
+discipline acflow
+    potential Mass_flow_state;
+    flow      Mass_flow_residual;
+enddiscipline
+
+discipline mech
+    potential Cone_position;
+    flow      Cone_force;
+enddiscipline
+
+discipline mech_v
+    potential Cone_velocity;
+    flow      Cone_force;
+enddiscipline
+
+discipline vc_heat
+    potential Coil_temperature;
+    flow      Coil_heat_flow;
+enddiscipline
+
+`endif

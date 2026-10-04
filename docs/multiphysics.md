@@ -21,28 +21,28 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 | `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
-| `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
-| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 | `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
-| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
-| `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
-| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
-| `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
-| integer parameters sizing structure, overridden per instance | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
+| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| integer parameters sizing structure, overridden per instance | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 | `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | a DC operating point that is a nonlinear network solve (load flow) | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
 | protection as events: a relay latching a line open | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
@@ -63,6 +63,8 @@ Which language features each example uses, so the set as a whole reads as a cove
 | `ddt` of a nonlinear function of a state (`ddt(ln(vol))`) | [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
 | a delayed, position-dependent force: anti-damping and a limit cycle, checked against the model's own linearization | [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `$strobe` from an event as a cheap envelope detector (no waveform report) | [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| an acoustic discipline (pressure, volume velocity): a transmission line as a `generate` ladder with section values computed from the genvar | [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| a self-heating element: a resistance fed by the module's own Joule heat through a thermal network | [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 
 ---
 
@@ -946,3 +948,79 @@ two-million-step run never has to report its waveform.
 - Classical: no quantum back-action and no sideband asymmetry.
 - Linear absorption.
 - The photothermal shift is lumped in one node, and these decks leave it off (`gt = 0`).
+
+---
+
+## Horn loudspeaker: an acoustic transmission line, a nonlinear driver and thermal compression
+
+**Domains:** electrical (the voice coil), mechanical (the cone), acoustic (the horn as a
+transmission line, a front chamber and the mouth's radiation load), thermal (coil, magnet,
+ambient). **Models:** `models/multiphysics/speaker/speaker_parts.va` and `speaker_natures.vams`.
+The `acoustic` discipline has pressure as potential and volume velocity as flow, so Kirchhoff's
+current law at an acoustic node is conservation of volume.
+
+The driver is a moving coil: V = R(T)·i + Le·di/dt + Bl(x)·v and
+Mms·dv/dt + Rms·v + K(x)·x + Kb·x + Sd·p = Bl(x)·i, with:
+
+- a stiffening suspension, K(x) = kms·(1 + (x/xk)²);
+- a motor whose force factor falls as the coil leaves the gap, Bl(x) = Bl₀/(1 + (x/xbl)²);
+- a sealed back box acting as an air spring, Kb.
+
+The horn is exponential, 200 cm² to 3 m² over 3.42 m, with a 40 Hz cutoff. It is a `generate`
+ladder: pressure nodes carrying the air's compliance, and between them acoustic masses whose
+volume velocity is a state node. Every section's values are computed from the genvar.
+
+### 1. Small signal, against the exact horn
+
+```bash
+python docs/examples/multiphysics/speaker_plots.py target/release/va-cli
+```
+
+![Input impedance and radiated power](examples/multiphysics/speaker_ac.svg)
+
+The reference is the same driver, chamber and mouth on the **continuous** exponential horn,
+whose transfer matrix the Webster equation gives in closed form. The input impedance follows it
+within 0.011 %. The radiated power shows how fine the ladder has to be:
+
+| Frequency | N = 64 | N = 256 |
+|---|---|---|
+| 100 Hz | −0.01 % | −0.00 % |
+| 251 Hz | +0.38 % | +0.02 % |
+| 501 Hz | +2.7 % (phase −19°) | +0.12 % (−1.2°) |
+| 1 kHz | −14 % (phase −161°) | −0.21 % (−9.2°) |
+
+About ten sections a wavelength hold the magnitude to 0.4 %. The phase, accumulated over ten
+wavelengths of horn at 1 kHz, needs more.
+
+### 2. Large signal: what a horn does to distortion
+
+![Cone excursion and mouth harmonics](examples/multiphysics/speaker_large.svg)
+
+20 V at 30 Hz, below the cutoff, where the horn unloads the cone. The nonlinear driver moves
+6.47 mm with only 2.3 % third harmonic in its excursion. Yet at the mouth the third harmonic
+(7.39 Pa) nearly equals the fundamental (7.86 Pa), because the horn radiates 90 Hz far better
+than 30 Hz.
+
+The same nonlinearity costs heat. Bl falls with excursion, and with it the back-EMF that holds
+the current down at the system's 30 Hz resonance (the 104 Ω impedance peak). The nonlinear coil
+dissipates **55×** the linear one's Joule heat: 2.10 J against 0.038 J over ten cycles.
+
+Energy balance over those ten cycles, electrical in = Joule + mechanical + radiated: residual
+−0.002 % (nonlinear) and +0.001 % (linear).
+
+### 3. Thermal compression
+
+![Coil temperature and output](examples/multiphysics/speaker_thermal.svg)
+
+40 V at 200 Hz for 12 s. The coil reaches 110 °C, and its resistance rises from 6.0 to 8.1 Ω. The
+sound falls 2.032 dB. The small-signal response, computed with the coil's resistance at each
+moment, predicts 2.028 dB. The transient sits 0.01–0.1 % above the prediction throughout (the
+32-section horn and the step), and stays in that band while the resistance rises 36 %.
+
+**Limitations.**
+
+- A one-dimensional plane-wave horn, with no wall losses.
+- A lumped radiation impedance at the mouth.
+- A constant voice-coil inductance (no semi-inductance).
+- Symmetric nonlinearities.
+- Bl and Kms independent of temperature.
