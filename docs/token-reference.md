@@ -1584,8 +1584,12 @@ including the ones with no implemented behavior at all.
     every corpus compact model writes) records one junction per node, not two.
   - `va-codegen` reports exactly those nodes through `ModelInstance::unknown_is_junction`, and
     reports `false` for every node the declaration left out. A module that declares nothing
-    keeps the structural guess: every node of a module whose source contains an `exp` is
-    treated as a junction, and none of a module without one.
+    keeps the structural guess: if its source contains an `exp` whose argument may read an
+    electrical quantity (an electrical branch's probe directly, or, conservatively, any
+    variable or user function), every **electrical** node is treated as a junction; otherwise
+    none is. (2.16.1 narrowed the guess to electrical nodes, 2.16.2 to `exp`s that may read
+    one: an Arrhenius `exp` of a temperature, or a breaker arc's `exp` of its log-conductance,
+    no longer limits the module's terminals.)
   - `va-core`'s `newton::solve` clamps a junction unknown's step through
     `convergence::limit_junction`, as it already did — no ABI change was needed, only a
     truthful answer to a question it was already asking.

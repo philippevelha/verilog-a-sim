@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2 - 2026-10-04
+-------------------
+**The structural junction guess counts an `exp` only when its argument may read an electrical
+quantity.** Since 2.16.1 the guess (a module with `exp` and no `$limit` has its electrical nodes
+step-limited like a pn junction's voltage) was limited to electrical nodes, but any `exp` still
+triggered it.
+  * Found by the circuit-breaker example: its arc is held as ln g, and `exp(Lg(lg))` made both
+    breaker terminals "junctions". Newton then cycled on the limiter's 0.33 V clamp at the
+    terminal, every step longer than 0.3 ns failed, and a 25 ms run had not finished after ten
+    minutes. With the fix it takes under a second.
+  * Rule: an `exp` counts if its argument may read an electrical quantity: a probe of a branch
+    with a non-ground electrical node, directly or through any operator, or, conservatively,
+    any variable or user function (their values are not traced). Constants, parameters and
+    `$param_given`-style queries do not count. A diode's `exp(V(a,c)/vt)` still counts.
+  * Deck-diff against 2.16.1+3: 127 identical, 2 different, 13 skipped. The two are the new,
+    not-yet-committed breaker decks: `breaker_static` takes 10,079 points where it took 61,876;
+    `breaker_interrupt` was killed on the old binary after 8 minutes of 0.3 ns steps. Every
+    committed deck, ReRAM included, is bit-identical (its `exp` arguments reach a voltage).
+  * Test: `an_exp_of_a_non_electrical_state_is_not_a_junction` (an Arrhenius `exp` of a thermal
+    state is not a junction; a diode `exp` is).
+  * Measured at this version: `cargo test --workspace` 952 passed, 0 failed, 0 ignored (1 new);
+    `cargo xtask validate` 28/28.
+
+
 2.16.1+3 - 2026-10-04
 ---------------------
 **Multiphysics example 10: a piezoelectric harvester** (`models/multiphysics/piezo/`;

@@ -6388,6 +6388,41 @@ X1 clk o counter
         );
     }
 
+    /// The structural junction guess reads an `exp` as a junction hint only when its argument
+    /// may read an electrical quantity (2.16.2). An `exp` of a state of another discipline -- here
+    /// a temperature, as in an Arrhenius factor; in the breaker example an arc's log-conductance --
+    /// leaves the electrical terminal unlimited; an `exp` of a voltage still marks it.
+    #[test]
+    fn an_exp_of_a_non_electrical_state_is_not_a_junction() {
+        let build = |src: &str| {
+            let design = va_frontend::compile(src).expect("compiles");
+            let m = &design.modules[0];
+            let terminals: Vec<usize> = (0..m.nodes.len()).collect();
+            let mut next = m.nodes.len();
+            va_codegen::build_instance(m, &terminals, &mut next).expect("builds")
+        };
+        let arrhenius = build(
+            "`include \"disciplines.vams\"
+module arr(a, t); inout a, t; electrical a; thermal t;
+  analog begin I(a) <+ exp(-1.0 / max(Temp(t), 1.0)) * V(a); Pwr(t) <+ Temp(t); end
+endmodule",
+        );
+        assert!(
+            !arrhenius.unknown_is_junction(0),
+            "a's only exp is of a temperature"
+        );
+        let diode = build(
+            "`include \"disciplines.vams\"
+module dio(a); inout a; electrical a;
+  analog I(a) <+ 1e-14 * (exp(V(a) / 0.025) - 1.0);
+endmodule",
+        );
+        assert!(
+            diode.unknown_is_junction(0),
+            "an exp of a voltage is still a junction"
+        );
+    }
+
     /// A monitored expression is evaluated against the instance's committed state (2.16.1): a
     /// relay that opened its line through `transition` sees the line open afterwards. The
     /// "line" carries 1 V peak at 1 kHz and the relay is set at 0.5; it trips on the first

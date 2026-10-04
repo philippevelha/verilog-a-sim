@@ -497,10 +497,15 @@ fn classify_nodes(module: &Module) -> Vec<bool> {
             .map(|i| module.node_is_limited_junction(va_ir::NodeId(i as u32)))
             .collect();
     }
-    let has_exponential = module
-        .exprs
-        .iter()
-        .any(|e| matches!(e, Expr::Call(Builtin::Exp, _)));
+    // Only an exponential that may read an electrical quantity hints at a junction (2.16.2): an
+    // `exp` of a state of another discipline -- a breaker arc's log-conductance, an Arrhenius
+    // factor of a temperature -- has no voltage to limit, and limiting the module's electrical
+    // nodes then only throttles Newton (a breaker's terminal node cycled at a 0.33 V clamp,
+    // never converging, so every step was halved to 0.3 ns).
+    let has_exponential = module.exprs.iter().any(|e| match e {
+        Expr::Call(Builtin::Exp, args) => args.iter().any(|&a| may_read_electrical(module, a)),
+        _ => false,
+    });
     // Only electrical nodes (2.16.1). The limiter is a pn junction's: it clamps a step in volts
     // against a thermal voltage and a critical voltage, which is meaningless for a node whose
     // potential is a temperature, a position or a concentration. Guessing those junctions too
@@ -512,6 +517,44 @@ fn classify_nodes(module: &Module) -> Vec<bool> {
         .iter()
         .map(|n| has_exponential && n.discipline == va_ir::Discipline::Electrical)
         .collect()
+}
+
+/// Whether expression `e` may depend on an electrical quantity: a potential or flow of a branch
+/// touching an electrical node. Conservative where it cannot see: a variable or a user function
+/// may carry anything, so either counts as "may". Used by [`classify_nodes`] to tell an `exp` of
+/// a voltage (a junction) from an `exp` of a temperature or of another discipline's state.
+fn may_read_electrical(module: &Module, e: va_ir::ExprId) -> bool {
+    // A branch's discipline is its non-ground node's: `Lg(x)` is a branch from `x` to the
+    // module's reference node, and that node is electrical whatever `x` is. The reference node
+    // is the one the frontend interns as `gnd` (as `va-cli` identifies it too).
+    let electrical = |b: va_ir::BranchId| {
+        module.branches.get(b.0 as usize).is_some_and(|br| {
+            [br.p, br.n].iter().any(|n| {
+                module.nodes.get(n.0 as usize).is_some_and(|d| {
+                    d.name != "gnd" && d.discipline == va_ir::Discipline::Electrical
+                })
+            })
+        })
+    };
+    match module.exprs.get(e.0 as usize) {
+        None => true,
+        Some(expr) => match expr {
+            Expr::Const(_)
+            | Expr::Param(_)
+            | Expr::ParamGiven(_)
+            | Expr::PortConnected(_)
+            | Expr::EventFired(_) => false,
+            Expr::Var(_) | Expr::CallUser(..) => true,
+            Expr::Probe(acc) => electrical(acc.branch),
+            Expr::Ddx(a, acc) => electrical(acc.branch) || may_read_electrical(module, *a),
+            Expr::Unary(_, a) => may_read_electrical(module, *a),
+            Expr::Binary(_, a, b) => {
+                may_read_electrical(module, *a) || may_read_electrical(module, *b)
+            }
+            Expr::Call(_, args) => args.iter().any(|&a| may_read_electrical(module, a)),
+            Expr::Select(c, t, f) => [*c, *t, *f].iter().any(|&a| may_read_electrical(module, a)),
+        },
+    }
 }
 
 impl GeneratedModel {
