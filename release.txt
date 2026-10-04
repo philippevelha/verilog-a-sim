@@ -22,9 +22,21 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2+5 - 2026-10-04
+---------------------
+**Release-log numbering fix.** The entries for 2.16.2+1 to +4 (and their commit subjects, which
+are left as committed) numbered the circuit breaker, optomechanics, loudspeaker and SEU examples
+13 to 16: those were their section numbers in the tutorial. In the count the earlier entries use
+(piezo harvester = example 10) they are examples 11 to 14, and the entries now say so. With them
+all fourteen examples of `docs/examples/examples_to_implement.txt` exist; not covered from that
+list: the optomechanics item's photothermal bistability and chaos (the model has the
+photothermal path, `gt`, but no deck exercises it).
+  * Measured at this version: no code or deck changed; as 2.16.2+4.
+
+
 2.16.2+4 - 2026-10-04
 ---------------------
-**Multiphysics example 16: an SRAM single-event upset** (`models/multiphysics/seu/`;
+**Multiphysics example 14: an SRAM single-event upset** (`models/multiphysics/seu/`;
 `seu_plots.py`; `docs/multiphysics.md` and the tutorial). An ion track's charge collected by
 diffusion (a 50-slice `generate` ladder of a `carrier` discipline, the deposit set as the
 operating point through `analysis("static")`), a 6T cell of simplified-EKV transistors held in
@@ -45,7 +57,7 @@ its state by `.nodeset`, and the critical charge found by bisection over generat
 
 2.16.2+3 - 2026-10-04
 ---------------------
-**Multiphysics example 15: a horn loudspeaker** (`models/multiphysics/speaker/`;
+**Multiphysics example 13: a horn loudspeaker** (`models/multiphysics/speaker/`;
 `speaker_plots.py`; `docs/multiphysics.md` and the tutorial). A moving-coil driver (stiffening
 suspension, Bl falling with excursion, sealed back box, temperature-dependent coil), an
 exponential horn as a `generate` ladder over an `acoustic` discipline, the mouth's radiation load,
@@ -70,7 +82,7 @@ and a coil -> magnet -> ambient thermal network. Electrical, mechanical, acousti
 
 2.16.2+2 - 2026-10-04
 ---------------------
-**Multiphysics example 14: cavity optomechanics** (`models/multiphysics/optomech/`;
+**Multiphysics example 12: cavity optomechanics** (`models/multiphysics/optomech/`;
 `optomech_plots.py`; `docs/multiphysics.md` and the tutorial). A 10 MHz mechanical mode in a
 1550 nm cavity: the field as two real nodes, radiation pressure as a force from the stored energy,
 the detuning moved by the displacement. Optical, mechanical and (unused here) thermal domains.
@@ -94,7 +106,7 @@ the detuning moved by the displacement. Optical, mechanical and (unused here) th
 
 2.16.2+1 - 2026-10-04
 ---------------------
-**Multiphysics example 13: a circuit-breaker arc** (`models/multiphysics/breaker/`;
+**Multiphysics example 11: a circuit-breaker arc** (`models/multiphysics/breaker/`;
 `breaker_plots.py`; `docs/multiphysics.md` and the tutorial). A Mayr arc between moving contacts,
 cooled by the gas a puffer blows across it; the puffer is compressed by the contacts' travel and
 heated by the arc. Electrical, gas dynamics and mechanical domains in one module.
