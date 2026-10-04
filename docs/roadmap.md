@@ -5018,7 +5018,10 @@ to choose, as 2.0's was, and the list below is evidence for that choice, not a p
    Evaluation dominates, and `docs/proposals/transient-solve.md` (C)–(E) has the options.
 4. **Model licenses.** BSIM4 (CC-BY-NC Verilog-A port) and HICUM/L2 (no license statement) are
    not in `benchmark/`, so their decks run only from a local `external/`. `nand/hisim2.net`
-   fails on every platform (a NaN on Newton's first iteration).
+   failed on every platform (a NaN on Newton's first iteration) until 2.15.0, which found the
+   cause was not convergence: its PMOS devices were elaborated with the NMOS defaults HiSIM2
+   computes from `TYPE` (`MUEPH1`, `BB`), because a deck override never reached a parameter
+   default folded at elaboration. It solves now.
 5. **`.nodeset`'s held phase** (SPICE solves with the nodes clamped first). Worth doing only if a
    circuit with several operating points needs it; ISCAS'85 does not (initial-guess.md §4).
 6. **Keeping 2.0's reproducibility.** CI's `repro-compare` gate (Linux = macOS = Windows, 68

@@ -413,7 +413,11 @@ pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)
         .with_context(|| format!("parsing {netlist}"))?;
 
     let compiled = match model {
-        Some(path) => compile_model_path(path)?,
+        Some(path) => {
+            let (mut modules, _, ctx) = compile_model_library_with_context(path)?;
+            elaborate_for_devices(&net, &mut modules, &ctx)?;
+            modules
+        }
         None => Vec::new(),
     };
 
@@ -438,6 +442,11 @@ pub fn load(netlist: &str, model: Option<&str>) -> Result<(Netlist, Vec<Module>)
 /// If a file cannot be read, or any module fails to parse or elaborate. A directory containing
 /// a file that is not a model is an error rather than a skip: `sim` is being told *this is the
 /// library*, unlike `check`, whose whole job is to survey files of unknown quality.
+///
+/// Test-only since 2.15.0: a library compiled for a deck goes through
+/// [`compile_model_library_with_context`] and [`elaborate_for_devices`], so that a device
+/// setting a parameter the module folds at elaboration gets an elaboration with its value.
+#[cfg(test)]
 fn compile_model_path(path: &str) -> Result<Vec<Module>> {
     compile_model_library(path).map(|(modules, _)| modules)
 }
@@ -520,7 +529,25 @@ fn library_entry_files(path: &str) -> Result<(Vec<std::path::PathBuf>, std::path
 /// resolve against its own library's directory only, so two libraries that each ship a
 /// `disciplines.vams` do not pick up each other's; the modules of all of them then elaborate
 /// as one unit, in the order the libraries were given.
+#[cfg(test)]
 fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> {
+    compile_model_library_with_context(path).map(|(modules, files, _)| (modules, files))
+}
+
+/// What elaborating a library needed, kept so a module can be elaborated **again** with a
+/// device's parameter values ([`elaborate_for_devices`]): the parsed modules, and the
+/// disciplines, natures and include path they were elaborated against.
+struct ElabContext {
+    library: Vec<va_frontend::ast::ModuleAst>,
+    disciplines: std::collections::HashMap<String, va_frontend::disciplines::DisciplineDecl>,
+    natures: std::collections::HashMap<String, va_frontend::disciplines::NatureDecl>,
+    include_dirs: Vec<std::path::PathBuf>,
+}
+
+/// [`compile_model_library`], also returning the [`ElabContext`] it elaborated with.
+fn compile_model_library_with_context(
+    path: &str,
+) -> Result<(Vec<Module>, Vec<LibraryFile>, ElabContext)> {
     let mut files: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     let mut include_dirs: Vec<std::path::PathBuf> = Vec::new();
     for entry in path.split(MODEL_PATH_SEPARATOR).filter(|e| !e.is_empty()) {
@@ -606,7 +633,13 @@ fn compile_model_library(path: &str) -> Result<(Vec<Module>, Vec<LibraryFile>)> 
     );
     warn_unplaceable_modules(&modules, path);
     warn_mfactor_double_scaling(&modules, path);
-    Ok((modules, library_files))
+    let ctx = ElabContext {
+        library,
+        disciplines,
+        natures,
+        include_dirs,
+    };
+    Ok((modules, library_files, ctx))
 }
 
 /// Print a refusal's labelled fields under a `check` verdict line, on stdout with the rest of
@@ -798,7 +831,11 @@ pub fn run_sim(
         eprintln!("[va-cli] note: {note}");
     }
     let (compiled, library_files) = match model {
-        Some(path) => compile_model_library(path)?,
+        Some(path) => {
+            let (mut modules, files, ctx) = compile_model_library_with_context(path)?;
+            elaborate_for_devices(&net, &mut modules, &ctx)?;
+            (modules, files)
+        }
         None => (Vec::new(), Vec::new()),
     };
 
@@ -3124,6 +3161,16 @@ fn build_instance(
 /// `psp103va` means the module `PSP103VA`. Two modules matching it ignoring case is ambiguous
 /// and refused rather than picked between.
 fn module_for<'a>(compiled: &'a [Module], dev: &Device) -> Result<Option<&'a Module>> {
+    match base_module_for(compiled, dev)? {
+        Some(base) => elaboration_for(compiled, base, dev).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The module `dev` names, as the library first elaborated it — at its declared defaults. The
+/// first module of that name in `compiled`, since [`elaborate_for_devices`] appends its
+/// re-elaborations after the library's own modules.
+fn base_module_for<'a>(compiled: &'a [Module], dev: &Device) -> Result<Option<&'a Module>> {
     if let Some(m) = compiled.iter().find(|m| m.name == dev.model) {
         return Ok(Some(m));
     }
@@ -3134,6 +3181,9 @@ fn module_for<'a>(compiled: &'a [Module], dev: &Device) -> Result<Option<&'a Mod
         .iter()
         .filter(|m| m.name.eq_ignore_ascii_case(&dev.model));
     let first = hits.next();
+    // A re-elaboration carries its module's name, so only a *differently* spelled module is a
+    // second match.
+    let mut hits = hits.filter(|m| first.is_some_and(|f| f.name != m.name));
     if let Some(second) = hits.next() {
         bail!(
             "`{}` names model `{}`, which matches both `{}` and `{}` ignoring case — SPICE              names are case-insensitive, so the deck cannot say which; rename one module",
@@ -3144,6 +3194,178 @@ fn module_for<'a>(compiled: &'a [Module], dev: &Device) -> Result<Option<&'a Mod
         );
     }
     Ok(first)
+}
+
+/// The values `dev` gives the parameters `base` folded at elaboration
+/// ([`va_ir::Module::elaboration_params`]), one per folded parameter the device line sets — by
+/// name, or positionally as the first parameter, the name winning as in
+/// [`compile_with_overrides`]. Empty when the line sets none of them, which is when `base`
+/// itself serves.
+fn elaboration_values(base: &Module, dev: &Device) -> Result<Vec<(va_ir::ParamId, f64)>> {
+    if base.elaboration_params.is_empty() {
+        return Ok(Vec::new());
+    }
+    let params = if dev.spice_names {
+        spice_param_names(base, &dev.params)?
+    } else {
+        dev.params.clone()
+    };
+    let mut out = Vec::new();
+    for &pid in &base.elaboration_params {
+        let name = &base.params[pid.0 as usize].name;
+        let named = params
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| *v);
+        let positional = if pid.0 == 0 { dev.value } else { None };
+        if let Some(v) = named.or(positional) {
+            out.push((pid, v));
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `m` was elaborated with exactly `values` for the parameters `base` folded: each one
+/// given (`$param_given`) with its stated value, bit for bit, and every other one not given.
+///
+/// An elaboration is a function of the values it was given and nothing else, so that is the
+/// whole identity. A folded parameter the device leaves alone is *not* compared with `base`'s
+/// default: its default may be computed from one the device does set (BSIM's defaults read
+/// `TYPE`), and then a `TYPE=-1` elaboration rightly differs from the base there.
+fn elaborated_with(m: &Module, base: &Module, values: &[(va_ir::ParamId, f64)]) -> bool {
+    base.elaboration_params
+        .iter()
+        .all(|&pid| match values.iter().find(|(p, _)| *p == pid) {
+            Some((_, v)) => {
+                m.param_is_given(pid)
+                    && m.params.get(pid.0 as usize).map(|p| p.default.to_bits())
+                        == Some(v.to_bits())
+            }
+            None => !m.param_is_given(pid),
+        })
+}
+
+/// The elaboration of `base` that `dev` must be built from: `base` itself unless the device sets
+/// a parameter `base` folded, else the re-elaboration [`elaborate_for_devices`] made for those
+/// values.
+///
+/// # Errors
+///
+/// If no such re-elaboration exists — the library was compiled without the netlist that places
+/// the device, by a caller that skipped [`elaborate_for_devices`]. Falling back to `base` would
+/// be the silent wrong answer this exists to prevent.
+fn elaboration_for<'a>(
+    compiled: &'a [Module],
+    base: &'a Module,
+    dev: &Device,
+) -> Result<&'a Module> {
+    let values = elaboration_values(base, dev)?;
+    if values.is_empty() {
+        return Ok(base);
+    }
+    compiled
+        .iter()
+        .filter(|m| m.name == base.name)
+        .find(|m| elaborated_with(m, base, &values))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "`{}` sets {}, which model `{}` fixes at elaboration, but the library holds no \
+                 elaboration of it with that value — compile the library with the deck that \
+                 places it (`va_cli::load`)",
+                dev.name,
+                describe_values(base, &values),
+                base.name
+            )
+        })
+}
+
+/// `N=300, len=0.06`: the folded parameters a device line sets, for a message.
+fn describe_values(base: &Module, values: &[(va_ir::ParamId, f64)]) -> String {
+    values
+        .iter()
+        .map(|(p, v)| format!("{}={v}", base.params[p.0 as usize].name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Elaborate again every module a device in `net` places with a value for a parameter the module
+/// folded at elaboration — a vector net's width, a `generate` loop's bound, another parameter's
+/// default ([`va_ir::Module::elaboration_params`]) — and append each distinct result to
+/// `modules`, where [`module_for`] finds it.
+///
+/// Until 2.15.0 a device line's overrides were applied to the one elaboration at the module's
+/// defaults, which reaches every analog-block read of a parameter and nothing elaboration had
+/// already folded: `N=300` on a cable declared `electrical [0:N-1] v` kept its 150 compartments
+/// and divided its length by 300, and `a=5` left `parameter real b = 2*a` at 2. Both ran and
+/// reported numbers.
+///
+/// One elaboration per distinct set of folded values, not per device: a thousand devices on two
+/// cards elaborate twice. A line that sets no folded parameter uses the library's elaboration,
+/// unchanged.
+///
+/// # Errors
+///
+/// If a re-elaboration fails — an override outside its parameter's declared range is the usual
+/// cause, which the frontend reports with the module and the parameter.
+fn elaborate_for_devices(
+    net: &Netlist,
+    modules: &mut Vec<Module>,
+    ctx: &ElabContext,
+) -> Result<()> {
+    let mut extra: Vec<Module> = Vec::new();
+    for dev in &net.devices {
+        let Some(base) = base_module_for(modules, dev)? else {
+            continue;
+        };
+        let values = elaboration_values(base, dev)?;
+        if values.is_empty()
+            || extra
+                .iter()
+                .any(|m| m.name == base.name && elaborated_with(m, base, &values))
+        {
+            continue;
+        }
+        let ast = ctx
+            .library
+            .iter()
+            .find(|a| a.name == base.name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "module `{}` has no parsed source to elaborate again",
+                    base.name
+                )
+            })?;
+        let overrides: std::collections::HashMap<String, f64> = values
+            .iter()
+            .map(|(p, v)| (base.params[p.0 as usize].name.clone(), *v))
+            .collect();
+        let m = va_frontend::elaborate::elaborate_unit_with_overrides(
+            ast,
+            &ctx.library,
+            &ctx.disciplines,
+            &ctx.natures,
+            &ctx.include_dirs,
+            &overrides,
+        )
+        .with_context(|| {
+            format!(
+                "elaborating module `{}` for `{}` with {}",
+                base.name,
+                dev.name,
+                describe_values(base, &values)
+            )
+        })?;
+        eprintln!(
+            "[va-cli] elaborated `{}` again for {}: fixed at elaboration (first placed by `{}`)",
+            base.name,
+            describe_values(base, &values),
+            dev.name
+        );
+        extra.push(m);
+    }
+    modules.extend(extra);
+    Ok(())
 }
 
 /// A SPICE-syntax device's parameter names (`Device::spice_names`), respelled as `module`
@@ -3841,6 +4063,66 @@ mod tests {
             .expect_err("placing the folded model is still refused");
         assert!(err.to_string().contains("absdelay"), "{err}");
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A device line that sets a parameter the module folds at elaboration gets an elaboration
+    /// with its value (2.15.0). Before, the override reached the analog block and nothing
+    /// folded: a bus declared `[0:n-1]` kept its default width, and `b = 2*a` kept the default
+    /// `a`'s value — both silently. Two devices on the same deck with different values get
+    /// their own elaborations, and one at the default keeps the library's.
+    #[test]
+    fn a_device_override_of_a_folded_parameter_is_elaborated_with_its_value() {
+        let dir = std::env::temp_dir().join("va_cli_folded_override_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A load of `n` unit-ish conductances in parallel, each `b = 2*a` siemens: the current
+        // drawn at 1 V is n * 2a.
+        let model = dir.join("par.va");
+        std::fs::write(
+            &model,
+            "`include \"disciplines.vams\"\n\
+             module par(p); inout p; electrical p;\n\
+             parameter integer n = 2; parameter real a = 1.0; parameter real b = 2.0 * a;\n\
+             electrical [0:n-1] v; genvar k;\n\
+             analog for (k = 0; k < n; k = k + 1) begin\n\
+               I(p, v[k]) <+ 1e3 * V(p, v[k]); I(v[k]) <+ b * V(v[k]);\n\
+             end\nendmodule\n",
+        )
+        .unwrap();
+        let deck = dir.join("par.net");
+        std::fs::write(
+            &deck,
+            "* folded overrides\nV1 p gnd DC 1\nV2 q gnd DC 1\nV3 r gnd DC 1\n\
+             X1 p par n=5 a=3\nX2 q par\nX3 r par a=0.5\n.op\n.end\n",
+        )
+        .unwrap();
+        let (net, compiled) = load(
+            &deck.display().to_string(),
+            Some(&model.display().to_string()),
+        )
+        .expect("loads");
+        // The library's own elaboration, plus one for each distinct folded set (X1, X3).
+        assert_eq!(compiled.iter().filter(|m| m.name == "par").count(), 3);
+        let op = solve_dc(&net, &compiled).expect("solves");
+        let current = |src: &str| {
+            let (_, idx) = branch_currents(&net, &compiled)
+                .unwrap()
+                .into_iter()
+                .find(|(n, _)| n == src)
+                .unwrap();
+            -op.x[idx]
+        };
+        // Each branch is 1 mΩ in series with b; the series term moves the 4th significant digit.
+        let expect = |n: f64, a: f64| n / (1e-3 + 1.0 / (2.0 * a));
+        for (src, n, a) in [("V1", 5.0, 3.0), ("V2", 2.0, 1.0), ("V3", 2.0, 0.5)] {
+            let i = current(src);
+            assert!(
+                (i - expect(n, a)).abs() < 1e-9 * expect(n, a),
+                "{src}: drew {i} A, expected {} A for n={n}, a={a}",
+                expect(n, a)
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -62,6 +62,7 @@ Module {
     ],
     event_sites: [],
     local_params: [],
+    elaboration_params: [],
     unconnected_ports: [],
     mfactor: None,
     given_params: [],

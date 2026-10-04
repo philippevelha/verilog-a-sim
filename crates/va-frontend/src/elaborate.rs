@@ -177,11 +177,44 @@ pub fn elaborate_unit(
     natures: &HashMap<String, NatureDecl>,
     include_dirs: &[std::path::PathBuf],
 ) -> Result<Module, FrontendError> {
+    elaborate_unit_with_overrides(
+        ast,
+        library,
+        disciplines,
+        natures,
+        include_dirs,
+        &HashMap::new(),
+    )
+}
+
+/// [`elaborate_unit`] with parameter values set by the instantiating context — a netlist
+/// device line — rather than left at their declared defaults.
+///
+/// The values that matter here are the ones elaboration *folds*: a vector net's range, a
+/// `generate` loop's bound, another parameter's default. A module elaborated once at its
+/// defaults has those baked in, and setting the parameter afterwards on the IR's
+/// [`va_ir::Param::default`] reaches every analog-block read and none of them. Which
+/// parameters a module folded is recorded in [`va_ir::Module::elaboration_params`]; a caller
+/// whose override touches one re-elaborates through here. Each override is held to the
+/// parameter's declared range and marks it given (`$param_given`), exactly as a `#(...)`
+/// override from a parent module does.
+///
+/// # Errors
+///
+/// As [`elaborate_unit`], plus an override outside its parameter's declared range.
+pub fn elaborate_unit_with_overrides(
+    ast: &ModuleAst,
+    library: &[ModuleAst],
+    disciplines: &HashMap<String, DisciplineDecl>,
+    natures: &HashMap<String, NatureDecl>,
+    include_dirs: &[std::path::PathBuf],
+    overrides: &HashMap<String, f64>,
+) -> Result<Module, FrontendError> {
     elaborate_inner(
         ast,
         library,
         &[],
-        &HashMap::new(),
+        overrides,
         &HashSet::new(),
         disciplines,
         natures,
@@ -230,8 +263,20 @@ fn elaborate_inner(
         genvar_env: HashMap::new(),
         vectors: HashMap::new(),
         var_arrays: HashMap::new(),
+        elab_reads: std::cell::RefCell::new(std::collections::BTreeSet::new()),
     };
     e.run()?;
+    // § elaboration-time parameters: every parameter whose value `const_eval` read, by id. An
+    // `aliasparam` resolves to its target's id, so overriding either spelling is caught.
+    let mut fixed: Vec<ParamId> = e
+        .elab_reads
+        .borrow()
+        .iter()
+        .filter_map(|name| e.params.get(name).copied())
+        .collect();
+    fixed.sort_by_key(|p| p.0);
+    fixed.dedup();
+    e.out.elaboration_params = fixed;
     Ok(e.out)
 }
 
@@ -390,6 +435,12 @@ struct Elaborator<'a> {
     /// `Select`/`If` chain over every declared value of that one dimension, since there is still
     /// no runtime-indexable-storage concept in the IR itself.
     var_arrays: HashMap<String, Vec<(i64, i64)>>,
+    /// Every parameter name [`Self::const_eval`] has read — the parameters whose values this
+    /// elaboration folded into structure or into another parameter's default, published as
+    /// [`va_ir::Module::elaboration_params`]. A cell because `const_eval` takes `&self`, and is
+    /// called from inside borrows of the rest of the elaborator; it is a set of names, not a
+    /// graph, so the arena rule (CLAUDE.md §5) is not what it is about.
+    elab_reads: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl Elaborator<'_> {
@@ -855,11 +906,15 @@ impl Elaborator<'_> {
                 if let Some(v) = self.genvar_env.get(name) {
                     Ok(*v as f64)
                 } else {
-                    self.param_vals.get(name).copied().ok_or_else(|| {
+                    let v = self.param_vals.get(name).copied().ok_or_else(|| {
                         elab(format!(
                             "`{name}` is not a compile-time constant in this context"
                         ))
-                    })
+                    })?;
+                    // The value is now baked into whatever asked: recorded so a deck override
+                    // of this parameter knows the module must be elaborated again.
+                    self.elab_reads.borrow_mut().insert(name.clone());
+                    Ok(v)
                 }
             }
             ExprAst::Unary(op, e) => {
@@ -5508,6 +5563,61 @@ mod tests {
         let asts = parse(&toks).expect("parse");
         let ast = asts.into_iter().next().expect("at least one module");
         elaborate(&ast).expect("elaborate")
+    }
+
+    /// § elaboration-time parameters: a parameter is recorded exactly when elaboration folded
+    /// its value — into a vector net's width, a generate bound, another parameter's default —
+    /// and not when only the analog block reads it. Overriding it, through the public entry a
+    /// netlist uses, rebuilds what it determined.
+    #[test]
+    fn folded_parameters_are_recorded_and_an_override_rebuilds_them() {
+        let src = "module cab(p); inout p; electrical p; \
+                   parameter integer n = 3; parameter real a = 1.0; \
+                   parameter real b = 2.0 * a; parameter real g = 1.0; \
+                   electrical [0:n-1] v; genvar k; \
+                   analog begin \
+                     for (k = 0; k < n; k = k + 1) I(v[k]) <+ g * b * V(v[k]); \
+                     I(p) <+ g * V(p); \
+                   end endmodule";
+        let toks = lex(src).expect("lex");
+        let asts = parse(&toks).expect("parse");
+        let m = elaborate(&asts[0]).expect("elaborate");
+        let names: Vec<&str> = m
+            .elaboration_params
+            .iter()
+            .map(|p| m.params[p.0 as usize].name.as_str())
+            .collect();
+        // `n` sizes the net and bounds the loop, `a` feeds `b`'s default; `b` and `g` are only
+        // read in the analog block, so setting them on the IR is enough.
+        assert_eq!(names, vec!["n", "a"]);
+        assert_eq!(
+            m.nodes.iter().filter(|d| d.name.starts_with("v[")).count(),
+            3
+        );
+
+        let overrides: HashMap<String, f64> = [("n".to_string(), 5.0), ("a".to_string(), 4.0)]
+            .into_iter()
+            .collect();
+        let m5 = elaborate_unit_with_overrides(
+            &asts[0],
+            &asts,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &overrides,
+        )
+        .expect("elaborate with overrides");
+        assert_eq!(
+            m5.nodes.iter().filter(|d| d.name.starts_with("v[")).count(),
+            5
+        );
+        let b = m5.params.iter().find(|p| p.name == "b").expect("b");
+        assert_eq!(
+            b.default, 8.0,
+            "b's default is recomputed from the overridden a"
+        );
+        let n = ParamId(m5.params.iter().position(|p| p.name == "n").unwrap() as u32);
+        assert!(m5.param_is_given(n), "an override is a given parameter");
     }
 
     /// Elaborate `top` (by name) from a multi-module source, with every module in `src`

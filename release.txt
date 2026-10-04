@@ -22,6 +22,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.15.0 - 2026-10-04
+-------------------
+**A deck override reaches what elaboration folded.** A device line's `name=value` used to be
+applied to the one elaboration of a module made at its defaults, by editing the parameter's value
+in the IR. That reaches every analog-block read and nothing the frontend had already folded: a
+vector net's width, a `generate` bound, a constant index, **another parameter's default**. All of
+it ran and printed numbers. The frontend now records which parameters it folded
+(`va_ir::Module::elaboration_params`, an additive §6 change, `docs/interfaces.md`), and va-cli
+elaborates a module again, through the new `elaborate_unit_with_overrides`, once per distinct set
+of folded values a deck uses. stderr says so (`elaborated `m` again for N=300`). A device whose
+values match no elaboration is an error, not a fallback.
+
+  * Found by the HH axon example (next entry): `N=300` on a cable sized `[0:N-1]` kept 150
+    compartments, divided its length by 300, and reported 37.6 m/s for a 19 m/s fibre.
+  * Wrong answers it corrects in committed decks, measured by `xtask deck-diff` against 2.14.0+3
+    (105 identical, 8 different, 13 skipped). Three moved, and all three are the same bug: a
+    compact model whose defaults read `TYPE` gave every PMOS the NMOS defaults.
+      - `nand/bsimsoi.net`: PMOS `VTHO` was +0.7 V instead of -0.7 (also `U0`, `EU`). V(out) at
+        VA = 0.6 V goes 1.1759 -> 1.1295 V; the endpoints barely move.
+      - `nand/bsimimg.net`: `WELLTYPE = -TYPE`, so every PMOS had an NMOS well. V(out) at
+        VA = 1.2 V goes 0.3707 -> 0.3001 V.
+      - `nand/hisim2.net`: **failed on every platform** (NaN at Newton's first iteration, listed in
+        `docs/roadmap.md` as an open model problem). Its PMOS took NMOS mobility defaults
+        (`MUEPH1`, `BB`). It solves now.
+    `bsim6`, `bsimbulk107` and `fiber_mzi_noise` re-elaborate but print identical results: their
+    folded values feed nothing these decks exercise, or the fold was attempted and not kept.
+    The record over-approximates on purpose, since a needless re-elaboration costs milliseconds
+    and a missed one costs a wrong answer.
+  * Cost: one extra elaboration per distinct folded set (two for a CMOS deck: TYPE=1 and -1),
+    plus one stderr line each. Every deck whose stdout did not change is listed above.
+  * Tests: `folded_parameters_are_recorded_and_an_override_rebuilds_them` (frontend) and
+    `a_device_override_of_a_folded_parameter_is_elaborated_with_its_value` (va-cli: three devices,
+    two re-elaborations, currents checked against n*2a). The golden-IR snapshots gained one
+    `elaboration_params: []` line each.
+  * Measured at this version: `cargo test --workspace` 948 passed, 0 failed, 0 ignored;
+    `cargo xtask validate` 28/28.
+
 2.14.0+3 - 2026-10-03
 --------------------
 **Multiphysics example 3: a filamentary ReRAM cell** — ionic filament gap, Joule heating and

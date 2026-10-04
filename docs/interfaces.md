@@ -354,6 +354,39 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > data file is resolved exactly as an `` `include `` is. The older entry points still exist and
 > pass an empty path, which resolves a relative name against the working directory alone.
 
+> ### 2026-10-04 — `Module::elaboration_params`: which parameters elaboration folded
+>
+> **Added** `Module::elaboration_params: Vec<ParamId>` and `Module::param_fixed_at_elaboration`,
+> plus `va_frontend::elaborate::elaborate_unit_with_overrides`. Purely additive: an empty `Vec`
+> by default, so every producer and consumer keeps compiling, and only modules that fold a
+> parameter gain a non-empty list.
+>
+> **The bug it closes.** A netlist device line's overrides were applied by editing
+> `Param::default` on the one elaboration made at the module's defaults. That reaches every
+> analog-block read of the parameter and **nothing elaboration had already folded**: a vector
+> net's width (`electrical [0:N-1] v`), a `generate` loop's bound, a `generate if`, another
+> parameter's default (`parameter real b = 2*a`), a constant vector index (`V(v[probe])`). So
+> `N=300` on a cable built for 150 compartments kept 150 and divided its length by 300, and
+> `a=5` left `b` at 2 — both silently, both with plausible output. Found by the Hodgkin–Huxley
+> axon example's spatial-convergence run, which reported 37.6 m/s for a fibre conducting at 19.
+>
+> **What the field means.** The parameters whose value the frontend's constant folder read,
+> sorted by id — exactly the set whose value is baked into the IR somewhere other than a
+> `Expr::Param`. It is recorded where the fold happens, not inferred from the source's
+> spelling, so a fold added later is covered without anyone remembering this list. It may
+> over-approximate (a fold attempted and then abandoned still records its reads), which costs
+> an unnecessary re-elaboration and never a wrong answer.
+>
+> **What a consumer owes it.** Setting one of these parameters means elaborating again with
+> the value, through `elaborate_unit_with_overrides`, which also range-checks the value and
+> marks it given. `va-cli` does this per **distinct set** of folded values a deck uses, before
+> any device is built, and refuses (an error, not a fallback) to build a device whose folded
+> values match no elaboration it holds. Parameters outside the list are still set on the IR as
+> before, so a deck that overrides only analog-block parameters elaborates exactly once, as it
+> always did.
+>
+> **Interface β is unchanged.**
+
 ## Interface β — model instance ABI (`va-abi`)
 
 The project's internal "OSDI." `va-core` calls `load`; both `va-codegen`'s generated models

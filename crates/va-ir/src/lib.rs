@@ -141,6 +141,18 @@ pub struct Module {
     /// existed it meant a `localparam` was silently overridable, so the kind is recorded and
     /// both override paths refuse it. See [`Self::param_is_local`].
     pub local_params: Vec<ParamId>,
+    /// The parameters whose values elaboration **folded** — read as compile-time constants to
+    /// size a vector net, bound a `generate` loop, choose a `generate` branch, compute another
+    /// parameter's default, or anything else the LRM fixes at elaboration — sorted by id.
+    ///
+    /// These are the parameters an instantiation cannot override by editing
+    /// [`Param::default`] on an elaborated module: the edit reaches every analog-block read and
+    /// none of what was folded, so `N=300` on a cable built for 150 compartments would keep 150
+    /// and divide its length by 300. A consumer that sets one of them must elaborate the module
+    /// again with the value (`va_frontend::elaborate::elaborate_unit_with_overrides`). Empty for
+    /// a module that folds no parameter, which is the common case. See
+    /// [`Self::param_fixed_at_elaboration`].
+    pub elaboration_params: Vec<ParamId>,
     /// The ports the *instantiating context* explicitly left unconnected — indices into
     /// [`Self::ports`] — the question `$port_connected` asks (LRM §9.19).
     ///
@@ -271,6 +283,12 @@ impl Module {
         if !self.limited_junctions.contains(&n) {
             self.limited_junctions.push(n);
         }
+    }
+
+    /// Whether elaboration folded parameter `p`'s value ([`Self::elaboration_params`]), so that
+    /// setting it on this module alone would not reach everything it determines.
+    pub fn param_fixed_at_elaboration(&self, p: ParamId) -> bool {
+        self.elaboration_params.contains(&p)
     }
 
     /// Whether parameter `p` was declared `localparam`, and so may not be overridden by an
