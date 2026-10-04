@@ -21,26 +21,29 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
 | `@(timer)` | [TEC](#peltier-cooler-under-pid-control) |
-| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
 | `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
 | `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
+| `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| integer parameters sizing structure, overridden per instance | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
 
 ---
 
@@ -256,3 +259,76 @@ loop starts to collapse once a half period is comparable with the SET time.
 
 **Limitations.** One lumped filament: no variability, no filament radius, no read noise; a
 constant field-enhancement factor; the thermal node is the filament's own.
+
+---
+
+## Hodgkin–Huxley axon: propagation, temperature, and sodium accumulation
+
+**Domains:** electrical (the membrane and the axoplasm's cable), gating kinetics (a user `gate`
+discipline whose potential is a channel's open probability), and chemistry (a user `chemical`
+discipline whose potential is an intracellular concentration). **Models:**
+`models/multiphysics/axon/hh_cable.va`, `axon_natures.vams`.
+
+An unmyelinated axon cut into `N` compartments, each with the 1952 Hodgkin–Huxley Na, K and leak
+channels, its own m, h, n gates, and its own intracellular Na⁺ and K⁺. The reversal potentials
+are not constants: each compartment computes ENa and EK from its own concentrations through the
+Nernst equation, and the concentrations move with the ionic currents, diffuse along the fibre,
+and relax back through a first-order pump. The compartments are built by `generate` loops over
+vector nets of three disciplines, `N` itself is a parameter, and `@(cross)` at two positions
+times the spike and prints the conduction velocity through `$strobe`.
+
+### 1. Conduction velocity, and what temperature does to it
+
+```bash
+va-cli sim circuits/multiphysics/hh_giant_axon.net --model models/multiphysics/axon --tran --report X1.v[0],X1.v[50],X1.v[100],X2.v[100] --plot docs/examples/multiphysics/hh_giant_axon.svg
+```
+
+![HH giant axon](examples/multiphysics/hh_giant_axon.svg)
+
+The squid giant axon with Hodgkin and Huxley's own parameters (radius 238 µm, 35.4 Ω·cm), 3 cm
+in 150 compartments. Their paper computed **18.8 m/s** for it at 18.5 °C (21.2 m/s measured).
+This model gives **18.97 m/s**, 0.9 % above, and is spatially converged: the same axon in 300
+compartments gives 18.98 m/s, and a 2 µs step cap 19.01 m/s. The second axon, identical but at 6.3 °C, conducts at
+**12.22 m/s**: its gating rates are 3.73× slower (Q₁₀ = 3), but the velocity falls by only 1.55×,
+because only the channels that regenerate the spike slow down, not the cable's passive spread.
+That figure is good to about 1 %: the slower spike is more sensitive to the time step, and the
+same axon alone in a deck gives 12.35 m/s with a 10 µs step cap and 12.29 m/s with 2 µs.
+
+### 2. A thin fibre under a spike train: sodium accumulates, ENa falls, spikes shrink
+
+```bash
+python docs/examples/multiphysics/hh_thin_fibre.py target/release/va-cli
+```
+
+![HH thin fibre](examples/multiphysics/hh_thin_fibre.svg)
+
+The same cable 0.25 µm in radius (1 mm, 10 compartments), driven at 100 Hz for one second with
+a slow pump (τ = 10 s). The membrane admits about the same sodium per spike per unit area as the
+giant axon, but each square micrometre has a/2 of axoplasm behind it, so the concentration
+change is ~950× larger. Measured in the middle compartment:
+
+| | First spike | 100th spike |
+|---|---|---|
+| [Na⁺]ᵢ | 55.3 mM | 86.6 mM |
+| ENa (Nernst, 18.5 °C) | 52.1 mV | 40.9 mV |
+| Spike peak | 29.6 mV | 18.8 mV |
+| Conduction velocity | 0.577 m/s | 0.531 m/s |
+
+The peak falls by 10.8 mV as ENa falls by 11.3 mV: the spike follows the potential its sodium
+current drives toward. Two cross-checks: the first spike's velocity is the giant axon's scaled
+by cable theory's √radius law (18.97·√(0.25/238) = 0.61 m/s, 5 % above with 0.1 mm compartments),
+and the potassium lost (30.3 mM) balances the sodium gained (31.6 mM), as charge balance requires
+of a membrane that ends the second where it started.
+
+**What building this found.** The first spatial-convergence run, `N=300` on the deck line,
+reported 37.6 m/s: the override reached the analog block's `dx = len/N` but not the vector
+nets and loops elaboration had already sized for 150 compartments. 2.15.0 elaborates a module
+again for any deck value it folded (see `release.txt`). The pump also has a reason to be pinned
+at the operating point: in a thin fibre with a slow pump, Newton's first DC steps carried a
+concentration through zero and the Nernst logarithm to NaN, so the concentrations sit at their
+initial values there (`analysis("static")`), as the resting state does by definition.
+
+**Limitations.** Extracellular space is an ideal ground (no extracellular resistance, no
+external K⁺ accumulation); the pump is a first-order relaxation, not an electrogenic Na/K ATPase;
+the leak carries no particular ion; squid HH kinetics are used for the thin fibre too, which no
+real thin fibre has — the point is the electrodiffusion, not mammalian physiology.

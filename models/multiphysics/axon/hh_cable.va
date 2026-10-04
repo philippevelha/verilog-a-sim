@@ -1,0 +1,175 @@
+// Hodgkin-Huxley cable with electrodiffusion: an unmyelinated axon discretized into `N`
+// compartments, each with Na, K and leak channels, its own gating states, and its own
+// intracellular Na+ and K+ concentrations.
+//
+// # Per compartment k (length dx, radius a; membrane area 2 pi a dx, volume pi a^2 dx)
+//
+//   membrane    Cm dV/dt = -gNa m^3 h (V - ENa) - gK n^4 (V - EK) - gL (V - EL) + axial + stimulus
+//   gating      dm/dt = phi (alpha_m(V) (1 - m) - beta_m(V) m)      (likewise h, n; HH 1952)
+//               phi = q10^((T - 6.3 C)/10)                           (temperature)
+//   Nernst      ENa = (R T / F) ln(Na_o / Na_i[k]),  EK = (R T / F) ln(K_o / K_i[k])
+//   ions        d[Na]i/dt = -(INa - INa_rest) / (F vol)  + diffusion  - ([Na]i - [Na]i0)/tau_pump
+//               (likewise K), with longitudinal diffusion D pi a^2 / dx between neighbours
+//   axial       pi a^2 / (Ri dx) between neighbouring compartments
+//
+// The reversal potentials therefore follow the concentrations the currents themselves change:
+// in a thin fibre a spike train loads the axoplasm with sodium, ENa falls and the spikes shrink.
+// The ion equations use the departure of each current from its resting value, because HH's
+// resting state balances the *total* current (the leak's ions are unspecified), not each ion's;
+// `tau_pump` stands for the Na/K pump and the slow exchangers that bring the concentrations back
+// (phenomenological, stated).
+//
+// # Units
+//
+// SI throughout the network (V, A, m, mol/m^3 = mM); the HH rate functions take mV and return
+// 1/ms as in the original paper, and are converted at the call.
+//
+// # Verilog-A shown here
+//
+// `generate` loops over a `genvar` building `N` compartments; vector internal nodes of three
+// disciplines (`electrical [0:N-1] v`, `gate [0:N-1] m, h, n`, `chemical [0:N-1] dnai, dki`, the
+// concentrations' departures from their initial values, so that 0 is the physical start); a
+// second loop for the links between neighbours; `analog function`s with a removable
+// singularity handled explicitly (`vtrap`); `analysis("static")` pinning the concentrations
+// at the operating point; `@(cross)` with a direction at two positions,
+// timing the spike between them and reporting the conduction velocity through `$strobe`;
+// integer parameters; `$temperature`-style parameters in Celsius.
+//
+// # Limitations
+//
+// Extracellular space is an ideal ground (no extracellular resistance, no K+ accumulation
+// outside); the pump is a first-order relaxation; the leak carries no particular ion.
+`include "disciplines.vams"
+`include "axon_natures.vams"
+
+module hh_cable(stim);
+    inout stim;                      // current injected into compartment 0
+    electrical stim;
+
+    parameter integer N       = 150     from [2:inf);
+    parameter real    len     = 0.03    from (0:inf);     // m, total length
+    parameter real    a       = 238e-6  from (0:inf);     // m, radius (squid giant axon)
+    parameter real    ri      = 0.354   from (0:inf);     // Ohm m, axoplasm resistivity
+    parameter real    cm      = 1e-2    from (0:inf);     // F/m^2 (1 uF/cm^2)
+    parameter real    gna     = 1200.0  from [0:inf);     // S/m^2 (120 mS/cm^2)
+    parameter real    gk      = 360.0   from [0:inf);     // S/m^2
+    parameter real    gl      = 3.0     from [0:inf);     // S/m^2
+    parameter real    el      = -54.387e-3;               // V
+    parameter real    tc      = 6.3;                      // C, temperature
+    parameter real    q10     = 3.0     from (0:inf);
+    parameter real    nao     = 440.0   from (0:inf);     // mM
+    parameter real    nai0    = 55.2    from (0:inf);     // mM, so ENa = +50 mV at 6.3 C
+    parameter real    ko      = 20.0    from (0:inf);     // mM
+    parameter real    ki0     = 490.6   from (0:inf);     // mM, so EK = -77 mV at 6.3 C
+    parameter real    dna     = 1.33e-9 from [0:inf);     // m^2/s, Na+ diffusion in axoplasm
+    parameter real    dk      = 1.96e-9 from [0:inf);     // m^2/s
+    parameter real    tau_pump = 1.0    from (0:inf);     // s
+    parameter real    vrest   = -65e-3;                   // V, where the resting currents are
+    parameter integer probe_a = 50      from [0:inf);     // compartments timed for velocity
+    parameter integer probe_b = 100     from [0:inf);
+
+    electrical [0:N-1] v;
+    gate       [0:N-1] m, h, n;
+    chemical   [0:N-1] dnai, dki;    // concentration departures from nai0, ki0 (mM)
+
+    real dx, area, vol, gax, rtf, phi, ina_rest, ik_rest, t_a;
+    real vm, ena, ek, ina, ik, il, mi, hi, ni;
+    genvar k;
+
+    // x / (exp(x/y) - 1), finite at x = 0 (where it tends to y): the HH alpha_m and alpha_n
+    // have a removable singularity there.
+    analog function real vtrap;
+        input x, y;
+        real x, y;
+        vtrap = (abs(x / y) < 1e-6) ? y * (1.0 - x / y / 2.0) : x / (exp(x / y) - 1.0);
+    endfunction
+
+    // HH rate functions: membrane potential in mV, result in 1/ms.
+    analog function real am;
+        input u; real u;
+        am = 0.1 * vtrap(-(u + 40.0), 10.0);
+    endfunction
+    analog function real bm;
+        input u; real u;
+        bm = 4.0 * exp(-(u + 65.0) / 18.0);
+    endfunction
+    analog function real ah;
+        input u; real u;
+        ah = 0.07 * exp(-(u + 65.0) / 20.0);
+    endfunction
+    analog function real bh;
+        input u; real u;
+        bh = 1.0 / (1.0 + exp(-(u + 35.0) / 10.0));
+    endfunction
+    analog function real an;
+        input u; real u;
+        an = 0.01 * vtrap(-(u + 55.0), 10.0);
+    endfunction
+    analog function real bn;
+        input u; real u;
+        bn = 0.125 * exp(-(u + 65.0) / 80.0);
+    endfunction
+
+    analog begin
+        dx   = len / N;
+        area = 2.0 * `AXON_PI * a * dx;
+        vol  = `AXON_PI * a * a * dx;
+        gax  = `AXON_PI * a * a / (ri * dx);
+        rtf  = 8.314462618 * (tc + 273.15) / 96485.33212;
+        phi  = pow(q10, (tc - 6.3) / 10.0);
+
+        // Resting currents per unit area at `vrest` with the initial concentrations: the
+        // baseline the ion equations subtract.
+        mi = am(vrest * 1e3) / (am(vrest * 1e3) + bm(vrest * 1e3));
+        hi = ah(vrest * 1e3) / (ah(vrest * 1e3) + bh(vrest * 1e3));
+        ni = an(vrest * 1e3) / (an(vrest * 1e3) + bn(vrest * 1e3));
+        ina_rest = gna * mi * mi * mi * hi * (vrest - rtf * ln(nao / nai0));
+        ik_rest  = gk * ni * ni * ni * ni * (vrest - rtf * ln(ko / ki0));
+
+        I(stim, v[0]) <+ V(stim, v[0]) * 1e3;   // the injection point: 1 mOhm to compartment 0
+
+        for (k = 0; k < N; k = k + 1) begin : seg
+            vm  = V(v[k]) * 1e3;
+            ena = rtf * ln(nao / (nai0 + Conc(dnai[k])));
+            ek  = rtf * ln(ko / (ki0 + Conc(dki[k])));
+            ina = gna * P(m[k]) * P(m[k]) * P(m[k]) * P(h[k]) * (V(v[k]) - ena);
+            ik  = gk * P(n[k]) * P(n[k]) * P(n[k]) * P(n[k]) * (V(v[k]) - ek);
+            il  = gl * (V(v[k]) - el);
+
+            I(v[k]) <+ area * (cm * ddt(V(v[k])) + ina + ik + il);
+            Pr(m[k]) <+ ddt(P(m[k])) - 1e3 * phi * (am(vm) * (1.0 - P(m[k])) - bm(vm) * P(m[k]));
+            Pr(h[k]) <+ ddt(P(h[k])) - 1e3 * phi * (ah(vm) * (1.0 - P(h[k])) - bh(vm) * P(h[k]));
+            Pr(n[k]) <+ ddt(P(n[k])) - 1e3 * phi * (an(vm) * (1.0 - P(n[k])) - bn(vm) * P(n[k]));
+            // A DC operating point is the resting axon with its initial concentrations: pinned
+            // there rather than solved for, because in a thin fibre with a slow pump the ion
+            // terms outweigh the pump a thousandfold, and Newton's first steps would carry a
+            // concentration through zero and its Nernst logarithm to NaN.
+            if (analysis("static")) begin
+                Flux(dnai[k]) <+ Conc(dnai[k]);
+                Flux(dki[k])  <+ Conc(dki[k]);
+            end else begin
+                Flux(dnai[k]) <+ ddt(Conc(dnai[k]))
+                                 + area * (ina - ina_rest) / (96485.33212 * vol)
+                                 + Conc(dnai[k]) / tau_pump;
+                Flux(dki[k])  <+ ddt(Conc(dki[k]))
+                                 + area * (ik - ik_rest) / (96485.33212 * vol)
+                                 + Conc(dki[k]) / tau_pump;
+            end
+        end
+        // The N-1 links between neighbours: axial current and longitudinal ion diffusion. A loop
+        // of its own rather than an `if (k < N-1)` in the one above, because the elaborator
+        // resolves `v[k+1]` for every k it unrolls, taken branch or not, and k = N-1 is out of
+        // range.
+        for (k = 0; k < N - 1; k = k + 1) begin : link
+            I(v[k], v[k + 1]) <+ gax * V(v[k], v[k + 1]);
+            Flux(dnai[k], dnai[k + 1]) <+ dna * Conc(dnai[k], dnai[k + 1]) / (dx * dx);
+            Flux(dki[k], dki[k + 1])   <+ dk * Conc(dki[k], dki[k + 1]) / (dx * dx);
+        end
+
+        // Conduction velocity: the spike's upstroke through 0 V at two compartments.
+        @(cross(V(v[probe_a]), +1)) t_a = $abstime;
+        @(cross(V(v[probe_b]), +1))
+            $strobe("%m: spike reached compartment %0d at t=%.4e s; velocity %.3f m/s", probe_b,
+                    $abstime, (probe_b - probe_a) * dx / ($abstime - t_a));
+    end
+endmodule

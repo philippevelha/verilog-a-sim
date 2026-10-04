@@ -1,0 +1,43 @@
+// Natures for the Hodgkin-Huxley axon example: gating probabilities (dimensionless) and
+// intracellular ion concentrations (mol/m^3 = mM), each as the potential of a state node.
+// Include-guarded.
+`ifndef AXON_NATURES_VAMS
+`define AXON_NATURES_VAMS
+
+`define AXON_PI 3.14159265358979323846
+
+nature Probability
+    units  = "";
+    access = P;
+    abstol = 1e-9;
+endnature
+
+nature Probability_rate
+    units  = "1/s";
+    access = Pr;
+    abstol = 1e-6;
+endnature
+
+nature Concentration
+    units  = "mM";
+    access = Conc;
+    abstol = 1e-9;
+endnature
+
+nature Molar_flux
+    units  = "mM/s";
+    access = Flux;
+    abstol = 1e-9;
+endnature
+
+discipline gate
+    potential Probability;
+    flow      Probability_rate;
+enddiscipline
+
+discipline chemical
+    potential Concentration;
+    flow      Molar_flux;
+enddiscipline
+
+`endif

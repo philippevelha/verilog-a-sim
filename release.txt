@@ -22,6 +22,34 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.15.0+1 - 2026-10-04
+---------------------
+**Multiphysics example 4: a Hodgkin-Huxley axon with electrodiffusion**
+(`models/multiphysics/axon/`; `docs/multiphysics.md`). `N` compartments built by `generate` loops
+over vector nets of three disciplines: electrical, a user `gate` (channel open probabilities) and
+a user `chemical` (intracellular Na+/K+). Each compartment's ENa and EK follow its own
+concentrations through Nernst, and the concentrations follow the currents, diffusion and a
+first-order pump. `@(cross)` at two compartments prints the conduction velocity via `$strobe`.
+
+  * `hh_giant_axon.net`: the squid axon with HH's parameters. 18.97 m/s at 18.5 C, against HH's
+    computed 18.8 (+0.9 %). Converged: 18.98 m/s in 300 compartments, 19.01 m/s with a 2 us step
+    cap. A twin at 6.3 C conducts at 12.22 m/s (Q10 = 3 makes the gates 3.73x slower, the
+    velocity only 1.55x). That figure is good to ~1 % only: alone in a deck it is 12.35 / 12.29 m/s
+    at 10 / 2 us caps.
+  * `hh_thin_fibre.net` + `hh_thin_fibre.py`: a 0.25 um fibre at 100 Hz for 1 s. In the middle
+    compartment [Na]i goes 55.3 -> 86.6 mM and ENa 52.1 -> 40.9 mV, and the spike peak follows it,
+    29.6 -> 18.8 mV. Velocity 0.577 -> 0.531 m/s; the first matches the sqrt(radius) scaling of
+    the giant axon's (0.61) to 5 %. K+ lost (30.3 mM) balances Na+ gained (31.6 mM).
+  * What it cost: the spatial-convergence run found the override bug fixed in 2.15.0. The
+    concentrations are pinned at the DC point with `analysis("static")` because, in a thin fibre
+    with a slow pump, Newton's first steps drove a concentration through zero and Nernst's log to
+    NaN. My first deck header compared the 6.3 C velocity with HH's 18.8 m/s; theirs was computed
+    at 18.5 C.
+  * Limitations: ideal extracellular ground, phenomenological pump, an ion-less leak, squid
+    kinetics in the thin fibre.
+  * No crate changed. Figures are from the runs above at this version; `cargo test --workspace`
+    (948 passed) and `cargo xtask validate` (28/28) are 2.15.0's, the same code.
+
 2.15.0 - 2026-10-04
 -------------------
 **A deck override reaches what elaboration folded.** A device line's `name=value` used to be

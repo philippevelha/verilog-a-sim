@@ -1,0 +1,24 @@
+* Hodgkin-Huxley thin fibre: a spike train loads the axoplasm with sodium, ENa falls, and the
+* spikes shrink -- the electrodiffusion half of models/multiphysics/axon/hh_cable.va.
+*
+* The same cable as hh_giant_axon.net at 18.5 C, but 0.25 um in radius instead of 238 um: a
+* 1 mm fibre in 10 compartments, driven by 2 nA, 0.5 ms pulses at 100 Hz for one second. A
+* spike's sodium influx per unit membrane is about the same in both fibres, but the volume
+* behind each square micrometre of membrane is a/2, so the concentration it causes is ~950x
+* larger in the thin one. The Na/K pump is slow (tau_pump = 10 s), so over one second the
+* train mostly accumulates.
+*
+* What to look for (measured at 2.15.0; docs/examples/multiphysics/hh_thin_fibre.py draws it):
+*   1. Conduction at 0.577 m/s for the first spike. Cable theory says velocity scales as
+*      sqrt(radius) at fixed membrane properties: 18.97 m/s * sqrt(0.25/238) = 0.61 m/s, 5 %
+*      above, with only 10 compartments over 1 mm (0.1 mm each).
+*   2. Intracellular sodium rising by ~0.35 mM per spike in the middle compartment.
+*   3. ENa = (RT/F) ln(Na_o/Na_i) falling with it, and each spike's peak with ENa: the
+*      reversal potential the sodium current drives the membrane toward is moving down.
+*   4. The conduction velocity printed for every spike, slowing as the train goes on.
+* Run: va-cli sim circuits/multiphysics/hh_thin_fibre.net --model models/multiphysics/axon --tran --report X1.v[5],X1.dnai[5],X1.dki[5]
+VP p gnd PULSE(0 1 1m 10u 10u 0.5m 10m)
+G1 gnd stim p gnd 2e-9
+X1 stim hh_cable N=10 len=1e-3 a=0.25e-6 tc=18.5 tau_pump=10 probe_a=2 probe_b=8
+.tran 20u 1
+.end

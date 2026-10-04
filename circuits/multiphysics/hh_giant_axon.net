@@ -1,0 +1,29 @@
+* Hodgkin-Huxley squid giant axon: action-potential propagation, its conduction velocity, and
+* what temperature does to it.
+*
+* Two copies of models/multiphysics/axon/hh_cable.va with HH's own parameters: radius 238 um,
+* axoplasm 35.4 Ohm cm, standard HH channels, squid concentrations (Na 440/55.2 mM,
+* K 20/490.6 mM, which give HH's ENa = +50 mV and EK = -77 mV through the Nernst equation at
+* 6.3 C). 3 cm of axon in 150 compartments (0.2 mm each), a 20 uA, 0.2 ms pulse into the first.
+* The two differ only in temperature: X1 at 18.5 C, X2 at 6.3 C.
+*
+* The check is Hodgkin and Huxley's own: their 1952 paper computed a conduction velocity of
+* 18.8 m/s for this axon at 18.5 C (measured: 21.2 m/s). Each cable times its spike's upstroke
+* through 0 V at compartments 50 and 100 (1 cm apart) and prints the velocity. Measured at
+* 2.15.0 (10 us step):
+*   X1, 18.5 C: 18.97 m/s -- 0.9 % above HH's 18.8. Spatially converged: the same axon in 300
+*               compartments (N=300 probe_a=100 probe_b=200) gives 18.98 m/s.
+*   X2,  6.3 C: 12.22 m/s. The gating rates scale by q10 = 3 per 10 C, so they run 3.73x slower
+*               at 6.3 C; the velocity falls by only 1.55x, because the cable's passive spread
+*               (radius, Ri, Cm) does not slow down, only the channels that regenerate the spike.
+*               Good to ~1 % (X1 to 0.2 %: 19.01 m/s at a 2 us cap): alone in a deck the
+*               same axon gives 12.35 m/s (10 us cap) and 12.29 m/s (2 us cap); here it
+*               shares X1's finer steps.
+* Run: va-cli sim circuits/multiphysics/hh_giant_axon.net --model models/multiphysics/axon --tran --report X1.v[0],X1.v[50],X1.v[100],X2.v[100] --plot docs/examples/multiphysics/hh_giant_axon.svg
+VP p gnd PULSE(0 20 0.5m 10u 10u 0.2m 1)
+G1 gnd stim1 p gnd 1e-6
+G2 gnd stim2 p gnd 1e-6
+X1 stim1 hh_cable N=150 len=0.03 a=238e-6 ri=0.354 tc=18.5 probe_a=50 probe_b=100
+X2 stim2 hh_cable N=150 len=0.03 a=238e-6 ri=0.354 tc=6.3 probe_a=50 probe_b=100
+.tran 10u 6m
+.end
