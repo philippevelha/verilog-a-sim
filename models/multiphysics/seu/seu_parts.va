@@ -1,0 +1,144 @@
+// Single-event upset of an SRAM cell: an ion's track of charge, its collection by diffusion at a
+// struck drain, and the cell's response.
+//
+// # Collection by diffusion (`strike_diffusion`)
+//
+// An ion leaves a column of electron-hole pairs along its track. Under the struck n+ drain the
+// excess electrons diffuse (coefficient dn) and recombine (lifetime taur); the drain's junction
+// at the surface collects every electron that reaches it. In one dimension, depth z:
+//
+//   dn/dt = dn d^2n/dz^2 - n / taur,     n(0) = 0 (collected),   dn/dz(L) = 0 (deep, reflecting)
+//
+// discretised as N slices of the column, each holding its excess charge as the potential of a
+// `carrier` node. At t = 0 the charge qdep lies uniformly over the first `track` metres: the
+// operating point (`analysis("static")`) pins every slice there and collects nothing, so the
+// circuit's own operating point is the unstruck one and the strike is the transient's start.
+// The collected current, 2 dn q_0 / dz^2 from the slice next to the junction, flows out of the
+// drain `d` into the body `b`.
+//
+// Closed form (checked in docs/examples/multiphysics/seu_plots.py): with k_m = (m + 1/2) pi / L,
+//   I(t) = (2 dn qdep / (L track)) sum_m (1 - cos(k_m track)) exp(-(dn k_m^2 + 1/taur) t),
+// with L = depth.
+//
+// # A prompt pulse (`strike_exp`)
+//
+// The circuit-level abstraction of a strike: I(t) = q / tau exp(-t / tau) out of the drain, for
+// comparing how the pulse's duration sets the critical charge.
+//
+// # Transistors (`mos`)
+//
+// The simplified EKV model: one equation from weak to strong inversion, symmetric in drain and
+// source, with continuous derivatives everywhere:
+//   I_d = 2 n beta U_t^2 [F((V_p - 0)/(2 U_t)) - F((V_p - V_ds)/(2 U_t))],  F(x) = ln^2(1 + e^x),
+//   V_p = (V_gs - vt0) / n.
+// `type` = +1 for n-channel, -1 for p-channel. The source doubles as the body (no body effect).
+//
+// # Verilog-A shown here
+//
+// A diffusion equation as a `generate` ladder of a user discipline; an initial condition through
+// `analysis("static")`; an `analog function` (softplus) inside a transistor model; a current source
+// reading `$abstime`; `$bound_step`; `@(cross)` and `@(final_step)` reporting.
+//
+// # Limitations
+//
+// One-dimensional collection (no lateral spreading to neighbouring junctions, no funnelling of the
+// junction's field down the track, no drift), a uniform track, constant mobility; the transistors
+// have no capacitances (the node capacitance is an explicit capacitor) and no body effect.
+`include "disciplines.vams"
+`include "seu_natures.vams"
+
+module mos(d, g, s);
+    inout d, g, s;
+    electrical d, g, s;
+    parameter integer type = 1      from [-1:1] exclude 0;
+    parameter real vt0     = 0.4    from (0:inf);    // V
+    parameter real n       = 1.3    from [1:inf);    // slope factor
+    parameter real beta    = 4e-4   from (0:inf);    // A/V^2 (mu Cox W / L)
+
+    real ut, vp, vds, id;
+
+    // ln(1 + e^x), without overflow.
+    analog function real softplus;
+        input x; real x;
+        softplus = (x > 40.0) ? x : ln(1.0 + exp(x));
+    endfunction
+
+    analog begin
+        ut  = 0.025852;
+        vp  = (type * V(g, s) - vt0) / n;
+        vds = type * V(d, s);
+        id  = 2.0 * n * beta * ut * ut * (softplus(vp / (2.0 * ut)) * softplus(vp / (2.0 * ut))
+              - softplus((vp - vds) / (2.0 * ut)) * softplus((vp - vds) / (2.0 * ut)));
+        I(d, s) <+ type * id;
+    end
+endmodule
+
+module strike_diffusion(d, b);
+    inout d, b;
+    electrical d, b;
+    parameter integer N   = 50     from [2:inf);
+    parameter real qdep   = 10e-15 from [0:inf);    // C deposited
+    parameter real track  = 2e-6   from (0:inf);    // m of track (uniform charge)
+    parameter real depth  = 5e-6   from (0:inf);    // m of silicon modelled (track <= depth)
+    parameter real dn     = 3.6e-3 from (0:inf);    // m^2/s, electrons (36 cm^2/s)
+    parameter real taur   = 1e-7   from (0:inf);    // s, recombination lifetime
+    parameter real vflip  = 0.6;                    // V: report the drain through this, falling
+
+    carrier [0:N-1] q;
+    carrier col;                                     // the charge collected so far
+
+    genvar k;
+    real dz, icol;
+
+    analog begin
+        dz = depth / N;
+        icol = 2.0 * dn * Qc(q[0]) / (dz * dz);
+        for (k = 0; k < N; k = k + 1) begin : slice
+            if (analysis("static"))
+                // The deposited charge: the part of the track inside this slice.
+                Qr(q[k]) <+ Qc(q[k]) - qdep / track
+                             * max(min((k + 1) * dz, track) - k * dz, 0.0);
+            else
+                Qr(q[k]) <+ ddt(Qc(q[k])) + Qc(q[k]) / taur;
+        end
+        for (k = 0; k < N - 1; k = k + 1) begin : link
+            if (!analysis("static"))
+                Qr(q[k], q[k + 1]) <+ dn * Qc(q[k], q[k + 1]) / (dz * dz);
+        end
+        if (analysis("static")) begin
+            Qr(q[0]) <+ 0.0;
+            Qr(col) <+ Qc(col);
+            I(d, b) <+ 0.0;
+        end else begin
+            Qr(q[0]) <+ icol;                        // out of the column, into the junction
+            Qr(col) <+ ddt(Qc(col)) - icol;
+            I(d, b) <+ icol;
+        end
+
+        @(cross(V(d, b) - vflip, -1))
+            $strobe("%m: drain through %.2f V at t=%.4e s, %.3f fC collected", vflip, $abstime,
+                    Qc(col) * 1e15);
+        @(final_step)
+            $strobe("%m: %.3f fC of %.3f fC collected by t=%.4e s, drain at %.4f V",
+                    Qc(col) * 1e15, qdep * 1e15, $abstime, V(d, b));
+    end
+endmodule
+
+module strike_exp(d, b);
+    inout d, b;
+    electrical d, b;
+    parameter real q     = 1e-15 from [0:inf);      // C
+    parameter real tau   = 1e-11 from (0:inf);      // s
+    parameter real vflip = 0.6;
+    analog begin
+        $bound_step(tau / 10.0);
+        if (analysis("static"))
+            I(d, b) <+ 0.0;
+        else
+            I(d, b) <+ q / tau * exp(-$abstime / tau);
+        @(cross(V(d, b) - vflip, -1))
+            $strobe("%m: drain through %.2f V at t=%.4e s", vflip, $abstime);
+        @(final_step)
+            $strobe("%m: q %.4f fC, tau %.3e s: drain at %.4f V", q * 1e15, tau, V(d, b));
+    end
+endmodule

@@ -1,0 +1,26 @@
+// Natures for the single-event-upset example. Include-guarded.
+//
+//   carrier   the excess electrons in one slice of the silicon under the struck drain, counted as
+//             charge (C) and held as the potential of a state node; the flow (A) names the row's
+//             residual, a charge rate.
+`ifndef SEU_NATURES_VAMS
+`define SEU_NATURES_VAMS
+
+nature Carrier_charge
+    units  = "C";
+    access = Qc;
+    abstol = 1e-21;
+endnature
+
+nature Carrier_rate
+    units  = "A";
+    access = Qr;
+    abstol = 1e-12;
+endnature
+
+discipline carrier
+    potential Carrier_charge;
+    flow      Carrier_rate;
+enddiscipline
+
+`endif

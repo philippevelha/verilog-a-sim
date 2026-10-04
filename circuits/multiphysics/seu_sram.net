@@ -1,0 +1,40 @@
+* Single-event upset, part 2: a 6T SRAM cell struck at the drain of its off pull-down transistor,
+* collecting by diffusion, just below and just above its critical charge.
+*
+* Each cell: cross-coupled EKV inverters (n beta 4e-4, p 2e-4 A/V^2, vt0 0.4 V), access
+* transistors off (word line at 0, bit lines at 1.2 V), 1 fF on each storage node; q stores 1.
+* The strike (strike_diffusion, 2 um track) deposits charge under q's pull-down drain; collected
+* electrons pull q down while the on p-channel pull-up restores it.
+*   cell 1: 10 fC deposited;  cell 2: 11 fC.
+* What to look for (measured at 2.16.2+4): both drains are dragged through 0.6 V within 5-8 ps,
+* by the first ~0.9 fC collected (the diffusion current's spike at the strike). Cell 1 recovers;
+* cell 2, whose collection tail keeps out-pulling the p-channel pull-up until the other inverter
+* has switched, flips. The critical charge, by bisection in seu_plots.py, is 10.54 fC deposited
+* (the same with 50, 100 or 200 slices; 10.72 fC with 25): 8.8 times the 1.2 fC (C VDD) an
+* instantaneous pulse needs, because most of it arrives over nanoseconds, against a pull-up that
+* can supply 46.6 uA.
+* Plot: python docs/examples/multiphysics/seu_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/seu_sram.net --model models/multiphysics/seu --tran --report q1,qb1,q2,qb2
+VDD vdd gnd DC 1.2
+VBL bl gnd DC 1.2
+XN11 q1 qb1 gnd mos
+XP11 q1 qb1 vdd mos type=-1 beta=2e-4
+XN21 qb1 q1 gnd mos
+XP21 qb1 q1 vdd mos type=-1 beta=2e-4
+XA11 bl gnd q1 mos beta=2e-4
+XA21 bl gnd qb1 mos beta=2e-4
+C11 q1 gnd 1f
+C21 qb1 gnd 1f
+XS1 q1 gnd strike_diffusion qdep=10f
+XN12 q2 qb2 gnd mos
+XP12 q2 qb2 vdd mos type=-1 beta=2e-4
+XN22 qb2 q2 gnd mos
+XP22 qb2 q2 vdd mos type=-1 beta=2e-4
+XA12 bl gnd q2 mos beta=2e-4
+XA22 bl gnd qb2 mos beta=2e-4
+C12 q2 gnd 1f
+C22 qb2 gnd 1f
+XS2 q2 gnd strike_diffusion qdep=11f
+.nodeset V(q1)=1.2 V(qb1)=0 V(q2)=1.2 V(qb2)=0
+.tran 10p 10n
+.end

@@ -37,6 +37,7 @@ The examples, in the order they were built:
 | [13](#breaker) | Circuit-breaker arc | electrical, gas dynamics, mechanical | a state held as its logarithm, a linearly continued `exp`, current chopping against energy conservation |
 | [14](#optomech) | Cavity optomechanics | optical, mechanical, thermal | a complex field as two nodes, a delayed force, rates against the model's own eigenvalues, a limit cycle |
 | [15](#speaker) | Horn loudspeaker | electrical, mechanical, acoustic, thermal | an acoustic transmission line as a `generate` ladder, distortion through a horn, thermal compression |
+| [16](#seu) | SRAM single-event upset | carrier diffusion, electrical | a diffusion PDE against its exact series, a transistor model, `.nodeset`, critical charge by bisection |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -2047,6 +2048,136 @@ The ratio column is the transient's amplitude over the prediction's. It stays be
 throughout, an offset from the 32-section horn and the step, while the coil's resistance rises
 36 %. The compression itself agrees to 0.004 dB.
 
+# SRAM single-event upset: diffusion collection and the critical charge {#seu}
+
+**Library:** `models/multiphysics/seu/`, which contains:
+
+- `seu_parts.va`: `mos`, `strike_diffusion`, `strike_exp`;
+- `seu_natures.vams`: `carrier` (excess electrons counted as charge, in C, with a charge rate
+  in A as flow).
+
+**A diffusion equation as a ladder of charge nodes.** `strike_diffusion` slices the silicon under
+the drain into `N` layers. Each layer's excess charge is the potential of a `carrier` node,
+neighbours exchange charge by diffusion, and the layer next to the surface empties into the
+junction:
+
+```verilog
+for (k = 0; k < N; k = k + 1) begin : slice
+    if (analysis("static"))
+        Qr(q[k]) <+ Qc(q[k]) - qdep / track * max(min((k + 1) * dz, track) - k * dz, 0.0);
+    else
+        Qr(q[k]) <+ ddt(Qc(q[k])) + Qc(q[k]) / taur;
+end
+for (k = 0; k < N - 1; k = k + 1) begin : link
+    if (!analysis("static"))
+        Qr(q[k], q[k + 1]) <+ dn * Qc(q[k], q[k + 1]) / (dz * dz);
+end
+```
+
+The surface's absorbing boundary is half a slice from the first node's centre, so the collected
+current is `2 * dn * Qc(q[0]) / (dz * dz)`. It flows out of the drain, `I(d, b) <+ icol`, and into
+a `col` node that integrates it.
+
+**The strike as the transient's initial condition.** In the operating point
+(`analysis("static")`) every slice is pinned to its share of the deposited charge, and nothing
+is collected. The circuit's operating point is therefore the unstruck cell, and the transient
+starts with the charge already in the silicon: the strike happens at t = 0.
+
+**The transistor.** `mos` is the simplified EKV model,
+I_d = 2nβU_t²·[F(V_p/2U_t) − F((V_p − V_ds)/2U_t)] with F(x) = ln²(1 + eˣ). Its continuous
+derivatives from weak to strong inversion suit a cell that passes through every operating
+region in picoseconds. `ln(1 + exp(x))` lives in an `analog function`, `softplus`, which returns
+x above 40 rather than overflow. `type=-1` makes a p-channel device.
+
+**Holding a bistable cell in its state: `.nodeset`.** A cross-coupled pair has three operating
+points: q = 1, q = 0, and the metastable middle. `.nodeset V(q1)=1.2 V(qb1)=0` starts Newton
+next to the q = 1 state, which it then converges to. Without it, the operating point is
+whichever state Newton happens to find.
+
+## Collection by diffusion
+
+```bash
+python docs/examples/multiphysics/seu_plots.py "$PWD/target/release/va-cli"
+```
+
+The script runs the two committed decks and the bisection runs.
+
+![Collected current and charge](examples/multiphysics/seu_collection.svg)
+
+**The deck** (`seu_collection.net`) is `V1 d gnd DC 1.2` holding the drain, with
+`X1 d gnd strike_diffusion qdep=10f`. `.tran 10p 20n` is the step cap. The adaptive step goes
+far finer at the strike, where the current changes fastest.
+
+**The reference** is the series solution of dn/dt = D·d²n/dz² − n/τ, with n = 0 at the surface
+and no flux at the bottom:
+I(t) = (2·D·q/(L·ℓ))·Σ_m (1 − cos k_m·ℓ)·e^(−(D·k_m² + 1/τ)·t), where k_m = (m + ½)π/L, L is the
+depth and ℓ the track length.
+
+```text
+  t =  0.10 ns: 3.3684 fC, exact 3.3735 fC (-0.152 %)
+  t =  0.50 ns: 6.1386 fC, exact 6.1399 fC (-0.021 %)
+  t =  2.00 ns: 8.0653 fC, exact 8.0654 fC (-0.001 %)
+  t = 20.00 ns: 9.8801 fC, exact 9.8799 fC (+0.002 %)
+```
+
+The exact current diverges as t^(−1/2) at the strike, where a ladder cannot follow it. A ladder
+of 0.1 µm slices starts resolving it after dz²/D ≈ 3 ps. That early error decays, and the
+collected charge converges.
+
+## The critical charge, by bisection
+
+![Critical charge against pulse duration](examples/multiphysics/seu_qcrit.svg)
+
+**How the script bisects.** A critical charge is a threshold, so the script searches for it:
+
+1. It writes `target/seu_bisect.net`: eight complete cells, each with its own strike, at charges
+   spaced geometrically across the current bracket.
+2. It runs that deck, and reads each strike's `@(final_step)` line, `drain at <v> V`.
+3. It narrows the bracket to the first pair that straddles the flip, and repeats, four rounds in
+   all.
+
+Eight cells a run make each round cut the bracket roughly sevenfold (the eight charges split it
+into seven intervals, and the flip lies in one). The final precision is ±0.2 %. The exponential
+pulses are `strike_exp q=... tau=...`, whose `$bound_step(tau / 10.0)` keeps the step short enough
+to follow a 0.1 ps pulse.
+
+**The two limits, from the cell's own equations.** The script re-implements `mos` in Python:
+
+- **Instantaneous:** remove charge Q from node q at once, integrate the two-node ODE, and bisect
+  on Q. The answer is exactly C·VDD = 1.2 fC. A symmetric cell's separatrix is the diagonal
+  q = qb, so with qb still at 0, q must reach zero.
+- **Static:** for each q, solve qb from its own node's balance, and take the largest net
+  restoring current, the peak of the N-curve: I_crit = 46.6 µA. A pulse slower than the cell's
+  response flips it when its peak current, Q/τ, exceeds I_crit.
+
+```text
+  tau 1.000e-13 s: Q_crit   1.2080 fC  (instantaneous 1.2000, I_crit tau   0.0047)
+  tau 9.769e-12 s: Q_crit   1.8922 fC  (instantaneous 1.2000, I_crit tau   0.4549)
+  tau 9.543e-10 s: Q_crit  49.3224 fC  (instantaneous 1.2000, I_crit tau  44.4417)
+  tau 3.000e-09 s: Q_crit 146.6158 fC  (instantaneous 1.2000, I_crit tau 139.7169)
+```
+
+The simulation approaches C·VDD from above as τ shrinks, and I_crit·τ from above as it grows
+(+11 % at 1 ns, +4.9 % at 3 ns). The remaining excess is the charge needed to actually move the
+node once the current has won.
+
+## A struck cell
+
+![SRAM node voltages after a strike](examples/multiphysics/seu_sram.svg)
+
+**The deck** (`seu_sram.net`) holds two cells struck by `strike_diffusion` with 10 fC and 11 fC.
+They bracket the diffusion critical charge, which the script bisects to 10.54 fC deposited. The
+time axis is logarithmic because the cell decides within 50 ps of a strike whose charge keeps
+arriving for 10 ns.
+
+- In both cells the diffusion current's initial spike drags the drain through 0.6 V within 5–8 ps,
+  after about 0.9 fC.
+- What separates them is the tail. At 11 fC the collected current keeps out-pulling the 46.6 µA
+  pull-up until qb has risen far enough to turn the pull-up off.
+
+**Is 10.54 fC converged?** The bisection gives 10.537 fC with 50, 100 and 200 slices, and with a
+1 ps step cap. With 25 slices it gives 10.72 fC. Fifty slices it is.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -2106,6 +2237,9 @@ python $F/optomech_plots.py "$VA"
 
 # Horn loudspeaker
 python $F/speaker_plots.py "$VA"
+
+# SRAM single-event upset
+python $F/seu_plots.py "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -2125,6 +2259,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | the two breaker decks (`breaker_plots.py`) | about 3 s together |
 | the two optomechanics decks (`optomech_plots.py`, 2.3 million steps) | about 2 min together |
 | the three loudspeaker decks (`speaker_plots.py`) | about 4 min together (the thermal deck is most of it) |
+| the SEU decks and the bisection runs (`seu_plots.py`) | about 3.5 min together |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

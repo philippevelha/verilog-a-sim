@@ -1,0 +1,17 @@
+* Single-event upset, part 1: an ion's charge collected by diffusion at a drain held at 1.2 V.
+*
+* strike_diffusion of models/multiphysics/seu/: 10 fC deposited uniformly along the first 2 um of a
+* 5 um column of silicon under the drain; electrons diffuse (36 cm^2/s) and recombine (100 ns);
+* the junction at the surface collects whatever reaches it. 50 slices of 0.1 um.
+* Reference: the diffusion equation's exact series solution (absorbing surface, reflecting
+* bottom), computed in docs/examples/multiphysics/seu_plots.py.
+* What to look for (measured at 2.16.2+4): 9.880 fC collected by 20 ns (the rest recombines).
+* Against the series: -0.15 % at 0.1 ns, -0.02 % at 0.5 ns, within 0.002 % from 2 ns on. The early
+* error is the ladder's: the exact current diverges as t^-1/2 at the strike, and 0.1 um slices
+* resolve it only after dz^2 / D ~ 3 ps.
+* Plot: python docs/examples/multiphysics/seu_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/seu_collection.net --model models/multiphysics/seu --tran --report V1,X1.col
+V1 d gnd DC 1.2
+X1 d gnd strike_diffusion qdep=10f
+.tran 10p 20n
+.end

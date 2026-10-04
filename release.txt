@@ -22,6 +22,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2+4 - 2026-10-04
+---------------------
+**Multiphysics example 16: an SRAM single-event upset** (`models/multiphysics/seu/`;
+`seu_plots.py`; `docs/multiphysics.md` and the tutorial). An ion track's charge collected by
+diffusion (a 50-slice `generate` ladder of a `carrier` discipline, the deposit set as the
+operating point through `analysis("static")`), a 6T cell of simplified-EKV transistors held in
+its state by `.nodeset`, and the critical charge found by bisection over generated decks.
+  * Collection against the diffusion equation's exact series: -0.15 % at 0.1 ns (the ladder cannot
+    follow the t^-1/2 spike for its first ~3 ps), within 0.002 % from 2 ns on.
+  * Critical charge against an exponential pulse's tau, between two limits from the cell's own
+    equations: C VDD = 1.2 fC for an instantaneous pulse (exact: a symmetric cell's separatrix is
+    q = qb), reached within 0.7 % at 0.1 ps; I_crit tau with I_crit = 46.6 uA (the N-curve's
+    peak), approached from above (+11 % at 1 ns, +4.9 % at 3 ns).
+  * Collected by diffusion from a 2 um track, the cell needs 10.54 fC deposited, 8.8 x C VDD;
+    the same with 50, 100 or 200 slices (10.72 fC with 25).
+  * Limitations: one-dimensional collection (no funnelling, drift or lateral spread), uniform
+    track, transistors without capacitance or body effect.
+  * Measured at this version: `seu_plots.py` 3 min 28 s (two decks and 41 bisection runs);
+    `cargo test --workspace` 952 passed, `cargo xtask validate` 28/28 (as 2.16.2; no code changed).
+
+
 2.16.2+3 - 2026-10-04
 ---------------------
 **Multiphysics example 15: a horn loudspeaker** (`models/multiphysics/speaker/`;
