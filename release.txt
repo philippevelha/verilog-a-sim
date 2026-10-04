@@ -22,6 +22,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.1+3 - 2026-10-04
+---------------------
+**Multiphysics example 10: a piezoelectric harvester** (`models/multiphysics/piezo/`;
+`piezo_plots.py`; `docs/multiphysics.md` and the tutorial). A Duffing cantilever with a piezo
+layer, base excitation as a node voltage (a swept `chirp`, or a jittered `multisine` standing in
+for random vibration, since `$rdist_*` folds to its mean in a transient), and Schottky bridges
+into storage.
+
+  * Linear power into a load: 6.3194 V against the exact two-degree-of-freedom steady state's
+    6.3193 V, at a 20 us cap. The step matters: Q ~ 50 magnifies the trapezoidal rule's
+    frequency error; 0.1 ms reads +0.08 %, converging at second order.
+  * Duffing sweep: the jump, against harmonic balance (folds at 51.762 / 52.809 Hz, peak 0.8572 mm
+    at 52.776 Hz). The sweep peaks at 0.859 mm, and the jumps lag the folds by 0.3 / 0.2 Hz at
+    0.2 Hz/s and 0.19 / 0.14 Hz at half that.
+  * Broadband storage as an ensemble of four realizations: the hardening beam wins one of four,
+    9 % less energy on average. Stated, because the example gave two wrong answers on the way:
+    +37 % from a deck that had lost a load resistor, -4 % from evenly spaced (periodic, bursty)
+    tones.
+  * The Schottky model carries leakage and junction capacitance: without them an all-reverse-
+    biased bridge left the piezo floating, and the step collapsed.
+  * Release record for 2.16.1: the combined deck-diff, 2.16.0 against 2.16.1 (rerun after the
+    two partial runs were stopped by memory pressure), gives 113 identical, 11 different,
+    13 skipped. Each difference is explained: the grid cascade (event state), the HH and ReRAM
+    decks (junction guess; ReRAM event tolerances), and the Li-ion and ring-bank decks, which
+    2.16.0 could not run.
+  * No crate changed; figures are from runs at this version.
+
 2.16.1+2 - 2026-10-04
 ---------------------
 **Multiphysics example 9: Gray-Scott reaction-diffusion** (`models/multiphysics/grayscott/`;

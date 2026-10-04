@@ -33,6 +33,7 @@ The examples, in the order they were built:
 | [9](#liion) | Li-ion cell | electrochemical, thermal | diffusion ladders, inverted Butler–Volmer, aging over years, runaway in seconds |
 | [10](#relay) | Electromagnetic relay | electrical, magnetic, mechanical, thermal | Jiles–Atherton hysteresis, contact bounce, hot pickup, remanence |
 | [11](#grayscott) | Gray–Scott reaction–diffusion | chemical kinetics on a grid | a PDE as a 2-D vector net, event `or` lists, file output from a model |
+| [12](#piezo) | Piezoelectric harvester | mechanical, electrical | a Duffing jump against harmonic balance, rectifiers, a broadband ensemble |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -1479,6 +1480,136 @@ t=    6000: mean v 0.09166, max v 0.36372, 4 region(s) with v > 0.3
   perturbation is too weak to break it. That run takes about 16 minutes, which is why it is not a
   deck.
 
+# Piezoelectric harvester: Duffing beam, rectifier, broadband vibration {#piezo}
+
+**Library:** `models/multiphysics/piezo/`, which contains:
+
+- `piezo_parts.va`: `piezo_beam`, `chirp`, `multisine`, `schottky`;
+- `piezo_natures.vams`: `beam` (position, with force as flow) and `beam_v` (velocity).
+
+**The beam** is one bending mode, with the piezo layer as its coupling:
+
+```verilog
+Frc(x) <+ m * ddt(Vel(v)) + c * Vel(v) + k * Pos(x) + k3 * Pos(x)*Pos(x)*Pos(x)
+          + theta * V(p, n) + m * V(acc);
+I(p, n) <+ cp * ddt(V(p, n)) - theta * Vel(v);
+```
+
+The base acceleration is the voltage of the electrical node `acc` (volts read as m/s²). Any
+source can therefore shake the beam: `SIN` for a tone, or one of the two excitation modules.
+
+- **`chirp`** sweeps a sine's frequency up and back. Its phase is the integral of the frequency,
+  so it is continuous at the turnaround. `$bound_step(1/(40 f1))` keeps at least 40 steps per
+  cycle wherever the deck's cap would allow fewer.
+- **`multisine`** stands in for random vibration. `$rdist_*` folds to its mean in a transient,
+  which would be a silent zero, so the module builds a flat-spectrum signal instead:
+  - 60 tones;
+  - one per frequency bin, at a pseudo-random point of the bin;
+  - pseudo-random phases from golden-ratio and √2 sequences;
+  - `seed` selecting another realization.
+
+  The jitter is not cosmetic. With the tones on an even grid, the sum is periodic, its phases
+  realign every 1.2 s, and its energy arrives in bursts.
+
+## Power into a load: a step size a resonator demands
+
+```bash
+python docs/examples/multiphysics/piezo_plots.py "$PWD/target/release/va-cli"
+```
+
+The script runs all three piezo decks.
+
+**The deck** (`piezo_linear.net`): `VA acc gnd SIN(0 2 50)` shakes the linear beam at its
+resonance, into `R1 p gnd 63662`, which is 1/(ωC_p).
+
+**The closed form.** With Z = R ∥ C_p, the steady state is
+
+$$X = \frac{-m a}{k - m\omega^2 + j\omega c + j\omega\theta^2 Z},\qquad V = j\omega\theta X Z,$$
+
+which gives 6.3193 V and 0.3136 mW. The script measures the amplitude from the RMS over the last
+ten cycles, not from a sample maximum, and prints:
+
+```text
+linear: |V| 6.3194 V (closed form 6.3193 V), power 0.3136 mW (closed form 0.3136 mW)
+```
+
+**Why `.tran 0.02m 3`.** That cap is 1000 steps per period, which looks excessive until you vary
+it:
+
+| Cap | Amplitude |
+|---|---|
+| 0.1 ms | 6.3241 V |
+| 0.05 ms | 6.3206 V |
+| 0.02 ms | 6.3194 V |
+
+That is second-order convergence onto the closed form. The trapezoidal rule's frequency error is
+tiny, but a resonator with Q ≈ 50 magnifies an error in its resonance frequency about 50-fold in
+amplitude. High-Q systems need small steps for amplitude accuracy, not for stability.
+
+## The Duffing jump, against harmonic balance
+
+![Swept amplitude of a linear and a hardening beam](examples/multiphysics/piezo_duffing.svg)
+
+**The deck** (`piezo_duffing.net`): `XS acc chirp amp=2 f0=48 f1=56 tsw=40` drives a linear beam
+and `piezo_beam k3=2e8` side by side, each on the same load. `.tran 0.1m 80` gives 80 s, at
+0.2 Hz/s.
+
+**Harmonic balance** is the closed form here. Assuming x = X·cos(ωt), the cubic term contributes
+(3/4)·k₃·X² to the stiffness, and the load's complex impedance contributes stiffness and damping.
+The amplitude then satisfies a cubic in X², solved by the script at every frequency:
+
+```text
+harmonic balance: folds at 51.762, 52.810 Hz; upper-branch peak 0.8572 mm at 52.776 Hz
+sweep: up-sweep peak 0.8591 mm at 52.860 Hz, drop between 53.10 and 53.14 Hz; down-sweep jump between 51.58 and 51.54 Hz
+```
+
+**What it shows.**
+
+- **Three branches** between the folds: two stable and a middle unstable one. The figure's dotted
+  lines are all three.
+- **The sweep chooses the branch.** Going up, the beam stays on the upper branch until it ends.
+  Going down, it stays on the lower one.
+- **The jumps lag the folds** by 0.3 and 0.2 Hz, because the sweep is finite. At half the rate
+  (`tsw=80`) the lags are 0.19 and 0.14 Hz. They shrink roughly as the sweep rate^(2/3), the
+  scaling of a slow passage through a saddle-node. The ring bank's bistability (§8) behaves the
+  same way.
+
+## Storage under broadband vibration: an ensemble, not a run
+
+![Four realizations, linear vs hardening](examples/multiphysics/piezo_storage.svg)
+
+**The deck** (`piezo_storage.net`). Four `multisine` sources (`seed=0..3`, 4 m/s² RMS over
+30–80 Hz) each drive one linear and one hardening beam. Each beam has its own rectifier and
+store: four `schottky` diodes, then 22 µF and 1 MΩ. That is 8 beams and 32 diodes, and the run
+takes about 4 minutes.
+
+**The rectifier needed real diodes.** The first Schottky model was the bare exponential. When all
+four diodes of a bridge are reverse-biased, its conductance underflows to zero, the piezo's
+terminals are joined only by C_p with nothing fixing their common voltage, and the time step
+collapsed. A real diode's reverse leakage (`gleak`) and junction capacitance (`cj`) fix that,
+and are part of the model now.
+
+**What the script prints.**
+
+```text
+seed 0: linear 4.218 V, hardening 4.896 V at t = 10 s
+seed 1: linear 5.197 V, hardening 4.691 V at t = 10 s
+seed 2: linear 5.387 V, hardening 4.693 V at t = 10 s
+seed 3: linear 5.285 V, hardening 4.908 V at t = 10 s
+mean over the four: linear 5.022 V, hardening 4.797 V (stored energy ratio 0.912)
+```
+
+**The lesson** is in the spread. Each number is step-converged: 0.05 and 0.1 ms caps agree to
+0.003 V. The realizations, though, differ by far more than the two beams do. One realization
+favours the hardening beam by 35 % in energy; the mean favours the linear one by 9 %.
+
+Before this ensemble, the example gave two other answers, both wrong:
+
+- **+37 % for hardening**, from a deck whose hardening store had lost its load resistor;
+- **−4 %**, from evenly spaced tones whose bursts are not random vibration.
+
+A broadband comparison is statistical. Ask it of one run and you can get any answer.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -1526,6 +1657,9 @@ python $F/relay_plots.py "$VA"
 # Gray-Scott
 va-cli sim $C/gray_scott_wellmixed.net --model $M/grayscott --tran --report X1.u[0][0],X1.v[0][0],X2.u[0][0],X2.v[0][0]
 python $F/gray_scott.py gray_scott_spots "$VA"
+
+# Piezo harvester
+python $F/piezo_plots.py "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -1541,6 +1675,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | the three Li-ion decks (`li_plots.py`) | about 30 s together |
 | the two relay decks (`relay_plots.py`) | about 40 s together |
 | Gray–Scott spots (2049 unknowns) | about 1.5 min |
+| the three piezo decks (`piezo_plots.py`) | about 4.5 min together (the storage ensemble is 4) |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

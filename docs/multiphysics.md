@@ -21,14 +21,14 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
 | `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
 | `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
 | `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
@@ -39,8 +39,8 @@ Which language features each example uses, so the set as a whole reads as a cove
 | `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
-| `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
+| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
 | `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
 | integer parameters sizing structure, overridden per instance | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
 | `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
@@ -56,6 +56,8 @@ Which language features each example uses, so the set as a whole reads as a cove
 | two-dimensional vector nets, nested `generate` loops | [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
 | an event `or` list (`initial_step or timer(...) or final_step`) | [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
 | file output from a model (`$fopen`/`$fwrite`/`$fdisplay`/`$fclose`) | [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
+| `$abstime` driving a source; a `for` loop summing tones | [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
+| a cubic (Duffing) stiffness and its jump phenomenon | [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
 
 ---
 
@@ -718,3 +720,75 @@ tile the torus and the pattern then settles: mean v 0.09133 at t = 4000 and 0.09
 **Limitations.** Second-order finite differences on a uniform grid. Grids much beyond 64×64 are
 slow, since the whole grid is one model instance. The step is set by accuracy, not by the
 explicit stability limit a dedicated pattern-formation code would use.
+
+---
+
+## Piezoelectric harvester: a Duffing beam, a rectifier and broadband vibration
+
+**Domains:** mechanical (a cantilever's bending mode) and electrical (its piezo layer, a
+rectifier, a store). **Models:** `models/multiphysics/piezo/piezo_parts.va` (`piezo_beam`,
+`chirp`, `multisine`, `schottky`) and `piezo_natures.vams`.
+
+The beam is m ẍ + c ẋ + kx + k₃x³ + θV = −m·a(t) (a hardening Duffing stiffness when k₃ > 0),
+coupled to its piezo layer: I = C_p·dV/dt − θẋ. The base acceleration a(t) is an electrical
+node's voltage, so any source can shake it:
+
+- `chirp`, a swept sine with continuous phase;
+- `multisine`, a stand-in for random vibration: 60 tones, one per bin at a jittered frequency,
+  with pseudo-random phases. Real random draws are not available in a transient here, because
+  `$rdist_*` folds to its mean.
+
+### 1. Power into a load, against the closed form
+
+```bash
+python docs/examples/multiphysics/piezo_plots.py target/release/va-cli
+```
+
+The linear beam at its 50 Hz resonance, 2 m/s², into R = 1/(ωC_p). The exact steady state of
+the coupled two-degree-of-freedom system gives |V| = 6.3193 V and 0.3136 mW; the simulation gives
+**6.3194 V**. That takes a 20 µs step cap. A resonator with Q ≈ 50 magnifies the trapezoidal
+rule's small frequency error, so 0.1 ms reads +0.08 %, converging at second order.
+
+### 2. The Duffing jump
+
+![Duffing harvester sweep](examples/multiphysics/piezo_duffing.svg)
+
+A 48 → 56 → 48 Hz sweep at 0.2 Hz/s, a linear beam beside a hardening one (k₃ = 2·10⁸ N/m³).
+Harmonic balance of the hardening beam's steady state, including the load's damping, gives:
+
+- a bistable band between **51.762 and 52.809 Hz**;
+- an upper-branch peak of **0.8572 mm at 52.776 Hz**.
+
+The sweep rides the upper branch to 0.859 mm and drops just past the upper fold, then jumps up
+just past the lower one on the way down. The jumps lag the folds by 0.3 and 0.2 Hz, and by 0.19
+and 0.14 Hz at half the sweep rate: the delay past a saddle-node shrinks as the rate^(2/3).
+
+### 3. Storage under broadband vibration: an ensemble
+
+![Storage under four broadband realizations](examples/multiphysics/piezo_storage.svg)
+
+Four realizations of 4 m/s² RMS over 30–80 Hz, each driving a linear and a hardening beam through
+bridge rectifiers into 22 µF and 1 MΩ:
+
+| Realization | Linear store at 10 s | Hardening store at 10 s |
+|---|---|---|
+| seed 0 | 4.218 V | 4.896 V |
+| seed 1 | 5.197 V | 4.691 V |
+| seed 2 | 5.387 V | 4.693 V |
+| seed 3 | 5.285 V | 4.908 V |
+
+The hardening beam wins one realization in four, and stores 9 % less energy on average.
+
+**What getting here found.** Two wrong answers first, both mine, and both instructive:
+
+- **+37 % for hardening**, from a deck that had lost one store's load.
+- **−4 %**, from evenly spaced tones: a periodic signal whose phases realign every 1.2 s, so it
+  delivers its energy in bursts.
+
+The ensemble shows why a single run cannot settle the question. A broadband comparison is
+statistical, and at this level and band the broadband advantage often claimed for Duffing
+harvesters does not appear.
+
+**Limitations.** One bending mode, linear piezoelectricity, and diodes with a constant junction
+capacitance. The Schottky model needed leakage and capacitance before it would run: without them,
+a bridge whose four diodes are all reverse-biased leaves the piezo floating.

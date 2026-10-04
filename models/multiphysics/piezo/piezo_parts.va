@@ -1,0 +1,143 @@
+// Piezoelectric vibration harvester: a Duffing cantilever with a piezo layer, base excitation
+// (a swept sine, or a broadband multisine), and a rectifier into a storage capacitor.
+//
+// # The beam (`piezo_beam`), a single-mode lumped model
+//
+//   mechanical   m x'' + c x' + k x + k3 x^3 + θ V = -m a(t)        (a: base acceleration)
+//   electrical   I(p, n) = Cp dV/dt − θ x'                             (V = V(p, n))
+//
+// θ (N/V) is the electromechanical coupling: the piezo layer pushes on the beam with θV and
+// sources a current θ x' into its own capacitance Cp. k3 > 0 is a hardening (Duffing)
+// stiffness: the resonance moves up with amplitude, and a frequency sweep jumps between two
+// branches.
+//
+// # Excitation
+//
+// `chirp`: a sine of constant amplitude whose frequency rises linearly from f0 to f1 over `tsw`
+// and falls back over another `tsw` (the phase is the integral of the frequency, so continuous).
+// `multisine`: K tones, one in each of K equal bins of [f0, f1] at a pseudo-random point of the
+// bin, with pseudo-random phases (golden-ratio and sqrt(2) sequences), each of amplitude
+// a_rms·sqrt(2/K), so the sum has RMS a_rms and a flat spectrum without repeating: a
+// reproducible stand-in for broadband random vibration. True random draws are not available
+// here: `$rdist_*` folds to its mean in a transient, which would be a silent zero.
+//
+// # Verilog-A shown here
+//
+// A user mechanical discipline beside electrical; a cubic stiffness; a branch current read in a
+// flow contribution; `$abstime` driving a source; a `for` loop accumulating tones; `analog
+// function`s; a diode written as an explicit branch so its exponential stays finite.
+//
+// # Limitations
+//
+// One bending mode; linear piezoelectricity (no dielectric loss, no depolarization); no beam
+// fatigue or strain limit; diodes with a constant junction capacitance and no reverse recovery.
+`include "disciplines.vams"
+`include "piezo_natures.vams"
+
+`define PZ_TWOPI 6.28318530717958647692
+
+module piezo_beam(acc, p, n);
+    inout acc, p, n;
+    electrical acc, p, n;
+
+    parameter real m     = 0.01    from (0:inf);    // kg, effective mass
+    parameter real f0    = 50.0    from (0:inf);    // Hz, linear resonance
+    parameter real zeta  = 0.01    from [0:inf);    // mechanical damping ratio
+    parameter real k3    = 0.0     from [0:inf);    // N/m^3, hardening
+    parameter real theta = 5e-4    from [0:inf);    // N/V, coupling
+    parameter real cp    = 50e-9   from (0:inf);    // F, piezo capacitance
+
+    beam x;
+    beam_v v;
+    real k, c;
+
+    analog begin
+        k = m * (`PZ_TWOPI * f0) * (`PZ_TWOPI * f0);
+        c = 2.0 * zeta * sqrt(k * m);
+        Frc(v) <+ Vel(v) - ddt(Pos(x));
+        Frc(x) <+ m * ddt(Vel(v)) + c * Vel(v) + k * Pos(x) + k3 * Pos(x) * Pos(x) * Pos(x)
+                  + theta * V(p, n) + m * V(acc);
+        I(p, n) <+ cp * ddt(V(p, n)) - theta * Vel(v);
+    end
+endmodule
+
+// A constant-amplitude sine swept f0 -> f1 over tsw, then back f1 -> f0 over tsw (volts =
+// m/s^2 of base acceleration).
+module chirp(out);
+    inout out;
+    electrical out;
+    parameter real amp = 2.0   from [0:inf);    // m/s^2
+    parameter real f0  = 40.0  from (0:inf);    // Hz
+    parameter real f1  = 60.0  from (0:inf);    // Hz
+    parameter real tsw = 20.0  from (0:inf);    // s per direction
+    real t, beta, ph;
+    analog begin
+        t = $abstime;
+        beta = (f1 - f0) / tsw;
+        if (t <= tsw)
+            ph = `PZ_TWOPI * (f0 * t + 0.5 * beta * t * t);
+        else
+            ph = `PZ_TWOPI * (f0 * tsw + 0.5 * beta * tsw * tsw
+                              + f1 * (t - tsw) - 0.5 * beta * (t - tsw) * (t - tsw));
+        V(out) <+ amp * sin(ph);
+        $bound_step(1.0 / (40.0 * f1));
+    end
+endmodule
+
+// K tones, one per bin of [f0, f1] at a jittered frequency, with golden-ratio phases: a
+// flat-spectrum, non-repeating, reproducible broadband excitation of RMS a_rms (volts = m/s^2).
+module multisine(out);
+    inout out;
+    electrical out;
+    parameter integer ntones = 60    from [1:1000];
+    parameter real    arms   = 1.0   from [0:inf);   // m/s^2 RMS
+    parameter real    f0     = 30.0  from (0:inf);   // Hz
+    parameter real    f1     = 80.0  from (0:inf);   // Hz
+    parameter integer seed   = 0     from [0:inf);   // selects another realization
+    real a, s, fk, ph, u, r;
+    integer kk;
+    analog begin
+        a = arms * sqrt(2.0 / ntones);
+        s = 0.0;
+        for (kk = 0; kk < ntones; kk = kk + 1) begin
+            // Each tone placed at a pseudo-random point of its own bin (a sqrt(2) sequence),
+            // not on a grid: evenly spaced tones sum to a periodic signal, whose phases realign
+            // every 1/spacing seconds and deliver the energy in bursts.
+            u  = (kk + seed * 7919) * 1.4142135623730951;
+            fk = f0 + (f1 - f0) * (kk + u - floor(u)) / ntones;
+            r  = (kk + seed * 104729) * 0.6180339887498949;
+            ph = `PZ_TWOPI * (r - floor(r));
+            s = s + a * sin(`PZ_TWOPI * fk * $abstime + ph);
+        end
+        V(out) <+ s;
+        $bound_step(1.0 / (40.0 * f1));
+    end
+endmodule
+
+// A Schottky diode, written so its exponential cannot overflow: above `vlin` the current
+// continues linearly with the slope it had there (the same idea as SPICE's limiting, done in the
+// model so that Newton's first iterates stay finite). Reverse leakage and a junction capacitance
+// are part of it, as they are of a real one: without them a bridge whose four diodes are all
+// reverse-biased leaves the piezo's two terminals joined only by its own capacitance, with
+// nothing fixing their common voltage, and the time step collapsed at the first such moment.
+module schottky(a, c);
+    inout a, c;
+    electrical a, c;
+    parameter real is    = 1e-8   from (0:inf);    // A
+    parameter real nf    = 1.05   from (0:inf);
+    parameter real vlin  = 0.8    from (0:inf);    // V
+    parameter real gleak = 1e-9   from [0:inf);    // S, reverse leakage
+    parameter real cj    = 50e-12 from [0:inf);    // F, junction capacitance
+    real vd, vt, e;
+    analog begin
+        vd = V(a, c);
+        vt = 0.025852 * nf;
+        if (vd < vlin)
+            I(a, c) <+ is * (exp(vd / vt) - 1.0);
+        else begin
+            e = exp(vlin / vt);
+            I(a, c) <+ is * (e - 1.0) + is * e / vt * (vd - vlin);
+        end
+        I(a, c) <+ gleak * vd + cj * ddt(vd);
+    end
+endmodule

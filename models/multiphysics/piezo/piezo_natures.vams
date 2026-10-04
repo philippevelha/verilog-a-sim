@@ -1,0 +1,35 @@
+// Natures for the piezoelectric harvester example: the beam tip's displacement (m) as a
+// potential with force (N) as flow, so Kirchhoff's law at the node is Newton's; and its velocity
+// (m/s) as an internal state. Include-guarded.
+`ifndef PIEZO_NATURES_VAMS
+`define PIEZO_NATURES_VAMS
+
+nature Beam_position
+    units  = "m";
+    access = Pos;
+    abstol = 1e-12;
+endnature
+
+nature Beam_force
+    units  = "N";
+    access = Frc;
+    abstol = 1e-12;
+endnature
+
+nature Beam_velocity
+    units  = "m/s";
+    access = Vel;
+    abstol = 1e-12;
+endnature
+
+discipline beam
+    potential Beam_position;
+    flow      Beam_force;
+enddiscipline
+
+discipline beam_v
+    potential Beam_velocity;
+    flow      Beam_force;
+enddiscipline
+
+`endif

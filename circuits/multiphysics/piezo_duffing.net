@@ -1,0 +1,24 @@
+* Piezo harvester, Duffing: a frequency sweep up and down, and the jump between branches.
+*
+* Two beams of models/multiphysics/piezo/piezo_parts.va on the same 63.66 kOhm load, driven by
+* one 2 m/s^2 sine swept 48 -> 56 -> 48 Hz over 40 s each way (`chirp`, 0.2 Hz/s): X1 linear,
+* X2 with a hardening stiffness k3 = 2e8 N/m^3.
+*
+* Closed form (harmonic balance of the steady state, the load's damping included; computed by
+* docs/examples/multiphysics/piezo_plots.py): the hardening beam's response folds over, with
+* two stable branches between 51.762 and 52.809 Hz and an upper-branch peak of 0.8572 mm at
+* 52.776 Hz. The linear beam peaks at 0.8937 mm at 50 Hz.
+* What to look for (measured at 2.16.1+3):
+*   X2 sweeping up rides the upper branch to 0.859 mm near 52.86 Hz and drops near 53.1 Hz;
+*   sweeping down it stays on the lower branch until ~51.56 Hz and jumps up. The jumps sit
+*   0.3 and 0.2 Hz past the folds because the sweep is not infinitely slow; at 0.1 Hz/s they
+*   sit 0.19 and 0.14 Hz past (the delay past a saddle-node shrinks as the rate^(2/3)).
+* Plot: python docs/examples/multiphysics/piezo_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/piezo_duffing.net --model models/multiphysics/piezo --tran --report X1.x,X2.x
+XS acc chirp amp=2 f0=48 f1=56 tsw=40
+X1 acc p1 gnd piezo_beam
+R1 p1 gnd 63662
+X2 acc p2 gnd piezo_beam k3=2e8
+R2 p2 gnd 63662
+.tran 0.1m 80
+.end

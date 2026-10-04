@@ -1,0 +1,86 @@
+* Piezo harvester into storage, under broadband vibration: linear vs hardening, as an ensemble.
+*
+* Beams of models/multiphysics/piezo/piezo_parts.va, each through a bridge of four Schottky
+* diodes into 22 uF with a 1 MOhm load. Four realizations of a broadband excitation (`multisine`:
+* 60 tones over 30-80 Hz, one per bin at a jittered frequency, 4 m/s^2 RMS, `seed=0..3`), each
+* driving one linear beam (store sLk) and one hardening beam, k3 = 2e8 N/m^3 (store sHk).
+* `multisine` stands in for random vibration because `$rdist_*` folds to its mean in a transient.
+*
+* The question: does a hardening (Duffing) beam, whose resonance moves up with amplitude, harvest
+* more from broadband vibration than a linear one? Measured at 2.16.1+3, stores at t = 10 s:
+*   seed 0:  linear 4.218 V,  hardening 4.896 V
+*   seed 1:  linear 5.198 V,  hardening 4.691 V
+*   seed 2:  linear 5.387 V,  hardening 4.692 V
+*   seed 3:  linear 5.285 V,  hardening 4.908 V
+* The hardening beam wins one realization in four; over the four, the linear beam stores 5.02 V
+* on average and the hardening one 4.80 V (9 % less energy). Each figure is step-converged
+* (0.05 vs 0.1 ms caps agree to 0.003 V); the spread is the excitation's, not the numerics'.
+* Two lessons in one deck: a broadband comparison is a statistical one, so one realization can
+* give either answer; and the broadband advantage often claimed for Duffing harvesters does
+* not appear at this level and band. (Getting here took two wrong answers: +37 % for hardening
+* from a deck that had lost one store's load, then -4 % from evenly spaced tones, a periodic
+* signal that delivers its energy in bursts.)
+* Plot: python docs/examples/multiphysics/piezo_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/piezo_storage.net --model models/multiphysics/piezo --tran --report sL0,sH0,sL1,sH1,sL2,sH2,sL3,sH3
+XM0 a0 multisine arms=4 f0=30 f1=80 seed=0
+XBL0 a0 pL0 nL0 piezo_beam
+D1L0 pL0 sL0 schottky
+D2L0 nL0 sL0 schottky
+D3L0 gnd pL0 schottky
+D4L0 gnd nL0 schottky
+CL0 sL0 gnd 22u
+RL0 sL0 gnd 1meg
+XBH0 a0 pH0 nH0 piezo_beam k3=2e8
+D1H0 pH0 sH0 schottky
+D2H0 nH0 sH0 schottky
+D3H0 gnd pH0 schottky
+D4H0 gnd nH0 schottky
+CH0 sH0 gnd 22u
+RH0 sH0 gnd 1meg
+XM1 a1 multisine arms=4 f0=30 f1=80 seed=1
+XBL1 a1 pL1 nL1 piezo_beam
+D1L1 pL1 sL1 schottky
+D2L1 nL1 sL1 schottky
+D3L1 gnd pL1 schottky
+D4L1 gnd nL1 schottky
+CL1 sL1 gnd 22u
+RL1 sL1 gnd 1meg
+XBH1 a1 pH1 nH1 piezo_beam k3=2e8
+D1H1 pH1 sH1 schottky
+D2H1 nH1 sH1 schottky
+D3H1 gnd pH1 schottky
+D4H1 gnd nH1 schottky
+CH1 sH1 gnd 22u
+RH1 sH1 gnd 1meg
+XM2 a2 multisine arms=4 f0=30 f1=80 seed=2
+XBL2 a2 pL2 nL2 piezo_beam
+D1L2 pL2 sL2 schottky
+D2L2 nL2 sL2 schottky
+D3L2 gnd pL2 schottky
+D4L2 gnd nL2 schottky
+CL2 sL2 gnd 22u
+RL2 sL2 gnd 1meg
+XBH2 a2 pH2 nH2 piezo_beam k3=2e8
+D1H2 pH2 sH2 schottky
+D2H2 nH2 sH2 schottky
+D3H2 gnd pH2 schottky
+D4H2 gnd nH2 schottky
+CH2 sH2 gnd 22u
+RH2 sH2 gnd 1meg
+XM3 a3 multisine arms=4 f0=30 f1=80 seed=3
+XBL3 a3 pL3 nL3 piezo_beam
+D1L3 pL3 sL3 schottky
+D2L3 nL3 sL3 schottky
+D3L3 gnd pL3 schottky
+D4L3 gnd nL3 schottky
+CL3 sL3 gnd 22u
+RL3 sL3 gnd 1meg
+XBH3 a3 pH3 nH3 piezo_beam k3=2e8
+D1H3 pH3 sH3 schottky
+D2H3 nH3 sH3 schottky
+D3H3 gnd pH3 schottky
+D4H3 gnd nH3 schottky
+CH3 sH3 gnd 22u
+RH3 sH3 gnd 1meg
+.tran 0.1m 10
+.end
