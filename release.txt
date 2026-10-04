@@ -22,6 +22,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2+6 - 2026-10-05
+---------------------
+**Multiphysics example 15: a silicon microring bank -- bistability, self-pulsing and chaos**
+(`models/multiphysics/ringchaos/`; `ringchaos_plots.py`; `docs/multiphysics.md` and the
+tutorial). Coupled-mode rings with two-photon absorption, free carriers (5 ns) and heat (100 ns),
+four state equations per ring; the bus carries the complex field from ring to ring as two nodes.
+  * Bistability: a power sweep up and down against the model's own steady states and Jacobian
+    eigenvalues: folds 3.445 / 0.2515 mW (sweep jumps at 3.70 / 0.20 mW, late by the thermal
+    lag), a supercritical Hopf at 0.373 mW (24.7 MHz) where the pulsing band closes, and a
+    subcritical one at 7.47 mW (pulsing coexists with a steady state up to ~12 mW).
+  * Self-pulsing against scipy (LSODA): periods 40.500 / 40.497 ns at 0.40 mW and 96.174 /
+    96.191 ns at 6 mW; extremes equal to 4 digits.
+  * Two rings on one bus at 7 mW: identical rings lock (periodic; 25.062 vs scipy 25.118 ns
+    between large peaks, 0.2 %); ring B with a 260 ns thermal time is chaotic: a folded return
+    map, 290 distinct maxima in 50 us, a 1e-9 twin decorrelated in 10 us, and a Benettin
+    Lyapunov exponent of the same equations of 1.36e6 /s over 100 us (still settling: 1.86, 1.67,
+    1.46e6 at 25/50/75 us; positive throughout).
+  * Found on the way, and stated in the docs: at 8 mW the same bank is only transiently chaotic
+    (settles after 50-125 us), caught by a Lyapunov estimate that kept falling and a 300 us run;
+    identical rings and rings coupled through the substrate lock instead of going chaotic; a
+    DC operating point on the unstable steady state never pulses (the decks ramp the laser on);
+    a twin's largest pointwise difference is not a chaos test (periodic twins end 2.4 ns apart).
+  * Limitations: one mode per ring, no Kerr effect, lumped carriers with a linear free-carrier
+    index, one thermal node per ring, one-way bus.
+  * Measured at this version: `ringchaos_plots.py` 9 min 58 s (51 min 50 s with --lyapunov);
+    `cargo test --workspace` 952 passed, `cargo xtask validate` 28/28 (as 2.16.2; no code
+    changed).
+
+
 2.16.2+5 - 2026-10-04
 ---------------------
 **Release-log numbering fix.** The entries for 2.16.2+1 to +4 (and their commit subjects, which

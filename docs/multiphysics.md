@@ -21,14 +21,14 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 | `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 | `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
 | `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
@@ -40,15 +40,15 @@ Which language features each example uses, so the set as a whole reads as a cove
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
 | `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
-| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression) |
+| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 | `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | integer parameters sizing structure, overridden per instance | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [loudspeaker](#horn-loudspeaker-an-acoustic-transmission-line-a-nonlinear-driver-and-thermal-compression), [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | a DC operating point that is a nonlinear network solve (load flow) | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
 | protection as events: a relay latching a line open | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
-| a complex ODE as two real state nodes (coupled-mode theory) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
-| one-way signal ports written as potentials (optical power, wavelength) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
-| a stiff system: ps optics against ms thermals | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| a complex ODE as two real state nodes (coupled-mode theory) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| one-way signal ports written as potentials (optical power, wavelength) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| a stiff system: ps optics against ms thermals | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 | `case` on an integer parameter; a potential contribution that reads its own branch current (inverted Butler-Volmer) | [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
 | a run from hours-long smouldering to seconds-long runaway (step control across 4 decades) | [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
 | a hysteretic ODE with direction-dependent right-hand side (Jiles-Atherton) | [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
@@ -68,6 +68,8 @@ Which language features each example uses, so the set as a whole reads as a cove
 | `.nodeset` choosing one state of a bistable circuit | [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | `@(final_step)` reporting a run's outcome for a script to read (bisection over generated decks) | [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
 | a transistor model in Verilog-A (simplified EKV, `type` with `exclude 0`) | [SEU](#sram-single-event-upset-charge-collection-by-diffusion-and-the-critical-charge) |
+| a complex field passed between modules as two potential nodes (a bus of cascaded devices) | [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
+| folds and Hopf points checked against the model's own linearization; chaos against a Lyapunov exponent | [ring chaos](#silicon-microring-bank-optical-bistability-self-pulsing-and-chaos) |
 
 ---
 
@@ -1100,3 +1102,105 @@ the other inverter to switch. The cell decides within about 50 ps.
 - One-dimensional collection: no lateral spreading, no funnelling, no drift.
 - A uniform track.
 - Transistors without capacitance or body effect; the node capacitance is an explicit 1 fF.
+
+---
+
+## Silicon microring bank: optical bistability, self-pulsing and chaos
+
+**Domains:** optical (bus fields and intracavity fields), electronic (free carriers from two-photon
+absorption), thermal (each ring's temperature, and the substrate between rings). **Models:**
+`models/multiphysics/ringchaos/rc_parts.va` and `rc_natures.vams`.
+
+A silicon ring has two nonlinear shifts of its resonance, pulling opposite ways at different speeds:
+
+- **Heat** (absorbed light) raises the index and pulls the resonance red, slowly (τ_th = 100 ns).
+- **Free carriers** (made by two-photon absorption) lower the index and push it blue, fast
+  (τ_fc = 5 ns), and absorb light themselves.
+
+The laser sits 10 linewidths red of the cold resonance. Heating pulls the resonance toward it,
+which gives bistability. On the upper branch the fast carriers push back against the slow heat,
+which gives self-pulsing (Johnson et al., Opt. Express 14, 817, 2006). Rings in sequence on one
+bus are driven by one another's pulsing, and two of them can be chaotic.
+
+The model is coupled-mode theory with the field as two real nodes, a carrier-density node and a
+temperature node per ring. The bus carries the complex field, as two `bus_field` nodes, from
+ring to ring.
+
+### 1. Bistability and the onset of self-pulsing
+
+```bash
+python docs/examples/multiphysics/ringchaos_plots.py target/release/va-cli
+```
+
+![Power sweep over the steady states](examples/multiphysics/ringchaos_bistable.svg)
+
+The laser power is swept up to 6 mW and back, at 0.2 mW/µs. The steady states and their
+stability come from the model's own equations: a branch parameterised by the stored energy, and
+the eigenvalues of its Jacobian.
+
+| Event | Analysis | Sweep |
+|---|---|---|
+| lower branch ends, ring jumps up | fold at 3.445 mW | 3.70 mW |
+| upper branch starts to self-pulse | Hopf at 0.373 mW (24.7 MHz) | on the way down, the pulsing band closes there |
+| upper branch ends, ring drops back | fold at 0.2515 mW | 0.20 mW |
+
+The sweep lags each threshold by the time the ring takes to follow, which is why the jumps land
+past the folds. The upper branch also has a second, subcritical Hopf point at 7.47 mW. Above it,
+steady and pulsing states coexist up to about 12 mW. That is a second bistability, which this
+deck stays below.
+
+### 2. Self-pulsing, against an independent integrator
+
+![Self-pulsing waveforms](examples/multiphysics/ringchaos_selfpulse.svg)
+
+The same equations are integrated with scipy (LSODA, rtol 10⁻¹⁰):
+
+| Power | Period, simulated | Period, scipy | Through power, simulated | scipy |
+|---|---|---|---|---|
+| 0.40 mW (7 % above the Hopf point) | 40.500 ns | 40.497 ns | 0.0470–0.2054 mW | 0.0470–0.2054 mW |
+| 6 mW | 96.174 ns | 96.191 ns | 1.3268–5.9650 mW | 1.3263–5.9650 mW |
+
+Just above the Hopf point the period is the Hopf frequency's (24.7 MHz, 40.4 ns).
+
+### 3. Two rings on one bus: periodic or chaotic
+
+![Return maps and twin separation](examples/multiphysics/ringchaos_bank.svg)
+
+Two rings in sequence at 7 mW, each bank with a twin started with 1 part in 10⁹ more power:
+
+- **Identical rings** lock into a periodic pulse train. Its return map (each maximum against the
+  next) is a handful of points. The simulated and scipy waveforms agree: an interval of 25.062 ns
+  against 25.118 ns between large peaks (0.2 %), and a through-power range of 1.4394–6.9192 mW
+  against 1.4386–6.9192 mW.
+- **Ring B with a 260 ns thermal time** would pulse at its own, lower frequency. Driven by ring A
+  at an incommensurate ratio, the bank is chaotic. Its return map is a folded set of curves,
+  with 290 distinct maxima in 50 µs. The twin separates from it exponentially, from 10⁻⁴ to 0.1 at
+  about 1.3·10⁶ /s, and is uncorrelated after 10 µs.
+
+The largest Lyapunov exponent of the same equations, computed with the Benettin method
+(`--lyapunov`, about 1.5 hours), is 1.36·10⁶ /s, over 100 µs after a 20 µs transient. The running estimate is positive throughout but still settling (1.86, 1.67 and 1.46·10⁶ /s at 25, 50 and 75 µs), so the figure is good to a few tens of per cent, not three digits.
+
+**What building this found.**
+
+- **Started exactly on an unstable state, nothing moves.** A ring whose operating point is the
+  unstable upper steady state stays there, with nothing to make it pulse. The decks switch the
+  laser on with a ramp, as in an experiment.
+- **Rings that pulse at the same rate lock.** Identical rings locked into periodic pulsing, and
+  so did rings coupled through the substrate: heat flowing both ways synchronised them. Chaos
+  needed natural frequencies at an incommensurate ratio.
+- **Chaos can be transient.** The first version of this deck ran at 8 mW. There the same bank
+  is chaotic for 50–125 µs, then settles onto a near-periodic orbit, and a 40 µs deck could not
+  tell. A Lyapunov estimate that kept falling (1.4·10⁶ to 4.3·10⁵ /s over 40 µs) prompted a
+  300 µs run, which showed it. At 7 mW the chaos persists for the 300 µs checked, main and twin
+  alike, and the deck runs there.
+- **A twin's largest pointwise difference does not separate periodic from chaotic.** A periodic
+  bank's twin ends on the same orbit shifted 2.4 ns in time, and with edges this sharp that
+  already looks like a large difference. The return map and the Lyapunov exponent make the case.
+
+**Limitations.**
+
+- One mode per ring: no backscattering.
+- No Kerr effect.
+- Carriers lumped over the mode volume, with a linearised free-carrier index.
+- One thermal node per ring.
+- Light travels one way along the bus.

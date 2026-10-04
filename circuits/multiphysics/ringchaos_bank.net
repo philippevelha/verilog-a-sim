@@ -1,0 +1,48 @@
+* Silicon microring bank, part 3: two self-pulsing rings in sequence on one bus at 7 mW, periodic
+* or chaotic, and a twin of each started with 1 part in 1e9 more laser power.
+*
+* Each bank: the laser, ring A (as in ringchaos_bistable.net), then ring B on the same bus, driven
+* by the field ring A lets through. The laser sits 10 linewidths red of both cold resonances.
+*   bank 1 (+ twin 2): ring B identical to ring A. The two pulse in lock: periodic.
+*   bank 3 (+ twin 4): ring B with a slower thermal time constant (260 ns, a larger or
+*     differently clad ring), so it would pulse at its own, lower frequency: driven by ring A's
+*     pulsing at an incommensurate ratio, the bank is chaotic. Checked over 300 us: about 300
+*     distinct maxima in every 50 us, main and twin alike. (At 8 mW the same bank is chaotic only
+*     for its first 50-125 us, then settles: transient chaos. The power matters.)
+* The twins measure sensitivity to initial conditions. A periodic bank and its twin settle on the
+* same orbit, at most shifted in time (the phase of an autonomous oscillation is free); a chaotic
+* one separates exponentially, at roughly the largest Lyapunov exponent, until the two are
+* uncorrelated. The return map of successive maxima (each against the next) shows the difference
+* at a glance: a few points for a periodic orbit, a folded set of curves for the chaotic one.
+* Reference: the largest Lyapunov exponent of the same equations, by the Benettin method
+* (ringchaos_plots.py --lyapunov, about 1.5 hours), and the periodic bank's period, integrated
+* with scipy.
+* What to look for (measured at 2.16.2+6): bank 1 periodic, 8 distinct maxima, an interval of
+* 25.062 ns between large peaks (scipy 25.118 ns), through power 1.4394-6.9192 mW (scipy
+* 1.4386-6.9192); bank 3 chaotic, 290 distinct maxima in 50 us, its twin separating at ~1.3e6 /s
+* and uncorrelated after 10 us; the Benettin exponent of the same equations is 1.36e6 /s over
+* 100 us (still settling: 1.86, 1.67, 1.46e6 at 25, 50, 75 us; positive throughout).
+* Run: va-cli sim circuits/multiphysics/ringchaos_bank.net --model models/multiphysics/ringchaos --tran --report o1,o2,o3,o4
+VW wctl gnd DC 1550.155016
+VP1 p1 gnd PWL(0 0 20n 7)
+VP2 p2 gnd PWL(0 0 20n 7.000000007)
+VP3 p3 gnd PWL(0 0 20n 7)
+VP4 p4 gnd PWL(0 0 20n 7.000000007)
+XL1 p1 wctl a0r a0i wl1 laser
+XA1 a0r a0i a1r a1i wl1 ta1 siring
+XB1 a1r a1i a2r a2i wl1 tb1 siring
+XD1 a2r a2i o1 detector
+XL2 p2 wctl b0r b0i wl2 laser
+XA2 b0r b0i b1r b1i wl2 ta2 siring
+XB2 b1r b1i b2r b2i wl2 tb2 siring
+XD2 b2r b2i o2 detector
+XL3 p3 wctl c0r c0i wl3 laser
+XA3 c0r c0i c1r c1i wl3 ta3 siring
+XB3 c1r c1i c2r c2i wl3 tb3 siring tth=260n
+XD3 c2r c2i o3 detector
+XL4 p4 wctl d0r d0i wl4 laser
+XA4 d0r d0i d1r d1i wl4 ta4 siring
+XB4 d1r d1i d2r d2i wl4 tb4 siring tth=260n
+XD4 d2r d2i o4 detector
+.tran 0.2n 60u
+.end

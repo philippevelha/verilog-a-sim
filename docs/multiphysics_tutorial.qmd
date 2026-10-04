@@ -38,6 +38,7 @@ The examples, in the order they were built:
 | [14](#optomech) | Cavity optomechanics | optical, mechanical, thermal | a complex field as two nodes, a delayed force, rates against the model's own eigenvalues, a limit cycle |
 | [15](#speaker) | Horn loudspeaker | electrical, mechanical, acoustic, thermal | an acoustic transmission line as a `generate` ladder, distortion through a horn, thermal compression |
 | [16](#seu) | SRAM single-event upset | carrier diffusion, electrical | a diffusion PDE against its exact series, a transistor model, `.nodeset`, critical charge by bisection |
+| [17](#ringchaos) | Silicon microring bank | optical, free carriers, thermal | bistability, self-pulsing and chaos, against bifurcation analysis, scipy and a Lyapunov exponent |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -2178,6 +2179,169 @@ arriving for 10 ns.
 **Is 10.54 fC converged?** The bisection gives 10.537 fC with 50, 100 and 200 slices, and with a
 1 ps step cap. With 25 slices it gives 10.72 fC. Fifty slices it is.
 
+# Silicon microring bank: bistability, self-pulsing, chaos {#ringchaos}
+
+**Library:** `models/multiphysics/ringchaos/`, which contains:
+
+- `rc_parts.va`: `laser`, `siring`, `detector`, `thermal_link`;
+- `rc_natures.vams`:
+  - `bus_field`: one quadrature of a bus waveguide's field, in √mW;
+  - `cmt_field`: one quadrature of a ring's field, in √fJ;
+  - `carrier`: the free-carrier density, in 1/µm³;
+  - `ring_heat`: temperature rise and heat.
+
+**One ring, four state equations.** `siring` holds the intracavity field as two `cmt_field`
+nodes, the carrier density as a `carrier` node, and its temperature on the `ring_heat` port `th`:
+
+```verilog
+Fld_rate(ar) <+ ddt(Fld(ar)) + g * Fld(ar) + dl * Fld(ai) - kap * sr;
+Fld_rate(ai) <+ ddt(Fld(ai)) + g * Fld(ai) - dl * Fld(ar) - kap * si;
+Ncar_rate(nc) <+ ddt(Ncar(nc)) - 1e-18 * (gen - nm / tfc);
+Pwr(th) <+ tth / rth * ddt(Temp(th)) + Temp(th) / rth - pabs;
+```
+
+- `g` is the decay rate: intrinsic loss, the bus, two-photon absorption (∝ U) and free-carrier
+  absorption (∝ N).
+- `dl` is the detuning, moved by heat (`dndt`) and by carriers (`dndn`, negative).
+- `gen` is the carrier generation by two-photon absorption, ∝ U².
+- The thermal row is a capacitance `tth/rth` and a resistance `rth` to the substrate, heated by
+  everything the ring absorbs.
+
+**A complex field between modules.** The bus is two nodes, real and imaginary, written by the
+device upstream and read downstream. Each ring's output is
+
+```verilog
+Fb(outr) <+ Fb(inr) - 1e-6 * kap * Fld(ar);
+Fb(outi) <+ Fb(ini) - 1e-6 * kap * Fld(ai);
+```
+
+so a chain of `siring` instances in the netlist is a bank on one bus. The next ring receives the
+field, not just the power: the phase a ring imprints matters to the ring after it.
+
+**Wavelength and power as ordinary sources.** `laser` turns two electrical nodes into the bus
+field (√ of the power in mW) and a wavelength node every ring reads. `VW wctl gnd DC 1550.155016`
+puts the laser 10 linewidths (0.155 nm) red of the 1550 nm cold resonance.
+
+## Bistability and the onset of self-pulsing
+
+```bash
+python docs/examples/multiphysics/ringchaos_plots.py "$PWD/target/release/va-cli"
+```
+
+The script runs all three decks, and the scipy references (about 10 minutes).
+`--lyapunov` adds the Lyapunov exponent (about 40 minutes more).
+
+![Power sweep over the steady states](examples/multiphysics/ringchaos_bistable.svg)
+
+**The deck** (`ringchaos_bistable.net`): `VP pctl gnd PWL(0 0 30u 6 60u 0)` sweeps the power up
+and back, under `.tran 1n 60u`. The sweep is slow against the 100 ns thermal time, so the ring
+follows its steady states wherever they are stable.
+
+**The reference.** For a stored energy U, every other steady quantity follows in closed form:
+N = G(U)·τ_fc, T = R_th·P_abs(U), and the input power that holds U. Scanning U traces the whole
+S-shaped branch, including the unstable middle that a sweep never visits. The eigenvalues of the
+model's Jacobian at each point give its stability: a real eigenvalue crossing zero is a fold,
+a complex pair is a Hopf point.
+
+```text
+  folds at 3.44498 mW, 0.25149 mW
+  Hopf points at 0.37328 mW (24.73 MHz), 7.46585 mW (21.94 MHz)
+  jumps up at 3.702 mW (fold 3.445 mW), drops back at 0.200 mW (fold 0.251 mW)
+```
+
+**Reading the figure.** The bands are the min–max of the signal in 0.25 µs windows: a line where
+the ring is steady, a band where it pulses.
+
+- **Up:** the ring stays on the lower branch past the fold. It jumps at 3.70 mW, late because the
+  heat takes time to build, and lands in self-pulsing.
+- **Down:** the ring pulses until near the Hopf point, holds the steady upper branch briefly, and
+  drops at 0.20 mW, just past the fold.
+
+**Why the laser is ramped on.** Every deck turns the laser on with a PWL ramp rather than a DC
+source. At 6 mW a DC operating point lands on the upper steady state, which is unstable there.
+Started exactly on it, the ring has nothing to grow from and sits there for the whole run. A ramp
+is also what the experiment does.
+
+## Self-pulsing
+
+![Self-pulsing waveforms](examples/multiphysics/ringchaos_selfpulse.svg)
+
+**The deck** (`ringchaos_selfpulse.net`) holds two rings, each first raised to 5–6 mW to reach the
+upper branch:
+
+- `VP1 ... PWL(0 0 20n 5 2u 5 4u 0.40)` ends at 0.40 mW, 7 % above the Hopf point;
+- `VP2 ... PWL(0 0 20n 6)` stays at 6 mW.
+
+`.tran 0.2n 20u` caps the step at 0.2 ns, which resolves the 6 mW pulses' fast edges.
+
+**The reference** is scipy's LSODA on the same equations, with the same ramps:
+
+```text
+  0.40 mW: period 40.5002 ns (scipy 40.4971), through power 0.0470..0.2054 mW (scipy 0.0470..0.2054)
+  6 mW: period 96.1741 ns (scipy 96.1908), through power 1.3268..5.9650 mW (scipy 1.3263..5.9650)
+```
+
+Near the Hopf point the pulsing is almost sinusoidal, at the Hopf frequency. At 6 mW it is a
+relaxation oscillation, the carriers kicking the ring off resonance and the heat dragging it back.
+
+## Two rings on one bus
+
+![Return maps and twin separation](examples/multiphysics/ringchaos_bank.svg)
+
+**The deck** (`ringchaos_bank.net`) holds four banks of two rings, A then B on one bus:
+
+- banks 1 and 2: identical rings;
+- banks 3 and 4: ring B with `tth=260n`;
+- banks 2 and 4 are twins of 1 and 3, with `PWL(0 0 20n 7.000000007)`, 1 part in 10⁹ more power.
+
+`.tran 0.2n 60u` runs for 60 µs, at 7 mW.
+
+**Reading it.**
+
+- **The return map** plots each maximum of the through power against the next.
+  - A periodic orbit gives as many points as it has maxima per period (bank 1).
+  - Chaos gives a folded set of curves (bank 3). The fold is where a small difference in one
+    maximum becomes a large difference in the next.
+- **The twin.** Bank 3 and its twin separate exponentially, from 10⁻⁴ to 0.1 at about
+  1.3·10⁶ /s, and are uncorrelated after 10 µs.
+- **The reference** is Benettin's method on the scipy model. It follows a trajectory and a
+  neighbour 10⁻⁷ away, renormalising the distance every 200 ns, for 100 µs. The result, 1.36·10⁶ /s, over 100 µs after a 20 µs transient. The running estimate is positive throughout but still settling (1.86, 1.67 and 1.46·10⁶ /s at 25, 50 and 75 µs), so the figure is good to a few tens of per cent, not three digits,
+  is the largest Lyapunov exponent. The dotted line in the figure has that slope.
+
+::: {.callout-note}
+## Why the second ring needs a different thermal time
+
+The search for chaos found mostly locking:
+
+- identical rings in sequence lock into one periodic train;
+- rings coupled through the substrate (`thermal_link`) synchronise even harder, since heat flows
+  both ways.
+
+Coupled oscillators go chaotic when their natural frequencies sit at an incommensurate ratio and
+the coupling is moderate. That is the breakdown of quasi-periodic motion on a torus. Ring B's
+260 ns thermal time lowers its natural pulsing rate, which sets that ratio.
+:::
+
+::: {.callout-warning}
+## Chaos can be transient: check it for longer than the deck runs
+
+At 8 mW the same bank looks just as chaotic for the first 50 µs: a folded return map and twins
+that decorrelate. It then settles onto a near-periodic orbit, the main bank after about 50 µs
+and its twin after about 125 µs. Two things gave it away. The Lyapunov estimate kept falling as
+the run grew longer, where a converged exponent levels off. And a 300 µs run showed the number of
+distinct maxima dropping from ~200 to ~40. At 7 mW the count stays near 300 in every 50 µs, for
+the 300 µs checked. The decks run at 7 mW.
+:::
+
+::: {.callout-warning}
+## A twin's largest difference is not a chaos test on its own
+
+The periodic bank's twin also drifts away, to a full-swing difference. Both twins settle on the
+same orbit, but 2.4 ns apart in time: an autonomous oscillation's phase is free, and the 10⁻⁹
+perturbation set it. With edges this sharp, 2.4 ns is a large pointwise difference. The return
+map and the Lyapunov exponent are what separate periodic from chaotic.
+:::
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -2240,6 +2404,9 @@ python $F/speaker_plots.py "$VA"
 
 # SRAM single-event upset
 python $F/seu_plots.py "$VA"
+
+# Silicon microring bank (add --lyapunov for the Lyapunov exponent, ~40 min more)
+python $F/ringchaos_plots.py "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -2260,6 +2427,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | the two optomechanics decks (`optomech_plots.py`, 2.3 million steps) | about 2 min together |
 | the three loudspeaker decks (`speaker_plots.py`) | about 4 min together (the thermal deck is most of it) |
 | the SEU decks and the bisection runs (`seu_plots.py`) | about 3.5 min together |
+| the microring decks and their scipy references (`ringchaos_plots.py`) | about 10 min; 52 min with `--lyapunov` |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

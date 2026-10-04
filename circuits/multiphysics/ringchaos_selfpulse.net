@@ -1,0 +1,23 @@
+* Silicon microring, part 2: self-pulsing just above the Hopf point and deep inside the window.
+*
+* Two rings as in ringchaos_bistable.net. Each laser is first raised past the up-jump fold (5 mW)
+* to put its ring on the upper branch, then set to its final power:
+*   X1: 0.40 mW, 7 % above the Hopf point (0.37328 mW): small, nearly sinusoidal pulsing;
+*   X2: 6 mW: relaxation-like pulsing, the ring swinging on and off resonance.
+* Reference: the same equations integrated with scipy (LSODA) in ringchaos_plots.py; the period
+* and the extremes of the through power are compared.
+* What to look for (measured at 2.16.2+6): X1 pulses at a 40.500 ns period (scipy 40.497 ns; the
+* Hopf frequency, 24.7 MHz, is 40.4 ns), 0.0470-0.2054 mW; X2 at 96.174 ns (scipy 96.191 ns),
+* 1.3268-5.9650 mW (scipy 1.3263-5.9650).
+* Run: va-cli sim circuits/multiphysics/ringchaos_selfpulse.net --model models/multiphysics/ringchaos --tran --report o1,o2
+VW wctl gnd DC 1550.155016
+VP1 p1 gnd PWL(0 0 20n 5 2u 5 4u 0.40)
+VP2 p2 gnd PWL(0 0 20n 6)
+XL1 p1 wctl a0r a0i wl1 laser
+X1 a0r a0i a1r a1i wl1 t1 siring
+XD1 a1r a1i o1 detector
+XL2 p2 wctl b0r b0i wl2 laser
+X2 b0r b0i b1r b1i wl2 t2 siring
+XD2 b1r b1i o2 detector
+.tran 0.2n 20u
+.end

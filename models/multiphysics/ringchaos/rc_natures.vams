@@ -1,0 +1,79 @@
+// Natures for the nonlinear microring-bank example. Include-guarded.
+//
+//   bus_field  one quadrature of a bus waveguide's field, in sqrt(mW) (so re^2 + im^2 is the power
+//              in mW): written by the device upstream, read downstream;
+//   cmt_field  one quadrature of a ring's intracavity field, in sqrt(fJ) (|a|^2 = stored energy);
+//   carrier    the ring's free-carrier density, in 1/um^3 (1e18 m^-3);
+//   ring_heat  the ring's temperature rise above the substrate (K) and heat flow (W).
+`ifndef RC_NATURES_VAMS
+`define RC_NATURES_VAMS
+
+nature Bus_amplitude
+    units  = "sqrt(mW)";
+    access = Fb;
+    abstol = 1e-9;
+endnature
+
+nature Bus_flow
+    units  = "sqrt(mW)";
+    access = Fb_flow;
+    abstol = 1e-9;
+endnature
+
+nature Cmt_amplitude
+    units  = "sqrt(fJ)";
+    access = Fld;
+    abstol = 1e-6;
+endnature
+
+nature Cmt_rate
+    units  = "sqrt(fJ)/s";
+    access = Fld_rate;
+    abstol = 1e-3;
+endnature
+
+nature Carrier_density
+    units  = "1/um^3";
+    access = Ncar;
+    abstol = 1e-6;
+endnature
+
+nature Carrier_rate
+    units  = "1/(um^3 s)";
+    access = Ncar_rate;
+    abstol = 1e-3;
+endnature
+
+nature Ring_temperature_rise
+    units  = "K";
+    access = Temp;
+    abstol = 1e-9;
+endnature
+
+nature Ring_heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-15;
+endnature
+
+discipline bus_field
+    potential Bus_amplitude;
+    flow      Bus_flow;
+enddiscipline
+
+discipline cmt_field
+    potential Cmt_amplitude;
+    flow      Cmt_rate;
+enddiscipline
+
+discipline carrier
+    potential Carrier_density;
+    flow      Carrier_rate;
+enddiscipline
+
+discipline ring_heat
+    potential Ring_temperature_rise;
+    flow      Ring_heat_flow;
+enddiscipline
+
+`endif

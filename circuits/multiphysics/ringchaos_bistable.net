@@ -1,0 +1,25 @@
+* Silicon microring, part 1: optical bistability and the onset of self-pulsing, by a slow power
+* sweep up to 6 mW and back.
+*
+* siring of models/multiphysics/ringchaos/: Q_i = Q_e = 1e5 at 1550 nm, two-photon and free-carrier
+* absorption, free-carrier dispersion (5 ns lifetime), thermo-optic shift (1e4 K/W, 100 ns). The
+* laser sits 10 linewidths red of the cold resonance (1550.155016 nm; linewidth 3.87 GHz).
+* The steady states and their stability, from the model's own equations (computed in
+* docs/examples/multiphysics/ringchaos_plots.py):
+*   fold (lower branch ends, the ring jumps up)        3.44495 mW
+*   fold (upper branch ends, the ring drops back)      0.25149 mW
+*   Hopf (upper branch starts to self-pulse), 24.7 MHz 0.37328 mW (supercritical)
+* What to look for (measured at 2.16.2+6): the ring jumps up at 3.70 mW, past the fold because the
+* heat needs time to build, and lands in self-pulsing; on the way down the pulsing band closes at
+* the Hopf point, the ring holds the steady upper branch, and drops back at 0.20 mW.
+* (A second, subcritical Hopf point at 7.47 mW: there the pulsing coexists with a stable steady
+* state up to ~12 mW, a second bistability this sweep stays below.)
+* Plot: python docs/examples/multiphysics/ringchaos_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/ringchaos_bistable.net --model models/multiphysics/ringchaos --tran --report pctl,pout,t1
+VW wctl gnd DC 1550.155016
+VP pctl gnd PWL(0 0 30u 6 60u 0)
+XL pctl wctl b0r b0i wl laser
+X1 b0r b0i b1r b1i wl t1 siring
+XD b1r b1i pout detector
+.tran 1n 60u
+.end

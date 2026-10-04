@@ -1,0 +1,136 @@
+// A bank of silicon microrings on one bus: thermo-optic and free-carrier nonlinearities, optical
+// bistability, self-pulsing, and chaos when self-pulsing rings drive one another.
+//
+// # The ring (`siring`), coupled-mode theory with silicon's nonlinearities
+//
+// In a frame rotating at the laser frequency, with |a|^2 = U the stored energy:
+//
+//   da/dt = (i Δ − γ) a + κ s,      κ = sqrt(2/τ_e),     s the bus field arriving at the ring
+//   Δ     = (ω_L − ω_0) + (ω_0/n_g) (dn/dT · T + dn/dN · N)     (laser minus resonance)
+//   γ     = 1/τ_i + 1/τ_e + β c^2 U / (2 n_g^2 V) + σ c N / (2 n_g)
+//                   (intrinsic, bus, two-photon absorption, free-carrier absorption)
+//   dN/dt = β c^2 U^2 / (2 ħω n_g^2 V^2) − N / τ_fc                (carriers from TPA)
+//   C dT/dt = P_abs − T / R_th,   P_abs = (2η/τ_i + β c^2 U/(n_g^2 V) + σ c N / n_g) U
+//   s_out = s − κ a                                                (the bus past the ring)
+//
+// Heating raises the index and pulls the resonance red, slowly (τ_th = R_th C, 100 ns); free
+// carriers lower it and push the resonance blue, fast (τ_fc, 5 ns). With the laser red of the
+// cold resonance the thermal shift makes the ring bistable; past a power threshold the fast
+// carriers push back against the slow heat and the upper branch oscillates by itself (Johnson
+// et al., Opt. Express 14, 817, 2006). A ring on the bus after a self-pulsing ring is driven by a
+// modulated field, and the sequence can go chaotic (Mancinelli et al., Opt. Express 22, 14505,
+// 2014, for coupled-resonator sequences).
+//
+// # Units
+//
+// Bus fields in sqrt(mW) (power = re^2 + im^2 in mW), ring field in sqrt(fJ), carrier density in
+// 1/um^3, temperature rise in K, wavelength in nm, laser power in mW (volts of `pctl`).
+//
+// # Verilog-A shown here
+//
+// A complex field passed between modules as two potential nodes; four coupled state equations
+// per ring across optical, electronic (carrier) and thermal natures; a thermal port so the netlist
+// can couple rings through the substrate; a laser whose power and wavelength are ordinary
+// voltage sources.
+//
+// # Limitations
+//
+// One mode per ring (no backscattering), no Kerr effect, carriers lumped over the mode volume
+// (no diffusion), a linear free-carrier index (the N^0.8 law linearized), a lumped thermal node;
+// no reflection between rings (the bus carries light one way).
+`include "disciplines.vams"
+`include "rc_natures.vams"
+
+`define RC_C     2.99792458e8
+`define RC_HBAR  1.054571817e-34
+`define RC_TWOPI 6.28318530717958647692
+
+// The laser: power (mW) and wavelength (nm) from two electrical control nodes. Its field is real
+// (the laser's phase is the reference).
+module laser(pctl, wctl, outr, outi, wl);
+    inout pctl, wctl, outr, outi, wl;
+    electrical pctl, wctl, wl;
+    bus_field outr, outi;
+    analog begin
+        // sqrt has an infinite slope at 0, where Newton starts: guard it.
+        Fb(outr) <+ (V(pctl) > 1e-12) ? sqrt(V(pctl)) : 0.0;
+        Fb(outi) <+ 0.0;
+        V(wl) <+ V(wctl);
+    end
+endmodule
+
+module siring(inr, ini, outr, outi, wl, th);
+    inout inr, ini, outr, outi, wl, th;
+    bus_field inr, ini, outr, outi;
+    electrical wl;
+    ring_heat th;
+
+    parameter real lambda0 = 1550.0    from (0:inf);   // nm, cold resonance
+    parameter real qi      = 1e5       from (0:inf);   // intrinsic Q
+    parameter real qe      = 1e5       from (0:inf);   // bus-coupling Q
+    parameter real ng      = 4.2       from (0:inf);   // group index
+    parameter real vol     = 3e-18     from (0:inf);   // m^3, mode volume (TPA and FCA)
+    parameter real beta    = 8.4e-12   from [0:inf);   // m/W, two-photon absorption
+    parameter real sfca    = 1.45e-21  from [0:inf);   // m^2, free-carrier absorption
+    parameter real dndn    = -1.73e-27;                // m^3, free-carrier dispersion
+    parameter real dndt    = 1.86e-4;                  // 1/K, thermo-optic
+    parameter real tfc     = 5e-9      from (0:inf);   // s, carrier lifetime
+    parameter real tth     = 100e-9    from (0:inf);   // s, thermal time constant
+    parameter real rth     = 1e4       from (0:inf);   // K/W, ring to substrate
+    parameter real eta     = 1.0       from [0:1];     // absorbed share of the intrinsic loss
+
+    cmt_field ar, ai;
+    carrier nc;
+
+    real w0, wl_l, ti, te, kap, u, nm, gt, gf, g, dl, sr, si, gen, pabs;
+
+    analog begin
+        w0   = `RC_TWOPI * `RC_C / (lambda0 * 1e-9);
+        // Newton starts at zero volts on the wavelength node: read the cold resonance there.
+        wl_l = (V(wl) > 1.0) ? V(wl) : lambda0;
+        ti   = 2.0 * qi / w0;
+        te   = 2.0 * qe / w0;
+        kap  = sqrt(2.0 / te);
+
+        u  = (Fld(ar) * Fld(ar) + Fld(ai) * Fld(ai)) * 1e-15;        // J
+        nm = Ncar(nc) * 1e18;                                          // 1/m^3
+        gt = beta * `RC_C * `RC_C * u / (2.0 * ng * ng * vol);
+        gf = sfca * `RC_C * nm / (2.0 * ng);
+        g  = 1.0 / ti + 1.0 / te + gt + gf;
+        dl = `RC_TWOPI * `RC_C / (wl_l * 1e-9) - w0
+             + w0 / ng * (dndt * Temp(th) + dndn * nm);
+
+        // The arriving bus field, sqrt(mW) -> sqrt(fJ/s): x 1e6.
+        sr = 1e6 * Fb(inr);
+        si = 1e6 * Fb(ini);
+        Fld_rate(ar) <+ ddt(Fld(ar)) + g * Fld(ar) + dl * Fld(ai) - kap * sr;
+        Fld_rate(ai) <+ ddt(Fld(ai)) + g * Fld(ai) - dl * Fld(ar) - kap * si;
+
+        gen = beta * `RC_C * `RC_C * u * u
+              / (2.0 * `RC_HBAR * w0 * ng * ng * vol * vol);           // 1/(m^3 s)
+        Ncar_rate(nc) <+ ddt(Ncar(nc)) - 1e-18 * (gen - nm / tfc);
+
+        pabs = (eta * 2.0 / ti + 2.0 * gt + 2.0 * gf) * u;            // W
+        Pwr(th) <+ tth / rth * ddt(Temp(th)) + Temp(th) / rth - pabs;
+
+        // The bus past the ring.
+        Fb(outr) <+ Fb(inr) - 1e-6 * kap * Fld(ar);
+        Fb(outi) <+ Fb(ini) - 1e-6 * kap * Fld(ai);
+    end
+endmodule
+
+// A photodetector: the bus power, mW, as the voltage of `p`.
+module detector(inr, ini, p);
+    inout inr, ini, p;
+    bus_field inr, ini;
+    electrical p;
+    analog V(p) <+ Fb(inr) * Fb(inr) + Fb(ini) * Fb(ini);
+endmodule
+
+// A thermal resistance between two rings (or a ring and the substrate).
+module thermal_link(a, b);
+    inout a, b;
+    ring_heat a, b;
+    parameter real r = 1e5 from (0:inf);    // K/W
+    analog Pwr(a, b) <+ Temp(a, b) / r;
+endmodule
