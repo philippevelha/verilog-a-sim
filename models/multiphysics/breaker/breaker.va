@@ -1,0 +1,130 @@
+// Gas-blast circuit breaker: a Mayr arc between moving contacts, cooled by gas a puffer chamber
+// blows through a nozzle, the chamber pressurised by its piston and by the arc's own heat.
+//
+// # The arc (Mayr)
+//
+//   I = g V,   d(ln g)/dt = (g V^2 / P − 1) / τ
+//
+// a conductance whose energy balance says: what the arc dissipates (V I = g V^2) against what it
+// loses (P, the cooling power); at constant current it settles where V I = P, the hyperbolic
+// static characteristic V = P / I. Its state is ln g, so g = exp(...) can never go negative.
+// The cooling power grows with the arc's length (the contact travel, from 1 mm) and with the
+// gas blown across it:
+//
+//   P = L_arc (p_len + k_blast · m'),   m' = A_n sqrt(2 ρ (p − p_amb)) for p > p_amb
+//
+// Before the contacts part (travel < 0), the arc state is held at the closed contacts'
+// conductance `gclosed`; past separation the Mayr equation takes over, from that value.
+//
+// # The puffer (an ideal gas at constant temperature for its density, adiabatic for its pressure)
+//
+//   dp/dt = −γ p d(ln V)/dt − γ R T m' / V(x) + (γ − 1) η P_arc / V(x),   V(x) = V0 − A_p x
+//
+// compression by the piston as the contacts open, outflow through the nozzle, and the
+// share η of the arc's power that heats the chamber gas (self-blast): a higher current heats the
+// chamber more, which blows harder at the next current zero.
+//
+// # Verilog-A shown here
+//
+// A log-transformed state; a smooth gate between two regimes (closed / arcing); a nozzle flow
+// with a square root guarded at its kink; a pressure ODE coupled both ways to the arc; `@(cross)`
+// on the current reporting each zero, and on the arc conductance reporting interruption or
+// re-ignition with `$strobe`.
+//
+// # Limitations
+//
+// The Mayr model only (no Cassie high-current regime, no Habedank series combination); constant
+// τ; the chamber gas density at a fixed temperature; incompressible nozzle flow (no choking);
+// travel prescribed, not computed from a drive mechanism; no contact erosion.
+`include "disciplines.vams"
+`include "breaker_natures.vams"
+
+module breaker(p, n, trav);
+    inout p, n, trav;
+    electrical p, n, trav;               // V(trav): contact travel in metres (negative: closed)
+
+    parameter real tau     = 1e-6    from (0:inf);    // s, Mayr time constant
+    parameter real p_len   = 1e6     from [0:inf);    // W/m, cooling without blast
+    parameter real k_blast = 1e8     from [0:inf);    // W/m per kg/s of gas blown
+    parameter real gclosed = 1e4     from (0:inf);    // S, closed contacts
+    parameter real p0      = 5e5     from (0:inf);    // Pa, initial (and ambient) pressure
+    parameter real v0      = 2e-4    from (0:inf);    // m^3, puffer volume closed
+    parameter real ap      = 5e-3    from [0:inf);    // m^2, piston area
+    parameter real an      = 1e-5    from [0:inf);    // m^2, nozzle throat area
+    parameter real gam     = 1.1     from (1:inf);    // SF6
+    parameter real rgas    = 56.9    from (0:inf);    // J/(kg K), SF6
+    parameter real tgas    = 300     from (0:inf);    // K
+    parameter real eta     = 0.3     from [0:1];      // share of arc power heating the chamber
+    parameter real lmin    = 1e-3    from (0:inf);    // m, shortest arc
+
+    arcstate lg;      // ln of the arc conductance
+    gas pr;           // puffer pressure
+
+    real x, w, g, vab, iab, parc, rho, dp, mflow, larc, pcool, vol, gcl;
+    integer arcing;
+
+    analog begin
+        x    = V(trav);
+        // 0 while the contacts touch, 1 once they have parted by ~1 mm: the two regimes blend
+        // smoothly over 0.2 mm of travel. Over 10 um (2 us at 5 m/s) the switch was too abrupt
+        // for a 1 ms step cap and the run failed at separation.
+        w    = 0.5 * (1.0 + tanh((x - 0.5e-3) / 0.2e-3));
+        // exp of the state, continued linearly above ln g = 18.4 (1e8 S): a Newton iterate can
+        // swing ln g far past any physical value, where exp would overflow (inf * 0 V = NaN).
+        // Continued, not clamped: a clamp would zero the derivative and leave the row singular.
+        g    = (Lg(lg) < 18.4) ? exp(Lg(lg)) : exp(18.4) * (1.0 + Lg(lg) - 18.4);
+        vab  = V(p, n);
+        iab  = g * vab;
+        parc = g * vab * vab;
+
+        // Floored: Newton's first iterate reads the pressure as 0, and sqrt(2 rho ...) at rho = 0
+        // has an infinite slope (a NaN once it meets a zero derivative).
+        rho  = max(Pres(pr), 1e3) / (rgas * tgas);
+        dp   = Pres(pr) - p0;
+        // Nozzle flow, with the square root's infinite slope at dp = 0 replaced by a linear
+        // segment below 10 Pa (the derivative would otherwise be 0 * inf at the start).
+        mflow = (dp > 10.0) ? an * sqrt(2.0 * rho * dp)
+              : an * sqrt(2.0 * rho * 10.0) * max(dp, 0.0) / 10.0;
+        larc  = max(x, lmin);
+        pcool = larc * (p_len + k_blast * mflow);
+        vol   = max(v0 - ap * max(x, 0.0), 0.05 * v0);
+
+        I(p, n) <+ iab;
+
+        gcl = ln(gclosed);
+        if (analysis("static")) begin
+            // The operating point: closed contacts at their conductance; parted ones at the arc's
+            // own static equilibrium, g V^2 = P (Mayr with d/dt = 0), written in the log so the
+            // row stays well scaled.
+            Lgr(lg) <+ (1.0 - w) * (Lg(lg) - gcl) + w * ln(max(parc, 1e-30) / max(pcool, 1.0));
+            Mflow(pr) <+ Pres(pr) - p0;
+        end else begin
+            // Mayr while arcing; held at the closed conductance before separation. No floor:
+            // after an interruption ln g falls without bound (at -1/tau) and exp of it goes to 0,
+            // which is the cold gap. A floor written as max(ln gmin - ln g, 0)/tau is a kink with
+            // a 1e6 1/s slope that the state sat on, and the step collapsed there.
+            Lgr(lg) <+ ddt(Lg(lg))
+                       - w * ((parc / max(pcool, 1.0) - 1.0) / tau)
+                       + (1.0 - w) * (Lg(lg) - gcl) / tau;
+            // Compression written as -γ p d(ln V)/dt: a coefficient times a ddt, which the
+            // charge form accepts, where γ p A_p max(dx/dt, 0)/V would put a ddt inside a max.
+            Mflow(pr) <+ ddt(Pres(pr)) + gam * Pres(pr) * ddt(ln(vol))
+                         - (- gam * rgas * tgas * mflow + (gam - 1.0) * eta * parc * w) / vol;
+        end
+
+        // Current zeros while the arc conducts (g above 1 uS; past that, a "zero" is only the
+        // recovery voltage ringing through zero across a cold gap), and the verdicts: the arc
+        // falling through 1 uS is an interruption, reported with the current it carried; rising
+        // back through it after one is a re-ignition.
+        @(cross(iab, 0)) if (w > 0.5 && g > 1e-6)
+            $strobe("%m: current zero at t=%.6e s, arc %.3e S, chamber %.3f bar, blast %.4f kg/s",
+                    $abstime, g, Pres(pr) / 1e5, mflow);
+        @(cross(Lg(lg) - ln(1e-6), -1)) if (w > 0.5) begin
+            arcing = 1;
+            $strobe("%m: INTERRUPTED at t=%.6e s carrying %.3f A, %.1f V across the gap, chamber %.3f bar",
+                    $abstime, iab, vab, Pres(pr) / 1e5);
+        end
+        @(cross(Lg(lg) - ln(1e-6), +1)) if (arcing && w > 0.5)
+            $strobe("%m: RE-IGNITED at t=%.6e s, %.1f V across the gap", $abstime, vab);
+    end
+endmodule

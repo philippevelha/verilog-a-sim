@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2+1 - 2026-10-04
+---------------------
+**Multiphysics example 13: a circuit-breaker arc** (`models/multiphysics/breaker/`;
+`breaker_plots.py`; `docs/multiphysics.md` and the tutorial). A Mayr arc between moving contacts,
+cooled by the gas a puffer blows across it; the puffer is compressed by the contacts' travel and
+heated by the arc. Electrical, gas dynamics and mechanical domains in one module.
+  * Static characteristic: under a slow current ramp, with no blast, V*I = 20004 W at 10 A and
+    20000.0 W at 1 kA against the closed form's 20 kW (the 0.02 % is the arc's lag, tau d(ln I)/dt).
+  * Interruption of an offset 1 kA, 50 Hz fault: with blast the arc chops 4.404 A at 19.144 ms and
+    the recovery voltage peaks at -16,969 V (energy-conservation closed form -17,203 V); without,
+    3.652 A at 19.225 ms and -14,828 V (-15,060 V). The closed form is 1.5 % high in both: it holds
+    the source still over the half-ring.
+  * Written so the solver survives it: the state is ln g (twenty decades become a range of 46);
+    `exp` is continued linearly past ln g = 18.4, because a `min()` clamp zeroed the row's
+    derivative and the matrix went singular; the contacts start closed; the gas density is
+    floored for Newton's first iterate. The run needed the 2.16.2 junction-guess fix.
+  * Not shown, stated: re-ignition. With tau from 1 to 20 us, with and without blast, the arc
+    always cleared at this circuit's recovery-voltage rates (up to ~2 kV/us).
+  * Limitations: Mayr only (no Cassie regime), constant tau, incompressible nozzle flow, travel
+    prescribed, the netlist `SIN` has no phase (hence the fully offset fault).
+  * Measured at this version: both decks 2.8 s together (`breaker_plots.py`); `cargo test
+    --workspace` 952 passed, `cargo xtask validate` 28/28 (as 2.16.2; no code changed).
+
+
 2.16.2 - 2026-10-04
 -------------------
 **The structural junction guess counts an `exp` only when its argument may read an electrical

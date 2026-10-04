@@ -1,0 +1,61 @@
+// Natures for the circuit-breaker example. Include-guarded.
+//
+//   arcstate   the natural log of the arc's conductance (ln S), as the potential of a state node:
+//              written as a log so that the conductance, exp of it, can never go negative;
+//   gas        the puffer chamber's gas pressure (Pa) as potential, mass flow (kg/s) as flow;
+//   contact    the moving contact's travel (m).
+`ifndef BREAKER_NATURES_VAMS
+`define BREAKER_NATURES_VAMS
+
+nature Log_conductance
+    units  = "";
+    access = Lg;
+    abstol = 1e-6;
+endnature
+
+nature Log_rate
+    units  = "1/s";
+    access = Lgr;
+    abstol = 1e-6;
+endnature
+
+nature Gas_pressure
+    units  = "Pa";
+    access = Pres;
+    abstol = 1e-3;
+endnature
+
+nature Gas_mass_flow
+    units  = "kg/s";
+    access = Mflow;
+    abstol = 1e-12;
+endnature
+
+nature Contact_travel
+    units  = "m";
+    access = Trav;
+    abstol = 1e-9;
+endnature
+
+nature Contact_force
+    units  = "N";
+    access = Cforce;
+    abstol = 1e-9;
+endnature
+
+discipline arcstate
+    potential Log_conductance;
+    flow      Log_rate;
+enddiscipline
+
+discipline gas
+    potential Gas_pressure;
+    flow      Gas_mass_flow;
+enddiscipline
+
+discipline contact
+    potential Contact_travel;
+    flow      Contact_force;
+enddiscipline
+
+`endif

@@ -34,6 +34,7 @@ The examples, in the order they were built:
 | [10](#relay) | Electromagnetic relay | electrical, magnetic, mechanical, thermal | Jiles–Atherton hysteresis, contact bounce, hot pickup, remanence |
 | [11](#grayscott) | Gray–Scott reaction–diffusion | chemical kinetics on a grid | a PDE as a 2-D vector net, event `or` lists, file output from a model |
 | [12](#piezo) | Piezoelectric harvester | mechanical, electrical | a Duffing jump against harmonic balance, rectifiers, a broadband ensemble |
+| [13](#breaker) | Circuit-breaker arc | electrical, gas dynamics, mechanical | a state held as its logarithm, a linearly continued `exp`, current chopping against energy conservation |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -1610,6 +1611,112 @@ Before this ensemble, the example gave two other answers, both wrong:
 
 A broadband comparison is statistical. Ask it of one run and you can get any answer.
 
+# Circuit-breaker arc: Mayr arc, puffer gas flow, current chopping {#breaker}
+
+**Library:** `models/multiphysics/breaker/`, which contains:
+
+- `breaker.va`: one module, `breaker(p, n, trav)`;
+- `breaker_natures.vams`: `arcstate` (ln g), `gas` (pressure in Pa, mass flow in kg/s), and
+  `contact`.
+
+**The arc, written so the solver survives it.** Mayr's equation is about the conductance g,
+which spans from 10⁴ S (closed contacts) to effectively zero (a cleared gap). Three choices make
+that solvable:
+
+1. **The state is ln g, not g.** `arcstate lg` holds ln g, so g = exp(ln g) is positive by
+   construction, and twenty decades are a range of 46 in the state.
+2. **`exp` continued, not clamped.** Above ln g = 18.4 the model continues g linearly:
+   `(Lg(lg) < 18.4) ? exp(Lg(lg)) : exp(18.4) * (1 + Lg(lg) - 18.4)`. A Newton iterate can
+   swing ln g past any physical value, and `exp` would overflow. A `min()` clamp was tried first:
+   it zeroed the row's derivative wherever it was active, and the matrix went singular.
+3. **The contacts start closed.** Before separation the state is held at `gclosed` and the
+   Mayr equation is blended in over 0.2 mm of travel. An operating point with the contacts
+   already apart has V = 0 at Newton's start, where V·I = P has no slope in g.
+
+**The gas.** The chamber pressure obeys dp/dt = −γ·p·d(ln V)/dt − γRT·ṁ/V + (γ − 1)·η·P_arc/V:
+compression, nozzle outflow, and the arc's own heat. The compression is written as a coefficient
+times `ddt(ln(vol))`. The direct form, γ·p·A_p·max(dx/dt, 0)/V, would put a `ddt` inside a
+`max`, which the charge formulation cannot represent.
+
+## The Mayr static characteristic
+
+```bash
+python docs/examples/multiphysics/breaker_plots.py "$PWD/target/release/va-cli"
+```
+
+![The arc on V = P / I](examples/multiphysics/breaker_static.svg)
+
+**The deck** (`breaker_static.net`).
+
+- **The travel.** `VT trav gnd PWL(0 -1m 10m -1m 14.2m 20m)` drives the contacts. A voltage
+  source in metres is the simplest way to prescribe a motion.
+- **The current.** `G1 gnd p ctl gnd 1` turns `VC`'s ramp, from 10 A to 1 kA over a second,
+  into a current through the arc.
+- **No blast.** `k_blast=0` fixes the cooling at P = 20 mm × 10⁶ W/m = 20 kW.
+
+**The check.** With τ = 1 µs against a one-second ramp the arc stays on its static
+characteristic, V·I = P:
+
+```text
+static: I = 10.1 A, V = 1980.39 V, V*I = 20004.0 W (closed form 20000 W)
+static: I = 505.1 A, V = 39.60 V, V*I = 20000.1 W (closed form 20000 W)
+static: I = 1000.0 A, V = 20.00 V, V*I = 20000.0 W (closed form 20000 W)
+```
+
+The 0.02 % at low current is the arc's lag behind the ramp, τ·d(ln I)/dt.
+
+## Interruption by current chopping
+
+![Recovery voltage and current](examples/multiphysics/breaker_interrupt.svg)
+
+**The deck** (`breaker_interrupt.net`). Two identical circuits share one travel source:
+
+- the source, `SIN(0 10k 50)`;
+- the line inductance, `L1 s1 p1 31.8m`;
+- the capacitance across the breaker, `C1 p1 gnd 10n`;
+- the breakers: X1 with `k_blast=1e7` and X2 with `k_blast=0`, both with `ap=2e-3`, the puffer's
+  piston area.
+
+**Why the current is offset.** The netlist's `SIN` takes offset, amplitude, frequency and delay,
+and no phase. Switched in at the voltage zero, the inductive circuit's current is fully offset:
+it rises to 2 kA and first passes zero at about 20 ms. That is a realistic asymmetric fault, and
+it gives the arc 17 ms of travel and compression before the zero.
+
+**What happens, and the closed form.** As the current falls, Mayr's arc voltage rises as P/I. A
+strongly cooled arc drives its own current to zero before the natural zero: current chopping.
+The current the inductor still carries then rings into the capacitance, around the source
+voltage, with an amplitude energy conservation fixes, A = √((v_c − V_src)² + (L/C)·I_chop²):
+
+```text
+gas blast: chopped 4.404 A at t = 19.144 ms; recovery voltage peak -16969 V (closed form -17203 V)
+no blast: chopped 3.652 A at t = 19.225 ms; recovery voltage peak -14828 V (closed form -15060 V)
+```
+
+The closed form is 1.5 % high in both. It holds the source voltage fixed over the 56 µs
+half-ring, and the arc's conductance does not vanish at the single instant the script picks.
+
+**The engineering trade-off.** The blast's stronger cooling clears the arc 0.08 ms earlier, at a
+higher current, and so produces the higher overvoltage. That is why strongly blasted breakers
+switching small inductive currents need surge protection.
+
+::: {.callout-note}
+## A simulator fix this example needed (2.16.2)
+
+The first version of this deck ran for more than ten minutes and did not finish 25 ms. A
+temporary step trace showed why: Newton failed at every step longer than 0.3 ns, cycling on a
+0.33 V clamp at the breaker's terminal. The junction limiter treated that terminal as a pn
+junction, because the module contains an `exp`. That `exp` is of the arc's log-conductance,
+not of a voltage.
+
+Since 2.16.2 the guess counts an `exp` only when its argument may read an electrical quantity:
+a probe of an electrical branch directly, or, conservatively, any variable or user function. A
+diode's `exp(vd/vt)` still counts; `exp(Lg(lg))` does not. The deck runs in under a second.
+:::
+
+**What it does not show.** A re-ignition. With τ from 1 to 20 µs, with and without blast, and
+with recovery voltages up to ~2 kV/µs, the Mayr arc always cleared. Re-ignition needs a slower
+arc or a faster recovery voltage than this circuit gives.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -1660,6 +1767,9 @@ python $F/gray_scott.py gray_scott_spots "$VA"
 
 # Piezo harvester
 python $F/piezo_plots.py "$VA"
+
+# Circuit breaker
+python $F/breaker_plots.py "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -1676,6 +1786,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | the two relay decks (`relay_plots.py`) | about 40 s together |
 | Gray–Scott spots (2049 unknowns) | about 1.5 min |
 | the three piezo decks (`piezo_plots.py`) | about 4.5 min together (the storage ensemble is 4) |
+| the two breaker decks (`breaker_plots.py`) | about 3 s together |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

@@ -1,0 +1,22 @@
+* Circuit-breaker arc: the Mayr static characteristic, V = P / I.
+*
+* One breaker of models/multiphysics/breaker/breaker.va, its contacts parting at 10 ms to 20 mm
+* (`VT` drives the travel: volts read as metres), with no gas blast (`k_blast=0`), so its cooling
+* power is fixed: P = 20 mm x 1e6 W/m = 20 kW. A current source (a VCCS driven by `VC`) holds 10 A
+* through the separation and then ramps the current to 1 kA over a second.
+*
+* Closed form: with the arc's 1 us time constant far shorter than the ramp, the arc sits on its
+* static characteristic, where the power it dissipates equals what it loses: V I = P, so
+* V = 20 kW / I, hyperbolic -- 2 kV at 10 A, 20 V at 1 kA. The arc is a negative resistance.
+* Measured at 2.16.2+1: V I = 20,004 W at 10 A falling to 20,000.0 W at 1 kA; the 0.02 % at low
+* current is the arc's lag behind the ramp (tau d(ln I)/dt).
+* The operating point starts the contacts closed: an arc operating point with the contacts
+* already apart has V = 0 as Newton's start, where the static equation has no slope in g.
+* Plot: python docs/examples/multiphysics/breaker_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/breaker_static.net --model models/multiphysics/breaker --tran --report p,ctl
+VT trav gnd PWL(0 -1m 10m -1m 14.2m 20m)
+VC ctl gnd PWL(0 10 20m 10 1 1000)
+G1 gnd p ctl gnd 1
+X1 p gnd trav breaker k_blast=0
+.tran 0.1m 1
+.end

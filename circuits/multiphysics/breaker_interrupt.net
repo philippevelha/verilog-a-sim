@@ -1,0 +1,34 @@
+* Circuit-breaker interruption: a gas-blast breaker clears a fault by chopping it, and the
+* chopped current rings into the recovery voltage.
+*
+* Two identical circuits, each a 10 kV, 50 Hz source behind 31.8 mH of line inductance (a 1 kA
+* symmetrical fault; switched in at the voltage zero, so the current is fully offset and first
+* passes zero at ~20 ms), 10 nF across the breaker. The contacts part at 3 ms and travel 20 mm by
+* 7 ms, compressing a 0.2 l puffer of SF6 at 5 bar (`ap=2e-3`) that the arc also heats.
+*   X1  blast on (`k_blast=1e7`): the cooling grows with the gas the puffer blows across the arc;
+*   X2  blast off: natural cooling only (20 kW at full travel).
+*
+* Mayr's arc voltage rises as P / I while the current falls toward zero, and a strongly cooled
+* arc drives its own current to zero before the natural zero: current chopping. The current
+* the inductor still carries then rings into the 10 nF, around the source voltage, with an
+* amplitude energy conservation fixes: A = sqrt((v_c - V_src)^2 + (L/C) I_chop^2).
+* What to look for (measured at 2.16.2+1; docs/examples/multiphysics/breaker_plots.py):
+*   X1 chops 4.404 A at 19.144 ms; the recovery voltage peaks at -16,969 V (closed form -17,203 V);
+*   X2 chops 3.652 A at 19.225 ms, peaking at -14,828 V (closed form -15,060 V).
+*   The closed form is 1.5 % high in both: it holds the source voltage still over the 56 us
+*   half-ring, and the arc's conductance does not vanish at the instant chosen.
+*   The blast's trade-off: stronger cooling clears earlier and chops more current, so it
+*   produces the higher overvoltage.
+* Plot: python docs/examples/multiphysics/breaker_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/breaker_interrupt.net --model models/multiphysics/breaker --tran --report p1,p2
+VS1 s1 gnd SIN(0 10k 50)
+L1 s1 p1 31.8m
+C1 p1 gnd 10n
+VS2 s2 gnd SIN(0 10k 50)
+L2 s2 p2 31.8m
+C2 p2 gnd 10n
+VT trav gnd PWL(0 -1m 3m -1m 7m 20m)
+X1 p1 gnd trav breaker k_blast=1e7 ap=2e-3
+X2 p2 gnd trav breaker k_blast=0 ap=2e-3
+.tran 20u 25m
+.end
