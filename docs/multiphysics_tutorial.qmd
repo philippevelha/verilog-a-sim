@@ -32,6 +32,7 @@ The examples, in the order they were built:
 | [8](#ring) | Thermo-optic ring bank | optical, thermal, control | a stiff ps/ms system, complex ODEs as node pairs, PI locks, bistability |
 | [9](#liion) | Li-ion cell | electrochemical, thermal | diffusion ladders, inverted Butler–Volmer, aging over years, runaway in seconds |
 | [10](#relay) | Electromagnetic relay | electrical, magnetic, mechanical, thermal | Jiles–Atherton hysteresis, contact bounce, hot pickup, remanence |
+| [11](#grayscott) | Gray–Scott reaction–diffusion | chemical kinetics on a grid | a PDE as a 2-D vector net, event `or` lists, file output from a model |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -1361,6 +1362,123 @@ three methods agree on every event, and the deck runs with the default.
 balance before blaming the integrator.
 :::
 
+# Gray–Scott reaction–diffusion: a pattern-forming grid {#grayscott}
+
+**Library:** `models/multiphysics/grayscott/`: `gray_scott.va` and `rd_natures.vams`, which
+defines `reactant` (potential `Cn`, a concentration; flow `Rate`).
+
+**A PDE as a circuit.** The grid is a single module instance:
+
+```verilog
+reactant [0:N-1][0:N-1] u, v;           // two 2-D vector nets: one node per cell per species
+...
+for (i = 0; i < N; i = i + 1) begin : row
+    for (j = 0; j < N; j = j + 1) begin : col
+        Rate(u[i][j]) <+ ddt(uu) + uu * vv * vv - f * (1.0 - uu);   // the reaction, per cell
+        ...
+```
+
+A second pair of loops adds the Laplacian as conductances D/h² between neighbours, plus the rows
+and columns that wrap around the torus. Those are kept in separate loops so that no unrolled
+index is ever out of range.
+
+- **`N` is structural.** It sizes the vector nets and bounds the loops, so a deck that sets
+  `N=32` makes the simulator elaborate the module again (§6).
+- **`analysis("static")` writes the initial pattern.** At the operating point every cell is
+  pinned to Pearson's state: a seeded square, plus a ±1 % perturbation from a hash of the cell's
+  indices, the same on every run and platform. The diffusion links are switched off there too,
+  or they would pull the pinned values apart.
+
+**Writing files from a model.** The grid is far too large to print as `--report` columns. The
+model writes it itself:
+
+```verilog
+@(initial_step) if (snap) fd = $fopen("target/gray_scott.txt", "w");
+@(initial_step or timer(tsnap, tsnap) or final_step) begin
+    if (snap) begin
+        $fdisplay(fd, "# %m t=%.6e", $abstime);
+        ... $fwrite(fd, "%.5f ", Cn(u[i][j])); ...
+    end
+    $strobe("%m: t=%.0f s, mean v %.5f, max v %.5f", $abstime, vsum / (N * N), vmax);
+end
+@(final_step) if (snap) $fclose(fd);
+```
+
+Each piece of the event list has a job:
+
+- **`initial_step`.** A `timer` never fires on the run's first point, so `initial_step` writes
+  the t = 0 snapshot.
+- **`final_step`.** It catches a run whose end is not a multiple of `tsnap`.
+- **One body for all three.** When a timer and `final_step` coincide, the `or` list runs the body
+  once, not twice. Event `or` lists were added in 2.16.0 for exactly this model.
+- **The file name.** `$fopen` takes a literal, so a deck holds one grid that writes the file.
+  `snap=0` switches the file off for decks that hold several instances.
+
+## The well-mixed reactor
+
+```bash
+va-cli sim circuits/multiphysics/gray_scott_wellmixed.net --model models/multiphysics/grayscott --tran --report X1.u[0][0],X1.v[0][0],X2.u[0][0],X2.v[0][0]
+```
+
+**The deck.** Two 2×2 grids with every cell alike (`seed=2` covers the grid, `amp=0`), so
+nothing diffuses and each cell is one stirred reactor. The control parameters are F = k = 0.04,
+and the two grids start on opposite sides of the separatrix:
+
+- `X1 ref gray_scott N=2 f=0.04 k=0.04 seed=2 u_seed=0.3 v_seed=0.35 amp=0 snap=0`;
+- the same with `u_seed=0.9 v_seed=0.05`.
+
+**The closed form.** Steady states satisfy u·v = F + k and F(1 − u) = u·v²:
+
+- (1, 0), stable;
+- (0.8, 0.1), a saddle;
+- (0.2, 0.4), a stable focus (Jacobian trace −0.12, determinant 0.0096).
+
+The run ends at `Cn(X1.u[0][0])=0.200000 Cn(X1.v[0][0])=0.400000` and `Cn(X2.u[0][0])=1.000000
+Cn(X2.v[0][0])=3.579108e-71`: the two stable states, reached from either side of the saddle.
+
+## Self-replicating spots
+
+```bash
+python docs/examples/multiphysics/gray_scott.py gray_scott_spots "$PWD/target/release/va-cli"
+```
+
+![Gray-Scott spots on a 32 x 32 torus](examples/multiphysics/gray_scott_spots.svg)
+
+**The deck** (`gray_scott_spots.net`): a single line,
+`X1 ref gray_scott N=32 len=0.32 f=0.0367 k=0.0649 seed=3 tsnap=1000`.
+
+- **The grid.** 32×32 cells of 0.01, Pearson's resolution: 2049 unknowns, which selects the
+  sparse solver.
+- **`.tran 20 6000`.** A 20 s step cap. The first trials used 5 s; 20 s gives the same pattern
+  (mean v at t = 5000: 0.09161 against 0.09161; max v 0.36331 against 0.36333) in 97 s instead of
+  225 s.
+- **Speed.** One instance means the instance-parallel evaluation has nothing to share out, which
+  is why a 2049-unknown grid takes a minute and a half.
+
+**What the script prints.** For each snapshot: the mean and maximum of v, and the number of
+spots, counted as regions with v > 0.3 on the torus (a spot that crosses the grid's edge is one
+region):
+
+```text
+t=       0: mean v 0.00850, max v 0.25000, 0 region(s) with v > 0.3
+t=    1000: mean v 0.02646, max v 0.34173, 1 region(s) with v > 0.3
+t=    2000: mean v 0.03532, max v 0.40045, 2 region(s) with v > 0.3
+t=    3000: mean v 0.07948, max v 0.40306, 4 region(s) with v > 0.3
+t=    4000: mean v 0.09133, max v 0.36495, 4 region(s) with v > 0.3
+t=    5000: mean v 0.09161, max v 0.36331, 4 region(s) with v > 0.3
+t=    6000: mean v 0.09166, max v 0.36372, 4 region(s) with v > 0.3
+```
+
+**What the run shows.**
+
+- **Mitosis.** One spot divides into two, then four, which tile the torus. In the figure, spots
+  straddling the edge appear as halves.
+- **Labyrinths need a bigger torus.** The labyrinth parameters (F = 0.029, k = 0.057) on the same
+  32×32 grid make a single ring: the domain is too small for the pattern's wavelength. On 48×48
+  they grow into nested rings that keep the seed's four-fold symmetry, because the ±1 %
+  perturbation is too weak to break it. That run takes about 16 minutes, which is why it is not a
+  deck.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -1404,6 +1522,10 @@ python $F/li_plots.py "$VA"
 
 # Relay
 python $F/relay_plots.py "$VA"
+
+# Gray-Scott
+va-cli sim $C/gray_scott_wellmixed.net --model $M/grayscott --tran --report X1.u[0][0],X1.v[0][0],X2.u[0][0],X2.v[0][0]
+python $F/gray_scott.py gray_scott_spots "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -1418,6 +1540,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | thin-fibre train | about 2 min |
 | the three Li-ion decks (`li_plots.py`) | about 30 s together |
 | the two relay decks (`relay_plots.py`) | about 40 s together |
+| Gray–Scott spots (2049 unknowns) | about 1.5 min |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

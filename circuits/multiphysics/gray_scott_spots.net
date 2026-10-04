@@ -1,0 +1,23 @@
+* Gray-Scott pattern formation: self-replicating spots on a 32 x 32 torus.
+*
+* models/multiphysics/grayscott/gray_scott.va with Pearson's parameters (Science 261, 1993):
+* Du = 2e-5, Dv = 1e-5, F = 0.0367, k = 0.0649 (his "mitosis" regime), on a 0.32 x 0.32
+* periodic domain in 32 x 32 cells (h = 0.01, Pearson's resolution), 2049 unknowns. The seed is
+* his: a central square (here 6 x 6 cells) at u = 1/2, v = 1/4 in u = 1, v = 0, with a fixed
+* +-1 % hash perturbation.
+*
+* What to look for (snapshots every 1000 s in target/gray_scott.txt;
+* docs/examples/multiphysics/gray_scott.py draws them and counts the spots):
+*   1. The square rounds into one spot, which grows and then divides: two spots by t = 2000 s.
+*   2. Each divides again: four by t = 3000 s, which tile the torus, after which the pattern
+*      only settles (mean v 0.09133 at 4000 s, 0.09166 at 6000 s). Counted as regions with
+*      v > 0.3 on the torus; a spot straddling the grid's edge shows as halves in the image.
+* Measured at 2.16.1+2: 0 (the seed is v = 0.25), 1, 2, 4, 4, 4, 4 spots at t = 0, 1000, ...,
+* 6000 s; 1 min 38 s.
+* Step size: .tran 20 caps the step at 20 s. The same run with a 5 s cap gives the same pattern,
+* mean v 0.09161 vs 0.09161 and max v 0.36331 vs 0.36333 at 5000 s, in 97 s instead of 225 s.
+* Run: va-cli sim circuits/multiphysics/gray_scott_spots.net --model models/multiphysics/grayscott --tran --report X1.v[16][16]
+X1 ref gray_scott N=32 len=0.32 f=0.0367 k=0.0649 seed=3 tsnap=1000
+R1 ref gnd 1
+.tran 20 6000
+.end

@@ -1,0 +1,148 @@
+// Gray-Scott reaction-diffusion on an N x N periodic grid: concentrations are node potentials,
+// diffusion is a conductance between neighbours, and the reaction is a nonlinear current source.
+//
+//   du/dt = Du lap(u) - u v^2 + F (1 - u)
+//   dv/dt = Dv lap(v) + u v^2 - (F + k) v
+//
+// u is fed from a reservoir at rate F, v is removed at rate F + k, and v converts u
+// autocatalytically (u + 2v -> 3v). Depending on (F, k) the grid grows spots that divide, stripes,
+// labyrinths or nothing (Pearson, "Complex patterns in a simple system", Science 261, 1993).
+//
+// # As a circuit
+//
+// Each grid cell has two nodes of a user `reactant` discipline, u[i][j] and v[i][j], whose
+// potentials are the concentrations. Its KCL row is the rate equation: a unit "capacitance"
+// (ddt), the reaction as a current to ground, and the five-point Laplacian as conductances
+// Du/h^2 to the four neighbours, wrapping around at the edges (a torus, so there are no
+// boundaries for a pattern to lock onto).
+//
+// # Initial state and output
+//
+// Pearson's: u = 1, v = 0 everywhere except a square of half-width `seed` cells in the centre at
+// u = 1/2, v = 1/4, with a deterministic +-amp/2 perturbation on every cell (a hash of its
+// indices; the same grid every run, on every platform). The DC operating point pins every cell to
+// it (`analysis("static")`); the transient evolves from there.
+//
+// Every `tsnap` seconds, and at the end, the whole grid is written to target/gray_scott.txt: a
+// line `# <instance> t=<time>`, then N rows of u, then N rows of v. `$strobe` reports the mean and
+// maximum of v at each snapshot. One instance per deck: the file name is fixed (`$fopen` takes a
+// literal), so two grids in one run would write one file.
+//
+// # Verilog-A shown here
+//
+// Two-dimensional vector nets of a user discipline (`reactant [0:N-1][0:N-1] u, v`), nested
+// `generate` loops over two `genvar`s for the cells, the links and the wrap-around links,
+// `analysis("static")` for the initial condition, `@(timer)` with a period and `@(final_step)`
+// writing files with `$fopen`/`$fwrite`/`$fdisplay`/`$fclose`, integer parameters sizing the grid.
+//
+// # Limitations
+//
+// Second-order finite differences on a uniform grid; the time integration is the simulator's
+// (implicit, adaptive), so the time step is set by accuracy, not by the explicit stability limit a
+// pattern-formation code would respect. Grid sizes much beyond 64 x 64 (8192 unknowns) are slow.
+`include "disciplines.vams"
+`include "rd_natures.vams"
+
+`define GS_NOISE(a, b) (((a) * 12.9898 + (b) * 78.233) * 43758.5453)
+
+module gray_scott(ref);
+    inout ref;                       // unused anchor: a module needs a port to be placed
+    electrical ref;
+
+    parameter integer N      = 32     from [2:256];
+    parameter real    len    = 0.32   from (0:inf);    // side of the square domain
+    parameter real    du     = 2e-5   from [0:inf);    // diffusion coefficients (Pearson)
+    parameter real    dv     = 1e-5   from [0:inf);
+    parameter real    f      = 0.0367 from [0:inf);    // feed rate
+    parameter real    k      = 0.0649 from [0:inf);    // kill rate
+    parameter integer seed   = 3      from [0:inf);    // half-width of the seeded square, cells
+    parameter real    u_bg   = 1.0;                    // background and seed concentrations
+    parameter real    v_bg   = 0.0;
+    parameter real    u_seed = 0.5;
+    parameter real    v_seed = 0.25;
+    parameter real    amp    = 0.02   from [0:inf);    // peak-to-peak perturbation
+    parameter real    tsnap  = 1000   from (0:inf);    // snapshot period, s
+    parameter integer snap   = 1      from [0:1];      // write target/gray_scott.txt
+
+    reactant [0:N-1][0:N-1] u, v;
+
+    real h, gu, gv, uu, vv, r, inseed, vsum, vmax;
+    integer fd;
+    genvar i, j;
+
+    analog begin
+        I(ref) <+ 0.0;
+        h  = len / N;
+        gu = du / (h * h);
+        gv = dv / (h * h);
+
+        for (i = 0; i < N; i = i + 1) begin : row
+            for (j = 0; j < N; j = j + 1) begin : col
+                if (analysis("static")) begin
+                    // Pearson's initial state, perturbed by a fixed hash of the cell's indices.
+                    inseed = ((i - N / 2) * (i - N / 2) < seed * seed
+                              && (j - N / 2) * (j - N / 2) < seed * seed) ? 1.0 : 0.0;
+                    r = `GS_NOISE(i, j) - floor(`GS_NOISE(i, j)) - 0.5;
+                    Rate(u[i][j]) <+ Cn(u[i][j])
+                                     - ((inseed > 0.5) ? u_seed : u_bg) - amp * r;
+                    Rate(v[i][j]) <+ Cn(v[i][j])
+                                     - max((inseed > 0.5) ? v_seed : v_bg + amp * r, 0.0);
+                end else begin
+                    uu = Cn(u[i][j]);
+                    vv = Cn(v[i][j]);
+                    Rate(u[i][j]) <+ ddt(uu) + uu * vv * vv - f * (1.0 - uu);
+                    Rate(v[i][j]) <+ ddt(vv) - uu * vv * vv + (f + k) * vv;
+                end
+            end
+        end
+
+        // Diffusion: a conductance between each cell and its right and lower neighbours, the
+        // last row and column wrapping to the first. Separate loops so that no index is ever
+        // out of range (the elaborator resolves every unrolled index, taken branch or not).
+        if (!analysis("static")) begin
+            for (i = 0; i < N; i = i + 1) begin : hlink
+                for (j = 0; j < N - 1; j = j + 1) begin : hcol
+                    Rate(u[i][j], u[i][j + 1]) <+ gu * Cn(u[i][j], u[i][j + 1]);
+                    Rate(v[i][j], v[i][j + 1]) <+ gv * Cn(v[i][j], v[i][j + 1]);
+                end
+                Rate(u[i][N - 1], u[i][0]) <+ gu * Cn(u[i][N - 1], u[i][0]);
+                Rate(v[i][N - 1], v[i][0]) <+ gv * Cn(v[i][N - 1], v[i][0]);
+            end
+            for (j = 0; j < N; j = j + 1) begin : vlink
+                for (i = 0; i < N - 1; i = i + 1) begin : vrow
+                    Rate(u[i][j], u[i + 1][j]) <+ gu * Cn(u[i][j], u[i + 1][j]);
+                    Rate(v[i][j], v[i + 1][j]) <+ gv * Cn(v[i][j], v[i + 1][j]);
+                end
+                Rate(u[N - 1][j], u[0][j]) <+ gu * Cn(u[N - 1][j], u[0][j]);
+                Rate(v[N - 1][j], v[0][j]) <+ gv * Cn(v[N - 1][j], v[0][j]);
+            end
+        end
+
+        @(initial_step) if (snap) fd = $fopen("target/gray_scott.txt", "w");
+
+        @(initial_step or timer(tsnap, tsnap) or final_step) begin
+            if (snap) begin
+                $fdisplay(fd, "# %m t=%.6e", $abstime);
+                for (i = 0; i < N; i = i + 1) begin : su
+                    for (j = 0; j < N; j = j + 1) begin : suc
+                        $fwrite(fd, "%.5f ", Cn(u[i][j]));
+                    end
+                    $fdisplay(fd, "");
+                end
+            end
+            vsum = 0.0;
+            vmax = 0.0;
+            for (i = 0; i < N; i = i + 1) begin : sv
+                for (j = 0; j < N; j = j + 1) begin : svc
+                    if (snap) $fwrite(fd, "%.5f ", Cn(v[i][j]));
+                    vsum = vsum + Cn(v[i][j]);
+                    vmax = max(vmax, Cn(v[i][j]));
+                end
+                if (snap) $fdisplay(fd, "");
+            end
+            $strobe("%m: t=%.0f s, mean v %.5f, max v %.5f", $abstime, vsum / (N * N), vmax);
+        end
+
+        @(final_step) if (snap) $fclose(fd);
+    end
+endmodule

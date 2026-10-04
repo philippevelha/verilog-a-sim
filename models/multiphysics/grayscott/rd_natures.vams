@@ -1,0 +1,23 @@
+// Natures for the Gray-Scott reaction-diffusion example: a dimensionless concentration as the
+// potential of a node, and its rate of change (per unit time) as the flow. Include-guarded.
+`ifndef RD_NATURES_VAMS
+`define RD_NATURES_VAMS
+
+nature Rd_concentration
+    units  = "";
+    access = Cn;
+    abstol = 1e-6;
+endnature
+
+nature Rd_rate
+    units  = "1/s";
+    access = Rate;
+    abstol = 1e-9;
+endnature
+
+discipline reactant
+    potential Rd_concentration;
+    flow      Rd_rate;
+enddiscipline
+
+`endif

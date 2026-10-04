@@ -1,0 +1,20 @@
+* Gray-Scott, well mixed: the reaction alone, against its closed-form steady states.
+*
+* models/multiphysics/grayscott/gray_scott.va on a 2 x 2 grid whose four cells all start alike
+* (seed=2 covers the grid, amp=0 removes the perturbation): with nothing to diffuse, every cell is
+* the same stirred reactor, du/dt = -u v^2 + F(1 - u), dv/dt = u v^2 - (F + k) v. snap=0: no
+* snapshot file, so the two instances do not share one.
+*
+* With F = k = 0.04 the steady states are (closed form; u v = F + k and F(1 - u) = u v^2):
+*   (u, v) = (1, 0)       the trivial state, stable;
+*   (u, v) = (0.8, 0.1)   a saddle, unstable;
+*   (u, v) = (0.2, 0.4)   stable: trace -0.12, determinant 0.0096 of the Jacobian, a focus.
+* X1 starts at (0.3, 0.35) and must spiral into (0.2, 0.4); X2 starts at (0.9, 0.05), on the
+* other side of the saddle's separatrix, and must decay to (1, 0). The reactor is bistable.
+* Measured at 2.16.1+2: X1 ends at (0.200000, 0.400000), X2 at (1.000000, 3.6e-71).
+* Run: va-cli sim circuits/multiphysics/gray_scott_wellmixed.net --model models/multiphysics/grayscott --tran --report X1.u[0][0],X1.v[0][0],X2.u[0][0],X2.v[0][0]
+X1 ref gray_scott N=2 f=0.04 k=0.04 seed=2 u_seed=0.3 v_seed=0.35 amp=0 snap=0 tsnap=500
+X2 ref gray_scott N=2 f=0.04 k=0.04 seed=2 u_seed=0.9 v_seed=0.05 amp=0 snap=0 tsnap=500
+R1 ref gnd 1
+.tran 1 2000
+.end

@@ -22,6 +22,23 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.1+2 - 2026-10-04
+---------------------
+**Multiphysics example 9: Gray-Scott reaction-diffusion** (`models/multiphysics/grayscott/`;
+`gray_scott.py`; `docs/multiphysics.md`, and its tutorial section). A PDE on an N x N torus as a
+circuit: 2-D vector nets of a user discipline, built by nested `generate` loops, with the
+reaction as a nonlinear current and the Laplacian as conductances. The model writes the whole
+grid to a file through `$fopen`/`$fwrite`, from an event `or` list (2.16.0).
+
+  * `gray_scott_wellmixed.net`: the reaction alone ends exactly on its closed-form states,
+    (0.200000, 0.400000) and (1.000000, 3.6e-71), from either side of the saddle: bistable.
+  * `gray_scott_spots.net`: Pearson's mitosis regime on 32 x 32 (2049 unknowns, sparse) divides
+    one spot into 2 then 4 by t = 3000, which tile the torus; a 20 s step cap gives the same
+    pattern as 5 s, in 97 s instead of 225 s.
+  * Not a deck, stated: the labyrinth regime needs a larger torus (48 x 48, ~16 min), and grew
+    the seed's four-fold symmetry rather than a labyrinth.
+  * No crate changed; figures are from runs at this version.
+
 2.16.1+1 - 2026-10-04
 ---------------------
 **Multiphysics examples 5-8, and a tutorial for all of them.** Each example has decks with
