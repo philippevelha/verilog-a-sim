@@ -21,24 +21,24 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
 | `transition` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
-| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
-| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration) |
 | `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [piezo harvester](#piezoelectric-harvester-a-duffing-beam-a-rectifier-and-broadband-vibration), [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
 | `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [Gray-Scott](#grayscott-reactiondiffusion-a-pattern-forming-grid) |
@@ -46,7 +46,7 @@ Which language features each example uses, so the set as a whole reads as a cove
 | `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | a DC operating point that is a nonlinear network solve (load flow) | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
 | protection as events: a relay latching a line open | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
-| a complex ODE as two real state nodes (coupled-mode theory) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| a complex ODE as two real state nodes (coupled-mode theory) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 | one-way signal ports written as potentials (optical power, wavelength) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
 | a stiff system: ps optics against ms thermals | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
 | `case` on an integer parameter; a potential contribution that reads its own branch current (inverted Butler-Volmer) | [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
@@ -61,6 +61,8 @@ Which language features each example uses, so the set as a whole reads as a cove
 | a state held as its logarithm (ln g), so a conductance spanning twenty decades stays positive | [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
 | `exp` continued linearly past a bound instead of clamped (a clamp zeroes the Jacobian) | [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
 | `ddt` of a nonlinear function of a state (`ddt(ln(vol))`) | [breaker](#circuit-breaker-arc-mayr-arc-puffer-gas-flow-and-current-chopping) |
+| a delayed, position-dependent force: anti-damping and a limit cycle, checked against the model's own linearization | [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
+| `$strobe` from an event as a cheap envelope detector (no waveform report) | [optomechanics](#cavity-optomechanics-radiation-pressure-anti-damping-cooling-and-a-phonon-laser) |
 
 ---
 
@@ -861,3 +863,86 @@ or a slower arc than this circuit has.
 **Limitations.** The Mayr model only (no Cassie high-current regime), a constant τ,
 incompressible nozzle flow, travel prescribed rather than computed from a drive, and a lossless
 external circuit.
+
+---
+
+## Cavity optomechanics: radiation-pressure anti-damping, cooling and a phonon laser
+
+**Domains:** optical (a cavity field, as two quadratures), mechanical (a 10 MHz mode), thermal
+(photothermal tuning, off in these decks). **Models:** `models/multiphysics/optomech/optomech.va`
+and `optomech_natures.vams`, with user disciplines for the field, the displacement, the velocity
+and the temperature rise.
+
+Light stored in a cavity pushes on one of its mirrors. The mirror's position sets the cavity's
+frequency, and so how much light it stores. The force therefore depends on the position through
+the cavity's response, which takes about 1/κ to follow: a delayed force.
+
+- With the laser tuned above the cavity (blue), the delay feeds energy into the motion.
+- Tuned below it (red), the delay takes energy out.
+
+The model is the coupled-mode equation, da/dt = (iΔ(x) − κ/2)·a + √κ_ex·s with Δ = Δ₀ + G·x,
+written as two real nodes. The mechanics is a mass on a spring driven by F = (G/ω_c)·|a|².
+
+### 1. The threshold, and cooling on the red side
+
+```bash
+python docs/examples/multiphysics/optomech_plots.py target/release/va-cli
+```
+
+![Mechanical amplitude under four drives](examples/multiphysics/optomech_threshold.svg)
+
+The deck holds four copies of the resonator. Each is kicked by 1 fm and left alone, and its
+amplitude grows or decays at −(Γ_m + Γ_opt)/2. The script prints two references beside each
+simulated rate:
+
+- the **exact** rate: the eigenvalue of the model's own four equations, linearized about their
+  steady state and computed with numpy;
+- the **formula** rate: the weak-coupling expression
+  Γ_opt = g²κ[1/(κ²/4 + (Δ+Ω)²) − 1/(κ²/4 + (Δ−Ω)²)].
+
+| Drive | Simulated | Exact | Formula |
+|---|---|---|---|
+| blue, 0.5 × P_th | −1569.0 /s | −1570.5 /s | −1570.5 /s |
+| blue, 1 × P_th | +0.3 /s | +0.3 /s | +0.4 /s |
+| blue, 2 × P_th | +3138.0 /s | +3141.0 /s | +3141.8 /s |
+| red, 2 × P_th | −9420.3 /s | −9429.3 /s | −9427.1 /s |
+
+P_th = 28.34 nW. The exact eigenvalues and the formula give the same threshold to four figures.
+
+- **Simulated against exact:** within 0.1 %, always on the damped side. The residual comes
+  from the 1 ns step.
+- **Formula against exact:** within 0.03 %. With g ≪ κ, as here, the weak-coupling formula
+  is very good.
+- **The red side:** the same light that pumps the blue side triples the damping.
+
+### 2. A phonon laser
+
+![Growth and saturation of the mechanical amplitude](examples/multiphysics/optomech_limit_cycle.svg)
+
+At 4 × P_th (113.4 nW) the motion grows at the exact linear rate, 9418 /s. It keeps growing until
+it sweeps the cavity resonance by more than its linewidth (G·x > κ, i.e. x > 2.1 pm). There the
+pumping, averaged over a cycle, falls back to the mechanical loss, and the amplitude settles at
+**4.7559 pm**. This is a self-sustained oscillation, the mechanical analogue of a laser.
+
+**The check.** The script finds the amplitude at which the radiation pressure's work over a
+cycle, ∮F·v dt, equals the mechanical loss π·m·Γ_m·Ω·A². It imposes harmonic motion and
+integrates the field ODE alone, independently of the simulator. The result is **4.7577 pm**, a
+0.04 % difference.
+
+The envelope comes from the model's own `$strobe` on every 100th displacement peak, so the
+two-million-step run never has to report its waveform.
+
+**What building this found.**
+
+- **A sign error in Δ.** It made the blue side damp.
+- **A wrong threshold.** The first decks were centred on 27.25 nW, a hand derivation. It made
+  the simulator look 7.7 % slow against "the textbook". The exact eigenvalues showed that the
+  simulator was right and the derivation was wrong. Evaluated correctly, the formula gives
+  28.34 nW too.
+
+**Limitations.**
+
+- One optical and one mechanical mode.
+- Classical: no quantum back-action and no sideband asymmetry.
+- Linear absorption.
+- The photothermal shift is lumped in one node, and these decks leave it off (`gt = 0`).

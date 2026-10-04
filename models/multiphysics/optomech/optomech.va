@@ -1,0 +1,97 @@
+// Cavity optomechanics: a laser-driven optical cavity whose resonance moves with a mechanical
+// mode's displacement, and the radiation pressure of the light on that mode.
+//
+//   field      da/dt = (i Δ(x, T) − κ/2) a + sqrt(κ_ex) s        (rotating at the laser frequency)
+//   detuning   Δ(x, T) = Δ0 + G x + G_T T                         (Δ0 = ω_L − ω_c at rest, cold)
+//   mechanics  m x'' + m Γ_m x' + m Ω_m^2 x = F,   F = (G / ω_c) |a|^2   (radiation pressure)
+//   heat       C_th T' + T / R_th = η κ_abs |a|^2                 (photothermal)
+//
+// with |a|^2 the stored energy. Light pushes the mirror outward (x > 0 lengthens the cavity and
+// lowers its frequency, so Δ = ω_L − ω_c grows with x; heating lowers it too), and the force depends on where the mirror is
+// through the detuning: a delayed, position-dependent force. With the laser blue of the cavity
+// (Δ0 > 0) the delay feeds energy into the motion; past a threshold power it outweighs the
+// mechanical damping and the mode oscillates by itself (a phonon laser).
+//
+// Linearized, the light adds to the mechanical damping Γ_m the optomechanical damping
+//   Γ_opt = g^2 κ [1/(κ^2/4 + (Δ+Ω_m)^2) − 1/(κ^2/4 + (Δ−Ω_m)^2)],   g^2 = G^2 U / (2 m Ω_m ω_c)
+// (U the steady stored energy), negative on the blue side; threshold is Γ_m + Γ_opt = 0.
+//
+// # Units
+//
+// Field in sqrt(fJ) (|a|^2 in fJ), laser power in W (volts of the control node), displacement in m,
+// temperature rise in K.
+//
+// # Verilog-A shown here
+//
+// A complex field as two real nodes coupled to a mechanical oscillator and a thermal node; an
+// initial kick set through `analysis("static")`; radiation pressure as a force from the field
+// energy; a peak detector on the mechanical motion (`@(cross)` of the velocity) reporting the
+// oscillation's amplitude envelope through `$strobe`.
+//
+// # Limitations
+//
+// One optical and one mechanical mode; classical (no quantum noise, no sideband asymmetry beyond
+// the classical response); linear absorption; the thermal shift lumped in one node.
+`include "disciplines.vams"
+`include "optomech_natures.vams"
+
+`define OM_TWOPI 6.28318530717958647692
+
+module optomech(pin);
+    inout pin;
+    electrical pin;                      // V(pin): the laser power, W
+
+    parameter real lambda = 1550e-9  from (0:inf);    // m
+    parameter real kappa  = 6.283185307e7 from (0:inf);  // 1/s, energy decay rate (2 pi x 10 MHz)
+    parameter real kex    = 3.1415926535e7 from (0:inf); // 1/s, input coupling (critical: kappa/2)
+    parameter real delta0 = 6.283185307e7;            // 1/s, laser minus cavity at rest
+    parameter real gom    = 2.9796e19    from [0:inf);    // rad/s per m (omega_c / R, R = 40 um)
+    parameter real m      = 1e-11        from (0:inf);    // kg
+    parameter real fm     = 10e6         from (0:inf);    // Hz, mechanical frequency
+    parameter real qm     = 1e4          from (0:inf);    // mechanical quality factor
+    parameter real gt     = 0.0          from [0:inf);    // rad/s per K, thermal tuning
+    parameter real cth    = 1e-9         from (0:inf);    // J/K
+    parameter real rth    = 1e5          from (0:inf);    // K/W
+    parameter real eta    = 0.1          from [0:1];      // absorbed share of the cavity loss
+    parameter real x0     = 1e-15;                         // m, initial kick of the mirror
+    parameter integer every = 2000       from [1:inf);    // report every n-th displacement peak
+
+    omfield ar, ai;      // field quadratures, sqrt(fJ)
+    mech x;              // mirror displacement
+    mech_v v;            // its velocity
+    omheat th;           // temperature rise
+
+    real wc, om, gm, dl, s, u, f;
+    integer npk;
+
+    analog begin
+        wc = `OM_TWOPI * 2.99792458e8 / lambda;
+        om = `OM_TWOPI * fm;
+        gm = om / qm;
+        dl = delta0 + gom * Pos(x) + gt * Temp(th);
+        s  = (V(pin) > 1e-30) ? sqrt(V(pin)) : 0.0;      // sqrt(W); 1e7.5 below converts to sqrt(fJ/s)
+        u  = Fld(ar) * Fld(ar) + Fld(ai) * Fld(ai);       // fJ
+        f  = gom / wc * u * 1e-15;                        // N
+
+        // da/dt = (iΔ − κ/2) a + sqrt(κ_ex) s;  sqrt(W) -> sqrt(fJ/s) is a factor sqrt(1e15).
+        Fldr(ar) <+ ddt(Fld(ar)) + 0.5 * kappa * Fld(ar) + dl * Fld(ai) - sqrt(kex) * 3.16227766e7 * s;
+        Fldr(ai) <+ ddt(Fld(ai)) + 0.5 * kappa * Fld(ai) - dl * Fld(ar);
+
+        if (analysis("static")) begin
+            // At rest: the mirror at its static deflection under the light, plus the kick.
+            Frc(x) <+ m * om * om * Pos(x) - f - m * om * om * x0;
+            Frc(v) <+ Vel(v);
+        end else begin
+            Frc(v) <+ Vel(v) - ddt(Pos(x));
+            Frc(x) <+ m * ddt(Vel(v)) + m * gm * Vel(v) + m * om * om * Pos(x) - f;
+        end
+        Pheat(th) <+ cth * ddt(Temp(th)) + Temp(th) / rth - eta * kappa * u * 1e-15;
+
+        // Displacement peaks (velocity through zero, falling): the oscillation's envelope.
+        @(cross(Vel(v), -1)) begin
+            npk = npk + 1;
+            if (npk % every == 0)
+                $strobe("%m: peak %0d at t=%.6e s, x=%.6e m", npk, $abstime, Pos(x));
+        end
+    end
+endmodule

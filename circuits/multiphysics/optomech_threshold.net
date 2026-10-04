@@ -1,0 +1,31 @@
+* Cavity optomechanics: the phonon-laser threshold, and optical cooling on the red side.
+*
+* The optomech model of models/multiphysics/optomech/: a 10 MHz mechanical mode (m = 10 pg,
+* Q = 1e4) in a 1550 nm cavity with kappa = 2 pi x 10 MHz, critically coupled, frequency pull
+* G = omega_c / 40 um. Each instance is kicked 1 fm off its static deflection and left alone;
+* the light makes the mode's damping Gamma_m + Gamma_opt, and the amplitude grows or decays at
+* -(Gamma_m + Gamma_opt) / 2.
+*   X1-X3  blue-detuned (Delta0 = +Omega_m) at 0.5, 1 and 2 x the threshold P_th = 28.34 nW,
+*          where Gamma_opt = -Gamma_m;
+*   X4     red-detuned (Delta0 = -Omega_m) at 2 x P_th: the light damps the motion instead.
+* References, both computed in docs/examples/multiphysics/optomech_plots.py: the eigenvalues of
+* the model's own equations linearized about the steady state (exact), and the weak-coupling
+* formula Gamma_opt = g^2 kappa [1/(kappa^2/4 + (Delta+Omega)^2) - 1/(kappa^2/4 + (Delta-Omega)^2)].
+* What to look for (measured at 2.16.2+2): amplitude rates -1569.0, +0.3, +3138.0 and -9420.3 /s
+* against exact -1570.5, +0.3, +3141.0 and -9429.3 /s: within 0.1 %, all on the damped side.
+* The formula agrees with the exact eigenvalues to 0.03 % here.
+* The 1 ns step cap matters. The rate is set by how the field's response lags the motion
+* (1/kappa = 16 ns), and a coarser step misrepresents that lag: at a 5 ns cap a blue-side growth rate
+* came out 2.3 % low (measured at 54.5 nW: 2830 /s against 2898 /s at 1 ns).
+* Plot: python docs/examples/multiphysics/optomech_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/optomech_threshold.net --model models/multiphysics/optomech --tran --report X1.x,X2.x,X3.x,X4.x
+VP1 p1 gnd DC 1.417e-8
+VP2 p2 gnd DC 2.834e-8
+VP3 p3 gnd DC 5.668e-8
+VP4 p4 gnd DC 5.668e-8
+X1 p1 optomech
+X2 p2 optomech
+X3 p3 optomech
+X4 p4 optomech delta0=-6.283185307e7
+.tran 1n 0.3m
+.end

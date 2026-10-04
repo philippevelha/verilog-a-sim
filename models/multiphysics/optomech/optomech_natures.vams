@@ -1,0 +1,71 @@
+// Natures for the cavity-optomechanics example. Include-guarded.
+//
+//   omfield  one quadrature of the cavity field, sqrt(fJ) (so |a|^2 is the stored energy in fJ);
+//   mech     the mirror's displacement (m), force (N) as flow; mech_v its velocity (m/s);
+//   omheat   the resonator's temperature rise (K) and heat (W).
+`ifndef OPTOMECH_NATURES_VAMS
+`define OPTOMECH_NATURES_VAMS
+
+nature Om_amplitude
+    units  = "sqrt(fJ)";
+    access = Fld;
+    abstol = 1e-9;
+endnature
+
+nature Om_rate
+    units  = "sqrt(fJ)/s";
+    access = Fldr;
+    abstol = 1e-3;
+endnature
+
+nature Om_position
+    units  = "m";
+    access = Pos;
+    abstol = 1e-21;
+endnature
+
+nature Om_force
+    units  = "N";
+    access = Frc;
+    abstol = 1e-18;
+endnature
+
+nature Om_velocity
+    units  = "m/s";
+    access = Vel;
+    abstol = 1e-15;
+endnature
+
+nature Om_temperature
+    units  = "K";
+    access = Temp;
+    abstol = 1e-9;
+endnature
+
+nature Om_heat
+    units  = "W";
+    access = Pheat;
+    abstol = 1e-15;
+endnature
+
+discipline omfield
+    potential Om_amplitude;
+    flow      Om_rate;
+enddiscipline
+
+discipline mech
+    potential Om_position;
+    flow      Om_force;
+enddiscipline
+
+discipline mech_v
+    potential Om_velocity;
+    flow      Om_force;
+enddiscipline
+
+discipline omheat
+    potential Om_temperature;
+    flow      Om_heat;
+enddiscipline
+
+`endif

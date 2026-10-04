@@ -22,6 +22,30 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.2+2 - 2026-10-04
+---------------------
+**Multiphysics example 14: cavity optomechanics** (`models/multiphysics/optomech/`;
+`optomech_plots.py`; `docs/multiphysics.md` and the tutorial). A 10 MHz mechanical mode in a
+1550 nm cavity: the field as two real nodes, radiation pressure as a force from the stored energy,
+the detuning moved by the displacement. Optical, mechanical and (unused here) thermal domains.
+  * Threshold and cooling: four instances kicked by 1 fm. Amplitude rates -1569.0, +0.3, +3138.0
+    (blue, 0.5/1/2 x P_th = 28.34 nW) and -9420.3 /s (red, 2 x P_th), against the exact
+    eigenvalues of the model's own linearized equations, -1570.5, +0.3, +3141.0, -9429.3 /s:
+    within 0.1 %, all on the damped side, at a 1 ns step cap (a 5 ns cap reads 2.3 % low).
+  * Phonon laser at 4 x P_th: growth at the exact rate (9418 /s), saturation at 4.7559 pm; an
+    independent energy balance (field ODE integrated under imposed harmonic motion, work per cycle
+    = mechanical loss) gives 4.7577 pm.
+  * Correction found while building it: the first decks were centred on a hand-derived threshold
+    of 27.25 nW, against which the simulator looked 7.7 % slow. The exact eigenvalues agreed with
+    the simulator; the weak-coupling formula, evaluated correctly, gives 28.34 nW as well. The
+    script now computes both references itself.
+  * Limitations: one optical and one mechanical mode, classical, linear absorption; the
+    photothermal path (`gt`) is in the model but in no deck.
+  * Measured at this version: both decks 2 min 6 s together (`optomech_plots.py`, 2.3 million
+    steps); `cargo test --workspace` 952 passed, `cargo xtask validate` 28/28 (as 2.16.2; no code
+    changed).
+
+
 2.16.2+1 - 2026-10-04
 ---------------------
 **Multiphysics example 13: a circuit-breaker arc** (`models/multiphysics/breaker/`;

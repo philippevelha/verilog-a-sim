@@ -35,6 +35,7 @@ The examples, in the order they were built:
 | [11](#grayscott) | Gray–Scott reaction–diffusion | chemical kinetics on a grid | a PDE as a 2-D vector net, event `or` lists, file output from a model |
 | [12](#piezo) | Piezoelectric harvester | mechanical, electrical | a Duffing jump against harmonic balance, rectifiers, a broadband ensemble |
 | [13](#breaker) | Circuit-breaker arc | electrical, gas dynamics, mechanical | a state held as its logarithm, a linearly continued `exp`, current chopping against energy conservation |
+| [14](#optomech) | Cavity optomechanics | optical, mechanical, thermal | a complex field as two nodes, a delayed force, rates against the model's own eigenvalues, a limit cycle |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -1717,6 +1718,156 @@ diode's `exp(vd/vt)` still counts; `exp(Lg(lg))` does not. The deck runs in unde
 with recovery voltages up to ~2 kV/µs, the Mayr arc always cleared. Re-ignition needs a slower
 arc or a faster recovery voltage than this circuit gives.
 
+# Cavity optomechanics: anti-damping, cooling, a phonon laser {#optomech}
+
+**Library:** `models/multiphysics/optomech/`, which contains:
+
+- `optomech.va`: one module, `optomech(pin)`; the laser power, in watts, is the voltage of the
+  electrical node `pin`;
+- `optomech_natures.vams`: `omfield` (one field quadrature, √fJ), `mech` (displacement in m,
+  force in N as flow), `mech_v` (velocity) and `omheat` (temperature rise).
+
+**A complex field as two real nodes.** The cavity's field a = a_r + i·a_i obeys
+da/dt = (iΔ − κ/2)·a + √κ_ex·s. Split into real and imaginary parts, it becomes two rows:
+
+```verilog
+Fldr(ar) <+ ddt(Fld(ar)) + 0.5 * kappa * Fld(ar) + dl * Fld(ai) - sqrt(kex) * 3.16227766e7 * s;
+Fldr(ai) <+ ddt(Fld(ai)) + 0.5 * kappa * Fld(ai) - dl * Fld(ar);
+```
+
+`dl = delta0 + gom * Pos(x) + gt * Temp(th)` is the detuning. It is where the mirror's position
+enters the optics, and `f = gom / wc * u * 1e-15` is where the light enters the mechanics.
+
+**Units chosen so the numbers stay near 1.** The field is in √fJ, so |a|² is the stored energy in
+femtojoules. The drive √P, in √W, becomes √(fJ/s) through the factor √10¹⁵ = 3.16227766·10⁷,
+and the force carries the 10⁻¹⁵ back.
+
+**The tolerances are part of the model.** `optomech_natures.vams` gives the displacement an
+`abstol` of 10⁻²¹ m and the force 10⁻¹⁸ N. The motion here is femtometres to picometres. An
+electrical-sized tolerance, around 10⁻⁶, would accept any Newton iterate as converged, and the
+mechanics would be noise.
+
+**The kick, through `analysis("static")`.** The operating point holds the mirror at its static
+deflection under the light plus `x0`:
+
+```verilog
+if (analysis("static")) begin
+    Frc(x) <+ m * om * om * Pos(x) - f - m * om * om * x0;
+    Frc(v) <+ Vel(v);
+end else begin
+    Frc(v) <+ Vel(v) - ddt(Pos(x));
+    Frc(x) <+ m * ddt(Vel(v)) + m * gm * Vel(v) + m * om * om * Pos(x) - f;
+end
+```
+
+The transient starts from that displaced, motionless state, and the field's steady state at that
+position. Without the kick the mirror would sit exactly at equilibrium, and only round-off would
+set it moving, above threshold or not.
+
+**An envelope from `$strobe`.** `@(cross(Vel(v), -1))` fires at each displacement maximum. An
+integer counter, which persists across events, prints every `every`-th one:
+
+```verilog
+@(cross(Vel(v), -1)) begin
+    npk = npk + 1;
+    if (npk % every == 0)
+        $strobe("%m: peak %0d at t=%.6e s, x=%.6e m", npk, $abstime, Pos(x));
+end
+```
+
+## The threshold, and cooling on the red side
+
+```bash
+python docs/examples/multiphysics/optomech_plots.py "$PWD/target/release/va-cli"
+```
+
+The script runs both decks, prints the checks, and writes both figures.
+
+![Mechanical amplitude under four drives](examples/multiphysics/optomech_threshold.svg)
+
+**The deck** (`optomech_threshold.net`). It holds four independent instances, each with its own
+power source:
+
+- `VP1`–`VP3` set 0.5, 1 and 2 × P_th, with P_th = 28.34 nW, on the blue side (`delta0` defaults
+  to +Ω_m);
+- `X4 p4 optomech delta0=-6.283185307e7` puts the fourth on the red side at 2 × P_th.
+
+`.tran 1n 0.3m` gives 300,001 points. The script reports the four displacements with
+`--report X1.x,X2.x,X3.x,X4.x`, measures each mechanical period's peak-to-peak swing, and fits
+the logarithm of the amplitude against time.
+
+**The two references.** The script computes both itself:
+
+- **exact:** the model's four equations (a_r, a_i, x, v) linearized about their steady state.
+  The real part of the slow eigenvalue pair is the amplitude rate.
+- **formula:** −(Γ_m + Γ_opt)/2, with
+  Γ_opt = g²κ[1/(κ²/4 + (Δ+Ω)²) − 1/(κ²/4 + (Δ−Ω)²)] and g² = G²U/(2mΩω_c).
+
+```text
+case              simulated      exact    formula   (amplitude rate, 1/s)
+blue, 0.5 P_th      -1569.0    -1570.5    -1570.5
+blue, 1 P_th            0.3        0.3        0.4
+blue, 2 P_th         3138.0     3141.0     3141.8
+red, 2 P_th         -9420.3    -9429.3    -9427.1
+threshold, exact: 28.337 nW
+threshold, weak-coupling formula: 28.337 nW
+```
+
+**Why `.tran 1n`.** The growth is 0.03 % per mechanical period, and it is set by how the field
+lags the motion: 1/κ = 16 ns, against a 100 ns period. A coarser step misrepresents that lag.
+
+| Cap | Blue-side rate at 54.5 nW |
+|---|---|
+| 5 ns | 2830 /s |
+| 1 ns | 2898 /s |
+| exact | 2899.5 /s |
+
+At 1 ns the remaining 0.1 % is on the damped side for all four drives.
+
+::: {.callout-tip}
+## Checking a model with its own linearization
+
+This example's first threshold was 27.25 nW, derived by hand. Against it the simulator looked
+7.7 % slow. The check that settled the question is the one in the script: linearize the model's
+**own** equations about their steady state and take the eigenvalue. That reference contains no
+approximation the simulator does not also make. It agreed with the simulator to 0.1 %, and
+showed that the hand derivation was wrong.
+:::
+
+## A phonon laser
+
+![Growth and saturation of the mechanical amplitude](examples/multiphysics/optomech_limit_cycle.svg)
+
+**The deck** (`optomech_limit_cycle.net`):
+
+- one instance at 4 × P_th, `VP pin gnd DC 1.1336e-7`;
+- `x0=1e-14`, a 10 fm kick, so that saturation comes within 2 ms;
+- `every=100`, so a strobe every 10 µs;
+- `.tran 1n 2m`: two million steps.
+
+The script passes `--report pin`, a constant, and reads only the strobes. Reporting the
+displacement as well would print two million lines that the figure does not need.
+
+**The checks:**
+
+```text
+limit cycle: amplitude 4.7559 pm, energy balance 4.7577 pm (kappa / G = 2.11 pm); linear growth at the exact rate 9418 /s
+```
+
+- **Early growth** follows the exact eigenvalue (the dotted line).
+- **The saturated amplitude** is compared with an independent prediction. Impose harmonic motion
+  x = x_s + A·cos Ωt on the field ODE alone, integrate it with RK4 until it settles, and find
+  the A at which the radiation pressure's work over a cycle, ∮F·v dt, equals the mechanical
+  loss π·m·Γ_m·Ω·A². That gives 4.7577 pm, 0.04 % from the simulation.
+
+The cycle saturates at about twice κ/G. At that swing the cavity spends part of every cycle off
+resonance, and the pumping, averaged over the cycle, falls to the mechanical loss.
+
+**Not exercised here.** The photothermal path. Setting `gt` to a nonzero value lets absorbed
+light heat the resonator and shift its resonance on the thermal time `cth`·`rth`. This adds a
+second, slow delay, a known route to self-pulsing. It is in the model but not in
+these decks.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -1770,6 +1921,9 @@ python $F/piezo_plots.py "$VA"
 
 # Circuit breaker
 python $F/breaker_plots.py "$VA"
+
+# Cavity optomechanics
+python $F/optomech_plots.py "$VA"
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -1787,6 +1941,7 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | Gray–Scott spots (2049 unknowns) | about 1.5 min |
 | the three piezo decks (`piezo_plots.py`) | about 4.5 min together (the storage ensemble is 4) |
 | the two breaker decks (`breaker_plots.py`) | about 3 s together |
+| the two optomechanics decks (`optomech_plots.py`, 2.3 million steps) | about 2 min together |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.

@@ -1,0 +1,17 @@
+* Cavity optomechanics: a phonon laser. Above threshold the blue-detuned light pumps the mode
+* until the motion sweeps the cavity's resonance far enough that the pumping falls back to the
+* mechanical loss: a self-sustained oscillation at a fixed amplitude, the limit cycle.
+*
+* The model of optomech_threshold.net at 4 x the threshold (113.4 nW), kicked 10 fm.
+* The `$strobe` on every 100th displacement peak (the model's `every` parameter) prints the
+* envelope without reporting a million time points.
+* What to look for (measured at 2.16.2+2): growth at the linear rate (the exact eigenvalue,
+* 9418 /s), then saturation once the swing of the detuning, G x, is comparable to kappa
+* (kappa / G = 2.11 pm). The amplitude settles at 4.7559 pm; harmonic motion whose cycle's
+* radiation-pressure work balances its mechanical loss has 4.7577 pm (computed in the script).
+* Plot: python docs/examples/multiphysics/optomech_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/optomech_limit_cycle.net --model models/multiphysics/optomech --tran --report X1.x
+VP pin gnd DC 1.1336e-7
+X1 pin optomech x0=1e-14 every=100
+.tran 1n 2m
+.end
