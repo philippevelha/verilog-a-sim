@@ -266,6 +266,15 @@ struct Parser<'a> {
 /// and the set they refuse can never drift apart.
 const STEP_EVENTS: [&str; 2] = ["initial_step", "final_step"];
 
+/// The **monitored** events this engine schedules, each with the synthetic call name its
+/// trigger is parsed into (`@` is not an identifier character, so no source can write one).
+/// Elaboration registers a `va_ir::EventSite` for each and reads it back as `EventFired`.
+const SCHEDULED_EVENTS: [(&str, &str); 3] = [
+    ("cross", "@cross"),
+    ("above", "@above"),
+    ("timer", "@timer"),
+];
+
 impl Parser<'_> {
     // --- cursor helpers --------------------------------------------------------------
 
@@ -433,14 +442,90 @@ impl Parser<'_> {
         None
     }
 
-    /// Whether the trigger starting at `self.pos` is exactly `<name> ( ... )` — i.e. the whole
-    /// event control is `@(<name>(...))`, not a compound like `initial_step or cross(...)`,
-    /// which stays unsupported and is refused just below.
-    fn trigger_is_bare(&self, name: &str) -> bool {
-        matches!(
-            (self.toks.get(self.pos), self.toks.get(self.pos + 1)),
-            (Some(Token::Keyword(kw)), Some(Token::LParen)) if kw.as_str() == name
-        )
+    /// Whether the trigger starting at `self.pos`, up to its closing `)`, is an `or` list whose
+    /// every term this engine schedules: `cross(...)`, `above(...)` or `timer(...)` with an
+    /// argument list, or a bare `initial_step`/`final_step` (an analysis filter such as
+    /// `final_step("tran")` is not bare, and is refused elsewhere). A scan of tokens only, so a
+    /// trigger it declines is left untouched for the refusals that follow.
+    fn trigger_is_schedulable_list(&self) -> bool {
+        let name_at = |i: usize| match self.toks.get(i) {
+            Some(Token::Keyword(kw)) => Some(kw.as_str().to_string()),
+            Some(Token::Ident(id)) => Some(id.clone()),
+            _ => None,
+        };
+        let mut i = self.pos;
+        loop {
+            let Some(name) = name_at(i) else {
+                return false;
+            };
+            let next = self.toks.get(i + 1);
+            if SCHEDULED_EVENTS.iter().any(|(kw, _)| *kw == name) && next == Some(&Token::LParen) {
+                // Skip the balanced argument list.
+                let mut depth = 0usize;
+                i += 1;
+                loop {
+                    match self.toks.get(i) {
+                        Some(Token::LParen) => depth += 1,
+                        Some(Token::RParen) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        Some(_) => {}
+                        None => return false,
+                    }
+                    i += 1;
+                }
+                i += 1;
+            } else if STEP_EVENTS.contains(&name.as_str())
+                && (next == Some(&Token::RParen)
+                    || matches!(next, Some(Token::Keyword(kw)) if kw.as_str() == "or"))
+            {
+                i += 1;
+            } else {
+                return false;
+            }
+            match self.toks.get(i) {
+                Some(Token::RParen) => return true,
+                Some(Token::Keyword(kw)) if kw.as_str() == "or" => i += 1,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Parse the `or` list [`Parser::trigger_is_schedulable_list`] accepted into one condition,
+    /// leaving the trigger's closing `)` unconsumed: each scheduled event becomes its synthetic
+    /// call (`@cross`, `@above`, `@timer`, each registering its own site at elaboration), each
+    /// step event the zero-argument call `initial_step()`/`final_step()`, joined by `||`.
+    fn parse_event_or_list(&mut self) -> Result<ExprRef, FrontendError> {
+        let mut cond: Option<ExprRef> = None;
+        loop {
+            let name = match self.peek() {
+                Some(Token::Keyword(kw)) => kw.as_str().to_string(),
+                Some(Token::Ident(id)) => id.clone(),
+                _ => return self.err("expected an event in the trigger list".to_string()),
+            };
+            let term = match SCHEDULED_EVENTS.iter().find(|(kw, _)| *kw == name) {
+                Some((_, synthetic)) => self.parse_event_trigger(synthetic)?,
+                None => {
+                    self.pos += 1;
+                    self.push(ExprAst::Call {
+                        name,
+                        args: Vec::new(),
+                    })
+                }
+            };
+            cond = Some(match cond {
+                None => term,
+                Some(lhs) => self.push(ExprAst::Binary(BinOp::Or, lhs, term)),
+            });
+            match self.peek() {
+                Some(Token::Keyword(kw)) if kw.as_str() == "or" => self.pos += 1,
+                _ => break,
+            }
+        }
+        cond.map_or_else(|| self.err("empty event trigger".to_string()), Ok)
     }
 
     /// Parse an event trigger's arguments from just after the `@(`, leaving the trigger's
@@ -1712,41 +1797,39 @@ impl Parser<'_> {
             Some(Token::At) => {
                 self.pos += 1;
                 self.eat(&Token::LParen)?;
-                // A bare `@(cross(...))` or `@(timer(...))` — the two monitored events this
-                // engine implements. Recognised *before* the refusal below, which still
-                // catches every compound trigger and the events that remain unimplemented.
-                for (kw, synthetic) in [
-                    ("cross", "@cross"),
-                    ("above", "@above"),
-                    ("timer", "@timer"),
-                ] {
-                    if self.trigger_is_bare(kw) {
-                        let cond = self.parse_event_trigger(synthetic)?;
-                        self.eat(&Token::RParen)?;
-                        let body = self.parse_stmt()?;
-                        return Ok(Stmt::If {
-                            cond,
-                            then_: vec![body],
-                            else_: Vec::new(),
-                        });
-                    }
+                // An event, or an `or` list of events (LRM §5.10), built only from the ones this
+                // engine schedules: `cross`, `above`, `timer` with their arguments, and bare
+                // `initial_step`/`final_step`. It becomes `if (e1 || e2 || ...)`: the body runs
+                // once at a point where any of them fires, which is what the LRM asks of an
+                // `or` list. Recognised *before* the refusals below, which catch every trigger
+                // containing anything else.
+                if self.trigger_is_schedulable_list() {
+                    let cond = self.parse_event_or_list()?;
+                    self.eat(&Token::RParen)?;
+                    let body = self.parse_stmt()?;
+                    return Ok(Stmt::If {
+                        cond,
+                        then_: vec![body],
+                        else_: Vec::new(),
+                    });
                 }
-                // A *compound* trigger containing `cross`, or any other monitored event, is
-                // still refused: this parser can honour neither half, and discarding the
-                // trigger runs the body unconditionally (§ v0.9.1).
+                // A trigger naming a monitored event in a form the list above does not cover
+                // (`absdelta`, which is unimplemented, or a malformed list) is refused:
+                // discarding the trigger runs the body unconditionally (§ v0.9.1).
                 if let Some(event) = self.monitored_event_in_trigger() {
                     return self.refuse(
-                        format!("`@(... {event}(...) ...)`, a compound event trigger"),
                         format!(
-                            "this engine can schedule a bare `{event}(...)` but not one \
-                             composed with `or`, and discarding the trigger would run the body \
-                             at every solve point instead of when the event fires - a wrong \
-                             answer rather than a missing feature"
+                            "`@(... {event} ...)`, an event trigger this engine does not schedule"
                         ),
                         format!(
-                            "split the trigger: a bare `@({event}(...))` is supported, as is a \
-                             bare `@(initial_step)`/`@(final_step)`"
+                            "a trigger naming `{event}` is honoured only as an `or` list of \
+                             `cross(...)`, `above(...)`, `timer(...)`, `initial_step` and \
+                             `final_step`, and discarding it would run the body at every solve \
+                             point instead of when the event fires - a wrong answer rather than a \
+                             missing feature"
                         ),
+                        "write the trigger with those events only; `absdelta` is not implemented"
+                            .to_string(),
                     );
                 }
                 let step_events = self.step_event_list();
@@ -3404,17 +3487,70 @@ mod tests {
         );
     }
 
-    /// Only the **bare** form is implemented. A compound `initial_step or cross(...)` is still
-    /// refused, and that is load-bearing rather than pedantic: implementing the bare form moved
-    /// `cross` out of the refusal path, and without keeping the compound case there it would
-    /// fall through to discard-the-trigger-and-run-the-body-unconditionally — the exact defect
-    /// 0.9.1 removed.
+    /// The synthetic-call names, left to right, of an `or` chain the parser built: what an event
+    /// trigger list composes into (2.16.0).
+    fn or_chain(m: &ModuleAst, e: ExprRef) -> Vec<String> {
+        match m.expr(e) {
+            ExprAst::Binary(BinOp::Or, l, r) => {
+                let mut v = or_chain(m, *l);
+                v.extend(or_chain(m, *r));
+                v
+            }
+            ExprAst::Call { name, .. } => vec![name.clone()],
+            other => panic!("expected an event term, got {other:?}"),
+        }
+    }
+
+    /// An `or` list mixing scheduled and step events composes into one `||` chain, every term
+    /// kept (2.16.0). Until then any list containing `cross`, `above` or `timer` was refused;
+    /// the refusal existed so that such a list could not fall through to
+    /// discard-the-trigger-and-run-the-body-unconditionally (the 0.9.1 defect), and composing it
+    /// removes that path as completely: the body is guarded by the disjunction, never by
+    /// nothing.
     #[test]
-    fn a_compound_trigger_containing_cross_is_still_refused() {
-        let err = parse_err(
-            "module t(a, b); electrical a, b; analog begin @(initial_step or cross(V(a, b) - 1.0, 1)) x = 1.0; I(a, b) <+ x; end endmodule",
-        );
-        assert_refusal(&err, "cross");
+    fn an_or_list_with_scheduled_events_composes() {
+        for (trigger, expected) in [
+            (
+                "initial_step or cross(V(a, b) - 1.0, 1)",
+                vec!["initial_step", "@cross"],
+            ),
+            (
+                "initial_step or above(V(a) - 1.0)",
+                vec!["initial_step", "@above"],
+            ),
+            ("timer(0, 1.0) or final_step", vec!["@timer", "final_step"]),
+            (
+                "cross(V(a), -1) or above(V(b)) or timer(2.0)",
+                vec!["@cross", "@above", "@timer"],
+            ),
+        ] {
+            let m = parse_src(&format!(
+                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+            ));
+            let body = analog_body(&m);
+            let Stmt::If { cond, then_, else_ } = &body[0] else {
+                panic!("expected a guarded if for `{trigger}`, got {:?}", body[0])
+            };
+            assert_eq!(or_chain(&m, *cond), expected, "{trigger}");
+            assert!(matches!(then_[0], Stmt::Assign { .. }));
+            assert!(else_.is_empty());
+        }
+    }
+
+    /// A list naming `absdelta`, or a step event with an analysis filter, is still refused: the
+    /// composition covers only the events this engine schedules, and nothing in such a list is
+    /// discarded silently.
+    #[test]
+    fn an_or_list_with_an_unscheduled_event_is_refused() {
+        for (trigger, named) in [
+            ("timer(1.0) or absdelta(V(a), 0.1)", "absdelta"),
+            ("cross(V(a)) or final_step(\"tran\")", "@("),
+        ] {
+            let err = parse_err(&format!(
+                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+            ));
+            assert_refusal(&err, named);
+        }
     }
 
     /// A bare `@(timer(...))` parses like `@(cross(...))` — the same guarded-body shape, with
@@ -3464,26 +3600,6 @@ mod tests {
             }
             other => panic!("expected the synthetic trigger call, got {other:?}"),
         }
-    }
-
-    /// A compound trigger containing `above` is still refused, like the other bare-only forms.
-    #[test]
-    fn a_compound_trigger_containing_above_is_still_refused() {
-        let err = parse_err(
-            "module t(a, b); electrical a, b; analog begin @(initial_step or above(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
-        );
-        assert_refusal(&err, "above");
-    }
-
-    /// A compound trigger containing `timer` is still refused, for the same reason the `cross`
-    /// one is: implementing the bare form must not open a fall-through to
-    /// discard-and-run-unconditionally.
-    #[test]
-    fn a_compound_trigger_containing_timer_is_still_refused() {
-        let err = parse_err(
-            "module t(a, b); electrical a, b; analog begin @(initial_step or timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
-        );
-        assert_refusal(&err, "timer");
     }
 
     /// `@(final_step)` desugars into a guarded `if`, exactly as `@(initial_step)` does — it is

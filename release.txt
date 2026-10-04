@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.0 - 2026-10-04
+-------------------
+**Event `or` lists** (LRM §5.10): `@(cross(...) or timer(...) or final_step)` and any mix of
+`cross`, `above`, `timer`, `initial_step` and `final_step` now composes into
+`if (e1 || e2 || ...)`, each scheduled event registering its own site. The body runs once at a
+point where any of them fires, and once when several fire together. Before, only
+`initial_step or final_step` composed; any list with a scheduled event was refused.
+
+  * Why now: the Gray-Scott example needs `@(initial_step or timer(T, T) or final_step)` to
+    write its grid at the start, periodically and at the end (a timer never fires on the run's
+    initial point, and `final_step` is what catches a run whose end is not a timer multiple).
+  * Still refused: a list naming `absdelta` (unimplemented) or a step event with an analysis
+    filter (`final_step("tran")`). Those are the cases where dropping a term would run the body at
+    the wrong points.
+  * Nothing that parsed before changes: bare events and step-event lists now take the same path
+    and build the same AST. `check --codegen` over models/, benchmark/models and external/ gives
+    the same verdict on all 313 module files as 2.15.0, apart from the new example itself.
+  * Tests: the three tests that pinned the old refusals now assert the composition
+    (`an_or_list_with_scheduled_events_composes`, `an_or_list_with_an_unscheduled_event_is_refused`).
+    `an_or_list_of_events_fires_on_either_and_once_on_both` (va-cli) runs a cross+timer list
+    (8 firings in 1 us) and a list of two identical timers (4, not 8).
+  * `Cargo.lock` now carries the version again: the 2.15.0 and 2.15.0+1 commits left it at
+    2.14.0+3, because `cargo metadata --no-deps` does not rewrite it.
+  * Measured at this version: `cargo test --workspace` 948 passed, 0 failed, 0 ignored (3 tests
+    removed, 3 added); `cargo xtask validate` 28/28.
+
 2.15.0+1 - 2026-10-04
 ---------------------
 **Multiphysics example 4: a Hodgkin-Huxley axon with electrodiffusion**

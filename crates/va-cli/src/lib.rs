@@ -6388,6 +6388,64 @@ X1 clk o counter
         );
     }
 
+    /// An `or` list of events fires its body when either event fires, and once when both fire
+    /// at the same point (LRM §5.10; 2.16.0). The clock falls at 249 ns into each 250 ns cycle
+    /// (4 falling edges in 1 us); the timer fires at 100, 350, 600, 850 ns. Summed: 8 by the end,
+    /// 2 by 0.3 us. The second counter is a list of two identical timers, which fire together
+    /// four times and must count four, not eight.
+    #[test]
+    fn an_or_list_of_events_fires_on_either_and_once_on_both() {
+        let design = va_frontend::compile(
+            "
+module counter(clk, o, d);
+  input clk; output o, d;
+  electrical clk, o, d;
+  integer n, m;
+  analog begin
+    @(cross(V(clk) - 1.65, -1) or timer(100n, 250n)) n = n + 1;
+    @(timer(100n, 250n) or timer(100n, 250n)) m = m + 1;
+    V(o) <+ n;
+    V(d) <+ m;
+  end
+endmodule
+",
+        )
+        .expect("compiles");
+        let net = va_netlist::parser::parse(
+            "Vclk clk gnd PULSE(0 3.3 125n 1n 1n 122n 250n)
+X1 clk o d counter
+.tran 5n 1u
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let col = |name: &str| net.node_order.iter().position(|n| n == name).unwrap();
+        let at = |t: f64, c: usize| {
+            let i = wf.t.iter().position(|&ti| ti >= t).unwrap();
+            wf.x[i][c]
+        };
+        let (o, d) = (col("o"), col("d"));
+        // Timer at 100 ns, falling edge at 249 ns: two by 0.3 us.
+        assert!(
+            (at(0.3e-6, o) - 2.0).abs() < 1e-9,
+            "n at 0.3 us reads {}",
+            at(0.3e-6, o)
+        );
+        let last = wf.x.last().unwrap();
+        assert!(
+            (last[o] - 8.0).abs() < 1e-9,
+            "4 edges + 4 timer ticks, n reads {}",
+            last[o]
+        );
+        assert!(
+            (last[d] - 4.0).abs() < 1e-9,
+            "coincident firings count once, m reads {}",
+            last[d]
+        );
+    }
+
     /// An `@(initial_step)` assignment survives past the first timepoint. The body runs once
     /// (the transient seed), so without persistence the variable is unbound from then on.
     #[test]
