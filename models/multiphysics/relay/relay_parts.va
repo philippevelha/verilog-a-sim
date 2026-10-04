@@ -1,0 +1,196 @@
+// Electromagnetic relay: coil, a Jiles-Atherton iron core with eddy currents, a variable air
+// gap, an armature on a preloaded spring with contact bounce, and coil heating.
+//
+// # Coil and magnetic circuit (`relay_coil`)
+//
+//   electrical   V(p, n) = R(T) i + N dΦ/dt,     R(T) = r20 (1 + 0.00393 (T − 293.15 K))
+//   Ampère       N i = H l_c + (Φ/μ0A) g(x) + l_c (σ d²/12) dB/dt          (core, gap, eddy)
+//   flux         Φ = A B,   B = μ0 (H + M)
+//   gap          g(x) = g0 − x, the armature's travel x closing it down to the residual gap
+//   force        F = Φ² / (2 μ0 A), pulling the armature closed
+//
+// # Jiles-Atherton hysteresis (Jiles & Atherton, J. Magn. Magn. Mater. 61, 48, 1986)
+//
+//   He = H + α M,   M_an = Ms (coth(He/a) − a/He)                 (anhysteretic, Langevin)
+//   dM/dH = 1/(1+c) · (M_an − M)/(δ k − α (M_an − M)) + c/(1+c) · dM_an/dH
+//   δ = sign(dH/dt); the irreversible term is dropped when δ (M_an − M) < 0 (the standard fix
+//   for the model's unphysical negative susceptibility on reversals). Both switches are smoothed
+//   (over `hs` in dH/dt and 1 % of k in δ(M_an − M)), so the right-hand side is continuous.
+//
+// dM/dt = dM/dH · dH/dt, with dH/dt's sign taken from a lagged copy of H rather than from a
+// differentiated one (see the comment at the M row).
+//
+// # Verilog-A shown here
+//
+// A potential contribution reading its own branch current (V = R i + N dΦ/dt); several state
+// nodes of a user discipline; an `analog function` for the Langevin function with its series
+// near zero; `analysis("static")` for the demagnetized initial state; a position-dependent
+// coupling between the magnetic and mechanical domains.
+//
+// # Limitations
+//
+// One lumped magnetic path (no leakage or fringing flux), a constant core cross-section, the
+// classical eddy-current term only (no excess loss), a scalar hysteresis model.
+`include "disciplines.vams"
+`include "relay_natures.vams"
+
+module relay_coil(p, n, x, th);
+    inout p, n, x, th;
+    electrical p, n;
+    mech x;
+    coil_heat th;
+
+    parameter real nturns = 2000    from (0:inf);
+    parameter real r20    = 200     from (0:inf);    // Ohm at 20 C
+    parameter real area   = 2e-5    from (0:inf);    // m^2, core and gap cross-section
+    parameter real lc     = 0.05    from (0:inf);    // m, core path length
+    parameter real g0     = 1e-3    from [0:inf);    // m, gap with the armature open
+    parameter real ms     = 1.6e6   from (0:inf);    // A/m, saturation magnetization
+    parameter real a      = 1000    from (0:inf);    // A/m, anhysteretic shape
+    parameter real kp     = 400     from (0:inf);    // A/m, pinning (sets the coercivity)
+    parameter real alpha  = 1e-3    from [0:inf);    // inter-domain coupling
+    parameter real c      = 0.1     from [0:inf);    // reversibility
+    parameter real ke     = 0.0     from [0:inf);    // A s/(m T): sigma d^2/12, eddy field per dB/dt
+    // A/(m s): dH/dt over which sign(dH/dt) is smoothed. Must sit far below any real dH/dt,
+    // or the smoothed δ is less than 1 and the loop becomes rate-dependent (at 1e3 the pickup
+    // current of a 1 s ramp moved by 0.9 % with the coil's resistance).
+    parameter real hs     = 10      from (0:inf);
+    parameter real tlag   = 1e-5    from (0:inf);    // s: the lag whose output gives dH/dt's sign
+
+    magfield h, mm, hl;     // core H, magnetization M, and H lagged by tlag
+
+    real t, r, he, xx, lan, dlan, man, dman, dlt, den, chi, dmdh, b, phi, g, i;
+    integer lifted;
+
+    // Langevin function L(x) = coth(x) - 1/x and its derivative, with their series near 0
+    // (where both terms diverge and cancel).
+    analog function real langevin;
+        input x; real x;
+        langevin = (abs(x) < 1e-3) ? x / 3.0 - x * x * x / 45.0 : 1.0 / tanh(x) - 1.0 / x;
+    endfunction
+    analog function real dlangevin;
+        input x; real x;
+        dlangevin = (abs(x) < 1e-3) ? 1.0 / 3.0 - x * x / 15.0
+                                     : 1.0 / (x * x) - 1.0 / (sinh(x) * sinh(x));
+    endfunction
+
+    analog begin
+        t = max(Temp(th), 200.0);
+        r = r20 * (1.0 + 0.00393 * (t - 293.15));
+        i = I(p, n);
+
+        he   = Hf(h) + alpha * Hf(mm);
+        xx   = he / a;
+        man  = ms * langevin(xx);
+        dman = ms / a * dlangevin(xx);
+        // δ = sign(dH/dt), smoothed over hs. With δ = ±1 the irreversible susceptibility
+        // (M_an − M)/(δk − α(M_an − M)) equals δ(M_an − M)/(k − αδ(M_an − M)); written that way,
+        // and with the "δ(M_an − M) > 0" switch smoothed too, it fades to zero continuously as
+        // dH/dt reverses. A hard sign there is a jump in dM/dt's slope at every peak of the
+        // drive, and the step controller shrank its step to nothing trying to resolve it.
+        // The denominator is held at >= 5 % of k: where α(M_an − M) reaches k the model's
+        // susceptibility is infinite (a guard, outside the parameters' range of validity).
+        dlt  = tanh((Hf(h) - Hf(hl)) / (tlag * hs));
+        den  = max(kp - alpha * dlt * (man - Hf(mm)), 0.05 * kp);
+        chi  = 0.5 * (1.0 + tanh(dlt * (man - Hf(mm)) / (0.01 * kp)))
+               * dlt * (man - Hf(mm)) / den;
+        dmdh = (chi + c * dman) / (1.0 + c);
+
+        b   = `RL_MU0 * (Hf(h) + Hf(mm));
+        phi = area * b;
+        g   = max(g0 - Pos(x), 0.0);
+
+        // The coil: resistance and induced voltage.
+        V(p, n) <+ r * i + nturns * area * `RL_MU0 * ddt(Hf(h) + Hf(mm));
+        // Ampère's law on the H node (amp-turns).
+        Hres(h) <+ Hf(h) * lc + (Hf(h) + Hf(mm)) * g
+                   + lc * ke * `RL_MU0 * ddt(Hf(h) + Hf(mm)) - nturns * i;
+        // The direction H is moving, from a first-order lag: H - H_lag ~ tlag dH/dt. Not a node
+        // holding ddt(H) itself: H is an algebraic unknown, and the trapezoidal rule's derivative
+        // of an algebraic quantity carries an error that alternates sign and does not decay; read
+        // as sign(dH/dt) it could switch the hysteresis branch from one step to the next.
+        Hres(hl) <+ tlag * ddt(Hf(hl)) - (Hf(h) - Hf(hl));
+        // Jiles-Atherton: dM/dt = dM/dH dH/dt. Demagnetized at the operating point.
+        if (analysis("static"))
+            Hres(mm) <+ Hf(mm);
+        else
+            Hres(mm) <+ ddt(Hf(mm)) - dmdh * ddt(Hf(h));
+
+        // The force on the armature, toward closing the gap.
+        Frc(x) <+ -phi * phi / (2.0 * `RL_MU0 * area);
+        // Joule heat into the coil.
+        Pwr(th) <+ -r * i * i;
+
+        // The armature leaving its backstop for the first time (its position through 0, upward):
+        // the force has just matched the spring's preload, so B is sqrt(2 mu0 fpre / A) whatever
+        // the core does. Latched: the bounces of a release cross 0 too.
+        @(cross(Pos(x), +1)) if (!lifted) begin
+            lifted = 1;
+            $strobe("%m: armature lifts at t=%.5f s: B=%.5f T, i=%.5f A, coil %.4f V, R %.3f Ohm",
+                    $abstime, b, i, V(p, n), r);
+        end
+
+    end
+endmodule
+
+// The armature: mass, damping, a preloaded return spring, a backstop at x = 0 and the pole face
+// at x = xmax, both Hertzian contacts with a little damping. Reports each closing and opening
+// with the coil voltage `vsense` at the time, and counts the bounces of each closing.
+module armature(x, vsense);
+    inout x, vsense;
+    mech x;
+    electrical vsense;
+    parameter real m      = 2e-3    from (0:inf);    // kg
+    parameter real b      = 0.2     from [0:inf);    // N s/m (air and pivot; zeta ~0.16)
+    parameter real k      = 200     from [0:inf);    // N/m
+    parameter real fpre   = 0.2     from [0:inf);    // N, spring preload at x = 0
+    parameter real xmax   = 0.95e-3 from (0:inf);    // m, travel to the pole face
+    parameter real kc     = 1e8     from (0:inf);    // N/m^1.5
+    parameter real bc     = 15.0    from [0:inf);    // N s/m, contact damping (restitution < 1)
+    parameter real tbounce = 2e-4   from (0:inf);    // s: a re-closing within this is a bounce
+
+    mech_v v;
+    integer closed, bounces;
+    real d0, d1, fc, t_last;
+
+    analog begin
+        Frc(v) <+ Vel(v) - ddt(Pos(x));
+        // Backstop below 0, pole face above xmax: Hertz plus damping, explicit branches (no
+        // pow of a max, whose derivative at contact is 0 * inf).
+        d0 = -Pos(x);
+        d1 = Pos(x) - xmax;
+        fc = 0.0;
+        // Each contact pushes the armature out of itself, and its damping opposes the velocity
+        // on either face: + bc v in this flow convention, as b v is.
+        if (d0 > 0.0)
+            fc = fc - kc * d0 * sqrt(d0) + bc * Vel(v);
+        if (d1 > 0.0)
+            fc = fc + kc * d1 * sqrt(d1) + bc * Vel(v);
+        Frc(x) <+ m * ddt(Vel(v)) + b * Vel(v) + k * Pos(x) + fpre + fc;
+
+        @(cross(Pos(x) - xmax, +1)) begin
+            if (closed == 0 && $abstime - t_last > tbounce) begin
+                closed = 1;
+                bounces = 0;
+                $strobe("%m: closed at t=%.5f s, coil %.3f V", $abstime, V(vsense));
+            end else
+                bounces = bounces + 1;
+            t_last = $abstime;
+        end
+        @(cross(Pos(x) - 0.5 * xmax, -1)) if (closed == 1) begin
+            closed = 0;
+            $strobe("%m: opened at t=%.5f s, coil %.3f V (the closing bounced %0d times)",
+                    $abstime, V(vsense), bounces);
+        end
+    end
+endmodule
+
+// The coil's heat capacity and its thermal resistance to an ambient (volts of `amb` = kelvin).
+module coil_thermal(th, amb);
+    inout th, amb;
+    coil_heat th;
+    electrical amb;
+    parameter real cth = 5.0   from (0:inf);    // J/K
+    parameter real rth = 40.0  from (0:inf);    // K/W
+    analog Pwr(th) <+ cth * ddt(Temp(th)) + (Temp(th) - V(amb)) / rth;
+endmodule

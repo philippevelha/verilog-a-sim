@@ -1,0 +1,76 @@
+// Natures for the relay example. Include-guarded.
+//
+//   magfield   a core's magnetic field strength H (A/m) and magnetization M (A/m) as the
+//              potentials of state nodes; the flow names the row's residual.
+//   mech       the armature's position (m) as potential, force (N) as flow, so that Kirchhoff's
+//              law at the node is Newton's (as in the MEMS example).
+//   mech_v     its velocity (m/s), an internal state.
+//   coil_heat  the coil's temperature (K) and heat flow (W).
+`ifndef RELAY_NATURES_VAMS
+`define RELAY_NATURES_VAMS
+
+`define RL_MU0 1.25663706212e-6
+
+nature Mag_field
+    units  = "A/m";
+    access = Hf;
+    abstol = 1e-6;
+endnature
+
+nature Mag_residual
+    units  = "A/m";
+    access = Hres;
+    abstol = 1e-6;
+endnature
+
+nature Arm_position
+    units  = "m";
+    access = Pos;
+    abstol = 1e-12;
+endnature
+
+nature Arm_force
+    units  = "N";
+    access = Frc;
+    abstol = 1e-9;
+endnature
+
+nature Arm_velocity
+    units  = "m/s";
+    access = Vel;
+    abstol = 1e-9;
+endnature
+
+nature Coil_temperature
+    units  = "K";
+    access = Temp;
+    abstol = 1e-6;
+endnature
+
+nature Coil_heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-9;
+endnature
+
+discipline magfield
+    potential Mag_field;
+    flow      Mag_residual;
+enddiscipline
+
+discipline mech
+    potential Arm_position;
+    flow      Arm_force;
+enddiscipline
+
+discipline mech_v
+    potential Arm_velocity;
+    flow      Arm_force;
+enddiscipline
+
+discipline coil_heat
+    potential Coil_temperature;
+    flow      Coil_heat_flow;
+enddiscipline
+
+`endif

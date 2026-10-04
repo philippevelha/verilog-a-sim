@@ -1,0 +1,37 @@
+* Relay switching: pickup, bounce, hot pickup, release, and an armature held by remanence.
+*
+* Three relays of models/multiphysics/relay/relay_parts.va (200 Ohm, 2000-turn coil, a
+* Jiles-Atherton core, a 1 mm air gap closed by a 2 g armature on a 200 N/m spring preloaded
+* to 0.2 N), all driven by one coil voltage: 0 -> 30 V over 1 s, held 0.5 s, back to 0 over 1 s.
+*   X1  coil at 20 C, armature travel 0.8 mm (a 0.2 mm residual gap when closed);
+*   X2  the same at 85 C (coil resistance +25.5 %);
+*   X3  coil at 20 C, travel 0.98 mm (a 20 um residual gap).
+*
+* Closed form, pickup: the armature leaves its backstop when the gap force Phi^2/(2 mu0 A)
+* reaches the 0.2 N preload, at B = sqrt(2 mu0 F / A) = 0.15853 T, whatever the core; the
+* current that takes depends on the core but not on the coil's temperature, so the hot coil
+* needs R(85 C)/R(20 C) = 1.2555 times the voltage.
+* What to look for (measured at 2.16.1+1; each coil reports lift-off, each armature its
+* closing and opening):
+*   lift-off at B = 0.15882 T (all three), i = 73.20 mA cold and 73.18 mA hot, at 14.657 V and
+*     18.389 V: a ratio of 1.2547 (the 1.2555 of the resistances, less the coil's L di/dt).
+*   the armature closes ~16 ms later and bounces once on the pole face.
+*   release: X1 at 1.884 V, X2 at 2.455 V. X3 never releases: with only 20 um of air in the
+*     closed circuit the core's remanence holds the armature shut at zero current -- why real
+*     relays have a non-magnetic shim (the residual gap) on the pole face.
+* Plot: python docs/examples/multiphysics/relay_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/relay_switch.net --model models/multiphysics/relay --tran --report x1,x2,x3,c
+VA20 a20 gnd DC 293.15
+VA85 a85 gnd DC 358.15
+VC c gnd PWL(0 0 1 30 1.5 30 2.5 0 3 0)
+X1 c gnd x1 th1 relay_coil
+XA1 x1 c armature xmax=0.8e-3
+XT1 th1 a20 coil_thermal
+X2 c gnd x2 th2 relay_coil
+XA2 x2 c armature xmax=0.8e-3
+XT2 th2 a85 coil_thermal
+X3 c gnd x3 th3 relay_coil
+XA3 x3 c armature xmax=0.98e-3
+XT3 th3 a20 coil_thermal
+.tran 100u 3
+.end

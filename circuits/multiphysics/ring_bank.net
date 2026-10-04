@@ -1,0 +1,66 @@
+* Thermo-optic ring bank: four WDM rings locked to their channels against thermal crosstalk
+* and self-heating.
+*
+* Four rings of models/multiphysics/ringbank/ring_parts.va on a 0.8 nm channel grid (lasers at
+* 1550.0, 1550.8, 1551.6, 1552.4 nm, 1 mW each), each fabricated 0.25-0.30 nm blue of its
+* channel. Each sits on a 4000 K/W, 1 ms thermal node, neighbours coupled through 16000 K/W
+* (a quarter of a ring's own conductance: the thermal crosstalk). A heater under each ring is
+* driven by a PI lock holding that ring's drop power at 40 % of its input (`lock frac=0.4`), on
+* the blue side of the resonance, the side a heater reaches from cold. The loops close at 1 ms.
+*
+* Two disturbances:
+*   30 ms  channel 1's laser hops +0.2 nm. Ring 1 must warm by ~2.914 K to follow, its heater
+*          rises, and the heat leaking to ring 2 is cancelled by ring 2's heater backing off.
+*   60 ms  channel 3's laser steps from 1 to 4 mW. The lock holds the drop at 40 % of the new
+*          input; at the same detuning the ring absorbs 3 x 0.044 mW more, which its heater
+*          gives back.
+* Closed form: with every ring held at its lock temperature, the thermal network is linear and
+* the heater powers follow from it (docs/examples/multiphysics/ring_plots.py computes them):
+*   at 30 ms  heater 1 +0.9105 mW = (1/4000 + 1/16000) W/K x 2.914 K; heater 2 -0.1821 mW
+*             = -2.914 K / 16000 K/W; heaters 3 and 4 unchanged (ring 2's lock stops the heat).
+*   at 60 ms  heater 3 -0.1320 mW = -eta (Q_e/Q_i) 0.4 x 3 mW; nothing else moves.
+* Measured at 2.16.1+1: all four lock (rings 1/4 at 4.92 ms, 2/3 at 6.37 ms); after the hop
+* heater 1 +0.9106 mW, heater 2 -0.1821 mW; after the power step heater 3 -0.1320 mW; every drop
+* back at 40 % of its input.
+* This deck is what found 2.16.1's fix: the dense solver called this well-posed 72-unknown system
+* singular at the 30 ms hop, because its residual test did not allow for rows written in 1/s
+* (~1e11) beside rows in W/K (~1e-4).
+* Plot: python docs/examples/multiphysics/ring_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/ring_bank.net --model models/multiphysics/ringbank --tran --report in1,in2,in3,in4,dr1,dr2,dr3,dr4,u1,u2,u3,u4
+VW1 w1 gnd PWL(0 1550.0 30m 1550.0 30.01m 1550.2)
+VW2 w2 gnd DC 1550.8
+VW3 w3 gnd DC 1551.6
+VW4 w4 gnd DC 1552.4
+VP1 p1 gnd DC 1
+VP2 p2 gnd DC 1
+VP3 p3 gnd PWL(0 1 60m 1 60.01m 4)
+VP4 p4 gnd DC 1
+XL1 p1 w1 in1 wl1 laser
+XL2 p2 w2 in2 wl2 laser
+XL3 p3 w3 in3 wl3 laser
+XL4 p4 w4 in4 wl4 laser
+XR1 in1 wl1 th1 dr1 t1 ring lambda0=1549.75
+XR2 in2 wl2 th2 dr2 t2 ring lambda0=1550.50
+XR3 in3 wl3 th3 dr3 t3 ring lambda0=1551.30
+XR4 in4 wl4 th4 dr4 t4 ring lambda0=1552.15
+XC1 t1 thermal_cap
+XC2 t2 thermal_cap
+XC3 t3 thermal_cap
+XC4 t4 thermal_cap
+XG1 t1 gnd thermal_res
+XG2 t2 gnd thermal_res
+XG3 t3 gnd thermal_res
+XG4 t4 gnd thermal_res
+XX12 t1 t2 thermal_res r=16000
+XX23 t2 t3 thermal_res r=16000
+XX34 t3 t4 thermal_res r=16000
+XH1 u1 t1 heater
+XH2 u2 t2 heater
+XH3 u3 t3 heater
+XH4 u4 t4 heater
+XK1 in1 dr1 u1 lock kp=5 ki=3e3
+XK2 in2 dr2 u2 lock kp=5 ki=3e3
+XK3 in3 dr3 u3 lock kp=5 ki=3e3
+XK4 in4 dr4 u4 lock kp=5 ki=3e3
+.tran 50u 100m
+.end

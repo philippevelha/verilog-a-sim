@@ -1,0 +1,30 @@
+* Relay core: the Jiles-Atherton B-H loop, major and minor, and the energy it dissipates.
+*
+* Two closed cores (no air gap, `g0=0`; the armature node grounded) of
+* models/multiphysics/relay/relay_parts.va, 2000 turns on a 5 cm path of 20 mm^2, each driven by
+* a 50 Hz sinusoidal current through a VCCS: 0.3 A peak (H to 12 kA/m: into saturation, the
+* major loop) and 0.02 A peak (H to 800 A/m: a minor loop). Jiles-Atherton soft-steel parameters:
+* Ms 1.6 MA/m, a 1000 A/m, k 400 A/m, alpha 1e-3, c 0.1.
+*
+* What to look for (measured at 2.16.1+1, second period; docs/examples/multiphysics/relay_plots.py):
+*   major loop: B 1.8718 T at 12 kA/m (the anhysteretic value there is 1.8765 T: M lags it at
+*     the tip), remanence 0.57 T, coercivity +-383 A/m (for small alpha the model's coercivity
+*     is close to k = 400 A/m);
+*   minor loop: B 0.5004 T at 800 A/m, remanence 0.36 T, coercivity +-375 A/m.
+*   Energy: the loop's area times the core volume is what the coil takes in and does not
+*   dissipate in its own resistance, per cycle:
+*     major  3.0219 mJ (loop) vs 3.0218 mJ (integral of (V - R I) I over the period);
+*     minor  0.67668 mJ vs 0.67669 mJ.
+* Plot: python docs/examples/multiphysics/relay_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/relay_bh.net --model models/multiphysics/relay --tran --report X1.h,X1.mm,X2.h,X2.mm
+VA amb gnd DC 293.15
+VC1 c1 gnd SIN(0 0.3 50)
+G1 gnd p1 c1 gnd 1
+X1 p1 gnd gnd th1 relay_coil g0=0
+XT1 th1 amb coil_thermal
+VC2 c2 gnd SIN(0 0.02 50)
+G2 gnd p2 c2 gnd 1
+X2 p2 gnd gnd th2 relay_coil g0=0
+XT2 th2 amb coil_thermal
+.tran 20u 60m
+.end

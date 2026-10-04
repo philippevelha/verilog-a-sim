@@ -1,0 +1,114 @@
+// Power-grid swing dynamics: synchronous machines, lossless transmission lines with protection,
+// and an infinite bus, on a network whose node potentials are bus voltage phase angles.
+//
+// # The model (classical, per unit)
+//
+//   machine   dδ/dt = ω,   M dω/dt = Pm − Pe − D ω,   M = 2H / ω_s
+//   line      P_ab = B sin(δ_a − δ_b)         (lossless, flat voltage magnitudes)
+//   bus       Σ P_lines = Pe                   (KCL: power balance at every bus)
+//
+// A generator has Pm > 0, a consumer Pm < 0 (a motor load with its own inertia, the convention of
+// second-order Kuramoto models of grids: Filatrella et al., Eur. Phys. J. B 61, 2008; Rohden et
+// al., PRL 109, 2012). D lumps mechanical damping and the frequency sensitivity of load. There are
+// no governors: a machine that loses its load speeds up until damping absorbs the surplus.
+//
+// The DC operating point is therefore the full nonlinear (lossless) load flow, ω = 0 everywhere,
+// and the transient is the swing.
+//
+// # Verilog-A shown here
+//
+// User natures and two disciplines (angle/power, speed); an internal state node; a sinusoidal
+// nonlinear "conductance" between nodes; protection as events — `@(timer)` for scheduled
+// switching, `@(cross(abs(P) − Pmax, +1))` for an overload trip, an `integer` state that persists
+// between events, `transition` to make the opening smooth — and `$strobe` reporting each trip
+// and each pole slip (`@(cross)` of the angle across a line through ±180°).
+//
+// # Limitations
+//
+// Classical model: constant voltage magnitudes behind transient reactance, no exciters, no
+// governors, lossless lines, instantaneous relays (no time-overcurrent curve). Angles are
+// measured against the network's own reference, which is the infinite bus when there is one and
+// otherwise a vanishing leak `eps` on every machine (see `machine`).
+`include "disciplines.vams"
+`include "grid_natures.vams"
+
+`define GRID_PI 3.14159265358979323846
+
+// A synchronous machine on bus `bus`: rotor angle = the bus angle (its transient reactance is
+// folded into the lines), speed deviation on the internal node `w`.
+module machine(bus);
+    inout bus;
+    grid bus;
+    grid_speed w;
+
+    parameter real pm  = 0.0;                    // mechanical power, pu (< 0: a consumer)
+    parameter real h   = 5.0   from (0:inf);     // inertia constant, s
+    parameter real f0  = 50.0  from (0:inf);     // synchronous frequency, Hz
+    parameter real d   = 0.0   from [0:inf);     // damping, pu per rad/s
+    // A leak to the angle reference, pu/rad. A grid with no infinite bus has no reference for
+    // its angles (only differences matter), which makes its DC operating point singular; a leak
+    // this small fixes the reference and moves no flow measurably.
+    parameter real eps = 0.0   from [0:inf);
+
+    real m;
+
+    analog begin
+        m = 2.0 * h / (2.0 * `GRID_PI * f0);
+        Pw(w)   <+ Om(w) - ddt(Ang(bus));
+        Pw(bus) <+ m * ddt(Om(w)) + d * Om(w) - pm + eps * Ang(bus);
+    end
+endmodule
+
+// A lossless line from a to b carrying B sin(δa − δb), with protection.
+//   - opens at `t_open` and recloses at `t_close` if those are >= 0 (a scheduled fault/clearing);
+//   - trips, and stays open, the first time |P| rises through `pmax` (an overload relay);
+//   - reports a pole slip each time the angle across it passes ±180°.
+module line(a, b);
+    inout a, b;
+    grid a, b;
+
+    parameter real bmax    = 1.0   from (0:inf);   // pu: the most power the line can carry
+    parameter real pmax    = 1e30  from (0:inf);   // pu: relay setting (default: no relay)
+    parameter real t_open  = -1.0;                 // s; < 0: never
+    parameter real t_close = -1.0;                 // s; < 0: never
+    parameter real tsw     = 1e-3  from (0:inf);   // s: breaker opening/closing time
+
+    integer open;
+    real p, g;
+
+    analog begin
+        // The scheduled switching. A timer that must never fire is pushed past any run.
+        @(timer((t_open < 0.0) ? 1e30 : t_open)) begin
+            open = 1;
+            $strobe("%m: opened at t=%.4f s (scheduled)", $abstime);
+        end
+        @(timer((t_close < 0.0) ? 1e30 : t_close)) begin
+            open = 0;
+            $strobe("%m: reclosed at t=%.4f s (scheduled)", $abstime);
+        end
+
+        g = 1.0 - transition(open, 0.0, tsw);
+        p = g * bmax * sin(Ang(a, b));
+        Pw(a, b) <+ p;
+
+        @(cross(abs(p) - pmax, +1)) begin
+            open = 1;
+            $strobe("%m: TRIPPED at t=%.4f s, |P| = %.3f pu > %.3f pu", $abstime, abs(p), pmax);
+        end
+        // The angle across the line passing ±180° (mod 360°): sin crosses zero where cos < 0.
+        // Every slip is reported, the second and later ones too, which a crossing of the bare
+        // angle through π would miss.
+        @(cross(sin(Ang(a, b)), 0))
+            if (cos(Ang(a, b)) < 0.0)
+                $strobe("%m: angle across the line passed 180 degrees at t=%.4f s (pole slip)",
+                        $abstime);
+    end
+endmodule
+
+// An infinite bus: an angle reference that can absorb or supply any power.
+module slack(bus);
+    inout bus;
+    grid bus;
+    parameter real angle = 0.0;
+    analog Ang(bus) <+ angle;
+endmodule

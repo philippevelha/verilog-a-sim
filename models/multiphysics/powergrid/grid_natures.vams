@@ -1,0 +1,37 @@
+// Natures for the power-grid swing example: a bus's voltage phase angle (rad) as the potential
+// of a node, active power (per unit) as the flow into it; and a rotor's speed deviation (rad/s)
+// for a machine's internal state node. Include-guarded.
+`ifndef GRID_NATURES_VAMS
+`define GRID_NATURES_VAMS
+
+nature Grid_angle
+    units  = "rad";
+    access = Ang;
+    abstol = 1e-9;
+endnature
+
+nature Grid_power
+    units  = "pu";
+    access = Pw;
+    abstol = 1e-9;
+endnature
+
+nature Grid_speed
+    units  = "rad/s";
+    access = Om;
+    abstol = 1e-9;
+endnature
+
+discipline grid
+    potential Grid_angle;
+    flow      Grid_power;
+enddiscipline
+
+// A machine's rotor speed deviation from synchronous speed, as the potential of an internal
+// state node. Its flow nature is only there to name the row's residual.
+discipline grid_speed
+    potential Grid_speed;
+    flow      Grid_power;
+enddiscipline
+
+`endif

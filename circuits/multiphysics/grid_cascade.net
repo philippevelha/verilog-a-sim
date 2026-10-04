@@ -1,0 +1,48 @@
+* Power-grid swing: a cascading failure. One tie line lost, the others overload and trip, the
+* grid splits into two islands, and their frequencies drift apart.
+*
+* Two areas of four buses each, rings of strong lines (B = 10 pu) inside each area. Area A holds
+* the generation (four machines at +0.9 pu), area B the consumption (four at -0.9 pu); every
+* machine has H = 5 s and damping D = 0.1 pu per rad/s, and no governor. Three tie lines carry
+* the 3.6 pu from A to B: ties of 2.5, 2.0 and 1.5 pu capacity (bmax), each behind an overload
+* relay set at 1.6 pu. The weakest tie (A3-B3) is opened by a fault at t = 1 s and stays open.
+*
+* What to look for (models/multiphysics/powergrid/grid_parts.va; figures measured at 2.16.1+1):
+*   1. The load flow (DC operating point) shares the 3.6 pu by tie strength, all within 1.6 pu:
+*      1.475 / 1.178 / 0.948 pu on T1 / T2 / T3.
+*   2. With A3-B3 gone, the two remaining ties must carry 3.6 pu between them, which their
+*      relays do not allow; the relays trip them one after another: T1 at t = 1.149 s, T2 at
+*      1.237 s (two `TRIPPED` lines, and no more).
+*   3. Once the last tie is open the areas are islands: A has 3.6 pu of surplus, B 3.6 pu of
+*      deficit, and with no governor each settles where damping absorbs the imbalance,
+*      w = P / sum(D) = 3.6 / 0.4 = 9 rad/s, i.e. +1.4324 Hz in A and -1.4324 Hz in B
+*      (measured at t = 10 s: +-1.4323 Hz).
+*   4. The open ties report the angle across them passing 180 degrees, over and over: the two
+*      islands are no longer synchronous.
+* Plot: python docs/examples/multiphysics/grid_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/grid_cascade.net --model models/multiphysics/powergrid --tran --report XA1.w,XB1.w
+*
+* Area A: generators and their ring
+XA1 a1 machine pm=0.9 h=5 d=0.1 eps=1e-6
+XA2 a2 machine pm=0.9 h=5 d=0.1 eps=1e-6
+XA3 a3 machine pm=0.9 h=5 d=0.1 eps=1e-6
+XA4 a4 machine pm=0.9 h=5 d=0.1 eps=1e-6
+XLA12 a1 a2 line bmax=10
+XLA23 a2 a3 line bmax=10
+XLA34 a3 a4 line bmax=10
+XLA41 a4 a1 line bmax=10
+* Area B: consumers and their ring
+XB1 b1 machine pm=-0.9 h=5 d=0.1 eps=1e-6
+XB2 b2 machine pm=-0.9 h=5 d=0.1 eps=1e-6
+XB3 b3 machine pm=-0.9 h=5 d=0.1 eps=1e-6
+XB4 b4 machine pm=-0.9 h=5 d=0.1 eps=1e-6
+XLB12 b1 b2 line bmax=10
+XLB23 b2 b3 line bmax=10
+XLB34 b3 b4 line bmax=10
+XLB41 b4 b1 line bmax=10
+* The ties, behind 1.6 pu overload relays
+XT1 a1 b1 line bmax=2.5 pmax=1.6
+XT2 a2 b2 line bmax=2.0 pmax=1.6
+XT3 a3 b3 line bmax=1.5 pmax=1.6 t_open=1.0
+.tran 1m 10
+.end

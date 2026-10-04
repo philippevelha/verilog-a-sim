@@ -1,0 +1,35 @@
+* Li-ion calendar aging: two years on the shelf, fully charged, at 25, 45 and 60 C.
+*
+* Three cells of models/multiphysics/liion/li_parts.va at open circuit, each with an SEI film on
+* its graphite (`sei=1`) that grows by a side reaction limited by solvent diffusion through the
+* film itself: d(delta)/dt = k(T)/delta, k = 6e-5 nm^2/s at 25 C with a 50 kJ/mol activation
+* energy. Every nanometre of film takes lithium out of the graphite for good.
+*
+* Closed form: delta(t) = sqrt(delta0^2 + 2 k(T) t), delta0 = 5 nm, t = 2 years (6.3072e7 s):
+*   25 C: 87.1415 nm;   45 C: 164.0743 nm;   60 C: 251.0315 nm,
+* and the lithium the film consumed, beta S (delta - delta0) with beta = 2.09e4 mol/m^3 and
+* S = 4.575 m^2 of graphite surface:
+*   25 C: 0.2105 Ah (10.5 % of 2 Ah);   45 C: 0.4077 Ah (20.4 %);   60 C: 0.6305 Ah (31.5 %).
+* Measured at 2.16.1+1: 87.1424 / 164.0769 / 251.0363 nm (the integration error is 2e-5 of the
+* growth, at steps of up to 1e5 s); the lithium lost, read off the graphite's stoichiometry
+* (docs/examples/multiphysics/li_plots.py), matches the closed form; the open-circuit voltage
+* falls from 4.1514 V to 4.1386 / 4.1281 / 4.1180 V as the graphite empties.
+* Plot: python docs/examples/multiphysics/li_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/li_calendar.net --model models/multiphysics/liion --tran --report p1,p2,p3,XN1.dfilm,XN2.dfilm,XN3.dfilm
+V25 a25 gnd DC 298.15
+V45 a45 gnd DC 318.15
+V60 a60 gnd DC 333.15
+XN1 gnd en1 th1 electrode kind=0 theta0=0.8 sei=1
+XE1 en1 ep1 th1 electrolyte
+XP1 p1 ep1 th1 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT1 th1 a25 cell_thermal
+XN2 gnd en2 th2 electrode kind=0 theta0=0.8 sei=1
+XE2 en2 ep2 th2 electrolyte
+XP2 p2 ep2 th2 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT2 th2 a45 cell_thermal
+XN3 gnd en3 th3 electrode kind=0 theta0=0.8 sei=1
+XE3 en3 ep3 th3 electrolyte
+XP3 p3 ep3 th3 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT3 th3 a60 cell_thermal
+.tran 1e5 6.3072e7
+.end

@@ -1,0 +1,30 @@
+* Power-grid swing: the equal-area criterion. One fault, cleared just before and just after
+* the critical clearing time.
+*
+* Two identical generators (H = 5 s, 50 Hz, Pm = 0.8 pu, no damping), each on its own line
+* (Pmax = 1.6 pu) to an infinite bus, from models/multiphysics/powergrid/grid_parts.va. At t = 1 s
+* each line opens -- a fault that leaves the machine with no electrical load -- and recloses
+* after a clearing time: 0.255 s for G1, 0.270 s for G2.
+*
+* Closed form (classical single machine against an infinite bus, M = 2H/w_s = 0.031831 s^2):
+*   operating point   d0 = asin(Pm/Pmax) = 30.00 deg (0.5236 rad), both machines;
+*   small-signal swing f = sqrt(Pmax cos d0 / M) / 2pi = 1.050 Hz;
+*   equal areas       cos d_cr = (pi - 2 d0) sin d0 - cos d0  ->  d_cr = 79.56 deg;
+*   during the fault  d(t) = d0 + Pm t^2 / (2M)  ->  t_cr = sqrt(2M (d_cr - d0)/Pm) = 0.2624 s.
+* So G1 (cleared 2.8 % before t_cr) must swing back, peaking short of 180 - 30 = 150 deg, and G2
+* (2.9 % after) must not: it passes 150 deg with speed to spare, its angle runs away, and its line
+* reports a pole slip. The 1 ms breaker transition (`tsw`) is the only departure from the
+* textbook case, and is symmetric about the switching instants.
+* Measured at 2.16.1+1: G1 peaks at 130.39 deg (closed form from the equal areas: 130.40) and
+* swings back; G2 reports its first pole slip at t = 1.763 s and slips again every ~0.2-0.4 s.
+* Bisecting the clearing time with this deck's G1 puts the simulator's own t_cr in
+* [0.262427, 0.262430] s, against the closed form's 0.262366 s (+0.02 %).
+* Plot: python docs/examples/multiphysics/grid_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/grid_equal_area.net --model models/multiphysics/powergrid --tran --report g1,g2
+XINF inf slack
+XG1 g1 machine pm=0.8 h=5
+XL1 g1 inf line bmax=1.6 t_open=1.0 t_close=1.255
+XG2 g2 machine pm=0.8 h=5
+XL2 g2 inf line bmax=1.6 t_open=1.0 t_close=1.270
+.tran 1m 3
+.end

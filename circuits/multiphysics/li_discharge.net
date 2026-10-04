@@ -1,0 +1,37 @@
+* Li-ion discharge at three rates, against the open-circuit capacity.
+*
+* Three identical 2 Ah cells of models/multiphysics/liion/li_parts.va (single-particle model:
+* graphite and LiCoO2 electrodes, ten diffusion shells each, Butler-Volmer interfaces, an
+* Arrhenius electrolyte resistance, and heat into a 40 J/K cell cooled at 0.03 W/K to 25 C),
+* each discharged from full (graphite at stoichiometry 0.8, LiCoO2 at 0.5) by a constant-current
+* load (`cc_load`) to 3.0 V: C/20 (0.1 A), 1C (2 A) and 2C (4 A).
+*
+* Closed form: discharging infinitely slowly, the voltage is the open-circuit difference
+* U_LCO(0.5 + q/Q_p) - U_graphite(0.8 - q/Q_n), with Q_n = 2.498 Ah and Q_p = 4.090 Ah of
+* lithium sites; it reaches 3.0 V at q = 1.9609 Ah, where the graphite is nearly empty
+* (stoichiometry 0.015).
+* Measured (2.16.1+1; each load reports its cutoff):
+*   C/20: 1.9604 Ah (-0.03 % of the open-circuit capacity);
+*   1C:   1.9558 Ah;   2C: 1.9493 Ah. The cells warm by 3.9 K (1C) and 10.8 K (2C) on the way.
+* The cutoff is reported at the first accepted point below 3.0 V, which at 1C and 2C, where the
+* voltage is falling steeply, is up to 65 mV below it.
+* Plot: python docs/examples/multiphysics/li_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/li_discharge.net --model models/multiphysics/liion --tran --report p1,p2,p3,th2,th3
+VA amb gnd DC 298.15
+XN1 gnd en1 th1 electrode kind=0 theta0=0.8
+XE1 en1 ep1 th1 electrolyte
+XP1 p1 ep1 th1 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT1 th1 amb cell_thermal
+XL1 p1 gnd cc_load iset=0.1
+XN2 gnd en2 th2 electrode kind=0 theta0=0.8
+XE2 en2 ep2 th2 electrolyte
+XP2 p2 ep2 th2 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT2 th2 amb cell_thermal
+XL2 p2 gnd cc_load iset=2
+XN3 gnd en3 th3 electrode kind=0 theta0=0.8
+XE3 en3 ep3 th3 electrolyte
+XP3 p3 ep3 th3 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT3 th3 amb cell_thermal
+XL3 p3 gnd cc_load iset=4
+.tran 10 75000
+.end

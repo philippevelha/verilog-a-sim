@@ -1,0 +1,77 @@
+// Natures for the thermo-optic ring-bank example. Include-guarded.
+//
+//   optical_power  a guided wave's power (mW) as the potential of a node: a signal that flows
+//                  one way, written by its source and read by whatever sits downstream;
+//   wavelength     a laser's wavelength (nm), carried alongside its power;
+//   cmt_field      one quadrature of a ring's intracavity field in coupled-mode theory, in
+//                  sqrt(fJ), so that |a|^2 is the stored energy in femtojoules;
+//   ring_heat      a ring's temperature rise above the substrate (K) and heat flow (W).
+//                  Declared here rather than taken from the standard `thermal`, whose natures
+//                  come from a `disciplines.vams` on disk: without one, a `thermal` node has no
+//                  access name (it prints as `V(...)`) and no tolerance of its own.
+`ifndef RING_NATURES_VAMS
+`define RING_NATURES_VAMS
+
+nature Optical_power
+    units  = "mW";
+    access = Popt;
+    abstol = 1e-9;
+endnature
+
+nature Optical_power_flow
+    units  = "mW";
+    access = Popt_flow;
+    abstol = 1e-9;
+endnature
+
+nature Wavelength_nm
+    units  = "nm";
+    access = Wl;
+    abstol = 1e-9;
+endnature
+
+nature Cmt_amplitude
+    units  = "sqrt(fJ)";
+    access = Fld;
+    abstol = 1e-6;
+endnature
+
+nature Cmt_rate
+    units  = "sqrt(fJ)/s";
+    access = Fld_rate;
+    abstol = 1e-3;
+endnature
+
+nature Ring_temperature_rise
+    units  = "K";
+    access = Temp;
+    abstol = 1e-6;
+endnature
+
+nature Ring_heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-12;
+endnature
+
+discipline ring_heat
+    potential Ring_temperature_rise;
+    flow      Ring_heat_flow;
+enddiscipline
+
+discipline optical_power
+    potential Optical_power;
+    flow      Optical_power_flow;
+enddiscipline
+
+discipline wavelength
+    potential Wavelength_nm;
+    flow      Optical_power_flow;
+enddiscipline
+
+discipline cmt_field
+    potential Cmt_amplitude;
+    flow      Cmt_rate;
+enddiscipline
+
+`endif

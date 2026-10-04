@@ -1,0 +1,183 @@
+// Thermo-optic microring bank: coupled-mode optics, self-heating, thermal crosstalk, and a
+// heater lock per ring.
+//
+// # The ring (add-drop, coupled-mode theory)
+//
+// In a frame rotating at the laser's frequency, the intracavity field a (|a|^2 = stored energy)
+// obeys
+//
+//   da/dt = (i·δ − 1/τ) a + κ s,     δ = ω_laser − ω_res(T),   κ = sqrt(2/τ_e)
+//   1/τ = 1/τ_i + 2/τ_e              (intrinsic loss, and two identical bus couplings)
+//
+// with s the input wave (|s|^2 = power). The ports follow:
+//   drop      P_drop = (2/τ_e) |a|^2
+//   through   P_thru = |s − κ a|^2
+//   heat      P_abs  = η (2/τ_i) |a|^2       (the absorbed part of the intrinsic loss)
+// and the resonance moves with the ring's temperature rise T:
+//   λ_res = λ0 + (dλ/dT) T,   dλ/dT = λ0 · (dn/dT) / n_g
+//
+// τ is picoseconds; the ring's thermal time constant is a millisecond. The field is solved,
+// not eliminated: a and T are both state nodes of one system, eight orders of magnitude apart in
+// time scale, which is what makes this circuit stiff (see the docs for what that asks of the
+// integration method).
+//
+// # Units
+//
+// Optical power in mW, wavelength in nm, field quadratures in sqrt(fJ) (|a|^2 in fJ), temperature
+// rise in K above the substrate (`ring_heat`), heat in W.
+//
+// # Verilog-A shown here
+//
+// Four user disciplines (`optical_power`, `wavelength`, `cmt_field`, `ring_heat`) beside
+// `electrical`; a complex ODE as two real state nodes; one-way signal ports written with
+// potential contributions; a PI controller with an internal integrator node and a soft enable
+// (`@(timer)` + `transition`); `$strobe` at lock.
+//
+// # Limitations
+//
+// Linear absorption only (no two-photon or free-carrier absorption), one mode per ring, no
+// backscattering (no split resonances), lumped thermal nodes, and rings on separate wavelength
+// channels share no light (only heat).
+`include "disciplines.vams"
+`include "ring_natures.vams"
+
+`define RB_C     2.99792458e8
+`define RB_TWOPI 6.28318530717958647692
+
+// A laser: power and wavelength from two electrical control nodes (mW and nm, as volts), so
+// that an ordinary PWL/PULSE source can sweep either.
+module laser(pctl, wctl, out, wl);
+    inout pctl, wctl, out, wl;
+    electrical pctl, wctl;
+    optical_power out;
+    wavelength wl;
+    analog begin
+        Popt(out) <+ V(pctl);
+        Wl(wl)    <+ V(wctl);
+    end
+endmodule
+
+// An add-drop microring on its own wavelength channel.
+module ring(in, wl, thru, drop, heat);
+    inout in, wl, thru, drop, heat;
+    optical_power in, thru, drop;
+    wavelength wl;
+    ring_heat heat;
+
+    parameter real lambda0 = 1550.0  from (0:inf);    // nm, cold resonance (T = 0)
+    parameter real qi      = 1e5     from (0:inf);    // intrinsic quality factor
+    parameter real qe      = 2.2e4   from (0:inf);    // each bus coupling's quality factor
+    parameter real ng      = 4.2     from (0:inf);    // group index
+    parameter real dndt    = 1.86e-4 from [0:inf);    // thermo-optic coefficient, 1/K (Si)
+    parameter real eta     = 0.5     from [0:1];      // absorbed fraction of the intrinsic loss
+
+    cmt_field ar, ai;    // the field's real and imaginary quadratures, sqrt(fJ)
+
+    real w0, taui, taue, tau, kap, lres, lam, delta, s, e2, tr, ti;
+
+    analog begin
+        w0   = `RB_TWOPI * `RB_C / (lambda0 * 1e-9);
+        // Amplitude decay times: with da/dt = -a/τ the stored energy decays at 2/τ, so a quality
+        // factor Q = ω0·(energy)/(power lost) = ω0·τ/2, i.e. τ = 2Q/ω0.
+        taui = 2.0 * qi / w0;
+        taue = 2.0 * qe / w0;
+        tau  = 1.0 / (1.0 / taui + 2.0 / taue);
+        kap  = sqrt(2.0 / taue);
+
+        lres  = lambda0 + lambda0 * dndt / ng * Temp(heat);
+        // Newton starts from the zero vector, where the wavelength node reads 0 nm and the input
+        // power 0 mW: guard both. 1/0 is infinite, and so is sqrt's slope at 0 (a NaN once it
+        // multiplies the zero derivative of a clamp).
+        lam = (Wl(wl) > 1.0) ? Wl(wl) : lambda0;
+        // ω_laser − ω_res, from the two wavelengths (nm).
+        delta = `RB_TWOPI * `RB_C * 1e9 * (1.0 / lam - 1.0 / lres);
+        // sqrt(P_in) in sqrt(mW); the input phase is the reference.
+        s = (Popt(in) > 1e-12) ? sqrt(Popt(in)) : 0.0;
+
+        // da/dt = (iδ − 1/τ) a + κ s. κ·s is in sqrt(mW)/sqrt(s); 1e6 converts sqrt(mW) to
+        // sqrt(fJ/s) (sqrt(1e-3 / 1e-15)).
+        Fld_rate(ar) <+ ddt(Fld(ar)) + Fld(ar) / tau + delta * Fld(ai) - 1e6 * kap * s;
+        Fld_rate(ai) <+ ddt(Fld(ai)) + Fld(ai) / tau - delta * Fld(ar);
+
+        e2 = Fld(ar) * Fld(ar) + Fld(ai) * Fld(ai);              // stored energy, fJ
+        Popt(drop) <+ 1e-12 * (2.0 / taue) * e2;                 // fJ/s -> mW
+        tr = s - 1e-6 * kap * Fld(ar);
+        ti = 1e-6 * kap * Fld(ai);
+        Popt(thru) <+ tr * tr + ti * ti;
+        Pwr(heat)  <+ -1e-15 * eta * (2.0 / taui) * e2;          // fJ/s -> W, into the ring
+    end
+endmodule
+
+// A heater driven by a power command: V(ctl) in mW, delivered as heat (no electrical load).
+module heater(ctl, heat);
+    inout ctl, heat;
+    electrical ctl;
+    ring_heat heat;
+    analog Pwr(heat) <+ -1e-3 * max(V(ctl), 0.0);
+endmodule
+
+// PI lock of a ring's drop power to `frac` of its own input power, acting on the heater.
+//
+//   e  = frac·P_in − P_drop       (positive: too little light dropped, the resonance is blue of
+//                                  the laser: heat to bring it closer)
+//   u  = clamp(u0 + kp e + x, 0, umax),   dx/dt = ki e + kb (u_clamped − u_unclamped)
+//
+// It locks on the **blue** side of the resonance (resonance below the laser), the side a heater
+// reaches from cold. That is the thermally unstable side for self-heating — more light, more heat,
+// a resonance pulled further toward the laser — which the loop has to out-gain.
+module lock(in, drop, ctl);
+    inout in, drop, ctl;
+    optical_power in, drop;
+    electrical ctl;
+
+    parameter real frac = 0.4   from (0:1);    // drop power held, as a fraction of the input
+    parameter real kp   = 5.0;                 // mW of heat per mW of error
+    parameter real ki   = 3e3;                 // mW/(mW s)
+    parameter real kb   = 1e3   from [0:inf);  // anti-windup, 1/s
+    parameter real u0   = 0.0;                 // mW, bias
+    parameter real umax = 10.0  from (0:inf); // mW, the heater's limit
+    parameter real ton  = 1e-3  from [0:inf);  // s, the loop closes here
+    parameter real tlock = 2e-4 from (0:inf);  // s, time within 1 % of the set point that counts as locked
+
+    electrical xi;    // integrator state, mW
+    integer en, locked;
+    real e, u, uc, g, tin;
+
+    analog begin
+        @(timer(ton)) begin
+            en = 1;
+            $strobe("%m: loop closed at t=%.4g s", $abstime);
+        end
+        g  = transition(en, 0.0, 1e-4);
+        e  = frac * Popt(in) - Popt(drop);
+        u  = u0 + kp * e + V(xi);
+        uc = min(max(u, 0.0), umax);
+        // Before the loop closes, and in the DC operating point, a leak (1 - g) holds the
+        // integrator at 0: without it the row reads 0 = 0 and the operating point is singular.
+        I(xi) <+ ddt(V(xi)) - g * (ki * e + kb * (uc - u)) + (1.0 - g) * V(xi);
+        V(ctl) <+ g * uc;
+
+        // Lock report: the first entry into a 1 % band around the set point.
+        @(cross(abs(e) - 0.01 * frac * Popt(in), -1))
+            if (!locked && en) begin
+                locked = 1;
+                $strobe("%m: locked at t=%.4g s, heater %.4f mW", $abstime, g * uc);
+            end
+    end
+endmodule
+
+// Thermal capacity of a node to the substrate's heat bath.
+module thermal_cap(t);
+    inout t;
+    ring_heat t;
+    parameter real c = 2.5e-7 from (0:inf);   // J/K
+    analog Pwr(t) <+ c * ddt(Temp(t));
+endmodule
+
+// A thermal resistance between two nodes.
+module thermal_res(a, b);
+    inout a, b;
+    ring_heat a, b;
+    parameter real r = 4000.0 from (0:inf);   // K/W
+    analog Pwr(a, b) <+ Temp(a, b) / r;
+endmodule

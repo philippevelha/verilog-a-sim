@@ -22,6 +22,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.16.1+1 - 2026-10-04
+---------------------
+**Multiphysics examples 5-8, and a tutorial for all of them.** Each example has decks with
+closed-form checks in their headers, a plot script that prints the checks beside the
+simulation, and a section in `docs/multiphysics.md`. The tutorial, `docs/multiphysics_tutorial.qmd`
+(Quarto), walks through every example: each figure's command, and every flag, card and
+parameter it depends on, with the reason it is there.
+
+  * Power-grid swing (`models/multiphysics/powergrid/`; `grid_plots.py`). Classical swing
+    equations on bus-angle nodes; the DC operating point is the nonlinear load flow; lines carry
+    their own relays. Equal-area criterion: the simulator's critical clearing time, bisected, is
+    within 0.02 % of the closed form's 0.2624 s, and the stable machine peaks at 130.39 deg
+    (equal areas: 130.40). Cascade: one tie lost, two tripped, islands at +-1.4323 Hz (closed
+    form +-1.4324).
+  * Thermo-optic ring bank (`ringbank/`; `ring_plots.py`). Coupled-mode optics (16 ps) on 1 ms
+    thermal nodes. Self-heating bistability: the jumps land within 0.009 nm of the fold points.
+    Four PI-locked rings against crosstalk: the heater powers match the thermal network's closed
+    form to 1e-4 mW in all three phases. The model's photon lifetime was first off by 2
+    (tau = Q/w0 for 2Q/w0), caught by the linewidth check.
+  * Li-ion cell (`liion/`; `li_plots.py`). Single-particle model: diffusion-shell ladders,
+    inverted Butler-Volmer (the forward form gave Newton a 1e50 conductance), SEI growth,
+    Hatchard-type abuse reactions.
+      - Discharge: C/20 within 0.03 % of the open-circuit capacity (1.9609 Ah).
+      - Calendar aging: SEI thickness within 2e-5 of the parabolic law over two years.
+      - Oven test: runaway threshold bisected at 134.07 C for these parameters; runaway time
+        step-converged to 0.2 s.
+  * Electromagnetic relay (`relay/`; `relay_plots.py`). A Jiles-Atherton core, made continuous
+    for an implicit integrator (lagged-H direction, smoothed switches), with a gap and armature
+    and a heated coil.
+      - B-H loop energy closes to 3e-5.
+      - Lift-off at B = 0.1588 T (force balance: 0.15853 T); hot-pickup voltage ratio 1.2547
+        against 1.2555.
+      - A 20 um residual gap leaves the armature held by remanence.
+      - Two model bugs, stated: a negative contact damping, hidden by backward Euler's numerical
+        damping, and a smoothing scale that made the loop rate-dependent.
+  * Limitations, per example, are in each model's header and in docs/multiphysics.md.
+  * No crate changed. Figures are from runs at this version. `cargo test --workspace` (951
+    passed) and `cargo xtask validate` (28/28) are 2.16.1's, the same code.
+
 2.16.1 - 2026-10-04
 -------------------
 **Three simulator fixes found by the multiphysics examples.** Each was found by an example that

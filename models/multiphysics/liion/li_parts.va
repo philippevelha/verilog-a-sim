@@ -1,0 +1,265 @@
+// Li-ion cell, single-particle model: solid diffusion as a shell ladder, Butler-Volmer kinetics,
+// an SEI film that grows and consumes lithium, heat generation, and the exothermic
+// decomposition reactions of thermal abuse.
+//
+// # Electrode (`electrode`)
+//
+// The active material of one electrode as N concentric shells of a representative particle,
+// each a state node whose potential is its lithium stoichiometry θ_k:
+//
+//   shell k holds   C_k = cmax · vact · ((k+1)^3 − k^3) / N^3          mol per unit θ
+//   between k,k+1   G_k = 3 D(T) cmax vact (k+1)^2 / (N R^2)           mol/s per unit θ
+//
+// i.e. Fick's law in a sphere, discretized in radius: an RC ladder. Lithium crosses the surface
+// at the outer shell, at the interface current over F. The interface is Butler-Volmer:
+//
+//   I = S · 2 i0 · sinh(F η / 2RT),   η = V(m, e) − U(θ_s),   i0 = F k0(T) sqrt(ce) cmax sqrt(θ_s(1 − θ_s))
+//
+// (written inverted, as the voltage η(I) = (2RT/F) asinh(I/(2 S i0)), for Newton's sake)
+// with S = 3 vact / R the active surface, U the open-circuit potential of graphite (`kind=0`) or
+// LiCoO2 (`kind=1`) (Ramadass et al., J. Electrochem. Soc. 151, A196, 2004), and an SEI film's
+// resistance between the terminal `s` and the interface node `m`.
+//
+// # SEI growth (`sei=1`, the negative electrode)
+//
+// The film grows by a side reaction limited by solvent diffusion through the film itself, so the
+// thickness δ (nm) obeys dδ/dt = k_sei(T)/δ: δ(t) = sqrt(δ0² + 2 k_sei t) at constant temperature,
+// the parabolic law of calendar aging. Every nanometre consumes `beta` · S · 1e-9 mol of lithium
+// from the outer shell (lost to cycling), and adds δ/(κ S) of film resistance.
+//
+// # Heat
+//
+// Into the cell's thermal node: the interface's I·η, the film's I²R. (No entropic heat.)
+//
+// # Verilog-A shown here
+//
+// `generate` loops over a shell ladder of a user discipline; `analog function`s for two
+// open-circuit potentials with their singularities guarded; Arrhenius kinetics; an internal
+// film node; `analysis("static")` pinning initial stoichiometry and film thickness;
+// `case` on an integer parameter.
+//
+// # Limitations
+//
+// Single particle per electrode (no electrolyte concentration or potential gradients: the
+// electrolyte is a temperature-dependent resistance), shell-average surface stoichiometry
+// (first order in 1/N), no entropic heat, no lithium plating.
+`include "disciplines.vams"
+`include "li_natures.vams"
+
+`define LI_F    96485.33212
+`define LI_R    8.314462618
+`define LI_PI   3.14159265358979323846
+
+module electrode(s, e, th);
+    inout s, e, th;
+    electrical s, e;
+    cell_heat th;
+
+    parameter integer kind   = 0        from [0:1];       // 0 graphite, 1 LiCoO2
+    parameter integer N      = 10       from [2:100];     // shells
+    parameter real    cmax   = 30555    from (0:inf);     // mol/m^3
+    parameter real    vact   = 3.05e-6  from (0:inf);     // m^3 of active material
+    parameter real    rp     = 2e-6     from (0:inf);     // m, particle radius
+    parameter real    ds     = 3.9e-14  from (0:inf);     // m^2/s at 298.15 K
+    parameter real    ea_d   = 3.5e4    from [0:inf);     // J/mol
+    parameter real    k0     = 1.764e-11 from (0:inf);    // m^2.5/(mol^0.5 s) at 298.15 K
+    parameter real    ea_k   = 3e4      from [0:inf);     // J/mol
+    parameter real    ce     = 1000     from (0:inf);     // mol/m^3, electrolyte
+    parameter real    theta0 = 0.8      from [0:1];       // initial stoichiometry
+    parameter integer sei    = 0        from [0:1];       // grow an SEI film
+    parameter real    dsei0  = 5.0      from (0:inf);     // nm, initial film
+    parameter real    ksei   = 6e-5     from [0:inf);     // nm^2/s at 298.15 K
+    parameter real    ea_sei = 5e4      from [0:inf);     // J/mol
+    parameter real    beta   = 2.09e4   from [0:inf);     // mol of Li per m^3 of film
+    parameter real    kappa  = 5e-6     from (0:inf);     // S/m, film conductivity
+    parameter real    rc     = 1e-3     from (0:inf);     // Ohm, contact
+
+    stoich [0:N-1] sh;      // shell stoichiometries, centre (0) to surface (N-1)
+    extent dfilm;           // SEI thickness, nm
+    electrical m;           // the interface, inside the film
+
+    real t, arr_d, arr_k, gs, ts, u, i0, ibv, eta, area, rfilm, dd, rate;
+    genvar k;
+
+    // Graphite, Ramadass 2004 (V vs Li/Li+). θ clamped where the fit's 1/θ terms diverge.
+    analog function real u_graphite;
+        input x; real x, y;
+        begin
+            y = min(max(x, 0.005), 0.995);
+            u_graphite = 0.7222 + 0.1387 * y + 0.029 * sqrt(y) - 0.0172 / y
+                         + 0.0019 / pow(y, 1.5) + 0.2808 * exp(0.9 - 15.0 * y)
+                         - 0.7984 * exp(0.4465 * y - 0.4108);
+        end
+    endfunction
+
+    // LiCoO2, Ramadass 2004 (V vs Li/Li+), a rational fit in θ^2.
+    analog function real u_lco;
+        input x; real x, y, y2;
+        begin
+            y = min(max(x, 0.4), 0.999);
+            y2 = y * y;
+            u_lco = (-4.656 + 88.669 * y2 - 401.119 * y2 * y2 + 342.909 * pow(y2, 3)
+                     - 462.471 * pow(y2, 4) + 433.434 * pow(y2, 5))
+                    / (-1.0 + 18.933 * y2 - 79.532 * y2 * y2 + 37.311 * pow(y2, 3)
+                       - 73.083 * pow(y2, 4) + 95.96 * pow(y2, 5));
+        end
+    endfunction
+
+    analog begin
+        t     = max(Temp(th), 200.0);    // Newton starts from 0 K; the cell never sees below 200
+        arr_d = exp(ea_d / `LI_R * (1.0 / 298.15 - 1.0 / t));
+        arr_k = exp(ea_k / `LI_R * (1.0 / 298.15 - 1.0 / t));
+        area  = 3.0 * vact / rp;
+
+        // The shells and the ladder between them.
+        for (k = 0; k < N; k = k + 1) begin : shell
+            if (analysis("static"))
+                Nli(sh[k]) <+ Th(sh[k]) - theta0;
+            else
+                Nli(sh[k]) <+ cmax * vact * ((k + 1) * (k + 1) * (k + 1) - k * k * k)
+                               / (N * N * N) * ddt(Th(sh[k]));
+        end
+        for (k = 0; k < N - 1; k = k + 1) begin : link
+            if (!analysis("static"))
+                Nli(sh[k], sh[k + 1]) <+ 3.0 * ds * arr_d * cmax * vact * (k + 1) * (k + 1)
+                                         / (N * rp * rp) * Th(sh[k], sh[k + 1]);
+        end
+
+        // The interface: Butler-Volmer on the surface shell.
+        ts = Th(sh[N - 1]);
+        case (kind)
+            0: u = u_graphite(ts);
+            default: u = u_lco(ts);
+        endcase
+        i0  = `LI_F * k0 * arr_k * sqrt(ce) * cmax * sqrt(min(max(ts, 1e-4), 0.9999)
+                                                         * (1.0 - min(max(ts, 1e-4), 0.9999)));
+        // Butler-Volmer, inverted: the interface is written as the voltage that drives its own
+        // current, V(m, e) = U + η with η = (2RT/F) asinh(I / (2 S i0)) and I the branch current.
+        // The forward form, I = 2 S i0 sinh(F η / 2RT), is the same equation, but Newton starts
+        // from 0 V, where the cathode's η is -4.2 V and sinh of it is ~1e50: a conductance no
+        // linear solve survives. asinh is smooth and cannot overflow.
+        ibv = I(m, e);
+        eta = 2.0 * `LI_R * t / `LI_F * asinh(ibv / (2.0 * area * i0));
+        V(m, e) <+ u + eta;
+        // Anodic current (positive, m -> e) removes lithium from the surface shell.
+        if (!analysis("static"))
+            Nli(sh[N - 1]) <+ ibv / `LI_F;
+
+        // The SEI film: thickness as a state, its resistance between s and m.
+        dd = max(Ext(dfilm), 0.1);
+        rate = (sei == 1) ? ksei * exp(ea_sei / `LI_R * (1.0 / 298.15 - 1.0 / t)) / dd : 0.0;
+        if (analysis("static"))
+            Ext_rate(dfilm) <+ Ext(dfilm) - dsei0;
+        else begin
+            Ext_rate(dfilm) <+ ddt(Ext(dfilm)) - rate;
+            // Lithium consumed by the film, from the surface shell.
+            Nli(sh[N - 1]) <+ beta * area * 1e-9 * rate;
+        end
+        rfilm = rc + ((sei == 1) ? dd * 1e-9 / (kappa * area) : 0.0);
+        I(s, m) <+ V(s, m) / rfilm;
+
+        Pwr(th) <+ -(ibv * eta + V(s, m) * V(s, m) / rfilm);
+    end
+endmodule
+
+// The electrolyte between the electrodes: a resistance with an Arrhenius conductivity, and its
+// Joule heat.
+module electrolyte(a, b, th);
+    inout a, b, th;
+    electrical a, b;
+    cell_heat th;
+    parameter real r25  = 0.02  from (0:inf);    // Ohm at 298.15 K
+    parameter real ea_e = 1.2e4 from [0:inf);    // J/mol
+    real r;
+    analog begin
+        r = r25 * exp(ea_e / `LI_R * (1.0 / max(Temp(th), 200.0) - 1.0 / 298.15));
+        I(a, b) <+ V(a, b) / r;
+        Pwr(th) <+ -V(a, b) * V(a, b) / r;
+    end
+endmodule
+
+// The cell's heat capacity and its convective coupling to an ambient (an oven) whose
+// temperature in kelvin is the voltage of `amb`.
+module cell_thermal(th, amb);
+    inout th, amb;
+    cell_heat th;
+    electrical amb;
+    parameter real mcp = 40.0  from (0:inf);    // J/K (an 18650 is ~45 g at ~0.9 J/(g K))
+    parameter real ha  = 0.03  from (0:inf);    // W/K to the ambient (h 7 W/(m^2 K) on 42 cm^2)
+    analog Pwr(th) <+ mcp * ddt(Temp(th)) + ha * (Temp(th) - V(amb));
+endmodule
+
+// The exothermic decomposition reactions of thermal abuse (Hatchard et al., J. Electrochem.
+// Soc. 148, A755, 2001), each an Arrhenius rate on a state of its own:
+//
+//   SEI decomposition         dx_sei/dt = -A_sei exp(-E_sei/RT) x_sei
+//   anode-solvent             dx_ne/dt  = -A_ne exp(-E_ne/RT) x_ne exp(-z/z0),  dz/dt = -dx_ne/dt
+//                             (the reaction is slowed by the layer it builds, z)
+//   cathode-electrolyte       dα/dt     =  A_pe exp(-E_pe/RT) α (1 - α)
+//
+// releasing H_sei m_c, H_ne m_c and H_pe m_p per unit of each into the cell's thermal node.
+// Masses are an 18650's (Kim et al., J. Power Sources 170, 476, 2007). No electrolyte
+// decomposition, no venting, no internal short: the minimum that runs away.
+module abuse(th);
+    inout th;
+    cell_heat th;
+    parameter real mc     = 0.010   from (0:inf);    // kg of carbon
+    parameter real mp     = 0.020   from (0:inf);    // kg of cathode
+    parameter real a_sei  = 1.667e15;  parameter real e_sei = 1.3508e5;  parameter real h_sei = 2.57e5;
+    parameter real a_ne   = 2.5e13;    parameter real e_ne  = 1.3508e5;  parameter real h_ne  = 1.714e6;
+    parameter real a_pe   = 6.667e13;  parameter real e_pe  = 1.396e5;   parameter real h_pe  = 3.14e5;
+    parameter real x_sei0 = 0.15;  parameter real x_ne0 = 0.75;  parameter real z0 = 0.033;
+    parameter real alpha0 = 0.04;
+    parameter real tcross = 473.15;   // K, reported when the cell passes it
+
+    extent xs, xn, z, al;
+    real t, rs, rn, rp;
+
+    analog begin
+        t  = max(Temp(th), 200.0);
+        rs = a_sei * exp(-e_sei / (`LI_R * t)) * max(Ext(xs), 0.0);
+        rn = a_ne * exp(-e_ne / (`LI_R * t)) * max(Ext(xn), 0.0) * exp(-max(Ext(z), 0.0) / z0);
+        rp = a_pe * exp(-e_pe / (`LI_R * t)) * max(Ext(al), 0.0) * max(1.0 - Ext(al), 0.0);
+        if (analysis("static")) begin
+            Ext_rate(xs) <+ Ext(xs) - x_sei0;
+            Ext_rate(xn) <+ Ext(xn) - x_ne0;
+            Ext_rate(z)  <+ Ext(z) - z0;
+            Ext_rate(al) <+ Ext(al) - alpha0;
+        end else begin
+            Ext_rate(xs) <+ ddt(Ext(xs)) + rs;
+            Ext_rate(xn) <+ ddt(Ext(xn)) + rn;
+            Ext_rate(z)  <+ ddt(Ext(z)) - rn;
+            Ext_rate(al) <+ ddt(Ext(al)) - rp;
+        end
+        Pwr(th) <+ -(h_sei * mc * rs + h_ne * mc * rn + h_pe * mp * rp);
+
+        @(cross(Temp(th) - tcross, +1))
+            $strobe("%m: cell passed %.0f K at t=%.1f s (SEI left %.3f, anode %.3f, cathode %.3f)",
+                    tcross, $abstime, max(Ext(xs), 0.0), max(Ext(xn), 0.0),
+                    max(1.0 - Ext(al), 0.0));
+    end
+endmodule
+
+// A constant-current load between p and n: draws `iset` from `ton` until the cell voltage falls
+// through `vmin`, then opens, reporting the charge it delivered.
+module cc_load(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real iset = 2.0   from [0:inf);    // A
+    parameter real vmin = 3.0   from (0:inf);    // V, cutoff
+    parameter real ton  = 10.0  from [0:inf);    // s
+    parameter real tr   = 1.0   from (0:inf);    // s, on/off ramp
+    integer on, done;
+    real g;
+    analog begin
+        @(timer(ton)) if (!done) on = 1;
+        @(cross(V(p, n) - vmin, -1)) if (on) begin
+            on = 0;
+            done = 1;
+            $strobe("%m: cutoff at t=%.1f s (%.4f V), %.4f Ah delivered at %.3f A",
+                    $abstime, V(p, n), iset * ($abstime - ton) / 3600.0, iset);
+        end
+        g = transition(on, 0.0, tr);
+        I(p, n) <+ g * iset;
+    end
+endmodule

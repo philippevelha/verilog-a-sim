@@ -1,0 +1,1423 @@
+---
+title: "Multiphysics with verilog-a-sim"
+subtitle: "A hands-on tutorial: every example, every command, every figure"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-copy: true
+    code-overflow: wrap
+    embed-resources: false
+execute:
+  eval: false
+---
+
+# What this tutorial is
+
+`docs/multiphysics.md` presents the multiphysics examples as results. This tutorial is the same
+material as a procedure. Each section explains the physics, then gives the commands that produce
+each figure, then explains every flag, analysis card and model parameter those commands depend
+on. It also says why each one is there: what goes wrong, or what the run would cost, without it.
+
+The examples, in the order they were built:
+
+| § | Example | Domains | What it exercises in the simulator |
+|---|---|---|---|
+| [3](#peltier) | Peltier cooler under PID control | electrical, thermal (absolute K) | `.dc` sweep, `.op`, transient with a controller, `@(timer)`, `laplace_nd`, `transition` |
+| [4](#mems) | Electrostatic MEMS actuator | electrical, mechanical, thermal | `.dc` continuation through pull-in, `.ac` small-signal, `PWL` transient with contact events |
+| [5](#reram) | Filamentary ReRAM | electrical, thermal, filament gap | stiff switching, `$bound_step`, `analysis("static")`, step size scaled with frequency |
+| [6](#axon) | Hodgkin–Huxley axon | electrical, gating, chemistry | `generate` loops, vector nets, structural parameter overrides, sparse solve |
+| [7](#grid) | Power-grid swing | electromechanical | nonlinear load flow as a DC point, relays as events, cascades |
+| [8](#ring) | Thermo-optic ring bank | optical, thermal, control | a stiff ps/ms system, complex ODEs as node pairs, PI locks, bistability |
+| [9](#liion) | Li-ion cell | electrochemical, thermal | diffusion ladders, inverted Butler–Volmer, aging over years, runaway in seconds |
+| [10](#relay) | Electromagnetic relay | electrical, magnetic, mechanical, thermal | Jiles–Atherton hysteresis, contact bounce, hot pickup, remanence |
+
+Every number quoted below was measured with the command shown next to it. Each figure is the
+file in `docs/examples/multiphysics/` that the command writes.
+
+::: {.callout-note}
+These examples are checked against closed-form results and conservation laws, which each section
+states. Unlike the decks under `golden/`, they are **not** validated against a reference
+simulator: QSPICE cannot run these models.
+:::
+
+# Getting set up, and how a run is put together
+
+## Build, and a name for the binary
+
+From the repository root:
+
+```bash
+cargo build --release
+```
+
+The binary is `target/release/va-cli` (`va-cli.exe` on Windows). The commands below call it
+`va-cli`, as the deck headers do. Make that name work in your shell:
+
+```bash
+# bash / Git Bash / zsh
+alias va-cli="$PWD/target/release/va-cli"
+```
+
+```powershell
+# PowerShell
+Set-Alias va-cli "$PWD\target\release\va-cli.exe"
+```
+
+The figures that need more than one plot of raw quantities are drawn by small Python scripts in
+`docs/examples/multiphysics/`, which need Python 3 and `matplotlib`. Each script runs the
+simulator itself and takes the binary's path as an argument:
+
+```bash
+python docs/examples/multiphysics/reram_iv.py "$PWD/target/release/va-cli"
+```
+
+::: {.callout-warning}
+## Windows: give the scripts an absolute path
+
+Python's `subprocess` on Windows does not resolve a relative, forward-slash path such as
+`target/release/va-cli`, and fails with `FileNotFoundError`. Pass the absolute path:
+`"$(pwd -W)/target/release/va-cli.exe"` in Git Bash, or
+`"$PWD\target\release\va-cli.exe"` in PowerShell.
+:::
+
+## The three inputs of a run
+
+```bash
+va-cli sim <deck.net> --model <library directory> [--tran | --ac | --noise] [--report a,b,...] [--plot out.svg]
+```
+
+**The model library** (`--model models/multiphysics/tec`). A *directory* is compiled as one
+unit: every `.va` and `.vams` file in it is parsed, then every module is elaborated against all
+of them. Each example therefore keeps its modules and its `nature`/`discipline` declarations
+(`tec_natures.vams`, `mems_natures.vams`, …) together in one directory. Each `.va` file pulls the
+declarations in with `` `include ``, which resolves against the file's own directory. A deck that
+needs two libraries can repeat `--model`.
+
+**The deck** (`circuits/multiphysics/*.net`) is a SPICE-like netlist:
+
+```text
+* comment lines start with a star; the first lines of every deck explain it
+V1 drv gnd DC 0                      voltage source: DC, AC, SIN(...), PWL(...), PULSE(...)
+G1 gnd stim p gnd 1e-6               voltage-controlled current source (out+ out- ctl+ ctl- gain)
+R1 in te 2k                          resistor
+X1 drv gnd cold hot tec alpha1=0     a Verilog-A module: ports, module name, parameter overrides
+.tran 0.5 150                        the analysis card
+.end
+```
+
+An `X` line places a Verilog-A module. Its terminals come first, in the order of the module's
+port list, then the module name, then any `name=value` overrides of its parameters. Every
+example uses overrides to configure one model several ways: `pressure=1` vs `pressure=100`,
+`tamb=300` vs `tamb=400`, `tc=18.5` vs `tc=6.3`.
+
+**The analysis**: a card in the deck, plus a flag that must agree with it.
+
+| Deck card | Flag | Analysis |
+|---|---|---|
+| `.op` | none | DC operating point |
+| `.dc V1 0 20 0.25` | none | DC sweep of a source |
+| `.ac lin 4001 8410 10410` | `--ac` | small-signal AC around the operating point |
+| `.tran 0.5 150` | `--tran` | transient |
+| `.noise …` | `--noise` | noise |
+
+A deck with a `.tran` card run without `--tran` is refused, rather than quietly run as DC:
+
+```text
+Error: deck requests transient analysis (`.tran`); pass `--tran` to run it
+```
+
+## Naming what you want to see: `--report`
+
+Without `--report`, every unknown is printed. With it, only the named quantities are printed and
+plotted. A name can be:
+
+- a net of the deck: `cold`, `x`, `g1`;
+- a device's current: `V1` (a voltage source's branch current);
+- a node *inside* an instance, by hierarchical name: `X1.g` (the ReRAM's gap node),
+  `XA1.w` (a machine's speed node), `X1.v[50]` (element 50 of a vector net),
+  `X1.dnai[5]` (the thin fibre's sodium in compartment 5).
+
+Each value is printed with the **access function of its nature**, not as a voltage. A thermal
+node prints `Temp(cold) = 277.705459 K`, a mechanical node `Pos(x) = 4.574131e-8 m`, the ReRAM
+gap `Gap(X1.g)`, a machine's speed `Om(XA1.w)`. Those names come from the `nature` declarations
+in each library's `.vams` file (`access = Temp;`, `units = "K";`). Declaring natures this way is
+how a model says what its unknowns *are*. It is also what makes each unknown's convergence
+tolerance its own (the nature's `abstol`), rather than one tolerance in volts for everything.
+
+## Plots: `--plot`, or a script
+
+`--plot out.svg` writes one SVG of every reported quantity, against time (transient), against the
+swept source (`.dc`), or as a Bode plot (`.ac`). That is enough for most of the figures here. A
+Python script is used where the figure needs a quantity the simulator does not report
+(a current computed from two node voltages, a Nernst potential, a frequency in Hz), several runs
+on one axis, or data the model wrote to a file.
+
+## How a transient run is controlled
+
+`.tran <tstep> <tstop> [UIC]` means something specific here:
+
+- **`tstep` is the maximum time step**, not an output grid. The step controller starts at
+  `tstep` and only ever shrinks below it, to keep the local truncation error within
+  `reltol·|x| + abstol` (defaults `1e-3` and the nature's own `abstol`). It also lands exactly on
+  every breakpoint: a `PWL`/`PULSE` corner, an `@(timer)` instant, a `cross` event bracketed in
+  time. The pre-flight line counts the resulting floor:
+  `~301 points (adaptive, 301 is the card's floor)` for `.tran 0.5 150`.
+  The run usually takes more points than that floor, wherever something fast happens.
+- **Choosing `tstep` is a modelling decision**, and every example below says why its value was
+  chosen. Too large, and a slow-looking stretch hides an event, or the step is long enough to
+  change an answer that converges with the step. Too small, and the run costs more than the
+  physics needs. The examples check their important numbers at two caps (§5, §6, §7).
+- **The run starts from the DC operating point** unless the card says `UIC`. None of these decks
+  uses `UIC`. With it, every unknown would start at zero, and zero is not a harmless start for a
+  physical model: for the Peltier cooler it is 0 K. Where a *state* needs a chosen starting value
+  rather than its equilibrium (the ReRAM gap, the concentrations of the axon), the model pins it
+  in the operating point with `analysis("static")`. Each example shows how.
+- Integration is trapezoidal (second order) by default; `--integration be|trap|gear` changes it.
+  None of the examples needs to.
+
+Before solving, `sim` prints what it is about to do, for example:
+
+```text
+[va-cli] circuit: 7 device(s) (7 compiled), 10 unknown(s) (4 net(s) + 6 auxiliary row(s)), ~301 points (adaptive, 301 is the card's floor)
+[va-cli] estimate: 14-635 ms of solve, 2.4 kB of matrix — rough, dense LU scaled from bench-scale on an i7-1185G7
+[va-cli] linear solve: dense LU (10 < 100 unknowns)
+```
+
+*Auxiliary rows* are unknowns the models create inside themselves (internal nodes, state
+variables). The linear solver is chosen by size: dense below 100 unknowns, sparse from 100
+(`--solver auto`, the default). The axon (903 unknowns) runs sparse; everything else runs dense.
+
+## What the models print
+
+Every model here reports its own events with `$strobe`. These lines arrive on standard output,
+interleaved with the results and prefixed with the instance name (`%m`):
+
+```text
+XP: loop closed at t=5 s
+XP: within 0.1 K of the setpoint at t=30.86 s (drive 4.222 V)
+XL: heat load steps from 1 W to 3 W at t=60 s
+```
+
+Many of the checks below are read straight off these lines.
+
+## Options these examples do *not* use, and why
+
+| Option | What it does | Why it is not used here |
+|---|---|---|
+| `--bypass` | reuses a device's last evaluation while its terminals barely move | results are not bit-identical; it pays off on large transistor circuits, not on a handful of models |
+| `--reltol`, `--abstol`, `--newton-reltol` | loosen step and Newton tolerances | defaults are what every quoted number was measured with |
+| `--threads <n>` | evaluates instances in parallel | results are identical at every count; these circuits have one to twenty instances |
+| `--tasks-once` | prints each distinct `$strobe` line once | the examples' strobes are events that should all be seen |
+| `--solver dense\|sparse` | overrides the size rule | the automatic choice is right for every example |
+
+# Peltier cooler under PID control {#peltier}
+
+**Library:** `models/multiphysics/tec/`, which contains:
+
+- `tec.va`: the thermoelectric module;
+- `thermal_parts.va`: `thermal_mass`, `thermal_res`, `ambient`, `heat_load`;
+- `pid.va`: the controller;
+- `tec_natures.vams`: the `thermal_abs` discipline, with temperature in **kelvin above 0 K** and heat in watts.
+
+**Why absolute temperature.** The Peltier heat at a junction is α·I·T, with T the junction's
+*absolute* temperature. A "temperature rise above ambient" discipline would make every Peltier
+term wrong by α·I·T_ambient. The `ambient` module is therefore a temperature source of
+298.15 K. It is also the first reason these decks never use `UIC`: a zero start would be 0 K.
+
+The module's Seebeck coefficient depends on temperature, α(T) = α₀ + α₁(T − 300 K), with
+resistance R(T) = R₀(1 + tcr·(T − 300 K)). The Peltier, Joule and conduction heats follow from
+that, and so does the Thomson heat, which is what makes the energy balance close.
+
+## Maximum temperature difference (DC sweep)
+
+```bash
+va-cli sim circuits/multiphysics/tec_dtmax.net --model models/multiphysics/tec --report cold --plot docs/examples/multiphysics/tec_dtmax.svg
+```
+
+![The cold face's temperature against drive voltage](examples/multiphysics/tec_dtmax.svg)
+
+**The deck.** The drive is swept 0 → 20 V by `.dc V1 0 20 0.25`. The hot face is held at 300 K
+by `XA hot ambient tamb=300` and the cold face is insulated: the module is the only thing
+touching it.
+
+**The parameters that matter.** `alpha1=0 tcr=0` on the module's line switch off the
+temperature dependence of α and R. That is not a simplification for its own sake: it is what
+makes the textbook closed form apply. With α and R constant, the cold face is coldest where the
+extra heat pumped by more current equals the extra Joule heat it brings, I = α·T_c/R, which
+gives **T_c = 232.455 K (ΔT = 67.545 K) at 5.811 A, 15.00 V**.
+
+**Check.** The sweep's minimum is 232.4555 K at 15.00 V and 5.8114 A. Past it the cold face warms
+again. Add `V1` to `--report` to see the current alongside.
+
+## Energy audit (operating point)
+
+```bash
+va-cli sim circuits/multiphysics/tec_energy.net --model models/multiphysics/tec
+```
+
+No plot: this is a single `.op`, and the check is arithmetic on what it prints.
+
+```text
+DC operating point:
+  V(drv) = 5.000000 V
+  Temp(cold) = 277.705459 K
+  Temp(hot) = 303.144232 K
+  Temp(amb) = 298.150000 K
+  I(V1) = -1.950932e0 A
+  XA.b0 = 9.754658e0
+```
+
+The full module (α₁ = 10⁻⁴ V/K², tcr = 0.4 %/K) at 5 V, with each face tied to a 298.15 K
+ambient through a thermal resistance: 2 K/W on the cold side, 0.25 K/W on the hot side.
+
+| Quantity | How it is read off the output | Value |
+|---|---|---|
+| Q_c, heat pumped | (298.15 − Temp(cold)) / 2 | 10.2223 W |
+| Q_h, heat rejected | (Temp(hot) − 298.15) / 0.25 | 19.9769 W |
+| P_e, electrical power | 5 × (−I(V1)) | 9.7547 W |
+
+**Q_h − Q_c − P_e = −2.5·10⁻⁶ W**, which is the print precision (temperatures to 10⁻⁶ K,
+divided by 0.25 K/W).
+
+The last line, `XA.b0`, is the ambient source's own branch flow: the net heat the ambient
+absorbs, 9.754658 W. It is P_e, as conservation requires at steady state: everything the
+electrical side puts in ends up in the ambient. Delete the Thomson term from `tec.va` and the
+balance is off by I·α₁·(T_h² − T_c²)/2 = 1.44 W.
+
+## Closed-loop regulation through a load step (transient)
+
+```bash
+va-cli sim circuits/multiphysics/tec_pid.net --model models/multiphysics/tec --tran --report plate,sink --plot docs/examples/multiphysics/tec_pid_temps.svg
+va-cli sim circuits/multiphysics/tec_pid.net --model models/multiphysics/tec --tran --report drv --plot docs/examples/multiphysics/tec_pid_drive.svg
+```
+
+The same run twice, reporting different quantities, because temperatures (~300 K) and the drive
+(0–12 V) would share one axis badly.
+
+![Plate and heat-sink temperatures](examples/multiphysics/tec_pid_temps.svg)
+![The controller's drive voltage](examples/multiphysics/tec_pid_drive.svg)
+
+**The deck.**
+
+- **The plant.** A 20 J/K plate (`XM1 … thermal_mass C=20`) carries a heat load of 1 W
+  (`XL … heat_load p0=1 dp=2 tstep=60 trise=0.5`), stepping by +2 W at 60 s. The module's hot
+  face sits on a 50 J/K sink, 0.5 K/W to the ambient.
+- **The controller.** `XP plate drv pid tset=278.15 kp=2 ki=0.2 kd=2 tf=0.5 kb=1 vmin=0 vmax=12 ton=5`
+  reads the plate's temperature and drives the module.
+
+**What each controller parameter is for.**
+
+- `kp`, `ki`, `kd` are the PID gains, in V/K, V/(K·s) and V·s/K.
+- `tf=0.5` filters the derivative, (s/(1 + s·tf)), so the D term does not amplify the
+  step-to-step noise of the solution. It is implemented as `laplace_nd` on an internal node of its own.
+  The Laplace operators are only accepted as a *whole* contribution to a node, not inside a
+  larger expression. Giving the filter its own node is how a model uses one as a building block.
+- `vmin=0 vmax=12` are the supply's rails. `kb=1` is the back-calculation anti-windup: while the
+  output is clamped at a rail, the integrator is bled toward the clamped value. With `kb=0` the
+  integrator winds up during the 12 V saturation at start-up, and the plate undershoots to
+  272.94 K, 5.2 K below the setpoint. With `kb=1` its lowest point is 278.00 K, within the
+  0.1 K band.
+- `ton=5` closes the loop at 5 s, through `@(timer(ton))`. Before that, and in the operating point
+  the run starts from, the drive is 0. The run therefore starts from the *uncooled* steady state
+  (plate 299.79 K) instead of from an artificial zero.
+- The loop is switched in through `transition(en, 0, 0.2)`, a 0.2 s ramp. Switched in as a bare
+  step, the drive would jump by several volts within one time step, and the step controller would
+  shrink the step until it underflowed: no step is short enough to make a discontinuity smooth.
+
+**The `.tran 0.5 150` card.** The plate's time constant is tens of seconds (20 J/K against the
+module's conductance), so a 0.5 s cap still resolves every transient, and the controller's
+fastest dynamics (the 0.2 s ramp, the 0.5 s derivative filter) are resolved by the step
+controller shrinking below the cap. The run takes 553 points.
+
+**What the strobes say, and the figure shows.**
+
+```text
+XP: loop closed at t=5 s
+XP: within 0.1 K of the setpoint at t=30.86 s (drive 4.222 V)
+XL: heat load steps from 1 W to 3 W at t=60 s
+```
+
+1. The loop closes at 5 s and the drive sits at the 12 V rail for about a second. The plate
+   falls 21.6 K and enters the 0.1 K band at **t = 30.86 s** without undershooting.
+2. The sink warms to 311.7 K, carrying the pumped heat plus all the electrical power, then
+   relaxes as the drive falls to about 3.4 V.
+3. At 60 s the load steps to 3 W. The plate rises by 0.18 K, the drive answers, and the plate is
+   back at 278.147 K at 150 s.
+
+# Electrostatic MEMS: pull-in, damping, contact and stiction {#mems}
+
+**Library:** `models/multiphysics/mems/mems_parts.va`, with composable parts on one mechanical
+node:
+
+- `proof_mass`;
+- `spring`;
+- `es_gap`, the parallel-plate transducer;
+- `squeeze_film`, gas damping with rarefaction;
+- `thermoelastic`;
+- `contact`, Hertzian landing plus adhesion.
+
+`mems_natures.vams` defines `MEMS_EPS0` and the mechanical disciplines.
+
+**Position as a potential.** The mechanical node's potential is the plate's displacement and its
+flow is force, so Kirchhoff's current law at the node *is* Newton's second law: spring, damping,
+electrostatic and contact forces summing to m·ẍ. Each effect is a separate module on the same
+node (`XK x spring`, `XM x proof_mass`, `XS x squeeze_film`, …). A deck composes the device, and
+removing a line removes an effect.
+
+The device: a 100 µm square plate, 2 µm above an electrode covered by 0.1 µm of dielectric
+(εᵣ = 7.5), on a 1 N/m spring, which resonates near 10 kHz.
+
+## Pull-in (DC sweep)
+
+```bash
+va-cli sim circuits/multiphysics/mems_pullin.net --model models/multiphysics/mems --report x --plot docs/examples/multiphysics/mems_pullin.svg
+```
+
+![Static deflection against voltage, through pull-in](examples/multiphysics/mems_pullin.svg)
+
+**Why a sweep, and why its step matters.** A `.dc` sweep starts each point's Newton solve from the
+previous point's solution. That is what lets it follow the *stable* branch of a system with
+several equilibria. Below pull-in the plate has two equilibria, stable and unstable. The sweep
+stays on the stable one because it starts there, with `.dc V1 0 8 0.05` in 0.05 V steps, each a
+small continuation step. At pull-in that branch ends, and the next point can only land on the
+contact branch, at the dielectric stop at x = 1.9 µm.
+
+**Closed form.** The effective gap is g₀ + t_d/εᵣ = 2.01333 µm.
+V_PI = √(8k·g_e³/(27ε₀A)) = **5.2259 V**, at x = g_e/3 = 0.67111 µm. Below pull-in the deck's
+header lists checkpoints from k·x = ε₀AV²/(2(g_e − x)²), and the sweep reproduces them:
+x = 4.574131·10⁻⁸ m at 2 V and 4.568402·10⁻⁷ m at 5 V (closed form 0.04574 µm and 0.45684 µm).
+
+## Resonance under bias, at two pressures (AC)
+
+```bash
+va-cli sim circuits/multiphysics/mems_resonance.net --model models/multiphysics/mems --ac --report xlo,xhi --plot docs/examples/multiphysics/mems_resonance.svg
+```
+
+![Small-signal response at 1 Pa and 100 Pa](examples/multiphysics/mems_resonance.svg)
+
+**The deck.** Two copies of the device in one netlist: `xlo` in a 1 Pa package and `xhi` at
+100 Pa (`squeeze_film pressure=1` vs `pressure=100`). Both are driven by `V1 drv gnd DC 3 AC 1`:
+the `DC 3` sets the bias the AC analysis linearises about, and `AC 1` is the small-signal
+amplitude.
+
+**The `.ac lin 4001 8410 10410` card** puts 4001 points linearly between 8.41 and 10.41 kHz, a
+0.5 Hz grid around the resonance. The grid matters for the Q measurement. At 1 Pa the
+half-power width is only 5.9 Hz, so a coarse grid misplaces the peak and the half-power points.
+On this grid the measured Q is 1603.6; on a 2.5 mHz grid around the peak it is 1605.2, which is
+the model's own value.
+
+**What the physics predicts.**
+
+- **Frequency.** The 3 V bias softens the spring by ε₀AV²/g³ = 0.1156 N/m, and the
+  thermoelastic coupling stiffens it by 4.7·10⁻⁴ N/m. The resonance moves from 10006 Hz to
+  **9412.55 Hz** in both packages.
+- **Damping at 1 Pa.** The rarefied gas barely damps, and thermoelastic loss limits
+  **Q to 1605**.
+- **Damping at 100 Pa.** The squeeze film dominates: **Q = 78.2**.
+
+The thermoelastic damping is not a fitted Q. The `thermoelastic` module couples the plate to a
+thermal mode with τ = 15.9 µs, and Zener's frequency-dependent loss comes out of the circuit.
+
+## Pull-in, bounce, stiction and release (transient)
+
+```bash
+va-cli sim circuits/multiphysics/mems_hysteresis.net --model models/multiphysics/mems --tran --report x --plot docs/examples/multiphysics/mems_hysteresis.svg
+```
+
+![Displacement through a slow voltage triangle](examples/multiphysics/mems_hysteresis.svg)
+
+**The deck.** `V1 drv gnd PWL(0 0 5m 7 10m 0)` is a 0 → 7 → 0 V triangle over 10 ms, at 100 Pa.
+Each corner of a `PWL` source is a breakpoint the step controller lands on.
+
+**The `.tran 2u 10m` card.** The plate's period is 0.1 ms, so a 2 µs cap gives at least 50 steps
+per oscillation, and the controller shrinks further during each impact. Every bounce on the
+Hertzian contact lasts microseconds, and the `contact` model counts them (`tbounce=50e-6`: a
+contact shorter than 50 µs is a bounce). A cap of the order of the period would skip most of
+them. The run takes 13,075 points in about 1.4 s.
+
+**What the contact model reports.**
+
+```text
+XC: landed   at t=3.8424e-03 s, V=5.3794 V
+XC: released at t=9.4973e-03 s, V=0.7038 V (the landing bounced 48 times)
+```
+
+- **Landing.** The plate lands at 5.38 V. That is V_PI plus the time the snap takes: about one
+  period (0.11 ms) to travel 1.3 µm.
+- **Release.** It releases at **0.7038 V**, against the closed form
+  √(2g_c²(k·x_c − f_a)/(ε₀A)) = 0.7023 V. In contact the gap is only the 0.1 µm dielectric, so
+  the same voltage pulls about 316 times harder.
+- **Adhesion.** The 0.2 µN adhesion (`fa=2e-7`) moves release from 0.742 V down to 0.702 V.
+  That is stiction, the reason RF-MEMS switches fail to release.
+
+**A modelling note.** The Hertzian force is written as an explicit branch,
+`if (d > 0.0) fc = kc*d*sqrt(d); else fc = 0.0;`, rather than `pow(max(d, 0), 1.5)`. Differentiating the latter at
+d ≤ 0 gives 0·∞ = NaN in the Jacobian, and d < 0 is every point before contact. The adhesion is
+switched on smoothly by a logistic in d, written in a form whose `exp` never overflows. Whatever
+a Newton solver differentiates must stay finite wherever it is evaluated, including at the
+corner of a `max`.
+
+# Filamentary ReRAM: filament growth, Joule heating, Arrhenius drift {#reram}
+
+**Library:** `models/multiphysics/reram/`: `reram.va` and `reram_natures.vams`, which defines a
+`gap_disc` discipline whose potential is the filament gap in nanometres.
+
+The cell's state is the gap g between the filament tip and the top electrode.
+
+- **Current.** It tunnels across the gap: I = i₀·e^(−g/g₀)·sinh(V/v₀).
+- **Gap motion.** The gap moves by thermally activated, field-driven ion drift,
+  dg/dt = −ν₀·e^(−Eₐ/kT)·sinh(γa₀V/(t_ox·kT)).
+- **Temperature.** T is the filament's own: ambient plus the rise its Joule heat V·I drives
+  through a 1 MK/W thermal resistance (an internal thermal node).
+- **Feedback.** A smaller gap passes more current, which heats the filament, which speeds the drift.
+
+**Three model choices.**
+
+- **`analysis("static")` sets the initial gap.** At zero bias the drift vanishes *for every gap*,
+  so the DC operating point has no unique gap and the matrix row is singular. The model says
+  instead: in a static analysis, the gap equals `g_init`; otherwise it obeys the drift equation.
+  This is the general pattern for a state that needs a chosen initial value.
+- **`$bound_step(0.02·(gmax − gmin)/|drift|)`.** A fast-moving gap asks for steps short enough to
+  move it by at most 2 % of its range. The model tells the step controller its own time scale
+  instead of the deck having to know it.
+- **`gam=8`, the field-enhancement factor.** At twice the value the end of RESET took less than a
+  picosecond, and no time step could follow it. The value used keeps the physics and keeps the
+  time scales resolvable.
+
+## SET, RESET and temperature (triangular sweep, two ambients)
+
+```bash
+va-cli sim circuits/multiphysics/reram_sweep.net --model models/multiphysics/reram --tran --report X1.g,X2.g --plot docs/examples/multiphysics/reram_gap.svg
+va-cli sim circuits/multiphysics/reram_sweep.net --model models/multiphysics/reram --tran --report X1.th,X2.th --plot docs/examples/multiphysics/reram_temp.svg
+python docs/examples/multiphysics/reram_iv.py "$PWD/target/release/va-cli"
+```
+
+![I–V loops at 300 K and 400 K](examples/multiphysics/reram_iv.svg)
+![The filament gap](examples/multiphysics/reram_gap.svg)
+![The filament temperature](examples/multiphysics/reram_temp.svg)
+
+**The deck.** Two cells behind 2 kΩ series resistors, the current compliance. One is at
+`tamb=300` and one at `tamb=400`. Both are driven by the same triangle,
+`PWL(0 0 2.5m 1.6 5m 0 7.5m -1.6 10m 0)`.
+
+**Reporting internal nodes.** `X1.g` is the gap node *inside* instance `X1`, reported as
+`Gap(X1.g)` in nanometres. `X1.th` is its thermal node: the filament's temperature rise, in K
+above ambient. Neither is a net of the deck, and both are reachable by hierarchical name.
+
+**Why a script for the I–V figure.** The cell current is not an unknown of the circuit; it is
+the series resistor's current, (V(in) − V(te))/2 kΩ. `reram_iv.py` reports `in,te1,te2`,
+computes it, and plots |I| on a log axis against the cell voltage, the usual way to show a
+switching curve.
+
+**The `.tran 1u 10m` card**, and why it is converged. The fast part, RESET, takes about 10 µs
+and is resolved by `$bound_step` and the step controller, not by the cap. The run takes 10,181
+points in under a second. With a 0.2 µs cap the SET and RESET voltages agree with these to
+0.1 mV.
+
+**Event time tolerances.** Both events carry a third argument: `@(above(expr, 1e-9))` and
+`@(cross(expr, +1, 1e-9))`. That is a 1 ns time tolerance. A step that reveals a crossing is
+re-taken until it lands within 1 ns of it, so the voltage and temperature the strobe prints are
+those *at* the crossing. Without it, they belonged to whichever accepted point first fell past
+the mid-gap. During a RESET the cell voltage moves tens of mV per step, so the printed voltage
+moved with the step size: −0.830 V at a 1 µs cap and −0.852 V at 0.2 µs.
+
+**What the strobes say.**
+
+```text
+X2: SET   at t=1.111878e-03 s: V=0.5073 V, I=1.021e-04 A, gap=0.900 nm, T=451.8 K
+X1: SET   at t=1.553725e-03 s: V=0.6413 V, I=1.766e-04 A, gap=0.900 nm, T=413.2 K
+X2: RESET at t=6.775593e-03 s: V=-0.6960 V, I=-2.202e-04 A, gap=0.900 nm, T=553.3 K
+X1: RESET at t=7.527534e-03 s: V=-0.8297 V, I=-3.763e-04 A, gap=0.900 nm, T=612.3 K
+```
+
+- **SET is self-limiting.** As the cell conducts, the series resistor takes a growing share of
+  the voltage, so the gap closes over 0.58 ms of the ramp.
+- **RESET is abrupt and thermal.** It waits until the filament reaches about 610 K, then the
+  opening cell takes the voltage back from the resistor, and the gap reopens in 10.5 µs.
+- **Arrhenius.** The 400 K cell switches earlier, because e^(−Eₐ/kT) is 1,412 times larger at
+  its starting temperature.
+- **The loop is pinched.** I = 0 whenever V = 0, whatever the state.
+
+The SET is reported by `@(above(...))`, which also fires at initialization if the condition
+already holds. RESET is reported by `@(cross(..., +1))`, the gap passing mid-range while
+opening.
+
+## The frequency fingerprint (three decks, one script)
+
+```bash
+python docs/examples/multiphysics/reram_loops.py "$PWD/target/release/va-cli"
+```
+
+![The pinched loop at 5 kHz, 500 kHz and 5 MHz](examples/multiphysics/reram_loops.svg)
+
+The script runs three decks (`reram_freq_5k.net`, `reram_freq_500k.net`, `reram_freq_5meg.net`),
+each a ±1.6 V sinusoid for two periods. It keeps the second period of each and plots the cell
+current against the cell voltage.
+
+**Why three decks, and why their time steps differ.** Each deck's `tstep` is a fixed fraction of
+its own period:
+
+| Deck | Drive | Card | Cap per period |
+|---|---|---|---|
+| `reram_freq_5k` | `SIN(0 1.6 5k)` | `.tran 10n 0.4m` | 1/20,000 |
+| `reram_freq_500k` | `SIN(0 1.6 500k)` | `.tran 0.1n 4u` | 1/20,000 |
+| `reram_freq_5meg` | `SIN(0 1.6 5meg)` | `.tran 10p 0.4u` | 1/20,000 |
+
+A single deck with all three cells would have to run for the slowest drive's two periods
+(0.4 ms) at the fastest drive's cap (10 ps): 4·10⁷ steps. That attempt ran for more than
+20 minutes. Splitting the decks lets each run at its own time scale.
+
+**What it measures.** A memristor's pinched loop shrinks as the drive outruns its state. The
+script integrates the two lobes separately: they are traversed in opposite directions, and a
+single signed ∮I dV would cancel them.
+
+| Drive | Gap range over a cycle | Lobe areas (V·A) |
+|---|---|---|
+| 5 kHz | 0.238–1.697 nm | 3.19·10⁻⁴ + 3.20·10⁻⁴ |
+| 500 kHz | 0.759–1.687 nm | 2.19·10⁻⁴ + 2.18·10⁻⁴ |
+| 5 MHz | 1.326–1.688 nm | 5.8·10⁻⁵ + 5.8·10⁻⁵ |
+
+# Hodgkin–Huxley axon: propagation, temperature, sodium accumulation {#axon}
+
+**Library:** `models/multiphysics/axon/`: `hh_cable.va` and `axon_natures.vams`, which defines a
+`gate` discipline (a channel's open probability) and a `chemical` discipline (an intracellular
+concentration).
+
+**One module, `N` compartments.** The cable is built inside the model by `generate` loops over a
+`genvar`, on vector nets of three disciplines:
+
+```verilog
+electrical [0:N-1] v;
+gate       [0:N-1] m, h, n;
+chemical   [0:N-1] dnai, dki;    // concentration departures from nai0, ki0 (mM)
+```
+
+Each compartment carries:
+
+- the 1952 Hodgkin–Huxley Na, K and leak channels;
+- its own gates m, h, n;
+- its own Na⁺ and K⁺, whose Nernst potentials set ENa and EK.
+
+The concentrations move with the currents, diffuse along the fibre, and relax back through a
+first-order pump (`tau_pump`). A second loop links neighbours: axial current, plus longitudinal
+ion diffusion.
+
+**Why the concentrations are stored as departures (`dnai`, `dki`).** Newton's first iterate reads
+every unknown as zero. A node holding the concentration itself would give ln(Na_o/0) at that
+first iterate: an infinite Nernst potential and a NaN residual. As a departure from the initial
+value, zero *is* the physical start.
+
+## Conduction velocity, and what temperature does to it
+
+```bash
+va-cli sim circuits/multiphysics/hh_giant_axon.net --model models/multiphysics/axon --tran --report X1.v[0],X1.v[50],X1.v[100],X2.v[100] --plot docs/examples/multiphysics/hh_giant_axon.svg
+```
+
+![Action potentials along the giant axon](examples/multiphysics/hh_giant_axon.svg)
+
+**The deck.**
+
+```text
+VP p gnd PULSE(0 20 0.5m 10u 10u 0.2m 1)
+G1 gnd stim1 p gnd 1e-6
+G2 gnd stim2 p gnd 1e-6
+X1 stim1 hh_cable N=150 len=0.03 a=238e-6 ri=0.354 tc=18.5 probe_a=50 probe_b=100
+X2 stim2 hh_cable N=150 len=0.03 a=238e-6 ri=0.354 tc=6.3 probe_a=50 probe_b=100
+.tran 10u 6m
+```
+
+- **The stimulus** is a current, not a voltage: a 20 V pulse turned into 20 µA by a
+  voltage-controlled current source (`G`, gain 1 µS). Each axon gets its own source, so the two
+  share a pulse without loading each other.
+- **The axon** is `len=0.03 a=238e-6 ri=0.354`: Hodgkin and Huxley's squid axon, 3 cm long,
+  radius 238 µm, axoplasm 35.4 Ω·cm, in `N=150` compartments of 0.2 mm.
+- **Temperature.** `tc` sets it in °C, and the gating rates scale by Q₁₀ = 3 per 10 °C. Their
+  1952 velocity, 18.8 m/s, was computed at **18.5 °C**, so that is the temperature to compare at.
+- **The velocity probes.** `probe_a=50 probe_b=100` choose the two compartments, 1 cm apart,
+  whose upstrokes through 0 V are timed by `@(cross(V(v[probe_a]), +1))`. The model prints the
+  velocity with `$strobe`.
+
+**Reporting inside a vector net.** `X1.v[50]` is element 50 of the vector net `v` inside `X1`.
+The plot shows the spike passing compartments 0, 50 and 100 of the warm axon, and compartment
+100 of the cold one, late.
+
+**What it prints.**
+
+```text
+X1: spike reached compartment 100 at t=1.6572e-03 s; velocity 18.971 m/s
+X2: spike reached compartment 100 at t=2.3072e-03 s; velocity 12.218 m/s
+```
+
+**18.97 m/s against Hodgkin and Huxley's 18.8 m/s**, 0.9 % above. The cold axon conducts at
+12.22 m/s. Its gating runs 3.73× slower, but the velocity falls by only 1.55×, because only the
+channels that regenerate the spike slow down, not the cable's passive spread.
+
+### Checking convergence: the time step
+
+`.tran 10u 6m` caps the step at 10 µs. To check that the answer does not depend on it, copy the
+deck, change the card to `.tran 2u 6m`, and run it again. The warm axon gives 19.01 m/s, 0.2 %
+away, so the 10 µs result is converged to that level.
+
+The cold axon is more sensitive. On its own in a deck it gives 12.35 m/s at a 10 µs cap and
+12.29 m/s at 2 µs. In this deck it shares the time steps the warm axon forces, and gives
+12.22 m/s. Its figure is good to about 1 %.
+
+### Checking convergence: the number of compartments
+
+Space is checked the same way, by doubling `N` and keeping the probes 1 cm apart:
+
+```bash
+sed 's/N=150/N=300/; s/probe_a=50 probe_b=100/probe_a=100 probe_b=200/' circuits/multiphysics/hh_giant_axon.net > /tmp/hh300.net
+va-cli sim /tmp/hh300.net --model models/multiphysics/axon --tran --report X1.v[0]
+```
+
+With 300 compartments (1803 unknowns, sparse solve) the warm axon gives **18.98 m/s**, against
+18.97 m/s with 150 compartments.
+
+::: {.callout-important}
+## Parameters that change the model's *structure*
+
+`N` sizes vector nets and bounds `generate` loops, and `probe_a`/`probe_b` index into them. These
+values are fixed when the module is **elaborated**, not when it is evaluated. Since 2.15.0, a
+device line that sets one of them makes the simulator elaborate the module again for that
+value, and it says so on stderr:
+
+```text
+[va-cli] elaborated `hh_cable` again for N=300, probe_a=100, probe_b=200: fixed at elaboration (first placed by `X1`)
+```
+
+Before 2.15.0 the override reached `dx = len/N` in the analog block, but not the vector
+declarations. `N=300` built 150 compartments, each 1/300 of the length, and reported 37.6 m/s.
+This tutorial's own convergence check is what found that bug. The same mechanism covers a
+parameter whose *default* is computed from another (`parameter real b = 2*a`): it was silently
+wrong in the same way, and gave every PMOS in three benchmark decks the NMOS defaults.
+:::
+
+## A thin fibre under a spike train: sodium accumulates, ENa falls, spikes shrink
+
+```bash
+python docs/examples/multiphysics/hh_thin_fibre.py "$PWD/target/release/va-cli"
+```
+
+![Spike peaks follow the falling sodium reversal potential](examples/multiphysics/hh_thin_fibre.svg)
+
+**The deck** (`hh_thin_fibre.net`).
+
+```text
+VP p gnd PULSE(0 1 1m 10u 10u 0.5m 10m)
+G1 gnd stim p gnd 2e-9
+X1 stim hh_cable N=10 len=1e-3 a=0.25e-6 tc=18.5 tau_pump=10 probe_a=2 probe_b=8
+.tran 20u 1
+```
+
+- **A different fibre from the same model.** Every parameter that differs from the giant axon is
+  on the device line: 0.25 µm radius, 1 mm long, 10 compartments, and new probe positions.
+  `N=10` and the probes are structural, so this deck too elaborates the module again.
+- **The stimulus** is a 2 nA, 0.5 ms pulse every 10 ms, a 100 Hz train for one second
+  (`PULSE(... 10m)` repeats with that period).
+- **`tau_pump=10`.** A slow pump means the train mostly *accumulates* sodium during the second.
+  With the default 1 s, the pump would carry a visible fraction back out.
+
+**Why sodium accumulates here and not in the giant axon.** A spike admits about the same sodium
+per unit membrane in both fibres. Behind each square micrometre of membrane, though, there is a/2
+of axoplasm. At 0.25 µm instead of 238 µm, the concentration change per spike is about 950× larger.
+
+**A pinned operating point.** With a slow pump in so small a volume, the ion terms outweigh the
+pump a thousandfold. Newton's first DC steps carried a concentration through zero, and its
+logarithm to NaN. The model therefore pins the concentrations at the DC point with
+`analysis("static")`, which is also physically right: the resting state is the initial
+concentrations, by definition. This is the same pattern as the ReRAM gap.
+
+**What the script does.** It reports `X1.v[5]` and `X1.dnai[5]` for the middle compartment, and
+computes ENa = (RT/F) ln(Na_o/Na_i) from the reported sodium (the model does not output ENa).
+It finds each spike's peak and parses the velocity strobes.
+
+| | First spike | 100th spike |
+|---|---|---|
+| [Na⁺]ᵢ | 55.3 mM | 86.6 mM |
+| ENa (Nernst, 18.5 °C) | 52.1 mV | 40.9 mV |
+| Spike peak | 29.6 mV | 18.8 mV |
+| Conduction velocity | 0.577 m/s | 0.531 m/s |
+
+The peak falls by 10.8 mV as ENa falls by 11.3 mV. Two cross-checks hold:
+
+- The first velocity is the giant axon's scaled by cable theory's √radius law,
+  18.97·√(0.25/238) = 0.61 m/s, 5 % away with only 0.1 mm compartments.
+- The potassium lost (30.3 mM, `X1.dki[5]`) balances the sodium gained (31.6 mM).
+
+# Power-grid swing: equal areas, relays and a cascade {#grid}
+
+**Library:** `models/multiphysics/powergrid/`, which contains:
+
+- `grid_parts.va`: `machine`, `line`, `slack`;
+- `grid_natures.vams`: the `grid` discipline (angle in rad as potential, power in pu as flow) and
+  `grid_speed` (rotor speed deviation in rad/s).
+
+**The network as a circuit.**
+
+- **A bus.** Its node potential is the voltage phase angle δ.
+- **A line.** `Pw(a, b) <+ g·bmax·sin(Ang(a, b))`, a nonlinear conductance between two angle nodes.
+- **A machine.** It stamps the swing equation M ω̇ + D ω = Pm − Pe on its bus, with the speed ω on
+  an internal node. M = 2H/ω_s comes from the inertia constant `h` and the frequency `f0`.
+- **Power balance.** Kirchhoff's current law at a bus is the bus's power balance.
+
+The **DC operating point is therefore the full nonlinear load flow**, with ω = 0 everywhere, and
+the transient is the swing.
+
+**Protection as events** (in `line`):
+
+- `@(timer(t_open))` and `@(timer(t_close))` schedule a fault and its clearing (a negative time
+  means never);
+- `@(cross(abs(p) - pmax, +1))` is an overload relay. It sets `integer open = 1`, which persists
+  between events, and the line opens through `g = 1 - transition(open, 0, tsw)`, a 1 ms breaker;
+- `@(cross(sin(Ang(a, b)), 0))`, with `cos(Ang(a, b)) < 0` checked in the body, reports every
+  passage of the angle across the line through ±180°: a pole slip.
+
+## The equal-area criterion
+
+```bash
+python docs/examples/multiphysics/grid_plots.py "$PWD/target/release/va-cli"
+```
+
+That one script draws both figures of this section. This one comes from `grid_equal_area.net`:
+
+![Two machines, cleared before and after the critical time](examples/multiphysics/grid_equal_area.svg)
+
+**The deck.**
+
+```text
+XINF inf slack
+XG1 g1 machine pm=0.8 h=5
+XL1 g1 inf line bmax=1.6 t_open=1.0 t_close=1.255
+XG2 g2 machine pm=0.8 h=5
+XL2 g2 inf line bmax=1.6 t_open=1.0 t_close=1.270
+.tran 1m 3
+```
+
+- **Two independent machines in one run**, each on its own line to the same infinite bus. G1's
+  fault is cleared after 0.255 s and G2's after 0.270 s. Damping is left at its default `d=0`,
+  because the equal-area criterion is a statement about an undamped machine.
+- **The `slack`** is an infinite bus: an angle source of 0 rad that supplies or absorbs any power.
+  It is also the angle reference, which a network otherwise lacks: only angle *differences*
+  matter.
+- **`.tran 1m 3`.** The swing frequency is 1.05 Hz, so a 1 ms cap is about 950 steps per swing.
+  The switching instants are timer breakpoints, landed on exactly.
+
+**Closed form.** With M = 0.031831 s² and Pm/Pmax = 0.5:
+
+- δ₀ = 30°.
+- The equal areas give the critical clearing angle 79.56°.
+- While the line is open, δ = δ₀ + Pm·t²/2M.
+- Together these give **t_cr = 0.2624 s**.
+
+**What the run shows.**
+
+- **G1**, cleared 2.8 % early, peaks at **130.39°** (equal areas: 130.40°) and swings back.
+  Undamped, it then oscillates between that and −36.3° indefinitely.
+- **G2**, cleared 2.9 % late, passes 150° (180° − δ₀) with speed to spare. Its line reports pole
+  slips from t = 1.763 s:
+
+```text
+XL2: angle across the line passed 180 degrees at t=1.7631 s (pole slip)
+```
+
+### Finding the simulator's own critical clearing time
+
+The pole-slip strobe makes the critical time searchable. This loop bisects the clearing time on a
+single machine:
+
+```bash
+lo=0.255; hi=0.270
+for k in $(seq 1 12); do
+  mid=$(python -c "print(round(($lo+$hi)/2,7))")
+  printf "* bisect\nXINF inf slack\nXG1 g1 machine pm=0.8 h=5\nXL1 g1 inf line bmax=1.6 t_open=1.0 t_close=%s\n.tran 1m 2.5\n.end\n" \
+    "$(python -c "print(1+$mid)")" > /tmp/bisect.net
+  if va-cli sim /tmp/bisect.net --model models/multiphysics/powergrid --tran --report g1 2>&1 | grep -q "pole slip"
+  then hi=$mid; else lo=$mid; fi
+done
+echo "t_cr in [$lo, $hi]"
+```
+
+It ends at `t_cr in [0.2624267, 0.2624304]`, against the closed form's 0.262366 s: **+0.02 %**.
+The 1 ms breaker transition is the only departure from the textbook case.
+
+## A cascade: one line lost, two tripped, two islands
+
+This figure comes from `grid_cascade.net`, drawn by the same script:
+
+![Tie flows, trips, and the islands' frequencies](examples/multiphysics/grid_cascade.svg)
+
+**The deck.**
+
+- **Two areas of four buses**, each a ring of strong lines (`bmax=10`). Area A's machines
+  generate (`pm=0.9`) and area B's consume (`pm=-0.9`). All have `h=5 d=0.1` and no governor.
+- **Three ties** of different strength, each behind a 1.6 pu relay:
+
+```text
+XT1 a1 b1 line bmax=2.5 pmax=1.6
+XT2 a2 b2 line bmax=2.0 pmax=1.6
+XT3 a3 b3 line bmax=1.5 pmax=1.6 t_open=1.0
+```
+
+- **`eps=1e-6` on every machine.** This grid has no infinite bus, so nothing fixes the absolute
+  angle. Every angle could shift by the same constant, and the DC operating point's matrix would
+  be singular. A leak of 10⁻⁶ pu/rad to the reference fixes the angle level and moves no flow
+  measurably.
+- **`.tran 1m 10`.** Ten seconds: long enough for the islands to settle at their new
+  frequencies.
+
+**The sequence.**
+
+1. **The load flow** shares the 3.6 pu by tie strength: **1.475 / 1.178 / 0.948 pu**, all within
+   1.6 pu.
+2. **At t = 1 s** a fault opens T3. The remaining ties cannot carry 3.6 pu within their
+   settings, and the relays trip them in turn:
+
+   ```text
+   XT3: opened at t=1.0000 s (scheduled)
+   XT1: TRIPPED at t=1.1494 s, |P| = 1.601 pu > 1.600 pu
+   XT2: TRIPPED at t=1.2374 s, |P| = 1.603 pu > 1.600 pu
+   ```
+
+3. **The islands settle.** With no governor, each settles where its damping absorbs the
+   imbalance: ω = P/ΣD = 3.6/0.4 = 9 rad/s, **±1.4324 Hz**. The run ends at ±1.4323 Hz.
+4. **Pole slips.** The open ties report pole slips as the islands drift past each other, about
+   75 reports in the remaining nine seconds.
+
+**Why the script, not `--plot`.** The tie flows are not unknowns. The script computes
+bmax·sin(δa − δb) from the reported bus angles, and sets each flow to zero from the moment that
+line's strobe reports it open. It also converts the speeds `Om(XA1.w)` from rad/s to Hz.
+
+::: {.callout-note}
+## A bug this example found (fixed in 2.16.1)
+
+The first cascade run printed 98 `TRIPPED` lines for the two trips that happened. When the
+simulator checked an event's condition after each accepted time point, it evaluated the
+expression *without the instance's committed state*. `open` read its initial 0 and
+`transition()` had no history, so a relay that had opened its line still saw it closed. It
+"tripped" again whenever the flow it no longer carried would have crossed 1.6 pu. The answer
+was right only because opening an open line changes nothing. Since 2.16.1 the event poll
+passes the committed state (`ModelInstance::events_with_state`).
+:::
+
+# Thermo-optic ring bank: self-heating, crosstalk and locking {#ring}
+
+**Library:** `models/multiphysics/ringbank/`, which contains:
+
+- `ring_parts.va`: `laser`, `ring`, `heater`, `lock`, `thermal_cap`, `thermal_res`;
+- `ring_natures.vams`, with four user disciplines.
+
+| Discipline | Potential | Used for |
+|---|---|---|
+| `optical_power` | `Popt`, mW | a guided wave's power |
+| `wavelength` | `Wl`, nm | the laser's wavelength, carried beside its power |
+| `cmt_field` | `Fld`, √fJ | one quadrature of a ring's intracavity field |
+| `ring_heat` | `Temp`, K above the substrate | a ring's temperature (flow `Pwr`, W) |
+
+**Why not the standard `thermal` discipline.** Its natures are defined in a `disciplines.vams`.
+When no such file is on the include path, the simulator still accepts `thermal`, but with no
+nature behind it: the node prints as `V(t1)` and gets no tolerance of its own. Declaring
+`ring_heat` gives the node a name (`Temp(t1) = … K`) and an `abstol`.
+
+**The ring.** Coupled-mode theory, in a frame rotating at the laser's frequency:
+
+$$\frac{da}{dt} = (i\delta - 1/\tau)\,a + \kappa s,\qquad
+P_\text{drop} = \tfrac{2}{\tau_e}|a|^2,\qquad P_\text{abs} = \eta\,\tfrac{2}{\tau_i}|a|^2$$
+
+- **The field.** a is complex, so the model carries its real and imaginary parts as two state
+  nodes, `ar` and `ai`, each with its own `ddt`.
+- **The detuning.** δ comes from the laser's wavelength and the ring's resonance, which moves
+  with the ring's temperature at 0.0686 nm/K.
+- **Time scales.** τ = 2Q/ω₀ = 16.3 ps, against a 1 ms thermal time constant.
+
+**One-way ports.** A laser's output is a *signal*, not a conserved flow: whatever reads it should
+not load it. The model therefore writes it as a potential, `Popt(out) <+ V(pctl)`, and every
+reader only probes it. The laser takes its power and wavelength from two electrical nodes, so
+ordinary `PWL`, `PULSE` and `DC` sources can drive them (volts read as mW and nm).
+
+**Stiffness.** Picosecond optics and millisecond thermals in one system is a stiffness ratio of
+about 10⁸. An explicit integrator would have to step at the photon lifetime: about 10¹¹ steps
+for the 2 s sweep below. The implicit trapezoidal default is A-stable, so the fast optical modes
+cannot blow up at a 0.5 ms step. The sweep takes 4,094 steps, and Gear (`--integration gear`)
+gives the same answers to every printed digit. Neither deck needs a non-default method.
+
+## Self-heating: the thermal triangle and its bistability
+
+```bash
+python docs/examples/multiphysics/ring_plots.py "$PWD/target/release/va-cli"
+```
+
+![Through-port transmission swept up and down at 0.1 mW and 20 mW](examples/multiphysics/ring_selfheat.svg)
+
+**The deck** (`ring_selfheat.net`):
+
+- **Two rings.** Two laser–ring–thermal-node chains share one wavelength control,
+  `VW wctl gnd PWL(0 1549.7 1 1550.6 2 1549.7)`. `VP1 … DC 0.1` and `VP2 … DC 20` set their
+  powers.
+- **The ring's thermal node** is `XC1 t1 thermal_cap` (2.5·10⁻⁷ J/K) plus
+  `XG1 t1 gnd thermal_res` (4000 K/W) to the substrate: τ = 1 ms.
+- **`.tran 0.5m 2`.** The sweep is 1 s each way. That is slow against the 1 ms thermal
+  constant, so the ring is nearly in thermal equilibrium at every wavelength, which is what makes
+  the fold points meaningful. The 0.5 ms cap is half a thermal time constant.
+
+**Why the sweep speed is a parameter, not a detail.** A bistable system's jump happens where its
+branch ends, but only in the quasi-static limit. Near a fold the dynamics slow down, so a finite
+sweep rate carries the state past the fold before it jumps. The first version of this deck swept
+ten times faster, 100 ms per direction. Its jumps landed 0.014 and 0.033 nm past the folds; the
+1 s sweep lands 0.004 and 0.009 nm past.
+
+**What the script prints**, with its closed forms:
+
+```text
+tau = 16.31 ps, linewidth 0.1564 nm, drop max 0.8116, through min 0.00982, dlambda/dT 0.06864 nm/K
+20 mW: hottest 7.1423 K (shift 0.4903 nm), folds at 1550.2545, 1550.4934 nm
+X1: through min 0.00982 at 1550.0024 nm
+X2: up-sweep jump at 1550.4976 nm, down-sweep snap at 1550.2456 nm, hottest 7.1416 K
+```
+
+- **The 0.1 mW ring** is a Lorentzian at the closed-form depth and width. It sits 0.0024 nm red
+  of 1550 nm because even 0.1 mW warms it by 0.036 K.
+- **The 20 mW ring** has its resonance dragged 0.49 nm by its own heat, the "thermal triangle".
+  It is bistable between the two folds, where the sweep direction decides the state.
+
+The closed form behind the folds is the steady state T = R_th·η·(2/τ_i)·|a|², with |a|²
+Lorentzian in the *heated* detuning. Solved for the laser wavelength as a function of T, its
+turning points are the folds.
+
+**A bug this check caught, in the model.** The first version set τ = Q/ω₀. With da/dt = −a/τ the
+*energy* decays at 2/τ, so Q = ω₀τ/2. The dip depth was right, but the linewidth came out
+0.3128 nm, twice the closed form. Comparing a single number, such as the dip depth, would not
+have caught it.
+
+## A locked bank against crosstalk and self-heating
+
+The same script draws this figure from `ring_bank.net`:
+
+![Drop power and heater power of four locked rings](examples/multiphysics/ring_bank.svg)
+
+**The deck.**
+
+- **Lasers.** Four, at 1550.0/1550.8/1551.6/1552.4 nm and 1 mW.
+- **Rings.** Four, made blue of their channels by fabrication: `lambda0=1549.75`, `1550.50`,
+  `1551.30` and `1552.15`.
+- **Thermal crosstalk.** `XX12 t1 t2 thermal_res r=16000`, and the same between rings 2–3 and
+  3–4: a quarter of each ring's own 4000 K/W conductance leaks to its neighbour.
+- **Heaters and locks.** `XH1 u1 t1 heater` turns a power command (V(u1) read as mW) into heat.
+  `XK1 in1 dr1 u1 lock kp=5 ki=3e3` closes the loop.
+- **Disturbances.** At 30 ms, `VW1`'s `PWL` hops channel 1 by +0.2 nm in 10 µs. At 60 ms,
+  `VP3`'s steps channel 3's power from 1 to 4 mW.
+- **`.tran 50u 100m`.** The 50 µs cap is a twentieth of the thermal constant, fine enough for
+  the loop transients. The run takes 2,152 points in about 4 s.
+
+**The lock, parameter by parameter** (`lock` in `ring_parts.va`).
+
+- `frac=0.4` holds the drop power at 40 % of the ring's own input. The set point is relative, so
+  a change of input power is not an error: it moves the target with it, and only the physics
+  that changes with power, the self-heating, needs correcting.
+- `kp=5 ki=3e3` are the PI gains. The plant's gain at the lock point is about 1.4 mW of drop per
+  mW of heater: about 5 mW of drop per nm of detuning, times 0.0686 nm/K, times 4 K/mW. The loop
+  crosses over well above the thermal pole. The integrator holds the drop *exactly* at the set
+  point in steady state, which is what the closed form relies on.
+- **Which side of the resonance.** A heater can only red-shift a ring, so from cold each ring
+  approaches its laser from the blue side and locks there. That is also the side where
+  self-heating is positive feedback (more light → more heat → closer → more light). The loop
+  out-gains it.
+- **The leak `(1 − g)·V(xi)`.** Before the loop closes (`ton=1e-3`, through `@(timer)` and a
+  0.1 ms `transition`), the integrator row would read 0 = 0, and the DC operating point would be
+  singular. The leak holds the integrator at zero until then. This is the same pattern as
+  `pid.va` in §3.
+
+**What the strobes and the script say.**
+
+```text
+XK1: locked at t=0.004921 s, heater 0.5325 mW
+XK4: locked at t=0.004921 s, heater 0.5309 mW
+XK2: locked at t=0.006371 s, heater 0.8036 mW
+XK3: locked at t=0.006371 s, heater 0.8029 mW
+ before 30 ms: heaters 0.5323/0.5322  0.8048/0.8048  0.8041/0.8041  0.5306/0.5306  mW (simulated/closed form)
+     30-60 ms: heaters 1.4428/1.4428  0.6227/0.6227  0.8041/0.8041  0.5306/0.5306  mW (simulated/closed form)
+  after 60 ms: heaters 1.4428/1.4428  0.6227/0.6227  0.6721/0.6721  0.5306/0.5306  mW (simulated/closed form)
+```
+
+**The closed form.** With every ring held at its lock temperature, everything that remains is
+linear.
+
+- The lock condition fixes each ring's detuning in *frequency*: the drop Lorentzian at 40 %.
+- That gives each ring's resonance, so its temperature, so its absorbed heat.
+- The heater powers are then G·T − P_abs, with G the thermal network's conductance matrix.
+
+`ring_plots.py` computes this and prints it beside the simulation. It agrees to 10⁻⁴ mW in all
+three phases:
+
+- **The hop.** Ring 1's heater rises by (1/4000 + 1/16000)·2.914 K = 0.9105 mW.
+- **The crosstalk.** Ring 2's heater falls by 2.914 K/16000 K/W = 0.1821 mW, exactly cancelling
+  the heat leaking across.
+- **The containment.** Rings 3 and 4 do not move, because ring 2's lock stops the disturbance.
+- **The power step.** Ring 3's heater gives back η·(Q_e/Q_i)·0.4·3 mW = 0.1320 mW of
+  self-heating.
+
+::: {.callout-note}
+## A bug this example found (fixed in 2.16.1)
+
+At the 30 ms hop the run first stopped with `singular matrix during linear solve`. The solve was
+not singular: `--solver sparse`, Gear and backward Euler all completed. The dense solver checks
+its answer by its residual, and that test compared the raw residual with `1e-6·(1 + ‖b‖)`. A
+field row's entries are about 10¹¹ (1/τ and δ in 1/s), so a correct factorisation leaves about
+10⁻⁴ of round-off in it, and near Newton convergence b is tiny. The test now measures each row
+against its own largest coefficient, so its verdict no longer depends on the units an equation
+is written in. Results that passed before are unchanged bit for bit.
+:::
+
+# Li-ion cell: kinetics, diffusion, aging and thermal runaway {#liion}
+
+**Library:** `models/multiphysics/liion/`, which contains:
+
+- `li_parts.va`: `electrode`, `electrolyte`, `cell_thermal`, `abuse`, `cc_load`;
+- `li_natures.vams`, with three user disciplines:
+
+| Discipline | Potential | Flow | Used for |
+|---|---|---|---|
+| `stoich` | `Th`, stoichiometry 0–1 | `Nli`, mol/s of lithium | the diffusion shells |
+| `cell_heat` | `Temp`, K | `Pwr`, W | the cell's temperature |
+| `extent` | `Ext` | (the row's residual) | a reaction's remaining fraction, or the SEI thickness in nm |
+
+**Building a cell from parts.** A cell is four device lines and a load:
+
+```text
+XN1 gnd en1 th1 electrode kind=0 theta0=0.8          graphite: terminal, electrolyte side, heat
+XE1 en1 ep1 th1 electrolyte                          the separator, as a resistance
+XP1 p1 ep1 th1 electrode kind=1 cmax=51555 vact=2.96e-6 ds=1e-14 k0=6.67e-11 theta0=0.5
+XT1 th1 amb cell_thermal                             40 J/K, 0.03 W/K to the node `amb`
+XL1 p1 gnd cc_load iset=2                            1C, cut off at 3.0 V
+```
+
+`electrode` is one module for both sides. `kind` selects the open-circuit potential with a
+`case`, and the cathode's line overrides the material constants. All three parts share the
+thermal node `th1`, so every heat they generate lands in the same 40 J/K. The ambient is an
+ordinary voltage source whose volts are kelvin: `VA amb gnd DC 298.15`, or a `PWL` for an oven
+that ramps.
+
+**Inside `electrode`.**
+
+- **Diffusion.** `stoich [0:N-1] sh` is a vector of N = 10 shells, written with two `generate`
+  loops: one gives each shell its lithium capacity (`ddt`), the other links neighbours with
+  Fick's conductance.
+- **The interface** is on the outermost shell, `sh[N-1]`.
+- **The initial state.** `analysis("static")` pins every shell at `theta0` and the film at
+  `dsei0`. Without the pin, a DC operating point of a diffusion ladder is any uniform
+  stoichiometry, and the matrix would be singular.
+
+::: {.callout-tip}
+## Writing Butler–Volmer so that Newton survives it
+
+The textbook form is a current, I = 2·S·i₀·sinh(Fη/2RT). Newton's first iterate reads every node
+as 0 V, so the cathode's overpotential there is η = −4.2 V, and sinh of it at 200 K is about
+10⁵⁰. That is a conductance no linear solve survives. The model therefore writes the *inverse*,
+as a voltage driven by the interface's own branch current:
+
+```verilog
+ibv = I(m, e);
+eta = 2.0 * `LI_R * t / `LI_F * asinh(ibv / (2.0 * area * i0));
+V(m, e) <+ u + eta;
+```
+
+It is the same equation, but asinh is smooth everywhere and cannot overflow. A potential
+contribution that reads its own branch current is legal Verilog-A, and here it is the difference
+between an operating point and none.
+:::
+
+## Discharge at three rates
+
+```bash
+python docs/examples/multiphysics/li_plots.py "$PWD/target/release/va-cli"
+```
+
+This one script runs all three Li-ion decks and draws all three figures.
+
+![Cell voltage against charge delivered](examples/multiphysics/li_discharge.svg)
+
+**The deck** (`li_discharge.net`): three identical cells, loaded at C/20, 1C and 2C
+(`cc_load iset=0.1 / 2 / 4`).
+
+- **The load.** `cc_load` switches on at 10 s through `@(timer)` and a 1 s `transition`. It
+  switches off through `@(cross(V(p, n) - vmin, -1))`, and its `$strobe` reports the charge
+  delivered.
+- **`.tran 10 75000`.** The C/20 cell needs about 20 hours; 1C and 2C finish in one hour and
+  half an hour. A 10 s cap resolves the 1,333 s thermal constant and the end-of-discharge knee.
+
+**The closed form.** Discharged infinitely slowly, the voltage is the difference of the two
+open-circuit potentials as lithium moves from graphite to LiCoO₂. The script finds where it
+reaches 3.0 V: **1.9609 Ah**, with the graphite almost empty.
+
+```text
+XL3: cutoff at t=1764.4 s (2.9413 V), 1.9493 Ah delivered at 4.000 A
+XL2: cutoff at t=3530.4 s (2.9347 V), 1.9558 Ah delivered at 2.000 A
+XL1: cutoff at t=70583.6 s (2.9996 V), 1.9604 Ah delivered at 0.100 A
+```
+
+- **C/20** comes within 0.03 % of the thermodynamic limit.
+- **1C and 2C** lose a little to overpotential, and warm the cells by 3.9 K and 10.8 K.
+- **The reported voltage** is the first accepted point *past* the cutoff, which at 1C and 2C
+  lands up to 65 mV low because the voltage is falling steeply. A `cross` time tolerance
+  (`cross(expr, -1, 1.0)`) would bracket it more tightly.
+
+## Calendar aging: two years on the shelf
+
+![SEI growth and lithium lost at 25, 45 and 60 °C](examples/multiphysics/li_calendar.svg)
+
+**The deck** (`li_calendar.net`): three fully charged cells at open circuit, with ambients of
+25, 45 and 60 °C. `sei=1` on the graphite switches on the film.
+
+**The `.tran 1e5 6.3072e7` card.** Two years in steps of up to 10⁵ s, about one per day: 648
+steps in about 2 s. Nothing in the cell moves faster than the film, and the film's equation is
+smooth, so the cap is a resolution choice for the figure, not an accuracy need.
+
+**The closed form.** The film obeys dδ/dt = k(T)/δ, so δ = √(δ₀² + 2k(T)·t): the parabolic law of
+calendar aging. The lithium it consumes is β·S·(δ − δ₀).
+
+```text
+calendar 25 C: film 87.1424 nm (closed form 87.1415), lithium lost 0.2105 Ah (closed form 0.2105), OCV 4.1386 V
+calendar 45 C: film 164.0769 nm (closed form 164.0743), lithium lost 0.4077 Ah (closed form 0.4077), OCV 4.1281 V
+calendar 60 C: film 251.0363 nm (closed form 251.0315), lithium lost 0.6305 Ah (closed form 0.6305), OCV 4.1180 V
+```
+
+The script reads the lithium lost from the graphite's stoichiometry: at rest the shells
+equalise, so `XN1.sh[0]` is the electrode's average. The tutorial's parameter `ksei=6e-5` is
+a calibration choice: at the model's first value, twice this, the 25 °C cell lost 15 % in two
+years, more than typical calendar fade.
+
+## Thermal abuse: the oven test
+
+![Cell temperature in three ovens](examples/multiphysics/li_oven.svg)
+
+**The deck** (`li_oven.net`): three cells, each in its own oven, ramped from 25 °C to 130, 135
+or 140 °C in 60 s (`PWL(0 298.15 60 403.15)`) and held for ten hours. Each cell is only a
+`cell_thermal` and an `abuse` module: no electrochemistry is needed for an oven test.
+
+**The `abuse` module.** Three Arrhenius reactions on `extent` state nodes, with Hatchard et
+al.'s rate constants and heats and an 18650's masses:
+
+- SEI decomposition;
+- anode–solvent reaction, slowed by the layer it builds;
+- cathode–electrolyte reaction, autocatalytic in α(1 − α).
+
+Each `extent` node is pinned to its initial value at DC by `analysis("static")`, and each
+reaction's heat goes into the thermal node. `@(cross(Temp(th) - 473.15, +1))` reports the cell
+passing 200 °C and what is left of each reactant.
+
+**Finding the threshold.** The same bisection pattern as the power grid's critical clearing
+time, on a one-cell deck:
+
+```bash
+lo=403.15; hi=408.15
+for k in 1 2 3 4 5 6 7 8; do
+  mid=$(python -c "print(round(($lo+$hi)/2,4))")
+  printf "* o\nVO1 o1 gnd PWL(0 298.15 60 $mid)\nXT1 th1 o1 cell_thermal\nXA1 th1 abuse\n.tran 10 36000\n.end\n" > /tmp/oven.net
+  if va-cli sim /tmp/oven.net --model models/multiphysics/liion --tran --report th1 2>&1 | grep -q passed
+  then hi=$mid; else lo=$mid; fi
+done
+echo "threshold in [$lo, $hi] K"
+```
+
+It ends at `[407.2125, 407.232]`: **134.07 °C** for these parameters. That is the model's
+threshold, not a measured cell's.
+
+**What the run shows.**
+
+- **130 °C.** The cell self-heats by 7 K and settles back.
+- **135 °C.** It smoulders for four and a half hours, then runs away to 524.5 K. By then the
+  slow burn has consumed 83 % of the cathode reactant, which caps the peak.
+- **140 °C.** It runs away at t = 5,846 s, to 685.7 K.
+
+**The hard convergence case.** Hours at the 10 s cap, then hundreds of kelvin in seconds, then
+back. The step controller covers four decades on its own. The runaway time is step-converged:
+5846.2 s at a 10 s cap and 5846.0 s at 2 s.
+
+::: {.callout-note}
+## A simulator fix this example needed (2.16.1)
+
+Newton limits each step of a "junction" node to protect `exp(V/V_T)` from overflowing. A module
+that declares no junctions gets a guess, and the guess used to be: any `exp` in the module makes
+*every* node a junction. In `electrode` the Arrhenius factor alone triggered it, so the cell's
+temperature was limited to 0.24 K per Newton step. Starting from 0 K it would have needed about
+1,200 iterations, and the operating point failed. Since 2.16.1 the guess applies to electrical
+nodes only: a pn junction's voltage limiter says nothing about a temperature.
+:::
+
+# Electromagnetic relay: hysteresis, heating, bounce and remanence {#relay}
+
+**Library:** `models/multiphysics/relay/`, which contains:
+
+- `relay_parts.va`: `relay_coil`, `armature`, `coil_thermal`;
+- `relay_natures.vams`, with four disciplines: `magfield` (A/m), `mech` (m, force as flow),
+  `mech_v` (m/s) and `coil_heat` (K, W).
+
+**One coil, three domains.** `relay_coil(p, n, x, th)` couples them all:
+
+- **Electrical port.** `p n`, written as a voltage reading its own current:
+  `V(p, n) <+ r * i + nturns * area * MU0 * ddt(Hf(h) + Hf(mm))`.
+- **Magnetic circuit.** The internal nodes `h` (field H) and `mm` (magnetization M), with
+  Ampère's law as the row of `h`.
+- **Mechanical port.** `x`: the gap shrinks as the armature travels, and the magnetic force
+  Φ²/(2μ₀A) is applied there.
+- **Thermal port.** `th`: R(T) rises 0.393 %/K, and the coil's I²R goes in.
+
+**Jiles–Atherton in an implicit simulator.** The model is an ODE in H whose right-hand side
+switches on the sign of dH/dt. Three choices make it solvable:
+
+1. **No differentiated node.** sign(dH/dt) comes from a first-order lag, H − H_lag ≈ τ·dH/dt,
+   not from a node holding ddt(H). H is an algebraic unknown, and the trapezoidal rule's
+   derivative of an algebraic quantity carries an alternating error that never decays.
+2. **Smooth switches.** Both the sign and the irreversible term's on/off gate are tanh-smoothed,
+   so dM/dt is continuous at every reversal. With a hard sign, the step controller shrank its
+   step to an underflow at the first peak of the drive.
+3. **A smoothing scale far below the physics.** `hs` (10 A/(m·s)) must sit well below every real
+   dH/dt, or the smoothed sign is less than 1 and the loop depends on the drive's speed. At
+   10³ A/(m·s) a 1 s ramp's pickup current moved 0.9 % with the coil's resistance; at 10 it
+   moves 0.03 %.
+
+## The B–H loop, and an energy check
+
+```bash
+python docs/examples/multiphysics/relay_plots.py "$PWD/target/release/va-cli"
+```
+
+![Major and minor B-H loops](examples/multiphysics/relay_bh.svg)
+
+**The deck** (`relay_bh.net`).
+
+- **No gap and no armature.** `relay_coil g0=0` with its `x` port tied to `gnd` makes a closed
+  toroid.
+- **A current drive.** A sinusoidal *current* comes from a VCCS controlled by a `SIN` voltage:
+  `VC1 c1 gnd SIN(0 0.3 50)` and `G1 gnd p1 c1 gnd 1`. H = N·i/l_c then follows the current
+  directly, which is how a B–H loop is measured on a bench.
+- **`.tran 20u 60m`.** Three periods at 50 Hz, a thousand steps per period. The script uses the
+  second period, after the initial magnetization curve.
+
+**The energy check.** Faraday and Ampère make (V − R·I)·I = A·l_c·H·dB/dt exactly, so over one
+period the electrical energy the coil keeps equals the loop's area times the core's volume. The
+script integrates both sides:
+
+```text
+major loop (0.3 A): B max 1.8718 T, remanence 0.570 T, coercivity 380, -385 A/m; loop 3.02190 mJ vs electrical 3.02182 mJ per cycle
+minor loop (0.02 A): B max 0.5004 T, remanence 0.362 T, coercivity 375, -374 A/m; loop 0.67668 mJ vs electrical 0.67669 mJ per cycle
+```
+
+This is an identity of the equations, so what it checks is the integration: two different
+integrals of one run agree to 3·10⁻⁵.
+
+## Pickup, hot pickup, bounce, release and remanence
+
+![Coil voltage and three armatures](examples/multiphysics/relay_switch.svg)
+
+**The deck** (`relay_switch.net`). One coil voltage, `PWL(0 0 1 30 1.5 30 2.5 0 3 0)`, drives
+three relays:
+
+- **X1:** coil at 20 °C (`XT1 th1 a20 coil_thermal` against `VA20 a20 gnd DC 293.15`),
+  armature travel `xmax=0.8e-3`, so 0.2 mm of air remains when closed.
+- **X2:** the same with its coil's ambient at 85 °C, `VA85 a85 gnd DC 358.15`.
+- **X3:** coil at 20 °C, `xmax=0.98e-3`, leaving a 20 µm residual gap.
+
+**`.tran 100u 3`.** The 1 s ramps are slow next to the coil's L/R (~0.5 ms) and the armature's
+~3 ms travel, so pickup and release are quasi-static. The 100 µs cap and the step controller
+resolve the travel and the bounce, which is microseconds.
+
+**What the models print.**
+
+```text
+X1: armature lifts at t=0.48856 s: B=0.15882 T, i=0.07320 A, coil 14.6567 V, R 200.027 Ohm
+X3: armature lifts at t=0.48856 s: B=0.15882 T, i=0.07320 A, coil 14.6567 V, R 200.027 Ohm
+XA1: closed at t=0.50444 s, coil 15.133 V
+XA3: closed at t=0.50484 s, coil 15.145 V
+X2: armature lifts at t=0.61298 s: B=0.15877 T, i=0.07318 A, coil 18.3894 V, R 251.133 Ohm
+XA2: closed at t=0.62942 s, coil 18.883 V
+XA2: opened at t=2.41816 s, coil 2.455 V (the closing bounced 1 times)
+XA1: opened at t=2.43719 s, coil 1.884 V (the closing bounced 1 times)
+```
+
+- **Lift-off.** Force balance at the backstop gives B = √(2μ₀F_pre/A) = 0.15853 T, independent
+  of the core. The coils report 0.1588 T; the 0.2 % is the armature already moving.
+- **Hot pickup.** The current at lift-off is the same hot or cold (73.2 mA). The voltage scales
+  with the coil's resistance: 18.389/14.657 = 1.2547, against R(85 °C)/R(20 °C) = 1.2555, less
+  the coil's L·di/dt.
+- **Release** is far below pickup, at 1.88 and 2.46 V: when closed, the gap is small and the
+  same current makes far more flux.
+- **X3 never opens.** With 20 µm of air in the closed magnetic circuit, the core's remanence
+  alone holds a flux above the release threshold at zero current. That is the reason for the
+  non-magnetic shim on real pole faces, and the residual gap X1 and X2 have.
+
+::: {.callout-warning}
+## A model bug that looked like a numerical one
+
+The first version oscillated on its backstop under the default trapezoidal rule and sat still
+under backward Euler and Gear. That pattern suggests a stiff mode trapezoidal fails to damp. The
+cause was a sign: the backstop's contact damping was −b·v, which pumps energy in. Backward
+Euler's own numerical damping outweighed it, and that hid the bug. With the sign fixed, all
+three methods agree on every event, and the deck runs with the default.
+
+**The lesson:** when only the dissipative integrators are stable, check the model's energy
+balance before blaming the integrator.
+:::
+
+# Reproducing every figure
+
+From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
+`VA` is the absolute path the scripts need.
+
+```bash
+VA="$PWD/target/release/va-cli"        # Git Bash on Windows: VA="$(pwd -W)/target/release/va-cli.exe"
+M=models/multiphysics
+C=circuits/multiphysics
+F=docs/examples/multiphysics
+
+# Peltier cooler
+va-cli sim $C/tec_dtmax.net  --model $M/tec --report cold --plot $F/tec_dtmax.svg
+va-cli sim $C/tec_energy.net --model $M/tec
+va-cli sim $C/tec_pid.net    --model $M/tec --tran --report plate,sink --plot $F/tec_pid_temps.svg
+va-cli sim $C/tec_pid.net    --model $M/tec --tran --report drv        --plot $F/tec_pid_drive.svg
+
+# MEMS
+va-cli sim $C/mems_pullin.net     --model $M/mems        --report x       --plot $F/mems_pullin.svg
+va-cli sim $C/mems_resonance.net  --model $M/mems --ac   --report xlo,xhi --plot $F/mems_resonance.svg
+va-cli sim $C/mems_hysteresis.net --model $M/mems --tran --report x       --plot $F/mems_hysteresis.svg
+
+# ReRAM
+va-cli sim $C/reram_sweep.net --model $M/reram --tran --report X1.g,X2.g   --plot $F/reram_gap.svg
+va-cli sim $C/reram_sweep.net --model $M/reram --tran --report X1.th,X2.th --plot $F/reram_temp.svg
+python $F/reram_iv.py "$VA"
+python $F/reram_loops.py "$VA"
+
+# Hodgkin-Huxley axon
+va-cli sim $C/hh_giant_axon.net --model $M/axon --tran --report X1.v[0],X1.v[50],X1.v[100],X2.v[100] --plot $F/hh_giant_axon.svg
+python $F/hh_thin_fibre.py "$VA"
+
+# Power grid
+python $F/grid_plots.py "$VA"
+
+# Thermo-optic ring bank
+python $F/ring_plots.py "$VA"
+
+# Li-ion cell
+python $F/li_plots.py "$VA"
+
+# Relay
+python $F/relay_plots.py "$VA"
+```
+
+Approximate run times on the development laptop (Intel i7-1185G7):
+
+| Run | Time |
+|---|---|
+| each TEC and MEMS run, the equal-area deck, each ring deck | under 5 s |
+| grid cascade | about 6 s |
+| ReRAM triangular sweep | under 1 s |
+| ReRAM frequency decks (`reram_loops.py` runs all three) | about 1 min each |
+| giant-axon pair | about 1.5 min |
+| thin-fibre train | about 2 min |
+| the three Li-ion decks (`li_plots.py`) | about 30 s together |
+| the two relay decks (`relay_plots.py`) | about 40 s together |
+
+These were measured with other simulations running on the same machine, so they are upper
+bounds.

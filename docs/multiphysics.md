@@ -21,29 +21,38 @@ Which language features each example uses, so the set as a whole reads as a cove
 
 | Construct | Examples |
 |---|---|
-| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| user `nature` / `discipline` declarations | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| several disciplines in one module | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| `analog function` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| ranged parameters (`from`, `exclude`) | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| `ddt` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | `laplace_nd` | [TEC](#peltier-cooler-under-pid-control) |
-| `transition` | [TEC](#peltier-cooler-under-pid-control) |
-| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| `@(timer)` | [TEC](#peltier-cooler-under-pid-control) |
-| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `transition` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
+| internal nodes as state variables | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| `@(timer)` | [TEC](#peltier-cooler-under-pid-control), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
+| `@(cross)` with a direction | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| `$strobe`, `%m` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | `.op`, `.dc` sweep, `.tran` | [TEC](#peltier-cooler-under-pid-control), [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `ddt` of a nonlinear charge (`d/dt[C(x)V]`) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
-| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
+| a coefficient times `ddt` | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| event variables persisting across events (bounce counter) | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction), [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | `.ac` small-signal analysis | [MEMS](#electrostatic-mems-pull-in-damping-contact-and-stiction) |
 | `@(above)` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `analysis("static")` (DC-only initial condition of a state) | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 | `$bound_step` | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift) |
-| `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `SIN` / `PWL` sources driving a model | [ReRAM](#filamentary-reram-filament-growth-joule-heating-arrhenius-drift), [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| `generate` loops over a `genvar`, vector nets of user disciplines | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
 | integer parameters sizing structure, overridden per instance | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
-| `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation) |
+| `PULSE` sources, a VCCS current drive | [HH axon](#hodgkinhuxley-axon-propagation-temperature-and-sodium-accumulation), [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| a DC operating point that is a nonlinear network solve (load flow) | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
+| protection as events: a relay latching a line open | [power grid](#power-grid-swing-equal-areas-relays-and-a-cascade) |
+| a complex ODE as two real state nodes (coupled-mode theory) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| one-way signal ports written as potentials (optical power, wavelength) | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| a stiff system: ps optics against ms thermals | [ring bank](#thermo-optic-ring-bank-self-heating-crosstalk-and-locking) |
+| `case` on an integer parameter; a potential contribution that reads its own branch current (inverted Butler-Volmer) | [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
+| a run from hours-long smouldering to seconds-long runaway (step control across 4 decades) | [Li-ion](#li-ion-cell-kinetics-diffusion-aging-and-thermal-runaway) |
+| a hysteretic ODE with direction-dependent right-hand side (Jiles-Atherton) | [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
+| position-dependent coupling between magnetic and mechanical domains | [relay](#electromagnetic-relay-jilesatherton-hysteresis-eddy-currents-heating-and-contact-bounce) |
 
 ---
 
@@ -230,8 +239,11 @@ Two cells behind 2 kΩ, swept 0 → +1.6 → −1.6 → 0 V in 10 ms, one at 300
 
 A model with the field-enhancement factor twice as large (γ = 16) switched in under a
 picosecond at the end of RESET, and no time step could follow it; the value used here (γ = 8)
-keeps the physics and the time scales resolvable. The run is converged in its step size: SET and
-RESET voltages agree to 0.5 mV between 1 µs and 0.2 µs maximum steps.
+keeps the physics and the time scales resolvable. Both events carry a 1 ns time tolerance
+(`cross(expr, +1, 1e-9)`), so what they print is the state *at* the crossing. With it, the SET
+and RESET voltages agree to 0.1 mV between 1 µs and 0.2 µs maximum steps. Without it they
+belonged to whichever accepted point first fell past mid-gap, and RESET's moved by 22 mV with
+the step.
 
 ### 2. The frequency fingerprint — the loop shrinks as the drive outruns the drift
 
@@ -332,3 +344,312 @@ initial values there (`analysis("static")`), as the resting state does by defini
 external K⁺ accumulation); the pump is a first-order relaxation, not an electrogenic Na/K ATPase;
 the leak carries no particular ion; squid HH kinetics are used for the thin fibre too, which no
 real thin fibre has — the point is the electrodiffusion, not mammalian physiology.
+
+---
+
+## Power-grid swing: equal areas, relays and a cascade
+
+**Domains:** electromechanical — rotor mechanics (a speed state per machine) and the network's
+power flow — on two user disciplines: `grid`, whose potential is a bus's voltage phase angle and
+whose flow is active power, and `grid_speed` for a rotor's speed deviation. **Models:**
+`models/multiphysics/powergrid/grid_parts.va` (`machine`, `line`, `slack`), `grid_natures.vams`.
+
+The classical model in per unit. A machine obeys the swing equation M ω̇ = Pm − Pe − Dω, δ̇ = ω
+(a consumer is a machine with Pm < 0, as in second-order Kuramoto models of grids). A lossless
+line carries B·sin(δa − δb) as a nonlinear conductance between two angle nodes, and Kirchhoff's
+current law at a bus is its power balance. So the **DC operating point is the full nonlinear
+load flow**, and the transient is the swing. A line is also its own protection. `@(timer)`
+schedules a fault and its clearing. `@(cross(abs(P) − Pmax, +1))` is an overload relay that opens
+the line and keeps it open, through an `integer` state and a `transition` breaker. `@(cross)` on
+sin(Δδ) where cos(Δδ) < 0 reports every pole slip through `$strobe`.
+
+### 1. The equal-area criterion
+
+```bash
+python docs/examples/multiphysics/grid_plots.py target/release/va-cli
+```
+
+![Equal-area criterion](examples/multiphysics/grid_equal_area.svg)
+
+Two identical machines (H = 5 s, Pm = 0.8 pu, no damping), each on its own 1.6 pu line to an
+infinite bus. At t = 1 s each line opens, so the machine accelerates with nothing to push
+against. The faults are cleared after 0.255 s and 0.270 s. The textbook closed form puts the
+critical clearing time at **0.2624 s**: δ₀ = 30°, critical angle 79.56°, and the rotor following
+δ₀ + Pm·t²/2M while the line is open.
+
+- G1, cleared 2.8 % early, swings to **130.39°** and back. The equal areas give 130.40°.
+  Without damping it then swings between that and −36.3° indefinitely.
+- G2, cleared 2.9 % late, passes 150° (180° − δ₀) with speed to spare and slips poles from
+  t = 1.763 s on.
+- **Bisecting the clearing time** with G1 alone puts the simulator's own critical time in
+  [0.262427, 0.262430] s, against the closed form's 0.262366 s: 0.02 %, of which the 1 ms
+  breaker transition is the only modelled departure from the textbook case.
+
+### 2. A cascade: one line lost, two tripped, two islands
+
+![Cascade](examples/multiphysics/grid_cascade.svg)
+
+Two areas of four buses, each a ring of strong lines. Area A generates 3.6 pu and area B
+consumes it, across three ties of 2.5, 2.0 and 1.5 pu capacity, each behind a 1.6 pu overload
+relay. The load flow shares the transfer by strength: **1.475 / 1.178 / 0.948 pu**. At t = 1 s
+a fault opens the weakest tie. The other two cannot carry 3.6 pu within their settings: T1's
+relay trips at 1.149 s and T2's at 1.237 s. The areas are now islands with no governors, and
+each settles where its damping absorbs the imbalance: ω = P/ΣD = 9 rad/s, **±1.4324 Hz**
+(measured: ±1.4323 Hz at 10 s). From then on the open ties report pole slips as the islands
+drift through each other.
+
+**What building this found.** The first cascade run printed 98 relay trips for the two that
+happened. An event site's expression was evaluated without the instance's committed state. A
+relay that had opened its line through `open = 1; g = 1 − transition(open, …)` therefore saw
+`open` at its seed and the line closed, and "tripped" again whenever the flow it no longer
+carried would have crossed 1.6 pu. 2.16.1 passes the committed state to the event poll
+(`ModelInstance::events_with_state`, `docs/interfaces.md`). The answer had been right only
+because opening an open line changes nothing.
+
+**Limitations.** Classical model: constant voltage magnitudes, no exciters or governors, lossless
+lines, instantaneous relays (no inverse-time curve), and transient reactances folded into the
+lines. A grid with no infinite bus takes its angle reference from a vanishing leak (`eps`) on
+every machine.
+
+---
+
+## Thermo-optic ring bank: self-heating, crosstalk and locking
+
+**Domains:** optical (a guided wave's power and wavelength, and each ring's intracavity field),
+thermal, electrical (the heater drive). **Models:** `models/multiphysics/ringbank/ring_parts.va`
+(`laser`, `ring`, `heater`, `lock`, `thermal_cap`, `thermal_res`) and `ring_natures.vams`, with
+four user disciplines: `optical_power` (mW), `wavelength` (nm), `cmt_field` (a field quadrature
+in √fJ) and `ring_heat` (K above the substrate, W).
+
+Each add-drop ring is solved in coupled-mode theory, with the field written in a frame rotating
+at its laser's frequency: da/dt = (iδ − 1/τ)·a + κ·s. Re a and Im a are two state nodes. The
+detuning δ follows the ring's temperature through the thermo-optic effect, and half the
+intrinsic loss heats the ring. The photon lifetime is **16.3 ps** and the thermal time constant
+**1 ms**: one system with eight orders of magnitude between its time scales. An implicit, A-stable
+integrator takes the millisecond steps anyway, where an explicit one would need picosecond steps
+throughout. Neither deck needs a non-default integration method.
+
+### 1. Self-heating: the thermal triangle and its bistability
+
+```bash
+python docs/examples/multiphysics/ring_plots.py target/release/va-cli
+```
+
+![Through-port transmission swept up and down](examples/multiphysics/ring_selfheat.svg)
+
+Two identical rings (loaded Q 9910) under a laser swept 1549.7 → 1550.6 → 1549.7 nm over 2 s,
+at 0.1 mW and at 20 mW.
+
+| Low-power ring | Simulated | Closed form |
+|---|---|---|
+| Linewidth | 0.1562 nm | 0.1564 nm |
+| Through minimum | 0.00982 | 0.00982 |
+| Drop maximum | 0.8116 | 0.8116 |
+
+At 20 mW the absorbed heat drags the resonance 0.490 nm (3.1 linewidths) ahead of the laser.
+The ring is 7.1416 K hot at the peak (closed form 7.1423 K).
+
+**Bistability.** The steady states fold, so the ring is bistable for lasers between
+**1550.2545 and 1550.4934 nm**. The upward sweep jumps out of resonance at 1550.4976 nm and the
+downward sweep snaps back in at 1550.2456 nm, 0.004 and 0.009 nm past the folds. A sweep ten
+times faster lands 0.014 and 0.033 nm past them, which is what a finite sweep rate against a
+1 ms thermal lag should give.
+
+**What this deck found.** A factor of two in the model's first version: with da/dt = −a/τ the
+energy decays at 2/τ, so τ = 2Q/ω₀, not Q/ω₀. The dip depth was right, but the linewidth came out
+twice too wide (0.3128 nm), which only the closed-form linewidth check could catch.
+
+### 2. A locked WDM bank against crosstalk and self-heating
+
+![Drop power and heater power of four locked rings](examples/multiphysics/ring_bank.svg)
+
+Four rings on a 0.8 nm channel grid, each made 0.25–0.30 nm blue of its laser. Neighbours are
+thermally coupled at a quarter of a ring's own conductance. Each ring has a PI lock holding its
+drop at 40 % of its input by driving its heater. The four lock by 6.4 ms (`$strobe` reports
+each). Two disturbances follow:
+
+- **At 30 ms channel 1 hops +0.2 nm.** Ring 1's heater rises 0.9106 mW to follow. The heat that
+  leaks into ring 2 shows as a brief overshoot of its drop, and ring 2's heater backs off by
+  **0.1821 mW** to cancel it. Rings 3 and 4 do not move: ring 2's lock stops the disturbance.
+- **At 60 ms channel 3's power steps from 1 to 4 mW.** The drop stays at 40 % of the new input,
+  and ring 3's heater gives back exactly the extra absorption, **0.1320 mW**.
+
+With every ring held at its lock temperature the thermal network is linear, so the heater powers
+have a closed form. `ring_plots.py` prints it beside the simulation for all four heaters in all
+three phases, and they agree to 10⁻⁴ mW.
+
+**What this deck found (fixed in 2.16.1).** At the 30 ms hop the dense linear solver reported this
+well-posed 72-unknown system singular: the sparse solver solved it, and so did Gear and backward
+Euler on the same deck. The post-solve residual test compared the raw residual with
+`1e-6·(1 + ‖b‖)`. A field row with entries ~10¹¹ (1/τ and δ, in 1/s) leaves ~10⁻⁴ of round-off
+after a correct factorisation, and near Newton convergence `b` is tiny. The test now measures each
+row on its own scale. Results that passed before are unchanged bit for bit, since the
+factorisation is the same.
+
+**Limitations.** Linear absorption only (no two-photon or free-carrier absorption), one mode per
+ring, no backscattering, lumped thermal nodes, and rings on different channels share heat but not
+light. The lock acquires from the blue side only, the side a heater reaches from cold.
+
+---
+
+## Li-ion cell: kinetics, diffusion, aging and thermal runaway
+
+**Domains:** electrochemical (lithium in two electrodes), electrical, thermal, and the chemistry
+of film growth and decomposition. **Models:** `models/multiphysics/liion/li_parts.va`
+(`electrode`, `electrolyte`, `cell_thermal`, `abuse`, `cc_load`) and `li_natures.vams`, with
+three user disciplines: `stoich` (a shell's lithium stoichiometry; flow in mol/s), `cell_heat`
+(K, W) and `extent` (a reaction's remaining fraction, or a film's thickness in nm).
+
+A single-particle model. Each electrode is one representative particle, with Fick's diffusion
+in the sphere discretised into ten shells. That is an RC ladder in a `generate` loop: each
+shell's "capacitance" is the lithium it can hold, and each link's conductance is D·(area)/Δr.
+The surface shell exchanges lithium with the electrolyte through a Butler–Volmer interface with
+Arrhenius kinetics. The graphite and LiCoO₂ open-circuit potentials are the fits of Ramadass et
+al. (2004). The graphite carries an SEI film that grows by a diffusion-limited side reaction,
+consuming lithium and adding resistance. A separate `abuse` module adds the exothermic
+decomposition reactions of thermal runaway (Hatchard et al., 2001).
+
+### 1. Discharge at three rates
+
+```bash
+python docs/examples/multiphysics/li_plots.py target/release/va-cli
+```
+
+![Discharge curves](examples/multiphysics/li_discharge.svg)
+
+Three 2 Ah cells are discharged by a constant-current load with a 3.0 V cutoff
+(`@(cross)` opens it and reports the charge delivered).
+
+- **Closed form.** Discharged infinitely slowly, the open-circuit curve reaches 3.0 V at
+  **1.9609 Ah**, where the graphite is all but empty.
+- **C/20** delivers **1.9604 Ah** (−0.03 %).
+- **1C and 2C** deliver 1.9558 and 1.9493 Ah, and warm the cell by 3.9 and 10.8 K on the way.
+
+### 2. Calendar aging: two years on the shelf at 25, 45 and 60 °C
+
+![SEI growth and lithium lost](examples/multiphysics/li_calendar.svg)
+
+The film obeys dδ/dt = k(T)/δ, so δ = √(δ₀² + 2k(T)·t): the parabolic law of calendar aging.
+
+| Storage | Film after 2 years (closed form) | Simulated | Lithium lost |
+|---|---|---|---|
+| 25 °C | 87.1415 nm | 87.1424 nm | 0.2105 Ah (10.5 %) |
+| 45 °C | 164.0743 nm | 164.0769 nm | 0.4077 Ah (20.4 %) |
+| 60 °C | 251.0315 nm | 251.0363 nm | 0.6305 Ah (31.5 %) |
+
+The lithium lost, read off the graphite's stoichiometry, equals the closed form's β·S·(δ − δ₀) to
+the printed digit. The run takes 648 steps of up to 10⁵ s, about one per day.
+
+### 3. Thermal abuse: the oven test
+
+![Oven test](examples/multiphysics/li_oven.svg)
+
+Three cells, each in an oven held at 130, 135 or 140 °C. Bisecting the oven temperature with this
+model puts the runaway threshold at **134.07 °C** (407.22 K).
+
+- **130 °C.** The cell self-heats by 7 K and settles back.
+- **135 °C.** It smoulders for four and a half hours and then runs away (peak 524.5 K). By then
+  the slow burn has consumed 83 % of the cathode reactant, which caps the peak.
+- **140 °C.** It runs away at t = 5,846 s and peaks at 685.7 K.
+
+This is the hard convergence case: hours at a 10 s step, then hundreds of kelvin within seconds.
+The runaway time is converged in the step to 0.2 s.
+
+**What building this found.** Two convergence problems, one in the model and one in the
+simulator:
+
+- **In the model.** Written forward, I = 2Si₀·sinh(Fη/2RT), Butler–Volmer gave the operating
+  point a ~10⁵⁰ conductance at Newton's first iterate, where the cathode's η is −4.2 V. The
+  model now writes the interface inverted, as V = U + (2RT/F)·asinh(I/2Si₀) with the branch
+  current as the unknown.
+- **In the simulator.** The codegen's junction guess limited *every* node of a module containing
+  `exp` to pn-junction-sized Newton steps, the temperature node included. The Arrhenius factor
+  alone was enough to trigger it. The cell temperature, starting at 0 K, would have needed about
+  1,200 iterations. Since 2.16.1 the guess limits only electrical nodes.
+
+**Limitations.** A single particle per electrode (no electrolyte concentration or potential
+gradients), shell-average surface stoichiometry, no entropic heat, no lithium plating, and no
+electrolyte decomposition, venting or internal short in the abuse model. The runaway threshold is
+this parameter set's, not a measured cell's.
+
+---
+
+## Electromagnetic relay: Jiles–Atherton hysteresis, eddy currents, heating and contact bounce
+
+**Domains:** electrical (the coil), magnetic (a hysteretic iron core and an air gap), mechanical
+(the armature) and thermal (the coil). **Models:** `models/multiphysics/relay/relay_parts.va`
+(`relay_coil`, `armature`, `coil_thermal`) and `relay_natures.vams`, with four user disciplines:
+
+- `magfield`: the core's H and M in A/m, as state nodes;
+- `mech`: the armature's position, with force as the flow;
+- `mech_v`: its velocity;
+- `coil_heat`: the coil's temperature and heat.
+
+**The coil and core.** The coil is written as V = R(T)·i + N·dΦ/dt. Ampère's law closes the
+magnetic circuit through the core (H·l_c) and an air gap g₀ − x that the armature's travel x
+closes. A classical lamination eddy-current term is available (`ke`). The core's magnetization
+follows the Jiles–Atherton model, with both of its switches smoothed so that the right-hand side
+is continuous:
+
+- the direction of change, sign(dH/dt), is taken from a lagged copy of H rather than from a
+  differentiated one;
+- the irreversible term's on/off gate.
+
+**The armature.** It is pulled by Φ²/(2μ₀A) against a preloaded spring. It rests on a backstop
+and closes onto the pole face, both Hertzian contacts.
+
+### 1. The core's B–H loop, and the energy it dissipates
+
+```bash
+python docs/examples/multiphysics/relay_plots.py target/release/va-cli
+```
+
+![Major and minor B-H loops](examples/multiphysics/relay_bh.svg)
+
+Two closed cores, each driven with a 50 Hz current:
+
+| Drive | Peak B | Remanence | Coercivity | Loop area × volume | ∮(V − R·I)·I dt |
+|---|---|---|---|---|---|
+| 0.3 A (major loop, into saturation) | 1.8718 T | 0.570 T | ±383 A/m | 3.0219 mJ | 3.0218 mJ |
+| 0.02 A (minor loop) | 0.5004 T | 0.362 T | ±375 A/m | 0.67668 mJ | 0.67669 mJ |
+
+- **Saturation.** The major loop's 1.8718 T at 12 kA/m sits just under the anhysteretic
+  1.8765 T there, as a lagging magnetization should.
+- **Coercivity.** For small α the model's coercivity is close to its pinning parameter, here
+  k = 400 A/m.
+- **Energy.** What the coil takes in and does not burn in its own resistance is the loop's
+  energy, cycle by cycle.
+
+### 2. Pickup, hot pickup, bounce, release, and remanence that will not let go
+
+![Coil voltage and armature travel](examples/multiphysics/relay_switch.svg)
+
+Three relays share one coil voltage, which ramps 0 → 30 V → 0. Two have a 0.2 mm residual gap
+(the non-magnetic shim on a pole face), one at 20 °C and one at 85 °C. The third has a 20 µm gap.
+
+- **Pickup.** The armature leaves its backstop when Φ²/(2μ₀A) reaches the 0.2 N preload, at
+  B = √(2μ₀F/A) = **0.15853 T**, whatever the core does. Every coil reports **0.1588 T** at
+  lift-off.
+- **Hot pickup.** The current that takes, 73.2 mA, is the same hot or cold. The voltage is not:
+  14.66 V at 20 °C and 18.39 V at 85 °C, a ratio of 1.2547 against the coils' resistance ratio
+  of 1.2555.
+- **Bounce.** The armature closes about 16 ms after lift-off and bounces once.
+- **Release.** At 1.88 V (cold) and 2.46 V (hot).
+- **Remanence.** The 20 µm relay never releases. With so little air in the closed circuit, the
+  core's remanence holds the armature shut at zero current, which is why real relays carry that
+  shim.
+
+**What building this found.** All in the model:
+
+- **A sign error in the backstop's contact damping:** −b·v instead of +b·v, so energy was pumped
+  in while the armature rested on the stop. Backward Euler's numerical damping hid it, and for
+  a while it looked like a trapezoidal-rule instability: it was not.
+- **The rate-dependence of a smoothing scale.** The smoothed sign(dH/dt) made the loop depend on
+  the drive's speed until the scale (`hs`) was set well below any real dH/dt. At the first
+  value, the pickup current moved 0.9 % with the coil's resistance.
+- **The Jiles–Atherton denominator** δk − α(M_an − M) can reach zero, an infinite
+  susceptibility, for parameter sets outside the model's range. The model holds it at 5 % of k.
+
+**Limitations.** A single lumped magnetic path (no leakage or fringing), the classical
+eddy-current term only, scalar hysteresis, and Jiles–Atherton's known non-closure of small
+minor loops.

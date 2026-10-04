@@ -1,0 +1,63 @@
+// Natures for the Li-ion example. Include-guarded.
+//
+//   stoich     the lithium stoichiometry of an electrode shell (dimensionless, 0..1) as the
+//              potential of a node; its flow is lithium in mol/s. A shell's "capacitance" is the
+//              lithium it holds when full, so ddt of the stoichiometry times that is a flux.
+//   cell_heat  the cell's absolute temperature (K) and heat flow (W).
+//   extent     a reaction's remaining fraction (dimensionless) or a film's thickness (nm), as
+//              the potential of a state node; the flow names the row's residual.
+`ifndef LI_NATURES_VAMS
+`define LI_NATURES_VAMS
+
+nature Li_stoichiometry
+    units  = "";
+    access = Th;
+    abstol = 1e-9;
+endnature
+
+nature Li_flux
+    units  = "mol/s";
+    access = Nli;
+    abstol = 1e-15;
+endnature
+
+nature Cell_temperature
+    units  = "K";
+    access = Temp;
+    abstol = 1e-6;
+endnature
+
+nature Cell_heat_flow
+    units  = "W";
+    access = Pwr;
+    abstol = 1e-9;
+endnature
+
+nature Reaction_extent
+    units  = "";
+    access = Ext;
+    abstol = 1e-9;
+endnature
+
+nature Reaction_rate
+    units  = "1/s";
+    access = Ext_rate;
+    abstol = 1e-15;
+endnature
+
+discipline stoich
+    potential Li_stoichiometry;
+    flow      Li_flux;
+enddiscipline
+
+discipline cell_heat
+    potential Cell_temperature;
+    flow      Cell_heat_flow;
+enddiscipline
+
+discipline extent
+    potential Reaction_extent;
+    flow      Reaction_rate;
+enddiscipline
+
+`endif

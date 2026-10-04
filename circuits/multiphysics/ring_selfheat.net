@@ -1,0 +1,39 @@
+* Thermo-optic microring: self-heating, the thermal triangle and its bistability.
+*
+* Two identical add-drop rings (models/multiphysics/ringbank/ring_parts.va: loaded Q 9910,
+* intrinsic Q 1e5, 1550 nm cold resonance, silicon thermo-optic coefficient, half the intrinsic
+* loss absorbed as heat), each on a 4000 K/W, 1 ms thermal node, each fed by its own laser swept
+* 1549.7 -> 1550.6 -> 1549.7 nm over 2 s. X1's laser is 0.1 mW, X2's is 20 mW.
+*
+* Closed form (coupled-mode theory, tau = 2Q/w0 = 16.31 ps):
+*   linewidth lambda/Q = 0.1564 nm; drop at resonance 4 tau^2/tau_e^2 = 0.8116 of the input;
+*   through at resonance (tau/tau_i)^2 = 0.00982; dlambda/dT = lambda0 dn/dT / n_g = 0.06864 nm/K;
+*   heat absorbed at resonance = 0.0893 of the input, so the ring warms by 0.0357 K at 0.1 mW
+*   (shift 0.0025 nm, 0.016 linewidths: a plain Lorentzian) and by 7.142 K at 20 mW
+*   (shift 0.490 nm, 3.1 linewidths: the resonance is dragged along by its own heat).
+*   At 20 mW the steady states fold: bistable for lasers between 1550.2545 and 1550.4934 nm
+*   (the folds of T = Rth*eta*(2/tau_i)|a|^2 with |a|^2 Lorentzian in the heated detuning).
+* What to look for (measured at 2.16.1+1):
+*   X1: through minimum 0.00982 at 1550.0024 nm, linewidth 0.1562 nm, drop peak 0.8116.
+*   X2, sweeping up: the resonance is dragged to 1550.490 nm (the ring 7.142 K hot) and the
+*   transmission jumps back at 1550.4976 nm; sweeping down it stays high until 1550.2456 nm and
+*   then snaps into resonance. The jumps sit 0.004 and 0.009 nm past the folds: the sweep moves
+*   0.9 nm/s against a 1 ms thermal time constant. (A sweep ten times faster puts them 0.014 and
+*   0.033 nm past.)
+* Stiffness: the field relaxes in 16 ps, the temperature in 1 ms. The run takes 4,094 steps of up
+* to 0.5 ms; an explicit method stable at the photon lifetime would need ~1e11.
+* Plot: python docs/examples/multiphysics/ring_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/ring_selfheat.net --model models/multiphysics/ringbank --tran --report th1,th2,t2
+VW wctl gnd PWL(0 1549.7 1 1550.6 2 1549.7)
+VP1 p1 gnd DC 0.1
+VP2 p2 gnd DC 20
+XL1 p1 wctl in1 wl1 laser
+XR1 in1 wl1 th1 dr1 t1 ring
+XC1 t1 thermal_cap
+XG1 t1 gnd thermal_res
+XL2 p2 wctl in2 wl2 laser
+XR2 in2 wl2 th2 dr2 t2 ring
+XC2 t2 thermal_cap
+XG2 t2 gnd thermal_res
+.tran 0.5m 2
+.end

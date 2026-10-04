@@ -1,0 +1,35 @@
+* Li-ion thermal abuse: the oven test, below and above the runaway threshold.
+*
+* Three cells of models/multiphysics/liion/li_parts.va (`abuse`: SEI decomposition,
+* anode-solvent and cathode-electrolyte reactions, Hatchard et al. 2001, with an 18650's
+* masses: 10 g carbon, 20 g cathode), each in its own oven, ramped from 25 C to its set point
+* in 60 s and held. Heat capacity 40 J/K, 0.03 W/K to the oven air.
+*
+* The reactions are Arrhenius: at the oven temperature they release heat slowly; if the cell
+* can shed it to the air at a temperature only slightly above the oven, it settles; if not, the
+* heat speeds the reactions faster than the excess temperature speeds the cooling, and the cell
+* runs away. For these parameters the boundary, found by bisecting the oven temperature with this
+* model, is 407.22 K (134.07 C).
+* What to look for (measured at 2.16.1+1):
+*   X1 at 403.15 K (130 C): self-heats to 410.36 K (at t = 5,680 s) and settles back.
+*   X2 at 408.15 K (135 C): smoulders for four and a half hours, then runs away: past 473 K at
+*      t = 16,358 s, peaking at 524.5 K. By then the slow burn has consumed 83 % of the cathode
+*      reactant, which is why its peak is lower than X3's.
+*   X3 at 413.15 K (140 C): runs away at t = 5,846 s and peaks at 685.7 K.
+* The `abuse` model reports each cell crossing 473 K (200 C) and what is left of each reactant.
+* Stiffness: hours of smouldering, then hundreds of kelvin in seconds. The step controller goes
+* from the 10 s cap to milliseconds and back; the runaway time is converged in the step to
+* 0.2 s (5846.2 s at a 10 s cap, 5846.0 s at 2 s, for a 413.15 K oven alone).
+* Plot: python docs/examples/multiphysics/li_plots.py target/release/va-cli
+* Run: va-cli sim circuits/multiphysics/li_oven.net --model models/multiphysics/liion --tran --report th1,th2,th3
+VO1 o1 gnd PWL(0 298.15 60 403.15)
+XT1 th1 o1 cell_thermal
+XA1 th1 abuse
+VO2 o2 gnd PWL(0 298.15 60 408.15)
+XT2 th2 o2 cell_thermal
+XA2 th2 abuse
+VO3 o3 gnd PWL(0 298.15 60 413.15)
+XT3 th3 o3 cell_thermal
+XA3 th3 abuse
+.tran 10 36000
+.end
