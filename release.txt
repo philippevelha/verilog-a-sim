@@ -22,6 +22,15 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.17.0+1 - 2026-10-07
+--------------------
+**2.17.0's deck-diff, which had not finished when it was committed.** `xtask deck-diff` of the
+2.17.0 binary against 2.16.2+6, every deck under `circuits/` except the 13 slow ISCAS'85 ones:
+123 identical, 0 different, 13 skipped. No code change.
+  * Measured at this version: as 2.17.0 (`cargo test --workspace` 954 passed, `cargo xtask
+    validate` 28/28).
+
+
 2.17.0 - 2026-10-07
 --------------------
 **A compiled model's evaluation is 1.66x cheaper on PSP103, bit-identical, and `--bypass` no
