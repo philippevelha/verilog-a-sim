@@ -22,6 +22,56 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.17.0 - 2026-10-07
+--------------------
+**A compiled model's evaluation is 1.66x cheaper on PSP103, bit-identical, and `--bypass` no
+longer goes parallel for work it never measured.** For the transistor-level SNN, where one
+SG13G2 PSP103 evaluation is most of every run (`docs/proposals/snn-transistor-performance.md`,
+new: where the time goes, what 2.17.0 did, and what is left, ranked).
+
+  * va-codegen, the static program (`sched.rs`, module doc "Less to run") runs less code:
+    constants are folded at compile time by the expression the instruction would evaluate (a
+    setup value no per-load statement reassigns counts as a constant, and is no longer reset
+    every load); an assignment whose variable reaches no contribution, condition, bound or task
+    compiles to nothing (kept if it calls the tree walker, which can fail); an `if` whose arms
+    hold only assignments is laid out as condition, jump and arms; consecutive such statements
+    run as one stretch instead of one `exec` and one walk step each. On the static path the
+    variable table is no longer allocated, cleared and dropped per load. One PSP103 `load()` with
+    the SG13G2 card: ~78 -> ~47 us (`xtask bench-instance .../bench_access_bias.net`).
+  * va-core, bypass (`par.rs`): in `Mode::Auto` a bypassed assembly went parallel on an estimate
+    it never measured (zero after the operating point, which meant parallel), so it handed a few
+    cheap leftover devices to the pool every iteration; 4 threads ran 1.9x slower than 1 on
+    `fig5_access`. Each instance's own evaluation time is now measured (serially: first time, then
+    every 256 assemblies) and an assembly goes parallel when its fresh instances' times reach
+    `PARALLEL_MIN_WORK_NS`. A stored recording takes its sparse slots from the slot cache that has
+    just placed it, and the column each stamp's drift correction reads is found once at store
+    time instead of searched for on every replay. A recording starts with its last length's
+    capacity. Speed only: bypass was already bit-identical across thread counts.
+  * Measured (Xeon 2.8 GHz, 4 vCPU, 2.16.2+6 -> this, single runs, each build's runs back to back, not interleaved; read as +-5 %):
+      fig5_access, 1 thread           51.5 -> 33.2 s     with --bypass 10.2 -> 7.6 s
+      fig5_access, 4 threads          37.5 -> 30.2 s     with --bypass 19.3 -> 9.8 s
+      xbar_h2_8, 4 threads            81.1 -> 55.7 s     with --bypass 37.5 -> 29.1 s
+      xbar_h2_8, 1 thread, --bypass   81.5 -> 57.2 s
+  * Still true: on `fig5_access` with `--bypass`, 4 threads are slower than 1 (9.8 vs 7.6
+    s): the hand-off on this machine costs more than the 200 us threshold assumes (tuned on an
+    i7, not re-tuned here).
+  * Identity: `xtask sched-check` over the 98 `.va` files in the tree, 0 differing (60 on the
+    static path); `xtask deck-diff` against 2.16.2+6: not finished when this was committed; its result is recorded in the
+    next entry; stdout hashes equal on
+    `fig5_access` (with and without `--bypass`, 1 and 4 threads) and `xbar_h2_8` (the
+    8-neuron hidden-2 crossbar, 1 024 PSP103, plain and `--bypass`). New tests
+    `the_static_path_folds_constants_and_drops_dead_assignments` and
+    `an_if_of_assignments_runs_as_code_and_takes_the_arm_the_bias_selects`, each failing with
+    its reduction switched off (checked).
+  * Limitations, stated: the program is still interpreted (compiling it to machine code needs
+    `unsafe` and owner sign-off, CLAUDE.md §5; the proposal's §4.2); liveness is
+    flow-insensitive, so a variable read anywhere that matters is kept everywhere it is
+    assigned; `case`, loops and `if`s with a contribution or task in an arm still go through the
+    statement walk; contributions are still turned into heap-allocated `Dual`s to stamp.
+  * Measured at this version: `cargo test --workspace` 954 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.16.2+6 - 2026-10-05
 ---------------------
 **Multiphysics example 15: a silicon microring bank -- bistability, self-pulsing and chaos**

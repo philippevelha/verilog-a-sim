@@ -180,6 +180,12 @@ pub struct Bypass {
     pub hits: u64,
     /// Loads of eligible instances that had to be evaluated.
     pub misses: u64,
+    /// Per instance, its last measured evaluation time (ns); 0 = not measured yet. What
+    /// [`Mode::Auto`] sums over the instances an assembly must evaluate fresh, to decide
+    /// whether that assembly goes parallel.
+    cost_ns: Vec<u64>,
+    /// Assemblies so far, for re-measuring every [`REMEASURE_EVERY`].
+    assemblies: u64,
 }
 
 struct BypassEntry {
@@ -191,6 +197,11 @@ struct BypassEntry {
     /// matrix entry). Filled on the first sparse replay and kept until the pattern changes, so a
     /// replay adds into the matrix directly instead of hashing every `(row, col)` again.
     slots: Option<(u64, Vec<u32>)>,
+    /// For each of `rec`'s stamps, the position in `x0` of its column (a Jacobian or
+    /// charge-Jacobian stamp whose column is one of the instance's unknowns), or [`NO_SLOT`]:
+    /// where the first-order correction reads its drift, found once when the recording is
+    /// stored rather than searched for on every replay.
+    cols: Vec<u32>,
 }
 
 /// A stamp with no cached slot: a residual or charge entry, a stamp outside the system, or one
@@ -209,6 +220,8 @@ impl Bypass {
             entries: instances.iter().map(|_| None).collect(),
             hits: 0,
             misses: 0,
+            cost_ns: vec![0; instances.len()],
+            assemblies: 0,
         }
     }
 
@@ -234,7 +247,16 @@ impl Bypass {
         })
     }
 
-    fn store(&mut self, i: usize, inst: &dyn ModelInstance, x: &[f64], rec: Recorder) {
+    /// Keep `rec`, instance `i`'s fresh recording at `x`. `slots`, when given, is its stamps'
+    /// sparse slots already resolved against that pattern ([`SlotCache::slots_of`]).
+    fn store(
+        &mut self,
+        i: usize,
+        inst: &dyn ModelInstance,
+        x: &[f64],
+        rec: Recorder,
+        slots: Option<(u64, Vec<u32>)>,
+    ) {
         let x0: Vec<(usize, f64)> = inst
             .unknowns()
             .iter()
@@ -255,10 +277,23 @@ impl Bypass {
             _ => true,
         });
         if covered {
+            let cols = rec
+                .0
+                .iter()
+                .map(|s| match *s {
+                    Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => x0
+                        .iter()
+                        .position(|&(u, _)| u == c)
+                        .and_then(|k| u32::try_from(k).ok())
+                        .unwrap_or(NO_SLOT),
+                    _ => NO_SLOT,
+                })
+                .collect();
             self.entries[i] = Some(BypassEntry {
                 x0,
                 rec,
-                slots: None,
+                slots,
+                cols,
             });
         } else {
             self.eligible[i] = false;
@@ -293,13 +328,8 @@ impl BypassEntry {
         let Some((_, slots)) = self.slots.as_ref() else {
             return;
         };
-        let dx = |c: usize| {
-            self.x0
-                .iter()
-                .find(|&&(u, _)| u == c)
-                .map_or(0.0, |&(u, v0)| x[u] - v0)
-        };
-        for (s, &slot) in self.rec.0.iter().zip(slots) {
+        let dx = |k: u32| self.x0.get(k as usize).map_or(0.0, |&(u, v0)| x[u] - v0);
+        for ((s, &slot), &col) in self.rec.0.iter().zip(slots).zip(&self.cols) {
             match *s {
                 Stamp::Jacobian(r, c, g) => {
                     if slot == NO_SLOT {
@@ -307,7 +337,7 @@ impl BypassEntry {
                     } else {
                         sys.add_jacobian_at(slot as usize, g);
                     }
-                    let d = dx(c);
+                    let d = dx(col);
                     if d != 0.0 {
                         StampSink::residual(sys, r, g * d);
                     }
@@ -318,7 +348,7 @@ impl BypassEntry {
                     } else {
                         sys.add_dcharge_at(slot as usize, g);
                     }
-                    let d = dx(c);
+                    let d = dx(col);
                     if d != 0.0 {
                         StampSink::charge(sys, r, g * d);
                     }
@@ -334,18 +364,13 @@ impl BypassEntry {
     }
 
     fn replay_corrected(&self, x: &[f64], sink: &mut dyn StampSink) {
-        let dx = |c: usize| {
-            self.x0
-                .iter()
-                .find(|&&(u, _)| u == c)
-                .map_or(0.0, |&(u, v0)| x[u] - v0)
-        };
-        for s in &self.rec.0 {
+        let dx = |k: u32| self.x0.get(k as usize).map_or(0.0, |&(u, v0)| x[u] - v0);
+        for (s, &col) in self.rec.0.iter().zip(&self.cols) {
             match *s {
                 Stamp::Residual(r, v) => sink.residual(r, v),
                 Stamp::Jacobian(r, c, g) => {
                     sink.jacobian(r, c, g);
-                    let d = dx(c);
+                    let d = dx(col);
                     if d != 0.0 {
                         sink.residual(r, g * d);
                     }
@@ -353,7 +378,7 @@ impl BypassEntry {
                 Stamp::Charge(r, v) => sink.charge(r, v),
                 Stamp::Dcharge(r, c, g) => {
                     sink.dcharge(r, c, g);
-                    let d = dx(c);
+                    let d = dx(col);
                     if d != 0.0 {
                         sink.charge(r, g * d);
                     }
@@ -465,6 +490,30 @@ impl SlotCache {
         Self::default()
     }
 
+    /// `rec`'s stamps' slots, one per stamp ([`NO_SLOT`] for a residual or charge entry or an
+    /// entry outside the pattern), tagged with the pattern they are valid for — taken from
+    /// instance `i`'s layout, so only right just after [`Self::replay`] has added `rec` itself
+    /// (`None` if the layout does not cover it stamp for stamp).
+    fn slots_of(&self, i: usize, rec: &Recorder) -> Option<(u64, Vec<u32>)> {
+        let layout = self.layouts.get(i)?;
+        let mut k = 0;
+        let mut slots = Vec::with_capacity(rec.0.len());
+        for s in &rec.0 {
+            match *s {
+                Stamp::Jacobian(r, c, _) | Stamp::Dcharge(r, c, _) => {
+                    let &(lr, lc, slot) = layout.get(k)?;
+                    if (lr, lc) != (r, c) {
+                        return None;
+                    }
+                    slots.push(slot);
+                    k += 1;
+                }
+                _ => slots.push(NO_SLOT),
+            }
+        }
+        Some((self.pattern, slots))
+    }
+
     /// Add instance `i`'s recording `rec` into `sys`: exactly what [`Recorder::replay`] does,
     /// through the layout instead of a hash lookup wherever the layout still matches.
     fn replay(&mut self, i: usize, rec: &Recorder, sys: &mut SparseSystem) {
@@ -533,21 +582,55 @@ fn bypass_into(
         .enumerate()
         .filter(|(i, _)| !hit[*i])
         .collect();
-    let est = NS_PER_INSTANCE.load(Ordering::Relaxed);
-    let parallel = work.len() >= 2
-        && rayon::current_num_threads() > 1
-        && match mode() {
-            Mode::Never => false,
-            Mode::Always => true,
-            Mode::Auto => est == 0 || est.saturating_mul(work.len() as u64) >= PARALLEL_MIN_WORK_NS,
-        };
+    // In `Mode::Auto` the decision is the *fresh* work's cost: with most instances replayed,
+    // what is left may be a few cheap devices, and handing those to the pool costs more than
+    // evaluating them (one process-wide estimate per instance, as `load_all` keeps, cannot
+    // see which instances are left). So each instance's own evaluation time is measured —
+    // serially, the first time it is evaluated and every `REMEASURE_EVERY` assemblies — and
+    // the assembly goes parallel when the fresh instances' times sum to `PARALLEL_MIN_WORK_NS`.
+    let threads = rayon::current_num_threads() > 1;
+    let call = bypass.assemblies;
+    bypass.assemblies += 1;
+    let (parallel, measure) = if work.len() < 2 || !threads {
+        (false, false)
+    } else {
+        match mode() {
+            Mode::Never => (false, false),
+            Mode::Always => (true, false),
+            Mode::Auto => {
+                if call.is_multiple_of(REMEASURE_EVERY)
+                    || work.iter().any(|(i, _)| bypass.cost_ns[*i] == 0)
+                {
+                    (false, true)
+                } else {
+                    let ns: u64 = work.iter().map(|(i, _)| bypass.cost_ns[*i]).sum();
+                    (ns >= PARALLEL_MIN_WORK_NS, false)
+                }
+            }
+        }
+    };
+    // A recording starts with room for as many stamps as the instance's last one had, rather
+    // than growing to it a push at a time.
+    let caps: Vec<usize> = (0..n)
+        .map(|i| bypass.entries[i].as_ref().map_or(0, |e| e.rec.0.len()))
+        .collect();
     let eval = |(i, mut st): (usize, ModelState<'_>)| {
-        let mut rec = Recorder::default();
+        let mut rec = Recorder(Vec::with_capacity(caps[i]));
         instances[i].load(x, ctx, &mut st, &mut rec);
         (i, rec)
     };
     let recorded: Vec<(usize, Recorder)> = if parallel {
         work.into_par_iter().map(eval).collect()
+    } else if measure {
+        work.into_iter()
+            .map(|w| {
+                let t0 = Instant::now();
+                let (i, rec) = eval(w);
+                let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                bypass.cost_ns[i] = ns.max(1);
+                (i, rec)
+            })
+            .collect()
     } else {
         work.into_iter().map(eval).collect()
     };
@@ -570,7 +653,13 @@ fn bypass_into(
         target.replay_fresh(i, &rec);
         if bypass.eligible[i] {
             bypass.misses += 1;
-            bypass.store(i, instances[i], x, rec);
+            // The slot cache now holds this very recording's layout: hand its slots on, so the
+            // first replay does not look every stamp up again.
+            let slots = match &target {
+                Target::Sparse(_, cache) => cache.slots_of(i, &rec),
+                Target::Any(_) => None,
+            };
+            bypass.store(i, instances[i], x, rec, slots);
         }
     }
 }

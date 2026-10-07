@@ -567,6 +567,32 @@ impl GeneratedModel {
         validating: bool,
         static_vars: &'a [Option<crate::ad::Dual>],
     ) -> Ctx<'a> {
+        self.ctx_sized(
+            x,
+            analysis,
+            state_prev,
+            events_fired,
+            validating,
+            static_vars,
+            true,
+        )
+    }
+
+    /// [`Self::ctx`], saying whether to pre-size the variable table to every declared local.
+    /// The statically scheduled path keeps its variables in registers and binds none in the
+    /// table, so for it the table starts empty rather than allocating, clearing and dropping
+    /// one entry per local on every evaluation (`Ctx::set_var` grows it if anything binds).
+    #[allow(clippy::too_many_arguments)]
+    fn ctx_sized<'a>(
+        &'a self,
+        x: &'a [f64],
+        analysis: &va_abi::AnalysisCtx,
+        state_prev: &'a [f64],
+        events_fired: &'a [bool],
+        validating: bool,
+        static_vars: &'a [Option<crate::ad::Dual>],
+        presize_vars: bool,
+    ) -> Ctx<'a> {
         // Three maps built per call (branch-current slots, `idt` slots, stateful-call slots):
         // counted for `--logfull` (`crate::counters`).
         crate::counters::ctx_maps_built(3);
@@ -603,7 +629,11 @@ impl GeneratedModel {
             .collect();
         // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
         // but doing it once here keeps a 1400-variable model from reallocating its way up.
-        let mut vars = vec![None; self.shared.module.vars.len()];
+        let mut vars = if presize_vars || !self.shared.lowered.persistent_vars.is_empty() {
+            vec![None; self.shared.module.vars.len()]
+        } else {
+            Vec::new()
+        };
         // A persistent variable starts from its value at the last accepted timepoint (0 if none
         // was ever committed, the LRM's initial value), `lower::PersistentVar`. A constant: what
         // it was then does not move with this evaluation's unknowns.
@@ -761,10 +791,14 @@ impl GeneratedModel {
     where
         F: FnMut(&Self, &Ctx, &Contribution),
     {
-        for stmt in stmts {
+        let mut i = 0;
+        while i < stmts.len() {
+            let stmt = &stmts[i];
+            i += 1;
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => match &ctx.sched {
-                    Some(run) => run.assign(ctx, *rhs)?,
+                    // This assignment and the ones after it whose code follows on: one stretch.
+                    Some(run) => i += run.stretch(ctx, *rhs, stmts.len() - i + 1)? - 1,
                     None => {
                         let d = tape::eval_root(ctx, *rhs)?;
                         ctx.set_var(*lhs, d);
@@ -782,6 +816,15 @@ impl GeneratedModel {
                     target,
                     monitor,
                 } => tasks::run(ctx, *kind, args, *target, *monitor)?,
+                // An `if` the static path laid out whole (arms of assignments only) runs as code,
+                // with the statements after it whose code follows on.
+                LoweredStmt::If { cond, .. }
+                    if ctx.sched.as_ref().is_some_and(|run| run.is_whole(*cond)) =>
+                {
+                    if let Some(run) = &ctx.sched {
+                        i += run.stretch(ctx, *cond, stmts.len() - i + 1)? - 1;
+                    }
+                }
                 LoweredStmt::If { cond, then_, else_ } => {
                     let taken = if tape::eval_value(ctx, *cond)? != 0.0 {
                         then_
@@ -2471,32 +2514,37 @@ impl ModelInstance for GeneratedModel {
         } else {
             None
         };
-        let mut ctx = self.ctx(
+        let prog = regs_guard.as_ref().and_then(|_| {
+            self.shared
+                .sched
+                .get_or_init(|| {
+                    sched::Program::compile(
+                        &self.shared.module,
+                        &self.shared.lowered,
+                        &self.shared.params,
+                        static_vars,
+                        self.terminals.len(),
+                    )
+                })
+                .as_ref()
+                .ok()
+        });
+        let mut ctx = self.ctx_sized(
             x,
             actx,
             state.committed(),
             state.fired_slots(),
             false,
             static_vars,
+            prog.is_none(),
         );
-        if let Some(guard) = regs_guard.as_mut() {
-            let prog = self.shared.sched.get_or_init(|| {
-                sched::Program::compile(
-                    &self.shared.module,
-                    &self.shared.lowered,
-                    &self.shared.params,
-                    static_vars,
-                    self.terminals.len(),
-                )
+        if let (Some(guard), Some(prog)) = (regs_guard.as_mut(), prog) {
+            let regs = guard.get_or_insert_with(|| prog.regs());
+            prog.begin(regs);
+            ctx.sched = Some(sched::Run {
+                prog,
+                regs: RefCell::new(regs),
             });
-            if let Ok(prog) = prog {
-                let regs = guard.get_or_insert_with(|| prog.regs());
-                prog.begin(regs);
-                ctx.sched = Some(sched::Run {
-                    prog,
-                    regs: RefCell::new(regs),
-                });
-            }
         }
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
@@ -3249,6 +3297,169 @@ mod tests {
             "the eval-phase binding must shadow the setup's: got {}, expected 0.5 (100.0 would \
              mean the stale setup value was read)",
             sink.residual[0]
+        );
+    }
+
+    /// The static path's compile-time reductions (2.17.0), on a model built to exercise each:
+    ///
+    /// - `k = R * 2` is setup and never reassigned, so `k * 3.0` is folded into one constant
+    ///   and `g = V(p,n) * (k * 3.0)` costs a probe and one multiply;
+    /// - `dead = V(p,n) * V(p,n) + 1` reaches no contribution: it compiles to nothing;
+    /// - `dead_call = $vt` reaches nothing either, but is a tree-walked call (which can fail),
+    ///   so it is kept.
+    ///
+    /// And the stamps are the hand-computed ones: `I = 6 R V`, `dI/dV = 6 R`.
+    #[test]
+    fn the_static_path_folds_constants_and_drops_dead_assignments() {
+        let mut m = resistor_ir();
+        m.vars = ["k", "g", "dead", "dead_call"]
+            .iter()
+            .map(|n| VarDecl {
+                name: n.to_string(),
+            })
+            .collect();
+        let r = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let two = m.push_expr(Expr::Const(2.0));
+        let k_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, r, two));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let k = m.push_expr(Expr::Var(VarId(0)));
+        let three = m.push_expr(Expr::Const(3.0));
+        let k3 = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, k, three));
+        let g_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v, k3));
+        let v2 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let sq = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v, v2));
+        let one = m.push_expr(Expr::Const(1.0));
+        let dead_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Add, sq, one));
+        let vt = m.push_expr(Expr::Call(va_ir::Builtin::Vt, vec![]));
+        let read_g = m.push_expr(Expr::Var(VarId(1)));
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: VarId(0),
+                rhs: k_rhs,
+            },
+            Stmt::Assign {
+                lhs: VarId(1),
+                rhs: g_rhs,
+            },
+            Stmt::Assign {
+                lhs: VarId(2),
+                rhs: dead_rhs,
+            },
+            Stmt::Assign {
+                lhs: VarId(3),
+                rhs: vt,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: read_g,
+            },
+        ];
+        let compiled = CompiledModel::new(&m).expect("compiles");
+        let instance = compiled.instantiate(&[0, 1], &mut 2).expect("builds");
+        let mut sink = DenseStamp::new(2);
+        let x = [0.25, 0.0];
+        instance.load(
+            &x,
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+        let r_val = compiled.shared.params[0];
+        assert_eq!(sink.residual[0], 0.25 * (r_val * 2.0 * 3.0));
+        assert_eq!(sink.jac(0, 0), r_val * 2.0 * 3.0);
+        if !sched_enabled() {
+            return; // `VA_SCHED=off`: nothing compiled to inspect
+        }
+        let prog = compiled
+            .shared
+            .sched
+            .get()
+            .expect("compiled on first load")
+            .as_ref()
+            .expect("on the static path");
+        // A probe and one multiply for `g`; the tree call for `dead_call` and the copy into its
+        // register; nothing for `dead`, and no `k * 3.0` at run time.
+        assert_eq!(prog.instr_kinds(), ["probe", "bin", "tree", "copy"]);
+    }
+
+    /// An `if` whose arms hold only assignments is laid out whole on the static path (2.17.0):
+    /// condition, jump, arms, one stretch of code. `if (V(p,n) > 0) g = 2 V(p,n); else
+    /// g = 3 V(p,n); I(p,n) <+ g;` must still take the arm the bias selects, on both sides.
+    #[test]
+    fn an_if_of_assignments_runs_as_code_and_takes_the_arm_the_bias_selects() {
+        let mut m = resistor_ir();
+        m.vars = vec![VarDecl { name: "g".into() }];
+        let probe = |m: &mut Module| {
+            m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }))
+        };
+        let v = probe(&mut m);
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v, zero));
+        let v1 = probe(&mut m);
+        let two = m.push_expr(Expr::Const(2.0));
+        let then_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, two, v1));
+        let v2 = probe(&mut m);
+        let three = m.push_expr(Expr::Const(3.0));
+        let else_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, three, v2));
+        let read_g = m.push_expr(Expr::Var(VarId(0)));
+        m.analog = vec![
+            Stmt::If {
+                cond,
+                then_: vec![Stmt::Assign {
+                    lhs: VarId(0),
+                    rhs: then_rhs,
+                }],
+                else_: vec![Stmt::Assign {
+                    lhs: VarId(0),
+                    rhs: else_rhs,
+                }],
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: read_g,
+            },
+        ];
+        let compiled = CompiledModel::new(&m).expect("compiles");
+        let instance = compiled.instantiate(&[0, 1], &mut 2).expect("builds");
+        for (vp, k) in [(0.5, 2.0), (-0.5, 3.0)] {
+            let mut sink = DenseStamp::new(2);
+            instance.load(
+                &[vp, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sink,
+            );
+            assert_eq!(sink.residual[0], k * vp, "V = {vp}");
+            assert_eq!(sink.jac(0, 0), k, "V = {vp}");
+        }
+        if !sched_enabled() {
+            return;
+        }
+        let prog = compiled
+            .shared
+            .sched
+            .get()
+            .expect("compiled on first load")
+            .as_ref()
+            .expect("on the static path");
+        assert_eq!(
+            prog.instr_kinds(),
+            ["probe", "flat2", "jz", "probe", "bin", "jump", "probe", "bin"]
         );
     }
 
