@@ -275,6 +275,35 @@ const SCHEDULED_EVENTS: [(&str, &str); 3] = [
     ("timer", "@timer"),
 ];
 
+/// The candidate within edit distance 2 of `word` (closest first), for a "did you mean"
+/// hint. `None` when nothing is that close: a hint that is a guess is worse than no hint.
+fn closest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    candidates
+        .map(|c| (edit_distance(word, c), c))
+        .filter(|&(d, _)| d <= 2)
+        .min_by_key(|&(d, _)| d)
+        .map(|(_, c)| c)
+}
+
+/// Levenshtein distance, by characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// Where the parser's event-trigger refusals are tracked.
+const ANALOG_EVENTS_TRACKING: &str = "docs/roadmap.md, section \"Analog events\"";
+
 impl Parser<'_> {
     // --- cursor helpers --------------------------------------------------------------
 
@@ -302,8 +331,20 @@ impl Parser<'_> {
         if self.at(t) {
             self.pos += 1;
             Ok(())
+        } else if let Some(e) = self.excluded_operator() {
+            e
+        } else if *t == Token::Semicolon && self.pos > 0 {
+            // A missing `;` is noticed at the *next* token, which is usually on the next line.
+            // Reported there, the message blames a line that is fine; the `;` belongs after the
+            // previous token, so that is where this points.
+            Err(FrontendError::Parse(format!(
+                "{}: expected `;` after {}, found {}",
+                self.location_after(self.pos - 1),
+                self.toks[self.pos - 1].describe(),
+                self.found()
+            )))
         } else {
-            self.err(format!("expected {t:?}"))
+            self.err(format!("expected {}", t.describe()))
         }
     }
 
@@ -575,12 +616,33 @@ impl Parser<'_> {
     }
 
     fn err<T>(&self, what: String) -> Result<T, FrontendError> {
+        if let Some(e) = self.excluded_operator() {
+            return e;
+        }
         Err(FrontendError::Parse(format!(
-            "{}: {}, found {:?}",
+            "{}: {}, found {}",
             self.location(),
             what,
-            self.peek()
+            self.found()
         )))
+    }
+
+    /// A construct opened at token `opener` that the source never closes with `closer`. The
+    /// error is located where the parser gave up, and names where the construct was opened,
+    /// because that is the line the user has to look at.
+    fn unclosed<T>(&self, opener: usize, what: &str, closer: &str) -> Result<T, FrontendError> {
+        let opened = self.location_of(opener);
+        Err(FrontendError::Parse(format!(
+            "{}: expected `{closer}` to close the {what} opened {opened}, found {}",
+            self.location(),
+            self.found()
+        )))
+    }
+
+    /// The current token for a "found …" tail, as the user wrote it ([`Token::describe`]).
+    fn found(&self) -> String {
+        self.peek()
+            .map_or_else(|| "the end of the file".to_string(), Token::describe)
     }
 
     /// Refuse a construct this parser recognises and declines to support, at the current
@@ -590,18 +652,45 @@ impl Parser<'_> {
     /// right tail for "your source is malformed" and exactly the wrong one here: a refusal is
     /// not a surprise about the next token, and the debug-formatted token made the message read
     /// as a syntax error in a construct the user had spelled correctly.
+    ///
+    /// `tracking` names where the limitation is recorded. It is an argument, not a constant:
+    /// until 2.18.2 every parser refusal said "docs/roadmap.md, section \"Analog events\"",
+    /// which was right for the event triggers and wrong for everything else.
     fn refuse<T>(
         &self,
         what: impl Into<String>,
         why: impl Into<String>,
         instead: impl Into<String>,
+        tracking: &str,
     ) -> Result<T, FrontendError> {
         Err(FrontendError::Refused(
             Refusal::new(what, why)
                 .at(self.location())
                 .instead(instead)
-                .tracking("docs/roadmap.md, section \"Analog events\""),
+                .tracking(tracking),
         ))
+    }
+
+    /// A parse error at the current location whose message already says what was found, so
+    /// it takes no `, found …` tail (contrast [`Self::err`]).
+    fn err_here<T>(&self, msg: String) -> Result<T, FrontendError> {
+        Err(FrontendError::Parse(format!("{}: {msg}", self.location())))
+    }
+
+    /// The error for a case-equality operator at the cursor, if there is one. Checked by both
+    /// [`Self::err`] and [`Self::eat`], so wherever the parser trips over `===` it explains the
+    /// operator rather than whatever it expected in its place.
+    fn excluded_operator<T>(&self) -> Option<Result<T, FrontendError>> {
+        let (op, instead) = match self.peek()? {
+            Token::CaseEq => ("===", "=="),
+            Token::CaseNe => ("!==", "!="),
+            _ => return None,
+        };
+        Some(self.err_here(format!(
+            "`{op}` is not part of Verilog-A: Annex C excludes the case-equality operators, which \
+             compare four-state logic values (`x`, `z`) that an analog value cannot hold; use \
+             `{instead}`"
+        )))
     }
 
     /// Where the parser is, phrased for a human if [`parse_with_disciplines_located`] supplied
@@ -611,8 +700,52 @@ impl Parser<'_> {
         let (Some(src), Some(offsets)) = (self.src, self.offsets) else {
             return format!("at token {}", self.pos);
         };
-        // Past the last token (an unexpected EOF), point at the end of the source.
-        let offset = offsets.get(self.pos).copied().unwrap_or(src.len());
+        // Past the last token (an unexpected EOF), point just past the last token: the end of
+        // the source is usually trailing blank lines, which the preprocessor's line map does
+        // not cover, and which would fall back to a "preprocessed line" no editor can find.
+        let offset = match offsets.get(self.pos) {
+            Some(&o) => o,
+            None => match self.pos.checked_sub(1) {
+                Some(last) => return self.location_after(last),
+                None => src.len(),
+            },
+        };
+        self.location_at(offset)
+    }
+
+    /// Where the text right after token `idx` ends on its line — the place a missing `;` (or a
+    /// missing `endmodule` at end of file) belongs.
+    fn location_after(&self, idx: usize) -> String {
+        let (Some(src), Some(offsets)) = (self.src, self.offsets) else {
+            return format!("at token {idx}");
+        };
+        let start = offsets
+            .get(idx)
+            .copied()
+            .unwrap_or(src.len())
+            .min(src.len());
+        let line_end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+        // The token is the last thing on its line in the case this is for; when it is not, the
+        // next token's position is the honest answer.
+        match offsets.get(idx + 1) {
+            Some(&next) if next < line_end => self.location_at(next),
+            _ => self.location_at(start + src[start..line_end].trim_end().len()),
+        }
+    }
+
+    /// [`Self::location`] for the start of token `idx`.
+    fn location_of(&self, idx: usize) -> String {
+        match self.offsets.and_then(|o| o.get(idx)) {
+            Some(&o) => self.location_at(o),
+            None => format!("at token {idx}"),
+        }
+    }
+
+    /// [`Self::location`] for an arbitrary byte offset into the preprocessed source.
+    fn location_at(&self, offset: usize) -> String {
+        let Some(src) = self.src else {
+            return format!("at token {}", self.pos);
+        };
         let offset = offset.min(src.len());
         let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
         let line_no = src[..offset].bytes().filter(|&b| b == b'\n').count() + 1;
@@ -1110,7 +1243,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("unexpected end of input inside `nature...endnature`".to_string());
+                return self.err("expected `endnature`".to_string());
             }
             if self.at_keyword("units") {
                 self.pos += 1;
@@ -1169,7 +1302,7 @@ impl Parser<'_> {
                 decl.ddt_nature = Some(self.expect_ident()?);
                 self.eat(&Token::Semicolon)?;
             } else {
-                return self.err(format!("unknown `nature` attribute {:?}", self.peek()));
+                return self.err("expected a `nature` attribute or `endnature`".to_string());
             }
         }
         self.eat_keyword("endnature")?;
@@ -1192,9 +1325,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err(
-                    "unexpected end of input inside `discipline...enddiscipline`".to_string(),
-                );
+                return self.err("expected `enddiscipline`".to_string());
             }
             if self.at_keyword("potential") {
                 self.pos += 1;
@@ -1219,7 +1350,8 @@ impl Parser<'_> {
                 });
                 self.eat(&Token::Semicolon)?;
             } else {
-                return self.err(format!("unknown `discipline` attribute {:?}", self.peek()));
+                return self
+                    .err("expected a `discipline` attribute or `enddiscipline`".to_string());
             }
         }
         self.eat_keyword("enddiscipline")?;
@@ -1248,6 +1380,7 @@ impl Parser<'_> {
             .and_then(|o| o.get(self.pos).copied())
             .unwrap_or(0);
         let settings = crate::preprocess::settings_at(self.directives, start);
+        let module_pos = self.pos;
         self.eat(&Token::Module)?;
         let name = self.expect_ident()?;
 
@@ -1278,7 +1411,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("unexpected end of input before `endmodule`".to_string());
+                return self.unclosed(module_pos, &format!("module `{name}`"), "endmodule");
             }
             items.push(self.parse_item()?);
         }
@@ -1410,9 +1543,29 @@ impl Parser<'_> {
     /// Parse a module instantiation, `module #(.p(expr), ...) name(conn, ...);`. `module` is
     /// the already-peeked (but not yet consumed) instantiated-module name.
     fn parse_instance(&mut self, module: String) -> Result<Item, FrontendError> {
+        let module_pos = self.pos;
         self.pos += 1; // consume the module-name identifier
         let params = self.parse_optional_param_overrides()?;
         let name = self.expect_ident()?;
+        // `foo a, b;` or `foo a;` is not an instance — an instance needs its `(...)` — but it is
+        // exactly a net declaration under a discipline `foo` that nobody declared. Most often
+        // a misspelling (`electical`) or a missing `` `include "disciplines.vams" ``, and the
+        // generic "expected `(`" says neither.
+        if params.is_empty() && matches!(self.peek(), Some(Token::Comma | Token::Semicolon)) {
+            let hint = closest(
+                &module,
+                ["electrical", "thermal"]
+                    .into_iter()
+                    .chain(self.disciplines.keys().map(String::as_str)),
+            )
+            .map_or_else(String::new, |d| format!("; did you mean `{d}`?"));
+            return Err(FrontendError::Parse(format!(
+                "{}: `{module} {name}` reads as a net declaration, but no discipline `{module}` is \
+                 declared (declare it in a `discipline` block, or `` `include `` the file that \
+                 does){hint}",
+                self.location_of(module_pos)
+            )));
+        }
         self.eat(&Token::LParen)?;
         let connections = self.parse_port_conn_list()?;
         self.eat(&Token::RParen)?;
@@ -1615,13 +1768,14 @@ impl Parser<'_> {
         self.eat(&Token::Semicolon)?;
 
         let mut args = Vec::new();
+        let mut declared = Vec::new();
         let mut body = Vec::new();
         loop {
             if self.at_keyword("endfunction") {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("unexpected end of input before `endfunction`".to_string());
+                return self.err("expected `endfunction`".to_string());
             }
             match self.peek() {
                 Some(Token::Input) | Some(Token::Output) | Some(Token::Inout) => {
@@ -1635,10 +1789,11 @@ impl Parser<'_> {
                     }
                     self.eat(&Token::Semicolon)?;
                 }
-                // Argument/local type declarations: consumed, types not tracked in v0.
+                // Argument/local type declarations: the names are kept (elaboration checks
+                // assignment targets against them); the types are not tracked.
                 Some(Token::Real) | Some(Token::Integer) => {
                     self.pos += 1;
-                    self.ident_list()?;
+                    declared.extend(self.ident_list()?);
                     self.eat(&Token::Semicolon)?;
                 }
                 _ => body.push(self.parse_stmt()?),
@@ -1649,6 +1804,7 @@ impl Parser<'_> {
             name,
             ret_ty,
             args,
+            declared,
             body,
         }))
     }
@@ -1729,6 +1885,7 @@ impl Parser<'_> {
     /// block scoping was introduced to fix: a 1 kΩ device silently becoming 0.5 Ω.
     fn parse_stmt_body(&mut self) -> Result<Stmt, FrontendError> {
         if self.at(&Token::Begin) {
+            let begin_pos = self.pos;
             self.pos += 1;
             // An optional `: label` names the block (Verilog-A); the name is discarded.
             if self.at(&Token::Colon) {
@@ -1737,8 +1894,15 @@ impl Parser<'_> {
             }
             let mut stmts = Vec::new();
             while !self.at(&Token::End) {
-                if self.peek().is_none() {
-                    return self.err("unexpected end of input before `end`".to_string());
+                // No statement starts with these, so meeting one means the block was never
+                // closed. Said here, against the `begin`, rather than as "expected a
+                // statement" against the `endmodule` — which is where the parser notices, not
+                // where the mistake is.
+                if self.peek().is_none()
+                    || self.at(&Token::EndModule)
+                    || self.at_keyword("endfunction")
+                {
+                    return self.unclosed(begin_pos, "`begin`", "end");
                 }
                 stmts.push(self.parse_stmt()?);
             }
@@ -1830,6 +1994,7 @@ impl Parser<'_> {
                         ),
                         "write the trigger with those events only; `absdelta` is not implemented"
                             .to_string(),
+                        ANALOG_EVENTS_TRACKING,
                     );
                 }
                 let step_events = self.step_event_list();
@@ -1853,6 +2018,7 @@ impl Parser<'_> {
                                 "write the bare `@({event})`, or an `or` list of bare \
                                  `initial_step`/`final_step`; both are honoured"
                             ),
+                            ANALOG_EVENTS_TRACKING,
                         );
                     }
                 }
@@ -1978,12 +2144,21 @@ impl Parser<'_> {
                         args,
                     })
                 }
+                // Not a refusal: Annex C excludes these from Verilog-A, so the source is not
+                // valid Verilog-A, and "not yet parsed" would promise support that will never
+                // come. Until 2.18.2 they fell through to the refusal below.
+                kw @ ("casex" | "casez") => self.err_here(format!(
+                    "`{kw}` is not part of Verilog-A: Annex C excludes it, because its \
+                     don't-care matching works on four-state logic values (`x`, `z`) that an \
+                     analog value cannot hold; use `case`"
+                )),
                 other => self.refuse(
                     format!("the reserved word `{other}`"),
-                    "it begins a Verilog-A construct this implementation does not yet parse, \
-                     and guessing at its meaning would silently change what the model says",
+                    "it begins a construct this implementation does not yet parse, and guessing \
+                     at its meaning would silently change what the model says",
                     "see `docs/token-reference.md` for this token's status, and \
                      `docs/roadmap.md` for whether it is planned",
+                    "docs/token-reference.md",
                 ),
             },
             _ => self.err("expected a statement".to_string()),
@@ -1999,7 +2174,7 @@ impl Parser<'_> {
         let mut stmts = Vec::new();
         while !self.at_keyword("endgenerate") {
             if self.peek().is_none() {
-                return self.err("unexpected end of input before `endgenerate`".to_string());
+                return self.err("expected `endgenerate`".to_string());
             }
             stmts.push(self.parse_stmt()?);
         }
@@ -2060,7 +2235,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("unexpected end of input before `endcase`".to_string());
+                return self.err("expected `endcase`".to_string());
             }
             if self.at_keyword("default") {
                 self.pos += 1;

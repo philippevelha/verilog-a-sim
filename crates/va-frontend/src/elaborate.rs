@@ -254,7 +254,6 @@ fn elaborate_inner(
         param_vals: HashMap::new(),
         vars: HashMap::new(),
         block_scopes: Vec::new(),
-        decl_scopes: Vec::new(),
         funcs: HashMap::new(),
         branches: HashMap::new(),
         named_branches: HashMap::new(),
@@ -401,13 +400,6 @@ struct Elaborator<'a> {
     /// [`Self::vars`], so an inner declaration shadows an outer variable *or* a module
     /// parameter for exactly the extent of its own block — and not one statement further.
     block_scopes: Vec<HashMap<String, VarId>>,
-    /// The variable-collecting pre-pass's mirror of [`Self::block_scopes`]: which names are
-    /// block-locally declared at each depth. It tracks *names only* — the pre-pass never
-    /// allocates a [`VarId`] for a block-local declaration, lowering does — which is what keeps
-    /// the two passes from having to agree on an allocation order. Its sole job is to stop
-    /// [`Self::register_var`] auto-registering a module-scope variable for an assignment whose
-    /// target is really a block-local declaration.
-    decl_scopes: Vec<std::collections::HashSet<String>>,
     funcs: HashMap<String, FuncId>,
     branches: HashMap<(u32, u32), BranchId>,
     /// Named branches declared with `branch (a, b) name;`, resolved to their [`BranchId`].
@@ -486,7 +478,25 @@ impl Elaborator<'_> {
     /// range(s)) a 1-D or § 2-D array — interning one [`VarId`] per index tuple, named
     /// `"name[k]"`/`"name[i][j]"`, exactly mirroring how [`Self::collect_nodes`] expands a
     /// vector net.
+    ///
+    /// A name already declared as a module-scope variable or a parameter is an error (the LRM
+    /// allows one declaration per name per scope). Before 2.18.1 a repeat was skipped, and a variable
+    /// sharing a parameter's name silently shadowed it for the whole analog block — every read
+    /// of the parameter became a read of a variable nothing had assigned.
     fn declare_var_entry(&mut self, entry: &ast::VarEntry) -> Result<(), FrontendError> {
+        let name = &entry.name;
+        if self.params.contains_key(name) {
+            return Err(elab(format!(
+                "`{name}` is declared both as a parameter and as a variable in this module; \
+                 rename one of them"
+            )));
+        }
+        if self.vars.contains_key(name) || self.var_arrays.contains_key(name) {
+            return Err(elab(format!(
+                "variable `{name}` is declared more than once in this module; remove one of \
+                 the declarations"
+            )));
+        }
         if entry.ranges.is_empty() {
             if let std::collections::hash_map::Entry::Vacant(slot) =
                 self.vars.entry(entry.name.clone())
@@ -539,8 +549,8 @@ impl Elaborator<'_> {
                 Item::Function(f) => f,
                 _ => continue,
             };
-            // Build the function-local scope: return variable, arguments, then any locals
-            // discovered as assignment targets in the body.
+            // Build the function-local scope: return variable, arguments, then the locals
+            // declared in the body.
             let mut local: HashMap<String, VarId> = HashMap::new();
             let ret = self.new_var(&f.name);
             local.insert(f.name.clone(), ret);
@@ -558,16 +568,28 @@ impl Elaborator<'_> {
                 });
             }
 
-            let mut targets = Vec::new();
-            collect_assign_targets(&f.body, &mut targets);
-            for name in targets {
-                if let std::collections::hash_map::Entry::Vacant(slot) = local.entry(name) {
+            // Declared locals. An argument's own type declaration (`input x; real x;`) names
+            // an argument already in scope and adds nothing.
+            for name in &f.declared {
+                if let std::collections::hash_map::Entry::Vacant(slot) = local.entry(name.clone()) {
                     let id = VarId(self.out.vars.len() as u32);
                     self.out.vars.push(VarDecl {
                         name: slot.key().clone(),
                     });
                     slot.insert(id);
                 }
+            }
+            // Every assignment target must be one of the above. Until 2.18.1 an undeclared
+            // target was declared on the spot, the same leniency the analog block had (see
+            // [`Self::collect_vars`]), so a misspelt local compiled as a second variable.
+            let mut targets = Vec::new();
+            collect_assign_targets(&f.body, &mut targets);
+            if let Some(name) = targets.iter().find(|t| !local.contains_key(*t)) {
+                return Err(elab(format!(
+                    "analog function `{}` assigns `{name}`, which is neither its name, one of its \
+                     arguments, nor declared inside it; declare it with `real {name};`",
+                    f.name
+                )));
             }
 
             // Lower the body with the function scope swapped in, then restore. The block-scope
@@ -594,8 +616,8 @@ impl Elaborator<'_> {
     }
 
     /// Register every declared `genvar` name (§ generate loops). Must run before variables are
-    /// collected, so a genvar's assignment-looking loop header is never mistaken for a real
-    /// analog variable (see [`Self::register_var`]).
+    /// lowered, so a genvar's assignment-looking loop header is never mistaken for an
+    /// assignment to an undeclared variable.
     fn collect_genvars(&mut self) {
         for item in &self.ast.items {
             if let Item::Genvar { names } = item {
@@ -833,6 +855,16 @@ impl Elaborator<'_> {
                     is_local,
                     ..
                 } => {
+                    // A second declaration of the same name is an error (the LRM allows one name,
+                    // one declaration, per scope). Before 2.18.1 the map insert below simply
+                    // overwrote the first, so the later default silently won — and which one
+                    // "wins" in another simulator is not something a model should depend on.
+                    if self.params.contains_key(name) {
+                        return Err(elab(format!(
+                            "parameter `{name}` is declared more than once in this module; \
+                             remove or rename one of the declarations"
+                        )));
+                    }
                     let (min, max) = match range {
                         Some(r) => (bound(self.const_eval(r.lo)?), bound(self.const_eval(r.hi)?)),
                         None => (None, None),
@@ -841,6 +873,15 @@ impl Elaborator<'_> {
                         Some(&v) => v,
                         None => self.const_eval(*default)?,
                     };
+                    // `1/0` folds to infinity and `0.0/0.0` to NaN; neither is a value a
+                    // parameter can hold. Caught here, where the parameter can still be named,
+                    // instead of as a non-finite residual at the first Newton iteration.
+                    if !default_val.is_finite() {
+                        return Err(elab(format!(
+                            "parameter `{name}` evaluates to {default_val}, not a finite number \
+                             (a division by zero in its default expression?)"
+                        )));
+                    }
                     if let Some(min) = min {
                         if default_val < min {
                             return Err(elab(format!(
@@ -879,6 +920,12 @@ impl Elaborator<'_> {
                 // another name resolving to `target`'s existing `ParamId`/value. `target`
                 // must already be declared — forward references are unsupported in v0.
                 Item::AliasParam { name, target } => {
+                    if self.params.contains_key(name) {
+                        return Err(elab(format!(
+                            "aliasparam `{name}` reuses the name of a parameter already declared \
+                             in this module"
+                        )));
+                    }
                     let id = *self.params.get(target).ok_or_else(|| {
                         elab(format!(
                             "aliasparam `{name}` targets unknown parameter `{target}`"
@@ -1110,6 +1157,16 @@ impl Elaborator<'_> {
 
     // --- pass 3: variables -----------------------------------------------------------
 
+    /// Check the analog block's variable declarations before lowering. It registers nothing:
+    /// a module-scope `real`/`integer` was registered by [`Self::collect_var_decls`], and a
+    /// block-local one is allocated by lowering when it reaches the declaration.
+    ///
+    /// **Until 2.18.1 this pass also declared variables nobody wrote.** Every assignment target
+    /// not already known was registered as a module-scope variable, so `g = 1e-3;` with no
+    /// `real g;` anywhere compiled — and so did a misspelling of a declared name (`gm_eff`
+    /// for `gmeff`), which quietly became a second variable and left the first one never
+    /// assigned. The LRM requires every variable to be declared; an undeclared
+    /// assignment target is now an error at lowering, which names it.
     fn collect_vars(&mut self) -> Result<(), FrontendError> {
         // Borrow the AST through a copy of the shared reference so we can mutate `self`.
         let items = self.ast;
@@ -1121,78 +1178,37 @@ impl Elaborator<'_> {
         Ok(())
     }
 
-    /// Register `name` as a local variable unless it is already a parameter, known variable,
-    /// or a genvar. A genvar (§ generate loops) never becomes an IR variable — it is folded to
-    /// a constant wherever it is read, and its only "assignment" is the header of the `for`
-    /// loop it drives, which elaboration unrolls rather than lowering as a normal assignment.
-    fn register_var(&mut self, name: &str) {
-        if self.genvars.contains(name) {
-            return;
+    /// The error for an assignment to `name`, which [`Self::lookup_var`] did not find. A
+    /// parameter gets its own message: it *is* declared, and "unknown variable" would send the
+    /// reader looking for a typo that is not there.
+    fn undeclared_assign_target(&self, name: &str) -> FrontendError {
+        if self.params.contains_key(name) {
+            elab(format!(
+                "`{name}` is a parameter, and a parameter cannot be assigned in the analog block; \
+                 declare a variable (`real {name}_eff;`) and assign that instead"
+            ))
+        } else {
+            elab(format!(
+                "variable `{name}` is assigned but never declared; declare it with \
+                 `real {name};` (or `integer {name};`) at module scope or at the top of the \
+                 enclosing named block"
+            ))
         }
-        // A block-local declaration owns this name here; lowering will allocate its `VarId` in
-        // the block scope. Auto-registering a module-scope variable for the same assignment
-        // would leave a second, dead binding behind — and, worse, one that a later read outside
-        // the block could resolve to.
-        if self.decl_scopes.iter().any(|sc| sc.contains(name)) {
-            return;
-        }
-        if !self.params.contains_key(name) && !self.vars.contains_key(name) {
-            let id = VarId(self.out.vars.len() as u32);
-            self.out.vars.push(VarDecl {
-                name: name.to_string(),
-            });
-            self.vars.insert(name.to_string(), id);
-        }
-    }
-
-    /// Record an explicit `real`/`integer` declaration inside the analog block as **block
-    /// local** for the pre-pass's purposes: its name, at the current block depth.
-    ///
-    /// # Real block scoping, and the silent wrong answer it replaces
-    ///
-    /// Verilog-A says a declaration inside `begin ... end` shadows an outer name **only within
-    /// that block**. This elaborator used to have one flat, module-wide `name -> VarId` map with
-    /// no push/pop at a `Stmt::Block`, so a block-local declaration leaked over the *entire*
-    /// analog block — including statements **before** the block, which no scoping rule could
-    /// justify. Given
-    ///
-    /// ```verilog
-    /// parameter real k = 1000.0;
-    /// analog begin
-    ///   begin : inner  real k;  k = 1.0;  end
-    ///   g = 1.0 / k;          // must divide by the parameter, 1000.0
-    ///   I(p, n) <+ g * V(p, n);
-    /// end
-    /// ```
-    ///
-    /// the read of `k` resolved to the block-local variable and the device silently became a
-    /// 1-ohm resistor instead of a 1-kilohm one. `external/bsimsoi.va` is the corpus instance: a
-    /// `begin : load` block declares `real ... MJSWG;`, hijacking the read of the `MJSWG`
-    /// *parameter* some 2200 lines earlier.
-    ///
-    /// From 2026-08-29 that collision was **rejected** rather than mis-resolved — the
-    /// conservative half of the fix, which could only turn a wrong answer into a diagnostic.
-    /// Since 2026-08-30 the scoping is real: [`Self::block_scopes`] gives each `begin ... end`
-    /// its own `name -> VarId` map, so the declaration shadows the parameter for exactly its own
-    /// block and not one statement further. The rejection is gone because there is nothing left
-    /// to reject, and so is the weaker "collision with an outer *variable* silently aliases the
-    /// two" limitation that sat beside it — both are ordinary shadowing now.
-    ///
-    /// **This pass allocates no `VarId`.** Lowering does, when it reaches the declaration with
-    /// the matching scope pushed. Keeping allocation in one pass is what lets the two walk the
-    /// AST independently without having to agree on an allocation order.
-    fn declare_local_var(&mut self, name: &str) -> Result<(), FrontendError> {
-        if self.genvars.contains(name) {
-            return Ok(());
-        }
-        if let Some(scope) = self.decl_scopes.last_mut() {
-            scope.insert(name.to_string());
-        }
-        Ok(())
     }
 
     /// Resolve a variable name against the block scopes (innermost outward), then the
     /// module/function scope. The single place shadowing is decided.
+    ///
+    /// # Real block scoping, and the silent wrong answer it replaced
+    ///
+    /// Verilog-A says a declaration inside `begin ... end` shadows an outer name **only within
+    /// that block**. This elaborator once had one flat, module-wide `name -> VarId` map, so a
+    /// block-local `real k;` leaked over the entire analog block — statements before the block
+    /// included — and a later `g = 1.0 / k;` divided by the local `1.0` instead of the parameter
+    /// `k = 1000.0`, a 1-ohm device where a 1-kilohm one was written. `external/bsimsoi.va` is
+    /// the corpus instance (a `begin : load` block's `real MJSWG;` against the `MJSWG`
+    /// parameter). Since 2026-08-30 [`Self::block_scopes`] gives each block its own map, so the
+    /// declaration shadows for exactly its own block.
     fn lookup_var(&self, name: &str) -> Option<VarId> {
         self.block_scopes
             .iter()
@@ -1203,14 +1219,9 @@ impl Elaborator<'_> {
 
     fn collect_vars_stmt(&mut self, stmt: &Stmt) -> Result<(), FrontendError> {
         match stmt {
-            // An indexed assignment target (`out_val[i] = ...;`) must already be declared as
-            // an array variable via `Item::Var` (§ array variables) — nothing to register here.
-            Stmt::Assign { lhs, index, .. } => {
-                if index.is_empty() {
-                    self.register_var(lhs);
-                }
-                Ok(())
-            }
+            // Nothing to register: an assignment target must already be declared, and
+            // lowering reports one that is not (§ `lower_stmt`'s `Stmt::Assign` arm).
+            Stmt::Assign { .. } => Ok(()),
             Stmt::VarDecl { names } => {
                 for entry in names {
                     // Array variables are elaboration-only in the sense that their whole size
@@ -1225,23 +1236,14 @@ impl Elaborator<'_> {
                             entry.name
                         )));
                     }
-                    self.declare_local_var(&entry.name)?;
                 }
                 Ok(())
             }
             Stmt::Block(body) => {
-                // Popped on the error path too, so a rejected declaration deep in one block
-                // cannot leave the scope stack skewed for anything that follows.
-                self.decl_scopes.push(std::collections::HashSet::new());
-                let mut result = Ok(());
                 for s in body {
-                    result = self.collect_vars_stmt(s);
-                    if result.is_err() {
-                        break;
-                    }
+                    self.collect_vars_stmt(s)?;
                 }
-                self.decl_scopes.pop();
-                result
+                Ok(())
             }
             Stmt::If { then_, else_, .. } => {
                 for s in then_ {
@@ -1467,7 +1469,7 @@ impl Elaborator<'_> {
                 if index.is_empty() {
                     let id = self
                         .lookup_var(lhs)
-                        .ok_or_else(|| elab(format!("assignment to unknown variable `{lhs}`")))?;
+                        .ok_or_else(|| self.undeclared_assign_target(lhs))?;
                     // `var = $fopen(name[, type])` (LRM §9.5.1, 2.12.0): the one system function
                     // with a side effect, so it lowers to a task that assigns the descriptor.
                     if let ExprAst::SysFunc { name, args } = self.ast.expr(*rhs) {
@@ -1704,9 +1706,9 @@ impl Elaborator<'_> {
             ExprAst::Ident(name) => {
                 // A genvar bound by an enclosing generate loop (§ generate loops) reads as the
                 // constant it is currently unrolled to — it never becomes a `Var`/`Param`. `vars`
-                // is checked *before* `params`: an explicit local declaration (`declare_local_var`)
-                // always shadows a same-named module parameter for the rest of its block (ordinary
-                // nested-scope shadowing — see `declare_local_var`'s doc comment), so once a local
+                // is checked *before* `params`: an explicit local declaration always shadows a
+                // same-named module parameter for the rest of its block (ordinary nested-scope
+                // shadowing — see [`Self::lookup_var`]'s doc comment), so once a local
                 // `MJSWG` exists, a read of `MJSWG` must resolve to it, not the outer parameter.
                 if let Some(v) = self.genvar_env.get(name) {
                     Expr::Const(*v as f64)
@@ -1714,6 +1716,12 @@ impl Elaborator<'_> {
                     Expr::Var(v)
                 } else if let Some(p) = self.params.get(name) {
                     Expr::Param(*p)
+                } else if self.genvars.contains(name) {
+                    // Declared, so "unknown identifier" would send the reader hunting for a typo.
+                    return Err(elab(format!(
+                        "genvar `{name}` is read outside the `for` loop that drives it; a genvar \
+                         only has a value inside its own generate loop"
+                    )));
                 } else {
                     return Err(elab(format!("unknown identifier `{name}`")));
                 }
@@ -2614,9 +2622,19 @@ impl Elaborator<'_> {
                 }
                 // A user-defined function takes precedence over the built-in table.
                 if let Some(fid) = self.funcs.get(name).copied() {
+                    let expected = self.out.functions[fid.0 as usize].args.len();
+                    if ids.len() != expected {
+                        return Err(elab(format!(
+                            "analog function `{name}` declares {expected} argument(s), but this \
+                             call passes {}",
+                            ids.len()
+                        )));
+                    }
                     Expr::CallUser(fid, ids)
                 } else {
-                    Expr::Call(call_builtin(name)?, ids)
+                    let builtin = call_builtin(name)?;
+                    check_builtin_arity(name, ids.len())?;
+                    Expr::Call(builtin, ids)
                 }
             }
             ExprAst::Unary(op, e) => {
@@ -4806,6 +4824,48 @@ fn map_binop(op: ast::BinOp) -> va_ir::BinOp {
     }
 }
 
+/// How many arguments a call-syntax built-in accepts, as an inclusive `(min, max)`; `None` for a
+/// name that is not one. One table for both places a built-in call is read — lowering
+/// ([`call_builtin`]'s caller) and constant folding ([`eval_const_call`]) — so the two cannot
+/// disagree about what `exp(x, 2.0)` means.
+///
+/// Before 2.18.1 neither place checked: lowering kept every argument and the back end read the
+/// ones it wanted, so `exp(V(p, n), 2.0)` compiled and silently evaluated `exp(V(p, n))`. An
+/// extra argument is almost always a misplaced parenthesis (`exp(a, b)` for `exp(a) * b`), and the
+/// model the user meant is not the one that ran.
+fn builtin_arity(name: &str) -> Option<(usize, usize)> {
+    Some(match name {
+        "exp" | "limexp" | "ln" | "log" | "sqrt" | "abs" | "floor" | "ceil" | "round"
+        | "integer" | "int" | "sin" | "cos" | "tan" | "sinh" | "cosh" | "tanh" | "asin"
+        | "acos" | "atan" | "asinh" | "acosh" | "atanh" => (1, 1),
+        "pow" | "hypot" | "atan2" | "min" | "max" => (2, 2),
+        // `ddt(expr [, abstol_or_nature])`.
+        "ddt" => (1, 2),
+        // `idt(expr [, ic [, assert [, abstol_or_nature]]])`.
+        "idt" => (1, 4),
+        _ => return None,
+    })
+}
+
+/// Reject a call to built-in `name` with `got` arguments when the LRM gives it a different
+/// count. A name [`builtin_arity`] does not know passes: the caller reports it as unknown.
+fn check_builtin_arity(name: &str, got: usize) -> Result<(), FrontendError> {
+    let Some((min, max)) = builtin_arity(name) else {
+        return Ok(());
+    };
+    if (min..=max).contains(&got) {
+        return Ok(());
+    }
+    let expected = match (min, max) {
+        (1, 1) => "exactly one argument".to_string(),
+        (a, b) if a == b => format!("exactly {a} arguments"),
+        (a, b) => format!("{a} to {b} arguments"),
+    };
+    Err(elab(format!(
+        "`{name}` takes {expected}, but this call passes {got}"
+    )))
+}
+
 /// Map a call-syntax function name to a math [`Builtin`].
 fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
     Ok(match name {
@@ -5098,6 +5158,7 @@ fn eval_binop(op: ast::BinOp, a: f64, b: f64) -> f64 {
 
 /// Evaluate a real math built-in numerically during constant folding.
 fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
+    check_builtin_arity(name, args.len())?;
     let arity_err = || {
         elab(format!(
             "wrong argument count for `{name}` in constant context"
@@ -5304,7 +5365,7 @@ mod tests {
     /// `g = 1.0 / k` after the block must divide by the **parameter** 1000.0, not the
     /// block-local `k = 1.0`: doing the latter turns a 1-kilohm device into a 1-ohm one with no
     /// diagnostic. `external/bsimsoi.va` is the corpus instance (see
-    /// [`Elaborator::declare_local_var`]).
+    /// [`Elaborator::lookup_var`]).
     ///
     /// This asserts the *resolution*, not merely that elaboration succeeds — which is the whole
     /// point, since the bug's signature was succeeding with the wrong answer.
@@ -7051,7 +7112,7 @@ mod tests {
 
         // Lowered in the analog block to the corresponding IR BinOps.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin x = V(a, b) > 0 && V(a, b) != 1; I(a, b) <+ x; end endmodule",
+            "module t(a, b); electrical a, b; real x; analog begin x = V(a, b) > 0 && V(a, b) != 1; I(a, b) <+ x; end endmodule",
         );
         assert!(m
             .exprs
@@ -7217,7 +7278,7 @@ mod tests {
     #[test]
     fn for_loop_lowers_to_ir() {
         // `for`/`while`/`repeat`/`case` now lower into the corresponding IR nodes.
-        let src = "module t(); electrical a; analog begin for (i = 0; i < 3; i = i + 1) I(a) <+ 1.0; end endmodule";
+        let src = "module t(); electrical a; integer i; analog begin for (i = 0; i < 3; i = i + 1) I(a) <+ 1.0; end endmodule";
         let m = elaborate_src(src);
         match &m.analog[0] {
             va_ir::Stmt::For {
@@ -8740,7 +8801,7 @@ mod tests {
     #[test]
     fn omitted_event_arguments_take_their_lrm_defaults() {
         let m = elaborate_top(
-            "module t(a, b); inout a, b; electrical a, b;              analog begin @(cross(V(a, b) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; real x;      analog begin @(cross(V(a, b) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
             "t",
         );
         assert!(
@@ -8750,7 +8811,7 @@ mod tests {
         );
 
         let m = elaborate_top(
-            "module t(a, b); inout a, b; electrical a, b;              analog begin @(timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; real x;      analog begin @(timer(1.0)) x = 1.0; I(a, b) <+ x; end endmodule",
             "t",
         );
         let va_ir::EventSite::Timer { period, .. } = m.event_sites[0] else {

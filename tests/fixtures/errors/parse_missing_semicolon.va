@@ -1,0 +1,10 @@
+// expect: parse
+// at: 7:18
+// message: expected `;` after identifier `n`, found `parameter`
+// fixed: 2.18.2 (before: blamed the line after, as `expected Semicolon, found Some(Parameter)`)
+module r(p, n);
+  inout p, n;
+  electrical p, n
+  parameter real R = 1k;
+  analog I(p, n) <+ V(p, n) / R;
+endmodule

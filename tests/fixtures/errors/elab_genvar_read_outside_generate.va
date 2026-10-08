@@ -1,0 +1,9 @@
+// expect: elab
+// message: genvar `i` is read outside the `for` loop that drives it
+// fixed: 2.18.2 (before: `unknown identifier `i``, for a declared genvar)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  genvar i;
+  analog I(p, n) <+ V(p, n) * i;
+endmodule

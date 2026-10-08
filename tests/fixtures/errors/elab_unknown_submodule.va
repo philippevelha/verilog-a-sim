@@ -1,0 +1,7 @@
+// expect: elab
+// message: instance `x1` references unknown module `nosuch`
+module top(a, b);
+  inout a, b;
+  electrical a, b;
+  nosuch #(.R(1k)) x1(a, b);
+endmodule

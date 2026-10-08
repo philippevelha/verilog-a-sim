@@ -1,0 +1,13 @@
+// expect: elab
+// message: analog function `sq` declares 1 argument(s), but this call passes 2
+// fixed: 2.18.1
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog function real sq;
+    input x;
+    real x;
+    sq = x * x;
+  endfunction
+  analog I(p, n) <+ sq(V(p, n), 2.0);
+endmodule

@@ -1,0 +1,8 @@
+// expect: elab
+// message: `idt` takes 1 to 4 arguments, but this call passes 5
+// fixed: 2.18.1
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ idt(V(p, n), 0, 0, 1e-9, 1);
+endmodule

@@ -1,0 +1,10 @@
+// expect: elab
+// message: `R` is declared both as a parameter and as a variable
+// fixed: 2.18.1 (before: the variable silently replaced the parameter in every read)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real R = 1k;
+  real R;
+  analog I(p, n) <+ V(p, n) / R;
+endmodule

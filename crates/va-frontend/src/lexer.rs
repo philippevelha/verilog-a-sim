@@ -347,6 +347,15 @@ pub enum Token {
     /// `==`.
     #[token("==")]
     EqEq,
+    /// `===` and `!==`, the case-equality operators. **Not Verilog-A**: Annex C excludes them,
+    /// because they compare four-state logic values (`x`, `z`) that an analog value cannot
+    /// hold. They are lexed as tokens of their own only so the parser can say that, instead of
+    /// reading `===` as `==` followed by a stray `=`. No grammar rule accepts them.
+    #[token("===")]
+    CaseEq,
+    /// `!==`; see [`Token::CaseEq`].
+    #[token("!==")]
+    CaseNe,
     /// `!=`.
     #[token("!=")]
     NotEq,
@@ -600,12 +609,116 @@ pub fn lex_spanned_with(
             Err(()) => {
                 return Err(FrontendError::Lex {
                     offset: span.start,
-                    message: format!("unexpected input {:?}", lexer.slice()),
+                    location: format!("byte {}", span.start),
+                    // The whole character at the error, from `source`: the error span can be
+                    // one byte of a multi-byte character, which printed as a broken glyph.
+                    message: format!(
+                        "unexpected character `{}`",
+                        source
+                            .get(span.start..)
+                            .and_then(|r| r.chars().next())
+                            .unwrap_or('?')
+                    ),
                 });
             }
         }
     }
     Ok((tokens, offsets))
+}
+
+impl Token {
+    /// The token as the user wrote it, for a diagnostic: `` `;` ``, `` `endmodule` ``,
+    /// ``identifier `gm` ``. Never the `Debug` form — `Some(Semicolon)` names this crate's enum,
+    /// not anything in the user's file.
+    pub fn describe(&self) -> String {
+        if let Some(word) = reserved_spelling(self) {
+            return format!("`{word}`");
+        }
+        let punct = match self {
+            Token::Ident(s) => return format!("identifier `{s}`"),
+            Token::Number(n) => return format!("number `{n}`"),
+            Token::Str(s) => return format!("string {s:?}"),
+            Token::SysFunc(s) => return format!("`${s}`"),
+            Token::Directive(s) => return format!("`` `{s} ``"),
+            Token::Contribute => "<+",
+            Token::Assign => "=",
+            Token::Plus => "+",
+            Token::Minus => "-",
+            Token::Star => "*",
+            Token::StarStar => "**",
+            Token::Slash => "/",
+            Token::Percent => "%",
+            Token::EqEq => "==",
+            Token::CaseEq => "===",
+            Token::CaseNe => "!==",
+            Token::NotEq => "!=",
+            Token::Le => "<=",
+            Token::Lt => "<",
+            Token::Ge => ">=",
+            Token::Gt => ">",
+            Token::Not => "!",
+            Token::AndAnd => "&&",
+            Token::OrOr => "||",
+            Token::Shl => "<<",
+            Token::Shr => ">>",
+            Token::Amp => "&",
+            Token::Pipe => "|",
+            Token::Caret => "^",
+            Token::CaretTilde => "^~",
+            Token::Tilde => "~",
+            Token::LParen => "(",
+            Token::RParen => ")",
+            Token::LBracket => "[",
+            Token::RBracket => "]",
+            Token::LBrace => "{",
+            Token::RBrace => "}",
+            Token::At => "@",
+            Token::Question => "?",
+            Token::Comma => ",",
+            Token::Semicolon => ";",
+            Token::Colon => ":",
+            Token::Dot => ".",
+            Token::Hash => "#",
+            // Every reserved word was answered by `reserved_spelling` above.
+            _ => return format!("{self:?}"),
+        };
+        format!("`{punct}`")
+    }
+}
+
+/// [`lex_spanned_with`], with a lex error located as `file:line:col` through the
+/// preprocessor's line map (`crate::preprocess::Preprocessed::line_map`) — the form a parse
+/// error already takes. A byte offset into the *preprocessed* text, which is all the lexer
+/// itself knows, matches no position in any file the user has open.
+///
+/// # Errors
+///
+/// As [`lex`].
+pub fn lex_located(
+    source: &str,
+    directives: &[crate::preprocess::DirectiveEvent],
+    line_map: &[crate::preprocess::SourceLoc],
+) -> Result<(Vec<Token>, Vec<usize>), FrontendError> {
+    lex_spanned_with(source, directives).map_err(|e| match e {
+        FrontendError::Lex {
+            offset, message, ..
+        } => {
+            let offset = offset.min(source.len());
+            let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
+            let line_idx = source[..offset].matches('\n').count();
+            let col = source[line_start..offset].chars().count() + 1;
+            let location = match line_map.get(line_idx) {
+                Some(loc) => format!("{}:{}:{col}", loc.file, loc.line),
+                None => format!("preprocessed line {}, column {col}", line_idx + 1),
+            };
+            FrontendError::Lex {
+                offset,
+                location,
+                message,
+            }
+        }
+        other => other,
+    })
 }
 
 /// The reserved word a token stands for, if it is one: a generic [`Token::Keyword`] or one of

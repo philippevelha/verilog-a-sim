@@ -1,0 +1,8 @@
+// expect: pp
+// message: pp_unterminated_string.va:7: this string literal is never closed
+// fixed: 2.18.2 (before: a lex error at a byte offset into the preprocessed text, quoting the rest of the file)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin $strobe("hi); I(p, n) <+ V(p, n); end
+endmodule

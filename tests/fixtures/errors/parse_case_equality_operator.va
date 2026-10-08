@@ -1,0 +1,11 @@
+// expect: parse
+// at: 10:29
+// message: `===` is not part of Verilog-A
+// message: use `==`
+// fixed: 2.18.2 (before: `expected an expression, found Some(Assign)`, reading `===` as `==` and a stray `=`)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  integer k;
+  analog begin k = 1; if (k === 1) I(p,n) <+ V(p,n); end
+endmodule
