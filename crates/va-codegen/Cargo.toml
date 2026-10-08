@@ -11,6 +11,11 @@ libm = { workspace = true }
 va-ir = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-native = { workspace = true }
 
 [features]
 # Count every expression node the tree walk visits, and how many of them an invariant-subexpression

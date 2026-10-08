@@ -63,6 +63,8 @@
 //! with no variable in their arguments run through the tree walker (`ad::eval`) and are scattered
 //! into a register (`Instr::Tree`).
 
+mod jit;
+
 use crate::ad::{self, Ctx, Dual};
 use crate::lower::{Lowered, LoweredStmt};
 use crate::CodegenError;
@@ -271,6 +273,8 @@ pub(crate) struct Program {
     /// Per-load resets: a variable that the setup assigns and the per-load statements may
     /// reassign starts every evaluation from its setup value.
     resets: Vec<(u32, f64)>,
+    /// The program as machine code (`VA_JIT=on`, [`jit`]), run in place of the interpreter.
+    jit: Option<jit::Jit>,
 }
 
 /// An instance's register file. Kept between evaluations (a constant, a parameter and a setup
@@ -285,6 +289,9 @@ pub(crate) struct Regs {
 pub(crate) struct Run<'a> {
     pub(crate) prog: &'a Program,
     pub(crate) regs: RefCell<&'a mut Regs>,
+    /// The terminal voltages the machine code's probes read ([`jit`]), gathered once per
+    /// evaluation; empty when the program is interpreted.
+    tv: Vec<f64>,
 }
 
 struct Compiler<'m> {
@@ -458,7 +465,7 @@ impl Program {
                 }
             }
         }
-        Ok(Program {
+        let mut prog = Program {
             n_slots,
             off: c.off,
             len: c.len,
@@ -470,7 +477,22 @@ impl Program {
             code: c.code,
             maps: c.maps,
             resets,
-        })
+            jit: None,
+        };
+        if crate::jit_enabled() {
+            prog.jit = jit::Jit::compile(&prog);
+        }
+        Ok(prog)
+    }
+
+    /// How many local slots a gradient spans.
+    pub(crate) fn n_slots(&self) -> usize {
+        self.n_slots
+    }
+
+    /// Whether this program runs as machine code ([`jit`]).
+    pub(crate) fn has_jit(&self) -> bool {
+        self.jit.is_some()
     }
 
     /// A fresh register file for one instance.
@@ -519,7 +541,31 @@ impl Program {
     }
 }
 
-impl Run<'_> {
+impl<'a> Run<'a> {
+    /// The run of `prog` over `regs` for an evaluation at `x` (through `terminals`).
+    pub(crate) fn new(
+        prog: &'a Program,
+        regs: &'a mut Regs,
+        x: &[f64],
+        terminals: &[usize],
+    ) -> Self {
+        let tv = if prog.jit.is_some() {
+            (0..prog.n_slots)
+                .map(|k| {
+                    let g = terminals.get(k).copied().unwrap_or(usize::MAX);
+                    x.get(g).copied().unwrap_or(0.0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Run {
+            prog,
+            regs: RefCell::new(regs),
+            tv,
+        }
+    }
+
     fn block(&self, root: ExprId) -> Result<Block, CodegenError> {
         let b = self
             .prog
@@ -551,7 +597,14 @@ impl Run<'_> {
         } else {
             (b.stmt_end, 1)
         };
-        exec(self.prog, &mut self.regs.borrow_mut(), ctx, b.start, end)?;
+        exec(
+            self.prog,
+            &mut self.regs.borrow_mut(),
+            &self.tv,
+            ctx,
+            b.start,
+            end,
+        )?;
         Ok(len)
     }
 
@@ -565,11 +618,37 @@ impl Run<'_> {
             .is_some_and(|b| b.whole)
     }
 
+    /// Run a root and write its gradient densely into `buf` (one entry per local slot, zero
+    /// outside its support), as [`Self::dual`]'s `Dual` holds it; returns its value and whether it
+    /// has a gradient at all (an empty support gives none, as `Dual::from_entries` does).
+    pub(crate) fn dual_into(
+        &self,
+        ctx: &Ctx,
+        root: ExprId,
+        buf: &mut [f64],
+    ) -> Result<(f64, bool), CodegenError> {
+        let b = self.block(root)?;
+        let mut regs = self.regs.borrow_mut();
+        exec(self.prog, &mut regs, &self.tv, ctx, b.start, b.end)?;
+        let r = b.result as usize;
+        let (o, l) = (self.prog.off[r] as usize, self.prog.len[r] as usize);
+        if l == 0 {
+            return Ok((regs.vals[r], false));
+        }
+        buf.fill(0.0);
+        for (&s, &v) in self.prog.slots[o..o + l].iter().zip(&regs.parts[o..o + l]) {
+            if let Some(g) = buf.get_mut(s as usize) {
+                *g = v;
+            }
+        }
+        Ok((regs.vals[r], true))
+    }
+
     /// Run a root and return its value only.
     pub(crate) fn value(&self, ctx: &Ctx, root: ExprId) -> Result<f64, CodegenError> {
         let b = self.block(root)?;
         let mut regs = self.regs.borrow_mut();
-        exec(self.prog, &mut regs, ctx, b.start, b.end)?;
+        exec(self.prog, &mut regs, &self.tv, ctx, b.start, b.end)?;
         Ok(regs.vals[b.result as usize])
     }
 
@@ -578,7 +657,7 @@ impl Run<'_> {
     pub(crate) fn dual(&self, ctx: &Ctx, root: ExprId) -> Result<Dual, CodegenError> {
         let b = self.block(root)?;
         let mut regs = self.regs.borrow_mut();
-        exec(self.prog, &mut regs, ctx, b.start, b.end)?;
+        exec(self.prog, &mut regs, &self.tv, ctx, b.start, b.end)?;
         let r = b.result as usize;
         let (o, l) = (self.prog.off[r] as usize, self.prog.len[r] as usize);
         Ok(Dual::from_entries(
@@ -1628,11 +1707,27 @@ fn unless_both_zero(p: f64, q: f64, r: f64) -> f64 {
 fn exec(
     prog: &Program,
     regs: &mut Regs,
+    tv: &[f64],
     ctx: &Ctx,
     start: u32,
     end: u32,
 ) -> Result<(), CodegenError> {
     let Regs { vals, parts } = regs;
+    match &prog.jit {
+        Some(j) => j.run(prog, vals, parts, tv, ctx, start, end),
+        None => exec_slices(prog, vals, parts, ctx, start, end),
+    }
+}
+
+/// [`exec`]'s interpreter, over the register file's two halves.
+fn exec_slices(
+    prog: &Program,
+    vals: &mut [f64],
+    parts: &mut [f64],
+    ctx: &Ctx,
+    start: u32,
+    end: u32,
+) -> Result<(), CodegenError> {
     let mut pc = start as usize;
     let end = end as usize;
     while pc < end {

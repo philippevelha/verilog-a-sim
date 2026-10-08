@@ -1,7 +1,8 @@
 # Transistor-level SNN: where the time goes, and what would make training affordable
 
 **Status:** analysis and plan, 2026-10-07. Section 3's changes are in 2.17.0. Section 4 is the
-ranked list of what is still open. Nothing in Section 4 has been decided.
+ranked list of what was open then. §4.2 (machine code, prototype, opt-in) and §4.3 are in 2.18.0;
+the rest is undecided.
 **Affects (2.17.0):** `va-codegen` (`sched.rs`, `lib.rs`: how a compiled model is evaluated),
 `va-core` (`par.rs`: device bypass's parallel decision and replay bookkeeping). Interfaces α and β
 are not touched.
@@ -94,25 +95,44 @@ bandwidth and RAM. `xbar_h2_8` needs a few hundred MB. The 64-neuron crossbar ne
 (2.6.0). **For throughput, run `--threads 1` per image and one image per core.** A batch driver
 (`run_all.sh` with a job count) is the only thing missing.
 
-### 4.2 Compile the static program to machine code (largest single win; needs sign-off)
+### 4.2 Compile the static program to machine code — **prototyped in 2.18.0** (`VA_JIT=on`)
 
-`sched::exec` is still an interpreter. Every instruction is a `match`, every partial costs an
-index load, and the dispatch branch mispredicts. All register offsets and maps are known when the
-model is built, so the program is ready to hand to a code generator. In a compiled function every
-partial becomes a load from a fixed address, one or two flops and a store, with no dispatch.
-Cranelift is pure Rust, so the no-native-link rule (`CLAUDE.md` §5) holds. **But calling generated
-code needs `unsafe`, which needs a written justification and owner sign-off (`CLAUDE.md` §5).**
-Expected gain: `exec` is ~50 % of a load. Compiled models run PSP103 in single-digit µs, so 5–10×
-on that half is plausible. That would put one load at roughly 20–25 µs. That figure is an
-estimate, not a measurement. `xtask sched-check` already compares every stamp against the tree
-walk, and it would be the gate for this change.
+Owner sign-off for the `unsafe` it needs: 2026-10-08. `crates/va-codegen/src/sched/jit.rs`
+turns each model's static program into one Cranelift function. Every partial becomes a load from
+a fixed address, the rule's flops and a store. Contiguous pairs of partials are packed into
+`f64x2`. The "zero in both operands" rule is a branch-free mask. Transcendental functions are
+called from the same `libm` the interpreter uses, and the rarer operators call back into the
+interpreter's own Rust functions. So the machine code gives the interpreter's bits.
+`cargo xtask jit-check` (new) checks this over every `.va` in the tree, with any two NaNs
+counted as equal (§4.2a).
 
-### 4.3 Contributions without allocations (~10 % of a load)
+| one SG13G2 PSP103 `load()` | µs |
+|---|---|
+| 2.16.2+6 | 78 |
+| 2.17.0, interpreted | 47 |
+| 2.18.0, interpreted (with §4.3) | 41 |
+| **2.18.0, `VA_JIT=on`** | **19** |
 
-Each contribution term is turned back into a dense, heap-allocated `Dual` (`Run::dual` →
-`Dual::from_entries`). Its terms are then summed and scaled through `Arc` buffers before
-stamping. Stamping straight from the result register's partials would remove the allocations.
-The scaling and summing would have to happen in the same order to keep the bits.
+**What it costs:** about 0.9 s of compilation per distinct model card, paid at the first
+evaluation. Most of that is Cranelift's register allocator on one ~6 000-instruction function.
+`jit-check` compiles 60 models in 9 s. A deck with many geometries pays once per geometry:
+`fig5_tx.net` has 19 PSP103 cards. The machine code for PSP103 is ~1 MB, and it is never freed
+(it lives as long as the process). Only the host ISA is supported. It was tested on x86-64 Linux
+only; Windows and Apple-silicon macOS are untested.
+
+**§4.2a — NaN bits.** The only differences `jit-check` ever saw were the signs of NaNs
+(`0x7ff8…` against `0xfff8…`) on `psp104`. LLVM compiles the interpreter's `v * -1.0` as a sign
+flip, and the machine code multiplies. IEEE 754 leaves a NaN result's sign unspecified, and the
+solver rejects a NaN whatever its bits. So `jit-check` treats NaNs as one value, and compares
+every other value bit for bit.
+
+### 4.3 Contributions without allocations — **done in 2.18.0**
+
+On the static path, a flow contribution's terms are summed from the registers into a stack
+buffer (`FastSum` in `va-codegen/src/lib.rs`). The arithmetic is `Dual::scale` and `Dual::add`,
+in their order and with their structural cases. One PSP103 load used to make 93 gradient
+allocations; it now makes 3. That took the interpreted load from 47 to 41 µs and the JIT's from
+25 to 20 µs. Potential contributions and self-probed flow branches still build `Dual`s.
 
 ### 4.4 Collapse PSP103's ideal shorts (matrix and memory, not evaluation)
 

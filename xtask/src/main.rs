@@ -40,6 +40,7 @@ fn main() -> Result<()> {
         Some("deck-compare") => repro::deck_compare(&rest),
         Some("tape-check") => tape_check(&rest),
         Some("sched-check") => sched_check(&rest),
+        Some("jit-check") => jit_check(&rest),
         Some("btf") => btf::btf(&rest),
         Some("ladder") => ladder::ladder_cmd(&rest),
         Some("--help") | Some("-h") | None => {
@@ -96,6 +97,8 @@ fn print_usage() {
                                  per solve, by size and matrix shape\n    \
          tape-check [<model.va>...]  Each model evaluated with flat tapes and by tree walk\n                                 \
                                  at many bias points; any bit that differs fails\n    \
+         jit-check [<model.va>...]  Each model's static program as machine code (VA_JIT)\n                                 \
+                                 against it interpreted; any bit that differs fails\n    \
          btf <deck> [--model <m>]  How far the deck's Jacobian splits into block\n                                 \
                                  triangular form: blocks, sizes, dependency depth\n    \
          ladder <deck> [--model <m>] [--current] [--nodeset]\n                                 \
@@ -3027,6 +3030,160 @@ fn sched_check(args: &[String]) -> Result<()> {
     );
     if failed > 0 {
         bail!("{failed} model(s) evaluate differently on the static path");
+    }
+    Ok(())
+}
+
+/// `cargo xtask jit-check [model.va ...]` — the static program run as machine code
+/// (`va_codegen`'s `sched::jit`, `VA_JIT=on`) against the same program interpreted, at
+/// `sched-check`'s bias points, in a DC and a transient context, **bit for bit**: every stamp and
+/// state proposal compared by its bits, an evaluation that is non-finite included, except that
+/// any two NaNs count as equal (their sign is unspecified; see the comparison). Reports, per
+/// model, whether it got machine code.
+/// The check behind "the JIT changes no answer".
+fn jit_check(args: &[String]) -> Result<()> {
+    let paths = model_paths(args)?;
+    let mut failed = 0;
+    let mut jitted = 0;
+    let mut compile = std::time::Duration::ZERO;
+    for (name, path) in &paths {
+        let src =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let Ok(design) = va_frontend::compile_with_includes(&src, &[dir]) else {
+            continue;
+        };
+        let Some(module) = design.modules.first().cloned() else {
+            continue;
+        };
+        // Two compiled models, so that each builds its own program: one interpreted, one not.
+        let (Ok(interp), Ok(jit)) = (
+            va_codegen::CompiledModel::new(&module),
+            va_codegen::CompiledModel::new(&module),
+        ) else {
+            continue;
+        };
+        let terminals: Vec<usize> = (0..module.nodes.len()).collect();
+        let (mut n1, mut n2) = (module.nodes.len(), module.nodes.len());
+        let a = interp
+            .instantiate(&terminals, &mut n1)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let b = jit
+            .instantiate(&terminals, &mut n2)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let dim = n1.max(1);
+        let mut seed: u64 = 0x5eed_7a9e;
+        let mut points = vec![vec![0.0; dim], vec![0.1; dim]];
+        for _ in 0..TAPE_CHECK_POINTS {
+            points.push(
+                (0..dim)
+                    .map(|_| {
+                        seed = seed
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        ((seed >> 11) as f64 / (1u64 << 53) as f64) * 3.0 - 1.5
+                    })
+                    .collect(),
+            );
+        }
+        let ctxs = [
+            va_abi::AnalysisCtx::dc(),
+            va_abi::AnalysisCtx::transient(1e-9).with_ddt(2e9, 1.0),
+        ];
+        // Bits, except that every NaN is one value: IEEE 754 leaves a NaN result's sign and
+        // payload unspecified, and LLVM uses that freedom in the interpreter (it compiles
+        // `v * -1.0` as a sign flip, which turns x86's default NaN, 0xfff8…, into 0x7ff8…)
+        // where the machine code multiplies. A NaN is rejected by the solver whatever its bits.
+        let bits = |v: &[f64]| {
+            v.iter()
+                .map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() })
+                .collect::<Vec<_>>()
+        };
+        let mut mismatches = 0;
+        va_codegen::set_sched_enabled(true);
+        for actx in &ctxs {
+            for x in &points {
+                let mut sa = va_abi::stamps::DenseStamp::new(dim);
+                let mut sb = va_abi::stamps::DenseStamp::new(dim);
+                let n = a.state_len();
+                let prev = vec![0.0; n];
+                let (mut na, mut nb) = (vec![0.0; n], vec![0.0; n]);
+                va_codegen::set_jit_enabled(false);
+                a.load(
+                    x,
+                    actx,
+                    &mut va_abi::ModelState::new(&prev, &mut na),
+                    &mut sa,
+                );
+                va_codegen::set_jit_enabled(true);
+                let t0 = std::time::Instant::now();
+                b.load(
+                    x,
+                    actx,
+                    &mut va_abi::ModelState::new(&prev, &mut nb),
+                    &mut sb,
+                );
+                if jit.jit_status().is_some() && x == &points[0] && actx.kind == ctxs[0].kind {
+                    compile += t0.elapsed();
+                }
+                let same = bits(&sa.residual) == bits(&sb.residual)
+                    && bits(&sa.jacobian) == bits(&sb.jacobian)
+                    && bits(&sa.charge) == bits(&sb.charge)
+                    && bits(&sa.dcharge) == bits(&sb.dcharge)
+                    && bits(&na) == bits(&nb)
+                    && format!("{sa:?}") == format!("{sb:?}");
+                if !same {
+                    if std::env::var("JIT_CHECK_VERBOSE").is_ok() {
+                        let show = |what: &str, u: &[f64], v: &[f64]| {
+                            for (i, (p, q)) in u.iter().zip(v).enumerate() {
+                                if p.to_bits() != q.to_bits() {
+                                    eprintln!(
+                                        "    {what}[{i}]: interpreted {p:e} ({:#x})  machine code {q:e} ({:#x})",
+                                        p.to_bits(),
+                                        q.to_bits()
+                                    );
+                                }
+                            }
+                        };
+                        eprintln!("  differing evaluation ({:?}):", actx.kind);
+                        show("residual", &sa.residual, &sb.residual);
+                        show("jacobian", &sa.jacobian, &sb.jacobian);
+                        show("charge", &sa.charge, &sb.charge);
+                        show("dcharge", &sa.dcharge, &sb.dcharge);
+                        show("state", &na, &nb);
+                    }
+                    mismatches += 1;
+                }
+            }
+        }
+        va_codegen::set_jit_enabled(false);
+        let status = match (interp.sched_status(), jit.jit_status()) {
+            (Some(Ok(())), Some(true)) => {
+                jitted += 1;
+                "machine code".to_string()
+            }
+            (Some(Ok(())), _) => "interpreted (the JIT refused the program)".to_string(),
+            (Some(Err(why)), _) => format!("tree walk ({why})"),
+            (None, _) => "tree walk (not compiled)".to_string(),
+        };
+        eprintln!(
+            "[xtask] jit-check {name:>14}: {} evaluations, {mismatches} differing — {status}",
+            points.len() * ctxs.len()
+        );
+        if mismatches > 0 {
+            failed += 1;
+        }
+    }
+    eprintln!(
+        "[xtask] jit-check: {jitted} of {} model(s) as machine code; {:.1} s compiling them",
+        paths.len(),
+        compile.as_secs_f64()
+    );
+    if failed > 0 {
+        bail!("{failed} model(s) evaluate differently as machine code");
     }
     Ok(())
 }

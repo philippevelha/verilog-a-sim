@@ -22,6 +22,39 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.0 - 2026-10-08
+--------------------
+**A compiled model's static program can run as machine code (`VA_JIT=on`, prototype, Cranelift),
+and contributions stop allocating: one SG13G2 PSP103 `load()` 47 -> 41 us interpreted, 19 us
+as machine code.** `docs/proposals/snn-transistor-performance.md` §4.2-4.3.
+
+  * va-codegen, `sched/jit.rs` (new): each model's static program becomes one Cranelift
+    function, every partial a load from a fixed address, the rule's flops and a store;
+    contiguous partial pairs packed as `f64x2`; the both-zero rule a branch-free mask;
+    transcendentals from the same `libm`, rarer operators by calling the interpreter's own
+    functions. The only `unsafe` in the crate, for calling the code, the shims' pointers and
+    `Send`/`Sync` (owner sign-off 2026-10-08, CLAUDE.md §5; the module doc says why each is
+    sound); the crate's `forbid(unsafe_code)` became `deny`. Off unless `VA_JIT=on`.
+  * va-codegen, `FastSum`: on the static path a flow contribution's terms are summed from the
+    registers into a stack buffer, `Dual::scale`/`Dual::add`'s arithmetic in their order:
+    gradient allocations per PSP103 load 93 -> 3. Bit-identical; helps with or without the JIT.
+  * xtask `jit-check` (new): machine code against interpreter over every `.va`, bit for bit,
+    any two NaNs counted as equal -- the only differences seen are NaN signs on `psp104` (LLVM
+    turns the interpreter's `v * -1.0` into a sign flip; IEEE leaves a NaN's sign unspecified).
+    60 of 98 models compile, all agree. `sched-check` 0 differing.
+  * Measured (Xeon 2.8 GHz): `bench-instance .../bench_access_bias.net` 40.9 us interpreted,
+    19.1 us `VA_JIT=on`; `fig5_access` 1 thread 32.7 -> 22.6 s with the JIT, output hashes equal.
+  * Dependencies: cranelift-{codegen,frontend,jit,module,native} 0.131 (pure Rust; licences
+    Apache-2.0 WITH LLVM-exception / MIT / Apache-2.0, all on deny.toml's list).
+  * Limitations: ~0.9 s of compilation per distinct model card at its first evaluation
+    (`fig5_tx.net`: 19 cards); ~1 MB of code per card, never freed; host ISA only, tested on
+    x86-64 Linux only (Windows and Apple-silicon macOS untested); potential contributions and
+    self-probed branches still build `Dual`s. `xtask deck-diff` was still running when this was
+    committed; its result is in the next entry.
+  * Measured at this version: `cargo test --workspace` 954 passed with `VA_JIT` off and on;
+    clippy clean.
+
+
 2.17.0+1 - 2026-10-07
 --------------------
 **2.17.0's deck-diff, which had not finished when it was committed.** `xtask deck-diff` of the
