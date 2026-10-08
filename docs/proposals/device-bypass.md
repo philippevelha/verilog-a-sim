@@ -173,6 +173,9 @@ and the source lines are held at V_ref. This is a reasoned expectation, not a me
    could ever be on by default.
 4. A golden that exercises a bypassed transistor.
 5. Memory of the recordings is unmeasured (estimate: ~80 MB at 64 neurons).
+7. ~~The replay is serial~~ **parallel in 2.19.0**, bit-identical: the system split by
+   destination, each thread adding its part's share of every recording in instance order
+   (`par::replay_parallel`; ~1.15x on the 16-neuron crossbar on 4 threads, release.txt 2.19.0).
 6. ~~The parallel decision does not know most loads are replayed~~ **fixed in 2.17.0**: with
    bypass on, `Mode::Auto` went parallel on an estimate it never measured (zero, which meant
    parallel), so a bypassed assembly handed a few cheap leftover devices to the pool and 4 threads

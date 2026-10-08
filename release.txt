@@ -22,6 +22,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.19.0 - 2026-10-08
+--------------------
+**The bypass replay runs on several threads, bit-identical to the serial one.** With `--bypass`
+on a large circuit, replaying the bypassed devices' recordings was a serial loop as long as the
+device evaluation it saves (profile of the 16-neuron crossbar, 35 262 unknowns, one thread:
+evaluation 36 %, replay and its bookkeeping 33 %, linear solve 17 %).
+  * How the bits are kept: floating-point sums depend on order, so what is kept is the order
+    in which each *entry* of the system receives its additions. The sparse system is split by
+    destination (`SparseSystem::parts`: part p owns a range of residual/charge rows and a range of
+    Jacobian/charge-Jacobian slots). Each recording's additions are bucketed by part (`Buckets`,
+    kept with a bypassed device's recording and rebuilt only when the pattern or the partition
+    changes). Each thread walks every device in instance order and adds its own part's bucket.
+    Preparing the buckets, finding a fresh recording's slots and storing the new bypass entries
+    also run in parallel, one device each, reusing the old entry's buffers: the first version
+    allocated per device and lost ~14 % of every worker to the allocator's lock.
+  * When: transient with `--bypass`, more than one thread, and at least
+    `PARALLEL_MIN_REPLAY_STAMPS` (50 000) recorded stamps in the assembly (`VA_PARALLEL=always`
+    forces it, `never` turns it off). An assembly with a stamp only the serial sink can take (an
+    entry the pattern does not hold yet, or a side effect) goes the serial way, unchanged.
+  * Measured (Xeon 2.8 GHz, 4 threads, `--bypass`, old and new binaries alternated; this
+    container's machine ran about 2x slower than for 2.18.0+2's figures, so compare within a
+    row only): crossbar 16 neurons, 2 cycles, `VA_JIT=on`: 86.3 / 83.8 s -> 72.8 / 74.0 s
+    (1.15x); 8 neurons, 3 cycles: 65.2 / 60.5 s -> 55.2 / 55.7 s (1.13x). One thread is the
+    serial path, unchanged. What is left on the main thread is mostly the linear solve (BTF + LU
+    ~34 % of its samples), the next limit.
+  * Identity: output hashes equal to 2.18.0+3 on the 8- and 16-neuron crossbars with
+    `--bypass` (1 and 4 threads), and with `VA_PARALLEL=always --bypass` on `fig5_access`,
+    `ring_osc` and `rectifier`. New test `the_parallel_replay_gives_the_serial_replays_bits`
+    (8 nodes, 4 parts, within and past tolerance, a grown pattern; fails if the replay drops
+    its corrections, checked).
+  * Measured at this version: `cargo test --workspace` 955 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.18.0+3 - 2026-10-08
 --------------------
 **The deck-diff 2.18.0 owed.** `xtask deck-diff` of this build with `VA_JIT=on` against the
