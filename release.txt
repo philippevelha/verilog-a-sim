@@ -22,6 +22,14 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.0+3 - 2026-10-08
+--------------------
+**The deck-diff 2.18.0 owed.** `xtask deck-diff` of this build with `VA_JIT=on` against the
+2.16.2+6 binary (interpreted): 123 identical, 0 different, 13 skipped (the slow ISCAS'85
+decks). So the machine code changes no deck's output, and nor do 2.17.0's and 2.18.0's
+interpreter changes. No code change.
+
+
 2.18.0+2 - 2026-10-08
 --------------------
 **`bench_xbar_jit_linux.sh`'s reference figures, and a header fix.** The default run here
