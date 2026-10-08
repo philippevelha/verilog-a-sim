@@ -29,6 +29,29 @@
 //! `±0.0` for finite operand values and `NaN` only where a rule multiplies a zero partial by an
 //! infinite operand value.
 //!
+//! # Less to run (2.17.0)
+//!
+//! Four compile-time reductions, each leaving every stamp bit-identical (`xtask sched-check`,
+//! and every deck's output under `xtask deck-diff`):
+//!
+//! - **Constant folding.** An operation whose operands are all fixed for the program's life — a
+//!   constant, a parameter, a setup value no per-load statement reassigns, or an operation
+//!   folded already — is computed once, by the very expression the instruction would evaluate
+//!   ([`bin_value`], [`chain_value`], [`flat1_value`], [`flat2_value`]), and becomes a constant
+//!   register. A setup value that is never reassigned is no longer reset on every load either.
+//! - **Dead assignments.** An assignment whose variable reaches no contribution, condition,
+//!   bound or task argument, directly or through other assignments ([`live_vars`],
+//!   flow-insensitive), compiles to nothing — PSP103's operating-point outputs, for one. Kept
+//!   if its code calls the tree walker, which can fail: a failure must still stop the walk.
+//! - **Whole `if`s.** An `if` whose arms hold only assignments (and such `if`s) is laid out as
+//!   condition, [`Instr::JumpIfZero`], arms ([`Layout::list`]), instead of returning to the
+//!   statement walk to evaluate the condition and descend into an arm.
+//! - **Stretches.** Consecutive statements of a list whose code follows on — assignments and
+//!   whole `if`s — run as one [`exec`] ([`Run::stretch`]), not one call each.
+//!
+//! On PSP103 with the SG13G2 card, one `load()` goes from ~78 µs to ~47 µs (`xtask
+//! bench-instance circuits/snn/transistor/bench_access_bias.net`, Xeon 2.8 GHz).
+//!
 //! # Scope (what makes a model fall back to the tree walk)
 //!
 //! A model runs here only if its per-load statements can be compiled whole; otherwise
@@ -40,6 +63,8 @@
 //! with no variable in their arguments run through the tree walker (`ad::eval`) and are scattered
 //! into a register (`Instr::Tree`).
 
+mod jit;
+
 use crate::ad::{self, Ctx, Dual};
 use crate::lower::{Lowered, LoweredStmt};
 use crate::CodegenError;
@@ -48,6 +73,9 @@ use std::collections::HashMap;
 use va_ir::{AccessKind, BinOp, Builtin, Expr, ExprId, Module, UnOp, VarId};
 
 const NONE: u32 = u32::MAX;
+/// The index of the always-zero partial in [`Regs::parts`]: what an operand that lacks a
+/// slot contributes there.
+const ZERO: u32 = 0;
 
 /// A support: the local slots an expression's partials can be non-zero in, as a bit set.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -176,7 +204,7 @@ enum Instr {
         src: u32,
         map: u32,
     },
-    /// `ddx(e, V(p, ·))`: the partial of `src` at one slot (`idx`, absolute, or `NONE`).
+    /// `ddx(e, V(p, ·))`: the partial of `src` at one slot (`idx`, absolute, or `ZERO`).
     Ddx {
         dst: u32,
         idx: u32,
@@ -207,6 +235,18 @@ struct Block {
     start: u32,
     end: u32,
     result: u32,
+    /// Where the code of the statement this root heads ends: `end` for an assignment; past
+    /// both arms for an `if` laid out whole ([`Self::whole`]).
+    stmt_end: u32,
+    /// This is the condition of an `if` laid out whole: running `start..stmt_end` runs the
+    /// statement, arms included.
+    whole: bool,
+    /// For the block heading a statement (an assignment's, or a whole `if`'s condition): how
+    /// many consecutive such statements of its list, starting with this one, have contiguous
+    /// code (at least 1), and where the last one's code ends. [`Run::stretch`] executes them
+    /// as one piece.
+    run_len: u32,
+    run_end: u32,
 }
 
 /// The statically scheduled form of a model's per-load statements. Built once per model
@@ -228,11 +268,13 @@ pub(crate) struct Program {
     blocks: Vec<Block>,
     code: Vec<Instr>,
     /// Per instruction with a map: for each of `dst`'s partials, the absolute index of the
-    /// matching partial in each operand, or `NONE`.
+    /// matching partial in each operand, or `ZERO` (the zero cell) if it has none.
     maps: Vec<(u32, u32)>,
     /// Per-load resets: a variable that the setup assigns and the per-load statements may
     /// reassign starts every evaluation from its setup value.
     resets: Vec<(u32, f64)>,
+    /// The program as machine code (`VA_JIT=on`, [`jit`]), run in place of the interpreter.
+    jit: Option<jit::Jit>,
 }
 
 /// An instance's register file. Kept between evaluations (a constant, a parameter and a setup
@@ -247,6 +289,9 @@ pub(crate) struct Regs {
 pub(crate) struct Run<'a> {
     pub(crate) prog: &'a Program,
     pub(crate) regs: RefCell<&'a mut Regs>,
+    /// The terminal voltages the machine code's probes read ([`jit`]), gathered once per
+    /// evaluation; empty when the program is interpreted.
+    tv: Vec<f64>,
 }
 
 struct Compiler<'m> {
@@ -261,6 +306,10 @@ struct Compiler<'m> {
     init_vals: Vec<f64>,
     init_parts: Vec<f64>,
     var_reg: Vec<u32>,
+    /// Per register: its value is fixed for the program's life (a constant, a parameter, a
+    /// setup value no per-load statement reassigns, or an operation on only such registers,
+    /// folded when compiled).
+    konst: Vec<bool>,
     consts: HashMap<u64, u32>,
     code: Vec<Instr>,
     maps: Vec<(u32, u32)>,
@@ -309,10 +358,13 @@ impl Program {
             var_support: vec![Support::empty(n_slots); nvars],
             off: Vec::new(),
             len: Vec::new(),
-            slots: Vec::new(),
+            // Partial 0 is the zero cell (`ZERO`): no register's run includes it, so nothing
+            // writes it, and a missing operand partial reads it.
+            slots: vec![NONE],
             init_vals: Vec::new(),
-            init_parts: Vec::new(),
+            init_parts: vec![0.0],
             var_reg: vec![NONE; nvars],
+            konst: Vec::new(),
             consts: HashMap::new(),
             code: Vec::new(),
             maps: Vec::new(),
@@ -337,6 +389,8 @@ impl Program {
         // Registers for every variable the per-load statements read or write.
         let mut used = vec![false; nvars];
         mark_vars(module, stmts, &mut used);
+        let mut written = vec![false; nvars];
+        mark_written(stmts, &mut written);
         let mut resets = Vec::new();
         for (i, u) in used.iter().enumerate() {
             if !*u {
@@ -346,51 +400,44 @@ impl Program {
             let r = c.new_reg(&s);
             if let Some(Some(d)) = setup.get(i) {
                 c.init_vals[r as usize] = d.value;
-                resets.push((r, d.value));
+                if written[i] {
+                    resets.push((r, d.value));
+                } else {
+                    // Never reassigned per load: its register holds the setup value for good.
+                    c.konst[r as usize] = true;
+                }
             }
             c.var_reg[i] = r;
         }
 
-        // Compile every root expression.
+        // Compile every root expression, statement by statement in the walk's order. An `if`
+        // whose arms hold only assignments (and such `if`s) is laid out whole — condition,
+        // jump, arms — so a stretch of statements runs as one piece of code.
         let mut roots = Vec::new();
         collect_roots(stmts, &mut roots);
-        let mut root_block = vec![NONE; module.exprs.len()];
-        let mut blocks = Vec::new();
         let mut assigns = Vec::new();
         collect_assigns(stmts, &mut assigns);
         let assign_rhs: HashMap<u32, VarId> = assigns.iter().map(|(l, r)| (r.0, *l)).collect();
-        for root in roots {
-            if root_block[root.0 as usize] != NONE {
-                continue;
-            }
-            let start = c.code.len() as u32;
-            // An assignment's root writes straight into its variable's register.
-            let target = assign_rhs
-                .get(&root.0)
-                .map(|v| c.var_reg[v.0 as usize])
-                .filter(|r| *r != NONE);
-            let result = match target {
-                Some(t) => {
-                    let r = c.expr(root, Some(t))?;
-                    if r != t {
-                        let map = c.copy_map(t, r);
-                        c.code.push(Instr::Copy {
-                            dst: t,
-                            src: r,
-                            map,
-                        });
-                    }
-                    t
-                }
-                None => c.expr(root, None)?,
-            };
-            root_block[root.0 as usize] = blocks.len() as u32;
-            blocks.push(Block {
-                start,
-                end: c.code.len() as u32,
-                result,
-            });
+        let live = live_vars(module, &roots, &assigns, &assign_rhs);
+        let mut uses: HashMap<u32, u32> = HashMap::new();
+        for r in &roots {
+            *uses.entry(r.0).or_default() += 1;
         }
+        let mut lay = Layout {
+            c,
+            assign_rhs: &assign_rhs,
+            live: &live,
+            uses: &uses,
+            root_block: vec![NONE; module.exprs.len()],
+            blocks: Vec::new(),
+        };
+        lay.list(stmts)?;
+        let Layout {
+            mut c,
+            root_block,
+            mut blocks,
+            ..
+        } = lay;
         // An assignment whose rhs is shared with another assignment (the same `ExprId`) would
         // write only the first variable: refuse rather than guess.
         let mut seen = HashMap::new();
@@ -401,7 +448,24 @@ impl Program {
                 }
             }
         }
-        Ok(Program {
+        mark_runs(stmts, &root_block, &mut blocks);
+        // A missing operand partial reads the zero cell rather than testing for `NONE`.
+        for m in &mut c.maps {
+            if m.0 == NONE {
+                m.0 = ZERO;
+            }
+            if m.1 == NONE {
+                m.1 = ZERO;
+            }
+        }
+        for i in &mut c.code {
+            if let Instr::Ddx { idx, .. } = i {
+                if *idx == NONE {
+                    *idx = ZERO;
+                }
+            }
+        }
+        let mut prog = Program {
             n_slots,
             off: c.off,
             len: c.len,
@@ -413,7 +477,22 @@ impl Program {
             code: c.code,
             maps: c.maps,
             resets,
-        })
+            jit: None,
+        };
+        if crate::jit_enabled() {
+            prog.jit = jit::Jit::compile(&prog);
+        }
+        Ok(prog)
+    }
+
+    /// How many local slots a gradient spans.
+    pub(crate) fn n_slots(&self) -> usize {
+        self.n_slots
+    }
+
+    /// Whether this program runs as machine code ([`jit`]).
+    pub(crate) fn has_jit(&self) -> bool {
+        self.jit.is_some()
     }
 
     /// A fresh register file for one instance.
@@ -433,6 +512,27 @@ impl Program {
         }
     }
 
+    /// The program's instructions by kind, in order (`"probe"`, `"bin"`, `"tree"`, ...).
+    #[cfg(test)]
+    pub(crate) fn instr_kinds(&self) -> Vec<&'static str> {
+        self.code
+            .iter()
+            .map(|i| match i {
+                Instr::Probe { .. } => "probe",
+                Instr::Bin { .. } => "bin",
+                Instr::Chain { .. } => "chain",
+                Instr::Flat2 { .. } => "flat2",
+                Instr::Flat1 { .. } => "flat1",
+                Instr::Pick { .. } => "pick",
+                Instr::Copy { .. } => "copy",
+                Instr::Ddx { .. } => "ddx",
+                Instr::Tree { .. } => "tree",
+                Instr::JumpIfZero { .. } => "jz",
+                Instr::Jump { .. } => "jump",
+            })
+            .collect()
+    }
+
     /// Whether `root` was compiled here.
     pub(crate) fn has_root(&self, root: ExprId) -> bool {
         self.root_block
@@ -441,7 +541,31 @@ impl Program {
     }
 }
 
-impl Run<'_> {
+impl<'a> Run<'a> {
+    /// The run of `prog` over `regs` for an evaluation at `x` (through `terminals`).
+    pub(crate) fn new(
+        prog: &'a Program,
+        regs: &'a mut Regs,
+        x: &[f64],
+        terminals: &[usize],
+    ) -> Self {
+        let tv = if prog.jit.is_some() {
+            (0..prog.n_slots)
+                .map(|k| {
+                    let g = terminals.get(k).copied().unwrap_or(usize::MAX);
+                    x.get(g).copied().unwrap_or(0.0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Run {
+            prog,
+            regs: RefCell::new(regs),
+            tv,
+        }
+    }
+
     fn block(&self, root: ExprId) -> Result<Block, CodegenError> {
         let b = self
             .prog
@@ -455,17 +579,76 @@ impl Run<'_> {
         Ok(self.prog.blocks[b as usize])
     }
 
-    /// Run an assignment's block (it writes its variable's register).
-    pub(crate) fn assign(&self, ctx: &Ctx, rhs: ExprId) -> Result<(), CodegenError> {
-        let b = self.block(rhs)?;
-        exec(self.prog, &mut self.regs.borrow_mut(), ctx, b.start, b.end)
+    /// Run the statement headed by root `head` — an assignment (whose block writes its
+    /// variable's register), or an `if` laid out whole ([`Self::is_whole`]) — together with the
+    /// statements after it in its list whose code follows on: the same instructions in the
+    /// same order as the statement walk would run them one by one, without returning to it in
+    /// between. `remaining` is how many statements of the list, this one included, the caller
+    /// has left; returns how many it ran.
+    pub(crate) fn stretch(
+        &self,
+        ctx: &Ctx,
+        head: ExprId,
+        remaining: usize,
+    ) -> Result<usize, CodegenError> {
+        let b = self.block(head)?;
+        let (end, len) = if (b.run_len as usize) <= remaining {
+            (b.run_end, b.run_len as usize)
+        } else {
+            (b.stmt_end, 1)
+        };
+        exec(
+            self.prog,
+            &mut self.regs.borrow_mut(),
+            &self.tv,
+            ctx,
+            b.start,
+            end,
+        )?;
+        Ok(len)
+    }
+
+    /// Whether the `if` with condition `cond` is laid out whole, arms included, so that
+    /// [`Self::stretch`] runs it.
+    pub(crate) fn is_whole(&self, cond: ExprId) -> bool {
+        self.prog
+            .root_block
+            .get(cond.0 as usize)
+            .and_then(|b| self.prog.blocks.get(*b as usize))
+            .is_some_and(|b| b.whole)
+    }
+
+    /// Run a root and write its gradient densely into `buf` (one entry per local slot, zero
+    /// outside its support), as [`Self::dual`]'s `Dual` holds it; returns its value and whether it
+    /// has a gradient at all (an empty support gives none, as `Dual::from_entries` does).
+    pub(crate) fn dual_into(
+        &self,
+        ctx: &Ctx,
+        root: ExprId,
+        buf: &mut [f64],
+    ) -> Result<(f64, bool), CodegenError> {
+        let b = self.block(root)?;
+        let mut regs = self.regs.borrow_mut();
+        exec(self.prog, &mut regs, &self.tv, ctx, b.start, b.end)?;
+        let r = b.result as usize;
+        let (o, l) = (self.prog.off[r] as usize, self.prog.len[r] as usize);
+        if l == 0 {
+            return Ok((regs.vals[r], false));
+        }
+        buf.fill(0.0);
+        for (&s, &v) in self.prog.slots[o..o + l].iter().zip(&regs.parts[o..o + l]) {
+            if let Some(g) = buf.get_mut(s as usize) {
+                *g = v;
+            }
+        }
+        Ok((regs.vals[r], true))
     }
 
     /// Run a root and return its value only.
     pub(crate) fn value(&self, ctx: &Ctx, root: ExprId) -> Result<f64, CodegenError> {
         let b = self.block(root)?;
         let mut regs = self.regs.borrow_mut();
-        exec(self.prog, &mut regs, ctx, b.start, b.end)?;
+        exec(self.prog, &mut regs, &self.tv, ctx, b.start, b.end)?;
         Ok(regs.vals[b.result as usize])
     }
 
@@ -474,7 +657,7 @@ impl Run<'_> {
     pub(crate) fn dual(&self, ctx: &Ctx, root: ExprId) -> Result<Dual, CodegenError> {
         let b = self.block(root)?;
         let mut regs = self.regs.borrow_mut();
-        exec(self.prog, &mut regs, ctx, b.start, b.end)?;
+        exec(self.prog, &mut regs, &self.tv, ctx, b.start, b.end)?;
         let r = b.result as usize;
         let (o, l) = (self.prog.off[r] as usize, self.prog.len[r] as usize);
         Ok(Dual::from_entries(
@@ -488,6 +671,191 @@ impl Run<'_> {
     }
 }
 
+/// The root-by-root compilation of a statement list, with the bookkeeping [`Program`] keeps.
+struct Layout<'c, 'm> {
+    c: Compiler<'m>,
+    assign_rhs: &'c HashMap<u32, VarId>,
+    live: &'c [bool],
+    /// How many times each root expression occurs among the per-load statements' roots.
+    uses: &'c HashMap<u32, u32>,
+    root_block: Vec<u32>,
+    blocks: Vec<Block>,
+}
+
+impl Layout<'_, '_> {
+    /// Compile one root expression (once; a root seen again keeps its first block).
+    fn root(&mut self, root: ExprId) -> Result<u32, Refuse> {
+        if self.root_block[root.0 as usize] != NONE {
+            return Ok(self.root_block[root.0 as usize]);
+        }
+        let c = &mut self.c;
+        let start = c.code.len() as u32;
+        let maps_at = c.maps.len();
+        // An assignment's root writes straight into its variable's register.
+        let target = self
+            .assign_rhs
+            .get(&root.0)
+            .map(|v| c.var_reg[v.0 as usize])
+            .filter(|r| *r != NONE);
+        let result = match target {
+            Some(t) => {
+                let r = c.expr(root, Some(t))?;
+                if r != t {
+                    let map = c.copy_map(t, r);
+                    c.code.push(Instr::Copy {
+                        dst: t,
+                        src: r,
+                        map,
+                    });
+                }
+                t
+            }
+            None => c.expr(root, None)?,
+        };
+        // A dead assignment — its variable reaches no contribution, condition, bound or
+        // task — keeps an empty block, unless its code calls out to the tree walker (which
+        // can fail, and a failure must still stop the walk where it did).
+        let dead = self
+            .assign_rhs
+            .get(&root.0)
+            .is_some_and(|v| !self.live[v.0 as usize]);
+        if dead
+            && !c.code[start as usize..]
+                .iter()
+                .any(|i| matches!(i, Instr::Tree { .. }))
+        {
+            c.code.truncate(start as usize);
+            c.maps.truncate(maps_at);
+        }
+        let end = c.code.len() as u32;
+        let b = self.blocks.len() as u32;
+        self.root_block[root.0 as usize] = b;
+        self.blocks.push(Block {
+            start,
+            end,
+            result,
+            stmt_end: end,
+            whole: false,
+            run_len: 1,
+            run_end: end,
+        });
+        Ok(b)
+    }
+
+    fn roots(&mut self, roots: impl IntoIterator<Item = ExprId>) -> Result<(), Refuse> {
+        for r in roots {
+            self.root(r)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `if` statement `s` can be laid out whole: its arms nothing but assignments and
+    /// such `if`s, and every root inside it (its condition, the arms' right-hand sides and
+    /// conditions) a root of that one place alone and not compiled yet — so its code is laid
+    /// out right there, and its block stands for nothing else.
+    fn can_lay_whole(&self, s: &LoweredStmt) -> bool {
+        let own =
+            |e: &ExprId| self.root_block[e.0 as usize] == NONE && self.uses.get(&e.0) == Some(&1);
+        match s {
+            LoweredStmt::Assign { rhs, .. } => own(rhs),
+            LoweredStmt::If { cond, then_, else_ } => {
+                own(cond)
+                    && then_.iter().chain(else_).all(|t| {
+                        matches!(t, LoweredStmt::Assign { .. } | LoweredStmt::If { .. })
+                            && self.can_lay_whole(t)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Compile `stmts`' roots in [`collect_roots`]' order.
+    fn list(&mut self, stmts: &[LoweredStmt]) -> Result<(), Refuse> {
+        for s in stmts {
+            match s {
+                LoweredStmt::Assign { rhs, .. } => {
+                    self.root(*rhs)?;
+                }
+                LoweredStmt::BoundStep(e) => {
+                    self.root(*e)?;
+                }
+                LoweredStmt::Task { args, .. } => {
+                    self.roots(args.iter().filter_map(va_ir::TaskArg::expr))?;
+                }
+                LoweredStmt::Contribute(c) => {
+                    self.roots(c.resistive.iter().map(|t| t.expr))?;
+                    for t in &c.charge {
+                        self.root(t.expr)?;
+                        self.roots(t.coeffs.iter().map(|(e, _)| *e))?;
+                    }
+                }
+                LoweredStmt::If { cond, then_, else_ } if self.can_lay_whole(s) => {
+                    let b = self.root(*cond)?;
+                    let rc = self.blocks[b as usize].result;
+                    let jz = self.c.code.len();
+                    self.c.code.push(Instr::JumpIfZero { cond: rc, to: 0 });
+                    self.list(then_)?;
+                    let jump = (!else_.is_empty()).then(|| {
+                        self.c.code.push(Instr::Jump { to: 0 });
+                        self.c.code.len() - 1
+                    });
+                    let else_at = self.c.code.len() as u32;
+                    self.list(else_)?;
+                    let end = self.c.code.len() as u32;
+                    self.c.code[jz] = Instr::JumpIfZero {
+                        cond: rc,
+                        to: else_at,
+                    };
+                    if let Some(j) = jump {
+                        self.c.code[j] = Instr::Jump { to: end };
+                    }
+                    let blk = &mut self.blocks[b as usize];
+                    blk.stmt_end = end;
+                    blk.whole = true;
+                    blk.run_end = end;
+                }
+                LoweredStmt::If { cond, then_, else_ } => {
+                    self.root(*cond)?;
+                    self.list(then_)?;
+                    self.list(else_)?;
+                }
+                LoweredStmt::Case {
+                    selector,
+                    arms,
+                    default,
+                } => {
+                    self.root(*selector)?;
+                    for a in arms {
+                        self.roots(a.labels.iter().copied())?;
+                        self.list(&a.body)?;
+                    }
+                    self.list(default)?;
+                }
+                LoweredStmt::While { cond, body } => {
+                    self.root(*cond)?;
+                    self.list(body)?;
+                }
+                LoweredStmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                } => {
+                    self.list(init)?;
+                    self.root(*cond)?;
+                    self.list(step)?;
+                    self.list(body)?;
+                }
+                LoweredStmt::Repeat { count, body } => {
+                    self.root(*count)?;
+                    self.list(body)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Compiler<'_> {
     fn new_reg(&mut self, s: &Support) -> u32 {
         let r = self.off.len() as u32;
@@ -498,6 +866,7 @@ impl Compiler<'_> {
             .extend(std::iter::repeat_n(0.0, slots.len()));
         self.slots.extend(slots);
         self.init_vals.push(0.0);
+        self.konst.push(false);
         r
     }
 
@@ -507,8 +876,14 @@ impl Compiler<'_> {
         }
         let r = self.new_reg(&Support::empty(self.n));
         self.init_vals[r as usize] = v;
+        self.konst[r as usize] = true;
         self.consts.insert(v.to_bits(), r);
         r
+    }
+
+    /// The value of register `r` if it is fixed for the program's life.
+    fn konst_val(&self, r: u32) -> Option<f64> {
+        self.konst[r as usize].then(|| self.init_vals[r as usize])
     }
 
     fn reg_slots(&self, r: u32) -> &[u32] {
@@ -657,6 +1032,9 @@ impl Compiler<'_> {
             }
             Expr::Unary(UnOp::Neg, a) => {
                 let ra = self.expr(*a, None)?;
+                if let Some(v) = self.konst_val(ra) {
+                    return Ok(self.const_reg(chain_value(Chain::Neg, v).0));
+                }
                 let s = self.support(e)?;
                 let dst = dst_for(self, &s);
                 let map = self.map2(dst, ra, NONE);
@@ -670,6 +1048,9 @@ impl Compiler<'_> {
             }
             Expr::Unary(op, a) => {
                 let ra = self.expr(*a, None)?;
+                if let Some(v) = self.konst_val(ra) {
+                    return Ok(self.const_reg(flat1_value(Flat1::Unary(*op), v)));
+                }
                 let dst = dst_for(self, &Support::empty(n));
                 self.code.push(Instr::Flat1 {
                     op: Flat1::Unary(*op),
@@ -689,6 +1070,13 @@ impl Compiler<'_> {
                     BinOp::Pow => Some(Bin::Pow),
                     _ => None,
                 };
+                if let (Some(av), Some(bv)) = (self.konst_val(ra), self.konst_val(rb)) {
+                    let v = match bin {
+                        Some(bin) => bin_value(bin, av, bv),
+                        None => flat2_value(*op, av, bv),
+                    };
+                    return Ok(self.const_reg(v));
+                }
                 match bin {
                     Some(bin) => {
                         let s = self.support(e)?;
@@ -750,6 +1138,9 @@ impl Compiler<'_> {
             Expr::Call(builtin, args) => {
                 if let Some(op) = chain_of(*builtin) {
                     let ra = self.expr(*args.first().ok_or("call arity")?, None)?;
+                    if let Some(v) = self.konst_val(ra) {
+                        return Ok(self.const_reg(chain_value(op, v).0));
+                    }
                     let s = self.support(e)?;
                     let dst = dst_for(self, &s);
                     let map = self.map2(dst, ra, NONE);
@@ -762,6 +1153,9 @@ impl Compiler<'_> {
                     Ok(dst)
                 } else if flat_call(*builtin) {
                     let ra = self.expr(*args.first().ok_or("call arity")?, None)?;
+                    if let Some(v) = self.konst_val(ra) {
+                        return Ok(self.const_reg(flat1_value(Flat1::Call(*builtin), v)));
+                    }
                     let dst = dst_for(self, &Support::empty(n));
                     self.code.push(Instr::Flat1 {
                         op: Flat1::Call(*builtin),
@@ -775,6 +1169,9 @@ impl Compiler<'_> {
                     }
                     let ra = self.expr(args[0], None)?;
                     let rb = self.expr(args[1], None)?;
+                    if let (Some(av), Some(bv)) = (self.konst_val(ra), self.konst_val(rb)) {
+                        return Ok(self.const_reg(bin_value(op, av, bv)));
+                    }
                     let s = self.support(e)?;
                     let dst = dst_for(self, &s);
                     let map = self.map2(dst, ra, rb);
@@ -792,6 +1189,9 @@ impl Compiler<'_> {
                     }
                     let ra = self.expr(args[0], None)?;
                     let rb = self.expr(args[1], None)?;
+                    if let (Some(av), Some(bv)) = (self.konst_val(ra), self.konst_val(rb)) {
+                        return Ok(self.const_reg(if pick_takes_a(max, av, bv) { av } else { bv }));
+                    }
                     let s = self.support(e)?;
                     let dst = dst_for(self, &s);
                     let map_a = self.copy_map(dst, ra);
@@ -938,6 +1338,70 @@ fn pick_call(b: Builtin) -> Option<bool> {
     }
 }
 
+/// Mark, in every statement list, each maximal stretch of consecutive assignments whose blocks
+/// follow one another in the code: the stretch's first block learns its length and end
+/// ([`Block::run_len`], [`Block::run_end`]).
+fn mark_runs(stmts: &[LoweredStmt], root_block: &[u32], blocks: &mut [Block]) {
+    let head = |e: &ExprId| root_block.get(e.0 as usize).copied().filter(|b| *b != NONE);
+    let block_of = |s: &LoweredStmt, blocks: &[Block]| match s {
+        LoweredStmt::Assign { rhs, .. } => head(rhs),
+        LoweredStmt::If { cond, .. } => head(cond).filter(|b| blocks[*b as usize].whole),
+        _ => None,
+    };
+    let mut i = 0;
+    while i < stmts.len() {
+        let Some(first) = block_of(&stmts[i], blocks) else {
+            i += 1;
+            continue;
+        };
+        let mut last = first;
+        let mut len = 1;
+        while let Some(next) = stmts.get(i + len).and_then(|t| block_of(t, blocks)) {
+            if blocks[next as usize].start != blocks[last as usize].stmt_end {
+                break;
+            }
+            last = next;
+            len += 1;
+        }
+        let end = blocks[last as usize].stmt_end;
+        let b = &mut blocks[first as usize];
+        b.run_len = len as u32;
+        b.run_end = end;
+        i += len;
+    }
+    visit_children(stmts, &mut |list| mark_runs(list, root_block, blocks));
+}
+
+/// Call `f` on each statement list nested directly in `stmts` (an arm, a loop body, …).
+fn visit_children(stmts: &[LoweredStmt], f: &mut impl FnMut(&[LoweredStmt])) {
+    for s in stmts {
+        match s {
+            LoweredStmt::Assign { .. }
+            | LoweredStmt::Contribute(_)
+            | LoweredStmt::BoundStep(_)
+            | LoweredStmt::Task { .. } => {}
+            LoweredStmt::If { then_, else_, .. } => {
+                f(then_);
+                f(else_);
+            }
+            LoweredStmt::Case { arms, default, .. } => {
+                for a in arms {
+                    f(&a.body);
+                }
+                f(default);
+            }
+            LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => f(body),
+            LoweredStmt::For {
+                init, step, body, ..
+            } => {
+                f(init);
+                f(step);
+                f(body);
+            }
+        }
+    }
+}
+
 fn collect_assigns(stmts: &[LoweredStmt], out: &mut Vec<(VarId, ExprId)>) {
     for s in stmts {
         match s {
@@ -1021,6 +1485,88 @@ fn collect_roots(stmts: &[LoweredStmt], out: &mut Vec<ExprId>) {
             }
         }
     }
+}
+
+/// Which variables the per-load statements need: those read by a root that is not an
+/// assignment's right-hand side (a contribution term, a condition, a bound, a task argument),
+/// and, to a fixpoint, those read by an assignment to a needed variable. Flow-insensitive, so
+/// conservative: a variable read anywhere it matters is needed everywhere it is assigned.
+/// Visiting the sinks in a hash map's order is fine: the result is a set.
+fn live_vars(
+    module: &Module,
+    roots: &[ExprId],
+    assigns: &[(VarId, ExprId)],
+    assign_rhs: &HashMap<u32, VarId>,
+) -> Vec<bool> {
+    let mut live = vec![false; module.vars.len()];
+    let mark = |e: ExprId, live: &mut Vec<bool>| {
+        let mut changed = false;
+        scan(module, e, &mut |x| {
+            if let Expr::Var(v) = x {
+                if let Some(l) = live.get_mut(v.0 as usize) {
+                    changed |= !*l;
+                    *l = true;
+                }
+            }
+        });
+        changed
+    };
+    // A root is a sink where it occurs other than as an assignment's right-hand side. Counted
+    // rather than looked up: an expression shared between an assignment and, say, a
+    // contribution is both, and then the assignment (whose block computes it) must stay too.
+    let mut count: HashMap<u32, i64> = HashMap::new();
+    for r in roots {
+        *count.entry(r.0).or_default() += 1;
+    }
+    for (_, rhs) in assigns {
+        *count.entry(rhs.0).or_default() -= 1;
+    }
+    for (&r, &n) in &count {
+        if n > 0 {
+            mark(ExprId(r), &mut live);
+            if let Some(l) = assign_rhs.get(&r).and_then(|v| live.get_mut(v.0 as usize)) {
+                *l = true;
+            }
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (lhs, rhs) in assigns {
+            if live.get(lhs.0 as usize).copied().unwrap_or(true) {
+                changed |= mark(*rhs, &mut live);
+            }
+        }
+        if !changed {
+            return live;
+        }
+    }
+}
+
+/// Every variable a per-load statement can write: an assignment's target or a task's.
+fn mark_written(stmts: &[LoweredStmt], written: &mut [bool]) {
+    let mut assigns = Vec::new();
+    collect_assigns(stmts, &mut assigns);
+    for (l, _) in assigns {
+        written[l.0 as usize] = true;
+    }
+    visit_stmts(stmts, &mut |s| {
+        if let LoweredStmt::Task {
+            target: Some(v), ..
+        } = s
+        {
+            if let Some(w) = written.get_mut(v.0 as usize) {
+                *w = true;
+            }
+        }
+    });
+}
+
+/// Call `f` on every statement in `stmts`, nested ones included.
+fn visit_stmts(stmts: &[LoweredStmt], f: &mut impl FnMut(&LoweredStmt)) {
+    for s in stmts {
+        f(s);
+    }
+    visit_children(stmts, &mut |list| visit_stmts(list, &mut *f));
 }
 
 fn mark_vars(module: &Module, stmts: &[LoweredStmt], used: &mut [bool]) {
@@ -1141,22 +1687,47 @@ fn check_da(module: &Module, stmts: &[LoweredStmt], da: &mut Vec<bool>) -> Resul
 
 #[inline]
 fn get(parts: &[f64], i: u32) -> f64 {
-    if i == NONE {
-        0.0
-    } else {
-        parts[i as usize]
-    }
+    parts[i as usize]
+}
+
+/// `r`, or `0.0` where both operand partials `p` and `q` are zero — the rule `Grad::Zero` has
+/// always applied (a slot zero in both operands is zero in the result, whatever the rule would
+/// compute there). Exactly `if p == 0.0 && q == 0.0 { 0.0 } else { r }`, `-0.0` and `NaN`
+/// included, but as a mask rather than a branch: which partials are zero varies from
+/// instruction to instruction, and the branch it replaced was mispredicted often enough to be
+/// the evaluator's largest single cost. `r` is computed either way; it is a pure function of
+/// finite or non-finite floats, so computing it where it is discarded changes nothing.
+#[inline(always)]
+fn unless_both_zero(p: f64, q: f64, r: f64) -> f64 {
+    let live = (p != 0.0) | (q != 0.0);
+    f64::from_bits(r.to_bits() & u64::from(live).wrapping_neg())
 }
 
 /// Run `code[start..end]`.
 fn exec(
     prog: &Program,
     regs: &mut Regs,
+    tv: &[f64],
     ctx: &Ctx,
     start: u32,
     end: u32,
 ) -> Result<(), CodegenError> {
     let Regs { vals, parts } = regs;
+    match &prog.jit {
+        Some(j) => j.run(prog, vals, parts, tv, ctx, start, end),
+        None => exec_slices(prog, vals, parts, ctx, start, end),
+    }
+}
+
+/// [`exec`]'s interpreter, over the register file's two halves.
+fn exec_slices(
+    prog: &Program,
+    vals: &mut [f64],
+    parts: &mut [f64],
+    ctx: &Ctx,
+    start: u32,
+    end: u32,
+) -> Result<(), CodegenError> {
     let mut pc = start as usize;
     let end = end as usize;
     while pc < end {
@@ -1182,7 +1753,7 @@ fn exec(
                         for (k, &(ia, ib)) in m.iter().enumerate() {
                             let p = get(parts, ia);
                             let q = get(parts, ib);
-                            parts[o + k] = if p == 0.0 && q == 0.0 { 0.0 } else { $f(p, q) };
+                            parts[o + k] = unless_both_zero(p, q, $f(p, q));
                         }
                     };
                 }
@@ -1244,25 +1815,16 @@ fn exec(
                 let l = prog.len[dst as usize] as usize;
                 for (k, &(ia, _)) in prog.maps[map as usize..map as usize + l].iter().enumerate() {
                     let g = get(parts, ia);
-                    parts[o + k] = if g == 0.0 { 0.0 } else { g * d };
+                    parts[o + k] = unless_both_zero(g, 0.0, g * d);
                 }
                 vals[dst as usize] = value;
             }
             Instr::Flat2 { op, dst, a, b } => {
-                vals[dst as usize] = ad::apply_binary(
-                    op,
-                    Dual::constant(vals[a as usize]),
-                    Dual::constant(vals[b as usize]),
-                )
-                .value;
+                vals[dst as usize] = flat2_value(op, vals[a as usize], vals[b as usize]);
                 zero(prog, parts, dst);
             }
             Instr::Flat1 { op, dst, a } => {
-                let x = Dual::constant(vals[a as usize]);
-                vals[dst as usize] = match op {
-                    Flat1::Unary(u) => ad::apply_unary(u, x).value,
-                    Flat1::Call(b) => ad::pure_call1(b, x).map_or(f64::NAN, |d| d.value),
-                };
+                vals[dst as usize] = flat1_value(op, vals[a as usize]);
                 zero(prog, parts, dst);
             }
             Instr::Pick {
@@ -1274,7 +1836,7 @@ fn exec(
                 map_b,
             } => {
                 let (sv, ov) = (vals[a as usize], vals[b as usize]);
-                let take_a = if max { sv >= ov } else { sv <= ov };
+                let take_a = pick_takes_a(max, sv, ov);
                 let (src, map) = if take_a { (a, map_a) } else { (b, map_b) };
                 copy(prog, vals, parts, dst, src, map);
             }
@@ -1312,6 +1874,43 @@ fn exec(
         pc += 1;
     }
     Ok(())
+}
+
+/// A value-only binary operator's result — what [`Instr::Flat2`] computes.
+fn flat2_value(op: BinOp, a: f64, b: f64) -> f64 {
+    ad::apply_binary(op, Dual::constant(a), Dual::constant(b)).value
+}
+
+/// A value-only unary operator's or rounding call's result — what [`Instr::Flat1`] computes.
+fn flat1_value(op: Flat1, a: f64) -> f64 {
+    let x = Dual::constant(a);
+    match op {
+        Flat1::Unary(u) => ad::apply_unary(u, x).value,
+        Flat1::Call(b) => ad::pure_call1(b, x).map_or(f64::NAN, |d| d.value),
+    }
+}
+
+/// Whether `min`/`max` selects its first operand — what [`Instr::Pick`] decides.
+fn pick_takes_a(max: bool, a: f64, b: f64) -> bool {
+    if max {
+        a >= b
+    } else {
+        a <= b
+    }
+}
+
+/// The value [`Instr::Bin`] computes for `op` — the same expression, operation for operation,
+/// so a folded constant is the value the instruction would have produced.
+fn bin_value(op: Bin, sv: f64, ov: f64) -> f64 {
+    match op {
+        Bin::Add => sv + ov,
+        Bin::Sub => sv - ov,
+        Bin::Mul => sv * ov,
+        Bin::Div => sv * (1.0 / ov),
+        Bin::Pow => libm::pow(sv, ov),
+        Bin::Hypot => libm::hypot(sv, ov),
+        Bin::Atan2 => libm::atan2(sv, ov),
+    }
 }
 
 fn zero(prog: &Program, parts: &mut [f64], dst: u32) {

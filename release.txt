@@ -22,6 +22,133 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.0+3 - 2026-10-08
+--------------------
+**The deck-diff 2.18.0 owed.** `xtask deck-diff` of this build with `VA_JIT=on` against the
+2.16.2+6 binary (interpreted): 123 identical, 0 different, 13 skipped (the slow ISCAS'85
+decks). So the machine code changes no deck's output, and nor do 2.17.0's and 2.18.0's
+interpreter changes. No code change.
+
+
+2.18.0+2 - 2026-10-08
+--------------------
+**`bench_xbar_jit_linux.sh`'s reference figures, and a header fix.** The default run here
+(Xeon 2.8 GHz, 4 vCPU; 8 neurons, 1 024 PSP103, 3 cycles, 2 234 timepoints): plain 108.6 s,
+`VA_JIT=on` 72.8 s (1.49x), `--bypass` 30.3 s, both 29.8 s; one thread: bypass 46.2 s, both
+38.6 s. Bypass replays 93.4 % of loads, which leaves the JIT little to do. Every check OK. Bypass
+moved V_m by at most 1.0e-14 V against the plain run. The header's transistor count read 32
+(the subcircuit definitions); it is now 128 x NEURONS. No simulator change.
+
+
+2.18.0+1 - 2026-10-08
+--------------------
+**`scripts/benchmark/bench_xbar_jit_linux.sh`: the small MNIST crossbar, interpreter vs JIT,
+with and without bypass, for a Linux machine.** It generates hidden layer 2's first N neurons and
+their 2T2R crossbar with SG13G2 PSP103 access transistors (`gen_xbar_deck.py`: no PDK needed,
+the deck's one card is the committed one). It runs plain, `VA_JIT=on`, `--bypass` and both, and
+checks that the JIT and the thread count change no bit. It reports how far bypass moves V_m from
+the plain run. No simulator change.
+  * Checked here with NEURONS=2, CYCLES=1: every check OK (plain = jit, bp = jit_bp = bp_t1),
+    bypass's largest V_m difference 1.0e-14 V.
+  * The truncated MNIST run (digit 0, first 1 us of 7.25, 3 755 timepoints, 4 threads):
+    2.16.2+6 61.3 s, this build 51.8 s, `VA_JIT=on` 51.5 s, outputs hash-equal. The network's
+    devices are behavioural and cheap, so the JIT barely moves it.
+  * The deck-diff that 2.18.0 left pending was stopped by a container restart and has not been
+    rerun; it is still owed.
+
+
+2.18.0 - 2026-10-08
+--------------------
+**A compiled model's static program can run as machine code (`VA_JIT=on`, prototype, Cranelift),
+and contributions stop allocating: one SG13G2 PSP103 `load()` 47 -> 41 us interpreted, 19 us
+as machine code.** `docs/proposals/snn-transistor-performance.md` §4.2-4.3.
+
+  * va-codegen, `sched/jit.rs` (new): each model's static program becomes one Cranelift
+    function, every partial a load from a fixed address, the rule's flops and a store;
+    contiguous partial pairs packed as `f64x2`; the both-zero rule a branch-free mask;
+    transcendentals from the same `libm`, rarer operators by calling the interpreter's own
+    functions. The only `unsafe` in the crate, for calling the code, the shims' pointers and
+    `Send`/`Sync` (owner sign-off 2026-10-08, CLAUDE.md §5; the module doc says why each is
+    sound); the crate's `forbid(unsafe_code)` became `deny`. Off unless `VA_JIT=on`.
+  * va-codegen, `FastSum`: on the static path a flow contribution's terms are summed from the
+    registers into a stack buffer, `Dual::scale`/`Dual::add`'s arithmetic in their order:
+    gradient allocations per PSP103 load 93 -> 3. Bit-identical; helps with or without the JIT.
+  * xtask `jit-check` (new): machine code against interpreter over every `.va`, bit for bit,
+    any two NaNs counted as equal -- the only differences seen are NaN signs on `psp104` (LLVM
+    turns the interpreter's `v * -1.0` into a sign flip; IEEE leaves a NaN's sign unspecified).
+    60 of 98 models compile, all agree. `sched-check` 0 differing.
+  * Measured (Xeon 2.8 GHz): `bench-instance .../bench_access_bias.net` 40.9 us interpreted,
+    19.1 us `VA_JIT=on`; `fig5_access` 1 thread 32.7 -> 22.6 s with the JIT, output hashes equal.
+  * Dependencies: cranelift-{codegen,frontend,jit,module,native} 0.131 (pure Rust; licences
+    Apache-2.0 WITH LLVM-exception / MIT / Apache-2.0, all on deny.toml's list).
+  * Limitations: ~0.9 s of compilation per distinct model card at its first evaluation
+    (`fig5_tx.net`: 19 cards); ~1 MB of code per card, never freed; host ISA only, tested on
+    x86-64 Linux only (Windows and Apple-silicon macOS untested); potential contributions and
+    self-probed branches still build `Dual`s. `xtask deck-diff` was still running when this was
+    committed; its result is in the next entry.
+  * Measured at this version: `cargo test --workspace` 954 passed with `VA_JIT` off and on;
+    clippy clean.
+
+
+2.17.0+1 - 2026-10-07
+--------------------
+**2.17.0's deck-diff, which had not finished when it was committed.** `xtask deck-diff` of the
+2.17.0 binary against 2.16.2+6, every deck under `circuits/` except the 13 slow ISCAS'85 ones:
+123 identical, 0 different, 13 skipped. No code change.
+  * Measured at this version: as 2.17.0 (`cargo test --workspace` 954 passed, `cargo xtask
+    validate` 28/28).
+
+
+2.17.0 - 2026-10-07
+--------------------
+**A compiled model's evaluation is 1.66x cheaper on PSP103, bit-identical, and `--bypass` no
+longer goes parallel for work it never measured.** For the transistor-level SNN, where one
+SG13G2 PSP103 evaluation is most of every run (`docs/proposals/snn-transistor-performance.md`,
+new: where the time goes, what 2.17.0 did, and what is left, ranked).
+
+  * va-codegen, the static program (`sched.rs`, module doc "Less to run") runs less code:
+    constants are folded at compile time by the expression the instruction would evaluate (a
+    setup value no per-load statement reassigns counts as a constant, and is no longer reset
+    every load); an assignment whose variable reaches no contribution, condition, bound or task
+    compiles to nothing (kept if it calls the tree walker, which can fail); an `if` whose arms
+    hold only assignments is laid out as condition, jump and arms; consecutive such statements
+    run as one stretch instead of one `exec` and one walk step each. On the static path the
+    variable table is no longer allocated, cleared and dropped per load. One PSP103 `load()` with
+    the SG13G2 card: ~78 -> ~47 us (`xtask bench-instance .../bench_access_bias.net`).
+  * va-core, bypass (`par.rs`): in `Mode::Auto` a bypassed assembly went parallel on an estimate
+    it never measured (zero after the operating point, which meant parallel), so it handed a few
+    cheap leftover devices to the pool every iteration; 4 threads ran 1.9x slower than 1 on
+    `fig5_access`. Each instance's own evaluation time is now measured (serially: first time, then
+    every 256 assemblies) and an assembly goes parallel when its fresh instances' times reach
+    `PARALLEL_MIN_WORK_NS`. A stored recording takes its sparse slots from the slot cache that has
+    just placed it, and the column each stamp's drift correction reads is found once at store
+    time instead of searched for on every replay. A recording starts with its last length's
+    capacity. Speed only: bypass was already bit-identical across thread counts.
+  * Measured (Xeon 2.8 GHz, 4 vCPU, 2.16.2+6 -> this, single runs, each build's runs back to back, not interleaved; read as +-5 %):
+      fig5_access, 1 thread           51.5 -> 33.2 s     with --bypass 10.2 -> 7.6 s
+      fig5_access, 4 threads          37.5 -> 30.2 s     with --bypass 19.3 -> 9.8 s
+      xbar_h2_8, 4 threads            81.1 -> 55.7 s     with --bypass 37.5 -> 29.1 s
+      xbar_h2_8, 1 thread, --bypass   81.5 -> 57.2 s
+  * Still true: on `fig5_access` with `--bypass`, 4 threads are slower than 1 (9.8 vs 7.6
+    s): the hand-off on this machine costs more than the 200 us threshold assumes (tuned on an
+    i7, not re-tuned here).
+  * Identity: `xtask sched-check` over the 98 `.va` files in the tree, 0 differing (60 on the
+    static path); `xtask deck-diff` against 2.16.2+6: not finished when this was committed; its result is recorded in the
+    next entry; stdout hashes equal on
+    `fig5_access` (with and without `--bypass`, 1 and 4 threads) and `xbar_h2_8` (the
+    8-neuron hidden-2 crossbar, 1 024 PSP103, plain and `--bypass`). New tests
+    `the_static_path_folds_constants_and_drops_dead_assignments` and
+    `an_if_of_assignments_runs_as_code_and_takes_the_arm_the_bias_selects`, each failing with
+    its reduction switched off (checked).
+  * Limitations, stated: the program is still interpreted (compiling it to machine code needs
+    `unsafe` and owner sign-off, CLAUDE.md §5; the proposal's §4.2); liveness is
+    flow-insensitive, so a variable read anywhere that matters is kept everywhere it is
+    assigned; `case`, loops and `if`s with a contribution or task in an arm still go through the
+    statement walk; contributions are still turned into heap-allocated `Dual`s to stamp.
+  * Measured at this version: `cargo test --workspace` 954 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
+
+
 2.16.2+6 - 2026-10-05
 ---------------------
 **Multiphysics example 15: a silicon microring bank -- bistability, self-pulsing and chaos**

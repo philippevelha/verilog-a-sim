@@ -167,7 +167,15 @@ and the source lines are held at V_ref. This is a reasoned expectation, not a me
    bypass): 1.12x without bypass and ~1.1x with it at 8-16 neurons, bit-identical. What remains
    of the serial part is the hash-free replay itself; the evaluation is now the cost.
 2. Find out why a fresh evaluation costs 8× more in the 64-neuron crossbar (a sampling profile).
+   *(2.17.0: one fresh SG13G2 PSP103 evaluation is ~1.6× cheaper —
+   `docs/proposals/snn-transistor-performance.md` §3; the 8× growth itself is still unexplained.)*
 3. A cost gate — bypass only instances whose evaluation costs more than a replay — before bypass
    could ever be on by default.
 4. A golden that exercises a bypassed transistor.
 5. Memory of the recordings is unmeasured (estimate: ~80 MB at 64 neurons).
+6. ~~The parallel decision does not know most loads are replayed~~ **fixed in 2.17.0**: with
+   bypass on, `Mode::Auto` went parallel on an estimate it never measured (zero, which meant
+   parallel), so a bypassed assembly handed a few cheap leftover devices to the pool and 4 threads
+   ran 1.9× slower than 1 on `fig5_access`. It now sums each fresh instance's own measured
+   evaluation time against `PARALLEL_MIN_WORK_NS` (19.3 → 9.8 s on 4 threads; 1 thread is still
+   faster on this deck, 7.6 s, see `snn-transistor-performance.md` §3).

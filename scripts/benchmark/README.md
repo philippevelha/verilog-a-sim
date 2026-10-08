@@ -63,3 +63,14 @@ MNIST SNN (`bench_snn_linux.sh`):
 | File | Machine | Notes |
 |---|---|---|
 | `bench_snn.txt` | AMD Ryzen 9 9950X, 32 threads, Ubuntu 26.04 | MNIST SNN (`bench_snn_linux.sh`), v2.0.0 binary: 7 580 s for the ten (Windows i7-1185G7: 35 145 s); timepoints, spikes and classes identical to the Windows run on every digit; its hashes are the first recorded |
+
+## Small MNIST crossbar: interpreter vs JIT, with and without bypass (Linux)
+
+`bench_xbar_jit_linux.sh /path/to/va-cli` (2.18.0+) generates hidden layer 2's first `NEURONS`
+neurons (default 8) and their 64-input crossbar with SG13G2 PSP103 access transistors (1 024 at
+the default), `CYCLES` 250 ns cycles (default 3). It runs the deck four ways: plain, `VA_JIT=on`,
+`--bypass`, and both, the bypass runs on one thread too. It writes `bench_xbar_jit.txt`: wall
+time, peak memory, timepoints and output hash per run; checks that the JIT and the thread count
+change no bit; and gives the largest V_m difference bypass makes against the plain run. Deck
+generation is `gen_xbar_deck.py` and needs no PDK (the one card it uses is committed). Each
+`VA_JIT=on` run includes ~0.9 s of compiling the PSP103 card, and it is counted in the wall time.

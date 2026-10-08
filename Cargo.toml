@@ -4,7 +4,7 @@ members = ["crates/*", "xtask"]
 
 [workspace.package]
 # Bump together with release.txt; the two must always agree.
-version = "2.16.2+6"
+version = "2.18.0+3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/philippevelha/verilog-a-sim"
@@ -26,6 +26,14 @@ rayon = "1"
 # SVG backend only (`default-features = false`): keeps the pure-Rust, no-native-deps posture
 # (§5) — the bitmap backend pulls in font-rasterization deps for no benefit here. Decision
 # recorded in docs/roadmap.md's Quarto-tutorials conventions.
+# Cranelift, the pure-Rust code generator behind the compiled-model JIT (va-codegen `jit`, 2.18.0;
+# docs/proposals/snn-transistor-performance.md §4.2). No native library: it emits machine code
+# into memory it maps itself. `(Default features: the host ISA is detected at run time.)
+cranelift-codegen = "0.131"
+cranelift-frontend = "0.131"
+cranelift-jit = "0.131"
+cranelift-module = "0.131"
+cranelift-native = "0.131"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
 
 # Internal crates (path deps), referenced by sibling crates per the §3 table.

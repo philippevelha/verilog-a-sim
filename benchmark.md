@@ -304,6 +304,10 @@ Worth knowing before wiring up a real card.
    indirection on the bias-dependent core. A flat SSA tape would remove most of it; a Cranelift JIT
    (pure Rust, so `CLAUDE.md` §5's no-native-link rule is satisfied, but `unsafe` is needed to call
    what it emits and so is owner sign-off) would go further.
+   *Since written:* flat tapes (1.16.0), then a statically scheduled register program (2.4.0),
+   which 2.17.0 folds, prunes and runs in longer stretches: one PSP103 `load()` with the SG13G2
+   card is ~47 µs against ~78 µs before 2.17.0 (Xeon 2.8 GHz). The program is still interpreted;
+   compiling it is the open item (`docs/proposals/snn-transistor-performance.md` §4.2).
 2. **The setup/eval split is a prefix.** Real dependence analysis would reach models like
    HICUM/L2 v3.0, which currently hoists 1 statement of 191.
 3. **`build_instances` is called three or four times per `sim` run** — by `quantities()`,

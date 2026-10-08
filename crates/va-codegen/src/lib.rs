@@ -37,7 +37,9 @@
 //!   evaluates the thermal voltage at the given absolute temperature `T`, carrying `T`'s
 //!   gradient (e.g. a self-heating thermal node).
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: `sched::jit` alone allows `unsafe`, to call the machine code it
+// generates (owner sign-off 2026-10-08, CLAUDE.md §5; its module doc says why each use is sound).
+#![deny(unsafe_code)]
 
 pub mod ad;
 pub mod counters;
@@ -237,6 +239,16 @@ impl CompiledModel {
             .sched
             .get()
             .map(|r| r.as_ref().map(|_| ()).map_err(|e| *e))
+    }
+
+    /// Whether this model's static program was compiled to machine code (`sched::jit`): `None`
+    /// until an instance has been evaluated once on the static path, then whether the code
+    /// exists (`false`: the JIT was off when the program was built, or refused it).
+    pub fn jit_status(&self) -> Option<bool> {
+        self.shared
+            .sched
+            .get()
+            .map(|r| r.as_ref().is_ok_and(|p| p.has_jit()))
     }
 
     /// The elaborated module this was compiled from.
@@ -567,6 +579,32 @@ impl GeneratedModel {
         validating: bool,
         static_vars: &'a [Option<crate::ad::Dual>],
     ) -> Ctx<'a> {
+        self.ctx_sized(
+            x,
+            analysis,
+            state_prev,
+            events_fired,
+            validating,
+            static_vars,
+            true,
+        )
+    }
+
+    /// [`Self::ctx`], saying whether to pre-size the variable table to every declared local.
+    /// The statically scheduled path keeps its variables in registers and binds none in the
+    /// table, so for it the table starts empty rather than allocating, clearing and dropping
+    /// one entry per local on every evaluation (`Ctx::set_var` grows it if anything binds).
+    #[allow(clippy::too_many_arguments)]
+    fn ctx_sized<'a>(
+        &'a self,
+        x: &'a [f64],
+        analysis: &va_abi::AnalysisCtx,
+        state_prev: &'a [f64],
+        events_fired: &'a [bool],
+        validating: bool,
+        static_vars: &'a [Option<crate::ad::Dual>],
+        presize_vars: bool,
+    ) -> Ctx<'a> {
         // Three maps built per call (branch-current slots, `idt` slots, stateful-call slots):
         // counted for `--logfull` (`crate::counters`).
         crate::counters::ctx_maps_built(3);
@@ -603,7 +641,11 @@ impl GeneratedModel {
             .collect();
         // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
         // but doing it once here keeps a 1400-variable model from reallocating its way up.
-        let mut vars = vec![None; self.shared.module.vars.len()];
+        let mut vars = if presize_vars || !self.shared.lowered.persistent_vars.is_empty() {
+            vec![None; self.shared.module.vars.len()]
+        } else {
+            Vec::new()
+        };
         // A persistent variable starts from its value at the last accepted timepoint (0 if none
         // was ever committed, the LRM's initial value), `lower::PersistentVar`. A constant: what
         // it was then does not move with this evaluation's unknowns.
@@ -761,10 +803,14 @@ impl GeneratedModel {
     where
         F: FnMut(&Self, &Ctx, &Contribution),
     {
-        for stmt in stmts {
+        let mut i = 0;
+        while i < stmts.len() {
+            let stmt = &stmts[i];
+            i += 1;
             match stmt {
                 LoweredStmt::Assign { lhs, rhs } => match &ctx.sched {
-                    Some(run) => run.assign(ctx, *rhs)?,
+                    // This assignment and the ones after it whose code follows on: one stretch.
+                    Some(run) => i += run.stretch(ctx, *rhs, stmts.len() - i + 1)? - 1,
                     None => {
                         let d = tape::eval_root(ctx, *rhs)?;
                         ctx.set_var(*lhs, d);
@@ -782,6 +828,15 @@ impl GeneratedModel {
                     target,
                     monitor,
                 } => tasks::run(ctx, *kind, args, *target, *monitor)?,
+                // An `if` the static path laid out whole (arms of assignments only) runs as code,
+                // with the statements after it whose code follows on.
+                LoweredStmt::If { cond, .. }
+                    if ctx.sched.as_ref().is_some_and(|run| run.is_whole(*cond)) =>
+                {
+                    if let Some(run) = &ctx.sched {
+                        i += run.stretch(ctx, *cond, stmts.len() - i + 1)? - 1;
+                    }
+                }
                 LoweredStmt::If { cond, then_, else_ } => {
                     let taken = if tape::eval_value(ctx, *cond)? != 0.0 {
                         then_
@@ -1134,7 +1189,26 @@ impl GeneratedModel {
                 let gp = self.terminals[c.p_slot];
                 let gn = self.terminals[c.n_slot];
 
-                if !c.resistive.is_empty() {
+                // The static path's sum, straight from the registers (`FastSum`): the same
+                // stamps in the same order, without a `Dual` per term. Not for a self-probed
+                // branch, whose running total wants the `Dual`.
+                let fast = if self.is_self_probed_flow_branch(c.branch.0) {
+                    None
+                } else {
+                    FastSum::resistive(ctx, &c.resistive)
+                };
+                if let Some(i) = fast {
+                    let Ok(i) = i else {
+                        return;
+                    };
+                    sink.residual(gp, i.value);
+                    sink.residual(gn, -i.value);
+                    for (slot, dg) in i.grad() {
+                        let gk = self.terminals[slot];
+                        sink.jacobian(gp, gk, dg);
+                        sink.jacobian(gn, gk, -dg);
+                    }
+                } else if !c.resistive.is_empty() {
                     // Post-validation this cannot fail; bail without stamping if it ever does.
                     let Ok(i) = Self::sum_terms(ctx, &c.resistive) else {
                         return;
@@ -1171,7 +1245,18 @@ impl GeneratedModel {
                     }
                 }
 
-                if !c.charge.is_empty() {
+                if let Some(q) = FastSum::charge(ctx, &c.charge) {
+                    let Ok(q) = q else {
+                        return;
+                    };
+                    sink.charge(gp, q.value);
+                    sink.charge(gn, -q.value);
+                    for (slot, dg) in q.grad() {
+                        let gk = self.terminals[slot];
+                        sink.dcharge(gp, gk, dg);
+                        sink.dcharge(gn, gk, -dg);
+                    }
+                } else if !c.charge.is_empty() {
                     let Ok(q) = Self::sum_charge_terms(ctx, &c.charge) else {
                         return;
                     };
@@ -2208,6 +2293,31 @@ fn sched_enabled() -> bool {
 
 static SCHED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+/// Whether the statically scheduled program is compiled to machine code (`sched::jit`): off
+/// unless `VA_JIT=on` or [`set_jit_enabled`] says otherwise (prototype, 2.18.0). Read when a
+/// model's program is built, so it applies to models built after it is set.
+fn jit_enabled() -> bool {
+    use std::sync::atomic::Ordering;
+    match JIT.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("VA_JIT").is_ok_and(|v| v == "on");
+            JIT.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+static JIT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Switch compiling the static program to machine code on or off for the whole process,
+/// overriding `VA_JIT`. Results are meant to be bit-identical either way; this exists so
+/// `cargo xtask sched-check --jit` can compare in one process.
+pub fn set_jit_enabled(on: bool) {
+    JIT.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Switch the statically scheduled evaluation path (`crate::sched`) on or off for the whole
 /// process, overriding `VA_SCHED`. Results are meant to be bit-identical either way; this exists
 /// so `cargo xtask sched-check` can compare the two in one process.
@@ -2471,32 +2581,34 @@ impl ModelInstance for GeneratedModel {
         } else {
             None
         };
-        let mut ctx = self.ctx(
+        let prog = regs_guard.as_ref().and_then(|_| {
+            self.shared
+                .sched
+                .get_or_init(|| {
+                    sched::Program::compile(
+                        &self.shared.module,
+                        &self.shared.lowered,
+                        &self.shared.params,
+                        static_vars,
+                        self.terminals.len(),
+                    )
+                })
+                .as_ref()
+                .ok()
+        });
+        let mut ctx = self.ctx_sized(
             x,
             actx,
             state.committed(),
             state.fired_slots(),
             false,
             static_vars,
+            prog.is_none(),
         );
-        if let Some(guard) = regs_guard.as_mut() {
-            let prog = self.shared.sched.get_or_init(|| {
-                sched::Program::compile(
-                    &self.shared.module,
-                    &self.shared.lowered,
-                    &self.shared.params,
-                    static_vars,
-                    self.terminals.len(),
-                )
-            });
-            if let Ok(prog) = prog {
-                let regs = guard.get_or_insert_with(|| prog.regs());
-                prog.begin(regs);
-                ctx.sched = Some(sched::Run {
-                    prog,
-                    regs: RefCell::new(regs),
-                });
-            }
+        if let (Some(guard), Some(prog)) = (regs_guard.as_mut(), prog) {
+            let regs = guard.get_or_insert_with(|| prog.regs());
+            prog.begin(regs);
+            ctx.sched = Some(sched::Run::new(prog, regs, x, &self.terminals));
         }
         self.stamp_branch_currents(x, sink);
         // Post-validation this cannot fail; `run` already stops early rather than stamping
@@ -2610,6 +2722,137 @@ impl ModelInstance for GeneratedModel {
             && l.laplace_terms.is_empty()
             && l.zi_terms.is_empty()
             && !lower::task_reachable(&self.shared.module, &self.shared.params, &l.stmts)
+    }
+}
+
+/// The most local unknowns [`FastSum`] keeps on the stack; a model with more takes the
+/// `Dual` path.
+const FAST_SUM_SLOTS: usize = 64;
+
+/// A flow contribution's summed terms on the statically scheduled path, built from the
+/// registers into a stack buffer instead of one heap-allocated [`ad::Dual`] per term (2.18.0).
+///
+/// **The same bits as [`GeneratedModel::sum_terms`] / [`GeneratedModel::sum_charge_terms`]**,
+/// by doing their arithmetic in their order: each term is what `sched::Run::dual` builds (a dense
+/// gradient, zero outside the root's support, or none if the support is empty), scaled as
+/// `Dual::scale` does (`0.0` stays `0.0`), and added to the running sum as `Dual::add` does —
+/// including its structural cases: no gradient plus a gradient is `0.0 + g`, a gradient plus none
+/// is `g + 0.0`. Only the instantaneous channel: a static-path root carries no time-derivative
+/// partials (`Run::dual` builds none).
+struct FastSum {
+    value: f64,
+    n: usize,
+    dense: bool,
+    g: [f64; FAST_SUM_SLOTS],
+}
+
+impl FastSum {
+    fn start<'c, 'a>(ctx: &'c Ctx<'a>) -> Option<(&'c sched::Run<'a>, Self)> {
+        let run = ctx.sched.as_ref()?;
+        let n = run.prog.n_slots();
+        (n <= FAST_SUM_SLOTS).then_some((
+            run,
+            FastSum {
+                value: 0.0,
+                n,
+                dense: false,
+                g: [0.0; FAST_SUM_SLOTS],
+            },
+        ))
+    }
+
+    /// `acc.add(&term)`, `term` being `(value, dense?, partials)`.
+    fn add(&mut self, v: f64, dense: bool, t: &[f64]) {
+        self.value += v;
+        let acc = &mut self.g[..self.n];
+        match (self.dense, dense) {
+            (false, false) => {}
+            (true, false) => acc.iter_mut().for_each(|a| *a += 0.0),
+            (false, true) => {
+                for (a, &q) in acc.iter_mut().zip(t) {
+                    *a = 0.0 + q;
+                }
+                self.dense = true;
+            }
+            (true, true) => {
+                for (a, &q) in acc.iter_mut().zip(t) {
+                    *a += q;
+                }
+            }
+        }
+    }
+
+    /// `Dual::scale(s)` on a term in place.
+    fn scale(v: &mut f64, dense: bool, t: &mut [f64], s: f64) {
+        *v *= s;
+        if dense {
+            for g in t.iter_mut() {
+                *g = if *g == 0.0 { 0.0 } else { *g * s };
+            }
+        }
+    }
+
+    /// [`GeneratedModel::sum_terms`]; `None` when not on the static path (or a term is not
+    /// one of its roots), `Some(Err)` where `sum_terms` would fail.
+    fn resistive(ctx: &Ctx, terms: &[lower::Term]) -> Option<Result<Self, CodegenError>> {
+        if terms.is_empty() {
+            return None;
+        }
+        let (run, mut acc) = Self::start(ctx)?;
+        if !terms.iter().all(|t| run.prog.has_root(t.expr)) {
+            return None;
+        }
+        let mut t = [0.0; FAST_SUM_SLOTS];
+        for term in terms {
+            let (mut v, dense) = match run.dual_into(ctx, term.expr, &mut t[..acc.n]) {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e)),
+            };
+            Self::scale(&mut v, dense, &mut t[..acc.n], term.sign);
+            acc.add(v, dense, &t[..acc.n]);
+        }
+        Some(Ok(acc))
+    }
+
+    /// [`GeneratedModel::sum_charge_terms`], as [`Self::resistive`].
+    fn charge(ctx: &Ctx, terms: &[lower::ChargeTerm]) -> Option<Result<Self, CodegenError>> {
+        if terms.is_empty() {
+            return None;
+        }
+        let (run, mut acc) = Self::start(ctx)?;
+        let all = terms.iter().all(|t| {
+            run.prog.has_root(t.expr) && t.coeffs.iter().all(|(e, _)| run.prog.has_root(*e))
+        });
+        if !all {
+            return None;
+        }
+        let mut t = [0.0; FAST_SUM_SLOTS];
+        for term in terms {
+            let (mut v, dense) = match run.dual_into(ctx, term.expr, &mut t[..acc.n]) {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e)),
+            };
+            for &(coeff_expr, is_divisor) in &term.coeffs {
+                let coeff = match run.value(ctx, coeff_expr) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                let s = if is_divisor { 1.0 / coeff } else { coeff };
+                Self::scale(&mut v, dense, &mut t[..acc.n], s);
+            }
+            Self::scale(&mut v, dense, &mut t[..acc.n], term.sign);
+            acc.add(v, dense, &t[..acc.n]);
+        }
+        Some(Ok(acc))
+    }
+
+    /// The non-zero partials, as `Dual::grad` yields them.
+    fn grad(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        let g: &[f64] = if self.dense { &self.g[..self.n] } else { &[] };
+        g.iter()
+            .enumerate()
+            .filter(|(_, g)| **g != 0.0)
+            .map(|(i, g)| (i, *g))
     }
 }
 
@@ -3252,6 +3495,169 @@ mod tests {
         );
     }
 
+    /// The static path's compile-time reductions (2.17.0), on a model built to exercise each:
+    ///
+    /// - `k = R * 2` is setup and never reassigned, so `k * 3.0` is folded into one constant
+    ///   and `g = V(p,n) * (k * 3.0)` costs a probe and one multiply;
+    /// - `dead = V(p,n) * V(p,n) + 1` reaches no contribution: it compiles to nothing;
+    /// - `dead_call = $vt` reaches nothing either, but is a tree-walked call (which can fail),
+    ///   so it is kept.
+    ///
+    /// And the stamps are the hand-computed ones: `I = 6 R V`, `dI/dV = 6 R`.
+    #[test]
+    fn the_static_path_folds_constants_and_drops_dead_assignments() {
+        let mut m = resistor_ir();
+        m.vars = ["k", "g", "dead", "dead_call"]
+            .iter()
+            .map(|n| VarDecl {
+                name: n.to_string(),
+            })
+            .collect();
+        let r = m.push_expr(Expr::Param(va_ir::ParamId(0)));
+        let two = m.push_expr(Expr::Const(2.0));
+        let k_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, r, two));
+        let v = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let k = m.push_expr(Expr::Var(VarId(0)));
+        let three = m.push_expr(Expr::Const(3.0));
+        let k3 = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, k, three));
+        let g_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v, k3));
+        let v2 = m.push_expr(Expr::Probe(Access {
+            kind: AccessKind::Potential,
+            branch: BranchId(0),
+        }));
+        let sq = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, v, v2));
+        let one = m.push_expr(Expr::Const(1.0));
+        let dead_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Add, sq, one));
+        let vt = m.push_expr(Expr::Call(va_ir::Builtin::Vt, vec![]));
+        let read_g = m.push_expr(Expr::Var(VarId(1)));
+        m.analog = vec![
+            Stmt::Assign {
+                lhs: VarId(0),
+                rhs: k_rhs,
+            },
+            Stmt::Assign {
+                lhs: VarId(1),
+                rhs: g_rhs,
+            },
+            Stmt::Assign {
+                lhs: VarId(2),
+                rhs: dead_rhs,
+            },
+            Stmt::Assign {
+                lhs: VarId(3),
+                rhs: vt,
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: read_g,
+            },
+        ];
+        let compiled = CompiledModel::new(&m).expect("compiles");
+        let instance = compiled.instantiate(&[0, 1], &mut 2).expect("builds");
+        let mut sink = DenseStamp::new(2);
+        let x = [0.25, 0.0];
+        instance.load(
+            &x,
+            &ANALYSIS_DC,
+            &mut va_abi::ModelState::stateless(),
+            &mut sink,
+        );
+        let r_val = compiled.shared.params[0];
+        assert_eq!(sink.residual[0], 0.25 * (r_val * 2.0 * 3.0));
+        assert_eq!(sink.jac(0, 0), r_val * 2.0 * 3.0);
+        if !sched_enabled() {
+            return; // `VA_SCHED=off`: nothing compiled to inspect
+        }
+        let prog = compiled
+            .shared
+            .sched
+            .get()
+            .expect("compiled on first load")
+            .as_ref()
+            .expect("on the static path");
+        // A probe and one multiply for `g`; the tree call for `dead_call` and the copy into its
+        // register; nothing for `dead`, and no `k * 3.0` at run time.
+        assert_eq!(prog.instr_kinds(), ["probe", "bin", "tree", "copy"]);
+    }
+
+    /// An `if` whose arms hold only assignments is laid out whole on the static path (2.17.0):
+    /// condition, jump, arms, one stretch of code. `if (V(p,n) > 0) g = 2 V(p,n); else
+    /// g = 3 V(p,n); I(p,n) <+ g;` must still take the arm the bias selects, on both sides.
+    #[test]
+    fn an_if_of_assignments_runs_as_code_and_takes_the_arm_the_bias_selects() {
+        let mut m = resistor_ir();
+        m.vars = vec![VarDecl { name: "g".into() }];
+        let probe = |m: &mut Module| {
+            m.push_expr(Expr::Probe(Access {
+                kind: AccessKind::Potential,
+                branch: BranchId(0),
+            }))
+        };
+        let v = probe(&mut m);
+        let zero = m.push_expr(Expr::Const(0.0));
+        let cond = m.push_expr(Expr::Binary(va_ir::BinOp::Gt, v, zero));
+        let v1 = probe(&mut m);
+        let two = m.push_expr(Expr::Const(2.0));
+        let then_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, two, v1));
+        let v2 = probe(&mut m);
+        let three = m.push_expr(Expr::Const(3.0));
+        let else_rhs = m.push_expr(Expr::Binary(va_ir::BinOp::Mul, three, v2));
+        let read_g = m.push_expr(Expr::Var(VarId(0)));
+        m.analog = vec![
+            Stmt::If {
+                cond,
+                then_: vec![Stmt::Assign {
+                    lhs: VarId(0),
+                    rhs: then_rhs,
+                }],
+                else_: vec![Stmt::Assign {
+                    lhs: VarId(0),
+                    rhs: else_rhs,
+                }],
+            },
+            Stmt::Contribute {
+                target: Access {
+                    kind: AccessKind::Flow,
+                    branch: BranchId(0),
+                },
+                value: read_g,
+            },
+        ];
+        let compiled = CompiledModel::new(&m).expect("compiles");
+        let instance = compiled.instantiate(&[0, 1], &mut 2).expect("builds");
+        for (vp, k) in [(0.5, 2.0), (-0.5, 3.0)] {
+            let mut sink = DenseStamp::new(2);
+            instance.load(
+                &[vp, 0.0],
+                &ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut sink,
+            );
+            assert_eq!(sink.residual[0], k * vp, "V = {vp}");
+            assert_eq!(sink.jac(0, 0), k, "V = {vp}");
+        }
+        if !sched_enabled() {
+            return;
+        }
+        let prog = compiled
+            .shared
+            .sched
+            .get()
+            .expect("compiled on first load")
+            .as_ref()
+            .expect("on the static path");
+        assert_eq!(
+            prog.instr_kinds(),
+            ["probe", "flat2", "jz", "probe", "bin", "jump", "probe", "bin"]
+        );
+    }
+
     /// Build the resistor IR: `I(p,n) <+ V(p,n) / R`, R defaulting to 1 kΩ.
     fn resistor_ir() -> Module {
         let mut m = Module::new("resistor");
@@ -3521,8 +3927,12 @@ mod tests {
             assert!(after.probe_allocs - before.probe_allocs >= loads);
         }
         // The charge is non-linear in `V`, so each load does dual arithmetic on a value that
-        // depends on an unknown: at least one gradient allocation per load.
-        assert!(after.grad_allocs - before.grad_allocs >= loads);
+        // depends on an unknown: at least one gradient allocation per load -- on the tree walk.
+        // The static path sums its contributions on the stack since 2.18.0 (`FastSum`) and
+        // allocates none.
+        if !sched_enabled() {
+            assert!(after.grad_allocs - before.grad_allocs >= loads);
+        }
         assert!(
             after.grad_clones <= after.grad_allocs,
             "clones are a subset"
