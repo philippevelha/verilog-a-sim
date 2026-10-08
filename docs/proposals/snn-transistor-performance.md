@@ -157,6 +157,10 @@ different deck nets is left as it was.
   `fig5_access` keeps the same 12 837 timepoints and agrees to 1e-6 (its print precision). The
   crossbar keeps the same 1 375 timepoints, 1 344 of them at identical times, where V_m agrees
   to 1e-10 V.
+- Over every deck in the tree (2.21.0+1): 29 decks' output text differs, and none moves beyond its
+  solver tolerances. 20 agree to the last printed digit. The fig5_tx* decks keep V_m to 1 uV and
+  the same spikes. The bsimsoi NAND's 31 uV goes away at tight Newton tolerances. `xtask
+  validate` with collapse on: 28/28.
 - A collapsed node is no longer reported under its own name (`V(X1.SI)` now reads as `V(S)`).
   A removed row is not reported, so the remaining `X1.b…` are numbered afresh.
 

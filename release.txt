@@ -22,6 +22,34 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.21.0+1 - 2026-10-08
+----------------------
+**Node collapse (2.20.0, `VA_COLLAPSE=on`) checked over every deck in the tree: no deck's answer
+moves beyond its solver tolerances.** No code change; this records the check 2.20.0 promised.
+`cargo xtask deck-diff` (collapse off against on, same binary): 29 decks differ in their output
+text, and every run exits 0 both ways. All 29 were rerun with both outputs kept, and every value
+reported in both was compared:
+  * Agree to the last printed digit: 20 decks. PSP102/103/104, BSIM6, BSIM-BULK, BSIM-CMG,
+    BSIM-IMG and HiSIM2 NANDs; the PSP103 inverters; c17; both microrings; speaker_ac and
+    speaker_large; ring_gyro_noise; bench_access_bias, fig5_access and uic_access.
+  * The six fig5_tx* decks: V_m equal to 1 uV at every cycle, and identical spike steps.
+    Every other value agrees within the time-print rounding (below), except up to 1.5 mV on
+    PSP103 internal nodes at waveform corners.
+  * bsimsoi NAND: V(out) moves by up to 31 uV in the transition (VA 0.56-0.70 V). Rebuilt with
+    Newton at abstol 1e-18 / reltol 1e-12 (not committed), off and on agree at every printed
+    digit over all 101 points, so this is Newton's tolerance, not collapse.
+  * speaker_thermal: 301 163 vs 299 285 timepoints, because the step control sees fewer rows.
+    Its pressures agree to <= 0.1 %, within the 1e-3 transient tolerance.
+  * What "within the time-print rounding" means: va-cli prints t to 7 digits, so two printed-equal
+    times can be one unit of the last digit apart. Near 11 s that is 10 us, enough to move the
+    deck's own 40 V, 200 Hz source by 0.47 V. These comparisons subtract slope x that bound.
+  * `VA_COLLAPSE=on cargo xtask validate`: 28/28.
+  * Found on the way, NOT caused by collapse and not fixed here: at the default Newton
+    tolerances, the bsimsoi NAND's transfer curve is up to 0.4 mV from the tight-tolerance answer,
+    collapse on or off. The circuit carries ~1 pA there, and abstol is 1e-12 A, which is a
+    current tolerance as large as the circuit's whole current.
+Measured: `cargo test --workspace` 961 passed; `cargo xtask validate` 28/28 (collapse off and on).
+
 2.21.0 - 2026-10-08
 --------------------
 **A behavioural access switch fitted to the SG13G2 transistor (rung A), for training: on Fig. 5 it
