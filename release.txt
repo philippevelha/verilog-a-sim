@@ -22,6 +22,58 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.2 - 2026-10-08
+--------------------
+**The ten diagnostics the error corpus flagged as poor now say what is wrong, where.** The
+corpus's `poor:` list is empty; each fixed file asserts the new wording and location, so none
+of these can quietly regress.
+  * **Tokens are named as written.** `found Some(Hash)` → `` found `#` ``,
+    `expected Semicolon` → `` expected `;` ``, `found None` → `found the end of the file`
+    (`Token::describe`).
+  * **A missing `;` is reported where it belongs**: after the last token of its line
+    (`` expected `;` after identifier `n` ``), not at the next line's first token.
+  * **An unclosed `begin` or module names its opener**:
+    `` expected `end` to close the `begin` opened at f.va:9:10 ``. End-of-file errors use the
+    file's own line numbering, not "preprocessed line N".
+  * **`/*` and string literals left open** are reported by the preprocessor at the line they
+    open on. An unclosed comment used to swallow the rest of the file and show up as a missing
+    `endmodule`. An unclosed string reached the lexer, which gave a byte offset into the
+    preprocessed text and quoted everything after it.
+  * **Lex errors are located as file:line:col** (`lexer::lex_located`, through the
+    preprocessor's line map) and quote the offending character.
+  * **Preprocessor errors carry file:line** (`undefined macro` included); an error inside an
+    `` `include ``d file keeps that file's location.
+  * **`electical p, n;`** reads as a net under an undeclared discipline: the error says so,
+    points at the word, and suggests `electrical` (edit distance <= 2 against the built-in and
+    declared disciplines; no suggestion when nothing is that close).
+  * **`===`/`!==` and `casex`/`casez`** are parse errors saying Annex C excludes them, and what to
+    write instead. `casex` used to be a *refusal* claiming it was "not yet" parsed. Every
+    parser refusal was also tracked under "Analog events", including ones that have nothing
+    to do with events; the tracking is now per refusal.
+  * **A genvar read outside its loop** says so, instead of "unknown identifier".
+
+**A real bug found on the way.** The macro expander copied text one byte at a time with
+`byte as char`, so every non-ASCII character outside a comment was turned into Latin-1 mojibake:
+`$strobe("1 µA")` printed `1 Âµ A`, and a lex error quoting `£` showed `Â`. It now copies whole
+characters. This changes the output of any model that prints non-ASCII text, and that change is
+the fix.
+
+Cost and limits:
+  * A string literal that runs past the end of its line is now a preprocessor error. Verilog
+    strings cannot span lines, and `\`-continued macro lines still work, but a third-party
+    model that relied on a tool accepting it would now stop. Nothing in the repository does:
+    `check models` 66/66, `check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+    **The local 280-file corpus was again not run here.**
+  * Elaboration errors still carry no line number; that needs source spans in the AST and is
+    the largest remaining gap in where a diagnostic points.
+  * The corpus still records 2 gaps (a port without a direction; `Temp` on an `electrical`
+    net), unchanged.
+
+Measured: `cargo test --workspace` 957 passed, 0 failed (955 + two preprocessor unit tests; the
+corpus gained `lex_unexpected_character.va`, 36 files, inside its one test); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
 2.18.1 - 2026-10-08
 --------------------
 **An error corpus, and four kinds of invalid Verilog-A that used to compile are now rejected.**

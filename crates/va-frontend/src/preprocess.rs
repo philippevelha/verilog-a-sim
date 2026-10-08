@@ -363,7 +363,8 @@ impl Preprocessor {
 
     /// Process a whole source string: strip comments, join line continuations, run each line.
     fn process_str(&mut self, source: &str) -> Result<(), FrontendError> {
-        let stripped = strip_comments(source);
+        let file = self.frames.last().map_or("<input>", |f| f.file.as_str());
+        let stripped = strip_comments(source).map_err(|u| pp_err(&u.message(file)))?;
         let lines: Vec<&str> = stripped.split('\n').collect();
         let mut i = 0;
         while i < lines.len() {
@@ -385,9 +386,21 @@ impl Preprocessor {
                     break;
                 }
             }
-            self.process_line(&line)?;
+            self.process_line(&line).map_err(|e| self.locate(e))?;
         }
         Ok(())
+    }
+
+    /// Prefix a preprocessor error with the file and line being processed. An error that
+    /// already carries a location — raised inside an `` `include ``d file, and located there —
+    /// keeps it: the included file's line is the one to look at.
+    fn locate(&self, e: FrontendError) -> FrontendError {
+        match (e, self.frames.last()) {
+            (FrontendError::Preprocess(m), Some(f)) if !m.starts_with("at ") => {
+                pp_err(&format!("at {}:{}: {m}", f.file, f.reported_line()))
+            }
+            (e, _) => e,
+        }
     }
 
     fn process_line(&mut self, line: &str) -> Result<(), FrontendError> {
@@ -810,8 +823,7 @@ impl Preprocessor {
                 }
                 continue;
             }
-            out.push(c);
-            i += 1;
+            i = push_char_at(text, i, &mut out);
         }
         Ok(out)
     }
@@ -919,8 +931,7 @@ fn substitute_params(body: &str, params: &[String], args: &[String]) -> String {
             out.push_str(map.get(id).copied().unwrap_or(id));
             continue;
         }
-        out.push(c);
-        i += 1;
+        i = push_char_at(body, i, &mut out);
     }
     out
 }
@@ -932,17 +943,33 @@ fn copy_string(text: &str, i: usize, out: &mut String) -> usize {
     out.push('"');
     let mut j = i + 1;
     while j < b.len() {
-        let c = b[j] as char;
-        out.push(c);
-        j += 1;
-        if c == '\\' && j < b.len() {
-            out.push(b[j] as char);
-            j += 1;
-        } else if c == '"' {
+        let c = b[j];
+        j = push_char_at(text, j, out);
+        if c == b'\\' && j < b.len() {
+            j = push_char_at(text, j, out);
+        } else if c == b'"' {
             break;
         }
     }
     j
+}
+
+/// Copy the character starting at byte `i` of `text` to `out` and return the index past it.
+///
+/// The loops above walk bytes, because everything they look for is ASCII. Copying a byte
+/// `as char` is only right for ASCII too: until 2.18.2 a non-ASCII character was copied one
+/// byte at a time, each byte read as a Latin-1 character, so `µ` came out as `Âµ` — in a
+/// `$strobe` string, and in the character a lex error quoted.
+fn push_char_at(text: &str, i: usize, out: &mut String) -> usize {
+    match text.get(i..).and_then(|r| r.chars().next()) {
+        Some(ch) => {
+            out.push(ch);
+            i + ch.len_utf8()
+        }
+        // Not a character boundary: cannot happen while every skip above is over ASCII, and
+        // copying nothing is safer than splitting a character.
+        None => i + 1,
+    }
 }
 
 /// Extract the first double-quoted token from `s` (for `` `include "file" ``).
@@ -952,14 +979,52 @@ fn parse_quoted(s: &str) -> Option<String> {
     Some(s[start..end].to_string())
 }
 
+/// A comment or string [`strip_comments`] found opened and never closed, with the 1-based
+/// physical line it was opened on.
+#[derive(Debug, PartialEq, Eq)]
+enum Unclosed {
+    /// A `/*` with no `*/` after it.
+    BlockComment(usize),
+    /// A `"` with no closing `"` on the same line.
+    String(usize),
+}
+
+impl Unclosed {
+    /// The diagnostic, located in `file`.
+    fn message(&self, file: &str) -> String {
+        match self {
+            Unclosed::BlockComment(line) => format!(
+                "at {file}:{line}: this `/*` comment is never closed by `*/`, so everything \
+                 after it is commented out"
+            ),
+            Unclosed::String(line) => format!(
+                "at {file}:{line}: this string literal is never closed: a string must end with \
+                 `\"` on the line it starts"
+            ),
+        }
+    }
+}
+
 /// Remove `//` and `/* */` comments, preserving newlines and string literals.
-fn strip_comments(src: &str) -> String {
+///
+/// # Errors
+///
+/// An unclosed `/*` or string, located at its opening line. Until 2.18.2 neither was reported
+/// here: an unclosed `/*` silently swallowed the rest of the file, so the user was told
+/// `endmodule` was missing; an unclosed string reached the lexer, which reported a byte offset
+/// into the preprocessed text and quoted everything after it.
+fn strip_comments(src: &str) -> Result<String, Unclosed> {
     let mut out = String::with_capacity(src.len());
     let mut chars = src.chars().peekable();
     let mut in_string = false;
     let mut in_line = false;
     let mut in_block = false;
+    let mut line = 1;
+    let mut opened = 0;
     while let Some(c) = chars.next() {
+        if c == '\n' {
+            line += 1;
+        }
         if in_line {
             if c == '\n' {
                 in_line = false;
@@ -977,9 +1042,16 @@ fn strip_comments(src: &str) -> String {
             continue;
         }
         if in_string {
+            if c == '\n' {
+                return Err(Unclosed::String(opened));
+            }
             out.push(c);
             if c == '\\' {
                 if let Some(n) = chars.next() {
+                    // A `\` before the newline continues a macro line; the line still counts.
+                    if n == '\n' {
+                        line += 1;
+                    }
                     out.push(n);
                 }
             } else if c == '"' {
@@ -990,6 +1062,7 @@ fn strip_comments(src: &str) -> String {
         match c {
             '"' => {
                 in_string = true;
+                opened = line;
                 out.push(c);
             }
             '/' if chars.peek() == Some(&'/') => {
@@ -999,11 +1072,18 @@ fn strip_comments(src: &str) -> String {
             '/' if chars.peek() == Some(&'*') => {
                 chars.next();
                 in_block = true;
+                opened = line;
             }
             _ => out.push(c),
         }
     }
-    out
+    if in_block {
+        return Err(Unclosed::BlockComment(opened));
+    }
+    if in_string {
+        return Err(Unclosed::String(opened));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1012,6 +1092,34 @@ mod tests {
 
     fn pp(src: &str) -> String {
         preprocess(src, &[]).expect("preprocess")
+    }
+
+    /// Non-ASCII text passes through unchanged, in a string and outside one. Until 2.18.2 the
+    /// expander copied it a byte at a time, each byte as a Latin-1 character: `µ` became `Âµ`.
+    #[test]
+    fn non_ascii_text_survives_expansion() {
+        let out = pp("`define U \"µA\"\n$strobe(\"I = 1 µA\", `U); x = 2 € 3;\n");
+        assert!(out.contains("\"I = 1 µA\""), "{out}");
+        assert!(out.contains("\"µA\""), "{out}");
+        assert!(out.contains("2 € 3"), "{out}");
+    }
+
+    /// An unclosed `/*` or string is reported at the line it opens on, not discovered later as
+    /// a missing `endmodule` or a lex error at a byte offset.
+    #[test]
+    fn unclosed_comment_and_string_name_their_opening_line() {
+        let err = preprocess("module m;\n/* never\nclosed\nendmodule\n", &[]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(":2: this `/*` comment is never closed"),
+            "{err}"
+        );
+        let err = preprocess("module m;\nx = \"open;\nendmodule\n", &[]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(":2: this string literal is never closed"),
+            "{err}"
+        );
     }
 
     #[test]

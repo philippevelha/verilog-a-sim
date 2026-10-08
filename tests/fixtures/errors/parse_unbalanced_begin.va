@@ -1,7 +1,8 @@
 // expect: parse
-// at: 10:1
-// message: expected a statement
-// poor: does not say that the `begin` on line 8 is the one left open
+// at: 11:1
+// message: expected `end` to close the `begin` opened at
+// message: parse_unbalanced_begin.va:9:10
+// fixed: 2.18.2 (before: `expected a statement, found Some(EndModule)`, with no mention of the `begin`)
 module r(p, n);
   inout p, n;
   electrical p, n;

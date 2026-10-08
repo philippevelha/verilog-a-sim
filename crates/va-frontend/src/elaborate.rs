@@ -1716,6 +1716,12 @@ impl Elaborator<'_> {
                     Expr::Var(v)
                 } else if let Some(p) = self.params.get(name) {
                     Expr::Param(*p)
+                } else if self.genvars.contains(name) {
+                    // Declared, so "unknown identifier" would send the reader hunting for a typo.
+                    return Err(elab(format!(
+                        "genvar `{name}` is read outside the `for` loop that drives it; a genvar \
+                         only has a value inside its own generate loop"
+                    )));
                 } else {
                     return Err(elab(format!("unknown identifier `{name}`")));
                 }

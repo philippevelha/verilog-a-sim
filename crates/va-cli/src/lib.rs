@@ -582,8 +582,9 @@ fn compile_model_library_with_context(
             eprintln!("[va-cli] warning: {name}: {w}");
         }
         let expanded = &pre.text;
-        let (tokens, offsets) = va_frontend::lexer::lex_spanned_with(expanded, &pre.directives)
-            .with_context(|| format!("lexing {name}"))?;
+        let (tokens, offsets) =
+            va_frontend::lexer::lex_located(expanded, &pre.directives, &pre.line_map)
+                .with_context(|| format!("lexing {name}"))?;
         let (asts, file_natures, file_disciplines) = va_frontend::parser::parse_unit(
             &tokens,
             Some((expanded, &offsets)),
@@ -1255,13 +1256,14 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
         println!("  [warn ] {path}: {w}");
     }
     let src = &pre.text;
-    let (tokens, offsets) = match va_frontend::lexer::lex_spanned_with(src, &pre.directives) {
-        Ok(t) => t,
-        Err(e) => {
-            println!("  [lex  ] {path}: {e}{}", skipped_clause(&skipped_includes));
-            return Err(skipped_includes);
-        }
-    };
+    let (tokens, offsets) =
+        match va_frontend::lexer::lex_located(src, &pre.directives, &pre.line_map) {
+            Ok(t) => t,
+            Err(e) => {
+                println!("  [lex  ] {path}: {e}{}", skipped_clause(&skipped_includes));
+                return Err(skipped_includes);
+            }
+        };
     match va_frontend::parser::parse_unit(
         &tokens,
         Some((src, &offsets)),

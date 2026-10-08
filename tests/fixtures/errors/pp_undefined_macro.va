@@ -1,5 +1,5 @@
 // expect: pp
-// message: undefined macro `RVAL
+// message: pp_undefined_macro.va:6: undefined macro `RVAL
 module r(p, n);
   inout p, n;
   electrical p, n;

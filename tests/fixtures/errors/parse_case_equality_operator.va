@@ -1,7 +1,8 @@
 // expect: parse
-// at: 9:31
-// message: expected an expression
-// poor: `===` is excluded from Verilog-A by Annex C; the message should say so rather than report a stray `=`
+// at: 10:29
+// message: `===` is not part of Verilog-A
+// message: use `==`
+// fixed: 2.18.2 (before: `expected an expression, found Some(Assign)`, reading `===` as `==` and a stray `=`)
 module r(p, n);
   inout p, n;
   electrical p, n;

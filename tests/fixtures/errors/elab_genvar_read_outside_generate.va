@@ -1,6 +1,6 @@
 // expect: elab
-// message: unknown identifier `i`
-// poor: `i` is a declared genvar; the message should say it is only defined inside the `for` loop it drives
+// message: genvar `i` is read outside the `for` loop that drives it
+// fixed: 2.18.2 (before: `unknown identifier `i``, for a declared genvar)
 module r(p, n);
   inout p, n;
   electrical p, n;

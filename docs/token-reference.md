@@ -370,7 +370,10 @@ class of lexemes.
   1.0/0.0-instead-of-a-real-bool representation matches C's historical lack of `_Bool` before
   C99 more than it matches digital Verilog's 4-valued (`0`/`1`/`x`/`z`) logic, which this v0
   subset does not model at all (LRM Annex C.4/C.5: `===`/`!==` case-equality and `x`/`z` values
-  are the Verilog-AMS-only, not-in-Verilog-A, part of the language).
+  are the Verilog-AMS-only, not-in-Verilog-A, part of the language). Since 2.18.2 `===`/`!==` are
+  lexed as tokens of their own (`Token::CaseEq`/`CaseNe`) that no grammar rule accepts, so a
+  model using one is told the operator is excluded and to write `==`/`!=` — before, `===` lexed
+  as `==` then `=`, and the error was about a stray `=`.
 
 ### `Not` (`!`), `AndAnd` (`&&`), `OrOr` (`||`)
 
@@ -1106,7 +1109,10 @@ including the ones with no implemented behavior at all.
   loop variable) but matches digital Verilog's `repeat` exactly. `casex`/`casez` (wildcard-match
   case, meaningful only for Verilog's 4-state values) are explicitly *not* part of Verilog-A at
   all per LRM Annex C.7 ("casex and casez are not supported in Verilog-A") — so their absence
-  from this project's grammar (§1.6) is spec-correct, not a gap.
+  from this project's grammar (§1.6) is spec-correct, not a gap. A statement starting with
+  either is a parse error saying so and pointing at `case` (2.18.2); before, it fell through to
+  the generic reserved-word *refusal*, which called it "not yet" parsed — a promise of support
+  the language rules out.
 
 ### Math builtins (`abs`, `acos`, `acosh`, `asin`, `asinh`, `atan`, `atan2`, `atanh`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `hypot`, `int`, `limexp`, `ln`, `log`, `max`, `min`, `pow`, `round`, `sin`, `sinh`, `sqrt`, `tan`, `tanh`)
 

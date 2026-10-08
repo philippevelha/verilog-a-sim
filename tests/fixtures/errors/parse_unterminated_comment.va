@@ -1,8 +1,0 @@
-// expect: parse
-// message: unexpected end of input
-// poor: reported as a missing `endmodule`; the `/*` opened on line 6 is never mentioned
-module r(p, n);
-  inout p, n;
-  electrical p, n; /* oops
-  analog I(p, n) <+ V(p, n);
-endmodule

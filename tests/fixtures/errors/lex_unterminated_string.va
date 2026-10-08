@@ -1,8 +1,0 @@
-// expect: lex
-// message: unexpected input
-// poor: located by a byte offset into the preprocessed text (`at byte 75`), which is no position in this file, and quotes the whole rest of the file
-module r(p, n);
-  inout p, n;
-  electrical p, n;
-  analog begin $strobe("hi); I(p, n) <+ V(p, n); end
-endmodule

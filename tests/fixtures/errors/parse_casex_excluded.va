@@ -1,0 +1,11 @@
+// expect: parse
+// at: 10:23
+// message: `casex` is not part of Verilog-A
+// message: use `case`
+// fixed: 2.18.2 (before: a refusal saying `casex` was not *yet* parsed, tracked under "Analog events")
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  integer k;
+  analog begin k = 1; casex (k) 1: I(p,n) <+ V(p,n); endcase end
+endmodule

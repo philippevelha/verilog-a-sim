@@ -1,6 +1,8 @@
 // expect: parse
-// message: unexpected end of input before `endmodule`
-// poor: located as `preprocessed line 9`, not as file:line, and ends with `found None`
+// at: 9:34
+// message: expected `endmodule` to close the module `r`
+// message: parse_missing_endmodule.va:6:1
+// fixed: 2.18.2 (before: located as `preprocessed line 9`, ending `found None`)
 module r(p, n);
   inout p, n;
   electrical p, n;

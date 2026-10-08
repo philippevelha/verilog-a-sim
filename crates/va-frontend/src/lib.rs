@@ -27,8 +27,16 @@ pub enum FrontendError {
     #[error("preprocess error: {0}")]
     Preprocess(String),
     /// The lexer hit a character it cannot tokenize.
-    #[error("lex error at byte {offset}: {message}")]
-    Lex { offset: usize, message: String },
+    #[error("lex error at {location}: {message}")]
+    Lex {
+        /// Byte offset of the offending text in the (preprocessed) source that was lexed.
+        offset: usize,
+        /// Where that is, for a reader: `file:line:col` when the preprocessor's line map was
+        /// available ([`lexer::lex_located`]), else `byte N` of the lexed text.
+        location: String,
+        /// What was found.
+        message: String,
+    },
     /// The parser hit an unexpected token.
     #[error("parse error: {0}")]
     Parse(String),
@@ -186,7 +194,7 @@ pub fn compile_named(
     // `expanded`, not of `source` — see `parser::parse_with_disciplines_located`.
     // Both stages take the directive events: the lexer for `begin_keywords` regions, the
     // parser for each module's `default_discipline`/`default_transition` settings.
-    let (tokens, offsets) = lexer::lex_spanned_with(expanded, &pre.directives)?;
+    let (tokens, offsets) = lexer::lex_located(expanded, &pre.directives, &pre.line_map)?;
     let (asts, natures, disciplines) = parser::parse_unit(
         &tokens,
         Some((expanded, &offsets)),
