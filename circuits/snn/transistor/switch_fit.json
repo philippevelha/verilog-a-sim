@@ -1,0 +1,17 @@
+{
+  "model": "models/snn/mos_switch.va (rung A)",
+  "device": "SG13G2 HV NMOS W/L = 10/0.45 um through PSP103, typical corner (tech.inc)",
+  "bias": {
+    "vs": 1.65,
+    "vds": 0.005,
+    "vgs_max": 1.65
+  },
+  "beta": 0.003795333,
+  "vt": 0.951051,
+  "ns": 0.0318,
+  "ron_psp103": 376.968,
+  "ron_fit": 376.968,
+  "worst_strong_inversion_error": 0.10273,
+  "ron_psp103_vds_m20mV": 369.873,
+  "ron_psp103_vds_p20mV": 381.843
+}

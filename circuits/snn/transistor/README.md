@@ -26,6 +26,7 @@ backend, and the decks are regenerated with `--tech`. A run names both libraries
 | 1. Access transistors in the Fig. 5 deck | `fig5_access.net` (`gen_fig5_access.py`) | **runs**, first measurements below |
 | 2. The neuron at transistor level (Fig. 2's blocks, designed and sized by us: the paper gives no sizes and draws the op-amp and flip-flop as boxes) | `fig5_tx*.net` (`gen_neuron.py`) | **runs** (2.5.0), every block; measurements below |
 | 3. Wall-time projection to the MNIST network, and the optimisations it calls for | — | next |
+| 4. A behavioural switch fitted to the transistor, for training (rung A) | `fig5_fit.net` (`gen_fig5_access.py --switch fit`, `fit_switch.py`) | **runs** (2.21.0), Fig. 5 only; measurements below |
 
 `uic_access.net` is one 2T2R branch started cold, kept as va-cli's regression deck for the
 seed rule (below).
@@ -213,3 +214,75 @@ so 29 cycles are 20 000–64 000 timepoints, **~16–52 h per image for the cros
 behavioural neurons**, on the condition that the superlinear part seen under bypass stays small
 beyond 140k unknowns, which nothing here shows. The transistor neurons would add 8 280 devices,
 and on the single-neuron deck they multiplied the timepoints by 2.2.
+
+## A switch fitted to the transistor (2026-10-08, Xeon 2.8 GHz, 2.21.0)
+
+Training cannot run at transistor level (`docs/proposals/snn-transistor-performance.md` §4.6),
+so the transistor has to come back into the behavioural model the training uses. The idea is a
+switch with as few parameters as the circuit allows, fitted to PSP103, built in rungs: each rung
+adds a parameter only once the one before it is shown to be short.
+
+| Rung | Model | Parameters | State |
+|---|---|---|---|
+| A | g = beta * ns * ln(1 + exp((V_GS - vt) / ns)), I = g * V_DS | beta, vt (+ ns from the subthreshold slope) | **done**: `models/snn/mos_switch.va` |
+| B | + the triode V_DS term | +0-1 | not needed yet (below) |
+| C | + the gate's charge (overlap and channel) | +1 | what the remaining error is (below) |
+
+**Step 1: what the switch sees.** Measured over `fig5_access.net` (the PSP103 deck, all 8
+access transistors, every timepoint):
+
+| Word line | V_DS | V_GS (from the lower terminal) | V_SB |
+|---|---|---|---|
+| high | -8 ... +20 mV | 1.641 ... 1.653 V | 1.642 ... 1.650 V |
+| low | down to -1.25 V (edge kicks, below) | -1.65 ... -0.37 V | 0.40 ... 1.65 V |
+
+The source line is held at V_ref by the ideal op-amp, so with the switch on V_SB is fixed (the
+body effect is a constant) and the transistor is in deep triode. On each word-line edge PSP103
+kicks the cell node, by up to 1.15 V for an HRS cell. The kick is the gate's charge, and the cell
+recharges through its RRAM within 12.5 ns, long before the integration window opens (125.5 ns
+into the cycle). No cell node moves during the window. The crossbar's cell (`gen_mnist_tx.py`'s
+`syn_p*_n*`) is the same circuit on the same ideal source line.
+
+**Rung A.** `fit_switch.py` sweeps the access device's gate at V_S = 1.65 V, V_DS = 5 mV
+(`switch_fit.json`):
+
+- `ns = 31.8 mV`, from the steepest weak-inversion slope.
+- `beta = 3.795e-3 A/V^2`, set so that R_on at the high word line (V_GS = 1.65 V) is PSP103's
+  376.97 Ohm exactly. That is the one bias the neuron integrates.
+- `vt = 0.951 V`, least squares over the rest of strong inversion. The largest current error
+  there is 10 %, near threshold.
+- PSP103's R_on at V_DS = -20 / +20 mV is 369.9 / 381.8 Ohm. Rung A holds it at 377.0.
+
+**Fig. 5 against PSP103** (`cmp_vm.py fig5_access.out fig5_fit.out`, V_m sampled where the
+flip-flop latches it):
+
+| Access switch | Worst \|V_m - PSP103\| | Output spikes | Wall (`fig5_access`: 20.4 s, `VA_JIT=on`) |
+|---|---|---|---|
+| `vswitch ron=10` (the old ideal switch) | 118.9 mV | 6, 10, 14 | 3.4 s |
+| `mos_switch`, rung A | **2.4 mV** | 6, 10, 14 | 3.2 s |
+| `vswitch ron=376.97` | 2.4 mV | 6, 10, 14 | — |
+
+**In this deck, rung A buys nothing over a constant R_on.** The last row agrees with rung A to
+1 µV at every sample. Fig. 5's word lines are ideal sources at exactly 0 or 3.3 V, so the gate
+dependence never comes into play. It matters where the word line is not a clean rail: a
+transistor word-line driver, or a lower V_high. Neither is measured yet.
+
+**Where the 2.4 mV comes from: the gate's charge, not V_DS.** The source-line current that the
+neuron integrates agrees with PSP103's to 1.8 nA (0.07 %) all through the window. That is the
+V_DS dependence that rung B would add, and at ~6 nA per mV of V_m it is worth well under 1 mV. The
+difference is at the word-line edges. At 250-251 ns PSP103 pushes the gate's charge through the
+source line (-74 uA, then +149 uA, within 1 ns), while clk's falling edge (249.5-250.5 ns) still
+has the input stage half open. Part of the first pulse reaches V_m, 1.5-2.4 mV per edge. Rung A
+has no charge. So the next rung, if one is needed, is C (an overlap capacitance), not B. Whether
+a real circuit sees this depends on its word-line timing against clk, which in these decks is an
+artefact of their ideal sources.
+
+**Limitations of rung A** (in `mos_switch.va`'s header):
+
+- one geometry (W/L = 10/0.45 um), the typical corner, room temperature;
+- one V_ref (V_SB is folded into vt, so another V_ref needs a refit);
+- linear in V_DS, not symmetric, no charge, no noise;
+- the reference is our own PSP103 run, not a reference simulator.
+- **Not yet checked on the MNIST crossbar.** That needs a folded `synapse_2t2r` form, which rung A
+  allows exactly because it is linear in V_DS, and a comparison against the small crossbar deck
+  (`scripts/benchmark/gen_xbar_deck.py`).

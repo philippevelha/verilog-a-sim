@@ -187,3 +187,9 @@ images, and four to five orders of magnitude too slow for a training set. The wo
    `circuits/snn/mnist/` did at circuit level for ten.
 
 The simulator work above makes steps 1 and 3 faster. It does not make step 2 unnecessary.
+
+**Step 2 for the access switch, rung A (2.21.0):** `models/snn/mos_switch.va`, fitted by
+`circuits/snn/transistor/fit_switch.py`. On Fig. 5 it puts V_m within 2.4 mV of the PSP103 deck
+(the 10 Ohm ideal switch: 119 mV), with the same spikes, in 3.2 s instead of 20 s. The remainder
+is the gate's charge at the word-line edges. `circuits/snn/transistor/README.md`, "A switch fitted
+to the transistor", has the measurements and what is not yet checked (the MNIST crossbar).

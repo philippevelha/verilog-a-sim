@@ -22,6 +22,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.21.0 - 2026-10-08
+--------------------
+**A behavioural access switch fitted to the SG13G2 transistor (rung A), for training: on Fig. 5 it
+puts V_m within 2.4 mV of the PSP103 deck, with the same spikes, in 3.2 s instead of 20 s.**
+Training cannot run at transistor level (snn-transistor-performance.md §4.6). So the transistor has
+to come back into the behavioural model, with as few parameters as the circuit allows.
+  * Step 1, measured over fig5_access.net: with the word line high, the access transistor sits in
+    deep triode at a fixed V_SB (the source line is held at V_ref = 1.65 V), with |V_DS| <= 20 mV.
+    Its edge kicks on the cell node (up to 1.15 V) settle in 12.5 ns, before the neuron
+    integrates.
+  * models/snn/mos_switch.va: g = beta * ns * ln(1 + exp((V_GS - vt) / ns)), I = g * V_DS. It has
+    vswitch.va's port order, so a deck swaps one for the other. It is linear in V_DS, so it can be
+    folded into synapse_2t2r exactly (not done yet).
+  * circuits/snn/transistor/fit_switch.py fits it to PSP103 and writes switch_fit.json:
+    ns = 31.8 mV (subthreshold slope); beta = 3.795e-3 A/V^2, pinned so that R_on at the high
+    word line is PSP103's 376.97 Ohm exactly; vt = 0.951 V, least squares over strong inversion
+    (largest current error 10 %).
+  * gen_fig5_access.py --switch fit writes fig5_fit.net.
+  * cmp_vm.py compares two runs where the flip-flop latches V_m, and checks the spike steps.
+Fig. 5, worst |V_m - PSP103|: 118.9 mV with the old 10 Ohm switch, 2.4 mV with rung A. Spikes
+6, 10, 14 in all three runs.
+  * **The cost, stated plainly:** in this deck rung A is no better than vswitch at a constant
+    376.97 Ohm, which agrees with it to 1 uV. The word lines are ideal rails, so the gate
+    dependence never comes into play.
+  * The remaining 2.4 mV is the gate's charge, not V_DS. Through the window the source-line
+    current agrees to 1.8 nA (0.07 %). The difference comes at the word-line edges: PSP103 pushes
+    -74 / +149 uA through the source line while clk's falling edge still has the input stage half
+    open. So the next rung, if any, is C (charge), not B.
+  * Not yet checked on the MNIST crossbar.
+  * Limits: one geometry, the typical corner, one V_ref; no charge or noise; the reference is our
+    own PSP103 run, not QSPICE.
+  * Test: the_fitted_access_switch_has_psp103s_r_on_and_a_jacobian_that_matches_differences
+    (R_on at the on-bias; AD against central differences in all three terminals, on both
+    softplus branches).
+Measured: `cargo test --workspace` 961 passed (960 + the new test); `cargo xtask validate` 28/28;
+fmt and clippy clean. No existing model or deck changed.
+
 2.20.0 - 2026-10-08
 --------------------
 **Node collapse, opt-in (`VA_COLLAPSE=on`): PSP103's proven ideal shorts and dead branch rows

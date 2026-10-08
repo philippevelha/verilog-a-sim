@@ -1,0 +1,46 @@
+// The 2T2R crossbar's access switch fitted to its transistor: rung A of
+// circuits/snn/transistor/README.md, "A switch fitted to the transistor".
+//
+// A gate-controlled conductance, linear in V(p, n):
+//     g = 1/roff + beta * ns * ln(1 + exp((V(c, n) - vt) / ns)),   I(p, n) = g * V(p, n)
+// This is the deep-triode MOS (I = beta * V_ov * V_DS) with the overdrive smoothed into weak
+// inversion: `ns` sets the subthreshold slope (one e-fold of g per `ns` volts of gate drive).
+// `n` is the source-line terminal and the gate drive is measured from it, so the port order is
+// vswitch.va's and a deck swaps one for the other.
+//
+// The defaults are fitted (circuits/snn/transistor/fit_switch.py, switch_fit.json) to the SG13G2
+// HV NMOS, W/L = 10/0.45 um, through PSP103, typical corner, with the source on the 1.65 V source
+// line and the bulk at ground. `beta` makes R_on at V(c, n) = 1.65 V (word line at 3.3 V)
+// PSP103's 376.97 Ohm exactly, and `vt` fits the turn-on (largest current error over strong
+// inversion 10 %).
+//
+// Limitations: the fit holds for one geometry, one corner, room temperature and one source-line
+// voltage. V_SB is folded into `vt`, so a different V_ref needs a refit. Linear in V_DS: PSP103's
+// R_on moves -1.9 % / +1.3 % at -20 / +20 mV, which this model does not follow (with the switch
+// on in the crossbar, |V_DS| stays under 20 mV). The model is not symmetric: if `p` drops below
+// `n`, the real device's source becomes `p`, but here the gate drive is still V(c, n). It has no
+// charge, so it has no gate capacitance, overlap capacitance or charge injection. PSP103 kicks the
+// cell node by up to 1.2 V on a word-line edge and settles in ~12 ns, outside the neuron's
+// integration window; a circuit that samples during an edge would see the difference. There is no
+// noise and no saturation region.
+`include "../disciplines.vams"
+
+module mos_switch(p, n, c);
+    inout p, n;
+    input c;
+    electrical p, n, c;
+    parameter real beta = 3.795333e-3 from (0:inf);
+    parameter real vt = 0.951051;
+    parameter real ns = 0.0318 from (0:inf);
+    parameter real roff = 1e12 from (0:inf);
+    real x, g;
+    analog begin
+        x = (V(c, n) - vt) / ns;
+        // softplus, written so exp never overflows
+        if (x > 0)
+            g = 1.0 / roff + beta * ns * (x + ln(1.0 + exp(-x)));
+        else
+            g = 1.0 / roff + beta * ns * ln(1.0 + exp(x));
+        I(p, n) <+ g * V(p, n);
+    end
+endmodule
