@@ -22,6 +22,27 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.0+4 - 2026-10-08
+--------------------
+**`bench_xbar_jit_linux.sh` on a Ryzen 9 9950X (32 logical CPUs), at 4x the default deck.**
+NEURONS=32 CYCLES=5: 4 096 PSP103, 70 366 unknowns, 5 141 timepoints. Plain 619.0 s, `VA_JIT=on`
+615.4 s (1.006x), `--bypass` 257.7 s (2.40x), both 255.8 s; one thread: bypass 355.7 s, both
+323.4 s (1.10x). Bypass replays 95.3 % of loads. Every check OK: the JIT is bit-identical with and
+without bypass, and bypass gives the same bits on 1 and 32 threads.
+
+What it says, against 2.18.0+2's Xeon run of the 8-neuron deck (JIT 1.49x): at 70 k unknowns the
+JIT is worth nothing on many threads. Bypass alone is worth 2.4x, and going from 1 to 32 threads
+under bypass gains only 1.38x. Both point at the time going to the sparse solve and per-step
+overhead, not to device evaluation, which is the only thing the JIT speeds up. That is an
+inference from these figures; this run has no profile to confirm it.
+
+Two things to watch. Bypass moved V_m by up to **1.8e-5 V**, against 1.0e-14 V on the small deck.
+It is within the tolerances bypass is built on, but it is nine orders of magnitude larger, and a
+deck this size is where it shows. And the report says `checkout: n/a`: the run was not made from
+a git checkout, so the exact source revision rests on the binary's SHA-256 (d8afd439...) alone.
+No simulator change; the figures are added to the script's header.
+
+
 2.18.0+3 - 2026-10-08
 --------------------
 **The deck-diff 2.18.0 owed.** `xtask deck-diff` of this build with `VA_JIT=on` against the
