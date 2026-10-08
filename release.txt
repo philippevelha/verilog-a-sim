@@ -22,6 +22,16 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.0+2 - 2026-10-08
+--------------------
+**`bench_xbar_jit_linux.sh`'s reference figures, and a header fix.** The default run here
+(Xeon 2.8 GHz, 4 vCPU; 8 neurons, 1 024 PSP103, 3 cycles, 2 234 timepoints): plain 108.6 s,
+`VA_JIT=on` 72.8 s (1.49x), `--bypass` 30.3 s, both 29.8 s; one thread: bypass 46.2 s, both
+38.6 s. Bypass replays 93.4 % of loads, which leaves the JIT little to do. Every check OK. Bypass
+moved V_m by at most 1.0e-14 V against the plain run. The header's transistor count read 32
+(the subcircuit definitions); it is now 128 x NEURONS. No simulator change.
+
+
 2.18.0+1 - 2026-10-08
 --------------------
 **`scripts/benchmark/bench_xbar_jit_linux.sh`: the small MNIST crossbar, interpreter vs JIT,

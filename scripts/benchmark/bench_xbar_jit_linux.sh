@@ -24,8 +24,9 @@
 #     difference of the 8 membrane voltages at the timepoints both runs share, and how many there
 #     are.
 #
-# Reference (2.18.0, Xeon 2.8 GHz, 4 vCPU, NEURONS=8, CYCLES=1): plain 55.7 s, bp 29.1 s on 4
-# threads (2.17.0 figures; JIT not yet measured on this deck at the time of writing).
+# Reference (2.18.0+1, Xeon 2.8 GHz, 4 vCPU, the defaults, 2 234 timepoints): plain 108.6 s,
+# jit 72.8 s, bp 30.3 s, jit_bp 29.8 s; on one thread bp 46.2 s, jit_bp 38.6 s. Bypass replayed
+# 93.4 % of loads; every check OK; bypass moved V_m by at most 1.0e-14 V. Peak memory ~0.6 GB.
 #
 # What it needs: a checkout at or after 2.18.0 and a va-cli built from it:
 #     cargo build --release -p va-cli
@@ -65,7 +66,7 @@ REPORT=$(seq -s, -f "XN_h2_%g.vm" 0 $((NEURONS - 1)))
   echo "checkout:      $(git rev-parse --short HEAD 2>/dev/null || echo n/a) $(git log -1 --format=%s 2>/dev/null | cut -c1-60)"
   echo "va-cli:        $VA"
   echo "va-cli sha256: $(sha256sum "$VA" | cut -d' ' -f1)"
-  echo "deck:          hidden-2 crossbar, digit $DIGIT, $NEURONS neurons, $CYCLES cycles ($(grep -c 'hvn_w10000n_l450n_ng1 w=' "$DECK") PSP103)"
+  echo "deck:          hidden-2 crossbar, digit $DIGIT, $NEURONS neurons, $CYCLES cycles ($((128 * NEURONS)) PSP103)"
   echo "extra env:     ${EXTRA_ENV:-none}"
   echo
   echo "== machine"
