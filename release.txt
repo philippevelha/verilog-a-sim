@@ -22,6 +22,23 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.0+1 - 2026-10-08
+--------------------
+**`scripts/benchmark/bench_xbar_jit_linux.sh`: the small MNIST crossbar, interpreter vs JIT,
+with and without bypass, for a Linux machine.** It generates hidden layer 2's first N neurons and
+their 2T2R crossbar with SG13G2 PSP103 access transistors (`gen_xbar_deck.py`: no PDK needed,
+the deck's one card is the committed one). It runs plain, `VA_JIT=on`, `--bypass` and both, and
+checks that the JIT and the thread count change no bit. It reports how far bypass moves V_m from
+the plain run. No simulator change.
+  * Checked here with NEURONS=2, CYCLES=1: every check OK (plain = jit, bp = jit_bp = bp_t1),
+    bypass's largest V_m difference 1.0e-14 V.
+  * The truncated MNIST run (digit 0, first 1 us of 7.25, 3 755 timepoints, 4 threads):
+    2.16.2+6 61.3 s, this build 51.8 s, `VA_JIT=on` 51.5 s, outputs hash-equal. The network's
+    devices are behavioural and cheap, so the JIT barely moves it.
+  * The deck-diff that 2.18.0 left pending was stopped by a container restart and has not been
+    rerun; it is still owed.
+
+
 2.18.0 - 2026-10-08
 --------------------
 **A compiled model's static program can run as machine code (`VA_JIT=on`, prototype, Cranelift),
