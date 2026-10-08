@@ -1615,6 +1615,7 @@ impl Parser<'_> {
         self.eat(&Token::Semicolon)?;
 
         let mut args = Vec::new();
+        let mut declared = Vec::new();
         let mut body = Vec::new();
         loop {
             if self.at_keyword("endfunction") {
@@ -1635,10 +1636,11 @@ impl Parser<'_> {
                     }
                     self.eat(&Token::Semicolon)?;
                 }
-                // Argument/local type declarations: consumed, types not tracked in v0.
+                // Argument/local type declarations: the names are kept (elaboration checks
+                // assignment targets against them); the types are not tracked.
                 Some(Token::Real) | Some(Token::Integer) => {
                     self.pos += 1;
-                    self.ident_list()?;
+                    declared.extend(self.ident_list()?);
                     self.eat(&Token::Semicolon)?;
                 }
                 _ => body.push(self.parse_stmt()?),
@@ -1649,6 +1651,7 @@ impl Parser<'_> {
             name,
             ret_ty,
             args,
+            declared,
             body,
         }))
     }

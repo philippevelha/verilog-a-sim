@@ -1,0 +1,7 @@
+// expect: parse
+// message: unexpected end of input before `endmodule`
+// poor: located as `preprocessed line 9`, not as file:line, and ends with `found None`
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) / 1k;

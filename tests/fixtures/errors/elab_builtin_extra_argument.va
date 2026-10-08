@@ -1,0 +1,8 @@
+// expect: elab
+// message: `exp` takes exactly one argument, but this call passes 2
+// fixed: 2.18.1 (before: the second argument was dropped and the model ran as exp(V(p, n)))
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ exp(V(p, n), 2.0);
+endmodule

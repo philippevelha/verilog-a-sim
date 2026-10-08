@@ -1,0 +1,13 @@
+// expect: elab
+// message: variable `gm_eff` is assigned but never declared
+// fixed: 2.18.1 (before: `gm_eff` became a second variable, `gmeff` stayed 0, and the device conducted nothing)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  real gmeff;
+  analog begin
+    gmeff = 0.0;
+    gm_eff = 1e-3;
+    I(p, n) <+ gmeff * V(p, n);
+  end
+endmodule

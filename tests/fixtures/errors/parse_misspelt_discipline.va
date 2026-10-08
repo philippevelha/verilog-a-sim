@@ -1,0 +1,8 @@
+// expect: parse
+// message: expected LParen
+// poor: `electical p, n;` is read as an instance of a module `electical`; the message should say the discipline is unknown and suggest `electrical`
+module r(p, n);
+  inout p, n;
+  electical p, n;
+  analog I(p, n) <+ V(p, n) / 1k;
+endmodule

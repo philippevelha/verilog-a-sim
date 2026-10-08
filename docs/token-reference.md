@@ -755,9 +755,7 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   is module-scope only — a block-local one is rejected with a specific error, since by the time
   the analog-block pass runs there's nowhere sound left to register an array's worth of nodes
   into (§2.2b). An explicit declaration always introduces a *new* identifier, shadowing a
-  same-named module parameter within its block (ordinary nested-scope rules — `declare_local_var` never checks `params`, unlike
-  `register_var`'s auto-registration for a bare, declaration-less assignment target, which treats
-  a same-named parameter as already resolvable and registers nothing new); `Ident` resolution
+  same-named module parameter within its block (ordinary nested-scope rules); `Ident` resolution
   checks `vars` before `params` so a read inside the shadowing scope sees the local variable, not
   the outer parameter. A real corpus pattern: `external/bsimsoi.va`'s `begin : load ... real
   ... MJSWG; ... end`, shadowing a same-named `` `MPRoo``-macro-declared parameter.
@@ -1119,7 +1117,11 @@ including the ones with no implemented behavior at all.
   compile-time fold).
 - **Declaration and Assignment**: Never declared — predefined; called as `name(args)`, one or
   two real-valued arguments depending on the function (`atan2`/`hypot`/`max`/`min`/`pow` take
-  two, the rest take one). `floor`/`ceil`/`round`/`int` implement the four standard rounding
+  two, the rest take one). The count is enforced (2.18.1), by one table (`builtin_arity`) that
+  both the dynamic and the constant path read: `exp(x, 2.0)` is an error naming `exp` and both
+  counts, where before it compiled and silently dropped the extra argument. `ddt` takes one or
+  two arguments and `idt` one to four, also checked; so is the argument count of a call to a
+  user `analog function`. `floor`/`ceil`/`round`/`int` implement the four standard rounding
   modes (toward −∞, toward +∞, nearest, toward zero); `limexp` is exactly `exp` under the hood
   in this project (no actual numerical limiting is modeled — a stated simplification, since it's
   documented as a Newton-convergence aid whose *value* and *derivative* this project treats as
@@ -2227,8 +2229,16 @@ dimensions, indexed as `tile[i][j]` / `V(grid[i][j])`. Not general N-D — cappe
 - Covered fully in Part 1 §1.4 (`Real`/`Integer`). Two grammar sites: `Item::Var` (module
   scope, `real x, y;`) and `Stmt::VarDecl` (block scope, same syntax inside `begin...end`).
   Since 2026-08-30 these are **not** treated identically: a `Stmt::VarDecl` allocates a fresh
-  `VarId` bound in the innermost block scope, so it shadows rather than aliases. A bare
-  assignment to an undeclared name still auto-registers one module-scope variable, as before.
+  `VarId` bound in the innermost block scope, so it shadows rather than aliases.
+- **Every variable must be declared (2.18.1).** An assignment to a name with no `real`/`integer`
+  declaration in scope is an error naming the variable; until 2.18.1 it silently declared a
+  module-scope variable, so a misspelt name compiled as a second variable. The same holds inside
+  an `analog function` (its locals are the names given a `real`/`integer` declaration in its
+  body). At module scope a name declared twice, or declared both as a variable and as a
+  parameter, is an error; inside a block a declaration still shadows an outer name, as above.
+  Assigning to a parameter gets its own message (the name is declared — it is just not
+  assignable). Gated by `tests/fixtures/errors/elab_*variable*.va` and
+  `elab_undeclared_function_local.va`.
 
 ## 2.9 Analog function definition
 

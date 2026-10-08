@@ -1,0 +1,7 @@
+// expect: elab
+// message: unknown identifier `Rx`
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) / Rx;
+endmodule

@@ -1,0 +1,13 @@
+// expect: elab
+// message: instance `x1` overrides unknown parameter `Rz` of module `r`
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real R = 1k;
+  analog I(p, n) <+ V(p, n) / R;
+endmodule
+module top(a, b);
+  inout a, b;
+  electrical a, b;
+  r #(.Rz(2k)) x1(a, b);
+endmodule

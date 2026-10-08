@@ -1,0 +1,7 @@
+// expect: elab
+// message: unknown net `q`
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, q) <+ V(p, n) / 1k;
+endmodule

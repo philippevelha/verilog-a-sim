@@ -1,0 +1,9 @@
+// expect: elab
+// message: unknown identifier `i`
+// poor: `i` is a declared genvar; the message should say it is only defined inside the `for` loop it drives
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  genvar i;
+  analog I(p, n) <+ V(p, n) * i;
+endmodule

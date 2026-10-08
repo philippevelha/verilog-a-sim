@@ -14,7 +14,7 @@ use va_cli::{check_models, run_sim, Analysis, Solver};
 
 fn main() -> std::process::ExitCode {
     match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         // A **refusal** — a construct this implementation recognises and declines — is reported
         // in its own labelled shape and swallowed here, rather than returned for the default
         // `Error: {}` rendering. Two reasons, both about the reader: the default rendering
@@ -30,15 +30,17 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// The real entry point; [`main`] only decides how a failure is rendered.
-fn run() -> Result<()> {
+/// The real entry point; [`main`] only decides how a failure is rendered. The exit code is
+/// returned rather than always `SUCCESS` because `check` can finish its report and still have
+/// failed: see [`cmd_check`].
+fn run() -> Result<std::process::ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("sim") => cmd_sim(&args[1..]),
+        Some("sim") => cmd_sim(&args[1..]).map(|()| std::process::ExitCode::SUCCESS),
         Some("check") => cmd_check(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_usage();
-            Ok(())
+            Ok(std::process::ExitCode::SUCCESS)
         }
         Some(other) => {
             print_usage();
@@ -114,7 +116,11 @@ fn print_usage() {
 /// The `check` subcommand: run the frontend over models/directories and report what fails.
 /// `--codegen` extends each file's verdict past elaboration into `va-codegen`, so the same
 /// command reports either the frontend or the frontend+codegen corpus figure.
-fn cmd_check(args: &[String]) -> Result<()> {
+///
+/// Exits 1 when any file declaring a module failed, after the full report is printed, so the
+/// command can gate a CI job or a script. Until 2.18.1 it exited 0 whatever it found, which made
+/// `va-cli check model.va && ...` proceed past a model that did not compile.
+fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
     let codegen = args.iter().any(|a| a == "--codegen");
     let paths: Vec<String> = args
         .iter()
@@ -124,7 +130,11 @@ fn cmd_check(args: &[String]) -> Result<()> {
     if paths.is_empty() {
         bail!("expected at least one model file or directory");
     }
-    check_models(&paths, codegen)
+    Ok(if check_models(&paths, codegen)? == 0 {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    })
 }
 
 /// The `sim` subcommand: run a netlist through the pipeline.

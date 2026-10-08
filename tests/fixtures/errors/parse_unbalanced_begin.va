@@ -1,0 +1,10 @@
+// expect: parse
+// at: 10:1
+// message: expected a statement
+// poor: does not say that the `begin` on line 8 is the one left open
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin
+    I(p, n) <+ V(p, n) / 1k;
+endmodule

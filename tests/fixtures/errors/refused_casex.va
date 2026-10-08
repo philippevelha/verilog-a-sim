@@ -1,0 +1,10 @@
+// expect: refused
+// message: `casex`
+// message: why:
+// poor: says the construct is not *yet* parsed and tracks it under "Analog events"; Annex C excludes `casex` from Verilog-A for good
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  integer k;
+  analog begin k = 1; casex (k) 1: I(p,n) <+ V(p,n); endcase end
+endmodule

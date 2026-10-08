@@ -967,8 +967,10 @@ pub fn run_sim(
 
 /// Run the frontend (lex → parse → elaborate) over each path and print a per-file report of
 /// the first failing stage. `paths` may be individual files or directories (scanned for
-/// `.va`/`.vams`). This is a diagnostic tool: it always returns `Ok`, reporting status to
-/// stdout, and is how we discover which Verilog-A constructs the v0 frontend is missing.
+/// `.va`/`.vams`). This is a diagnostic tool: it reports status to stdout, and is how we
+/// discover which Verilog-A constructs the frontend is missing. It returns how many files
+/// declaring a module failed, so the caller can turn a failure into an exit code; a file that
+/// declares no module is not counted as either.
 ///
 /// With `codegen` set, every module that elaborates is additionally pushed through
 /// [`va_codegen::build_instance`], so the run measures the **frontend + codegen** figure
@@ -979,8 +981,9 @@ pub fn run_sim(
 ///
 /// # Errors
 ///
-/// Only if a directory cannot be read.
-pub fn check_models(paths: &[String], codegen: bool) -> Result<()> {
+/// Only if a directory cannot be read. A model that fails to compile is not an error here: it
+/// is reported, and counted in the return value.
+pub fn check_models(paths: &[String], codegen: bool) -> Result<usize> {
     // Each entry pairs a file with the root directory it was scanned from, so nested
     // library folders (e.g. `external/some-lib/`) can still resolve `` `include `` of
     // shared headers (`constants.vams`, `disciplines.vams`) that live at the scanned root.
@@ -1063,7 +1066,7 @@ pub fn check_models(paths: &[String], codegen: bool) -> Result<()> {
         tally.passed, tally.passed_approximated
     );
     println!("  {total} file(s) scanned in total");
-    Ok(())
+    Ok(tally.failed)
 }
 
 /// What one `check` run found, split so the headline number cannot silently absorb the three

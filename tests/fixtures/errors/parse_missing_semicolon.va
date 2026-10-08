@@ -1,0 +1,9 @@
+// expect: parse
+// message: expected Semicolon
+// poor: blames line 7 (the next token) when the `;` is missing at the end of line 6, and prints the token name `Semicolon`/`Some(Parameter)` instead of `;`
+module r(p, n);
+  inout p, n;
+  electrical p, n
+  parameter real R = 1k;
+  analog I(p, n) <+ V(p, n) / R;
+endmodule

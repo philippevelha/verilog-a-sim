@@ -1,0 +1,9 @@
+// expect: parse
+// at: 8:29
+// message: found Some(Hash)
+// poor: `Some(Hash)` is the parser's internal token name; the user wrote `#`
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) # 1k;
+endmodule

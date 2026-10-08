@@ -1,0 +1,8 @@
+// expect: elab
+// message: a string literal is not valid in a parameter context
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real R = "abc";
+  analog I(p, n) <+ V(p, n) / R;
+endmodule
