@@ -22,6 +22,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.20.0 - 2026-10-08
+--------------------
+**Node collapse, opt-in (`VA_COLLAPSE=on`): PSP103's proven ideal shorts and dead branch rows
+leave the system, and one SG13G2 transistor drops from 16 own unknowns to 7.** PSP103 writes
+each parasitic resistor as `if (R > 0) I(a,b) <+ V(a,b)/R; else V(a,b) <+ 0;` and so carries a
+branch-current row for each of the seven, needed or not. With the SG13G2 card, S-SI and D-DI are
+true shorts (`rsh = 0`), each costing a node and a row to say "the same node". The other five are
+resistors whose rows are only ever pinned to zero.
+  * va-codegen: `lower::collapse_plan` / `CompiledModel::collapse` proves both cases, folding
+    branch conditions through variables the parameter-only setup fixes (`RSE_i`; assigned in
+    the setup and never by a per-load statement, task or function output). The old prover
+    (`ideal_shorts`, literals and parameters only, unchanged) recognised none of PSP103's.
+    `instantiate_dropping` maps the dropped rows to ground, where every stamp is dropped.
+  * va-cli: `collapse_nodes` gives nodes joined by a proven short one unknown (the deck net a
+    member is wired to, or one fresh unknown). It leaves a short that would join two different
+    nets as it was, and drops the shorts' rows and the dead ones.
+  * Measured (Xeon 2.8 GHz): `fig5_access` 208 -> 136 unknowns, same 12 837 timepoints, outputs
+    equal to its 1e-6 print precision, time unchanged (its solve is small). 16-neuron crossbar,
+    `VA_JIT=on --bypass`, 4 threads: 35 262 -> 16 830 unknowns, 74.9 / 73.1 s -> 62.4 / 60.9 s
+    (~1.2x), peak memory 983 -> 758 MB; same 1 375 timepoints, 1 344 at identical times, V_m
+    equal to 1e-10 V there.
+  * **Not bit-identical, by design, and that is why it is opt-in**: the matrix is smaller, so LU
+    rounds differently and step control can land a step elsewhere. A collapsed node is no longer
+    reported under its own name (`V(X1.SI)` is `V(X1.S)`). A removed row is not reported, and the
+    remaining `X1.b...` are renumbered. With it off, output is byte-identical to 2.19.0
+    (checked on `fig5_access` and `bench_access_bias`).
+  * `bench_xbar_jit_linux.sh`: a `_col` run suffix, and `jit_bp_col` among the defaults, with
+    the largest V_m difference collapse makes reported next to bypass's.
+  * New tests: `the_collapse_plan_folds_setup_variables_and_finds_dead_rows` (a short through a
+    setup variable, a dead row, a per-load variable left unfolded) and
+    `collapse_nodes_joins_shorted_nodes_and_drops_their_rows` (a chain of two shorts into one
+    net; never two nets merged).
+  * Measured at this version: `cargo test --workspace` 957 passed, 0 failed, with
+    `VA_COLLAPSE` off and on; `cargo xtask validate` 28/28 with it on; clippy clean. A
+    deck-diff of every deck with it on against off was still running when this was committed;
+    its result is in the next entry.
+
+
 2.19.0 - 2026-10-08
 --------------------
 **The bypass replay runs on several threads, bit-identical to the serial one.** With `--bypass`

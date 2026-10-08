@@ -1392,8 +1392,117 @@ pub struct IdealShort {
 /// bias-independent. BSIM-BULK's `RDrainGeo > 0` arms are that shape; its thermal
 /// `SHMOD != 0 && RTH0 > 0` is not, and that is the case that motivated this.
 pub fn ideal_shorts(module: &Module, lowered: &Lowered, params: &[f64]) -> Vec<IdealShort> {
+    short_analysis(module, lowered, &Known { params, vars: &[] }).shorts
+}
+
+/// What [`collapse_plan`] proves about a model's auxiliary branch rows under its parameter
+/// values and its setup (2.20.0, opt-in): which can be removed from the system.
+#[derive(Clone, Debug, Default)]
+pub struct Collapse {
+    /// The ideal shorts, as [`ideal_shorts`] defines them, but with conditions also folded
+    /// through variables the setup fixes (`RSE_i > 0.0` in PSP103's `CollapsableR`). Two nodes
+    /// joined by one are the same node: a caller may give both one unknown, and then the
+    /// short's own row carries nothing.
+    pub shorts: Vec<IdealShort>,
+    /// The local slots of **dead** rows: mixed branches (`if (R > 0) I(a,b) <+ ...; else
+    /// V(a,b) <+ 0;`) on which no potential contribution can run, and whose current nothing
+    /// reads. Such a row is only ever pinned to zero (`finalize_mixed_branch_currents`), so it
+    /// can be left out of the system.
+    pub dead_rows: Vec<usize>,
+}
+
+/// [`Collapse`] for `lowered` under `params`, with `vars[i]` the value of variable `i` wherever
+/// the setup fixes it for good (assigned by the bias-independent prefix and never by a
+/// per-load statement), `None` elsewhere.
+///
+/// The same proof obligations as [`ideal_shorts`] — prove it or leave it alone — with one more
+/// kind of foldable leaf: a fixed variable is a constant of the compiled model, exactly as a
+/// parameter is, and the run-time condition reads the very value folded here.
+pub fn collapse_plan(
+    module: &Module,
+    lowered: &Lowered,
+    params: &[f64],
+    vars: &[Option<f64>],
+) -> Collapse {
+    short_analysis(module, lowered, &Known { params, vars })
+}
+
+/// Every variable a per-load statement can write — an assignment's target, a task's target —
+/// plus, conservatively, every variable passed anywhere in the module as a user function's
+/// `output`/`inout` argument. What is not in here, and has a setup value, is fixed for the
+/// compiled model's life ([`collapse_plan`]'s `vars`).
+pub fn vars_written_per_load(module: &Module, lowered: &Lowered) -> Vec<bool> {
+    fn walk(stmts: &[LoweredStmt], w: &mut [bool]) {
+        let mark = |v: VarId, w: &mut [bool]| {
+            if let Some(x) = w.get_mut(v.0 as usize) {
+                *x = true;
+            }
+        };
+        for s in stmts {
+            match s {
+                LoweredStmt::Assign { lhs, .. } => mark(*lhs, w),
+                LoweredStmt::Task {
+                    target: Some(v), ..
+                } => mark(*v, w),
+                LoweredStmt::Task { .. }
+                | LoweredStmt::Contribute(_)
+                | LoweredStmt::BoundStep(_) => {}
+                LoweredStmt::If { then_, else_, .. } => {
+                    walk(then_, w);
+                    walk(else_, w);
+                }
+                LoweredStmt::Case { arms, default, .. } => {
+                    for a in arms {
+                        walk(&a.body, w);
+                    }
+                    walk(default, w);
+                }
+                LoweredStmt::While { body, .. } | LoweredStmt::Repeat { body, .. } => walk(body, w),
+                LoweredStmt::For {
+                    init, step, body, ..
+                } => {
+                    walk(init, w);
+                    walk(step, w);
+                    walk(body, w);
+                }
+            }
+        }
+    }
+    let mut w = vec![false; module.vars.len()];
+    walk(&lowered.stmts[lowered.static_prefix..], &mut w);
+    for e in &module.exprs {
+        if let Expr::CallUser(f, args) = e {
+            let Some(func) = module.functions.get(f.0 as usize) else {
+                continue;
+            };
+            for (a, dir) in args.iter().zip(&func.arg_dirs) {
+                if !matches!(dir, va_ir::ArgDir::Input) {
+                    if let Expr::Var(v) = module.expr(*a) {
+                        if let Some(x) = w.get_mut(v.0 as usize) {
+                            *x = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for pv in &lowered.persistent_vars {
+        if let Some(x) = w.get_mut(pv.var.0 as usize) {
+            *x = true;
+        }
+    }
+    w
+}
+
+/// What the condition folding may read: parameter values, and fixed variables' values.
+struct Known<'a> {
+    params: &'a [f64],
+    vars: &'a [Option<f64>],
+}
+
+fn short_analysis(module: &Module, lowered: &Lowered, known: &Known) -> Collapse {
     let mut facts: HashMap<u32, ShortFacts> = HashMap::new();
-    walk_short_facts(module, params, &lowered.stmts, true, &mut facts);
+    walk_short_facts(module, known, &lowered.stmts, true, &mut facts);
 
     let pair = |b: BranchId| {
         let br = module.branches[b.0 as usize];
@@ -1407,28 +1516,34 @@ pub fn ideal_shorts(module: &Module, lowered: &Lowered, params: &[f64]) -> Vec<I
             _ => None,
         })
         .collect();
-
-    lowered
-        .branch_currents
-        .iter()
-        .filter(|bc| {
-            let (p, n) = pair(bc.branch);
-            let read = read_pairs
+    let read = |bc: &BranchCurrent| {
+        let (p, n) = pair(bc.branch);
+        read_pairs
+            .iter()
+            .any(|&(a, b)| (a, b) == (p, n) || (a, b) == (n, p))
+            || lowered
+                .node_kcl_probes
                 .iter()
-                .any(|&(a, b)| (a, b) == (p, n) || (a, b) == (n, p))
-                || lowered
-                    .node_kcl_probes
-                    .iter()
-                    .any(|probe| probe.terms.iter().any(|&(s, _)| s == bc.local_slot));
-            let f = facts.get(&bc.branch.0).copied().unwrap_or_default();
-            !read && !f.flow && !f.nonzero_potential && (!bc.mixed || f.certain_zero_potential)
-        })
-        .map(|bc| IdealShort {
-            p_slot: bc.p_slot,
-            n_slot: bc.n_slot,
-            local_slot: bc.local_slot,
-        })
-        .collect()
+                .any(|probe| probe.terms.iter().any(|&(s, _)| s == bc.local_slot))
+    };
+
+    let mut out = Collapse::default();
+    for bc in &lowered.branch_currents {
+        let f = facts.get(&bc.branch.0).copied().unwrap_or_default();
+        if read(bc) {
+            continue;
+        }
+        if !f.flow && !f.nonzero_potential && (!bc.mixed || f.certain_zero_potential) {
+            out.shorts.push(IdealShort {
+                p_slot: bc.p_slot,
+                n_slot: bc.n_slot,
+                local_slot: bc.local_slot,
+            });
+        } else if bc.mixed && !f.potential {
+            out.dead_rows.push(bc.local_slot);
+        }
+    }
+    out
 }
 
 /// What [`walk_short_facts`] learned about one branch.
@@ -1440,22 +1555,27 @@ struct ShortFacts {
     nonzero_potential: bool,
     /// A plain-zero potential contribution runs on every path.
     certain_zero_potential: bool,
+    /// Any potential contribution can run.
+    potential: bool,
 }
 
 /// Walk `stmts` for [`ideal_shorts`]. `certain` is whether these statements run on every path
 /// under the given parameters.
 fn walk_short_facts(
     module: &Module,
-    params: &[f64],
+    params: &Known,
     stmts: &[LoweredStmt],
     certain: bool,
     facts: &mut HashMap<u32, ShortFacts>,
 ) {
-    let fold = |e: ExprId| fold_param_expr(module, params, e);
+    let fold = |e: ExprId| fold_known(module, params, e);
     for stmt in stmts {
         match stmt {
             LoweredStmt::Contribute(c) => {
                 let f = facts.entry(c.branch.0).or_default();
+                if c.branch_slot.is_some() {
+                    f.potential = true;
+                }
                 if c.branch_slot.is_none() {
                     f.flow = true;
                 } else if c.charge.is_empty()
@@ -1514,14 +1634,14 @@ fn walk_short_facts(
 /// not fold. First matching arm wins, as in `GeneratedModel::run`.
 fn case_arm_taken(
     module: &Module,
-    params: &[f64],
+    params: &Known,
     selector: ExprId,
     arms: &[LoweredCaseArm],
 ) -> Option<Option<usize>> {
-    let sel = fold_param_expr(module, params, selector)?;
+    let sel = fold_known(module, params, selector)?;
     for (i, arm) in arms.iter().enumerate() {
         for &label in &arm.labels {
-            if fold_param_expr(module, params, label)? == sel {
+            if fold_known(module, params, label)? == sel {
                 return Some(Some(i));
             }
         }
@@ -1533,12 +1653,19 @@ fn case_arm_taken(
 /// comparison and logical operators — with the operator semantics `ad::eval` uses — and `None`
 /// for anything else.
 fn fold_param_expr(module: &Module, params: &[f64], e: ExprId) -> Option<f64> {
+    fold_known(module, &Known { params, vars: &[] }, e)
+}
+
+/// [`fold_param_expr`], also reading the fixed variables in `known.vars`.
+fn fold_known(module: &Module, known: &Known, e: ExprId) -> Option<f64> {
     let b = |v: bool| if v { 1.0 } else { 0.0 };
+    let params = known.params;
     match module.expr(e) {
         Expr::Const(v) => Some(*v),
         Expr::Param(p) => params.get(p.0 as usize).copied(),
+        Expr::Var(v) => known.vars.get(v.0 as usize).copied().flatten(),
         Expr::Unary(op, a) => {
-            let a = fold_param_expr(module, params, *a)?;
+            let a = fold_known(module, known, *a)?;
             match op {
                 UnOp::Neg => Some(-a),
                 UnOp::Not => Some(b(a == 0.0)),
@@ -1546,8 +1673,8 @@ fn fold_param_expr(module: &Module, params: &[f64], e: ExprId) -> Option<f64> {
             }
         }
         Expr::Binary(op, l, r) => {
-            let l = fold_param_expr(module, params, *l)?;
-            let r = fold_param_expr(module, params, *r)?;
+            let l = fold_known(module, known, *l)?;
+            let r = fold_known(module, known, *r)?;
             match op {
                 BinOp::Add => Some(l + r),
                 BinOp::Sub => Some(l - r),
@@ -3745,7 +3872,7 @@ pub fn task_reachable(module: &Module, params: &[f64], stmts: &[LoweredStmt]) ->
                 selector,
                 arms,
                 default,
-            } => match case_arm_taken(module, params, *selector, arms) {
+            } => match case_arm_taken(module, &Known { params, vars: &[] }, *selector, arms) {
                 Some(Some(i)) => walk(module, params, &arms[i].body),
                 Some(None) => walk(module, params, default),
                 None => {

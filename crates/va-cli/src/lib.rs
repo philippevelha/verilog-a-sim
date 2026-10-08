@@ -3737,16 +3737,23 @@ fn build_from_model(
             assigned[i] = Some(va_abi::reference::GROUND);
         }
     }
-    let full: Vec<usize> = assigned
-        .into_iter()
-        .map(|slot| {
-            slot.unwrap_or_else(|| {
-                let g = *next_unknown;
-                *next_unknown += 1;
-                g
+    // `VA_COLLAPSE=on` (2.20.0, opt-in): nodes joined by a proven ideal short share one unknown,
+    // and the rows that then carry nothing are left out (`collapse_nodes`).
+    let (full, dropped) = if collapse_enabled() {
+        collapse_nodes(&compiled, assigned, next_unknown)
+    } else {
+        let full: Vec<usize> = assigned
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    let g = *next_unknown;
+                    *next_unknown += 1;
+                    g
+                })
             })
-        })
-        .collect();
+            .collect();
+        (full, Vec::new())
+    };
 
     // Pair every IR node with the global unknown it was just assigned, so reporting can name
     // that entry of the solution vector (§ quantity reporting). Built here rather than
@@ -3760,7 +3767,13 @@ fn build_from_model(
         .collect();
 
     let inst = compiled
-        .instantiate_named(&full, next_unknown, |p, n| shorts.join(p, n), name)
+        .instantiate_dropping(
+            &full,
+            next_unknown,
+            |p, n| shorts.join(p, n),
+            name,
+            &dropped,
+        )
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
     // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
@@ -3769,6 +3782,82 @@ fn build_from_model(
     // `wrap` returns this very box, so a deck with no `m=` is bit-identical to one run before
     // multiplicity existed.
     Ok((va_abi::Multiplied::wrap(inst, m.multiplicity()), assignment))
+}
+
+/// Whether node collapse is on: `VA_COLLAPSE=on` (2.20.0, a prototype; off by default because
+/// it changes the system's size, so results are equal only to round-off, and it removes
+/// unknowns from the report).
+fn collapse_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VA_COLLAPSE").is_ok_and(|v| v == "on"))
+}
+
+/// **Node collapse** for one compiled-model instance: the global unknown of every IR node, and
+/// the auxiliary rows to leave out of the system.
+///
+/// Every ideal short `compiled` proves under its card ([`va_codegen::CompiledModel::collapse`])
+/// joins its two nodes into one class, which gets one unknown: the deck net or ground already
+/// assigned to a member (a port), or one fresh unknown for a class of internal nodes alone. A
+/// short that would join two *different* assigned nets (two ports, or a port and ground) is not
+/// collapsed: that would change the deck's circuit, not just its bookkeeping, and it keeps its row
+/// as before. The rows left out are the collapsed shorts' own (the current through a short whose
+/// two ends are one node flows nowhere), and the model's dead mixed-branch rows.
+///
+/// Physically the same circuit; numerically a smaller system, so results agree with the
+/// uncollapsed run to round-off, not to the bit. A collapsed internal node is reported under the
+/// unknown it joined, and a removed row is not reported at all.
+fn collapse_nodes(
+    compiled: &va_codegen::CompiledModel,
+    assigned: Vec<Option<usize>>,
+    next_unknown: &mut usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let plan = compiled.collapse();
+    let n = assigned.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut net: Vec<Option<usize>> = assigned.clone();
+    fn root(parent: &mut [usize], mut a: usize) -> usize {
+        while parent[a] != a {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        a
+    }
+    let mut dropped: Vec<usize> = plan.dead_rows.clone();
+    for short in &plan.shorts {
+        if short.p_slot >= n || short.n_slot >= n {
+            continue;
+        }
+        let (a, b) = (
+            root(&mut parent, short.p_slot),
+            root(&mut parent, short.n_slot),
+        );
+        if a == b {
+            dropped.push(short.local_slot);
+            continue;
+        }
+        let merged = match (net[a], net[b]) {
+            (Some(x), Some(y)) if x != y => continue,
+            (x, y) => x.or(y),
+        };
+        parent[a] = b;
+        net[b] = merged;
+        dropped.push(short.local_slot);
+    }
+    let mut fresh: Vec<Option<usize>> = vec![None; n];
+    let full = (0..n)
+        .map(|i| {
+            let r = root(&mut parent, i);
+            match net[r] {
+                Some(g) => g,
+                None => *fresh[r].get_or_insert_with(|| {
+                    let g = *next_unknown;
+                    *next_unknown += 1;
+                    g
+                }),
+            }
+        })
+        .collect();
+    (full, dropped)
 }
 
 /// Build a device instance from the hand-written `va-abi` reference primitives.
@@ -10343,6 +10432,97 @@ endmodule
 
     /// Which branches `va_codegen` proves are ideal shorts. The costly mistake is a false "yes",
     /// which pins a real current to zero, so most cases here are ones that must be refused.
+    #[test]
+    fn the_collapse_plan_folds_setup_variables_and_finds_dead_rows() {
+        // PSP103's `CollapsableR` shape: the arm is chosen by a variable the setup computes from
+        // a parameter, which `ideal_shorts` (literals and parameters only) cannot fold.
+        let plan = |body: &str, r: f64| -> (usize, usize, usize) {
+            let src = format!(
+                "`include \"disciplines.vams\"
+module m(a, b); inout a, b; electrical a, b, c; parameter real r = 0; real rr;
+  analog begin {body} end
+endmodule
+"
+            );
+            let design = compile_model(&src, body);
+            let mut module = design.modules[0].clone();
+            module.params[0].default = r;
+            let compiled = va_codegen::CompiledModel::new(&module).expect("compiles");
+            let c = compiled.collapse();
+            (
+                compiled.ideal_shorts().len(),
+                c.shorts.len(),
+                c.dead_rows.len(),
+            )
+        };
+        let collapsible = "rr = r * 1.0; \
+            if (rr > 0.0) I(a, c) <+ V(a, c) / rr; else V(a, c) <+ 0.0; \
+            I(c, b) <+ V(c, b) / 1k;";
+        assert_eq!(
+            plan(collapsible, 0.0),
+            (0, 1, 0),
+            "r = 0: a short, through `rr`"
+        );
+        assert_eq!(
+            plan(collapsible, 5.0),
+            (0, 0, 1),
+            "r > 0: a resistor, its row dead"
+        );
+        // Reassigned during the load: `rr` is no longer the setup's value to fold.
+        let bias = "rr = r * 1.0; rr = rr + V(a, b); \
+            if (rr > 0.0) I(a, c) <+ V(a, c) / 1k; else V(a, c) <+ 0.0; \
+            I(c, b) <+ V(c, b) / 1k;";
+        assert_eq!(
+            plan(bias, 0.0),
+            (0, 0, 0),
+            "a per-load variable is not folded"
+        );
+    }
+
+    #[test]
+    fn collapse_nodes_joins_shorted_nodes_and_drops_their_rows() {
+        let src = "`include \"disciplines.vams\"
+module m(a, b); inout a, b; electrical a, b, c, d; parameter real r = 0; real rr;
+  analog begin
+    rr = r * 1.0;
+    if (rr > 0.0) I(a, c) <+ V(a, c) / rr; else V(a, c) <+ 0.0;
+    if (rr > 0.0) I(c, d) <+ V(c, d) / rr; else V(c, d) <+ 0.0;
+    I(d, b) <+ V(d, b) / 1k;
+  end
+endmodule
+";
+        let design = compile_model(src, "collapse");
+        let module = design.modules[0].clone();
+        let compiled = va_codegen::CompiledModel::new(&module).expect("compiles");
+        // a = net 0, b = net 1; c and d internal.
+        let mut assigned = vec![None; module.nodes.len()];
+        assigned[0] = Some(0);
+        assigned[1] = Some(1);
+        let mut next = 2;
+        let (full, dropped) = collapse_nodes(&compiled, assigned, &mut next);
+        assert_eq!(
+            &full[..4],
+            &[0, 1, 0, 0],
+            "c and d join a through the two shorts"
+        );
+        assert_eq!(next, 2, "no fresh unknown for a node that joined a net");
+        assert_eq!(dropped.len(), 2, "both shorts' rows left out");
+        // The same with both ends on different nets: never merged.
+        let mut assigned = vec![None; module.nodes.len()];
+        assigned[0] = Some(0);
+        assigned[1] = Some(1);
+        assigned[2] = Some(1);
+        let mut next = 2;
+        let (full, dropped) = collapse_nodes(&compiled, assigned, &mut next);
+        assert_eq!(full[2], 1, "c stays on its own net");
+        assert_eq!(full[3], 1, "d joins c's net through the second short");
+        assert_eq!(
+            dropped.len(),
+            1,
+            "only the short that did not join two nets"
+        );
+    }
+
     #[test]
     fn only_provable_zero_potential_branches_are_ideal_shorts() {
         let count = |body: &str, sh: Option<f64>| -> usize {

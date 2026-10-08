@@ -134,16 +134,31 @@ in their order and with their structural cases. One PSP103 load used to make 93 
 allocations; it now makes 3. That took the interpreted load from 47 to 41 µs and the JIT's from
 25 to 20 µs. Potential contributions and self-probed flow branches still build `Dual`s.
 
-### 4.4 Collapse PSP103's ideal shorts (matrix and memory, not evaluation)
+### 4.4 Collapse PSP103's ideal shorts — **prototyped in 2.20.0** (`VA_COLLAPSE=on`)
 
-Currently an ideal short (`V(a,b) <+ 0` under the card's parameters, `lower::IdealShort`) keeps
-its own node and its own branch-current row. Merging the two nodes and dropping the row, as
-SPICE's node collapse does, would take one SG13G2 PSP103 from 21 unknowns to roughly 12. Not
-allocating a row for a mixed branch that the card proves is always a resistor would take it lower
-still. That roughly halves the crossbar's matrix and the bypass bookkeeping per device. **This
-changes behaviour:** fewer unknowns are reported (`X1.SI`, `X1.b1`), and the factorization rounds
-differently. So it needs its own release and its own deck-diff tolerance argument, not a
-bit-identity claim.
+PSP103 writes each parasitic resistor as `if (R > 0) I(a,b) <+ V(a,b)/R; else V(a,b) <+ 0;`
+(`CollapsableR`). Because the potential arm might run, each of those seven branches gets a
+branch-current unknown and a constraint row. With the SG13G2 card, `rsh = 0` makes the S–SI and
+D–DI branches true shorts: the node and the row each repeat what S or D already says. The other
+five are resistors, so their rows are only ever pinned to zero.
+
+`CompiledModel::collapse` proves both cases from the card. It uses `lower::collapse_plan`, which
+folds the branch conditions through variables that the parameter-only setup fixes. `RSE_i` is
+such a variable; the old prover (`ideal_shorts`) folds only literals and parameters. `va-cli`
+(`collapse_nodes`) then gives SI the unknown of S and DI that of D, and maps the shorts' rows
+and the dead rows to ground, where every stamp is dropped. A short that would join two
+different deck nets is left as it was.
+
+- One SG13G2 PSP103 has 16 unknowns of its own, beyond its 4 terminals; collapsed, it has 7.
+  `fig5_access`: 208 -> 136 unknowns. The 16-neuron crossbar: 35 262 -> 16 830.
+- 16-neuron crossbar, `VA_JIT=on --bypass`, 4 threads: 74.9 / 73.1 s -> 62.4 / 60.9 s
+  (~1.2x), peak memory 983 -> 758 MB.
+- **Not bit-identical, by design.** The matrix is smaller, so LU rounds differently.
+  `fig5_access` keeps the same 12 837 timepoints and agrees to 1e-6 (its print precision). The
+  crossbar keeps the same 1 375 timepoints, 1 344 of them at identical times, where V_m agrees
+  to 1e-10 V.
+- A collapsed node is no longer reported under its own name (`V(X1.SI)` now reads as `V(S)`).
+  A removed row is not reported, so the remaining `X1.b…` are numbered afresh.
 
 ### 4.5 Bypass: tolerance and default
 
