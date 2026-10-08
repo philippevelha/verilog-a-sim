@@ -1,0 +1,8 @@
+// expect: elab
+// message: variable `g` is assigned but never declared
+// fixed: 2.18.1 (before: `g` was declared implicitly and the model ran)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin g = 1e-3; I(p, n) <+ g * V(p, n); end
+endmodule

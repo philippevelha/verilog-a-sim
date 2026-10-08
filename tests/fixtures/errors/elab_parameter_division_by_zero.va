@@ -1,0 +1,9 @@
+// expect: elab
+// message: parameter `K` evaluates to inf
+// fixed: 2.18.1 (before: accepted; the simulation then failed on a non-finite residual)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter integer K = 1/0;
+  analog I(p, n) <+ V(p, n) * K;
+endmodule

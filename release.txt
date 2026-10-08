@@ -22,6 +22,128 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.2 - 2026-10-08
+--------------------
+**The ten diagnostics the error corpus flagged as poor now say what is wrong, where.** The
+corpus's `poor:` list is empty; each fixed file asserts the new wording and location, so none
+of these can quietly regress.
+  * **Tokens are named as written.** `found Some(Hash)` → `` found `#` ``,
+    `expected Semicolon` → `` expected `;` ``, `found None` → `found the end of the file`
+    (`Token::describe`).
+  * **A missing `;` is reported where it belongs**: after the last token of its line
+    (`` expected `;` after identifier `n` ``), not at the next line's first token.
+  * **An unclosed `begin` or module names its opener**:
+    `` expected `end` to close the `begin` opened at f.va:9:10 ``. End-of-file errors use the
+    file's own line numbering, not "preprocessed line N".
+  * **`/*` and string literals left open** are reported by the preprocessor at the line they
+    open on. An unclosed comment used to swallow the rest of the file and show up as a missing
+    `endmodule`. An unclosed string reached the lexer, which gave a byte offset into the
+    preprocessed text and quoted everything after it.
+  * **Lex errors are located as file:line:col** (`lexer::lex_located`, through the
+    preprocessor's line map) and quote the offending character.
+  * **Preprocessor errors carry file:line** (`undefined macro` included); an error inside an
+    `` `include ``d file keeps that file's location.
+  * **`electical p, n;`** reads as a net under an undeclared discipline: the error says so,
+    points at the word, and suggests `electrical` (edit distance <= 2 against the built-in and
+    declared disciplines; no suggestion when nothing is that close).
+  * **`===`/`!==` and `casex`/`casez`** are parse errors saying Annex C excludes them, and what to
+    write instead. `casex` used to be a *refusal* claiming it was "not yet" parsed. Every
+    parser refusal was also tracked under "Analog events", including ones that have nothing
+    to do with events; the tracking is now per refusal.
+  * **A genvar read outside its loop** says so, instead of "unknown identifier".
+
+**A real bug found on the way.** The macro expander copied text one byte at a time with
+`byte as char`, so every non-ASCII character outside a comment was turned into Latin-1 mojibake:
+`$strobe("1 µA")` printed `1 Âµ A`, and a lex error quoting `£` showed `Â`. It now copies whole
+characters. This changes the output of any model that prints non-ASCII text, and that change is
+the fix.
+
+Cost and limits:
+  * A string literal that runs past the end of its line is now a preprocessor error. Verilog
+    strings cannot span lines, and `\`-continued macro lines still work, but a third-party
+    model that relied on a tool accepting it would now stop. Nothing in the repository does:
+    `check models` 66/66, `check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+    **The local 280-file corpus was again not run here.**
+  * Elaboration errors still carry no line number; that needs source spans in the AST and is
+    the largest remaining gap in where a diagnostic points.
+  * The corpus still records 2 gaps (a port without a direction; `Temp` on an `electrical`
+    net), unchanged.
+
+Measured: `cargo test --workspace` 957 passed, 0 failed (955 + two preprocessor unit tests; the
+corpus gained `lex_unexpected_character.va`, 36 files, inside its one test); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
+2.18.1 - 2026-10-08
+--------------------
+**An error corpus, and four kinds of invalid Verilog-A that used to compile are now rejected.**
+`tests/fixtures/errors/` holds 35 models, each with one deliberate mistake and a header saying
+what `va-cli check --codegen` must report: the stage, the words, the line:col where it is
+right, and the exit code. `crates/va-cli/tests/error_corpus.rs` runs the real binary on each, so
+what is tested is what a user reads. The format is in that directory's README.
+
+Rejected from this version, each with a message naming what the user wrote:
+  * **Wrong argument count** to a built-in (`exp(x, 2.0)`, `pow(x)`, `max(a, b, c)`, `idt` with
+    five arguments) or to a user `analog function`. Before, `exp(V(p,n), 2.0)` dropped the
+    second argument and simulated as `exp(V(p,n))`. One table serves both the analog-block and
+    the parameter-default path, so the two cannot disagree.
+  * **Undeclared variables**, in the analog block and in analog functions. Before, any
+    assignment target was declared on the spot, so a misspelt `gm_eff = ...` for a declared
+    `gmeff` compiled as a second variable and `gmeff` kept its old value. To make this
+    possible the parser now keeps an analog function's `real`/`integer` local names (they were
+    discarded). Assigning to a parameter gets its own message, not "unknown variable".
+  * **Duplicate declarations** at module scope: a parameter declared twice (the second
+    default silently won), a variable declared twice, and a variable sharing a parameter's
+    name (it replaced the parameter in every read).
+  * **A parameter whose default is not finite** (`1/0`), which surfaced only as a
+    non-finite residual at the first Newton iteration.
+
+`va-cli check` now **exits 1 when any model fails**, after printing the full report. It used to
+exit 0 whatever it found, so it could not gate a script or a CI job.
+
+Cost and limits, plainly:
+  * Three frontend unit tests had undeclared variables in their inline Verilog-A and now
+    declare them; nothing else in the repository relied on the leniency. The committed models
+    are unchanged: `check models --codegen` 66/66, `check benchmark/models --codegen` 25/25,
+    `check external --codegen` 8/9 (same failure as before). **The local third-party corpus
+    (last recorded at 256/280) was not run in this session**, because it lives outside the
+    repository. It is the place where a real model relying on an implicit variable or a
+    duplicate parameter would show up. Any drop there is a correction (those models were
+    invalid, and some were running with a wrong value), but it has to be measured, not assumed.
+  * Anything that scripted `va-cli check` and expected exit 0 on a corpus with failures now
+    sees exit 1. Nothing in this repository does.
+  * The corpus records **2 gaps** (still accepted though invalid: a port without a direction,
+    and `Temp(...)` on an `electrical` net, which then fails in `sim` as "singular matrix") and
+    **10 messages worth improving** (internal token names such as `Some(Hash)` shown to the
+    user, a missing `;` blamed on the next line, lexer errors located by a byte offset into the
+    preprocessed text, `casex` refused as "not yet" parsed when Annex C excludes it for good).
+    Elaboration errors still carry no line number. None of this is fixed here.
+
+Measured: `cargo test --workspace` 955 passed, 0 failed (954 + the corpus test);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
+2.18.0+4 - 2026-10-08
+--------------------
+**`bench_xbar_jit_linux.sh` on a Ryzen 9 9950X (32 logical CPUs), at 4x the default deck.**
+NEURONS=32 CYCLES=5: 4 096 PSP103, 70 366 unknowns, 5 141 timepoints. Plain 619.0 s, `VA_JIT=on`
+615.4 s (1.006x), `--bypass` 257.7 s (2.40x), both 255.8 s; one thread: bypass 355.7 s, both
+323.4 s (1.10x). Bypass replays 95.3 % of loads. Every check OK: the JIT is bit-identical with and
+without bypass, and bypass gives the same bits on 1 and 32 threads.
+
+What it says, against 2.18.0+2's Xeon run of the 8-neuron deck (JIT 1.49x): at 70 k unknowns the
+JIT is worth nothing on many threads. Bypass alone is worth 2.4x, and going from 1 to 32 threads
+under bypass gains only 1.38x. Both point at the time going to the sparse solve and per-step
+overhead, not to device evaluation, which is the only thing the JIT speeds up. That is an
+inference from these figures; this run has no profile to confirm it.
+
+Two things to watch. Bypass moved V_m by up to **1.8e-5 V**, against 1.0e-14 V on the small deck.
+It is within the tolerances bypass is built on, but it is nine orders of magnitude larger, and a
+deck this size is where it shows. And the report says `checkout: n/a`: the run was not made from
+a git checkout, so the exact source revision rests on the binary's SHA-256 (d8afd439...) alone.
+No simulator change; the figures are added to the script's header.
+
+
 2.18.0+3 - 2026-10-08
 --------------------
 **The deck-diff 2.18.0 owed.** `xtask deck-diff` of this build with `VA_JIT=on` against the

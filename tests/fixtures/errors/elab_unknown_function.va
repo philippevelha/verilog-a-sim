@@ -1,0 +1,7 @@
+// expect: elab
+// message: unknown function `foo`
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ foo(V(p, n));
+endmodule

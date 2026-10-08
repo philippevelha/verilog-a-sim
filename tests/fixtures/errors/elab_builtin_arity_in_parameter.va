@@ -1,0 +1,9 @@
+// expect: elab
+// message: `max` takes exactly 2 arguments, but this call passes 3
+// fixed: 2.18.1 (before: the third argument was ignored in the constant fold)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real R = max(1k, 2k, 3k);
+  analog I(p, n) <+ V(p, n) / R;
+endmodule

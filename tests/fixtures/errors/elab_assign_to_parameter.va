@@ -1,0 +1,9 @@
+// expect: elab
+// message: `R` is a parameter, and a parameter cannot be assigned
+// fixed: 2.18.1 (before: "assignment to unknown variable `R`", for a name that is declared)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real R = 1k;
+  analog begin R = 2.0; I(p, n) <+ V(p, n) / R; end
+endmodule

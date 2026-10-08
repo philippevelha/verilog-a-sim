@@ -1,0 +1,6 @@
+// expect: elab
+// message: port `p` has no discipline declaration
+module r(p, n);
+  inout p, n;
+  analog I(p, n) <+ V(p, n) / 1k;
+endmodule

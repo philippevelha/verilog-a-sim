@@ -1,0 +1,12 @@
+// expect: elab
+// message: instance `x1` of `r` connects 3 port(s), but the module declares 2
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) / 1k;
+endmodule
+module top(a, b);
+  inout a, b;
+  electrical a, b;
+  r x1(a, b, a);
+endmodule

@@ -1,0 +1,10 @@
+// expect: parse
+// at: 8:3
+// message: no discipline `electical` is declared
+// message: did you mean `electrical`?
+// fixed: 2.18.2 (before: read as a module instance: `expected LParen, found Some(Comma)` at the comma)
+module r(p, n);
+  inout p, n;
+  electical p, n;
+  analog I(p, n) <+ V(p, n) / 1k;
+endmodule

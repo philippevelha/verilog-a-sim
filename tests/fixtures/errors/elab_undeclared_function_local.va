@@ -1,0 +1,16 @@
+// expect: elab
+// message: analog function `f` assigns `t`
+// fixed: 2.18.1
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog function real f;
+    input x;
+    real x;
+    begin
+      t = 2.0 * x;
+      f = t;
+    end
+  endfunction
+  analog I(p, n) <+ f(V(p, n));
+endmodule

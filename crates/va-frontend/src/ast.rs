@@ -338,6 +338,10 @@ pub struct AnalogFunction {
     pub ret_ty: ParamType,
     /// Formal arguments, in declaration order.
     pub args: Vec<FuncArg>,
+    /// Names given a `real`/`integer` declaration inside the function, in source order —
+    /// argument type declarations (`input x; real x;`) and local variables alike. The types are
+    /// not kept; the names are what lets elaboration tell a declared local from a typo.
+    pub declared: Vec<String>,
     /// Body statements.
     pub body: Vec<Stmt>,
 }

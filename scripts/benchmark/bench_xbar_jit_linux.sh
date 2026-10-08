@@ -28,6 +28,12 @@
 # jit 72.8 s, bp 30.3 s, jit_bp 29.8 s; on one thread bp 46.2 s, jit_bp 38.6 s. Bypass replayed
 # 93.4 % of loads; every check OK; bypass moved V_m by at most 1.0e-14 V. Peak memory ~0.6 GB.
 #
+# Reference (2.18.0+4, Ryzen 9 9950X, 32 logical CPUs, NEURONS=32 CYCLES=5: 4 096 PSP103, 70 366
+# unknowns, 5 141 timepoints): plain 619.0 s, jit 615.4 s, bp 257.7 s, jit_bp 255.8 s; on one
+# thread bp 355.7 s, jit_bp 323.4 s. Bypass replayed 95.3 % of loads; every check OK; bypass moved
+# V_m by at most 1.8e-5 V. Peak memory ~3.9 GB. At this size the JIT buys under 1 % (10 % on one
+# thread): device evaluation is no longer what the run waits on.
+#
 # What it needs: a checkout at or after 2.18.0 and a va-cli built from it:
 #     cargo build --release -p va-cli
 #     bash scripts/benchmark/bench_xbar_jit_linux.sh target/release/va-cli

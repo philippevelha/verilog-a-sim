@@ -1,0 +1,11 @@
+// expect: parse
+// at: 11:1
+// message: expected `end` to close the `begin` opened at
+// message: parse_unbalanced_begin.va:9:10
+// fixed: 2.18.2 (before: `expected a statement, found Some(EndModule)`, with no mention of the `begin`)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin
+    I(p, n) <+ V(p, n) / 1k;
+endmodule

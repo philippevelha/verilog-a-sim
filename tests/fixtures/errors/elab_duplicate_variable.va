@@ -1,0 +1,10 @@
+// expect: elab
+// message: variable `g` is declared more than once
+// fixed: 2.18.1
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  real g;
+  analog begin g = 1e-3; I(p, n) <+ g * V(p, n); end
+endmodule

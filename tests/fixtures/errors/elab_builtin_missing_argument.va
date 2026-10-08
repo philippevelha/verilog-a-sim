@@ -1,0 +1,8 @@
+// expect: elab
+// message: `pow` takes exactly 2 arguments, but this call passes 1
+// fixed: 2.18.1
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ pow(V(p, n));
+endmodule
