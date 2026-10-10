@@ -1,0 +1,58 @@
+// One 2T2R synapse with its access transistors as the fitted switch of mos_switch.va (rung A of
+// circuits/snn/transistor/README.md, "A switch fitted to the transistor"): synapse_2t2r.va with
+// the logistic gate replaced by the SG13G2 access NMOS's fitted conductance, folded into one device
+// with no internal node.
+//
+// Each path is its RRAM cell in series with an access switch whose source is the source line `sl`
+// and whose gate is the word line `wl`:
+//     g_sw = 1/roff + beta * ns * ln(1 + exp((V(wl, sl) - vt) / ns))
+//     I(vp, sl) = V(vp, sl) / (R_p + 1/g_sw),   I(vn, sl) = V(vn, sl) / (R_n + 1/g_sw)
+// This is exact for mos_switch.va's conductance in series with a resistor, because that conductance
+// is linear in V_DS and its gate drive is taken from `sl`, a terminal this device has. So the folded
+// form is the two-part one (rram + mos_switch) without its cell node. `levp`/`levn` select the
+// paper's RRAM levels as in synapse_2t2r.va (0 = 8 kOhm, 1 = 10.5 kOhm, 2 = 15 kOhm, 3 = 210 kOhm).
+// The defaults of `beta`, `vt` and `ns` are mos_switch.va's, fitted to the SG13G2 HV NMOS,
+// W/L = 10/0.45 um, through PSP103 (fit_switch.py, switch_fit.json).
+//
+// Limitations: those of rram.va and of mos_switch.va. The fit holds for one geometry, the typical
+// corner and one source-line voltage. The switch is linear in V_DS and has no charge, so it has no
+// gate charge to kick the cell node or the source line on a word-line edge; folding removes the
+// cell node that charge would land on. No noise.
+`include "../disciplines.vams"
+
+module synapse_2t2r_mos(vp, vn, sl, wl);
+    inout vp, vn, sl;
+    input wl;
+    electrical vp, vn, sl, wl;
+    parameter integer levp = 3 from [0:3];
+    parameter integer levn = 3 from [0:3];
+    parameter real beta = 3.795333e-3 from (0:inf);
+    parameter real vt = 0.951051;
+    parameter real ns = 0.0318 from (0:inf);
+    parameter real roff = 1e12 from (0:inf);
+    real rp, rn, x, g, gp, gn;
+    analog begin
+        case (levp)
+            0: rp = 8e3;
+            1: rp = 10.5e3;
+            2: rp = 15e3;
+            default: rp = 210e3;
+        endcase
+        case (levn)
+            0: rn = 8e3;
+            1: rn = 10.5e3;
+            2: rn = 15e3;
+            default: rn = 210e3;
+        endcase
+        // the access switch, as mos_switch.va; softplus written so exp never overflows
+        x = (V(wl, sl) - vt) / ns;
+        if (x > 0)
+            g = 1.0 / roff + beta * ns * (x + ln(1.0 + exp(-x)));
+        else
+            g = 1.0 / roff + beta * ns * ln(1.0 + exp(x));
+        gp = 1.0 / (rp + 1.0 / g);
+        gn = 1.0 / (rn + 1.0 / g);
+        I(vp, sl) <+ gp * V(vp, sl);
+        I(vn, sl) <+ gn * V(vn, sl);
+    end
+endmodule
