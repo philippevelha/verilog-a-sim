@@ -226,7 +226,7 @@ adds a parameter only once the one before it is shown to be short.
 |---|---|---|---|
 | A | g = beta * ns * ln(1 + exp((V_GS - vt) / ns)), I = g * V_DS | beta, vt (+ ns from the subthreshold slope) | **done**: `models/snn/mos_switch.va` |
 | B | + the triode V_DS term | +0-1 | not needed yet (below) |
-| C | + the gate's charge (overlap and channel) | +1 | what the remaining error is (below) |
+| C | + the gate's charge (overlap and channel), on each channel terminal | +2: cov, cch | **done** (2.23.0): `mos_switch.va`'s `cov`, `cch` |
 
 **Step 1: what the switch sees.** Measured over `fig5_access.net` (the PSP103 deck, all 8
 access transistors, every timepoint):
@@ -310,3 +310,52 @@ where the flip-flop latches V_m (`cmp_vm.py`), against the PSP103 crossbar:
   PWL rails.
 - 20 of the network's 29 cycles, 16 of hidden layer 2's 64 neurons, one image. Hidden layers 3 and
   the output are not in the slice.
+
+## Rung C: the gate's charge (2026-10-10, 2.23.0)
+
+Rungs A's remaining error was one-signed and came from the word-line edges, so rung C adds
+the gate's charge to `mos_switch.va`. Each channel terminal carries
+`q(V) = cov * V + cch * ns * ln(1 + exp((V - vt) / ns))` from the gate, with V = V_G - V_terminal:
+an overlap and fringe capacitance plus half the channel's charge. It switches on with rung A's own
+`vt` and `ns`, so the rung adds two parameters.
+
+**The fit** (`fit_switch.py`, `switch_fit.json`). The gate is ramped 0 -> 3.3 V in 1 us with
+drain and source both held at 1.65 V. At V_DS = 0 no DC current flows, so each terminal current
+is exactly dQ/dt. Drain and source carry identical currents (PSP103 splits the channel half and
+half there). Per terminal, the capacitance is 3.5-4.0 fF with the channel off and 11.7-12.2 fF
+with it on, turning on near V_GS = 0.9 V. Least squares on the integrated charge gives
+`cov = 3.742 fF`, `cch = 8.472 fF`. Over the full swing PSP103 moves 18.23 fC through each
+terminal, and the fit is within 0.29 fC of it everywhere (~0.4 mV of V_m). Freeing the
+turn-on's own threshold and width would bring that to 0.11 fC, for two more parameters.
+
+**Fig. 5** (`gen_fig5_access.py --switch fitc`, `fig5_fitc.net`):
+
+| Access switch | Worst \|V_m - PSP103\| | Sign | Spikes | Wall |
+|---|---|---|---|---|
+| rung A | 2.4 mV | always high | 6, 10, 14 | 3.2 s |
+| **rung C** | **0.21 mV** | both | 6, 10, 14 | 4.9 s |
+
+The edge pulse in the source line now matches PSP103's: -68 / +145 uA against -74 / +149 uA
+(rung A: none). The cell-node kick overshoots: an HRS cell node falls to -0.23 V, where PSP103
+stops at +0.40 V. That is because rung C gives the cell node no junction capacitance. It settles
+before the window, so V_m does not see it.
+
+**The MNIST crossbar** (`gen_xbar_deck.py --synapses fitc`; 16 hidden-2 neurons, 20 cycles,
+digit 0, against the same PSP103 run as rung A). With charge on the drain side the cell node
+cannot be folded away, so each path is written as `rram` + `mos_switch` (2 unknowns a synapse):
+
+| Access device | Unknowns | Mean / RMS / worst V_m - PSP103 | Above / below PSP103 | Spikes | Wall |
+|---|---|---|---|---|---|
+| PSP103 | 35 262 | — | — | 17 | 2 693 s |
+| rung A (folded) | ~300 | +8.0 / 9.2 / 14.7 mV | 283 / 4 of 320 | all 17 | 52 s |
+| **rung C** | 2 494 | **+1.6 / 1.9 / 4.6 mV** | 277 / 10 | **all 17** | 168 s |
+
+The thin margin rung A left is back to PSP103's. h2_5 at step 16 is 16.1 mV below V_th in PSP103,
+14.7 mV with rung C, and 4.7 mV with rung A. h2_8 at step 8 is +2.2 mV in PSP103, +2.5 mV with
+rung C, and +8.3 mV with rung A.
+
+**Still open.** A +1.6 mV mean bias remains on the crossbar, still mostly above PSP103. Candidates,
+not yet separated: the missing junction capacitance (the overshooting kick changes how the drain
+charge drains away), the triode V_DS term (rung B, estimated at ~0.2 mV a cycle), and the
+half-and-half charge partition away from V_DS = 0. The coverage is the same as rung A's: one image,
+16 of 64 hidden-2 neurons, 20 of 29 cycles.

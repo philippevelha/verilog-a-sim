@@ -8318,6 +8318,89 @@ endmodule
         }
     }
 
+    /// Rung C of `models/snn/mos_switch.va`: with switch_fit.json's `cov` and `cch`, the charge
+    /// on the source-line terminal moves PSP103's 18.23 fC over the full gate swing (fitted to
+    /// within 0.29 fC everywhere), the drain side carries the same charge at V_DS = 0, and the
+    /// charge Jacobian matches a central difference in all three terminals. With `cov = cch =
+    /// 0`, the defaults, the switch has no charge (rung A).
+    #[test]
+    fn the_fitted_switchs_gate_charge_moves_psp103s_charge_and_differentiates_correctly() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models/snn");
+        let src = std::fs::read_to_string(format!("{dir}/mos_switch.va")).expect("reads");
+        let compile = || {
+            va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+                .expect("compiles")
+        };
+        let rung_a = compile();
+        let mut rung_c = compile();
+        for p in rung_c.modules[0].params.iter_mut() {
+            match p.name.as_str() {
+                "cov" => p.default = 3.74244e-15,
+                "cch" => p.default = 8.472407e-15,
+                _ => {}
+            }
+        }
+        let ctx = va_abi::AnalysisCtx::transient(1e-9)
+            .with_ddt(1e9, 0.0)
+            .with_initial_step(false);
+        let charge = |design: &va_frontend::CompiledDesign, x: &[f64]| {
+            let inst =
+                va_codegen::build_instance(&design.modules[0], &[0, 1, 2], &mut 3).expect("builds");
+            let committed = vec![0.0; inst.state_len()];
+            let mut next = vec![0.0; committed.len()];
+            let mut st = va_abi::ModelState::new(&committed, &mut next);
+            let mut s = va_abi::stamps::DenseStamp::new(3);
+            inst.load(x, &ctx, &mut st, &mut s);
+            s
+        };
+
+        // [V(p), V(n), V(c)]: both channel terminals on the 1.65 V source line
+        let lo = charge(&rung_c, &[1.65, 1.65, 0.0]);
+        let hi = charge(&rung_c, &[1.65, 1.65, 3.3]);
+        let swing_n = (hi.charge[1] - lo.charge[1]).abs();
+        let swing_p = (hi.charge[0] - lo.charge[0]).abs();
+        assert!(
+            (swing_n - 18.234e-15).abs() < 0.3e-15,
+            "source-side swing {swing_n:e} C"
+        );
+        assert!(
+            (swing_p - swing_n).abs() < 1e-20,
+            "drain {swing_p:e} vs source {swing_n:e}"
+        );
+        let none = charge(&rung_a, &[1.65, 1.65, 3.3]);
+        assert!(
+            none.charge.iter().all(|&q| q == 0.0),
+            "rung A carries charge {:?}",
+            none.charge
+        );
+
+        for x in [
+            [1.655, 1.65, 3.3],
+            [1.65, 1.65, 2.6],
+            [0.4, 1.65, 0.0],
+            [1.6, 1.65, 2.55],
+        ] {
+            let s = charge(&rung_c, &x);
+            for col in 0..3 {
+                let h = 1e-6;
+                let (mut xp, mut xm) = (x, x);
+                xp[col] += h;
+                xm[col] -= h;
+                let (qp, qm) = (charge(&rung_c, &xp), charge(&rung_c, &xm));
+                for row in 0..3 {
+                    let fd = (qp.charge[row] - qm.charge[row]) / (2.0 * h);
+                    let an = s.dcharge[row * 3 + col];
+                    let scale = an.abs().max(fd.abs()).max(1e-18);
+                    assert!(
+                        (fd - an).abs() / scale < 1e-5,
+                        "x = {x:?}, d q{row} / d x{col}: analytic {an:e}, difference {fd:e}"
+                    );
+                }
+            }
+        }
+    }
+
     /// `models/snn/synapse_2t2r_mos.va`, the 2T2R synapse with mos_switch.va's fitted access
     /// switch folded in: with the word line high, each path carries exactly V / (R_cell + R_on)
     /// with PSP103's R_on; with it low, the synapse is near-open; and the Jacobian matches a

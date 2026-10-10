@@ -198,5 +198,7 @@ The simulator work above makes steps 1 and 3 faster. It does not make step 2 unn
 is the gate's charge at the word-line edges. On 16 hidden-2 neurons of the MNIST crossbar over 20
 cycles (2.22.0+1), it keeps all 17 of PSP103's spikes at the same steps, with V_m within 14.7 mV,
 in 52 s instead of 2 693 s. The 10 Ohm switch moves three neurons' spikes.
-`circuits/snn/transistor/README.md`, "A switch fitted to the transistor", has the measurements
-and the margins.
+Rung C (2.23.0) adds the gate's charge, with two more parameters. It brings Fig. 5 to 0.21 mV and
+the crossbar to 4.6 mV worst (mean +1.6 mV, from rung A's +8.0), with all 17 spikes, in 168 s.
+`circuits/snn/transistor/README.md`, "A switch fitted to the transistor" and "Rung C", has the
+measurements and the margins.

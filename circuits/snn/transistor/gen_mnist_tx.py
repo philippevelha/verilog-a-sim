@@ -44,10 +44,11 @@ def main():
     ap.add_argument("--neurons", choices=["tx", "behavioural"], default="tx",
                     help="the neurons as transistors (default) or the behavioural blocks; the "
                          "synapses' access devices are transistors either way")
-    ap.add_argument("--synapses", choices=["tx", "fit", "ideal"], default="tx",
+    ap.add_argument("--synapses", choices=["tx", "fit", "fitc", "ideal"], default="tx",
                     help="the synapses' access devices: transistors (default); synapse_2t2r_mos.va "
-                         "with switch_fit.json's parameters (rung A); or the behavioural deck's "
-                         "own synapse_2t2r.va (the 10 Ohm switch)")
+                         "with switch_fit.json's parameters (rung A); rram + mos_switch.va with the "
+                         "gate's charge (rung C, which keeps each cell node); or the behavioural "
+                         "deck's own synapse_2t2r.va (the 10 Ohm switch)")
     ap.add_argument("--layers", default="h2,h3,o",
                     help="which layers to keep (h2, h3, o); a synapse is kept only if its "
                          "source spike train exists")
@@ -74,9 +75,22 @@ def main():
     if a.synapses == "tx" or a.neurons == "tx":
         out.append(".include tech.inc")
     fit = ""
-    if a.synapses == "fit":
+    if a.synapses in ("fit", "fitc"):
         sw = json.load(open(os.path.join(HERE, "switch_fit.json")))
         fit = f" beta={sw['beta']!r} vt={sw['vt']!r} ns={sw['ns']!r}"
+    if a.synapses == "fitc":
+        # rung C: each path is its cell and a charged switch, so the cell node stays, and the
+        # gate's charge on the drain side lands on it as in the transistor deck
+        for p in range(4):
+            for n in range(4):
+                out += [
+                    f".subckt sync_p{p}_n{n} vp vn sl wl",
+                    f"XGp vp cp rram level={p}",
+                    f"XAp cp sl wl mos_switch{fit} cov={sw['cov']!r} cch={sw['cch']!r}",
+                    f"XGn vn cn rram level={n}",
+                    f"XAn cn sl wl mos_switch{fit} cov={sw['cov']!r} cch={sw['cch']!r}",
+                    ".ends",
+                ]
     # 16 synapse cells, one per (levp, levn).
     for p in range(4 if a.synapses == "tx" else 0):
         for n in range(4):
@@ -130,6 +144,8 @@ def main():
                 continue
             if a.synapses == "tx":
                 out.append(f"{inst} {vp} {vn} {sl} {wl} syn_p{p}_n{n}")
+            elif a.synapses == "fitc":
+                out.append(f"{inst} {vp} {vn} {sl} {wl} sync_p{p}_n{n}")
             elif a.synapses == "fit":
                 out.append(f"{inst} {vp} {vn} {sl} {wl} synapse_2t2r_mos levp={p} levn={n}{fit}")
             else:

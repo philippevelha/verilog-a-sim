@@ -22,6 +22,41 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.23.0 - 2026-10-10
+--------------------
+**Rung C: the fitted access switch gets the gate's charge (two more parameters). Fig. 5's V_m
+error falls from 2.4 to 0.21 mV, and the 16-neuron MNIST crossbar's from 14.7 to 4.6 mV worst,
+with every PSP103 spike kept.** Rung A's error was one-signed and came from the word-line edges,
+so the charge was the next rung, not the V_DS term.
+  * models/snn/mos_switch.va: each channel terminal carries q(V) = cov*V + cch*ns*softplus((V -
+    vt)/ns), with V = V_G - V_terminal: overlap plus half the channel, switching on with rung A's
+    own vt and ns. `cov` and `cch` default to 0, which is rung A, byte-identical
+    (fig5_fit.net's output is unchanged).
+  * fit_switch.py: a quasi-static gate ramp at V_DS = 0, where each terminal current is exactly
+    dQ/dt. cov = 3.742 fF, cch = 8.472 fF per terminal. PSP103 moves 18.23 fC through each
+    terminal over the full swing, and the fit is within 0.29 fC everywhere. Added to
+    switch_fit.json; the rung A values there are unchanged.
+  * gen_fig5_access.py --switch fitc writes fig5_fitc.net. gen_mnist_tx.py / gen_xbar_deck.py
+    --synapses fitc write each path as rram + charged mos_switch, keeping the cell node, because
+    the drain-side charge needs somewhere to land.
+  * Fig. 5: worst |V_m - PSP103| 0.21 mV, both signs (rung A: 2.4 mV, always high). The edge pulse
+    in the source line is -68 / +145 uA against PSP103's -74 / +149 uA. Spikes 6, 10, 14.
+  * Crossbar, 16 hidden-2 neurons, 20 cycles, digit 0, same PSP103 reference: mean / RMS / worst
+    +1.6 / 1.9 / 4.6 mV (rung A +8.0 / 9.2 / 14.7). All 17 spikes at the same steps. 2 494
+    unknowns (PSP103 35 262), 168 s (PSP103 2 693 s; rung A folded 52 s). The 4.7 mV margin rung
+    A left at h2_5 step 16 is back to 14.7 mV (PSP103 16.1).
+  * **The cost, stated plainly:** about 3x rung A's run time, because the cell nodes return. The
+    cell-node kick overshoots (an HRS node falls to -0.23 V, PSP103's to +0.40 V), because there
+    is no junction capacitance; it settles before the window. A +1.6 mV mean bias remains on the
+    crossbar, still mostly high, with its cause not yet separated (junction capacitance, the V_DS
+    term, the charge partition). The coverage is still one image, 16 of 64 neurons, 20 of 29
+    cycles.
+  * Test: the_fitted_switchs_gate_charge_moves_psp103s_charge_and_differentiates_correctly
+    (the 18.23 fC swing, drain and source alike, no charge in rung A, charge Jacobian against
+    central differences in all three terminals).
+Measured: `cargo test --workspace` 963 passed; `cargo xtask validate` 28/28; fmt and clippy clean.
+Default decks and models unchanged (mos_switch.va without cov/cch is rung A, byte-identical).
+
 2.22.0+1 - 2026-10-10
 ----------------------
 **Rung A on the MNIST crossbar with spikes: 16 hidden-2 neurons, 20 cycles, digit 0. All 17 of
