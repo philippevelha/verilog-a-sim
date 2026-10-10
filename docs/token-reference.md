@@ -843,17 +843,17 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
     production" in §1.6 below. A continuous net's type comes from its discipline. `signed` is
     likewise not accepted — it has no meaning for a continuous net. Zero corpus files use
     either slot.
-  - **A port without a direction is a warning (2.18.5).** A port in the module header with
+  - **A port without a direction is a warning (2.23.3).** A port in the module header with
     no `input`/`output`/`inout` declaration is reported as a warning naming the port, located
     at its name in the header (`va-cli`: `[warn ]` in `check`, `[va-cli] warning:` in `sim`),
-    and is elaborated as `inout`. Before 2.18.4 it was accepted silently; 2.18.4 made it an
-    error, and 2.18.5 a warning because the rule below is unsettled. The basis is IEEE 1364's rule that
+    and is elaborated as `inout`. Before 2.23.2 it was accepted silently; 2.23.2 made it an
+    error, and 2.23.3 a warning because the rule below is unsettled. The basis is IEEE 1364's rule that
     each port in the port list is also declared input, output, or inout in the module body
     (§12.3.3 — cited from memory, not checked against the text), which Verilog-A's module
     rules inherit, and Keysight ADS's Verilog-A reference, which says a port's direction must
     be declared. **To be checked against the local LRM copy:** this entry used to quote the LRM as
     saying "`inout` is the default for analog bidirectional ports", which would make the
-    omission legal. That sentence could not be located when 2.18.4 was written (the LRM is not
+    omission legal. That sentence could not be located when 2.23.2 was written (the LRM is not
     in the repository), so it is no longer stated here as a quotation. If the LRM requires the
     direction, the warning can become an error again; if it makes `inout` the default, the
     warning can be dropped. Either change is in `elaborate::port_direction_warnings`.
@@ -2379,12 +2379,12 @@ as an ordinary loop.
 - **Purpose and Static Nature**: Simulation-time — a probe (`Expr::Probe`, read) or contribution
   target (`Stmt::Contribute`, write) against a specific branch, re-evaluated every solve
   iteration.
-- **Checked against the nets' discipline (2.18.4).** The access function must be one the
+- **Checked against the nets' discipline (2.23.2).** The access function must be one the
   discipline of every net it is applied to defines: the `access` of its potential/flow natures
   when the discipline comes from a parsed `discipline` block, else `V`/`I` for `electrical` and
   `Temp`/`Pwr` for `thermal`. A named branch is checked through its declared terminals.
   `Temp(p, n)` on electrical nets is an error naming the discipline, the net and the access to
-  use instead; before 2.18.4 it compiled as a voltage contribution and failed in `sim` as a
+  use instead; before 2.23.2 it compiled as a voltage contribution and failed in `sim` as a
   singular matrix. A net whose discipline or natures name no access function is not checked.
 - **Declaration and Assignment**: N/A (these are uses, not declarations) — but note none of
   `V`/`I`/`Temp`/`Pwr` are reserved words in this project (LRM §5.5: nature access-function

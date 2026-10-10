@@ -42,7 +42,10 @@
 #   NEURONS=8      hidden-2 neurons kept (the crossbar has 64 x NEURONS synapses, 2 PSP103 each)
 #   CYCLES=3       250 ns cycles simulated (the first carries no spikes yet; 3 shows two)
 #   DIGIT=0        which held-out image's spike trains drive the crossbar
-#   RUNS="..."     default: "plain jit bp jit_bp bp_t1 jit_bp_t1"; add plain_t1 / jit_t1 if wanted
+#   RUNS="..."     default: "plain jit bp jit_bp bp_t1 jit_bp_t1 jit_bp_col"; add plain_t1 / jit_t1
+#                  if wanted. A `_col` suffix turns on node collapse (VA_COLLAPSE=on, 2.20.0+): PSP103's
+#                  proven ideal shorts and dead branch rows leave the system (21 -> 12 unknowns per
+#                  transistor). Not bit-identical by design: the script reports how far it moves V_m.
 #   EXTRA_ENV="VAR=value ..." passed to every va-cli run
 # Send back bench_xbar_jit.txt.
 # =============================================================================================
@@ -52,7 +55,7 @@ OUT=bench_xbar_jit.txt
 NEURONS=${NEURONS:-8}
 CYCLES=${CYCLES:-3}
 DIGIT=${DIGIT:-0}
-RUNS=${RUNS:-plain jit bp jit_bp bp_t1 jit_bp_t1}
+RUNS=${RUNS:-plain jit bp jit_bp bp_t1 jit_bp_t1 jit_bp_col}
 [ -x "$VA" ] || { echo "not an executable: $VA"; exit 1; }
 [ -f scripts/benchmark/gen_xbar_deck.py ] || {
   echo "Run this from the root of a verilog-a-sim checkout at or after 2.18.0."; exit 1; }
@@ -91,8 +94,9 @@ for r in $RUNS; do
   env_=(); args=()
   case $r in *jit*) env_+=(VA_JIT=on) ;; *) env_+=(VA_JIT=off) ;; esac
   case $r in *bp*) args+=(--bypass) ;; esac
-  case $r in *_t1) args+=(--threads 1) ;; esac
-  case $r in plain|jit|bp|jit_bp|plain_t1|jit_t1|bp_t1|jit_bp_t1) ;;
+  case $r in *_t1*) args+=(--threads 1) ;; esac
+  case $r in *_col*) env_+=(VA_COLLAPSE=on) ;; *) env_+=(VA_COLLAPSE=off) ;; esac
+  case ${r%_col} in plain|jit|bp|jit_bp|plain_t1|jit_t1|bp_t1|jit_bp_t1) ;;
     *) echo "unknown run $r" | tee -a "$OUT"; continue ;; esac
   f=$W/$r.out
   echo "--- $r: ${env_[*]} ${args[*]}" | tee -a "$OUT"
@@ -144,6 +148,13 @@ def read(name):
             t = line.split()[0][2:-1]
             rows[t] = [float(x.split("=")[1]) for x in re.findall(r"=\S+", line)[1:]]
     return rows
+for x, y in [("jit_bp", "jit_bp_col"), ("plain", "plain_col"), ("jit", "jit_col")]:
+    p, q = read(x), read(y)
+    if p and q:
+        shared = [t for t in p if t in q]
+        worst = max((abs(u - v) for t in shared for u, v in zip(p[t], q[t])), default=float("nan"))
+        print(f"collapse, {y} vs {x} (not identical by design): {len(shared)} shared timepoints of "
+              f"{len(p)} / {len(q)}; largest |delta V_m| there {worst:.3e} V")
 a, b = read("plain"), read("bp")
 if a and b:
     shared = [t for t in a if t in b]

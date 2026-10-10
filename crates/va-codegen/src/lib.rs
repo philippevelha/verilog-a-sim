@@ -206,6 +206,7 @@ impl CompiledModel {
             params,
             lowered,
             ideal_shorts,
+            collapse: OnceLock::new(),
             vt: VT,
             temp: TEMP,
             node_is_junction,
@@ -249,6 +250,43 @@ impl CompiledModel {
             .sched
             .get()
             .map(|r| r.as_ref().is_ok_and(|p| p.has_jit()))
+    }
+
+    /// What can be collapsed out of this model's instances under its parameter values
+    /// ([`lower::Collapse`], 2.20.0, opt-in): ideal shorts proven through the setup's fixed
+    /// variables as well as its parameters, and dead mixed-branch rows. Computed on first use.
+    pub fn collapse(&self) -> &lower::Collapse {
+        self.shared.collapse.get_or_init(|| {
+            let prototype = GeneratedModel {
+                terminals: (0..self.shared.lowered.n_unknowns).collect(),
+                name: Arc::from(self.shared.module.name.as_str()),
+                files: std::sync::Mutex::new(Vec::new()),
+                shared: Arc::clone(&self.shared),
+                pinned: Vec::new(),
+                sched_regs: std::sync::Mutex::new(None),
+            };
+            let written = lower::vars_written_per_load(&self.shared.module, &self.shared.lowered);
+            // A setup that did not complete fixes nothing: its bindings are half-made.
+            let vars: Vec<Option<f64>> = match prototype.setup() {
+                Some(s) if s.completed => (0..self.shared.module.vars.len())
+                    .map(|i| {
+                        let fixed = !written.get(i).copied().unwrap_or(true);
+                        s.vars
+                            .get(i)
+                            .and_then(|d| d.as_ref())
+                            .filter(|d| fixed && !d.depends_on_unknowns())
+                            .map(|d| d.value)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            lower::collapse_plan(
+                &self.shared.module,
+                &self.shared.lowered,
+                &self.shared.params,
+                &vars,
+            )
+        })
     }
 
     /// The elaborated module this was compiled from.
@@ -322,8 +360,29 @@ impl CompiledModel {
         &self,
         terminals: &[usize],
         next_unknown: &mut usize,
+        keep: impl FnMut(usize, usize) -> bool,
+        name: &str,
+    ) -> Result<Box<dyn ModelInstance>, CodegenError> {
+        self.instantiate_dropping(terminals, next_unknown, keep, name, &[])
+    }
+
+    /// [`Self::instantiate_named`], leaving out of the system the auxiliary rows at the local
+    /// slots in `dropped` (a node collapse, [`Self::collapse`]): each is mapped to the ground
+    /// sentinel instead of claiming a global unknown, so every stamp it would receive is
+    /// dropped and every read of it is `0.0`. Right only for a row whose current is never needed:
+    /// a dead mixed-branch row, or the row of an ideal short whose two nodes the caller has
+    /// given the same unknown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::instantiate`].
+    pub fn instantiate_dropping(
+        &self,
+        terminals: &[usize],
+        next_unknown: &mut usize,
         mut keep: impl FnMut(usize, usize) -> bool,
         name: &str,
+        dropped: &[usize],
     ) -> Result<Box<dyn ModelInstance>, CodegenError> {
         let nodes = self.shared.module.nodes.len();
         if terminals.len() != nodes {
@@ -338,8 +397,12 @@ impl CompiledModel {
         // `lower::lower`), so this stays correct regardless of how many categories of auxiliary
         // unknown exist.
         while full.len() < self.shared.lowered.n_unknowns {
-            full.push(*next_unknown);
-            *next_unknown += 1;
+            if dropped.contains(&full.len()) {
+                full.push(va_abi::reference::GROUND);
+            } else {
+                full.push(*next_unknown);
+                *next_unknown += 1;
+            }
         }
         let pinned = self
             .shared
@@ -418,6 +481,8 @@ struct SharedModel {
     lowered: Lowered,
     /// [`lower::ideal_shorts`] under `params`.
     ideal_shorts: Vec<lower::IdealShort>,
+    /// [`CompiledModel::collapse`], once asked for.
+    collapse: OnceLock<lower::Collapse>,
     vt: f64,
     temp: f64,
     /// Which of `module.nodes` are junction potentials — the answer

@@ -1,0 +1,76 @@
+// The 2T2R crossbar's access switch fitted to its transistor: rung A of
+// circuits/snn/transistor/README.md, "A switch fitted to the transistor".
+//
+// A gate-controlled conductance, linear in V(p, n):
+//     g = 1/roff + beta * ns * ln(1 + exp((V(c, n) - vt) / ns)),   I(p, n) = g * V(p, n)
+// This is the deep-triode MOS (I = beta * V_ov * V_DS) with the overdrive smoothed into weak
+// inversion: `ns` sets the subthreshold slope (one e-fold of g per `ns` volts of gate drive).
+// `n` is the source-line terminal and the gate drive is measured from it, so the port order is
+// vswitch.va's and a deck swaps one for the other.
+//
+// Rung C adds the gate's charge, which is what moves the source line on a word-line edge. Each
+// channel terminal carries
+//     q(V_G - V_terminal) = cov * V + cch * ns * ln(1 + exp((V - vt) / ns))
+// from the gate, the source side measured from `n` and the drain side from `p`: an overlap (and
+// fringe) capacitance `cov`, plus half the channel's charge, `cch` per volt of smoothed overdrive,
+// switching on with the same `vt` and `ns` as the conductance. With `cov = cch = 0` (the
+// defaults) the switch has no charge, and is rung A.
+//
+// The defaults are fitted (circuits/snn/transistor/fit_switch.py, switch_fit.json) to the SG13G2
+// HV NMOS, W/L = 10/0.45 um, through PSP103, typical corner, with the source on the 1.65 V source
+// line and the bulk at ground. `beta` makes R_on at V(c, n) = 1.65 V (word line at 3.3 V)
+// PSP103's 376.97 Ohm exactly, and `vt` fits the turn-on (largest current error over strong
+// inversion 10 %). Rung C's fitted values (switch_fit.json, not the defaults) are cov = 3.742 fF
+// and cch = 8.472 fF per terminal, from a quasi-static gate ramp at V_DS = 0. Over the full gate
+// swing that moves 18.23 fC through each terminal, and the fit is within 0.29 fC of PSP103 all the
+// way.
+//
+// Limitations: the fit holds for one geometry, one corner, room temperature and one source-line
+// voltage. V_SB is folded into `vt`, so a different V_ref needs a refit. Linear in V_DS: PSP103's
+// R_on moves -1.9 % / +1.3 % at -20 / +20 mV, which this model does not follow (with the switch
+// on in the crossbar, |V_DS| stays under 20 mV). The conductance is not symmetric: if `p` drops
+// below `n`, the real device's source becomes `p`, but here the gate drive is still V(c, n). Rung
+// A has no charge. Rung C's charge is quasi-static (no channel transit time). It splits the channel
+// half and half between the terminals, which is PSP103's partition at V_DS = 0 and not elsewhere.
+// It has no gate-bulk charge, which loads the word-line driver but never reaches the source line.
+// It has no junction capacitance, so the drain-side charge lands on a cell node with less
+// capacitance than PSP103's. Its kick overshoots: an HRS cell node falls to -0.23 V on a falling
+// word line where PSP103's stops at +0.40 V. A real drain junction would start to conduct there;
+// this model does not. The kick still settles before the neuron integrates (Fig. 5).
+// There is no noise and no saturation region.
+`include "../disciplines.vams"
+
+module mos_switch(p, n, c);
+    inout p, n;
+    input c;
+    electrical p, n, c;
+    parameter real beta = 3.795333e-3 from (0:inf);
+    parameter real vt = 0.951051;
+    parameter real ns = 0.0318 from (0:inf);
+    parameter real roff = 1e12 from (0:inf);
+    parameter real cov = 0 from [0:inf);
+    parameter real cch = 0 from [0:inf);
+    real x, g, xs, xd, qs, qd;
+    analog begin
+        x = (V(c, n) - vt) / ns;
+        // softplus, written so exp never overflows
+        if (x > 0)
+            g = 1.0 / roff + beta * ns * (x + ln(1.0 + exp(-x)));
+        else
+            g = 1.0 / roff + beta * ns * ln(1.0 + exp(x));
+        I(p, n) <+ g * V(p, n);
+        // rung C: the gate's charge on each channel terminal
+        xs = (V(c, n) - vt) / ns;
+        xd = (V(c, p) - vt) / ns;
+        if (xs > 0)
+            qs = cov * V(c, n) + cch * ns * (xs + ln(1.0 + exp(-xs)));
+        else
+            qs = cov * V(c, n) + cch * ns * ln(1.0 + exp(xs));
+        if (xd > 0)
+            qd = cov * V(c, p) + cch * ns * (xd + ln(1.0 + exp(-xd)));
+        else
+            qd = cov * V(c, p) + cch * ns * ln(1.0 + exp(xd));
+        I(c, n) <+ ddt(qs);
+        I(c, p) <+ ddt(qd);
+    end
+endmodule

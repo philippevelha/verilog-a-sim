@@ -225,6 +225,17 @@ impl<'a> SparseMatrix<'a> {
     }
 }
 
+/// One of [`SparseSystem::parts`]' disjoint views: rows from `row0` of the residual and charge
+/// vectors, slots from `slot0` of the Jacobian and charge-Jacobian values.
+pub(crate) struct Part<'a> {
+    pub(crate) row0: usize,
+    pub(crate) slot0: usize,
+    pub(crate) residual: &'a mut [f64],
+    pub(crate) charge: &'a mut [f64],
+    pub(crate) jacobian: &'a mut [f64],
+    pub(crate) dcharge: &'a mut [f64],
+}
+
 /// The assembled MNA system for `dim` unknowns, stored sparse: residual, charge, and the
 /// Jacobian and charge Jacobian over one shared [`Pattern`]. The sparse counterpart of
 /// [`crate::mna::System`] (DC) and `va_abi::stamps::DenseStamp` (transient).
@@ -277,6 +288,48 @@ impl SparseSystem {
     /// The current pattern.
     pub fn pattern(&self) -> &Pattern {
         &self.pattern
+    }
+
+    /// Disjoint mutable views of the residual, charge, Jacobian and charge-Jacobian values, for
+    /// adding into them from several threads at once ([`crate::par`]'s parallel bypass replay):
+    /// part `p` holds rows `rows[p]..rows[p + 1]` of the two vectors and slots
+    /// `slots[p]..slots[p + 1]` of the two value arrays. `rows` must run from 0 to [`Self::dim`]
+    /// and `slots` from 0 to the pattern's [`Pattern::nnz`], both non-decreasing, with the same
+    /// length; `None` otherwise.
+    pub(crate) fn parts(&mut self, rows: &[usize], slots: &[usize]) -> Option<Vec<Part<'_>>> {
+        let ok = |b: &[usize], end: usize| {
+            b.first() == Some(&0) && b.last() == Some(&end) && b.windows(2).all(|w| w[0] <= w[1])
+        };
+        if rows.len() != slots.len()
+            || !ok(rows, self.residual.len())
+            || !ok(slots, self.jacobian.len())
+            || self.charge.len() != self.residual.len()
+            || self.dcharge.len() != self.jacobian.len()
+        {
+            return None;
+        }
+        let (mut res, mut chg) = (&mut self.residual[..], &mut self.charge[..]);
+        let (mut jac, mut dq) = (&mut self.jacobian[..], &mut self.dcharge[..]);
+        let mut out = Vec::with_capacity(rows.len() - 1);
+        for (r, s) in rows.windows(2).zip(slots.windows(2)) {
+            let (a, rest) = std::mem::take(&mut res).split_at_mut(r[1] - r[0]);
+            res = rest;
+            let (b, rest) = std::mem::take(&mut chg).split_at_mut(r[1] - r[0]);
+            chg = rest;
+            let (c, rest) = std::mem::take(&mut jac).split_at_mut(s[1] - s[0]);
+            jac = rest;
+            let (d, rest) = std::mem::take(&mut dq).split_at_mut(s[1] - s[0]);
+            dq = rest;
+            out.push(Part {
+                row0: r[0],
+                slot0: s[0],
+                residual: a,
+                charge: b,
+                jacobian: c,
+                dcharge: d,
+            });
+        }
+        Some(out)
     }
 
     /// Zero every value, keeping the pattern, before the next assembly.

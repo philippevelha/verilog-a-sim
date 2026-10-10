@@ -22,9 +22,16 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
-2.18.5 - 2026-10-10
+2.23.3 - 2026-10-10
 --------------------
-**A port without a direction is a warning, not an error.** 2.18.4 rejected it, but the rule
+These three entries were developed on 2.18.2 as 2.18.3, 2.18.4 and 2.18.5 (their commit
+subjects keep those numbers) and renumbered when the branch was merged with 2.23.0+1.
+Measured after that merge: `cargo test --workspace` 965 passed, 0 failed; `cargo xtask validate`
+28 checked, 0 failed, convergence 28/28; `check models` 68/68 (two models came with 2.23.0+1,
+and neither draws the direction warning or the access check), `check benchmark/models` 25/25,
+`check external` 8/9. The figures in each entry below are from before the merge.
+
+**A port without a direction is a warning, not an error.** 2.23.2 rejected it, but the rule
 behind that is unsettled here. IEEE 1364 requires a direction for every listed port, while
 `docs/token-reference.md` once quoted the LRM as making `inout` the default for analog ports,
 and the LRM was not available to check. A model that relies on the default now runs, and its
@@ -43,8 +50,8 @@ entry, `expect: ok` with a `warning:` line, which asserts the warning text on a 
 `warn_port_without_direction.va`. The corpus runner no longer reads a `[warn ]` line as a
 failing verdict.
 
-Unchanged from 2.18.4: the access-function check (`Temp` on `electrical`) is still an error,
-and the 198 test models that 2.18.4 gave explicit `inout` declarations keep them (they are valid
+Unchanged from 2.23.2: the access-function check (`Temp` on `electrical`) is still an error,
+and the 198 test models that 2.23.2 gave explicit `inout` declarations keep them (they are valid
 either way). No committed model triggers the warning (`check models` 66/66, `benchmark/models`
 25/25, `external` 8/9).
 
@@ -55,7 +62,7 @@ Measured: `cargo test --workspace` 959 passed, 0 failed (the corpus: 36 files, 0
 messages, 1 warning case); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
 
 
-2.18.4 - 2026-10-10
+2.23.2 - 2026-10-10
 --------------------
 **The error corpus's last two gaps are closed; it now has none.**
   * **A port with no direction is an error**, located at the port's name in the header: "port
@@ -93,7 +100,7 @@ Measured: `cargo test --workspace` 959 passed, 0 failed (the error corpus, 36 fi
 28/28.
 
 
-2.18.3 - 2026-10-10
+2.23.1 - 2026-10-10
 --------------------
 **Elaboration errors name file:line:col.** Before this, no elaboration error carried a
 location: `unknown identifier `Rx`` left the user to search the model for it. Now it reads
@@ -139,6 +146,234 @@ located by its statement or item.
 Measured: `cargo test --workspace` 959 passed, 0 failed (957 + two elaboration-location
 tests); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28; `check models` 66/66,
 `check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+
+
+2.23.0+1 - 2026-10-10
+----------------------
+**Docs only: `notes/rung-c-report.md`, the 2.23.0 rung C write-up as a standalone page.** It
+holds the fit, the Fig. 5 and MNIST comparison against PSP103, the open points (cell-node
+overshoot, the +1.6 mV bias) and the CI note. No code, model or deck changes.
+
+Measured: unchanged from 2.23.0 (no behaviour change); `cargo metadata` reports 2.23.0+1.
+
+2.23.0 - 2026-10-10
+--------------------
+**Rung C: the fitted access switch gets the gate's charge (two more parameters). Fig. 5's V_m
+error falls from 2.4 to 0.21 mV, and the 16-neuron MNIST crossbar's from 14.7 to 4.6 mV worst,
+with every PSP103 spike kept.** Rung A's error was one-signed and came from the word-line edges,
+so the charge was the next rung, not the V_DS term.
+  * models/snn/mos_switch.va: each channel terminal carries q(V) = cov*V + cch*ns*softplus((V -
+    vt)/ns), with V = V_G - V_terminal: overlap plus half the channel, switching on with rung A's
+    own vt and ns. `cov` and `cch` default to 0, which is rung A, byte-identical
+    (fig5_fit.net's output is unchanged).
+  * fit_switch.py: a quasi-static gate ramp at V_DS = 0, where each terminal current is exactly
+    dQ/dt. cov = 3.742 fF, cch = 8.472 fF per terminal. PSP103 moves 18.23 fC through each
+    terminal over the full swing, and the fit is within 0.29 fC everywhere. Added to
+    switch_fit.json; the rung A values there are unchanged.
+  * gen_fig5_access.py --switch fitc writes fig5_fitc.net. gen_mnist_tx.py / gen_xbar_deck.py
+    --synapses fitc write each path as rram + charged mos_switch, keeping the cell node, because
+    the drain-side charge needs somewhere to land.
+  * Fig. 5: worst |V_m - PSP103| 0.21 mV, both signs (rung A: 2.4 mV, always high). The edge pulse
+    in the source line is -68 / +145 uA against PSP103's -74 / +149 uA. Spikes 6, 10, 14.
+  * Crossbar, 16 hidden-2 neurons, 20 cycles, digit 0, same PSP103 reference: mean / RMS / worst
+    +1.6 / 1.9 / 4.6 mV (rung A +8.0 / 9.2 / 14.7). All 17 spikes at the same steps. 2 494
+    unknowns (PSP103 35 262), 168 s (PSP103 2 693 s; rung A folded 52 s). The 4.7 mV margin rung
+    A left at h2_5 step 16 is back to 14.7 mV (PSP103 16.1).
+  * **The cost, stated plainly:** about 3x rung A's run time, because the cell nodes return. The
+    cell-node kick overshoots (an HRS node falls to -0.23 V, PSP103's to +0.40 V), because there
+    is no junction capacitance; it settles before the window. A +1.6 mV mean bias remains on the
+    crossbar, still mostly high, with its cause not yet separated (junction capacitance, the V_DS
+    term, the charge partition). The coverage is still one image, 16 of 64 neurons, 20 of 29
+    cycles.
+  * Test: the_fitted_switchs_gate_charge_moves_psp103s_charge_and_differentiates_correctly
+    (the 18.23 fC swing, drain and source alike, no charge in rung A, charge Jacobian against
+    central differences in all three terminals).
+Measured: `cargo test --workspace` 963 passed; `cargo xtask validate` 28/28; fmt and clippy clean.
+Default decks and models unchanged (mos_switch.va without cov/cch is rung A, byte-identical).
+
+2.22.0+1 - 2026-10-10
+----------------------
+**Rung A on the MNIST crossbar with spikes: 16 hidden-2 neurons, 20 cycles, digit 0. All 17 of
+the PSP103 crossbar's spikes land at the same steps, with V_m within 14.7 mV, in 52 s instead of
+2 693 s.** No code change; this records the run 2.22.0 promised.
+  * Reference: the PSP103 crossbar (gen_xbar_deck.py, VA_JIT=on, no bypass or collapse, so the
+    reference carries no approximation of its own). 17 spikes on h2_6, h2_8, h2_11 and h2_15.
+  * Constant 376.97 Ohm (synapse_2t2r): 14.7 mV, the same spikes. As in Fig. 5, the word lines
+    are ideal rails, so rung A's gate dependence never comes into play.
+  * 10 Ohm switch: 1 767 mV. h2_8 spikes one step early, h2_11 once more, and h2_5 twice where
+    PSP103 never fires.
+  * **The cost, stated plainly:** the error has one sign. Rung A's V_m reads 4-15 mV high,
+    growing ~3 mV a cycle between resets, which is the gate charge Fig. 5 showed. One latch
+    decision here keeps only 4.7 mV of margin (h2_5, step 16: PSP103 16.1 mV below V_th, rung A
+    4.7 mV below). Both decisions agree, but nothing guarantees that on another image. Rung C
+    (charge) would remove the bias.
+  * Coverage: one image, 16 of 64 hidden-2 neurons, 20 of 29 cycles, hidden-3 and output not
+    included.
+  * circuits/snn/transistor/README.md has the table; snn-transistor-performance.md §4.6 has a
+    line.
+Measured: `cargo test --workspace` 962 passed; `cargo xtask validate` 28/28 (unchanged since
+2.22.0, rerun at this version).
+
+2.22.0 - 2026-10-10
+--------------------
+**Rung A on the MNIST crossbar: a folded synapse with the fitted switch.** On 8 hidden-2 neurons
+over 5 cycles, V_m is within 9.4 mV of the PSP103 crossbar (the 10 Ohm switch: 206 mV), and the
+run takes 4.6 s instead of 227 s. No neuron spikes in those 5 cycles, so this run does not test
+spike timing; a 16-neuron, 20-cycle comparison with spikes is running and will follow as
+2.22.0+1.
+  * models/snn/synapse_2t2r_mos.va: synapse_2t2r.va with the logistic gate replaced by
+    mos_switch.va's conductance, g(V(wl, sl)), in series with each cell. This is exact for
+    rung A, because the switch is linear in V_DS and its gate drive is taken from `sl`, so the
+    cell node folds away. The crossbar keeps the behavioural deck's size (302 unknowns for 8
+    neurons, against PSP103's 17 710).
+  * gen_mnist_tx.py --synapses tx|fit|ideal and gen_xbar_deck.py --synapses: emit the access
+    devices as PSP103 (default, unchanged), the fitted folded synapse, or the behavioural deck's
+    own synapse_2t2r (10 Ohm).
+  * 8 neurons, 5 cycles, digit 0, worst |V_m - PSP103| at the latch sample: rung A 9.4 mV;
+    synapse_2t2r at a constant ron = 376.97 Ohm 9.4 mV (the same: the hidden-1 word lines are
+    ideal PWL rails, as in Fig. 5); the 10 Ohm switch 206 mV. The error grows by about 3 mV a
+    cycle; whether that costs spikes is what the longer run is for.
+  * Test: the_folded_fitted_synapse_puts_psp103s_r_on_in_series_with_each_cell (each path
+    carries V / (R_cell + 376.97 Ohm) on, near-open off, AD against central differences in all
+    four terminals).
+Measured: `cargo test --workspace` 962 passed; `cargo xtask validate` 28/28; fmt and clippy
+clean. Default decks and models unchanged.
+
+2.21.0+1 - 2026-10-08
+----------------------
+**Node collapse (2.20.0, `VA_COLLAPSE=on`) checked over every deck in the tree: no deck's answer
+moves beyond its solver tolerances.** No code change; this records the check 2.20.0 promised.
+`cargo xtask deck-diff` (collapse off against on, same binary): 29 decks differ in their output
+text, and every run exits 0 both ways. All 29 were rerun with both outputs kept, and every value
+reported in both was compared:
+  * Agree to the last printed digit: 20 decks. PSP102/103/104, BSIM6, BSIM-BULK, BSIM-CMG,
+    BSIM-IMG and HiSIM2 NANDs; the PSP103 inverters; c17; both microrings; speaker_ac and
+    speaker_large; ring_gyro_noise; bench_access_bias, fig5_access and uic_access.
+  * The six fig5_tx* decks: V_m equal to 1 uV at every cycle, and identical spike steps.
+    Every other value agrees within the time-print rounding (below), except up to 1.5 mV on
+    PSP103 internal nodes at waveform corners.
+  * bsimsoi NAND: V(out) moves by up to 31 uV in the transition (VA 0.56-0.70 V). Rebuilt with
+    Newton at abstol 1e-18 / reltol 1e-12 (not committed), off and on agree at every printed
+    digit over all 101 points, so this is Newton's tolerance, not collapse.
+  * speaker_thermal: 301 163 vs 299 285 timepoints, because the step control sees fewer rows.
+    Its pressures agree to <= 0.1 %, within the 1e-3 transient tolerance.
+  * What "within the time-print rounding" means: va-cli prints t to 7 digits, so two printed-equal
+    times can be one unit of the last digit apart. Near 11 s that is 10 us, enough to move the
+    deck's own 40 V, 200 Hz source by 0.47 V. These comparisons subtract slope x that bound.
+  * `VA_COLLAPSE=on cargo xtask validate`: 28/28.
+  * Found on the way, NOT caused by collapse and not fixed here: at the default Newton
+    tolerances, the bsimsoi NAND's transfer curve is up to 0.4 mV from the tight-tolerance answer,
+    collapse on or off. The circuit carries ~1 pA there, and abstol is 1e-12 A, which is a
+    current tolerance as large as the circuit's whole current.
+Measured: `cargo test --workspace` 961 passed; `cargo xtask validate` 28/28 (collapse off and on).
+
+2.21.0 - 2026-10-08
+--------------------
+**A behavioural access switch fitted to the SG13G2 transistor (rung A), for training: on Fig. 5 it
+puts V_m within 2.4 mV of the PSP103 deck, with the same spikes, in 3.2 s instead of 20 s.**
+Training cannot run at transistor level (snn-transistor-performance.md §4.6). So the transistor has
+to come back into the behavioural model, with as few parameters as the circuit allows.
+  * Step 1, measured over fig5_access.net: with the word line high, the access transistor sits in
+    deep triode at a fixed V_SB (the source line is held at V_ref = 1.65 V), with |V_DS| <= 20 mV.
+    Its edge kicks on the cell node (up to 1.15 V) settle in 12.5 ns, before the neuron
+    integrates.
+  * models/snn/mos_switch.va: g = beta * ns * ln(1 + exp((V_GS - vt) / ns)), I = g * V_DS. It has
+    vswitch.va's port order, so a deck swaps one for the other. It is linear in V_DS, so it can be
+    folded into synapse_2t2r exactly (not done yet).
+  * circuits/snn/transistor/fit_switch.py fits it to PSP103 and writes switch_fit.json:
+    ns = 31.8 mV (subthreshold slope); beta = 3.795e-3 A/V^2, pinned so that R_on at the high
+    word line is PSP103's 376.97 Ohm exactly; vt = 0.951 V, least squares over strong inversion
+    (largest current error 10 %).
+  * gen_fig5_access.py --switch fit writes fig5_fit.net.
+  * cmp_vm.py compares two runs where the flip-flop latches V_m, and checks the spike steps.
+Fig. 5, worst |V_m - PSP103|: 118.9 mV with the old 10 Ohm switch, 2.4 mV with rung A. Spikes
+6, 10, 14 in all three runs.
+  * **The cost, stated plainly:** in this deck rung A is no better than vswitch at a constant
+    376.97 Ohm, which agrees with it to 1 uV. The word lines are ideal rails, so the gate
+    dependence never comes into play.
+  * The remaining 2.4 mV is the gate's charge, not V_DS. Through the window the source-line
+    current agrees to 1.8 nA (0.07 %). The difference comes at the word-line edges: PSP103 pushes
+    -74 / +149 uA through the source line while clk's falling edge still has the input stage half
+    open. So the next rung, if any, is C (charge), not B.
+  * Not yet checked on the MNIST crossbar.
+  * Limits: one geometry, the typical corner, one V_ref; no charge or noise; the reference is our
+    own PSP103 run, not QSPICE.
+  * Test: the_fitted_access_switch_has_psp103s_r_on_and_a_jacobian_that_matches_differences
+    (R_on at the on-bias; AD against central differences in all three terminals, on both
+    softplus branches).
+Measured: `cargo test --workspace` 961 passed (960 + the new test); `cargo xtask validate` 28/28;
+fmt and clippy clean. No existing model or deck changed.
+
+2.20.0 - 2026-10-08
+--------------------
+**Node collapse, opt-in (`VA_COLLAPSE=on`): PSP103's proven ideal shorts and dead branch rows
+leave the system, and one SG13G2 transistor drops from 16 own unknowns to 7.** PSP103 writes
+each parasitic resistor as `if (R > 0) I(a,b) <+ V(a,b)/R; else V(a,b) <+ 0;` and so carries a
+branch-current row for each of the seven, needed or not. With the SG13G2 card, S-SI and D-DI are
+true shorts (`rsh = 0`), each costing a node and a row to say "the same node". The other five are
+resistors whose rows are only ever pinned to zero.
+  * va-codegen: `lower::collapse_plan` / `CompiledModel::collapse` proves both cases, folding
+    branch conditions through variables the parameter-only setup fixes (`RSE_i`; assigned in
+    the setup and never by a per-load statement, task or function output). The old prover
+    (`ideal_shorts`, literals and parameters only, unchanged) recognised none of PSP103's.
+    `instantiate_dropping` maps the dropped rows to ground, where every stamp is dropped.
+  * va-cli: `collapse_nodes` gives nodes joined by a proven short one unknown (the deck net a
+    member is wired to, or one fresh unknown). It leaves a short that would join two different
+    nets as it was, and drops the shorts' rows and the dead ones.
+  * Measured (Xeon 2.8 GHz): `fig5_access` 208 -> 136 unknowns, same 12 837 timepoints, outputs
+    equal to its 1e-6 print precision, time unchanged (its solve is small). 16-neuron crossbar,
+    `VA_JIT=on --bypass`, 4 threads: 35 262 -> 16 830 unknowns, 74.9 / 73.1 s -> 62.4 / 60.9 s
+    (~1.2x), peak memory 983 -> 758 MB; same 1 375 timepoints, 1 344 at identical times, V_m
+    equal to 1e-10 V there.
+  * **Not bit-identical, by design, and that is why it is opt-in**: the matrix is smaller, so LU
+    rounds differently and step control can land a step elsewhere. A collapsed node is no longer
+    reported under its own name (`V(X1.SI)` is `V(X1.S)`). A removed row is not reported, and the
+    remaining `X1.b...` are renumbered. With it off, output is byte-identical to 2.19.0
+    (checked on `fig5_access` and `bench_access_bias`).
+  * `bench_xbar_jit_linux.sh`: a `_col` run suffix, and `jit_bp_col` among the defaults, with
+    the largest V_m difference collapse makes reported next to bypass's.
+  * New tests: `the_collapse_plan_folds_setup_variables_and_finds_dead_rows` (a short through a
+    setup variable, a dead row, a per-load variable left unfolded) and
+    `collapse_nodes_joins_shorted_nodes_and_drops_their_rows` (a chain of two shorts into one
+    net; never two nets merged).
+  * Measured at this version: `cargo test --workspace` 960 passed, 0 failed (after merging main), with
+    `VA_COLLAPSE` off and on; `cargo xtask validate` 28/28 with it on; clippy clean. A
+    deck-diff of every deck with it on against off was still running when this was committed;
+    its result is in the next entry.
+
+
+2.19.0 - 2026-10-08
+--------------------
+**The bypass replay runs on several threads, bit-identical to the serial one.** With `--bypass`
+on a large circuit, replaying the bypassed devices' recordings was a serial loop as long as the
+device evaluation it saves (profile of the 16-neuron crossbar, 35 262 unknowns, one thread:
+evaluation 36 %, replay and its bookkeeping 33 %, linear solve 17 %).
+  * How the bits are kept: floating-point sums depend on order, so what is kept is the order
+    in which each *entry* of the system receives its additions. The sparse system is split by
+    destination (`SparseSystem::parts`: part p owns a range of residual/charge rows and a range of
+    Jacobian/charge-Jacobian slots). Each recording's additions are bucketed by part (`Buckets`,
+    kept with a bypassed device's recording and rebuilt only when the pattern or the partition
+    changes). Each thread walks every device in instance order and adds its own part's bucket.
+    Preparing the buckets, finding a fresh recording's slots and storing the new bypass entries
+    also run in parallel, one device each, reusing the old entry's buffers: the first version
+    allocated per device and lost ~14 % of every worker to the allocator's lock.
+  * When: transient with `--bypass`, more than one thread, and at least
+    `PARALLEL_MIN_REPLAY_STAMPS` (50 000) recorded stamps in the assembly (`VA_PARALLEL=always`
+    forces it, `never` turns it off). An assembly with a stamp only the serial sink can take (an
+    entry the pattern does not hold yet, or a side effect) goes the serial way, unchanged.
+  * Measured (Xeon 2.8 GHz, 4 threads, `--bypass`, old and new binaries alternated; this
+    container's machine ran about 2x slower than for 2.18.0+2's figures, so compare within a
+    row only): crossbar 16 neurons, 2 cycles, `VA_JIT=on`: 86.3 / 83.8 s -> 72.8 / 74.0 s
+    (1.15x); 8 neurons, 3 cycles: 65.2 / 60.5 s -> 55.2 / 55.7 s (1.13x). One thread is the
+    serial path, unchanged. What is left on the main thread is mostly the linear solve (BTF + LU
+    ~34 % of its samples), the next limit.
+  * Identity: output hashes equal to 2.18.0+3 on the 8- and 16-neuron crossbars with
+    `--bypass` (1 and 4 threads), and with `VA_PARALLEL=always --bypass` on `fig5_access`,
+    `ring_osc` and `rectifier`. New test `the_parallel_replay_gives_the_serial_replays_bits`
+    (8 nodes, 4 parts, within and past tolerance, a grown pattern; fails if the replay drops
+    its corrections, checked).
+  * Measured at this version: `cargo test --workspace` 955 passed, 0 failed; `cargo xtask
+    validate` 28/28; clippy clean.
 
 
 2.18.2 - 2026-10-08

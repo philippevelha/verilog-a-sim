@@ -448,7 +448,7 @@ struct Elaborator<'a> {
 impl Elaborator<'_> {
     /// Run every pass. An error is located on its way out: by the innermost expression or
     /// statement that has a position (`lower_expr`, `const_eval`, `lower_stmt`), else by the
-    /// item or port the failing pass was on ([`Self::cur_at`]). Until 2.18.3 no elaboration
+    /// item or port the failing pass was on ([`Self::cur_at`]). Until 2.23.1 no elaboration
     /// error carried a location at all.
     fn run(&mut self) -> Result<(), FrontendError> {
         let result = self.run_passes();
@@ -635,7 +635,7 @@ impl Elaborator<'_> {
             // target was declared on the spot, the same leniency the analog block had (see
             // [`Self::collect_vars`]), so a misspelt local compiled as a second variable.
             // A `real t;` inside a named block of the body is a declaration too; lowering
-            // scopes it to its block. Until 2.18.3 this check missed that and rejected it.
+            // scopes it to its block. Until 2.23.1 this check missed that and rejected it.
             let mut block_decls = HashSet::new();
             walk_stmts(&f.body, &mut |st| {
                 if let Stmt::VarDecl { names } = st {
@@ -2840,7 +2840,7 @@ impl Elaborator<'_> {
     /// Reject an access function that is not the one its nets' discipline defines:
     /// `Temp(p, n)` on `electrical` nets, `V(t)` on a `thermal` one.
     ///
-    /// Until 2.18.4 nothing checked this. The access *kind* (potential or flow) came from the
+    /// Until 2.23.2 nothing checked this. The access *kind* (potential or flow) came from the
     /// name alone, so `Temp(p, n) <+ V(p, n)` on electrical nets compiled as a voltage
     /// contribution and `va-cli sim` failed later with "singular matrix" — the right verdict,
     /// with a reason that sent the user looking at the circuit instead of the model.
@@ -3613,7 +3613,7 @@ impl Elaborator<'_> {
     /// the source-level variable that carries it.
     ///
     /// The message names the variable that carries the `ddt`; the line comes from
-    /// [`Self::lower_stmt`], which locates the error at the contribution (2.18.3).
+    /// [`Self::lower_stmt`], which locates the error at the contribution (2.23.1).
     fn ddt_guard_message(&self, port: &str, guard: ExprId, tainted: &HashSet<u32>) -> String {
         let via = match self.first_tainted_var(guard, tainted) {
             Some(id) => match self.vars.iter().find(|(_, v)| **v == id) {
@@ -4681,7 +4681,7 @@ fn call_site_state_operator(b: Builtin) -> Option<&'static str> {
 /// legal Verilog-A is unsettled in this project: IEEE 1364 requires every listed port to be
 /// declared with a direction, while `docs/token-reference.md` once quoted the LRM as making
 /// `inout` the default for analog ports, and the LRM text was not available to settle it.
-/// 2.18.4 made it an error; 2.18.5 made it this warning, so a model that relies on the default
+/// 2.23.2 made it an error; 2.23.3 made it this warning, so a model that relies on the default
 /// still runs and its author is still told.
 ///
 /// The caller decides where the warnings go (`va-cli` prints them beside its other warnings);

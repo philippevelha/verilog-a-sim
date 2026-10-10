@@ -3748,16 +3748,23 @@ fn build_from_model(
             assigned[i] = Some(va_abi::reference::GROUND);
         }
     }
-    let full: Vec<usize> = assigned
-        .into_iter()
-        .map(|slot| {
-            slot.unwrap_or_else(|| {
-                let g = *next_unknown;
-                *next_unknown += 1;
-                g
+    // `VA_COLLAPSE=on` (2.20.0, opt-in): nodes joined by a proven ideal short share one unknown,
+    // and the rows that then carry nothing are left out (`collapse_nodes`).
+    let (full, dropped) = if collapse_enabled() {
+        collapse_nodes(&compiled, assigned, next_unknown)
+    } else {
+        let full: Vec<usize> = assigned
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    let g = *next_unknown;
+                    *next_unknown += 1;
+                    g
+                })
             })
-        })
-        .collect();
+            .collect();
+        (full, Vec::new())
+    };
 
     // Pair every IR node with the global unknown it was just assigned, so reporting can name
     // that entry of the solution vector (§ quantity reporting). Built here rather than
@@ -3771,7 +3778,13 @@ fn build_from_model(
         .collect();
 
     let inst = compiled
-        .instantiate_named(&full, next_unknown, |p, n| shorts.join(p, n), name)
+        .instantiate_dropping(
+            &full,
+            next_unknown,
+            |p, n| shorts.join(p, n),
+            name,
+            &dropped,
+        )
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
     // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
@@ -3780,6 +3793,82 @@ fn build_from_model(
     // `wrap` returns this very box, so a deck with no `m=` is bit-identical to one run before
     // multiplicity existed.
     Ok((va_abi::Multiplied::wrap(inst, m.multiplicity()), assignment))
+}
+
+/// Whether node collapse is on: `VA_COLLAPSE=on` (2.20.0, a prototype; off by default because
+/// it changes the system's size, so results are equal only to round-off, and it removes
+/// unknowns from the report).
+fn collapse_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VA_COLLAPSE").is_ok_and(|v| v == "on"))
+}
+
+/// **Node collapse** for one compiled-model instance: the global unknown of every IR node, and
+/// the auxiliary rows to leave out of the system.
+///
+/// Every ideal short `compiled` proves under its card ([`va_codegen::CompiledModel::collapse`])
+/// joins its two nodes into one class, which gets one unknown: the deck net or ground already
+/// assigned to a member (a port), or one fresh unknown for a class of internal nodes alone. A
+/// short that would join two *different* assigned nets (two ports, or a port and ground) is not
+/// collapsed: that would change the deck's circuit, not just its bookkeeping, and it keeps its row
+/// as before. The rows left out are the collapsed shorts' own (the current through a short whose
+/// two ends are one node flows nowhere), and the model's dead mixed-branch rows.
+///
+/// Physically the same circuit; numerically a smaller system, so results agree with the
+/// uncollapsed run to round-off, not to the bit. A collapsed internal node is reported under the
+/// unknown it joined, and a removed row is not reported at all.
+fn collapse_nodes(
+    compiled: &va_codegen::CompiledModel,
+    assigned: Vec<Option<usize>>,
+    next_unknown: &mut usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let plan = compiled.collapse();
+    let n = assigned.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut net: Vec<Option<usize>> = assigned.clone();
+    fn root(parent: &mut [usize], mut a: usize) -> usize {
+        while parent[a] != a {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        a
+    }
+    let mut dropped: Vec<usize> = plan.dead_rows.clone();
+    for short in &plan.shorts {
+        if short.p_slot >= n || short.n_slot >= n {
+            continue;
+        }
+        let (a, b) = (
+            root(&mut parent, short.p_slot),
+            root(&mut parent, short.n_slot),
+        );
+        if a == b {
+            dropped.push(short.local_slot);
+            continue;
+        }
+        let merged = match (net[a], net[b]) {
+            (Some(x), Some(y)) if x != y => continue,
+            (x, y) => x.or(y),
+        };
+        parent[a] = b;
+        net[b] = merged;
+        dropped.push(short.local_slot);
+    }
+    let mut fresh: Vec<Option<usize>> = vec![None; n];
+    let full = (0..n)
+        .map(|i| {
+            let r = root(&mut parent, i);
+            match net[r] {
+                Some(g) => g,
+                None => *fresh[r].get_or_insert_with(|| {
+                    let g = *next_unknown;
+                    *next_unknown += 1;
+                    g
+                }),
+            }
+        })
+        .collect();
+    (full, dropped)
 }
 
 /// Build a device instance from the hand-written `va-abi` reference primitives.
@@ -8174,6 +8263,232 @@ endmodule
         );
     }
 
+    /// `models/snn/mos_switch.va`, the access switch fitted to the SG13G2 access transistor
+    /// (rung A, `circuits/snn/transistor/fit_switch.py`): its defaults give PSP103's R_on at the
+    /// crossbar's on-bias (gate 3.3 V over a 1.65 V source line), it is a near-open switch with
+    /// the gate low, and its Jacobian matches a central difference in every terminal on both
+    /// branches of the softplus, through weak inversion and strong.
+    #[test]
+    fn the_fitted_access_switch_has_psp103s_r_on_and_a_jacobian_that_matches_differences() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models/snn");
+        let src = std::fs::read_to_string(format!("{dir}/mos_switch.va")).expect("reads");
+        let design = va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+            .expect("compiles");
+        let inst =
+            va_codegen::build_instance(&design.modules[0], &[0, 1, 2], &mut 3).expect("builds");
+        let load = |x: &[f64]| {
+            let mut s = va_abi::stamps::DenseStamp::new(3);
+            inst.load(
+                x,
+                &va_abi::ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
+            s
+        };
+
+        // [V(p), V(n), V(c)]: the cell node 5 mV above the source line, word line high.
+        let on = load(&[1.655, 1.65, 3.3]);
+        let r_on = 0.005 / on.residual[0].abs();
+        assert!((r_on - 376.97).abs() < 0.01, "R_on = {r_on} Ohm");
+        let off = load(&[1.75, 1.65, 0.0]);
+        assert!(
+            off.residual[0].abs() < 1e-12,
+            "off current {}",
+            off.residual[0]
+        );
+
+        for x in [
+            [1.655, 1.65, 3.3], // strong inversion
+            [1.645, 1.65, 2.6], // near vt, x > 0
+            [1.70, 1.65, 2.55], // just below vt, x < 0
+            [1.75, 1.65, 0.0],  // off
+            [1.60, 1.65, 3.0],  // p below n
+        ] {
+            let s = load(&x);
+            for col in 0..3 {
+                let h = 1e-6;
+                let (mut xp, mut xm) = (x, x);
+                xp[col] += h;
+                xm[col] -= h;
+                let (rp, rm) = (load(&xp), load(&xm));
+                for row in 0..3 {
+                    let fd = (rp.residual[row] - rm.residual[row]) / (2.0 * h);
+                    let an = s.jac(row, col);
+                    let scale = an.abs().max(fd.abs()).max(1e-12);
+                    assert!(
+                        (fd - an).abs() / scale < 1e-5,
+                        "x = {x:?}, d r{row} / d x{col}: analytic {an:e}, difference {fd:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Rung C of `models/snn/mos_switch.va`: with switch_fit.json's `cov` and `cch`, the charge
+    /// on the source-line terminal moves PSP103's 18.23 fC over the full gate swing (fitted to
+    /// within 0.29 fC everywhere), the drain side carries the same charge at V_DS = 0, and the
+    /// charge Jacobian matches a central difference in all three terminals. With `cov = cch =
+    /// 0`, the defaults, the switch has no charge (rung A).
+    #[test]
+    fn the_fitted_switchs_gate_charge_moves_psp103s_charge_and_differentiates_correctly() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models/snn");
+        let src = std::fs::read_to_string(format!("{dir}/mos_switch.va")).expect("reads");
+        let compile = || {
+            va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+                .expect("compiles")
+        };
+        let rung_a = compile();
+        let mut rung_c = compile();
+        for p in rung_c.modules[0].params.iter_mut() {
+            match p.name.as_str() {
+                "cov" => p.default = 3.74244e-15,
+                "cch" => p.default = 8.472407e-15,
+                _ => {}
+            }
+        }
+        let ctx = va_abi::AnalysisCtx::transient(1e-9)
+            .with_ddt(1e9, 0.0)
+            .with_initial_step(false);
+        let charge = |design: &va_frontend::CompiledDesign, x: &[f64]| {
+            let inst =
+                va_codegen::build_instance(&design.modules[0], &[0, 1, 2], &mut 3).expect("builds");
+            let committed = vec![0.0; inst.state_len()];
+            let mut next = vec![0.0; committed.len()];
+            let mut st = va_abi::ModelState::new(&committed, &mut next);
+            let mut s = va_abi::stamps::DenseStamp::new(3);
+            inst.load(x, &ctx, &mut st, &mut s);
+            s
+        };
+
+        // [V(p), V(n), V(c)]: both channel terminals on the 1.65 V source line
+        let lo = charge(&rung_c, &[1.65, 1.65, 0.0]);
+        let hi = charge(&rung_c, &[1.65, 1.65, 3.3]);
+        let swing_n = (hi.charge[1] - lo.charge[1]).abs();
+        let swing_p = (hi.charge[0] - lo.charge[0]).abs();
+        assert!(
+            (swing_n - 18.234e-15).abs() < 0.3e-15,
+            "source-side swing {swing_n:e} C"
+        );
+        assert!(
+            (swing_p - swing_n).abs() < 1e-20,
+            "drain {swing_p:e} vs source {swing_n:e}"
+        );
+        let none = charge(&rung_a, &[1.65, 1.65, 3.3]);
+        assert!(
+            none.charge.iter().all(|&q| q == 0.0),
+            "rung A carries charge {:?}",
+            none.charge
+        );
+
+        for x in [
+            [1.655, 1.65, 3.3],
+            [1.65, 1.65, 2.6],
+            [0.4, 1.65, 0.0],
+            [1.6, 1.65, 2.55],
+        ] {
+            let s = charge(&rung_c, &x);
+            for col in 0..3 {
+                let h = 1e-6;
+                let (mut xp, mut xm) = (x, x);
+                xp[col] += h;
+                xm[col] -= h;
+                let (qp, qm) = (charge(&rung_c, &xp), charge(&rung_c, &xm));
+                for row in 0..3 {
+                    let fd = (qp.charge[row] - qm.charge[row]) / (2.0 * h);
+                    let an = s.dcharge[row * 3 + col];
+                    let scale = an.abs().max(fd.abs()).max(1e-18);
+                    assert!(
+                        (fd - an).abs() / scale < 1e-5,
+                        "x = {x:?}, d q{row} / d x{col}: analytic {an:e}, difference {fd:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `models/snn/synapse_2t2r_mos.va`, the 2T2R synapse with mos_switch.va's fitted access
+    /// switch folded in: with the word line high, each path carries exactly V / (R_cell + R_on)
+    /// with PSP103's R_on; with it low, the synapse is near-open; and the Jacobian matches a
+    /// central difference in all four terminals.
+    #[test]
+    fn the_folded_fitted_synapse_puts_psp103s_r_on_in_series_with_each_cell() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models/snn");
+        let src = std::fs::read_to_string(format!("{dir}/synapse_2t2r_mos.va")).expect("reads");
+        let mut design =
+            va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+                .expect("compiles");
+        // levp = 0 (8 kOhm), levn = 2 (15 kOhm)
+        for p in design.modules[0].params.iter_mut() {
+            match p.name.as_str() {
+                "levp" => p.default = 0.0,
+                "levn" => p.default = 2.0,
+                _ => {}
+            }
+        }
+        let inst =
+            va_codegen::build_instance(&design.modules[0], &[0, 1, 2, 3], &mut 4).expect("builds");
+        let load = |x: &[f64]| {
+            let mut s = va_abi::stamps::DenseStamp::new(4);
+            inst.load(
+                x,
+                &va_abi::ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
+            s
+        };
+
+        // [V(vp), V(vn), V(sl), V(wl)]: the crossbar's read biases, word line high.
+        let on = load(&[1.75, 1.55, 1.65, 3.3]);
+        let r_on = 376.97;
+        let (ip, in_) = (0.1 / (8e3 + r_on), -0.1 / (15e3 + r_on));
+        assert!(
+            (on.residual[0].abs() - ip).abs() < 1e-6 * ip,
+            "I(vp) {}",
+            on.residual[0]
+        );
+        assert!(
+            (on.residual[1].abs() - in_.abs()).abs() < 1e-6 * ip,
+            "I(vn) {}",
+            on.residual[1]
+        );
+        let off = load(&[1.75, 1.55, 1.65, 0.0]);
+        assert!(
+            off.residual[0].abs() < 1e-12,
+            "off current {}",
+            off.residual[0]
+        );
+
+        for x in [
+            [1.75, 1.55, 1.65, 3.3],
+            [1.75, 1.55, 1.65, 2.6],
+            [1.75, 1.55, 1.65, 2.55],
+            [1.75, 1.55, 1.65, 0.0],
+        ] {
+            let s = load(&x);
+            for col in 0..4 {
+                let h = 1e-6;
+                let (mut xp, mut xm) = (x, x);
+                xp[col] += h;
+                xm[col] -= h;
+                let (rp, rm) = (load(&xp), load(&xm));
+                for row in 0..4 {
+                    let fd = (rp.residual[row] - rm.residual[row]) / (2.0 * h);
+                    let an = s.jac(row, col);
+                    let scale = an.abs().max(fd.abs()).max(1e-12);
+                    assert!(
+                        (fd - an).abs() / scale < 1e-5,
+                        "x = {x:?}, d r{row} / d x{col}: analytic {an:e}, difference {fd:e}"
+                    );
+                }
+            }
+        }
+    }
+
     /// `is_pure_in_x` (device-bypass prototype): asserted as the property bypass relies on, not
     /// only as flags. Every module that claims purity must stamp the same values at the same
     /// `x` under a different time, step coefficients and committed state; the ones that read
@@ -10356,6 +10671,97 @@ endmodule
 
     /// Which branches `va_codegen` proves are ideal shorts. The costly mistake is a false "yes",
     /// which pins a real current to zero, so most cases here are ones that must be refused.
+    #[test]
+    fn the_collapse_plan_folds_setup_variables_and_finds_dead_rows() {
+        // PSP103's `CollapsableR` shape: the arm is chosen by a variable the setup computes from
+        // a parameter, which `ideal_shorts` (literals and parameters only) cannot fold.
+        let plan = |body: &str, r: f64| -> (usize, usize, usize) {
+            let src = format!(
+                "`include \"disciplines.vams\"
+module m(a, b); inout a, b; electrical a, b, c; parameter real r = 0; real rr;
+  analog begin {body} end
+endmodule
+"
+            );
+            let design = compile_model(&src, body);
+            let mut module = design.modules[0].clone();
+            module.params[0].default = r;
+            let compiled = va_codegen::CompiledModel::new(&module).expect("compiles");
+            let c = compiled.collapse();
+            (
+                compiled.ideal_shorts().len(),
+                c.shorts.len(),
+                c.dead_rows.len(),
+            )
+        };
+        let collapsible = "rr = r * 1.0; \
+            if (rr > 0.0) I(a, c) <+ V(a, c) / rr; else V(a, c) <+ 0.0; \
+            I(c, b) <+ V(c, b) / 1k;";
+        assert_eq!(
+            plan(collapsible, 0.0),
+            (0, 1, 0),
+            "r = 0: a short, through `rr`"
+        );
+        assert_eq!(
+            plan(collapsible, 5.0),
+            (0, 0, 1),
+            "r > 0: a resistor, its row dead"
+        );
+        // Reassigned during the load: `rr` is no longer the setup's value to fold.
+        let bias = "rr = r * 1.0; rr = rr + V(a, b); \
+            if (rr > 0.0) I(a, c) <+ V(a, c) / 1k; else V(a, c) <+ 0.0; \
+            I(c, b) <+ V(c, b) / 1k;";
+        assert_eq!(
+            plan(bias, 0.0),
+            (0, 0, 0),
+            "a per-load variable is not folded"
+        );
+    }
+
+    #[test]
+    fn collapse_nodes_joins_shorted_nodes_and_drops_their_rows() {
+        let src = "`include \"disciplines.vams\"
+module m(a, b); inout a, b; electrical a, b, c, d; parameter real r = 0; real rr;
+  analog begin
+    rr = r * 1.0;
+    if (rr > 0.0) I(a, c) <+ V(a, c) / rr; else V(a, c) <+ 0.0;
+    if (rr > 0.0) I(c, d) <+ V(c, d) / rr; else V(c, d) <+ 0.0;
+    I(d, b) <+ V(d, b) / 1k;
+  end
+endmodule
+";
+        let design = compile_model(src, "collapse");
+        let module = design.modules[0].clone();
+        let compiled = va_codegen::CompiledModel::new(&module).expect("compiles");
+        // a = net 0, b = net 1; c and d internal.
+        let mut assigned = vec![None; module.nodes.len()];
+        assigned[0] = Some(0);
+        assigned[1] = Some(1);
+        let mut next = 2;
+        let (full, dropped) = collapse_nodes(&compiled, assigned, &mut next);
+        assert_eq!(
+            &full[..4],
+            &[0, 1, 0, 0],
+            "c and d join a through the two shorts"
+        );
+        assert_eq!(next, 2, "no fresh unknown for a node that joined a net");
+        assert_eq!(dropped.len(), 2, "both shorts' rows left out");
+        // The same with both ends on different nets: never merged.
+        let mut assigned = vec![None; module.nodes.len()];
+        assigned[0] = Some(0);
+        assigned[1] = Some(1);
+        assigned[2] = Some(1);
+        let mut next = 2;
+        let (full, dropped) = collapse_nodes(&compiled, assigned, &mut next);
+        assert_eq!(full[2], 1, "c stays on its own net");
+        assert_eq!(full[3], 1, "d joins c's net through the second short");
+        assert_eq!(
+            dropped.len(),
+            1,
+            "only the short that did not join two nets"
+        );
+    }
+
     #[test]
     fn only_provable_zero_potential_branches_are_ideal_shorts() {
         let count = |body: &str, sh: Option<f64>| -> usize {

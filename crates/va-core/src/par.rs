@@ -202,7 +202,229 @@ struct BypassEntry {
     /// where the first-order correction reads its drift, found once when the recording is
     /// stored rather than searched for on every replay.
     cols: Vec<u32>,
+    /// The recording split by destination for the parallel replay ([`Buckets`]), built against
+    /// the pattern and partition it carries and rebuilt when either changes.
+    buckets: Option<Buckets>,
 }
+
+/// One addition of a replay, resolved: where it lands and what it adds.
+#[derive(Clone, Copy, Debug)]
+struct Op {
+    kind: OpKind,
+    /// A matrix slot (`Jac`, `Dq`) or a row (`Res`, `Chg`, `ResCorr`, `ChgCorr`).
+    dst: u32,
+    /// For a correction, the position in the entry's `x0` of the column whose drift it reads.
+    col: u32,
+    v: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpKind {
+    /// `jacobian[dst] += v`.
+    Jac,
+    /// `dcharge[dst] += v`.
+    Dq,
+    /// `residual[dst] += v`.
+    Res,
+    /// `charge[dst] += v`.
+    Chg,
+    /// `residual[dst] += v · d` if the drift `d` of `x0[col]` is non-zero.
+    ResCorr,
+    /// `charge[dst] += v · d`, likewise.
+    ChgCorr,
+}
+
+/// A recording's additions split by the part of the system they land in
+/// ([`crate::sparse::SparseSystem::parts`]), each part's in recording order.
+#[derive(Debug)]
+struct Buckets {
+    pattern: u64,
+    bounds: (Vec<usize>, Vec<usize>),
+    parts: Vec<Vec<Op>>,
+}
+
+impl Buckets {
+    /// Split `rec`'s stamps, with their resolved `slots` (one per stamp, [`NO_SLOT`] where none)
+    /// and, for a bypass replay, the drift column of each (`cols`; `None` for a fresh
+    /// recording, which is added as it stands). `None` if a stamp cannot be replayed in parallel:
+    /// one the pattern does not hold yet (it goes to the system's overflow map), or a side
+    /// effect (a task, a file operation, a bound, an excitation), which must reach the sink in
+    /// order with everything else.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        rec: &Recorder,
+        slots: &[u32],
+        cols: Option<&[u32]>,
+        dim: usize,
+        pattern: u64,
+        rows: &[usize],
+        slot_bounds: &[usize],
+        reuse: Option<Buckets>,
+    ) -> Option<Buckets> {
+        let k = rows.len() - 1;
+        let part_of =
+            |b: &[usize], i: usize| b.partition_point(|&x| x <= i).saturating_sub(1).min(k - 1);
+        // An earlier recording's buffers, emptied, rather than k new allocations: many threads
+        // building at once otherwise queue on the allocator's lock.
+        let mut parts = match reuse {
+            Some(b) if b.parts.len() == k => {
+                let mut p = b.parts;
+                p.iter_mut().for_each(Vec::clear);
+                p
+            }
+            _ => vec![Vec::new(); k],
+        };
+        for (n, s) in rec.0.iter().enumerate() {
+            let slot = slots.get(n).copied().unwrap_or(NO_SLOT);
+            let col = cols.map_or(NO_SLOT, |c| c.get(n).copied().unwrap_or(NO_SLOT));
+            let (r, c, v, mat, corr) = match *s {
+                Stamp::Jacobian(r, c, v) => (r, c, v, OpKind::Jac, OpKind::ResCorr),
+                Stamp::Dcharge(r, c, v) => (r, c, v, OpKind::Dq, OpKind::ChgCorr),
+                Stamp::Residual(r, v) | Stamp::Charge(r, v) => {
+                    if r < dim {
+                        let kind = if matches!(s, Stamp::Residual(..)) {
+                            OpKind::Res
+                        } else {
+                            OpKind::Chg
+                        };
+                        parts[part_of(rows, r)].push(Op {
+                            kind,
+                            dst: u32::try_from(r).ok()?,
+                            col: NO_SLOT,
+                            v,
+                        });
+                    }
+                    continue;
+                }
+                Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) | Stamp::File(..) => {
+                    return None
+                }
+            };
+            // The matrix entry: by its slot; one outside the system is dropped, as the sink
+            // drops it; one inside it the pattern lacks is not replayable here.
+            if r < dim && c < dim {
+                if slot == NO_SLOT {
+                    return None;
+                }
+                parts[part_of(slot_bounds, slot as usize)].push(Op {
+                    kind: mat,
+                    dst: slot,
+                    col: NO_SLOT,
+                    v,
+                });
+            }
+            // Its first-order correction, after it, as `BypassEntry::replay_corrected_sparse`.
+            if col != NO_SLOT && r < dim {
+                parts[part_of(rows, r)].push(Op {
+                    kind: corr,
+                    dst: u32::try_from(r).ok()?,
+                    col,
+                    v,
+                });
+            }
+        }
+        Some(Buckets {
+            pattern,
+            bounds: (rows.to_vec(), slot_bounds.to_vec()),
+            parts,
+        })
+    }
+
+    fn valid_for(&self, pattern: u64, rows: &[usize], slots: &[usize]) -> bool {
+        self.pattern == pattern && self.bounds.0 == rows && self.bounds.1 == slots
+    }
+}
+
+/// `rec`'s slots, one per stamp ([`NO_SLOT`] for a residual or charge entry or an entry the
+/// pattern lacks), found and recorded in the instance's `layout` exactly as
+/// [`SlotCache::replay`] finds them — the layout ends up the same — without adding anything.
+fn resolve(
+    layout: &mut Vec<(usize, usize, u32)>,
+    rec: &Recorder,
+    pattern: &crate::sparse::Pattern,
+) -> Vec<u32> {
+    let mut k = 0;
+    rec.0
+        .iter()
+        .map(|s| match *s {
+            Stamp::Jacobian(r, c, _) | Stamp::Dcharge(r, c, _) => {
+                let slot = match layout.get(k) {
+                    Some(&(lr, lc, slot)) if lr == r && lc == c => slot,
+                    _ => {
+                        let slot = pattern
+                            .slot(r, c)
+                            .and_then(|x| u32::try_from(x).ok())
+                            .unwrap_or(NO_SLOT);
+                        layout.truncate(k);
+                        layout.push((r, c, slot));
+                        slot
+                    }
+                };
+                k += 1;
+                slot
+            }
+            _ => NO_SLOT,
+        })
+        .collect()
+}
+
+/// A bypassed recording's slots against `pattern`, as `BypassEntry::replay_corrected_sparse`
+/// resolves them.
+fn slots_against(rec: &Recorder, pattern: &crate::sparse::Pattern) -> Vec<u32> {
+    rec.0
+        .iter()
+        .map(|s| match *s {
+            Stamp::Jacobian(r, c, _) | Stamp::Dcharge(r, c, _) => pattern
+                .slot(r, c)
+                .and_then(|k| u32::try_from(k).ok())
+                .unwrap_or(NO_SLOT),
+            _ => NO_SLOT,
+        })
+        .collect()
+}
+
+/// Apply `ops` (one part's bucket of one recording) to `part`; `x0`/`x` give a correction's
+/// drift. Exactly the additions the serial replay makes there, in its order.
+///
+/// `corrections: false` skips the first-order corrections: a fresh recording, taken at `x`
+/// itself, is added as it stands, as the serial replay adds it.
+fn apply(
+    ops: &[Op],
+    part: &mut crate::sparse::Part<'_>,
+    x0: &[(usize, f64)],
+    x: &[f64],
+    corrections: bool,
+) {
+    for op in ops {
+        let d = op.dst as usize;
+        match op.kind {
+            OpKind::Jac => part.jacobian[d - part.slot0] += op.v,
+            OpKind::Dq => part.dcharge[d - part.slot0] += op.v,
+            OpKind::Res => part.residual[d - part.row0] += op.v,
+            OpKind::Chg => part.charge[d - part.row0] += op.v,
+            OpKind::ResCorr | OpKind::ChgCorr if corrections => {
+                let dx = x0.get(op.col as usize).map_or(0.0, |&(u, v0)| x[u] - v0);
+                if dx != 0.0 {
+                    let to = if op.kind == OpKind::ResCorr {
+                        &mut part.residual
+                    } else {
+                        &mut part.charge
+                    };
+                    to[d - part.row0] += op.v * dx;
+                }
+            }
+            OpKind::ResCorr | OpKind::ChgCorr => {}
+        }
+    }
+}
+
+/// In [`Mode::Auto`], the replay goes parallel from this many recorded stamps in an assembly
+/// (replayed and fresh together): about the work of the ~40 µs hand-off, many times over.
+pub const PARALLEL_MIN_REPLAY_STAMPS: usize = 50_000;
+
+/// Assemblies [`replay_parallel`] has replayed in parallel, process-wide — for tests to check
+/// that the path they mean to exercise ran.
+static PARALLEL_REPLAYS: AtomicU64 = AtomicU64::new(0);
 
 /// A stamp with no cached slot: a residual or charge entry, a stamp outside the system, or one
 /// the pattern does not (yet) hold. Replayed through the sink as before.
@@ -257,49 +479,81 @@ impl Bypass {
         rec: Recorder,
         slots: Option<(u64, Vec<u32>)>,
     ) {
-        let x0: Vec<(usize, f64)> = inst
-            .unknowns()
-            .iter()
-            .filter(|&&u| u < x.len())
-            .map(|&u| (u, x[u]))
-            .collect();
-        let covered = rec.0.iter().all(|s| match *s {
-            // A column outside `x` is ground: it never moves, so it needs no correction.
-            Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => {
-                c >= x.len() || x0.iter().any(|&(u, _)| u == c)
-            }
-            // A task is a side effect a replay would repeat or skip at the wrong time; a module
-            // with one does not claim purity (`va_codegen`), and this keeps a hand-written one
-            // that did from being bypassed.
-            Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) | Stamp::File(..) => {
-                false
-            }
-            _ => true,
-        });
-        if covered {
-            let cols = rec
-                .0
-                .iter()
-                .map(|s| match *s {
-                    Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => x0
-                        .iter()
-                        .position(|&(u, _)| u == c)
-                        .and_then(|k| u32::try_from(k).ok())
-                        .unwrap_or(NO_SLOT),
-                    _ => NO_SLOT,
-                })
-                .collect();
-            self.entries[i] = Some(BypassEntry {
-                x0,
-                rec,
-                slots,
-                cols,
-            });
-        } else {
+        self.entries[i] = make_entry(inst, x, rec, slots);
+        if self.entries[i].is_none() {
             self.eligible[i] = false;
-            self.entries[i] = None;
         }
     }
+}
+
+/// [`Bypass::store`]'s entry for `rec`, instance `inst`'s fresh recording at `x`, or `None` if
+/// it cannot be replayed (a column the instance does not own, or a side effect) — the instance
+/// is then no longer eligible.
+fn make_entry(
+    inst: &dyn ModelInstance,
+    x: &[f64],
+    rec: Recorder,
+    slots: Option<(u64, Vec<u32>)>,
+) -> Option<BypassEntry> {
+    make_entry_reusing(inst, x, rec, slots, None)
+}
+
+/// [`make_entry`], refilling `old`'s buffers (and keeping its buckets' for [`Buckets::build`])
+/// instead of allocating new ones.
+fn make_entry_reusing(
+    inst: &dyn ModelInstance,
+    x: &[f64],
+    rec: Recorder,
+    slots: Option<(u64, Vec<u32>)>,
+    old: Option<BypassEntry>,
+) -> Option<BypassEntry> {
+    let (mut x0, mut cols, buckets) = match old {
+        Some(o) => (o.x0, o.cols, o.buckets),
+        None => (Vec::new(), Vec::new(), None),
+    };
+    x0.clear();
+    x0.extend(
+        inst.unknowns()
+            .iter()
+            .filter(|&&u| u < x.len())
+            .map(|&u| (u, x[u])),
+    );
+    let covered = rec.0.iter().all(|s| match *s {
+        // A column outside `x` is ground: it never moves, so it needs no correction.
+        Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => {
+            c >= x.len() || x0.iter().any(|&(u, _)| u == c)
+        }
+        // A task is a side effect a replay would repeat or skip at the wrong time; a module
+        // with one does not claim purity (`va_codegen`), and this keeps a hand-written one
+        // that did from being bypassed.
+        Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) | Stamp::File(..) => false,
+        _ => true,
+    });
+    if !covered {
+        return None;
+    }
+    cols.clear();
+    cols.extend(rec.0.iter().map(|s| {
+        match *s {
+            Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => x0
+                .iter()
+                .position(|&(u, _)| u == c)
+                .and_then(|k| u32::try_from(k).ok())
+                .unwrap_or(NO_SLOT),
+            _ => NO_SLOT,
+        }
+    }));
+    Some(BypassEntry {
+        x0,
+        rec,
+        slots,
+        cols,
+        // Stale until rebuilt (its pattern and partition say so); kept for its buffers.
+        buckets: buckets.map(|b| Buckets {
+            pattern: u64::MAX,
+            ..b
+        }),
+    })
 }
 
 impl BypassEntry {
@@ -516,6 +770,18 @@ impl SlotCache {
 
     /// Add instance `i`'s recording `rec` into `sys`: exactly what [`Recorder::replay`] does,
     /// through the layout instead of a hash lookup wherever the layout still matches.
+    /// Ready the layouts for `n` instances against pattern `id` (cleared if the pattern is
+    /// new), as [`Self::replay`] does before it reads one.
+    fn prepare(&mut self, n: usize, id: u64) {
+        if id != self.pattern {
+            self.layouts.iter_mut().for_each(Vec::clear);
+            self.pattern = id;
+        }
+        if self.layouts.len() < n {
+            self.layouts.resize_with(n, Vec::new);
+        }
+    }
+
     fn replay(&mut self, i: usize, rec: &Recorder, sys: &mut SparseSystem) {
         let id = sys.pattern().id();
         if id != self.pattern {
@@ -634,6 +900,261 @@ fn bypass_into(
     } else {
         work.into_iter().map(eval).collect()
     };
+    if let Target::Sparse(sys, cache) = &mut target {
+        if let Some(recorded) = replay_parallel(instances, x, sys, cache, bypass, &hit, recorded) {
+            // Not this assembly: the serial replay below takes it, unchanged.
+            return serial_replay(instances, x, target, bypass, &hit, recorded);
+        }
+        return;
+    }
+    serial_replay(instances, x, target, bypass, &hit, recorded);
+}
+
+/// The parallel replay (2.19.0): the bypassed recordings and the fresh ones added into the
+/// sparse system by several threads at once, **with the bits of the serial replay**.
+///
+/// Floating-point addition is not associative, so what has to be kept is the order in which
+/// each *entry* of the system receives its additions, not the order of the devices. The
+/// system is split into parts by destination — part `p` owns a range of residual/charge rows
+/// and a range of Jacobian/charge-Jacobian slots ([`SparseSystem::parts`]) — and each
+/// recording's additions are bucketed by the part they land in ([`Buckets`], kept with a
+/// bypassed device's recording). Each thread then walks every device in instance order and
+/// applies that device's bucket for its own part: every entry still receives its additions in
+/// instance order, then recording order, as the serial loop gives them.
+///
+/// Returns the fresh recordings back (`Some`) when this assembly cannot or should not be done
+/// this way, for [`serial_replay`]: one thread, `Mode::Never`, too little to replay
+/// ([`PARALLEL_MIN_REPLAY_STAMPS`]), or a recording with a stamp only the serial sink can take
+/// (one the pattern does not hold yet, or a side effect).
+fn replay_parallel(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    sys: &mut SparseSystem,
+    cache: &mut SlotCache,
+    bypass: &mut Bypass,
+    hit: &[bool],
+    recorded: Vec<(usize, Recorder)>,
+) -> Option<Vec<(usize, Recorder)>> {
+    let threads = rayon::current_num_threads();
+    let stamps: usize = recorded.iter().map(|(_, r)| r.0.len()).sum::<usize>()
+        + hit
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| **h)
+            .filter_map(|(i, _)| bypass.entries[i].as_ref())
+            .map(|e| e.rec.0.len())
+            .sum::<usize>();
+    let go = threads > 1
+        && match mode() {
+            Mode::Never => false,
+            Mode::Always => true,
+            Mode::Auto => stamps >= PARALLEL_MIN_REPLAY_STAMPS,
+        };
+    if !go {
+        return Some(recorded);
+    }
+    let n = hit.len();
+    let dim = sys.dim();
+    let nnz = sys.pattern().nnz();
+    let pid = sys.pattern().id();
+    let k = threads.min(dim.max(1));
+    let rows: Vec<usize> = (0..=k).map(|p| p * dim / k).collect();
+    let slot_bounds: Vec<usize> = (0..=k).map(|p| p * nnz / k).collect();
+    // The fresh recordings by instance.
+    let mut taken: Vec<Option<Recorder>> = (0..n).map(|_| None).collect();
+    for (i, rec) in recorded {
+        if let Some(t) = taken.get_mut(i) {
+            *t = Some(rec);
+        }
+    }
+
+    // Each device on its own, in parallel. A bypassed one: its buckets, rebuilt only if the
+    // pattern or the partition moved. A fresh one: its slots (its layout updated as the serial
+    // replay would update it), and either its new bypass entry with buckets (eligible: what the
+    // serial loop would store), or plain buckets (not eligible, or not replayable).
+    let pattern = sys.pattern();
+    cache.prepare(n, pid);
+    let mut plan: Vec<Fresh> = (0..n).map(|_| Fresh::None).collect();
+    let eligible: &[bool] = &bypass.eligible;
+    let ok = cache.layouts[..n]
+        .par_iter_mut()
+        .zip(bypass.entries.par_iter_mut())
+        .zip(plan.par_iter_mut())
+        .zip(taken.par_iter_mut())
+        .enumerate()
+        .map(|(i, (((layout, entry), plan), t))| {
+            if hit[i] {
+                let Some(e) = entry.as_mut() else {
+                    return true;
+                };
+                if e.buckets
+                    .as_ref()
+                    .is_some_and(|b| b.valid_for(pid, &rows, &slot_bounds))
+                {
+                    return true;
+                }
+                if e.slots.as_ref().is_none_or(|(p, _)| *p != pid) {
+                    e.slots = Some((pid, slots_against(&e.rec, pattern)));
+                }
+                let slots = e.slots.as_ref().map_or(&[][..], |(_, s)| s.as_slice());
+                let old = e.buckets.take();
+                e.buckets = Buckets::build(
+                    &e.rec,
+                    slots,
+                    Some(&e.cols),
+                    dim,
+                    pid,
+                    &rows,
+                    &slot_bounds,
+                    old,
+                );
+                return e.buckets.is_some();
+            }
+            let Some(rec) = t.take() else {
+                return true;
+            };
+            let slots = resolve(layout, &rec, pattern);
+            if eligible[i] {
+                // Not built from `make_entry` alone: an uncovered recording makes no entry.
+                let covered = covered_by(instances[i], x, &rec);
+                if covered {
+                    let old = entry.take();
+                    let Some(mut e) =
+                        make_entry_reusing(instances[i], x, rec, Some((pid, slots)), old)
+                    else {
+                        return false;
+                    };
+                    let s = e.slots.as_ref().map_or(&[][..], |(_, s)| s.as_slice());
+                    let old = e.buckets.take();
+                    e.buckets = Buckets::build(
+                        &e.rec,
+                        s,
+                        Some(&e.cols),
+                        dim,
+                        pid,
+                        &rows,
+                        &slot_bounds,
+                        old,
+                    );
+                    let built = e.buckets.is_some();
+                    *plan = Fresh::Entry(e);
+                    return built;
+                }
+            }
+            let b = Buckets::build(&rec, &slots, None, dim, pid, &rows, &slot_bounds, None);
+            let built = b.is_some();
+            *plan = Fresh::Plain(rec, b);
+            built
+        })
+        .reduce(|| true, |a, b| a && b);
+    if !ok {
+        // Back to the serial replay: the fresh recordings in instance order. A replaced entry
+        // was taken out for its buffers; the serial loop stores a new one anyway.
+        let recorded = plan
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                Fresh::Entry(e) => Some((i, e.rec)),
+                Fresh::Plain(r, _) => Some((i, r)),
+                Fresh::None => None,
+            })
+            .collect();
+        return Some(recorded);
+    }
+
+    // Apply: thread `p` walks every device in instance order, adding its part's bucket.
+    let Some(parts) = sys.parts(&rows, &slot_bounds) else {
+        let recorded = plan
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                Fresh::Entry(e) => Some((i, e.rec)),
+                Fresh::Plain(r, _) => Some((i, r)),
+                Fresh::None => None,
+            })
+            .collect();
+        return Some(recorded);
+    };
+    {
+        let entries = &bypass.entries;
+        let plan = &plan;
+        parts.into_par_iter().enumerate().for_each(|(p, mut part)| {
+            for (i, &h) in hit.iter().enumerate() {
+                if h {
+                    if let Some(e) = entries[i].as_ref() {
+                        if let Some(b) = e.buckets.as_ref() {
+                            apply(&b.parts[p], &mut part, &e.x0, x, true);
+                        }
+                    }
+                    continue;
+                }
+                match &plan[i] {
+                    Fresh::Entry(e) => {
+                        if let Some(b) = e.buckets.as_ref() {
+                            apply(&b.parts[p], &mut part, &e.x0, x, false);
+                        }
+                    }
+                    Fresh::Plain(_, Some(b)) => apply(&b.parts[p], &mut part, &[], x, false),
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    // The bookkeeping the serial loop does as it goes.
+    PARALLEL_REPLAYS.fetch_add(1, Ordering::Relaxed);
+    bypass.hits += hit.iter().filter(|h| **h).count() as u64;
+    for (i, p) in plan.into_iter().enumerate() {
+        match p {
+            Fresh::Entry(e) => {
+                bypass.misses += 1;
+                bypass.entries[i] = Some(e);
+            }
+            Fresh::Plain(..) if bypass.eligible[i] => {
+                // Eligible, but its recording cannot be replayed: as `Bypass::store` decides.
+                bypass.misses += 1;
+                bypass.entries[i] = None;
+                bypass.eligible[i] = false;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What [`replay_parallel`] does with one instance's fresh recording.
+enum Fresh {
+    /// Not evaluated fresh this assembly.
+    None,
+    /// Bypass-eligible and replayable: the entry the serial loop would store, with buckets.
+    Entry(BypassEntry),
+    /// Added as it stands; `None` buckets if a stamp cannot be added in parallel.
+    Plain(Recorder, Option<Buckets>),
+}
+
+/// Whether [`make_entry`] would keep `rec` (every Jacobian column the instance's own or ground,
+/// and no side effect) — asked before it consumes the recording.
+fn covered_by(inst: &dyn ModelInstance, x: &[f64], rec: &Recorder) -> bool {
+    let unknowns = inst.unknowns();
+    rec.0.iter().all(|s| match *s {
+        Stamp::Jacobian(_, c, _) | Stamp::Dcharge(_, c, _) => {
+            c >= x.len() || unknowns.iter().any(|&u| u == c && u < x.len())
+        }
+        Stamp::Excitation(..) | Stamp::BoundStep(_) | Stamp::Task(..) | Stamp::File(..) => false,
+        _ => true,
+    })
+}
+
+/// The serial replay: every bypassed recording and every fresh one, in instance order, through
+/// the target.
+fn serial_replay(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    mut target: Target<'_>,
+    bypass: &mut Bypass,
+    hit: &[bool],
+    recorded: Vec<(usize, Recorder)>,
+) {
     let mut recorded = recorded.into_iter().peekable();
     for (i, &is_hit) in hit.iter().enumerate() {
         if is_hit {
@@ -886,6 +1407,80 @@ mod tests {
         fn is_pure_in_x(&self) -> bool {
             true
         }
+    }
+
+    /// The parallel replay (2.19.0) gives the serial replay's bits: a chain of bypassable
+    /// diodes over eight nodes — so the four parts each own rows and slots — and one diode
+    /// evaluated fresh every time, assembled on a 4-thread pool with the replay forced parallel
+    /// and, as the reference, through the sink one stamp at a time. Within tolerance (replays
+    /// with corrections), past it (fresh recordings stored with their buckets), and after the
+    /// pattern grows (every bucket rebuilt).
+    #[test]
+    fn the_parallel_replay_gives_the_serial_replays_bits() {
+        let pure: Vec<PureDiode> = (0..7)
+            .map(|k| PureDiode(Diode::new(k, k + 1, 1e-14, 1.0 + 0.1 * k as f64, 0.025_852)))
+            .collect();
+        let plain = Diode::new(7, GROUND, 1e-14, 1.0, 0.025_852);
+        let mut insts: Vec<&dyn ModelInstance> =
+            pure.iter().map(|d| d as &dyn ModelInstance).collect();
+        insts.push(&plain);
+        let n = insts.len();
+        let st = || (0..n).map(|_| ModelState::stateless()).collect::<Vec<_>>();
+        let dim = 8;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("a pool");
+        parallel_always(|| {
+            pool.install(|| {
+                let mut bp_par = Bypass::new(&insts, 1e-3, vec![1e-6; dim]);
+                let mut bp_ref = Bypass::new(&insts, 1e-3, vec![1e-6; dim]);
+                let mut sys_par = SparseSystem::new(dim);
+                let mut sys_ref = SparseSystem::new(dim);
+                let mut cache = SlotCache::new();
+                let before = PARALLEL_REPLAYS.load(Ordering::Relaxed);
+                let base: Vec<f64> = (0..dim)
+                    .map(|k| 0.6 * (dim - k) as f64 / dim as f64)
+                    .collect();
+                for (step, bump) in [0.0, 0.0, 4e-4, 0.0, 5e-2, 5e-2 + 1e-4, 0.1]
+                    .iter()
+                    .enumerate()
+                {
+                    let x: Vec<f64> = base.iter().map(|v| v + bump).collect();
+                    sys_par.clear();
+                    load_all_bypass_sparse(
+                        &insts,
+                        &x,
+                        &ANALYSIS_DC,
+                        st(),
+                        &mut sys_par,
+                        &mut bp_par,
+                        &mut cache,
+                    );
+                    sys_par.finish();
+                    sys_ref.clear();
+                    load_all_bypass(&insts, &x, &ANALYSIS_DC, st(), &mut sys_ref, &mut bp_ref);
+                    sys_ref.finish();
+                    let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(sys_par.residual_values()),
+                        bits(sys_ref.residual_values()),
+                        "step {step}"
+                    );
+                    assert_eq!(
+                        bits(sys_par.jacobian().values()),
+                        bits(sys_ref.jacobian().values()),
+                        "step {step}"
+                    );
+                }
+                assert_eq!((bp_par.hits, bp_par.misses), (bp_ref.hits, bp_ref.misses));
+                assert!(bp_par.hits >= 14, "replays happened: {} hits", bp_par.hits);
+                assert!(
+                    PARALLEL_REPLAYS.load(Ordering::Relaxed) > before,
+                    "the parallel replay ran"
+                );
+            })
+        });
     }
 
     /// Dense residual and Jacobian of one load through `f`.

@@ -41,12 +41,12 @@ the improvement is locked in.
 A file named `warn_*` is accepted, with a warning. Use this for source whose validity is
 unsettled, or which a simulator should run but flag. The `warning:` line is asserted like a
 `message:`, and `at:` checks the warning's location. Currently one file:
-`warn_port_without_direction.va` (see `release.txt` 2.18.5 for why it is not an error).
+`warn_port_without_direction.va` (see `release.txt` 2.23.3 for why it is not an error).
 
 ## Adding a case
 
 Name the file `<stage>_<what is wrong>.va` and keep it minimal: one mistake, in an otherwise
 valid model. That way the expected verdict is unambiguous. Assert the part of the message that
 names what the user wrote (the identifier, the function, the counts), not the boilerplate around
-it. Give every case an `at:` when the diagnostic is located; since 2.18.3 every stage's is,
+it. Give every case an `at:` when the diagnostic is located; since 2.23.1 every stage's is,
 except `cgen`, whose input (the IR) carries no source positions.
