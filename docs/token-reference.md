@@ -843,16 +843,20 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
     production" in §1.6 below. A continuous net's type comes from its discipline. `signed` is
     likewise not accepted — it has no meaning for a continuous net. Zero corpus files use
     either slot.
-  - **Required for every port (2.18.4).** A port in the module header with no `input`/
-    `output`/`inout` declaration is an elaboration error naming the port, located at its name
-    in the header. Until 2.18.4 it was silently accepted. The basis is IEEE 1364's rule that
+  - **A port without a direction is a warning (2.18.5).** A port in the module header with
+    no `input`/`output`/`inout` declaration is reported as a warning naming the port, located
+    at its name in the header (`va-cli`: `[warn ]` in `check`, `[va-cli] warning:` in `sim`),
+    and is elaborated as `inout`. Before 2.18.4 it was accepted silently; 2.18.4 made it an
+    error, and 2.18.5 a warning because the rule below is unsettled. The basis is IEEE 1364's rule that
     each port in the port list is also declared input, output, or inout in the module body
     (§12.3.3 — cited from memory, not checked against the text), which Verilog-A's module
     rules inherit, and Keysight ADS's Verilog-A reference, which says a port's direction must
     be declared. **To be checked against the local LRM copy:** this entry used to quote the LRM as
     saying "`inout` is the default for analog bidirectional ports", which would make the
     omission legal. That sentence could not be located when 2.18.4 was written (the LRM is not
-    in the repository), so it is no longer stated here as a quotation.
+    in the repository), so it is no longer stated here as a quotation. If the LRM requires the
+    direction, the warning can become an error again; if it makes `inout` the default, the
+    warning can be dropped. Either change is in `elaborate::port_direction_warnings`.
 - **Expressions and Evaluation**: N/A — pure declaration.
 - **Structural and Analog Usage**: Module-level only.
 - **Comparison with Traditional Constructs**: Analogous to a C function's parameter direction

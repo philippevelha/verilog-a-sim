@@ -13,6 +13,8 @@
 //! - `poor:` records a defect in an otherwise correct diagnostic (wrong line, an internal token
 //!   name). It is not asserted, because asserting it would lock the defect in; it is counted
 //!   and printed, so the list of messages worth improving lives next to the inputs that show it.
+//! - `expect: ok` with a `warning:` line records questionable source that is accepted **with a
+//!   warning**; the warning text is asserted, on a `[warn ]` line.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +32,8 @@ struct Expectation {
     gap: Option<String>,
     /// A known defect in the message.
     poor: Option<String>,
+    /// Text a `[warn ]` line must contain.
+    warning: Option<String>,
 }
 
 fn read_expectation(path: &Path) -> Expectation {
@@ -49,6 +53,7 @@ fn read_expectation(path: &Path) -> Expectation {
             "at" => e.at = Some(value),
             "gap" => e.gap = Some(value),
             "poor" => e.poor = Some(value),
+            "warning" => e.warning = Some(value),
             "fixed" => {}
             other => panic!("{}: unknown header key `{other}`", path.display()),
         }
@@ -73,7 +78,8 @@ fn verdict(stdout: &str) -> String {
             continue;
         };
         let label = label.trim();
-        if label == "ok" || label == "none" {
+        // A warning is not a verdict: the module it is about still passes or fails on its own.
+        if label == "ok" || label == "none" || label == "warn" {
             continue;
         }
         return if tail.contains("refused: ") {
@@ -140,8 +146,19 @@ fn every_error_corpus_file_is_reported_as_its_header_says() {
                 problems.push(format!("not located at {at}"));
             }
         }
-        if want_success && want.gap.is_none() {
-            problems.push("`expect: ok` needs a `gap:` line saying what is wrong".to_string());
+        if want_success && want.gap.is_none() && want.warning.is_none() {
+            problems.push(
+                "`expect: ok` needs a `gap:` line saying what is wrong, or a `warning:` line"
+                    .to_string(),
+            );
+        }
+        if let Some(w) = &want.warning {
+            let warned = stdout
+                .lines()
+                .any(|l| l.trim_start().starts_with("[warn ]") && l.contains(w.as_str()));
+            if !warned {
+                problems.push(format!("no `[warn ]` line contains `{w}`"));
+            }
         }
         if !problems.is_empty() {
             failures.push(format!(

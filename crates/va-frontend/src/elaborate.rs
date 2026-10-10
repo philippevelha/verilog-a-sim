@@ -831,24 +831,8 @@ impl Elaborator<'_> {
     /// interned in `collect_nodes`), a stated simplification for a wiring convention
     /// (`va-netlist`) that doesn't exist yet to have an opinion on connection order.
     fn resolve_ports(&mut self) -> Result<(), FrontendError> {
-        let directed: HashSet<&str> = self
-            .ast
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Direction { nets, .. } => Some(nets.iter().map(String::as_str)),
-                _ => None,
-            })
-            .flatten()
-            .collect();
         for (port_idx, port) in self.ast.ports.iter().enumerate() {
             self.cur_at = self.ast.port_pos.get(port_idx).copied().flatten();
-            if !directed.contains(port.as_str()) {
-                return Err(elab(format!(
-                    "port `{port}` has no direction; declare it `inout {port};` (or `input` / \
-                     `output`)"
-                )));
-            }
             // § `$port_connected`: the parent named this port in an empty connection slot, so
             // it is unconnected for *this* instantiation. Recorded by index, which is what
             // `Expr::PortConnected` carries.
@@ -4689,6 +4673,49 @@ fn call_site_state_operator(b: Builtin) -> Option<&'static str> {
 /// ascending-index-order lists ([`Elaborator::resolve_ports`], [`Elaborator::resolve_conn_nodes`]),
 /// so a width mismatch here means the connection's own width — not just port count — disagrees
 /// with the module's declared port width.
+/// A warning for each port of `ast` that the module never gives a direction
+/// (`input`/`output`/`inout`), located at the port's name in the header.
+///
+/// A warning, not an error. The model is elaborated exactly as if the port were declared
+/// `inout`, the only direction an analog terminal behaves as here. Whether the omission is
+/// legal Verilog-A is unsettled in this project: IEEE 1364 requires every listed port to be
+/// declared with a direction, while `docs/token-reference.md` once quoted the LRM as making
+/// `inout` the default for analog ports, and the LRM text was not available to settle it.
+/// 2.18.4 made it an error; 2.18.5 made it this warning, so a model that relies on the default
+/// still runs and its author is still told.
+///
+/// The caller decides where the warnings go (`va-cli` prints them beside its other warnings);
+/// elaboration itself never prints.
+pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<String> {
+    let directed: HashSet<&str> = ast
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Direction { nets, .. } => Some(nets.iter().map(String::as_str)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    ast.ports
+        .iter()
+        .enumerate()
+        .filter(|(_, port)| !directed.contains(port.as_str()))
+        .map(|(i, port)| {
+            let at = ast
+                .port_pos
+                .get(i)
+                .copied()
+                .flatten()
+                .map_or_else(String::new, |p| format!("at {}: ", ast.describe(p)));
+            format!(
+                "{at}module `{}`: port `{port}` has no direction; it is treated as `inout`. \
+                 Declare it `inout {port};` (or `input` / `output`) to be explicit",
+                ast.name
+            )
+        })
+        .collect()
+}
+
 /// Map every net name a module declares to the discipline it was declared with
 /// (§ port-connection discipline checking).
 ///

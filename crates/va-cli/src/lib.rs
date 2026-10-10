@@ -616,6 +616,9 @@ fn compile_model_library_with_context(
     // Pass 2: elaborate each module against every module in the library.
     let mut modules = Vec::with_capacity(library.len());
     for ast in &library {
+        for w in va_frontend::elaborate::port_direction_warnings(ast) {
+            eprintln!("[va-cli] warning: {w}");
+        }
         // The include path goes to elaboration too, not just to the preprocessor: a
         // `$table_model` data file is found the same way a `` `include `` is.
         let m = va_frontend::elaborate::elaborate_unit(
@@ -1412,6 +1415,9 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         }
         let mut all_ok = true;
         for ast in &library[range] {
+            for w in va_frontend::elaborate::port_direction_warnings(ast) {
+                println!("  [warn ] {file}: {w}");
+            }
             match va_frontend::elaborate::elaborate_unit(
                 ast,
                 &library,

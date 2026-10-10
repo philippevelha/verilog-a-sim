@@ -22,6 +22,39 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.5 - 2026-10-10
+--------------------
+**A port without a direction is a warning, not an error.** 2.18.4 rejected it, but the rule
+behind that is unsettled here. IEEE 1364 requires a direction for every listed port, while
+`docs/token-reference.md` once quoted the LRM as making `inout` the default for analog ports,
+and the LRM was not available to check. A model that relies on the default now runs, and its
+author is told, at the port's name:
+  `[va-cli] warning: at r.va:5:10: module `r`: port `p` has no direction; it is treated as
+  `inout`. Declare it `inout p;` (or `input` / `output`) to be explicit`
+`check` prints the same text as a `[warn ]` line, and the file still counts as a pass (exit 0).
+"Treated as `inout`" is exact: elaboration does not read port directions at all, so every port
+is an inout node.
+
+The warning comes from `va_frontend::elaborate::port_direction_warnings(&ModuleAst)`. It is a
+function the caller prints from, the shape the other model warnings already have: `va_ir::Module`
+is a frozen interface, and elaboration does not print. The error corpus learned a third kind of
+entry, `expect: ok` with a `warning:` line, which asserts the warning text on a `[warn ]` line
+(and `at:` its location). `elab_port_without_direction.va` became
+`warn_port_without_direction.va`. The corpus runner no longer reads a `[warn ]` line as a
+failing verdict.
+
+Unchanged from 2.18.4: the access-function check (`Temp` on `electrical`) is still an error,
+and the 198 test models that 2.18.4 gave explicit `inout` declarations keep them (they are valid
+either way). No committed model triggers the warning (`check models` 66/66, `benchmark/models`
+25/25, `external` 8/9).
+
+To settle the rule: if the LRM requires the direction, `port_direction_warnings` can feed an
+error again; if it makes `inout` the default, the warning can go.
+
+Measured: `cargo test --workspace` 959 passed, 0 failed (the corpus: 36 files, 0 gaps, 0 poor
+messages, 1 warning case); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.18.4 - 2026-10-10
 --------------------
 **The error corpus's last two gaps are closed; it now has none.**
