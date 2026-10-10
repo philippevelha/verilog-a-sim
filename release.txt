@@ -22,6 +22,35 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.0 - 2026-10-10
+--------------------
+**Rung B: the fitted access switch gets the triode's V_DS term, and rung C's +1.6 mV bias is
+explained.** `mos_switch.va` gains `kds` (default 0 = rungs A/C, byte-identical): the gate drive
+loses kds * V(p, n). `fit_switch.py` fits kds = 0.5533 with vt = 0.948284 V (and refits the
+charge with that vt). R_on then follows PSP103 within 0.09 % over +-20 mV, against rung A's 1.9 %.
+`--switch fitbc` / `--synapses fitbc` write the decks. New: `bias_phases.py`, which splits a
+fitted switch's V_m error by cycle phase, and `edge_kick.py`, a one-word-line bench for the
+word-line edge kicks.
+
+  * Why: on the MNIST crossbar, rung C's error grows +0.77 mV a neuron-cycle while the stage
+    integrates with the word lines steady, the same for rung A. Its gate drive was measured from
+    the source-line terminal, so the switch was too conductive on each synapse's branch above the
+    source line and not enough on the one below, and both push V_m up. Rung B removes it
+    (+1.8 uV a neuron-cycle left).
+  * Ten digits, against the same PSP103 references: worst V_m error 5.5 -> 1.8 mV, RMS 1.2-2.2
+    -> 0.6-1.0 mV, every spike (340) still agrees. The sign flips: -0.5 to -0.8 mV mean.
+  * What is left (not modelled): the first ~50 ps of each word-line edge, which V_m sees because
+    the edges coincide with the clock edge to the picosecond. PSP103's gate resistance (~73 Ohm),
+    its lower overlap capacitance at the swing's low end (3.46 against 3.74 fF) and the cell
+    node's junction capacitance account for it on a bench, but do not separate cleanly.
+  * Cost: ~25 % slower than rung C on the crossbar (381-526 s against 322-376 s). The closest
+    calls move as much as with rung C (up to 6.8 mV), since the edge charge decides them. Fig. 5:
+    same spikes, worst V_m 0.30 mV against rung C's 0.21, now one-signed.
+
+Measured: `cargo test --workspace` 964 passed (new: the V_DS term's R_on and Jacobian against
+central differences); `cargo xtask validate` 28/28; fmt and clippy clean. Fig. 5 with rungs A and
+C byte-identical before and after the model change.
+
 2.23.0+2 - 2026-10-10
 ----------------------
 **Rung C holds on all ten MNIST digits: every spike agrees with PSP103.** The 16-neuron hidden-2

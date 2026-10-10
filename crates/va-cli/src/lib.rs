@@ -8401,6 +8401,78 @@ endmodule
         }
     }
 
+    /// Rung B of `models/snn/mos_switch.va`: with switch_fit.json's `kds` and `vt_b`, the gate
+    /// drive loses `kds` of V(p, n), so R_on follows PSP103's V_DS dependence (369.87 / 381.84
+    /// Ohm at -20 / +20 mV, within 0.15 %), while R_on at the fit's own +5 mV is still rung A's
+    /// 376.97 Ohm. The conductance's Jacobian, which now depends on V(p) and V(n) through the
+    /// gate drive as well, matches a central difference on both sides of the source line.
+    #[test]
+    fn the_fitted_switchs_vds_term_follows_psp103s_r_on_and_differentiates_correctly() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models/snn");
+        let src = std::fs::read_to_string(format!("{dir}/mos_switch.va")).expect("reads");
+        let mut design =
+            va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+                .expect("compiles");
+        for p in design.modules[0].params.iter_mut() {
+            match p.name.as_str() {
+                "kds" => p.default = 0.5533,
+                "vt" => p.default = 0.948284,
+                _ => {}
+            }
+        }
+        let inst =
+            va_codegen::build_instance(&design.modules[0], &[0, 1, 2], &mut 3).expect("builds");
+        let load = |x: &[f64]| {
+            let mut s = va_abi::stamps::DenseStamp::new(3);
+            inst.load(
+                x,
+                &va_abi::ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
+            s
+        };
+        let r_on = |vds: f64| (vds / load(&[1.65 + vds, 1.65, 3.3]).residual[0]).abs();
+        assert!(
+            (r_on(0.005) - 376.97).abs() < 0.02,
+            "R_on(+5 mV) = {}",
+            r_on(0.005)
+        );
+        for (vds, psp) in [(-0.02, 369.873), (0.02, 381.843)] {
+            let r = r_on(vds);
+            assert!(
+                (r / psp - 1.0).abs() < 1.5e-3,
+                "R_on({vds} V) = {r} Ohm, PSP103 {psp}"
+            );
+        }
+
+        for x in [
+            [1.67, 1.65, 3.3],  // strong inversion, p above n
+            [1.63, 1.65, 3.3],  // strong inversion, p below n
+            [1.66, 1.65, 2.6],  // near vt, x > 0
+            [1.70, 1.65, 2.55], // just below vt, x < 0
+        ] {
+            let s = load(&x);
+            for col in 0..3 {
+                let h = 1e-6;
+                let (mut xp, mut xm) = (x, x);
+                xp[col] += h;
+                xm[col] -= h;
+                let (rp, rm) = (load(&xp), load(&xm));
+                for row in 0..3 {
+                    let fd = (rp.residual[row] - rm.residual[row]) / (2.0 * h);
+                    let an = s.jac(row, col);
+                    let scale = an.abs().max(fd.abs()).max(1e-12);
+                    assert!(
+                        (fd - an).abs() / scale < 1e-5,
+                        "x = {x:?}, d r{row} / d x{col}: analytic {an:e}, difference {fd:e}"
+                    );
+                }
+            }
+        }
+    }
+
     /// `models/snn/synapse_2t2r_mos.va`, the 2T2R synapse with mos_switch.va's fitted access
     /// switch folded in: with the word line high, each path carries exactly V / (R_cell + R_on)
     /// with PSP103's R_on; with it low, the synapse is near-open; and the Jacobian matches a

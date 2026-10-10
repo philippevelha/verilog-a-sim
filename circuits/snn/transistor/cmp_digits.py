@@ -4,8 +4,8 @@
 
 `<runs-dir>/<digit>/<kind>.out` and `.err` are the va-cli `--tran` output and log of
 `scripts/benchmark/xbar_digits.sh`, one per access device: `tx` (PSP103), `txbp` (PSP103 with
-`--bypass`), `fitc` (rung C) and `fit` (rung A). A run counts only if its `.err` ends in `exit 0`.
-The reference is `tx`, or `txbp` where `tx` is missing; the other kinds are compared with it.
+`--bypass`), `fitbc` (rungs B and C), `fitc` (rung C) and `fit` (rung A). A run counts only if
+its `.err` ends in `exit 0`. The reference is `tx`, or `txbp` where `tx` is missing; the other kinds are compared with it.
 
 As cmp_vm.py does, V_m is sampled 0.5 ns before each cycle ends, and a spike is V(spk) > 1.65 V
 at mid-cycle. The threshold margin is V_m - V_th at the cycle's end, where the flip-flop
@@ -23,7 +23,8 @@ from cmp_vm import T, at, read  # noqa: E402
 
 VTH = 2.4
 N = 16
-NAMES = {"tx": "PSP103", "txbp": "PSP103 --bypass", "fitc": "rung C", "fit": "rung A"}
+NAMES = {"tx": "PSP103", "txbp": "PSP103 --bypass", "fitbc": "rungs B+C", "fitc": "rung C",
+         "fit": "rung A"}
 
 
 def vm(run, n, dt):
@@ -58,7 +59,7 @@ def main():
         print(f"digit {d} (reference {NAMES[rk]}): {sum(map(len, rs.values()))} spikes on "
               f"{sum(1 for v in rs.values() if v)} neurons; closest call h2_{m[1]} step {m[2]}, "
               f"{1e3 * (re_[m[1]][m[2]] - VTH):+.1f} mV")
-        for k in ("txbp", "fitc", "fit"):
+        for k in ("txbp", "fitbc", "fitc", "fit"):
             if k == rk or not ok(k):
                 continue
             t = read(path(k, ".out"))
@@ -75,7 +76,7 @@ def main():
                      "SPIKES DIFFER on " + ", ".join(f"h2_{i}" for i in diff)))
             worst[k] = max(worst.get(k, 0.0), abs(e[w]))
             worst[k + " differ"] = worst.get(k + " differ", 0) + len(diff)
-    for k in ("txbp", "fitc", "fit"):
+    for k in ("txbp", "fitbc", "fitc", "fit"):
         if k in worst:
             print(f"{NAMES[k]}: worst {1e3 * worst[k]:.3f} mV over the digits, "
                   f"{worst[k + ' differ']} neuron(s) with a different spike train")

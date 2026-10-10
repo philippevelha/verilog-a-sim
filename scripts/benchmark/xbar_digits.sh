@@ -4,7 +4,7 @@
 #
 #   bash scripts/benchmark/xbar_digits.sh <runs-dir> <jobs> <threads> <kind> <digit>...
 #
-# <kind> is gen_xbar_deck.py's --synapses (tx, fit, fitc, ideal), or txbp: tx with --bypass.
+# <kind> is gen_xbar_deck.py's --synapses (tx, fit, fitc, fitbc, ideal), or txbp: tx with --bypass.
 # <jobs> runs go at once with <threads> threads each. Each writes <runs-dir>/<digit>/<kind>.out and
 # .err (ending in `exit <status>`); a run whose .err already ends in `exit 0` is skipped, so the
 # same command resumes. Compare with circuits/snn/transistor/cmp_digits.py <runs-dir>.

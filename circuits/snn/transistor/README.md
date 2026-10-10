@@ -358,7 +358,7 @@ rung C, and +8.3 mV with rung A.
 not yet separated: the missing junction capacitance (the overshooting kick changes how the drain
 charge drains away), the triode V_DS term (rung B, estimated at ~0.2 mV a cycle), and the
 half-and-half charge partition away from V_DS = 0. The coverage is the same as rung A's: one image,
-16 of 64 hidden-2 neurons, 20 of 29 cycles.
+16 of 64 hidden-2 neurons, 20 of 29 cycles. (2.24.0: it is mostly the V_DS term; see "Where rung C's bias comes from".)
 
 ## Ten digits (2026-10-10, 2.23.0+2)
 
@@ -431,3 +431,88 @@ moves it by up to 13 mV (digit 6), and rung C by at most 6.7 mV (digit 5).
 
 **Coverage.** One image per digit, 16 of 64 hidden-2 neurons, 20 of 29 cycles, behavioural
 neurons, hidden-1 word lines as ideal PWL rails.
+
+## Where rung C's bias comes from; rung B (2026-10-10, 2.24.0)
+
+Rung C reads +0.9 to +1.7 mV above PSP103 on every digit. `bias_phases.py` splits each cycle into
+phases and sums how much V_m(rung C) - V_m(PSP103) changes in each (digit 1, 16 neurons, 18
+cycles):
+
+| Phase (ns from the cycle start) | Rung C | Rungs B+C |
+|---|---|---|
+| -1 .. 0: clk high, then falling | +7 uV | +0.4 uV |
+| 0 .. 0.05: word-line edges start, stage still integrating | -534 uV | -544 uV |
+| 0.05 .. 2.5: edges finish, stage closed | -202 uV | +96 uV |
+| 2.5 .. 122.5: V_m shares with CL (scales what is there) | +108 uV | +348 uV |
+| 122.5 .. 127: clk rising | +13 uV | 0 |
+| **127 .. 249: integrating, word lines steady** | **+767 uV** | **+1.8 uV** |
+
+**The integration phase (the V_DS term).** Rung A gains exactly the same +767 uV there as rung C,
+so it is not charge. It does not track the net synaptic current (-0.02 % of it), and it grows
+with the number of word lines on. The cause is the switch's gate drive: rungs A and C measure it
+from the source-line terminal, V(c, n). In triode the drive is from the channel, which sits
+V_DS / 2 away, plus the body effect. PSP103's R_on moves +0.30 Ohm per mV of V_DS: 369.87 Ohm at
+-20 mV, 375.45 at 0, 381.84 at +20. Each synapse has one branch above the source line (+0.1 V
+through its cell) and one below (-0.1 V). Without the term, the switch is too conductive on the
+first and not enough on the second, and both errors push V_m up. A second, smaller part: rung A
+pins R_on at V_DS = +5 mV, where PSP103's is 1.5 Ohm above its value at 0.
+
+**Rung B** (`mos_switch.va`, `kds`): the gate drive loses `kds` of V(p, n). `fit_switch.py` fits
+it to PSP103's R_on at +-5, +-10 and +-20 mV: kds = 0.5533 (0.5 is the channel's midpoint; the
+rest is body effect). vt moves to 0.948284 V, so that R_on at the fit's own +5 mV is rung A's
+376.97 Ohm exactly. The charge is refitted with that vt: cov_b = 3.741 fF, cch_b = 8.434 fF, within
+0.28 fC. R_on then follows PSP103 within 0.09 % from -20 to +20 mV; rung A was 1.9 % off. With
+`kds = 0` (the default) the switch is rung A or C exactly: Fig. 5's rung A and C outputs are
+byte-identical before and after. Decks: `gen_fig5_access.py --switch fitbc`,
+`gen_xbar_deck.py --synapses fitbc` (or `gen_mnist_tx.py`).
+
+**Ten digits with rungs B+C** (same runs and references as the section above, 1 thread, 4 at
+once):
+
+| Digit | Rung C: mean / RMS / worst V_m - PSP103 | Rungs B+C: mean / RMS / worst | Spikes (both) |
+|---|---|---|---|
+| 0 | +1.58 / 1.90 / 4.6 mV | -0.66 / 0.76 / 1.2 mV | all 17 agree |
+| 1 | +1.05 / 1.39 / 3.5 mV | -0.56 / 0.67 / 1.0 mV | all 32 agree |
+| 2 | +1.36 / 1.81 / 5.0 mV | -0.63 / 0.79 / 1.4 mV | all 41 agree |
+| 3 | +1.06 / 1.51 / 4.0 mV | -0.55 / 0.69 / 1.1 mV | all 52 agree |
+| 4 | +1.15 / 1.50 / 4.2 mV | -0.53 / 0.70 / 1.5 mV | all 43 agree |
+| 5 | +1.51 / 1.81 / 4.3 mV | -0.67 / 0.79 / 1.2 mV | all 26 agree |
+| 6 | +1.69 / 2.20 / 5.5 mV | -0.80 / 1.01 / 1.8 mV | all 34 agree |
+| 7 | +1.19 / 1.48 / 3.4 mV | -0.58 / 0.71 / 1.1 mV | all 33 agree |
+| 8 | +0.93 / 1.17 / 3.0 mV | -0.51 / 0.60 / 1.0 mV | all 22 agree |
+| 9 | +1.05 / 1.41 / 3.3 mV | -0.54 / 0.68 / 1.2 mV | all 40 agree |
+
+- **Worst error over the ten digits: 5.5 -> 1.8 mV; RMS 1.2-2.2 -> 0.6-1.0 mV.** The sign flips:
+  rungs B+C read low in 78 % of the 3 200 samples.
+- **The closest calls do not improve.** Rungs B+C move them by up to 6.8 mV (digit 5), as rung C
+  did (6.7 mV). Those margins are read at the cycle's edge, where the edge charge below decides.
+- **Cost: ~25 % slower than rung C** (381-526 s against 322-376 s, 1 thread, 4 at once), the
+  conductance now depending on V(p, n) as well. Fig. 5 is unchanged in its spikes (6, 10, 14); its
+  worst V_m error is 0.30 mV against rung C's 0.21, now one-signed (low) where rung C's errors
+  partly cancelled.
+
+**What is left: the word-line edges' first 50 ps (-0.5 to -0.8 mV).** The word lines start their
+1 ns ramp at the instant clk is halfway down, and sl_stage.va passes current until ~50 ps after.
+So V_m sees only the first few percent of each gate swing. The per-edge kicks in that window
+(`bias_phases.py`, part 2) are, on digit 1: PSP103 +217 uV per rising word line and -1195 uV per
+falling one; rungs C and B+C +235 / -1336 uV. `edge_kick.py` reproduces the gap on a bench of 4
+synapses on one word line (+7 % rising, +12 % falling) and tries what PSP103 has and the switch
+does not:
+
+| Rungs B+C, plus | Rising kick vs PSP103 | Falling kick vs PSP103 |
+|---|---|---|
+| nothing | +7.0 % | +11.8 % |
+| PSP103's gate resistance, ~73 Ohm | +7.4 % | +1.9 % |
+| 3 fF junction capacitance on each cell node | 0.0 % | +8.8 % |
+| both | +6.5 % | -0.3 % |
+
+The gate resistance (RSHG * W / (3 NGCON) / (NGCON L) + NF * RGO + RINT / (W L) for this device)
+delays the charge by a few ps, which is most of the falling gap. The rising gap also follows the
+overlap capacitance at the swing's low end: PSP103's is 3.46 fF there, rung C's constant 3.74 fF.
+Setting cov = 3.464 fF on the crossbar makes digit 1's rising kick +218 uV, PSP103's. The three do
+not separate cleanly (with both added, the rising kick goes back to +6.5 %), so none is modelled.
+
+This residual depends on the testbench's timing as much as on the device: the word-line edges
+coincide with the clock edge to the picosecond, so V_m samples the edge's first ~50 ps. With a
+non-overlap gap of a few hundred ps between the two, this neuron model (sl_stage.va) would pass none
+of the edge charge to V_m, whatever the switch. That is not tested here.

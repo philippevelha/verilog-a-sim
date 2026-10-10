@@ -8,6 +8,15 @@
 // `n` is the source-line terminal and the gate drive is measured from it, so the port order is
 // vswitch.va's and a deck swaps one for the other.
 //
+// Rung B adds the triode's V_DS term: the gate drive loses `kds` of V(p, n),
+//     g = 1/roff + beta * ns * ln(1 + exp((V(c, n) - kds * V(p, n) - vt) / ns))
+// kds = 0.5 would measure the drive from the channel's midpoint; PSP103's body effect makes it
+// 0.5533. It matters because the crossbar's two branches carry V_DS of opposite sign: without it,
+// the switch is too conductive on the branch above the source line and not enough on the one
+// below, and both errors push V_m the same way (+0.77 mV a neuron-cycle on the MNIST crossbar,
+// circuits/snn/transistor/README.md, "Where rung C's bias comes from"). With kds = 0, the default,
+// the switch is rung A or C exactly.
+//
 // Rung C adds the gate's charge, which is what moves the source line on a word-line edge. Each
 // channel terminal carries
 //     q(V_G - V_terminal) = cov * V + cch * ns * ln(1 + exp((V - vt) / ns))
@@ -23,20 +32,28 @@
 // inversion 10 %). Rung C's fitted values (switch_fit.json, not the defaults) are cov = 3.742 fF
 // and cch = 8.472 fF per terminal, from a quasi-static gate ramp at V_DS = 0. Over the full gate
 // swing that moves 18.23 fC through each terminal, and the fit is within 0.29 fC of PSP103 all the
-// way.
+// way. Rung B's fitted values (switch_fit.json: kds, vt_b, and the charge refitted with that vt,
+// cov_b, cch_b) are kds = 0.5533 with vt = 0.948284 V, so R_on at the fit's own +5 mV is rung A's.
+// R_on then follows PSP103 within 0.09 % from -20 to +20 mV, against rung A's 1.9 %.
 //
 // Limitations: the fit holds for one geometry, one corner, room temperature and one source-line
-// voltage. V_SB is folded into `vt`, so a different V_ref needs a refit. Linear in V_DS: PSP103's
-// R_on moves -1.9 % / +1.3 % at -20 / +20 mV, which this model does not follow (with the switch
-// on in the crossbar, |V_DS| stays under 20 mV). The conductance is not symmetric: if `p` drops
-// below `n`, the real device's source becomes `p`, but here the gate drive is still V(c, n). Rung
-// A has no charge. Rung C's charge is quasi-static (no channel transit time). It splits the channel
-// half and half between the terminals, which is PSP103's partition at V_DS = 0 and not elsewhere.
+// voltage. V_SB is folded into `vt`, so a different V_ref needs a refit. Without rung B (kds = 0)
+// it is linear in V_DS: PSP103's R_on moves -1.9 % / +1.3 % at -20 / +20 mV, which rungs A and C
+// do not follow (with the switch on in the crossbar, |V_DS| stays under 20 mV). Rung B's V_DS
+// term is fitted over +-20 mV, not beyond. The conductance is not symmetric: if `p` drops below
+// `n`, the real device's source becomes `p`, but here the gate drive is still measured from `n`
+// (rung B's term only shifts it by kds * V(p, n)). Rung A has no charge. Rung C's charge is
+// quasi-static (no channel transit time). It splits the channel half and half between the
+// terminals, which is PSP103's partition at V_DS = 0 and not elsewhere.
 // It has no gate-bulk charge, which loads the word-line driver but never reaches the source line.
 // It has no junction capacitance, so the drain-side charge lands on a cell node with less
 // capacitance than PSP103's. Its kick overshoots: an HRS cell node falls to -0.23 V on a falling
 // word line where PSP103's stops at +0.40 V. A real drain junction would start to conduct there;
-// this model does not. The kick still settles before the neuron integrates (Fig. 5).
+// this model does not. The kick still settles before the neuron integrates (Fig. 5). The overlap
+// capacitance is one constant, 3.74 fF, the best fit over the whole swing; PSP103's is 3.46 fF at
+// the swing's low end. There is no gate resistance (PSP103's is ~73 Ohm here). These three matter
+// only in the first ~50 ps of a word-line edge; on the MNIST crossbar the source-line stage still
+// integrates then, and they leave ~-0.5 mV on V_m (README, "Where rung C's bias comes from").
 // There is no noise and no saturation region.
 `include "../disciplines.vams"
 
@@ -50,9 +67,10 @@ module mos_switch(p, n, c);
     parameter real roff = 1e12 from (0:inf);
     parameter real cov = 0 from [0:inf);
     parameter real cch = 0 from [0:inf);
+    parameter real kds = 0 from [0:1];
     real x, g, xs, xd, qs, qd;
     analog begin
-        x = (V(c, n) - vt) / ns;
+        x = (V(c, n) - kds * V(p, n) - vt) / ns;
         // softplus, written so exp never overflows
         if (x > 0)
             g = 1.0 / roff + beta * ns * (x + ln(1.0 + exp(-x)));

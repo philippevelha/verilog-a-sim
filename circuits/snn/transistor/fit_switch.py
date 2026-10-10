@@ -121,6 +121,29 @@ def model_g(vgs, beta, vt, ns):
     return beta * ns * softplus((vgs - vt) / ns)
 
 
+def fit_kds(ron, beta, vt, ns, vgs, vds):
+    """Rung B: kds, the fraction of V_DS the gate drive loses (x = (V_GS - kds * V_DS - vt) / ns),
+    by least squares on the relative R_on error at the V_DS values in `ron` ({V_DS: PSP103
+    R_on}). vt moves with kds to vt - kds * vds, so the model at the fit's own V_DS is rung A's
+    exactly. Returns kds, that vt, and the model's R_on at each V_DS."""
+    def r_model(k, d):
+        return 1.0 / model_g(vgs - k * d, beta, vt - k * vds, ns)
+
+    def err(k):
+        return sum((r_model(k, d) / r - 1) ** 2 for d, r in ron.items())
+
+    lo, hi = 0.0, 1.0
+    g = (math.sqrt(5) - 1) / 2
+    for _ in range(200):  # golden section on kds
+        a, b = hi - g * (hi - lo), lo + g * (hi - lo)
+        if err(a) < err(b):
+            hi = b
+        else:
+            lo = a
+    k = (lo + hi) / 2
+    return k, vt - k * vds, {d: r_model(k, d) for d in ron}
+
+
 def fit(pts, vds, ns):
     top = pts[-1][1]
     strong = [(v, i) for v, i in pts if i > 0.1 * top]
@@ -164,9 +187,10 @@ def main():
     ron_fit = 1.0 / model_g(vgmax, beta, vt, ns)
 
     lin = {}
-    for d in (-0.02, 0.02):
+    for d in (-0.02, -0.01, -0.005, 0.005, 0.01, 0.02):
         i = sweep(a.va, a.vs, d, vgmax, vgmax)[-1][1]
         lin[d] = d / i
+    kds, vt_b, ron_b = fit_kds(lin, beta, vt, ns, vgmax, a.vds)
     print(f"PSP103 sweep: V_S = {a.vs} V, V_DS = {a.vds * 1e3:g} mV, V_GS 0..{vgmax:g} V, "
           f"{len(pts)} points ({len(strong)} in strong inversion)")
     print(f"fit:  beta = {beta:.6e} A/V^2   vt = {vt:.6f} V   ns = {ns:.6f} V")
@@ -176,22 +200,33 @@ def main():
     print("PSP103 R_on at V_DS = -20 / +20 mV: "
           + " / ".join(f"{lin[d]:.2f}" for d in (-0.02, 0.02))
           + f" Ohm (rung A holds it at {ron_fit:.2f})")
+    print(f"rung B: kds = {kds:.4f}, vt = {vt_b:.6f} V; R_on at V_DS = "
+          + ", ".join(f"{d * 1e3:+g} mV: {ron_b[d]:.2f} ({(ron_b[d] / lin[d] - 1) * 100:+.2f} %)"
+                      for d in sorted(lin)))
     qpts = charge_ramp(a.va, a.vs, a.vhigh)
     cov, cch, qworst = fit_charge(qpts, vt, ns)
     print(f"charge (rung C), per channel terminal: cov = {cov * 1e15:.4f} fF, "
           f"cch = {cch * 1e15:.4f} fF (vt and ns as rung A); PSP103 moves "
           f"{qpts[-1][1] * 1e15:.3f} fC through one terminal over the full gate swing, the fit's "
           f"largest error on the way is {qworst * 1e15:.3f} fC")
+    cov_b, cch_b, qworst_b = fit_charge(qpts, vt_b, ns)
+    print(f"charge with rung B's vt: cov = {cov_b * 1e15:.4f} fF, cch = {cch_b * 1e15:.4f} fF, "
+          f"largest error {qworst_b * 1e15:.3f} fC")
     out = {
-        "model": "models/snn/mos_switch.va (rung A: beta, vt, ns; rung C adds cov, cch)",
+        "model": "models/snn/mos_switch.va (rung A: beta, vt, ns; rung C adds cov, cch; "
+                 "rung B: kds with vt_b; rungs B+C: kds, vt_b, cov_b, cch_b)",
         "device": "SG13G2 HV NMOS W/L = 10/0.45 um through PSP103, typical corner (tech.inc)",
         "bias": {"vs": a.vs, "vds": a.vds, "vgs_max": vgmax},
         "beta": float(f"{beta:.6e}"), "vt": round(vt, 6), "ns": round(ns, 6),
         "ron_psp103": round(ron_psp, 3), "ron_fit": round(ron_fit, 3),
         "worst_strong_inversion_error": round(worst, 5),
         "ron_psp103_vds_m20mV": round(lin[-0.02], 3), "ron_psp103_vds_p20mV": round(lin[0.02], 3),
+        "kds": round(kds, 4), "vt_b": round(vt_b, 6),
+        "ron_b_vds_m20mV": round(ron_b[-0.02], 3), "ron_b_vds_p20mV": round(ron_b[0.02], 3),
         "cov": float(f"{cov:.6e}"), "cch": float(f"{cch:.6e}"),
         "q_swing_psp103": float(f"{qpts[-1][1]:.6e}"), "q_worst_error": float(f"{qworst:.4e}"),
+        "cov_b": float(f"{cov_b:.6e}"), "cch_b": float(f"{cch_b:.6e}"),
+        "q_worst_error_b": float(f"{qworst_b:.4e}"),
     }
     with open(os.path.join(HERE, "switch_fit.json"), "w", newline="\n") as fh:
         json.dump(out, fh, indent=2)
