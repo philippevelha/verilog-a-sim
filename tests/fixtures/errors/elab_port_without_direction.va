@@ -1,0 +1,8 @@
+// expect: elab
+// at: 5:10
+// message: port `p` has no direction; declare it `inout p;`
+// fixed: 2.18.4 (before: accepted)
+module r(p, n);
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) / 1k;
+endmodule

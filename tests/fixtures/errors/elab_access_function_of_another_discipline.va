@@ -1,0 +1,10 @@
+// expect: elab
+// at: 9:10
+// message: `Temp(...)` is not an access function of discipline `electrical`
+// message: write `V(...)`
+// fixed: 2.18.4 (before: accepted; `va-cli sim` then failed with "singular matrix")
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog Temp(p, n) <+ V(p, n);
+endmodule

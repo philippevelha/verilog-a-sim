@@ -134,6 +134,9 @@ pub enum AccessKind {
 /// A branch access: an access function applied to one or two net terminals.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Access {
+    /// The access function as written (`V`, `I`, `Temp`, `Pwr`, or one a parsed nature
+    /// declares). Elaboration checks it against the discipline of the nets it is applied to.
+    pub func: String,
     /// Potential or flow.
     pub kind: AccessKind,
     /// One net (node-to-reference) or two (explicit branch terminals).

@@ -22,6 +22,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.4 - 2026-10-10
+--------------------
+**The error corpus's last two gaps are closed; it now has none.**
+  * **A port with no direction is an error**, located at the port's name in the header: "port
+    `p` has no direction; declare it `inout p;` (or `input` / `output`)". It used to be
+    accepted.
+  * **An access function from the wrong discipline is an error.** `Temp(p, n)` on `electrical`
+    nets now reports "`Temp(...)` is not an access function of discipline `electrical`, which
+    net `p` is declared with: its access functions are `V` and `I`; write `V(...)` for its
+    potential". It used to compile as a voltage contribution, and `sim` then failed with
+    "singular matrix". The accesses come from the discipline's parsed natures when it was
+    declared in a `discipline` block, else V/I for electrical and Temp/Pwr for thermal. A named
+    branch is checked through its terminals. A net whose discipline names no access function is
+    not checked. The AST's `Access` now keeps the function's name (`func`) to make this possible.
+
+**The direction rule needs checking against the LRM, which is not in this repository.** The
+basis is IEEE 1364's rule that every listed port is declared input/output/inout (cited from
+memory as §12.3.3), plus Keysight ADS's Verilog-A reference. Against it,
+`docs/token-reference.md` used to quote the LRM as saying "`inout` is the default for analog
+bidirectional ports", which would make the omission legal. That quote could not be traced, so
+the doc no longer presents it as a quotation, and says so. If the local LRM does make `inout`
+the default, this check should become a warning; it is one `return Err` in `resolve_ports`.
+
+Cost:
+  * 198 inline test models in `va-frontend` and `va-cli` unit tests omitted their port
+    directions. A script added `inout <ports>;` after each such header (three parser-only tests
+    that index items by position were left as they were). No test's meaning changed, and every
+    test passes. **No committed model was affected**: `check models` 66/66, `check
+    benchmark/models` 25/25, `check external` 8/9, all unchanged. The local third-party
+    corpus is the place a model without directions would show up; it was not run here.
+  * The access check costs +0.5% instructions on `check benchmark/models`: each net's
+    discipline is looked up in a table built once per module.
+
+Measured: `cargo test --workspace` 959 passed, 0 failed (the error corpus, 36 files, 0 gaps,
+0 poor messages, is one of them); `cargo xtask validate` 28 checked, 0 failed, convergence
+28/28.
+
+
 2.18.3 - 2026-10-10
 --------------------
 **Elaboration errors name file:line:col.** Before this, no elaboration error carried a
