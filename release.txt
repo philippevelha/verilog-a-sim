@@ -22,6 +22,14 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.23.0+1 - 2026-10-10
+----------------------
+**Docs only: `notes/rung-c-report.md`, the 2.23.0 rung C write-up as a standalone page.** It
+holds the fit, the Fig. 5 and MNIST comparison against PSP103, the open points (cell-node
+overshoot, the +1.6 mV bias) and the CI note. No code, model or deck changes.
+
+Measured: unchanged from 2.23.0 (no behaviour change); `cargo metadata` reports 2.23.0+1.
+
 2.23.0 - 2026-10-10
 --------------------
 **Rung C: the fitted access switch gets the gate's charge (two more parameters). Fig. 5's V_m
