@@ -195,5 +195,8 @@ The simulator work above makes steps 1 and 3 faster. It does not make step 2 unn
 **Step 2 for the access switch, rung A (2.21.0):** `models/snn/mos_switch.va`, fitted by
 `circuits/snn/transistor/fit_switch.py`. On Fig. 5 it puts V_m within 2.4 mV of the PSP103 deck
 (the 10 Ohm ideal switch: 119 mV), with the same spikes, in 3.2 s instead of 20 s. The remainder
-is the gate's charge at the word-line edges. `circuits/snn/transistor/README.md`, "A switch fitted
-to the transistor", has the measurements and what is not yet checked (the MNIST crossbar).
+is the gate's charge at the word-line edges. On 16 hidden-2 neurons of the MNIST crossbar over 20
+cycles (2.22.0+1), it keeps all 17 of PSP103's spikes at the same steps, with V_m within 14.7 mV,
+in 52 s instead of 2 693 s. The 10 Ohm switch moves three neurons' spikes.
+`circuits/snn/transistor/README.md`, "A switch fitted to the transistor", has the measurements
+and the margins.

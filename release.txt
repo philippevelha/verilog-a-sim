@@ -22,6 +22,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.22.0+1 - 2026-10-10
+----------------------
+**Rung A on the MNIST crossbar with spikes: 16 hidden-2 neurons, 20 cycles, digit 0. All 17 of
+the PSP103 crossbar's spikes land at the same steps, with V_m within 14.7 mV, in 52 s instead of
+2 693 s.** No code change; this records the run 2.22.0 promised.
+  * Reference: the PSP103 crossbar (gen_xbar_deck.py, VA_JIT=on, no bypass or collapse, so the
+    reference carries no approximation of its own). 17 spikes on h2_6, h2_8, h2_11 and h2_15.
+  * Constant 376.97 Ohm (synapse_2t2r): 14.7 mV, the same spikes. As in Fig. 5, the word lines
+    are ideal rails, so rung A's gate dependence never comes into play.
+  * 10 Ohm switch: 1 767 mV. h2_8 spikes one step early, h2_11 once more, and h2_5 twice where
+    PSP103 never fires.
+  * **The cost, stated plainly:** the error has one sign. Rung A's V_m reads 4-15 mV high,
+    growing ~3 mV a cycle between resets, which is the gate charge Fig. 5 showed. One latch
+    decision here keeps only 4.7 mV of margin (h2_5, step 16: PSP103 16.1 mV below V_th, rung A
+    4.7 mV below). Both decisions agree, but nothing guarantees that on another image. Rung C
+    (charge) would remove the bias.
+  * Coverage: one image, 16 of 64 hidden-2 neurons, 20 of 29 cycles, hidden-3 and output not
+    included.
+  * circuits/snn/transistor/README.md has the table; snn-transistor-performance.md §4.6 has a
+    line.
+Measured: `cargo test --workspace` 962 passed; `cargo xtask validate` 28/28 (unchanged since
+2.22.0, rerun at this version).
+
 2.22.0 - 2026-10-10
 --------------------
 **Rung A on the MNIST crossbar: a folded synapse with the fitted switch.** On 8 hidden-2 neurons

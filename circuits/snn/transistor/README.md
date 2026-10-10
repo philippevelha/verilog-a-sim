@@ -283,6 +283,30 @@ artefact of their ideal sources.
 - one V_ref (V_SB is folded into vt, so another V_ref needs a refit);
 - linear in V_DS, not symmetric, no charge, no noise;
 - the reference is our own PSP103 run, not a reference simulator.
-- **Not yet checked on the MNIST crossbar.** That needs a folded `synapse_2t2r` form, which rung A
-  allows exactly because it is linear in V_DS, and a comparison against the small crossbar deck
-  (`scripts/benchmark/gen_xbar_deck.py`).
+
+**The MNIST crossbar** (2.22.0, 2.22.0+1). `synapse_2t2r_mos.va` folds rung A into the 2T2R
+synapse. That is exact, because the switch is linear in V_DS and its gate drive is taken from the
+source line, so the cell node goes away. `gen_xbar_deck.py --synapses tx|fit|ideal` writes the same
+slice of hidden layer 2 (digit 0, behavioural neurons) with each kind of access device. Compared
+where the flip-flop latches V_m (`cmp_vm.py`), against the PSP103 crossbar:
+
+| Hidden-2 slice | Access device | Worst \|V_m - PSP103\| | Spikes | Wall (`VA_JIT=on`, 4 threads) |
+|---|---|---|---|---|
+| 8 neurons, 5 cycles | PSP103 (17 710 unknowns) | — | none in this window | 227 s |
+| | rung A (302 unknowns) | 9.4 mV | — | 4.6 s |
+| | 10 Ohm switch | 206 mV | — | 4.0 s |
+| 16 neurons, 20 cycles | PSP103 | — | 17, on h2_6, 8, 11, 15 | 2 693 s |
+| | **rung A** | **14.7 mV** | **all 17 at the same steps** | **52 s** |
+| | constant 376.97 Ohm | 14.7 mV | all the same | 54 s |
+| | 10 Ohm switch | 1 767 mV | h2_8 one step early, h2_11 one extra, h2_5 two spurious | 60 s |
+
+- **What the margin is.** The error has one sign: rung A's V_m is 4-15 mV above PSP103's, growing
+  by ~3 mV a cycle between resets. That is the gate charge Fig. 5 showed. Two latch decisions
+  in this slice come close to V_th = 2.4 V. h2_8 at step 8 is 2.2 mV above in PSP103 and 8.3 mV
+  above with rung A. h2_5 at step 16 is 16.1 mV below in PSP103 and only 4.7 mV below with
+  rung A. Both decisions agree, but a slightly different image could flip one. Rung C (the gate's
+  charge) would remove the bias; rung B (V_DS) would not.
+- **Again no better than a constant R_on.** The hidden-1 word lines in these decks are ideal
+  PWL rails.
+- 20 of the network's 29 cycles, 16 of hidden layer 2's 64 neurons, one image. Hidden layers 3 and
+  the output are not in the slice.
