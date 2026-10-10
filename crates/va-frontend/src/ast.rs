@@ -16,7 +16,25 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ExprRef(pub u32);
 
+/// Where a construct starts in the source the user wrote: after `` `include `` expansion and
+/// `` `line `` overrides are undone, so it names a line of a file they have open, not a line of
+/// the preprocessed text. `file` indexes [`ModuleAst::files`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SrcPos {
+    /// Index into [`ModuleAst::files`].
+    pub file: u32,
+    /// 1-based line.
+    pub line: u32,
+    /// 1-based column, in characters.
+    pub col: u32,
+}
+
 /// A parsed Verilog-A module (surface syntax).
+///
+/// The position tables (`expr_pos`, `item_pos`, `port_pos`) are what lets an elaboration
+/// error say `at diode.va:14:22`. They are parallel to the vectors they describe and hold `None`
+/// where the parser had no source to locate against (a token stream parsed without its text, as
+/// some tests do), so a missing position degrades to an unlocated message, never a wrong one.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleAst {
     /// Module name.
@@ -27,6 +45,14 @@ pub struct ModuleAst {
     pub items: Vec<Item>,
     /// Expression arena; [`ExprRef`]s index into this `Vec`.
     pub exprs: Vec<ExprAst>,
+    /// Where each expression starts, parallel to [`Self::exprs`].
+    pub expr_pos: Vec<Option<SrcPos>>,
+    /// Where each item starts, parallel to [`Self::items`].
+    pub item_pos: Vec<Option<SrcPos>>,
+    /// Where each port is named in the module header, parallel to [`Self::ports`].
+    pub port_pos: Vec<Option<SrcPos>>,
+    /// The file names [`SrcPos::file`] indexes.
+    pub files: Vec<String>,
     /// The compiler-directive state in force where this module's `module` keyword sits
     /// (`docs/proposals/directives.md`): the default discipline for an undeclared net and the
     /// default transition time. Every directive that carries this state is illegal inside a
@@ -43,6 +69,21 @@ impl ModuleAst {
     /// mirroring [`va_ir::Module::expr`].
     pub fn expr(&self, r: ExprRef) -> &ExprAst {
         &self.exprs[r.0 as usize]
+    }
+
+    /// `pos` as `file:line:col`.
+    pub fn describe(&self, pos: SrcPos) -> String {
+        let file = self
+            .files
+            .get(pos.file as usize)
+            .map_or("?", String::as_str);
+        format!("{file}:{}:{}", pos.line, pos.col)
+    }
+
+    /// Where expression `r` starts, as `file:line:col`, if known.
+    pub fn expr_at(&self, r: ExprRef) -> Option<String> {
+        let pos = (*self.expr_pos.get(r.0 as usize)?)?;
+        Some(self.describe(pos))
     }
 }
 
@@ -390,6 +431,8 @@ pub enum Stmt {
         target: Access,
         /// The contributed value.
         value: ExprRef,
+        /// Where the statement starts.
+        at: Option<SrcPos>,
     },
     /// A procedural assignment: `lhs = rhs;`, or an array-element assignment,
     /// `lhs[index] = rhs;` / `lhs[i][j] = rhs;` (§ array variables / § 2-D array variables).
@@ -404,6 +447,8 @@ pub enum Stmt {
         index: Vec<ExprRef>,
         /// Right-hand-side expression.
         rhs: ExprRef,
+        /// Where the statement starts (its target's name).
+        at: Option<SrcPos>,
     },
     /// `if (cond) then_ [else else_]`. Branch arms are normalised to statement lists.
     If {

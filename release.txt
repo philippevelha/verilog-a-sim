@@ -22,6 +22,54 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.18.3 - 2026-10-10
+--------------------
+**Elaboration errors name file:line:col.** Before this, no elaboration error carried a
+location: `unknown identifier `Rx`` left the user to search the model for it. Now it reads
+`at diode.va:7:31: unknown identifier `Rx``, pointing at the identifier itself.
+
+How: the parser records where each construct starts, as positions in the file the user wrote
+(through the preprocessor's line map, so `` `include `` and `` `line `` are undone):
+  * every expression, in `ModuleAst::expr_pos`, parallel to the expression arena;
+  * every module item, in `item_pos`, and every header port, in `port_pos`;
+  * `Stmt::Assign` and `Stmt::Contribute`, in a new `at` field (the AST is `va-frontend`'s own
+    type, not a frozen interface).
+Elaboration locates an error on its way out, innermost first: the expression being lowered or
+constant-folded, then the statement (its own position, or its condition/selector), then the
+item or port the pass was on. The first location wins. An elaboration-time refusal gets its
+`where:` the same way. All 23 `elab_*` corpus files now assert `at:`, and each points at the
+right line and column.
+
+**A regression from 2.18.1, fixed.** That version's undeclared-local check in an
+`analog function` only knew the declarations at the top of the function. So a local declared
+inside a named block of the body (`begin : b real t; t = 2.0 * x; f = t; end`) was rejected
+as undeclared, although it compiled before 2.18.1. It is accepted again, and simulates to the
+value it should (`f = 2x`, checked). The error for a genuinely undeclared local now points at
+the assignment, not at the `analog function` line.
+
+Cost, measured on `va-cli check benchmark/models` (the 25 big compact models, frontend only),
+against a 2.18.2 build:
+  * 3.68 -> 3.88 G instructions (+5.4%, callgrind), and 696 -> 766 ms best-of-10 wall time
+    (+10%; the mean is noisier on this machine).
+  * The first version cost 3x. Three fixes brought it down: columns are byte offsets on ASCII
+    lines instead of a character count from the line start (macro-expanded lines are long);
+    the line map is resolved to file indices once per file, not once per expression; and
+    locations are formatted only when an error needs one, not for every item on every pass.
+    What is left is the position tables themselves (16 bytes per expression, copied wherever a
+    `ModuleAst` is cloned) and the lookup per expression.
+  * This is a frontend cost, paid once per run; the crossbar deck in 2.18.0+4 simulates for
+    260-620 s.
+
+Limits: `va-codegen` errors (`[cgen ]`) are still unlocated, because the IR carries no
+positions; that would be a change to Interface α (CLAUDE.md §6). An expression the parser
+synthesizes rather than reads (event-trigger desugaring) has no position of its own and is
+located by its statement or item.
+
+Measured: `cargo test --workspace` 959 passed, 0 failed (957 + two elaboration-location
+tests); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28; `check models` 66/66,
+`check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+
+
 2.18.2 - 2026-10-08
 --------------------
 **The ten diagnostics the error corpus flagged as poor now say what is wrong, where.** The

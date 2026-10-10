@@ -40,4 +40,5 @@ the improvement is locked in.
 Name the file `<stage>_<what is wrong>.va` and keep it minimal: one mistake, in an otherwise
 valid model. That way the expected verdict is unambiguous. Assert the part of the message that
 names what the user wrote (the identifier, the function, the counts), not the boilerplate around
-it. Elaboration errors carry no line number yet, so they have no `at:`.
+it. Give every case an `at:` when the diagnostic is located; since 2.18.3 every stage's is,
+except `cgen`, whose input (the IR) carries no source positions.

@@ -173,6 +173,14 @@ pub fn parse_unit(
         toks: tokens,
         pos: 0,
         exprs: Vec::new(),
+        expr_pos: Vec::new(),
+        files: Vec::new(),
+        line_origin: Vec::new(),
+        last_line: 0,
+        line_starts: located.map_or_else(Vec::new, |(src, _)| line_starts(src)),
+        line_ascii: located.map_or_else(Vec::new, |(src, _)| {
+            src.split('\n').map(str::is_ascii).collect()
+        }),
         natures: HashMap::new(),
         disciplines: HashMap::new(),
         known_access,
@@ -182,6 +190,7 @@ pub fn parse_unit(
         directives,
         line_map,
     };
+    p.intern_line_origins();
     let mut modules = Vec::new();
     loop {
         p.skip_directives();
@@ -235,6 +244,26 @@ struct Parser<'a> {
     line_map: &'a [crate::preprocess::SourceLoc],
     pos: usize,
     exprs: Vec<ExprAst>,
+    /// Where each of [`Self::exprs`] starts; becomes [`ModuleAst::expr_pos`].
+    expr_pos: Vec<Option<crate::ast::SrcPos>>,
+    /// The file names positions index — every file the source's lines came from, interned
+    /// once up front. Each module gets a copy as [`ModuleAst::files`].
+    files: Vec<String>,
+    /// For each line of [`Self::src`], its index into [`Self::files`] and its line number in
+    /// that file: the line map, resolved once instead of once per expression.
+    line_origin: Vec<(u32, u32)>,
+    /// Byte offset of each line start in [`Self::src`], so a token's line is a binary search
+    /// rather than a count of every newline before it (which, done per expression, would be
+    /// quadratic in the size of a compact model).
+    line_starts: Vec<usize>,
+    /// Whether each line of [`Self::src`] is pure ASCII, where a column is a byte count. A
+    /// macro-expanded line can run to many kilobytes; counting characters from its start for
+    /// every expression on it would be quadratic in its length.
+    line_ascii: Vec<bool>,
+    /// The line [`Self::src_pos`] found last. Tokens are located in source order, so the next
+    /// one is almost always on the same line or the one after, and checking those first saves
+    /// the binary search.
+    last_line: usize,
     /// Parsed `nature ... endnature` blocks, keyed by name (§ module preamble discipline/nature
     /// parsing).
     natures: HashMap<String, NatureDecl>,
@@ -299,6 +328,13 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
+}
+
+/// Byte offset of every line start in `src`.
+fn line_starts(src: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+        .collect()
 }
 
 /// Where the parser's event-trigger refusals are tracked.
@@ -1052,10 +1088,87 @@ impl Parser<'_> {
         Ok(names)
     }
 
+    /// Add `e` to the arena, with no position yet. Every expression the source spells passes
+    /// through [`Self::parse_unary`], which records where it starts; [`Self::parse_bin`] and
+    /// [`Self::parse_expr`] give a binary or conditional node its left operand's start. A node
+    /// the parser synthesizes (no source spelling of its own) keeps `None`, and an error in it
+    /// is located by its statement or item instead.
     fn push(&mut self, e: ExprAst) -> ExprRef {
         let r = ExprRef(self.exprs.len() as u32);
         self.exprs.push(e);
+        self.expr_pos.push(None);
         r
+    }
+
+    /// Set where expression `r` starts.
+    fn set_expr_pos(&mut self, r: ExprRef, at: Option<crate::ast::SrcPos>) {
+        if let Some(slot) = self.expr_pos.get_mut(r.0 as usize) {
+            *slot = at;
+        }
+    }
+
+    /// The position of token `idx` in the user's source, if this parser was given the text.
+    fn src_pos(&mut self, idx: usize) -> Option<crate::ast::SrcPos> {
+        let src = self.src?;
+        let offset = (*self.offsets?.get(idx)?).min(src.len());
+        let starts = &self.line_starts;
+        let on_line = |l: usize| {
+            starts.get(l).is_some_and(|&s| s <= offset)
+                && starts.get(l + 1).is_none_or(|&next| offset < next)
+        };
+        let line_idx = if on_line(self.last_line) {
+            self.last_line
+        } else if on_line(self.last_line + 1) {
+            self.last_line + 1
+        } else {
+            starts.partition_point(|&s| s <= offset).saturating_sub(1)
+        };
+        self.last_line = line_idx;
+        let line_start = self.line_starts.get(line_idx).copied().unwrap_or(0);
+        let col = if self.line_ascii.get(line_idx).copied().unwrap_or(false) {
+            offset - line_start + 1
+        } else {
+            src.get(line_start..offset)
+                .map_or(1, |t| t.chars().count() + 1)
+        } as u32;
+        let (file, line) = match self.line_origin.get(line_idx) {
+            Some(&origin) => origin,
+            None => (self.preprocessed_file(), line_idx as u32 + 1),
+        };
+        Some(crate::ast::SrcPos { file, line, col })
+    }
+
+    /// Resolve [`Self::line_map`] into [`Self::line_origin`], interning each file name once.
+    fn intern_line_origins(&mut self) {
+        let mut origin = Vec::with_capacity(self.line_map.len());
+        for loc in self.line_map {
+            // Consecutive lines almost always share a file; check that before searching.
+            let file = match self.files.last() {
+                Some(last) if *last == loc.file => self.files.len() - 1,
+                _ => match self.files.iter().position(|f| *f == loc.file) {
+                    Some(i) => i,
+                    None => {
+                        self.files.push(loc.file.clone());
+                        self.files.len() - 1
+                    }
+                },
+            };
+            origin.push((file as u32, loc.line as u32));
+        }
+        self.line_origin = origin;
+    }
+
+    /// The file index standing for "a line of the preprocessed text", for a line the line map
+    /// does not cover.
+    fn preprocessed_file(&mut self) -> u32 {
+        const NAME: &str = "<preprocessed>";
+        match self.files.iter().position(|f| f == NAME) {
+            Some(i) => i as u32,
+            None => {
+                self.files.push(NAME.to_string());
+                (self.files.len() - 1) as u32
+            }
+        }
     }
 
     /// Consume any run of compiler directives (`` `include "..." `` etc.).
@@ -1404,7 +1517,9 @@ impl Parser<'_> {
         };
         self.eat(&Token::Semicolon)?;
 
+        let header_end = self.pos;
         let mut items = Vec::new();
+        let mut item_pos = Vec::new();
         loop {
             self.skip_directives();
             if self.at(&Token::EndModule) {
@@ -1413,15 +1528,38 @@ impl Parser<'_> {
             if self.peek().is_none() {
                 return self.unclosed(module_pos, &format!("module `{name}`"), "endmodule");
             }
+            // An item queued by a declaration that expanded into two belongs to that
+            // declaration, not to the token the parser happens to be on now.
+            let at = if self.pending_items.is_empty() {
+                self.src_pos(self.pos)
+            } else {
+                item_pos.last().copied().flatten()
+            };
             items.push(self.parse_item()?);
+            item_pos.push(at);
         }
         self.eat(&Token::EndModule)?;
+
+        // Each port where the header names it: the first identifier token with its name after
+        // the module name.
+        let port_pos = ports
+            .iter()
+            .map(|p| {
+                (module_pos + 2..header_end)
+                    .find(|&t| matches!(self.toks.get(t), Some(Token::Ident(n)) if n == p))
+                    .and_then(|t| self.src_pos(t))
+            })
+            .collect();
 
         Ok(ModuleAst {
             name,
             ports,
             items,
             exprs: std::mem::take(&mut self.exprs),
+            expr_pos: std::mem::take(&mut self.expr_pos),
+            item_pos,
+            port_pos,
+            files: self.files.clone(),
             settings,
         })
     }
@@ -2094,13 +2232,15 @@ impl Parser<'_> {
                          side of `<+` — it is read-only (LRM §5.4.3)"
                     ));
                 }
+                let at = self.src_pos(self.pos);
                 let target = self.parse_access()?;
                 self.eat(&Token::Contribute)?;
                 let value = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Contribute { target, value })
+                Ok(Stmt::Contribute { target, value, at })
             }
             Some(Token::Ident(_)) => {
+                let at = self.src_pos(self.pos);
                 let lhs = self.expect_ident()?;
                 // `lhs[index] = rhs;` / `lhs[i][j] = rhs;` assigns one element of a 1-D or § 2-D
                 // array variable; each index must be a compile-time-constant or genvar
@@ -2109,18 +2249,29 @@ impl Parser<'_> {
                 self.eat(&Token::Assign)?;
                 let rhs = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Assign { lhs, index, rhs })
+                Ok(Stmt::Assign {
+                    lhs,
+                    index,
+                    rhs,
+                    at,
+                })
             }
             // `electrical`/`thermal`/`ground` reused as a plain variable name (see
             // `ident_like_keyword`'s doc comment) — an assignment target here, never a
             // declaration start (that only ever happens in `parse_item`).
             Some(t) if ident_like_keyword(t).is_some() => {
+                let at = self.src_pos(self.pos);
                 let lhs = self.expect_ident()?;
                 let index = self.parse_index_list()?;
                 self.eat(&Token::Assign)?;
                 let rhs = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Assign { lhs, index, rhs })
+                Ok(Stmt::Assign {
+                    lhs,
+                    index,
+                    rhs,
+                    at,
+                })
             }
             Some(&Token::Keyword(kw)) => match kw.as_str() {
                 "while" => self.parse_while(),
@@ -2266,6 +2417,7 @@ impl Parser<'_> {
 
     /// Parse a bare `lhs = rhs` assignment with no trailing terminator (for `for` headers).
     fn parse_assignment(&mut self) -> Result<Stmt, FrontendError> {
+        let at = self.src_pos(self.pos);
         let lhs = self.expect_ident()?;
         self.eat(&Token::Assign)?;
         let rhs = self.parse_expr()?;
@@ -2273,6 +2425,7 @@ impl Parser<'_> {
             lhs,
             index: Vec::new(),
             rhs,
+            at,
         })
     }
 
@@ -2336,7 +2489,10 @@ impl Parser<'_> {
             let then_ = self.parse_expr()?;
             self.eat(&Token::Colon)?;
             let else_ = self.parse_expr()?;
-            Ok(self.push(ExprAst::Cond { cond, then_, else_ }))
+            let r = self.push(ExprAst::Cond { cond, then_, else_ });
+            let at = self.expr_pos.get(cond.0 as usize).copied().flatten();
+            self.set_expr_pos(r, at);
+            Ok(r)
         } else {
             Ok(cond)
         }
@@ -2350,12 +2506,23 @@ impl Parser<'_> {
             }
             self.pos += 1;
             let rhs = self.parse_bin(rbp)?;
+            let at = self.expr_pos.get(lhs.0 as usize).copied().flatten();
             lhs = self.push(ExprAst::Binary(op, lhs, rhs));
+            self.set_expr_pos(lhs, at);
         }
         Ok(lhs)
     }
 
     fn parse_unary(&mut self) -> Result<ExprRef, FrontendError> {
+        let start = self.pos;
+        let r = self.parse_unary_at()?;
+        let at = self.src_pos(start);
+        self.set_expr_pos(r, at);
+        Ok(r)
+    }
+
+    /// [`Self::parse_unary`], which records where the result starts.
+    fn parse_unary_at(&mut self) -> Result<ExprRef, FrontendError> {
         match self.peek() {
             Some(Token::Minus) => {
                 self.pos += 1;
@@ -2694,7 +2861,7 @@ mod tests {
         // Ohm's law, then the thermal-noise contribution (T5.2).
         assert_eq!(analog.len(), 2);
         match &analog[0] {
-            Stmt::Contribute { target, value } => {
+            Stmt::Contribute { target, value, .. } => {
                 assert_eq!(target.kind, AccessKind::Flow);
                 assert_eq!(target.args[0].name, "p");
                 assert_eq!(target.args[1].name, "n");
@@ -4130,6 +4297,12 @@ mod tests {
             toks,
             pos: 0,
             exprs: Vec::new(),
+            expr_pos: Vec::new(),
+            files: Vec::new(),
+            line_origin: Vec::new(),
+            last_line: 0,
+            line_starts: Vec::new(),
+            line_ascii: Vec::new(),
             natures: HashMap::new(),
             disciplines: HashMap::new(),
             known_access,

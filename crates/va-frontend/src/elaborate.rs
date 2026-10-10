@@ -240,6 +240,7 @@ fn elaborate_inner(
     include_dirs: &[std::path::PathBuf],
 ) -> Result<Module, FrontendError> {
     let mut e = Elaborator {
+        cur_at: None,
         ast,
         library,
         stack,
@@ -355,6 +356,11 @@ fn combine_idx(dyn_dim: usize, k: i64, other_idx: Option<i64>) -> Vec<i64> {
 }
 
 struct Elaborator<'a> {
+    /// Where the pass in progress is, as `file:line:col`: the item (or port) it is working
+    /// on. The fallback location for an error nothing more specific located — see
+    /// [`Self::run`]. Reset between passes, so one pass's last item is never blamed for the
+    /// next pass's error.
+    cur_at: Option<crate::ast::SrcPos>,
     ast: &'a ModuleAst,
     /// Every module parsed from the same compilation unit (including `ast` itself), used to
     /// resolve [`Item::Instance`] references (§ module instantiation).
@@ -436,23 +442,63 @@ struct Elaborator<'a> {
 }
 
 impl Elaborator<'_> {
+    /// Run every pass. An error is located on its way out: by the innermost expression or
+    /// statement that has a position (`lower_expr`, `const_eval`, `lower_stmt`), else by the
+    /// item or port the failing pass was on ([`Self::cur_at`]). Until 2.18.3 no elaboration
+    /// error carried a location at all.
     fn run(&mut self) -> Result<(), FrontendError> {
+        let result = self.run_passes();
+        result.map_err(|e| locate(e, || self.cur_at.map(|p| self.ast.describe(p))))
+    }
+
+    fn run_passes(&mut self) -> Result<(), FrontendError> {
         // Parameters first: a vector net's `[msb:lsb]` range may reference one (§ vector nets).
         self.collect_params()?;
+        self.cur_at = None;
         self.collect_genvars();
         self.collect_nodes()?;
+        self.cur_at = None;
         self.collect_ground()?;
+        self.cur_at = None;
         self.resolve_ports()?;
+        self.cur_at = None;
         self.collect_branches()?;
+        self.cur_at = None;
         self.collect_functions()?;
+        self.cur_at = None;
         self.collect_var_decls()?;
+        self.cur_at = None;
         self.collect_vars()?;
         // Every parent-scope naming environment (nodes, params, genvars, vars, branches,
         // functions) is fully populated by this point, regardless of source order — so
         // instances may freely appear before or after the parent constructs they connect to.
         self.collect_instances()?;
+        self.cur_at = None;
         self.lower_analog()?;
         Ok(())
+    }
+
+    /// Where item `idx` starts. Kept unformatted: it is recorded for every item of every pass
+    /// and needed only when one fails.
+    fn item_at(&self, idx: usize) -> Option<crate::ast::SrcPos> {
+        self.ast.item_pos.get(idx).copied().flatten()
+    }
+
+    /// Where statement `stmt` is: its own position for an assignment or contribution, else the
+    /// expression that heads it (an `if`'s condition, a `case`'s selector, a task's first
+    /// argument), which is on the line the statement starts on.
+    fn stmt_at(&self, stmt: &Stmt) -> Option<String> {
+        let head = match stmt {
+            Stmt::Assign { at, .. } | Stmt::Contribute { at, .. } => {
+                return at.map(|p| self.ast.describe(p))
+            }
+            Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::For { cond, .. } => *cond,
+            Stmt::Repeat { count, .. } => *count,
+            Stmt::Case { selector, .. } => *selector,
+            Stmt::Task { args, .. } => *args.first()?,
+            Stmt::Block(_) | Stmt::VarDecl { .. } => return None,
+        };
+        self.ast.expr_at(head)
     }
 
     /// Register explicitly declared module-level variables (`real q, v;`) and array variables
@@ -464,7 +510,8 @@ impl Elaborator<'_> {
     /// [`Self::collect_vars_stmt`]).
     fn collect_var_decls(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Var { names, .. } = item {
                 for entry in names {
                     self.declare_var_entry(entry)?;
@@ -544,7 +591,8 @@ impl Elaborator<'_> {
     /// defined later in source resolves as unknown (forward references are unsupported in v0).
     fn collect_functions(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             let f = match item {
                 Item::Function(f) => f,
                 _ => continue,
@@ -582,14 +630,34 @@ impl Elaborator<'_> {
             // Every assignment target must be one of the above. Until 2.18.1 an undeclared
             // target was declared on the spot, the same leniency the analog block had (see
             // [`Self::collect_vars`]), so a misspelt local compiled as a second variable.
-            let mut targets = Vec::new();
-            collect_assign_targets(&f.body, &mut targets);
-            if let Some(name) = targets.iter().find(|t| !local.contains_key(*t)) {
-                return Err(elab(format!(
-                    "analog function `{}` assigns `{name}`, which is neither its name, one of its \
-                     arguments, nor declared inside it; declare it with `real {name};`",
-                    f.name
-                )));
+            // A `real t;` inside a named block of the body is a declaration too; lowering
+            // scopes it to its block. Until 2.18.3 this check missed that and rejected it.
+            let mut block_decls = HashSet::new();
+            walk_stmts(&f.body, &mut |st| {
+                if let Stmt::VarDecl { names } = st {
+                    block_decls.extend(names.iter().map(|e| e.name.clone()));
+                }
+            });
+            let mut undeclared = None;
+            walk_stmts(&f.body, &mut |st| {
+                if let Stmt::Assign { lhs, at, .. } = st {
+                    if undeclared.is_none()
+                        && !local.contains_key(lhs)
+                        && !block_decls.contains(lhs)
+                    {
+                        undeclared = Some((lhs.clone(), *at));
+                    }
+                }
+            });
+            if let Some((name, at)) = undeclared {
+                return Err(locate(
+                    elab(format!(
+                        "analog function `{}` assigns `{name}`, which is neither its name, one of \
+                         its arguments, nor declared inside it; declare it with `real {name};`",
+                        f.name
+                    )),
+                    || at.map(|p| ast.describe(p)),
+                ));
             }
 
             // Lower the body with the function scope swapped in, then restore. The block-scope
@@ -631,7 +699,8 @@ impl Elaborator<'_> {
     // --- pass 1: nodes ---------------------------------------------------------------
 
     fn collect_nodes(&mut self) -> Result<(), FrontendError> {
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Net { discipline, nets } = item {
                 let disc = match discipline {
                     ast::Discipline::Electrical => Discipline::Electrical,
@@ -704,7 +773,8 @@ impl Elaborator<'_> {
     /// names is electrically the same global reference node (LRM §3.6.4), so this merges them
     /// rather than leaving them as distinct nodes that happen to both read as zero.
     fn collect_ground(&mut self) -> Result<(), FrontendError> {
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Ground { names } = item {
                 for name in names {
                     let id = *self.nodes.get(name).ok_or_else(|| {
@@ -757,7 +827,8 @@ impl Elaborator<'_> {
     /// interned in `collect_nodes`), a stated simplification for a wiring convention
     /// (`va-netlist`) that doesn't exist yet to have an opinion on connection order.
     fn resolve_ports(&mut self) -> Result<(), FrontendError> {
-        for port in &self.ast.ports {
+        for (port_idx, port) in self.ast.ports.iter().enumerate() {
+            self.cur_at = self.ast.port_pos.get(port_idx).copied().flatten();
             // § `$port_connected`: the parent named this port in an empty connection slot, so
             // it is unconnected for *this* instantiation. Recorded by index, which is what
             // `Expr::PortConnected` carries.
@@ -828,7 +899,8 @@ impl Elaborator<'_> {
     /// `V(name)` and a positional access `V(a, b)` refer to the same branch.
     fn collect_branches(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Branch { terminals, names } = item {
                 let id = self.resolve_branch(terminals)?;
                 for name in names {
@@ -846,7 +918,8 @@ impl Elaborator<'_> {
     /// instantiation) — either way validated against the declared `from` range, so an override
     /// is held to the same bound as an ordinary default.
     fn collect_params(&mut self) -> Result<(), FrontendError> {
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             match item {
                 Item::Param {
                     name,
@@ -947,6 +1020,12 @@ impl Elaborator<'_> {
     /// as constant here, matching the rule that a genvar expression may reference other
     /// genvars as well as literals and parameters.
     fn const_eval(&self, r: ExprRef) -> Result<f64, FrontendError> {
+        self.const_eval_inner(r)
+            .map_err(|e| locate(e, || self.ast.expr_at(r)))
+    }
+
+    /// [`Self::const_eval`], unlocated.
+    fn const_eval_inner(&self, r: ExprRef) -> Result<f64, FrontendError> {
         match self.ast.expr(r) {
             ExprAst::Number(n) => Ok(*n),
             ExprAst::Ident(name) => {
@@ -1316,7 +1395,8 @@ impl Elaborator<'_> {
     /// § event control), so "prepended, in source order" is the closest sound DC reading.
     fn lower_module_var_inits(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Var { names, .. } = item {
                 for entry in names {
                     if let Some(init) = entry.init {
@@ -1331,6 +1411,11 @@ impl Elaborator<'_> {
     }
 
     fn lower_stmt(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
+        self.lower_stmt_inner(stmt)
+            .map_err(|e| locate(e, || self.stmt_at(stmt)))
+    }
+
+    fn lower_stmt_inner(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
         match stmt {
             Stmt::Block(body) => {
                 // A `begin ... end` is a scope (§ block scoping): declarations inside it shadow
@@ -1430,7 +1515,7 @@ impl Elaborator<'_> {
             // and the ones `crate::unimplemented_task_warnings` reports at compile time —
             // `$monitor` and file output — have no effect.
             Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
-            Stmt::Contribute { target, value } => {
+            Stmt::Contribute { target, value, .. } => {
                 // Constant/genvar-indexed terminals (or none at all) resolve straight to a
                 // single fixed branch, as always. A runtime-indexed vector-net terminal
                 // (§ dynamic vector-net/array-variable indexing) has no single `BranchId` to
@@ -1454,7 +1539,9 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            Stmt::Assign { lhs, index, rhs } => {
+            Stmt::Assign {
+                lhs, index, rhs, ..
+            } => {
                 // Restricted assignment (§ generate loops): a genvar may only be written by
                 // the header of the `for` loop it drives, which `Stmt::For` below intercepts
                 // and unrolls directly — it never reaches this generic path. Any other
@@ -1697,7 +1784,14 @@ impl Elaborator<'_> {
         })
     }
 
+    /// Lower expression `r`; an error is located at `r` unless a sub-expression already
+    /// located it more precisely.
     fn lower_expr(&mut self, r: ExprRef) -> Result<ExprId, FrontendError> {
+        self.lower_expr_inner(r)
+            .map_err(|e| locate(e, || self.ast.expr_at(r)))
+    }
+
+    fn lower_expr_inner(&mut self, r: ExprRef) -> Result<ExprId, FrontendError> {
         // `self.ast` is a shared reference; copy it locally so the read borrow is of the
         // external `ModuleAst`, not of `self`, leaving `self` free to mutate.
         let ast = self.ast;
@@ -3422,8 +3516,8 @@ impl Elaborator<'_> {
     /// `ddt` arrived through an assignment rather than being written in the condition itself —
     /// the source-level variable that carries it.
     ///
-    /// **Limitation**: [`FrontendError::Elaborate`] carries no source span (no elaboration error
-    /// in this crate does), so the message locates the problem by name, not by line.
+    /// The message names the variable that carries the `ddt`; the line comes from
+    /// [`Self::lower_stmt`], which locates the error at the contribution (2.18.3).
     fn ddt_guard_message(&self, port: &str, guard: ExprId, tainted: &HashSet<u32>) -> String {
         let via = match self.first_tainted_var(guard, tainted) {
             Some(id) => match self.vars.iter().find(|(_, v)| **v == id) {
@@ -3967,7 +4061,8 @@ impl Elaborator<'_> {
     /// submodule and inline it into `self.out` (see [`Self::inline_instance`]).
     fn collect_instances(&mut self) -> Result<(), FrontendError> {
         let mut seen_names = std::collections::HashSet::new();
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Instance {
                 module,
                 name,
@@ -4403,6 +4498,37 @@ fn elab(msg: String) -> FrontendError {
     FrontendError::Elaborate(msg)
 }
 
+/// `e`, located `at` (a `file:line:col`) unless it already is. An elaboration error is
+/// located by prefixing `at …: `, the shape preprocessor errors take; a refusal by its `at`
+/// field. Applied from the inside out — an expression before its statement, a statement before
+/// its item — so the first, most precise location wins and the outer ones leave it alone.
+///
+/// `at` is a closure so a caller pays for formatting a location only when it is used: `const_eval`
+/// fails routinely and recoverably (a caller probing whether an expression is constant), and
+/// formatting on every such failure tripled `check`'s time on the benchmark models.
+fn locate(e: FrontendError, at: impl FnOnce() -> Option<String>) -> FrontendError {
+    let unlocated = match &e {
+        FrontendError::Elaborate(m) => !m.starts_with("at "),
+        FrontendError::Refused(r) => r.at.is_none(),
+        _ => false,
+    };
+    if !unlocated {
+        return e;
+    }
+    let Some(at) = at() else {
+        return e;
+    };
+    match e {
+        FrontendError::Elaborate(m) if !m.starts_with("at ") => {
+            FrontendError::Elaborate(format!("at {at}: {m}"))
+        }
+        FrontendError::Refused(r) if r.at.is_none() => {
+            FrontendError::Refused(r.at(format!("at {at}")))
+        }
+        e => e,
+    }
+}
+
 /// A lowered construct whose meaning is keyed by the *call site* it was written at, and which a
 /// runtime loop therefore cannot legally repeat — what
 /// [`Elaborator::reject_call_site_state_in_loop`] looks for.
@@ -4698,35 +4824,37 @@ fn remap_stmt(
 
 /// Collect every assignment-target name in a statement list (recursing through control flow),
 /// used to discover a function's local variables before lowering its body.
-fn collect_assign_targets(stmts: &[Stmt], out: &mut Vec<String>) {
+/// Call `f` on every statement in `stmts`, nested ones included, in source order.
+fn walk_stmts(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
     for stmt in stmts {
+        f(stmt);
         match stmt {
-            Stmt::Assign { lhs, .. } => out.push(lhs.clone()),
-            Stmt::VarDecl { names } => out.extend(names.iter().map(|entry| entry.name.clone())),
-            Stmt::Block(body) => collect_assign_targets(body, out),
-            Stmt::If { then_, else_, .. } => {
-                collect_assign_targets(then_, out);
-                collect_assign_targets(else_, out);
+            Stmt::Block(body) | Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                walk_stmts(body, f)
             }
-            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
-                collect_assign_targets(body, out)
+            Stmt::If { then_, else_, .. } => {
+                walk_stmts(then_, f);
+                walk_stmts(else_, f);
             }
             Stmt::For {
                 init, step, body, ..
             } => {
-                collect_assign_targets(std::slice::from_ref(&**init), out);
-                collect_assign_targets(std::slice::from_ref(&**step), out);
-                collect_assign_targets(body, out);
+                walk_stmts(std::slice::from_ref(&**init), f);
+                walk_stmts(std::slice::from_ref(&**step), f);
+                walk_stmts(body, f);
             }
             Stmt::Case { arms, default, .. } => {
                 for arm in arms {
-                    collect_assign_targets(&arm.body, out);
+                    walk_stmts(&arm.body, f);
                 }
                 if let Some(body) = default {
-                    collect_assign_targets(body, out);
+                    walk_stmts(body, f);
                 }
             }
-            Stmt::Contribute { .. } | Stmt::Task { .. } => {}
+            Stmt::Assign { .. }
+            | Stmt::Contribute { .. }
+            | Stmt::Task { .. }
+            | Stmt::VarDecl { .. } => {}
         }
     }
 }
@@ -6411,6 +6539,49 @@ mod tests {
         );
         // The block lowers; the declaration contributes an empty block, not a statement error.
         assert!(!m.analog.is_empty());
+    }
+
+    /// Elaboration errors name `file:line:col`, at the innermost construct that has a
+    /// position: the identifier for an unresolved read, the statement for an undeclared
+    /// assignment target, the declaration for a duplicate parameter, the header for a port.
+    #[test]
+    fn elaboration_errors_are_located() {
+        let err = |src: &str| match crate::compile_named(src, &[], "m.va") {
+            Ok(_) => panic!("must not compile: {src}"),
+            Err(e) => e.to_string(),
+        };
+        let e = err("module m(p, n); inout p, n; electrical p, n;\n  analog I(p, n) <+ V(p, n) / Rx;\nendmodule\n");
+        assert!(e.contains("at m.va:2:31: unknown identifier `Rx`"), "{e}");
+        let e = err("module m(p, n); inout p, n; electrical p, n;\n  analog begin\n    g = 1.0;\n  end\nendmodule\n");
+        assert!(
+            e.contains("at m.va:3:5: variable `g` is assigned but never declared"),
+            "{e}"
+        );
+        let e = err("module m(p, n); inout p, n; electrical p, n;\n  parameter real R = 1;\n  parameter real R = 2;\n  analog I(p, n) <+ V(p, n) / R;\nendmodule\n");
+        assert!(
+            e.contains("at m.va:3:3: parameter `R` is declared more than once"),
+            "{e}"
+        );
+        let e = err("module m(p, n);\n  inout p, n;\n  analog I(p, n) <+ V(p, n);\nendmodule\n");
+        assert!(
+            e.contains("at m.va:1:10: port `p` has no discipline"),
+            "{e}"
+        );
+    }
+
+    /// An `analog function` may declare a local inside a named block of its body. 2.18.1's
+    /// undeclared-local check rejected that, because it only knew the declarations at the top of
+    /// the function.
+    #[test]
+    fn a_function_block_local_counts_as_declared() {
+        let src = "module t(a, b); electrical a, b;
+            analog function real f; input x; real x;
+                begin : body real t; t = 2.0 * x; f = t; end
+            endfunction
+            analog I(a, b) <+ f(V(a, b));
+        endmodule";
+        let m = elaborate_src(src);
+        assert_eq!(m.functions.len(), 1);
     }
 
     #[test]
