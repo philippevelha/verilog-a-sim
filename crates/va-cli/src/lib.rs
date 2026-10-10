@@ -8318,6 +8318,86 @@ endmodule
         }
     }
 
+    /// `models/snn/synapse_2t2r_mos.va`, the 2T2R synapse with mos_switch.va's fitted access
+    /// switch folded in: with the word line high, each path carries exactly V / (R_cell + R_on)
+    /// with PSP103's R_on; with it low, the synapse is near-open; and the Jacobian matches a
+    /// central difference in all four terminals.
+    #[test]
+    fn the_folded_fitted_synapse_puts_psp103s_r_on_in_series_with_each_cell() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models/snn");
+        let src = std::fs::read_to_string(format!("{dir}/synapse_2t2r_mos.va")).expect("reads");
+        let mut design =
+            va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+                .expect("compiles");
+        // levp = 0 (8 kOhm), levn = 2 (15 kOhm)
+        for p in design.modules[0].params.iter_mut() {
+            match p.name.as_str() {
+                "levp" => p.default = 0.0,
+                "levn" => p.default = 2.0,
+                _ => {}
+            }
+        }
+        let inst =
+            va_codegen::build_instance(&design.modules[0], &[0, 1, 2, 3], &mut 4).expect("builds");
+        let load = |x: &[f64]| {
+            let mut s = va_abi::stamps::DenseStamp::new(4);
+            inst.load(
+                x,
+                &va_abi::ANALYSIS_DC,
+                &mut va_abi::ModelState::stateless(),
+                &mut s,
+            );
+            s
+        };
+
+        // [V(vp), V(vn), V(sl), V(wl)]: the crossbar's read biases, word line high.
+        let on = load(&[1.75, 1.55, 1.65, 3.3]);
+        let r_on = 376.97;
+        let (ip, in_) = (0.1 / (8e3 + r_on), -0.1 / (15e3 + r_on));
+        assert!(
+            (on.residual[0].abs() - ip).abs() < 1e-6 * ip,
+            "I(vp) {}",
+            on.residual[0]
+        );
+        assert!(
+            (on.residual[1].abs() - in_.abs()).abs() < 1e-6 * ip,
+            "I(vn) {}",
+            on.residual[1]
+        );
+        let off = load(&[1.75, 1.55, 1.65, 0.0]);
+        assert!(
+            off.residual[0].abs() < 1e-12,
+            "off current {}",
+            off.residual[0]
+        );
+
+        for x in [
+            [1.75, 1.55, 1.65, 3.3],
+            [1.75, 1.55, 1.65, 2.6],
+            [1.75, 1.55, 1.65, 2.55],
+            [1.75, 1.55, 1.65, 0.0],
+        ] {
+            let s = load(&x);
+            for col in 0..4 {
+                let h = 1e-6;
+                let (mut xp, mut xm) = (x, x);
+                xp[col] += h;
+                xm[col] -= h;
+                let (rp, rm) = (load(&xp), load(&xm));
+                for row in 0..4 {
+                    let fd = (rp.residual[row] - rm.residual[row]) / (2.0 * h);
+                    let an = s.jac(row, col);
+                    let scale = an.abs().max(fd.abs()).max(1e-12);
+                    assert!(
+                        (fd - an).abs() / scale < 1e-5,
+                        "x = {x:?}, d r{row} / d x{col}: analytic {an:e}, difference {fd:e}"
+                    );
+                }
+            }
+        }
+    }
+
     /// `is_pure_in_x` (device-bypass prototype): asserted as the property bypass relies on, not
     /// only as flags. Every module that claims purity must stamp the same values at the same
     /// `x` under a different time, step coefficients and committed state; the ones that read

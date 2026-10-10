@@ -22,6 +22,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.22.0 - 2026-10-10
+--------------------
+**Rung A on the MNIST crossbar: a folded synapse with the fitted switch.** On 8 hidden-2 neurons
+over 5 cycles, V_m is within 9.4 mV of the PSP103 crossbar (the 10 Ohm switch: 206 mV), and the
+run takes 4.6 s instead of 227 s. No neuron spikes in those 5 cycles, so this run does not test
+spike timing; a 16-neuron, 20-cycle comparison with spikes is running and will follow as
+2.22.0+1.
+  * models/snn/synapse_2t2r_mos.va: synapse_2t2r.va with the logistic gate replaced by
+    mos_switch.va's conductance, g(V(wl, sl)), in series with each cell. This is exact for
+    rung A, because the switch is linear in V_DS and its gate drive is taken from `sl`, so the
+    cell node folds away. The crossbar keeps the behavioural deck's size (302 unknowns for 8
+    neurons, against PSP103's 17 710).
+  * gen_mnist_tx.py --synapses tx|fit|ideal and gen_xbar_deck.py --synapses: emit the access
+    devices as PSP103 (default, unchanged), the fitted folded synapse, or the behavioural deck's
+    own synapse_2t2r (10 Ohm).
+  * 8 neurons, 5 cycles, digit 0, worst |V_m - PSP103| at the latch sample: rung A 9.4 mV;
+    synapse_2t2r at a constant ron = 376.97 Ohm 9.4 mV (the same: the hidden-1 word lines are
+    ideal PWL rails, as in Fig. 5); the 10 Ohm switch 206 mV. The error grows by about 3 mV a
+    cycle; whether that costs spikes is what the longer run is for.
+  * Test: the_folded_fitted_synapse_puts_psp103s_r_on_in_series_with_each_cell (each path
+    carries V / (R_cell + 376.97 Ohm) on, near-open off, AD against central differences in all
+    four terminals).
+Measured: `cargo test --workspace` 962 passed; `cargo xtask validate` 28/28; fmt and clippy
+clean. Default decks and models unchanged.
+
 2.21.0+1 - 2026-10-08
 ----------------------
 **Node collapse (2.20.0, `VA_COLLAPSE=on`) checked over every deck in the tree: no deck's answer

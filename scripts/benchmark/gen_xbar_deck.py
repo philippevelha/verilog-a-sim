@@ -3,6 +3,7 @@ neurons as the behavioural blocks, every 2T2R synapse with its two SG13G2 PSP103
 transistors (circuits/snn/transistor/gen_mnist_tx.py), for a given number of 250 ns cycles.
 
     python3 scripts/benchmark/gen_xbar_deck.py <out-dir> [--neurons 8] [--cycles 3] [--digit 0]
+        [--synapses tx|fit|ideal]
 
 Writes <out-dir>/d/xbar.net, <out-dir>/d/tech.inc and <out-dir>/dff.inc (the deck includes
 ../dff.inc).
@@ -33,6 +34,9 @@ def main():
     ap.add_argument("--neurons", type=int, default=8)
     ap.add_argument("--cycles", type=float, default=3)
     ap.add_argument("--digit", type=int, default=0)
+    ap.add_argument("--synapses", choices=["tx", "fit", "ideal"], default="tx",
+                    help="gen_mnist_tx.py's --synapses: the access devices as PSP103 (default), "
+                         "the fitted switch (synapse_2t2r_mos.va), or the 10 Ohm ideal switch")
     a = ap.parse_args()
 
     # The behavioural network deck the crossbar deck is generated from.
@@ -77,7 +81,7 @@ def main():
     deck = os.path.join(d, "xbar.net")
     sys.argv = ["gen_mnist_tx.py", "--digit", str(a.digit), "--cycles", str(a.cycles),
                 "--layers", "h2", "--per-layer", str(a.neurons), "--neurons", "behavioural",
-                "--out", deck]
+                "--synapses", a.synapses, "--out", deck]
     cwd = os.getcwd()
     os.chdir(TX)
     try:
