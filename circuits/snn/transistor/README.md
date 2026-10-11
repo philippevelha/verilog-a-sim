@@ -358,4 +358,161 @@ rung C, and +8.3 mV with rung A.
 not yet separated: the missing junction capacitance (the overshooting kick changes how the drain
 charge drains away), the triode V_DS term (rung B, estimated at ~0.2 mV a cycle), and the
 half-and-half charge partition away from V_DS = 0. The coverage is the same as rung A's: one image,
-16 of 64 hidden-2 neurons, 20 of 29 cycles.
+16 of 64 hidden-2 neurons, 20 of 29 cycles. (2.24.0: it is mostly the V_DS term; see "Where rung C's bias comes from".)
+
+## Ten digits (2026-10-10, 2.23.0+2)
+
+The same crossbar slice (16 hidden-2 neurons, 20 cycles, behavioural neurons) for one image of
+each digit 0-9. Each access device is compared with PSP103 where the neuron reads V_m.
+`scripts/benchmark/xbar_digits.sh` runs the decks, and `cmp_digits.py` compares them. All runs use
+`VA_JIT=on VA_COLLAPSE=on`, except digit 0, which is the plain-JIT run from the sections above.
+
+**The reference.** PSP103 in full for digits 0, 1, 3 and 4. For digits 2 and 5-9 it is PSP103 with
+`--bypass`, after bypass matched the full runs on digits 1, 3 and 4. All 127 spikes agree there,
+V_m differs by at most 1 uV (the output's print resolution), and it is equal in all but two of
+the 960 samples. Digit 2's full run ran out of memory (below).
+
+| Digit | PSP103 spikes (neurons) | Rung C: mean / RMS / worst V_m - PSP103 | Rung A: mean / RMS / worst | Spikes, rungs C and A | Closest call (PSP103 / rung C / rung A) |
+|---|---|---|---|---|---|
+| 0 | 17 (4) | +1.58 / 1.90 / 4.6 mV | +8.04 / 9.22 / 14.7 mV | all agree | h2_8 step 8: +6.2 / +6.6 / +10.9 mV |
+| 1 | 32 (5) | +1.05 / 1.39 / 3.5 mV | +6.55 / 7.77 / 12.8 mV | all agree | h2_5 step 2: -13.3 / -12.6 / -10.9 mV |
+| 2 (bypass) | 41 (7) | +1.36 / 1.81 / 5.0 mV | +7.53 / 9.29 / 17.4 mV | all agree | h2_1 step 11: +9.3 / +5.8 / +9.6 mV |
+| 3 | 52 (7) | +1.06 / 1.51 / 4.0 mV | +6.42 / 8.06 / 14.3 mV | all agree | h2_9 step 5: -48.2 / -47.1 / -39.1 mV |
+| 4 | 43 (9) | +1.15 / 1.50 / 4.2 mV | +6.27 / 8.07 / 16.8 mV | all agree | h2_7 step 8: -65.2 / -63.2 / -57.6 mV |
+| 5 (bypass) | 26 (4) | +1.51 / 1.81 / 4.3 mV | +8.07 / 9.38 / 14.6 mV | all agree | h2_3 step 8: +14.5 / +7.8 / +23.9 mV |
+| 6 (bypass) | 34 (7) | +1.69 / 2.20 / 5.5 mV | +9.52 / 11.73 / 20.2 mV | all agree | h2_13 step 8: -10.8 / -7.9 / +2.2 mV |
+| 7 (bypass) | 33 (8) | +1.19 / 1.48 / 3.4 mV | +6.90 / 8.27 / 13.2 mV | all agree | h2_0 step 3: +12.0 / +9.1 / +17.7 mV |
+| 8 (bypass) | 22 (5) | +0.93 / 1.17 / 3.0 mV | +5.83 / 6.80 / 11.8 mV | all agree | h2_9 step 12: +5.2 / +6.1 / +11.9 mV |
+| 9 (bypass) | 40 (6) | +1.05 / 1.41 / 3.3 mV | +6.34 / 7.84 / 13.4 mV | all agree | h2_12 step 6: -67.9 / -67.3 / -64.1 mV |
+
+**Spikes.** Every spike train agrees in all ten digits, for both rungs: 340 spikes from 62
+spiking neurons. Rung C's error has the same size and sign on every digit: +0.9 to +1.7 mV mean,
+worst 5.5 mV, above PSP103 in 88 % of the 3 200 samples. So the bias the section above leaves
+open is not particular to digit 0. Rung A is 5-6 times larger everywhere: +5.8 to +9.5 mV mean, worst
+20.2 mV.
+
+**What "closest call" measures.** It is V_m - V_th at the end of the cycle, where the flip-flop
+latches, for the latch decision nearest V_th in PSP103. V_m still rises by ~13 mV/ns at that
+point, so the sample 0.5 ns earlier, which the V_m columns use, reads several mV low. This is why
+digit 0's figures differ from the section above (h2_8 at step 8: +6.2 mV here, +2.2 mV there).
+The comparator also switches over a logistic ~2 mV wide (`comparator.va`, `vw`), and the
+flip-flop reads it just before the edge. So within a few mV of V_th, the margin does not decide
+the spike: rung A puts digit 6's h2_13 at step 8 2.2 mV above V_th (PSP103 says 10.8 mV below),
+and it still does not spike. The spike column is read from the spike outputs. In the
+PSP103 runs, the margin's sign agrees with the spike at every latch. The tightest decision in
+each image is 5-15 mV from V_th in seven of the ten, and 48-68 mV in digits 3, 4 and 9. Rung A
+moves it by up to 13 mV (digit 6), and rung C by at most 6.7 mV (digit 5).
+
+**Run time and memory**, for parallel inference. Container with 4 vCPUs and ~15 GB:
+
+| Run | Per run | Images per hour |
+|---|---|---|
+| PSP103, 4 threads, alone (digit 0, no collapse) | 2 693 s | 1.3 |
+| PSP103, 1 thread, 4 at once (digits 1, 3, 4) | 9 889-10 717 s | 1.4 |
+| PSP103 `--bypass`, 2 threads, 2 at once | 650-838 s | 9.7 |
+| rung C, 4 threads, alone (digits 1-4) | 188-213 s | 18 |
+| rung C, 1 thread, 4 at once (digits 5-9) | 322-376 s | 41 |
+| rung A, 4 threads, alone (digits 1-4) | 58-67 s | 57 |
+| rung A, 1 thread, 4 at once (digits 5-9) | 75-86 s | 180 |
+
+- **Full PSP103 gains almost nothing from running images in parallel**: 1.4 images an hour
+  against 1.3. The 4-thread figure is digit 0 without collapse, so the comparison is rough. The
+  likely reason, inferred and not profiled: without bypass, device evaluation dominates and
+  spreads well over threads, so one run already keeps the cores busy.
+- **Parallel images pay with the fitted switches**, where the linear solve and per-step work
+  take a larger share and threads help less. Rung C goes 2.3x and rung A 3.2x.
+- **Bypass is the large gain for PSP103:** about 7x the images per hour of the full runs, at the
+  same spikes.
+- **Memory, not cores, limits how many runs fit.** The transient keeps every unknown at every
+  timepoint (`va_transient::Waveform::x`, whatever `--report` asks for). That is 16 830 unknowns
+  x 8 B per point on this PSP103 deck, so a 20-cycle run grows to ~3.5 GB. With four at once,
+  digit 2's full run was killed for memory after 9 580 s. Keeping only the reported unknowns
+  would remove this limit; that is a simulator change, not made here.
+
+**Coverage.** One image per digit, 16 of 64 hidden-2 neurons, 20 of 29 cycles, behavioural
+neurons, hidden-1 word lines as ideal PWL rails.
+
+## Where rung C's bias comes from; rung B (2026-10-10, 2.24.0)
+
+Rung C reads +0.9 to +1.7 mV above PSP103 on every digit. `bias_phases.py` splits each cycle into
+phases and sums how much V_m(rung C) - V_m(PSP103) changes in each (digit 1, 16 neurons, 18
+cycles):
+
+| Phase (ns from the cycle start) | Rung C | Rungs B+C |
+|---|---|---|
+| -1 .. 0: clk high, then falling | +7 uV | +0.4 uV |
+| 0 .. 0.05: word-line edges start, stage still integrating | -534 uV | -544 uV |
+| 0.05 .. 2.5: edges finish, stage closed | -202 uV | +96 uV |
+| 2.5 .. 122.5: V_m shares with CL (scales what is there) | +108 uV | +348 uV |
+| 122.5 .. 127: clk rising | +13 uV | 0 |
+| **127 .. 249: integrating, word lines steady** | **+767 uV** | **+1.8 uV** |
+
+**The integration phase (the V_DS term).** Rung A gains exactly the same +767 uV there as rung C,
+so it is not charge. It does not track the net synaptic current (-0.02 % of it), and it grows
+with the number of word lines on. The cause is the switch's gate drive: rungs A and C measure it
+from the source-line terminal, V(c, n). In triode the drive is from the channel, which sits
+V_DS / 2 away, plus the body effect. PSP103's R_on moves +0.30 Ohm per mV of V_DS: 369.87 Ohm at
+-20 mV, 375.45 at 0, 381.84 at +20. Each synapse has one branch above the source line (+0.1 V
+through its cell) and one below (-0.1 V). Without the term, the switch is too conductive on the
+first and not enough on the second, and both errors push V_m up. A second, smaller part: rung A
+pins R_on at V_DS = +5 mV, where PSP103's is 1.5 Ohm above its value at 0.
+
+**Rung B** (`mos_switch.va`, `kds`): the gate drive loses `kds` of V(p, n). `fit_switch.py` fits
+it to PSP103's R_on at +-5, +-10 and +-20 mV: kds = 0.5533 (0.5 is the channel's midpoint; the
+rest is body effect). vt moves to 0.948284 V, so that R_on at the fit's own +5 mV is rung A's
+376.97 Ohm exactly. The charge is refitted with that vt: cov_b = 3.741 fF, cch_b = 8.434 fF, within
+0.28 fC. R_on then follows PSP103 within 0.09 % from -20 to +20 mV; rung A was 1.9 % off. With
+`kds = 0` (the default) the switch is rung A or C exactly: Fig. 5's rung A and C outputs are
+byte-identical before and after. Decks: `gen_fig5_access.py --switch fitbc`,
+`gen_xbar_deck.py --synapses fitbc` (or `gen_mnist_tx.py`).
+
+**Ten digits with rungs B+C** (same runs and references as the section above, 1 thread, 4 at
+once):
+
+| Digit | Rung C: mean / RMS / worst V_m - PSP103 | Rungs B+C: mean / RMS / worst | Spikes (both) |
+|---|---|---|---|
+| 0 | +1.58 / 1.90 / 4.6 mV | -0.66 / 0.76 / 1.2 mV | all 17 agree |
+| 1 | +1.05 / 1.39 / 3.5 mV | -0.56 / 0.67 / 1.0 mV | all 32 agree |
+| 2 | +1.36 / 1.81 / 5.0 mV | -0.63 / 0.79 / 1.4 mV | all 41 agree |
+| 3 | +1.06 / 1.51 / 4.0 mV | -0.55 / 0.69 / 1.1 mV | all 52 agree |
+| 4 | +1.15 / 1.50 / 4.2 mV | -0.53 / 0.70 / 1.5 mV | all 43 agree |
+| 5 | +1.51 / 1.81 / 4.3 mV | -0.67 / 0.79 / 1.2 mV | all 26 agree |
+| 6 | +1.69 / 2.20 / 5.5 mV | -0.80 / 1.01 / 1.8 mV | all 34 agree |
+| 7 | +1.19 / 1.48 / 3.4 mV | -0.58 / 0.71 / 1.1 mV | all 33 agree |
+| 8 | +0.93 / 1.17 / 3.0 mV | -0.51 / 0.60 / 1.0 mV | all 22 agree |
+| 9 | +1.05 / 1.41 / 3.3 mV | -0.54 / 0.68 / 1.2 mV | all 40 agree |
+
+- **Worst error over the ten digits: 5.5 -> 1.8 mV; RMS 1.2-2.2 -> 0.6-1.0 mV.** The sign flips:
+  rungs B+C read low in 78 % of the 3 200 samples.
+- **The closest calls do not improve.** Rungs B+C move them by up to 6.8 mV (digit 5), as rung C
+  did (6.7 mV). Those margins are read at the cycle's edge, where the edge charge below decides.
+- **Cost: ~25 % slower than rung C** (381-526 s against 322-376 s, 1 thread, 4 at once), the
+  conductance now depending on V(p, n) as well. Fig. 5 is unchanged in its spikes (6, 10, 14); its
+  worst V_m error is 0.30 mV against rung C's 0.21, now one-signed (low) where rung C's errors
+  partly cancelled.
+
+**What is left: the word-line edges' first 50 ps (-0.5 to -0.8 mV).** The word lines start their
+1 ns ramp at the instant clk is halfway down, and sl_stage.va passes current until ~50 ps after.
+So V_m sees only the first few percent of each gate swing. The per-edge kicks in that window
+(`bias_phases.py`, part 2) are, on digit 1: PSP103 +217 uV per rising word line and -1195 uV per
+falling one; rungs C and B+C +235 / -1336 uV. `edge_kick.py` reproduces the gap on a bench of 4
+synapses on one word line (+7 % rising, +12 % falling) and tries what PSP103 has and the switch
+does not:
+
+| Rungs B+C, plus | Rising kick vs PSP103 | Falling kick vs PSP103 |
+|---|---|---|
+| nothing | +7.0 % | +11.8 % |
+| PSP103's gate resistance, ~73 Ohm | +7.4 % | +1.9 % |
+| 3 fF junction capacitance on each cell node | 0.0 % | +8.8 % |
+| both | +6.5 % | -0.3 % |
+
+The gate resistance (RSHG * W / (3 NGCON) / (NGCON L) + NF * RGO + RINT / (W L) for this device)
+delays the charge by a few ps, which is most of the falling gap. The rising gap also follows the
+overlap capacitance at the swing's low end: PSP103's is 3.46 fF there, rung C's constant 3.74 fF.
+Setting cov = 3.464 fF on the crossbar makes digit 1's rising kick +218 uV, PSP103's. The three do
+not separate cleanly (with both added, the rising kick goes back to +6.5 %), so none is modelled.
+
+This residual depends on the testbench's timing as much as on the device: the word-line edges
+coincide with the clock edge to the picosecond, so V_m samples the edge's first ~50 ps. With a
+non-overlap gap of a few hundred ps between the two, this neuron model (sl_stage.va) would pass none
+of the edge charge to V_m, whatever the switch. That is not tested here.

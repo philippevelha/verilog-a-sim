@@ -22,131 +22,62 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
-2.23.3 - 2026-10-10
+2.24.0 - 2026-10-10
 --------------------
-These three entries were developed on 2.18.2 as 2.18.3, 2.18.4 and 2.18.5 (their commit
-subjects keep those numbers) and renumbered when the branch was merged with 2.23.0+1.
-Measured after that merge: `cargo test --workspace` 965 passed, 0 failed; `cargo xtask validate`
-28 checked, 0 failed, convergence 28/28; `check models` 68/68 (two models came with 2.23.0+1,
-and neither draws the direction warning or the access check), `check benchmark/models` 25/25,
-`check external` 8/9. The figures in each entry below are from before the merge.
+**Rung B: the fitted access switch gets the triode's V_DS term, and rung C's +1.6 mV bias is
+explained.** `mos_switch.va` gains `kds` (default 0 = rungs A/C, byte-identical): the gate drive
+loses kds * V(p, n). `fit_switch.py` fits kds = 0.5533 with vt = 0.948284 V (and refits the
+charge with that vt). R_on then follows PSP103 within 0.09 % over +-20 mV, against rung A's 1.9 %.
+`--switch fitbc` / `--synapses fitbc` write the decks. New: `bias_phases.py`, which splits a
+fitted switch's V_m error by cycle phase, and `edge_kick.py`, a one-word-line bench for the
+word-line edge kicks.
 
-**A port without a direction is a warning, not an error.** 2.23.2 rejected it, but the rule
-behind that is unsettled here. IEEE 1364 requires a direction for every listed port, while
-`docs/token-reference.md` once quoted the LRM as making `inout` the default for analog ports,
-and the LRM was not available to check. A model that relies on the default now runs, and its
-author is told, at the port's name:
-  `[va-cli] warning: at r.va:5:10: module `r`: port `p` has no direction; it is treated as
-  `inout`. Declare it `inout p;` (or `input` / `output`) to be explicit`
-`check` prints the same text as a `[warn ]` line, and the file still counts as a pass (exit 0).
-"Treated as `inout`" is exact: elaboration does not read port directions at all, so every port
-is an inout node.
+  * Why: on the MNIST crossbar, rung C's error grows +0.77 mV a neuron-cycle while the stage
+    integrates with the word lines steady, the same for rung A. Its gate drive was measured from
+    the source-line terminal, so the switch was too conductive on each synapse's branch above the
+    source line and not enough on the one below, and both push V_m up. Rung B removes it
+    (+1.8 uV a neuron-cycle left).
+  * Ten digits, against the same PSP103 references: worst V_m error 5.5 -> 1.8 mV, RMS 1.2-2.2
+    -> 0.6-1.0 mV, every spike (340) still agrees. The sign flips: -0.5 to -0.8 mV mean.
+  * What is left (not modelled): the first ~50 ps of each word-line edge, which V_m sees because
+    the edges coincide with the clock edge to the picosecond. PSP103's gate resistance (~73 Ohm),
+    its lower overlap capacitance at the swing's low end (3.46 against 3.74 fF) and the cell
+    node's junction capacitance account for it on a bench, but do not separate cleanly.
+  * Cost: ~25 % slower than rung C on the crossbar (381-526 s against 322-376 s). The closest
+    calls move as much as with rung C (up to 6.8 mV), since the edge charge decides them. Fig. 5:
+    same spikes, worst V_m 0.30 mV against rung C's 0.21, now one-signed.
 
-The warning comes from `va_frontend::elaborate::port_direction_warnings(&ModuleAst)`. It is a
-function the caller prints from, the shape the other model warnings already have: `va_ir::Module`
-is a frozen interface, and elaboration does not print. The error corpus learned a third kind of
-entry, `expect: ok` with a `warning:` line, which asserts the warning text on a `[warn ]` line
-(and `at:` its location). `elab_port_without_direction.va` became
-`warn_port_without_direction.va`. The corpus runner no longer reads a `[warn ]` line as a
-failing verdict.
+Measured: `cargo test --workspace` 964 passed (new: the V_DS term's R_on and Jacobian against
+central differences); `cargo xtask validate` 28/28; fmt and clippy clean. Fig. 5 with rungs A and
+C byte-identical before and after the model change.
 
-Unchanged from 2.23.2: the access-function check (`Temp` on `electrical`) is still an error,
-and the 198 test models that 2.23.2 gave explicit `inout` declarations keep them (they are valid
-either way). No committed model triggers the warning (`check models` 66/66, `benchmark/models`
-25/25, `external` 8/9).
+2.23.0+2 - 2026-10-10
+----------------------
+**Rung C holds on all ten MNIST digits: every spike agrees with PSP103.** The 16-neuron hidden-2
+crossbar (20 cycles) for one image of each digit, with PSP103, rung C and rung A. Results are in
+circuits/snn/transistor/README.md ("Ten digits"). New: `scripts/benchmark/xbar_digits.sh` runs
+the decks several at once, and `circuits/snn/transistor/cmp_digits.py` compares them. No
+simulator, model or deck change.
 
-To settle the rule: if the LRM requires the direction, `port_direction_warnings` can feed an
-error again; if it makes `inout` the default, the warning can go.
+  * Spikes: 340 PSP103 spikes; rung C and rung A agree on every spike train. Rung C's V_m is
+    +0.9 to +1.7 mV high on average, worst 5.5 mV; rung A +5.8 to +9.5 mV, worst 20.2 mV.
+    The +1.6 mV bias rung C left on digit 0 is the same on every digit, still open.
+  * The reference for digits 2 and 5-9 is PSP103 `--bypass`. On digits 1, 3 and 4, bypass
+    matched the full runs: 127/127 spikes, V_m within 1 uV (print resolution).
+  * Margins are now measured at the latch edge. The 0.5 ns-earlier sample reads several mV
+    low, because V_m still rises ~13 mV/ns there. A margin within a few mV of V_th does not
+    decide the spike, because of the comparator's ~2 mV logistic and the flip-flop's latch
+    instant.
+  * Throughput, 4 vCPUs: full PSP103 gains almost nothing from parallel runs (1.4 against 1.3
+    images an hour). With bypass it is 9.7 an hour. Rung C gains 2.3x (18 -> 41 an hour)
+    and rung A 3.2x (57 -> 180) from 1-thread runs side by side.
+  * Cost found: the transient keeps every unknown at every timepoint (`Waveform::x`), ~3.5 GB
+    for a 20-cycle PSP103 run. Four at once overran the ~15 GB container, and digit 2's full
+    run was killed after 9 580 s. Memory, not cores, limits parallel inference. Not fixed
+    here.
 
-Measured: `cargo test --workspace` 959 passed, 0 failed (the corpus: 36 files, 0 gaps, 0 poor
-messages, 1 warning case); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
-
-
-2.23.2 - 2026-10-10
---------------------
-**The error corpus's last two gaps are closed; it now has none.**
-  * **A port with no direction is an error**, located at the port's name in the header: "port
-    `p` has no direction; declare it `inout p;` (or `input` / `output`)". It used to be
-    accepted.
-  * **An access function from the wrong discipline is an error.** `Temp(p, n)` on `electrical`
-    nets now reports "`Temp(...)` is not an access function of discipline `electrical`, which
-    net `p` is declared with: its access functions are `V` and `I`; write `V(...)` for its
-    potential". It used to compile as a voltage contribution, and `sim` then failed with
-    "singular matrix". The accesses come from the discipline's parsed natures when it was
-    declared in a `discipline` block, else V/I for electrical and Temp/Pwr for thermal. A named
-    branch is checked through its terminals. A net whose discipline names no access function is
-    not checked. The AST's `Access` now keeps the function's name (`func`) to make this possible.
-
-**The direction rule needs checking against the LRM, which is not in this repository.** The
-basis is IEEE 1364's rule that every listed port is declared input/output/inout (cited from
-memory as §12.3.3), plus Keysight ADS's Verilog-A reference. Against it,
-`docs/token-reference.md` used to quote the LRM as saying "`inout` is the default for analog
-bidirectional ports", which would make the omission legal. That quote could not be traced, so
-the doc no longer presents it as a quotation, and says so. If the local LRM does make `inout`
-the default, this check should become a warning; it is one `return Err` in `resolve_ports`.
-
-Cost:
-  * 198 inline test models in `va-frontend` and `va-cli` unit tests omitted their port
-    directions. A script added `inout <ports>;` after each such header (three parser-only tests
-    that index items by position were left as they were). No test's meaning changed, and every
-    test passes. **No committed model was affected**: `check models` 66/66, `check
-    benchmark/models` 25/25, `check external` 8/9, all unchanged. The local third-party
-    corpus is the place a model without directions would show up; it was not run here.
-  * The access check costs +0.5% instructions on `check benchmark/models`: each net's
-    discipline is looked up in a table built once per module.
-
-Measured: `cargo test --workspace` 959 passed, 0 failed (the error corpus, 36 files, 0 gaps,
-0 poor messages, is one of them); `cargo xtask validate` 28 checked, 0 failed, convergence
-28/28.
-
-
-2.23.1 - 2026-10-10
---------------------
-**Elaboration errors name file:line:col.** Before this, no elaboration error carried a
-location: `unknown identifier `Rx`` left the user to search the model for it. Now it reads
-`at diode.va:7:31: unknown identifier `Rx``, pointing at the identifier itself.
-
-How: the parser records where each construct starts, as positions in the file the user wrote
-(through the preprocessor's line map, so `` `include `` and `` `line `` are undone):
-  * every expression, in `ModuleAst::expr_pos`, parallel to the expression arena;
-  * every module item, in `item_pos`, and every header port, in `port_pos`;
-  * `Stmt::Assign` and `Stmt::Contribute`, in a new `at` field (the AST is `va-frontend`'s own
-    type, not a frozen interface).
-Elaboration locates an error on its way out, innermost first: the expression being lowered or
-constant-folded, then the statement (its own position, or its condition/selector), then the
-item or port the pass was on. The first location wins. An elaboration-time refusal gets its
-`where:` the same way. All 23 `elab_*` corpus files now assert `at:`, and each points at the
-right line and column.
-
-**A regression from 2.18.1, fixed.** That version's undeclared-local check in an
-`analog function` only knew the declarations at the top of the function. So a local declared
-inside a named block of the body (`begin : b real t; t = 2.0 * x; f = t; end`) was rejected
-as undeclared, although it compiled before 2.18.1. It is accepted again, and simulates to the
-value it should (`f = 2x`, checked). The error for a genuinely undeclared local now points at
-the assignment, not at the `analog function` line.
-
-Cost, measured on `va-cli check benchmark/models` (the 25 big compact models, frontend only),
-against a 2.18.2 build:
-  * 3.68 -> 3.88 G instructions (+5.4%, callgrind), and 696 -> 766 ms best-of-10 wall time
-    (+10%; the mean is noisier on this machine).
-  * The first version cost 3x. Three fixes brought it down: columns are byte offsets on ASCII
-    lines instead of a character count from the line start (macro-expanded lines are long);
-    the line map is resolved to file indices once per file, not once per expression; and
-    locations are formatted only when an error needs one, not for every item on every pass.
-    What is left is the position tables themselves (16 bytes per expression, copied wherever a
-    `ModuleAst` is cloned) and the lookup per expression.
-  * This is a frontend cost, paid once per run; the crossbar deck in 2.18.0+4 simulates for
-    260-620 s.
-
-Limits: `va-codegen` errors (`[cgen ]`) are still unlocated, because the IR carries no
-positions; that would be a change to Interface α (CLAUDE.md §6). An expression the parser
-synthesizes rather than reads (event-trigger desugaring) has no position of its own and is
-located by its statement or item.
-
-Measured: `cargo test --workspace` 959 passed, 0 failed (957 + two elaboration-location
-tests); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28; `check models` 66/66,
-`check benchmark/models` 25/25, `check external` 8/9 (unchanged).
-
+Measured: the runs above at this commit's simulator (2.23.0+1, unchanged). `xbar_digits.sh`
+reproduced digit 9's rung C output byte for byte at 2 threads, against the 4-thread original.
 
 2.23.0+1 - 2026-10-10
 ----------------------

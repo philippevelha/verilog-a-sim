@@ -24,6 +24,7 @@ import json
 import os
 import re
 
+import gen_fig5_access as gfa
 import gen_neuron as gn
 import input_stage
 import tech
@@ -44,11 +45,12 @@ def main():
     ap.add_argument("--neurons", choices=["tx", "behavioural"], default="tx",
                     help="the neurons as transistors (default) or the behavioural blocks; the "
                          "synapses' access devices are transistors either way")
-    ap.add_argument("--synapses", choices=["tx", "fit", "fitc", "ideal"], default="tx",
+    ap.add_argument("--synapses", choices=["tx", "fit", "fitc", "fitbc", "ideal"], default="tx",
                     help="the synapses' access devices: transistors (default); synapse_2t2r_mos.va "
                          "with switch_fit.json's parameters (rung A); rram + mos_switch.va with the "
-                         "gate's charge (rung C, which keeps each cell node); or the behavioural "
-                         "deck's own synapse_2t2r.va (the 10 Ohm switch)")
+                         "gate's charge (rung C, which keeps each cell node); the same plus the "
+                         "gate drive's V_DS term (fitbc, rungs B and C); or the behavioural deck's "
+                         "own synapse_2t2r.va (the 10 Ohm switch)")
     ap.add_argument("--layers", default="h2,h3,o",
                     help="which layers to keep (h2, h3, o); a synapse is kept only if its "
                          "source spike train exists")
@@ -75,20 +77,22 @@ def main():
     if a.synapses == "tx" or a.neurons == "tx":
         out.append(".include tech.inc")
     fit = ""
-    if a.synapses in ("fit", "fitc"):
+    if a.synapses in ("fit", "fitc", "fitbc"):
         sw = json.load(open(os.path.join(HERE, "switch_fit.json")))
         fit = f" beta={sw['beta']!r} vt={sw['vt']!r} ns={sw['ns']!r}"
-    if a.synapses == "fitc":
+    if a.synapses in ("fitc", "fitbc"):
         # rung C: each path is its cell and a charged switch, so the cell node stays, and the
-        # gate's charge on the drain side lands on it as in the transistor deck
+        # gate's charge on the drain side lands on it as in the transistor deck. fitbc adds rung
+        # B's V_DS term (kds), with the vt and charge fitted alongside it.
+        swp = " " + gfa.switch_params(sw, True, a.synapses == "fitbc")
         for p in range(4):
             for n in range(4):
                 out += [
                     f".subckt sync_p{p}_n{n} vp vn sl wl",
                     f"XGp vp cp rram level={p}",
-                    f"XAp cp sl wl mos_switch{fit} cov={sw['cov']!r} cch={sw['cch']!r}",
+                    f"XAp cp sl wl mos_switch{swp}",
                     f"XGn vn cn rram level={n}",
-                    f"XAn cn sl wl mos_switch{fit} cov={sw['cov']!r} cch={sw['cch']!r}",
+                    f"XAn cn sl wl mos_switch{swp}",
                     ".ends",
                 ]
     # 16 synapse cells, one per (levp, levn).
@@ -144,7 +148,7 @@ def main():
                 continue
             if a.synapses == "tx":
                 out.append(f"{inst} {vp} {vn} {sl} {wl} syn_p{p}_n{n}")
-            elif a.synapses == "fitc":
+            elif a.synapses in ("fitc", "fitbc"):
                 out.append(f"{inst} {vp} {vn} {sl} {wl} sync_p{p}_n{n}")
             elif a.synapses == "fit":
                 out.append(f"{inst} {vp} {vn} {sl} {wl} synapse_2t2r_mos levp={p} levn={n}{fit}")
