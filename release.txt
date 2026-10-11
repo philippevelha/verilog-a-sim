@@ -22,6 +22,19 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.1+1 - 2026-10-11
+----------------------
+**Lockfile: `private-gemm-x86` 0.1.20 -> 0.1.22 (a `faer` dependency), because 0.1.20 was
+yanked.** `cargo deny`'s advisories check refuses yanked crates (`deny.toml`: `yanked = "deny"`),
+so CI's `cargo deny` job failed on every branch, `main` included. It only showed once the Actions
+runners came back (2026-10-11; before that every job died without a runner). `cargo update -p
+private-gemm-x86`, nothing else moves. No behaviour change: `deck-diff` between the two lockfiles
+gives 14 of 14 decks byte-identical (dense and sparse solves, PSP103 transients, diodes, the ring
+oscillator, Fig. 5, HiCUM).
+
+Measured: `cargo deny check` fails with 0.1.20 (the CI error, reproduced) and passes with 0.1.22;
+`cargo test --workspace` 968 passed; `cargo xtask validate` 28/28.
+
 2.24.1 - 2026-10-11
 --------------------
 **A transient run keeps only what it reports: memory no longer grows with the circuit.**

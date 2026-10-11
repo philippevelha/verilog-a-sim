@@ -1144,9 +1144,9 @@ dependencies = [
 
 [[package]]
 name = "private-gemm-x86"
-version = "0.1.20"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0af8c3e5087969c323f667ccb4b789fa0954f5aa650550e38e81cf9108be21b5"
+checksum = "bba0a7831d1297712e7e7b33759b0c837941e79196dd05df506d5f36f7f78619"
 dependencies = [
  "crossbeam",
  "defer",
@@ -1638,14 +1638,14 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "va-abi"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "va-acnoise"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "libm",
  "thiserror 2.0.18",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "va-cli"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "anyhow",
  "libm",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "va-codegen"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "va-core"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "faer",
  "libm",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "va-frontend"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "libm",
  "logos",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "va-harness"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "plotters",
  "thiserror 2.0.18",
@@ -1718,11 +1718,11 @@ dependencies = [
 
 [[package]]
 name = "va-ir"
-version = "2.24.1"
+version = "2.24.1+1"
 
 [[package]]
 name = "va-netlist"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "thiserror 2.0.18",
  "va-abi",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "va-transient"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "libm",
  "thiserror 2.0.18",
@@ -1849,7 +1849,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2008,7 +2008,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "xtask"
-version = "2.24.1"
+version = "2.24.1+1"
 dependencies = [
  "anyhow",
  "va-abi",
