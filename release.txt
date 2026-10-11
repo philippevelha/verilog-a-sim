@@ -22,6 +22,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.1 - 2026-10-11
+--------------------
+**A transient run keeps only what it reports: memory no longer grows with the circuit.**
+`va_transient::integrator::run_recording` integrates as `run_with_events` does but stores only
+the unknowns asked for at each timepoint (`Waveform::columns` says which, `Waveform::value`
+reads by unknown index either way). `va-cli sim --tran` passes the quantities it prints, so
+`--report` now bounds memory as well as output. `run`, `run_with_events` and every library
+caller (va-harness, xtask, the tests) still get the whole vector.
+
+  * Why: every accepted timepoint stored the whole solution vector, 8 B per unknown. On the
+    MNIST crossbar with PSP103 (16 830 unknowns, 20 cycles) that reached ~3.5 GB a run, and
+    with four runs at once one was killed for memory (2.23.0+2). Memory, not cores, limited
+    parallel inference.
+  * Measured (digit 1, 32 quantities reported): rung C crossbar 418 -> 40 MB peak; PSP103
+    `--bypass` crossbar 590 MB peak, flat through the run (2.24.0 had reached 2.6 GB by 500 s
+    of its 713 s; its peak was not measured). Both outputs byte-identical to 2.24.0's. No
+    speed cost: Fig. 5 (PSP103, 1 thread, old and new alternated) 26.8 / 24.6 s -> 25.5 /
+    24.5 s, same output.
+  * A reported quantity with no unknown behind it (index `GROUND`, e.g. a model's own branch
+    to ground) never printed and still does not; va-cli drops it from the kept set.
+    `run_recording` itself refuses an out-of-range index (`TransientError::RecordOutOfRange`)
+    instead of skipping it. `deck-diff` caught the first version refusing them on 22 decks.
+  * Limitation: what is not reported is not kept, so it cannot be plotted or measured after
+    the run; ask for it in `--report`. The rest of a run's memory (matrix, JIT, bypass cache)
+    is unchanged.
+  * Also recorded (circuits/snn/transistor/README.md): no further switch parameters. Rung B's
+    one parameter costs ~25 % of run time; the edge effects stay unmodelled, and PSP103 is the
+    working reference until the real device model ships.
+
+Measured: `cargo test --workspace` 968 passed (new: recording keeps the kept unknowns'
+bits and refuses an unknown out of range; va-cli keeps a ground quantity unprinted, not
+refused); `cargo xtask validate` 28/28; fmt and clippy clean; `cargo xtask deck-diff` 2.24.0
+against this change: 63 decks compared identical, all those sorted before
+circuits/multiphysics/piezo_storage.net (the run hit a time limit there; the remaining 72 were
+still running at commit time, and their result is on the PR). The 13 slow decks deck-diff skips
+without --all were not run.
+
 2.24.0 - 2026-10-10
 --------------------
 **Rung B: the fitted access switch gets the triode's V_DS term, and rung C's +1.6 mV bias is

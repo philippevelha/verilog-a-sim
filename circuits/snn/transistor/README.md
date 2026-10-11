@@ -427,7 +427,9 @@ moves it by up to 13 mV (digit 6), and rung C by at most 6.7 mV (digit 5).
   timepoint (`va_transient::Waveform::x`, whatever `--report` asks for). That is 16 830 unknowns
   x 8 B per point on this PSP103 deck, so a 20-cycle run grows to ~3.5 GB. With four at once,
   digit 2's full run was killed for memory after 9 580 s. Keeping only the reported unknowns
-  would remove this limit; that is a simulator change, not made here.
+  would remove this limit; that is a simulator change, not made here. (2.24.1 makes it: va-cli
+  keeps only the reported unknowns. A 20-cycle PSP103 `--bypass` run now peaks at 590 MB,
+  flat, where 2.24.0 held 2.6 GB by two thirds of the run; rung C 418 -> 40 MB.)
 
 **Coverage.** One image per digit, 16 of 64 hidden-2 neurons, 20 of 29 cycles, behavioural
 neurons, hidden-1 word lines as ideal PWL rails.
@@ -511,6 +513,11 @@ delays the charge by a few ps, which is most of the falling gap. The rising gap 
 overlap capacitance at the swing's low end: PSP103's is 3.46 fF there, rung C's constant 3.74 fF.
 Setting cov = 3.464 fF on the crossbar makes digit 1's rising kick +218 uV, PSP103's. The three do
 not separate cleanly (with both added, the rising kick goes back to +6.5 %), so none is modelled.
+
+**No further parameters (decision, 2026-10-11).** These three are not added to the switch. The
+point of the fitted switch is to be cheaper than the transistor, and rung B's one parameter
+already costs ~25 % of run time; more would eat the speed-up. PSP103 is also only the working
+reference until the real device model ships, so fitting its finer details buys little.
 
 This residual depends on the testbench's timing as much as on the device: the word-line edges
 coincide with the clock edge to the picosecond, so V_m samples the edge's first ~50 ps. With a

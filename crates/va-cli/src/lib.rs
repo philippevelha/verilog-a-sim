@@ -897,7 +897,19 @@ pub fn run_sim(
             println!("{banner}");
             eprintln!("{banner}");
         }
-        let wf = solve_transient_impl(&net, &compiled, integration, solver, Some(built))?;
+        // Only what is reported is kept at each timepoint (selected before the run, so the
+        // waveform need not hold every unknown): the memory a run takes then grows with the
+        // report, not with the circuit.
+        let shown = select_quantities(&all_quantities, report_only)?;
+        let keep: Vec<usize> = shown.iter().map(|q| q.index).collect();
+        let wf = solve_transient_impl(
+            &net,
+            &compiled,
+            integration,
+            solver,
+            Some(built),
+            Some(&keep),
+        )?;
         // Said only when a request actually went unmet, rather than whenever a tolerance is
         // written: the bracketing step control (§ `cross`) normally honours it, and a blanket
         // warning would cry wolf on every model that asks for one.
@@ -917,7 +929,6 @@ pub fn run_sim(
                 wf.stalled_steps
             );
         }
-        let shown = select_quantities(&all_quantities, report_only)?;
         report_transient(&shown, &wf);
         if let Some(f) = &wf.finished {
             tasks::report_finish(f.kind, &f.by, &format!("t={:e}", f.t));
@@ -2528,17 +2539,22 @@ pub fn solve_transient_with(
     integration: Integration,
     solver: Solver,
 ) -> Result<Waveform> {
-    solve_transient_impl(net, compiled, integration, solver, None)
+    solve_transient_impl(net, compiled, integration, solver, None, None)
 }
 
 /// [`solve_transient_with`], on the circuit `prebuilt` already holds when given one (`run_sim`
 /// builds once and shares the build with the estimate and the report), else building it.
+/// With `keep`, the waveform holds only those unknowns
+/// ([`va_transient::integrator::run_recording`]): `run_sim` passes the quantities it reports,
+/// so a `--report` of a few nodes on a large circuit does not store every unknown at every
+/// timepoint.
 fn solve_transient_impl(
     net: &Netlist,
     compiled: &[Module],
     integration: Integration,
     solver: Solver,
     prebuilt: Option<BuiltInstances>,
+    keep: Option<&[usize]>,
 ) -> Result<Waveform> {
     let (tstep, tstop) = net
         .tran
@@ -2614,9 +2630,18 @@ fn solve_transient_impl(
         op.x
     };
 
-    va_transient::integrator::run(&refs, dim, x0, cfg)
-        .map_err(|e| name_non_finite_row(e.into(), &quantities))
-        .context("transient integration failed")
+    let events = va_transient::events::EventQueue::new();
+    match keep {
+        None => va_transient::integrator::run(&refs, dim, x0, cfg),
+        Some(keep) => {
+            // A quantity with no unknown behind it (index `GROUND`) has never printed: it
+            // stays unprinted rather than refused.
+            let keep: Vec<usize> = keep.iter().copied().filter(|&k| k < dim).collect();
+            va_transient::integrator::run_recording(&refs, dim, x0, cfg, &events, &keep)
+        }
+    }
+    .map_err(|e| name_non_finite_row(e.into(), &quantities))
+    .context("transient integration failed")
 }
 
 /// The transient run's initial solution vector: zero everywhere, then each reactive element's
@@ -4084,10 +4109,15 @@ fn report_transient(quantities: &[Quantity], wf: &Waveform) {
         wf.t.len(),
         wf.t.last().copied().unwrap_or(0.0)
     );
+    let cols: Vec<(&Quantity, Option<usize>)> =
+        quantities.iter().map(|q| (q, wf.column(q.index))).collect();
     for (t, x) in wf.t.iter().zip(&wf.x) {
-        let cols: Vec<String> = quantities
+        let cols: Vec<String> = cols
             .iter()
-            .filter_map(|q| x.get(q.index).map(|v| q.render(*v).replace(" = ", "=")))
+            .filter_map(|(q, c)| {
+                c.and_then(|c| x.get(c))
+                    .map(|v| q.render(*v).replace(" = ", "="))
+            })
             .collect();
         println!("  t={t:.6e}s  {}", cols.join("  "));
     }
@@ -4466,6 +4496,57 @@ mod tests {
     /// This is the end-to-end statement of the fold that used to be wrong. `va-frontend` folded
     /// `$abstime` to `0.0` at elaboration, so this model was a plain resistor at every timepoint
     /// and the waveform below would have been flat.
+    #[test]
+    fn keeping_only_the_reported_quantities_changes_no_value_and_skips_ground() {
+        // `run_sim` keeps only the reported quantities at each timepoint
+        // (`va_transient::integrator::run_recording`). A quantity with no unknown behind it
+        // (index `GROUND`; models/abstime_ramp.va's own branch to ground has one) never
+        // printed, and must stay unprinted rather than fail the run (2.24.0+1: `deck-diff`
+        // caught it on 22 decks). Every other value is the full run's, bit for bit.
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let dir = format!("{root}/models");
+        let src = std::fs::read_to_string(format!("{dir}/abstime_ramp.va")).expect("reads");
+        let design = va_frontend::compile_with_includes(&src, &[std::path::PathBuf::from(&dir)])
+            .expect("compiles");
+        let net = va_netlist::parser::parse(
+            "D1 out gnd abstime_ramp\nR1 out gnd 1000\n.tran 20u 1m\n.end\n",
+        )
+        .expect("parses");
+        let quantities = quantities(&net, &design.modules).expect("builds");
+        assert!(
+            quantities.iter().any(|q| q.index == GROUND),
+            "the test needs a quantity on ground: {:?}",
+            quantities
+                .iter()
+                .map(|q| (&q.label, q.index))
+                .collect::<Vec<_>>()
+        );
+        let keep: Vec<usize> = quantities.iter().map(|q| q.index).collect();
+
+        let full = solve_transient(&net, &design.modules, Integration::Trapezoidal).expect("runs");
+        let kept = solve_transient_impl(
+            &net,
+            &design.modules,
+            Integration::Trapezoidal,
+            Solver::Auto,
+            None,
+            Some(&keep),
+        )
+        .expect("a ground quantity is skipped, not refused");
+        assert_eq!(kept.t, full.t);
+        for q in quantities.iter().filter(|q| q.index != GROUND) {
+            for k in 0..full.t.len() {
+                assert_eq!(
+                    kept.value(k, q.index).map(f64::to_bits),
+                    full.value(k, q.index).map(f64::to_bits),
+                    "{} at t[{k}]",
+                    q.label
+                );
+            }
+        }
+        assert!(kept.columns.is_some() && full.columns.is_none());
+    }
+
     #[test]
     fn a_model_reading_abstime_ramps_in_transient_and_reads_zero_in_dc() {
         // I(p,n) <+ V(p,n)/R + k*$abstime — a 1 mA/ms current ramp in parallel with 1 kΩ.
