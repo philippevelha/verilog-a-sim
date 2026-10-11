@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.2 - 2026-10-11
+--------------------
+**Predefined macros, and `va-cli --define`.** `__VAMS_ENABLE__` and
+`__VAMS_COMPACT_MODELING__` are defined (as `1`) before any source is read
+(`va_frontend::preprocess::PREDEFINED`). `va-cli sim|check --define NAME[=VALUE]` predefines
+more, repeatable, `NAME` alone meaning `1` (`PreprocessOptions::defines`,
+`preprocess_named_with`). Every LRM directive was already handled; these were the gap.
+
+  * Why: compact models guard the compact-modeling extensions with
+    `` `ifdef __VAMS_COMPACT_MODELING__ ``. Undefined, that branch was compiled out silently.
+    `external/mos11010.va` (MOS11) now compiles its correlated-noise network: 7 nodes, where
+    it had 4. Its noise analysis runs with it (a 1 kOhm-loaded MOS11, 1 kHz-1 MHz).
+  * Correction to what was said before the change: MOS11 does not compile in this repo
+    either way. It includes `discipline.h`/`constants.h`, which are not shipped, and uses
+    `P_EPS0` from the vendor's `constants.h`. The comparison above supplied
+    `P_EPS0=8.854187817e-12` (now possible with `--define`) and the standard headers in a
+    scratch copy.
+  * No other effect: `va-cli check --codegen` over `external/` (7/7) and `models/` (68/68)
+    gives line-identical reports before and after; no other model there uses the macros.
+  * A name that is not an identifier is refused before any source is read. A model may still
+    `` `undef `` either predefined macro. Function-like macros cannot be predefined.
+
+Measured: `cargo test --workspace` 970 passed (new: the predefined macros take their
+`` `ifdef `` branch, read 1 and can be undefined; caller defines are seen, replace a predefined
+one and have their names checked); `cargo xtask validate` 28/28; fmt and clippy clean.
+
 2.24.1+1 - 2026-10-11
 ----------------------
 **Lockfile: `private-gemm-x86` 0.1.20 -> 0.1.22 (a `faer` dependency), because 0.1.20 was

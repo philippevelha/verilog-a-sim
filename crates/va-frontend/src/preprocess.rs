@@ -17,6 +17,12 @@
 //! - **Undefined macro usage is an error.**
 //! - Comments and string literals are honoured: directives/macros inside them are ignored.
 //! - No `` `__FILE__ ``/`` `__LINE__ ``, token-pasting (`##`), or stringization (`#`).
+//! - **Predefined macros** ([`PREDEFINED`]): `__VAMS_ENABLE__` and
+//!   `__VAMS_COMPACT_MODELING__` are defined (as `1`) before any source is read, so a model's
+//!   `` `ifdef __VAMS_COMPACT_MODELING__ `` takes the branch this tool supports (`ddx`,
+//!   `$param_given`, `aliasparam`, …) instead of silently dropping it. A model may still
+//!   `` `undef `` them. Further macros can be predefined by the caller
+//!   ([`PreprocessOptions::defines`]; `va-cli --define NAME[=VALUE]`).
 //! - **Every LRM directive is recognised, and none is dropped silently** (2026-09-12,
 //!   `docs/proposals/directives.md`). The ones that change what a module means —
 //!   `` `default_discipline ``, `` `default_transition ``, `` `begin_keywords ``/
@@ -246,6 +252,29 @@ pub fn preprocess_full(
     preprocess_named(source, include_dirs, "<input>")
 }
 
+/// The macros every preprocessing run starts with, as `(name, body)`.
+///
+/// - `__VAMS_ENABLE__`: Verilog-AMS tools define it, so a source can tell it is being read by
+///   one rather than by a digital Verilog tool.
+/// - `__VAMS_COMPACT_MODELING__`: the compact-modeling extensions (`ddx`, `$param_given`,
+///   `aliasparam`, `$simparam`, analog functions with output arguments, …) are supported.
+///   Compact models guard those features with it, `external/mos11010.va`'s correlated-noise
+///   network among them; undefined, that network was silently compiled out.
+///
+/// Both read `1`, so an `` `ifdef `` sees them and a use in an expression is a valid integer.
+pub const PREDEFINED: &[(&str, &str)] =
+    &[("__VAMS_ENABLE__", "1"), ("__VAMS_COMPACT_MODELING__", "1")];
+
+/// Caller-supplied settings for a preprocessing run, beyond the source and include path.
+#[derive(Debug, Clone, Default)]
+pub struct PreprocessOptions {
+    /// Object-like macros defined before the source is read, after [`PREDEFINED`] (so one of
+    /// the same name replaces it), as `(name, body)` — what `va-cli --define NAME[=VALUE]`
+    /// passes. A name must be a simple identifier (letter or `_`, then letters, digits, `_` or
+    /// `$`); anything else is an error before any source is read.
+    pub defines: Vec<(String, String)>,
+}
+
 /// [`preprocess_full`] with the name the top-level source should carry in the line map —
 /// the model's own path, so a diagnostic can point at it. `<input>` when there is none.
 pub fn preprocess_named(
@@ -253,9 +282,45 @@ pub fn preprocess_named(
     include_dirs: &[PathBuf],
     name: &str,
 ) -> (Result<Preprocessed, FrontendError>, Vec<String>) {
+    preprocess_named_with(source, include_dirs, name, &PreprocessOptions::default())
+}
+
+/// [`preprocess_named`] with [`PreprocessOptions`]: the macros a caller predefines.
+///
+/// # Errors
+///
+/// As [`preprocess_full`], plus a define whose name is not a simple identifier.
+pub fn preprocess_named_with(
+    source: &str,
+    include_dirs: &[PathBuf],
+    name: &str,
+    options: &PreprocessOptions,
+) -> (Result<Preprocessed, FrontendError>, Vec<String>) {
+    let mut macros = HashMap::new();
+    let predefined = PREDEFINED
+        .iter()
+        .map(|&(n, b)| (n.to_string(), b.to_string()));
+    for (n, body) in predefined.chain(options.defines.iter().cloned()) {
+        let valid = n
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+        if !valid {
+            return (
+                Err(pp_err(&format!(
+                    "cannot predefine macro `{n}`: a macro name is a letter or `_` followed by \
+                     letters, digits, `_` or `$`"
+                ))),
+                Vec::new(),
+            );
+        }
+        macros.insert(n, Macro { params: None, body });
+    }
     let mut pp = Preprocessor {
         include_dirs: include_dirs.to_vec(),
-        macros: HashMap::new(),
+        macros,
         cond: Vec::new(),
         include_stack: Vec::new(),
         out: String::new(),
@@ -1120,6 +1185,54 @@ mod tests {
                 .contains(":2: this string literal is never closed"),
             "{err}"
         );
+    }
+
+    /// The LRM's predefined macros are there before any source is read: an `` `ifdef `` on them
+    /// takes its branch (`external/mos11010.va`'s correlated-noise network sits behind
+    /// `__VAMS_COMPACT_MODELING__`, and was compiled out before they existed), each reads `1`,
+    /// and a model may still `` `undef `` them.
+    #[test]
+    fn the_predefined_macros_are_defined_and_can_be_undefined() {
+        let src = "`ifdef __VAMS_ENABLE__\na = `__VAMS_ENABLE__;\n`else\na = 0;\n`endif\n\
+                   `ifdef __VAMS_COMPACT_MODELING__\nb = 1;\n`else\nb = 0;\n`endif\n\
+                   `undef __VAMS_COMPACT_MODELING__\n\
+                   `ifndef __VAMS_COMPACT_MODELING__\nc = 1;\n`endif\n";
+        let out: String = pp(src).split_whitespace().collect();
+        assert_eq!(out, "a=1;b=1;c=1;");
+    }
+
+    /// Caller-predefined macros (`va-cli --define`): defined before the source, so `` `ifdef ``
+    /// sees them and a use expands to the value; one named like a predefined macro replaces
+    /// it; a name that is not an identifier is refused before any source is read.
+    #[test]
+    fn caller_defines_are_predefined_and_their_names_checked() {
+        let opts = |d: &[(&str, &str)]| PreprocessOptions {
+            defines: d
+                .iter()
+                .map(|&(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+        };
+        let run = |src: &str, o: &PreprocessOptions| {
+            preprocess_named_with(src, &[], "<t>", o).0.map(|p| p.text)
+        };
+        let src = "`ifdef FAST\nx = `FAST;\n`else\nx = 0;\n`endif\ny = `__VAMS_ENABLE__;\n";
+        let with: String = run(src, &opts(&[("FAST", "3"), ("__VAMS_ENABLE__", "7")]))
+            .expect("preprocesses")
+            .split_whitespace()
+            .collect();
+        assert_eq!(with, "x=3;y=7;");
+        let without: String = run(src, &opts(&[]))
+            .expect("preprocesses")
+            .split_whitespace()
+            .collect();
+        assert_eq!(without, "x=0;y=1;");
+        for bad in ["", "1X", "A-B", "A B"] {
+            let err = run("x = 1;\n", &opts(&[(bad, "1")])).expect_err(bad);
+            assert!(
+                err.to_string().contains("cannot predefine macro"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

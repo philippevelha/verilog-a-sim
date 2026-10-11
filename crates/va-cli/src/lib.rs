@@ -103,6 +103,23 @@ pub fn set_btf(on: bool) {
 
 static BTF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Macros to predefine, as `(name, body)`, for every model file this process preprocesses
+/// (`va_frontend::preprocess::PreprocessOptions::defines`), after the LRM's own
+/// (`va_frontend::preprocess::PREDEFINED`). `va-cli --define NAME[=VALUE]` sets them.
+/// Process-wide like [`set_btf`]: one run compiles its models once, all with the same macros.
+pub fn set_defines(defines: Vec<(String, String)>) {
+    *DEFINES.lock().unwrap_or_else(|e| e.into_inner()) = defines;
+}
+
+static DEFINES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The preprocessing options [`set_defines`] has set.
+fn preprocess_options() -> va_frontend::preprocess::PreprocessOptions {
+    va_frontend::preprocess::PreprocessOptions {
+        defines: DEFINES.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+    }
+}
+
 /// Switch device bypass on (`Some`) or off (`None`) for every `.tran` this process runs from
 /// here on (`va_transient::integrator::TranConfig::bypass`). `va-cli sim --bypass` calls it.
 /// Off by default: a bypassed run is not bit-identical to a plain one and no committed golden
@@ -574,9 +591,14 @@ fn compile_model_library_with_context(
     for (f, dir) in &files {
         let name = f.display().to_string();
         let src = std::fs::read_to_string(f).with_context(|| format!("reading model {name}"))?;
-        let pre = va_frontend::preprocess::preprocess_named(&src, std::slice::from_ref(dir), &name)
-            .0
-            .with_context(|| format!("preprocessing {name}"))?;
+        let pre = va_frontend::preprocess::preprocess_named_with(
+            &src,
+            std::slice::from_ref(dir),
+            &name,
+            &preprocess_options(),
+        )
+        .0
+        .with_context(|| format!("preprocessing {name}"))?;
         // A directive the LRM gives no Verilog-A meaning is accepted and said so, once.
         for w in &pre.warnings {
             eprintln!("[va-cli] warning: {name}: {w}");
@@ -1250,8 +1272,12 @@ fn parse_file(path: &str, scan_root: &std::path::Path) -> Result<ParsedFile, Vec
     if !scan_root.as_os_str().is_empty() && Some(scan_root) != own_dir {
         include_dirs.push(scan_root.to_path_buf());
     }
-    let (result, skipped_includes) =
-        va_frontend::preprocess::preprocess_named(&src, &include_dirs, path);
+    let (result, skipped_includes) = va_frontend::preprocess::preprocess_named_with(
+        &src,
+        &include_dirs,
+        path,
+        &preprocess_options(),
+    );
     let pre = match result {
         Ok(pre) => pre,
         Err(e) => {
