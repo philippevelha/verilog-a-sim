@@ -173,6 +173,14 @@ pub fn parse_unit(
         toks: tokens,
         pos: 0,
         exprs: Vec::new(),
+        expr_pos: Vec::new(),
+        files: Vec::new(),
+        line_origin: Vec::new(),
+        last_line: 0,
+        line_starts: located.map_or_else(Vec::new, |(src, _)| line_starts(src)),
+        line_ascii: located.map_or_else(Vec::new, |(src, _)| {
+            src.split('\n').map(str::is_ascii).collect()
+        }),
         natures: HashMap::new(),
         disciplines: HashMap::new(),
         known_access,
@@ -182,6 +190,7 @@ pub fn parse_unit(
         directives,
         line_map,
     };
+    p.intern_line_origins();
     let mut modules = Vec::new();
     loop {
         p.skip_directives();
@@ -235,6 +244,26 @@ struct Parser<'a> {
     line_map: &'a [crate::preprocess::SourceLoc],
     pos: usize,
     exprs: Vec<ExprAst>,
+    /// Where each of [`Self::exprs`] starts; becomes [`ModuleAst::expr_pos`].
+    expr_pos: Vec<Option<crate::ast::SrcPos>>,
+    /// The file names positions index — every file the source's lines came from, interned
+    /// once up front. Each module gets a copy as [`ModuleAst::files`].
+    files: Vec<String>,
+    /// For each line of [`Self::src`], its index into [`Self::files`] and its line number in
+    /// that file: the line map, resolved once instead of once per expression.
+    line_origin: Vec<(u32, u32)>,
+    /// Byte offset of each line start in [`Self::src`], so a token's line is a binary search
+    /// rather than a count of every newline before it (which, done per expression, would be
+    /// quadratic in the size of a compact model).
+    line_starts: Vec<usize>,
+    /// Whether each line of [`Self::src`] is pure ASCII, where a column is a byte count. A
+    /// macro-expanded line can run to many kilobytes; counting characters from its start for
+    /// every expression on it would be quadratic in its length.
+    line_ascii: Vec<bool>,
+    /// The line [`Self::src_pos`] found last. Tokens are located in source order, so the next
+    /// one is almost always on the same line or the one after, and checking those first saves
+    /// the binary search.
+    last_line: usize,
     /// Parsed `nature ... endnature` blocks, keyed by name (§ module preamble discipline/nature
     /// parsing).
     natures: HashMap<String, NatureDecl>,
@@ -299,6 +328,13 @@ fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     row[b.len()]
+}
+
+/// Byte offset of every line start in `src`.
+fn line_starts(src: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+        .collect()
 }
 
 /// Where the parser's event-trigger refusals are tracked.
@@ -1052,10 +1088,87 @@ impl Parser<'_> {
         Ok(names)
     }
 
+    /// Add `e` to the arena, with no position yet. Every expression the source spells passes
+    /// through [`Self::parse_unary`], which records where it starts; [`Self::parse_bin`] and
+    /// [`Self::parse_expr`] give a binary or conditional node its left operand's start. A node
+    /// the parser synthesizes (no source spelling of its own) keeps `None`, and an error in it
+    /// is located by its statement or item instead.
     fn push(&mut self, e: ExprAst) -> ExprRef {
         let r = ExprRef(self.exprs.len() as u32);
         self.exprs.push(e);
+        self.expr_pos.push(None);
         r
+    }
+
+    /// Set where expression `r` starts.
+    fn set_expr_pos(&mut self, r: ExprRef, at: Option<crate::ast::SrcPos>) {
+        if let Some(slot) = self.expr_pos.get_mut(r.0 as usize) {
+            *slot = at;
+        }
+    }
+
+    /// The position of token `idx` in the user's source, if this parser was given the text.
+    fn src_pos(&mut self, idx: usize) -> Option<crate::ast::SrcPos> {
+        let src = self.src?;
+        let offset = (*self.offsets?.get(idx)?).min(src.len());
+        let starts = &self.line_starts;
+        let on_line = |l: usize| {
+            starts.get(l).is_some_and(|&s| s <= offset)
+                && starts.get(l + 1).is_none_or(|&next| offset < next)
+        };
+        let line_idx = if on_line(self.last_line) {
+            self.last_line
+        } else if on_line(self.last_line + 1) {
+            self.last_line + 1
+        } else {
+            starts.partition_point(|&s| s <= offset).saturating_sub(1)
+        };
+        self.last_line = line_idx;
+        let line_start = self.line_starts.get(line_idx).copied().unwrap_or(0);
+        let col = if self.line_ascii.get(line_idx).copied().unwrap_or(false) {
+            offset - line_start + 1
+        } else {
+            src.get(line_start..offset)
+                .map_or(1, |t| t.chars().count() + 1)
+        } as u32;
+        let (file, line) = match self.line_origin.get(line_idx) {
+            Some(&origin) => origin,
+            None => (self.preprocessed_file(), line_idx as u32 + 1),
+        };
+        Some(crate::ast::SrcPos { file, line, col })
+    }
+
+    /// Resolve [`Self::line_map`] into [`Self::line_origin`], interning each file name once.
+    fn intern_line_origins(&mut self) {
+        let mut origin = Vec::with_capacity(self.line_map.len());
+        for loc in self.line_map {
+            // Consecutive lines almost always share a file; check that before searching.
+            let file = match self.files.last() {
+                Some(last) if *last == loc.file => self.files.len() - 1,
+                _ => match self.files.iter().position(|f| *f == loc.file) {
+                    Some(i) => i,
+                    None => {
+                        self.files.push(loc.file.clone());
+                        self.files.len() - 1
+                    }
+                },
+            };
+            origin.push((file as u32, loc.line as u32));
+        }
+        self.line_origin = origin;
+    }
+
+    /// The file index standing for "a line of the preprocessed text", for a line the line map
+    /// does not cover.
+    fn preprocessed_file(&mut self) -> u32 {
+        const NAME: &str = "<preprocessed>";
+        match self.files.iter().position(|f| f == NAME) {
+            Some(i) => i as u32,
+            None => {
+                self.files.push(NAME.to_string());
+                (self.files.len() - 1) as u32
+            }
+        }
     }
 
     /// Consume any run of compiler directives (`` `include "..." `` etc.).
@@ -1404,7 +1517,9 @@ impl Parser<'_> {
         };
         self.eat(&Token::Semicolon)?;
 
+        let header_end = self.pos;
         let mut items = Vec::new();
+        let mut item_pos = Vec::new();
         loop {
             self.skip_directives();
             if self.at(&Token::EndModule) {
@@ -1413,15 +1528,38 @@ impl Parser<'_> {
             if self.peek().is_none() {
                 return self.unclosed(module_pos, &format!("module `{name}`"), "endmodule");
             }
+            // An item queued by a declaration that expanded into two belongs to that
+            // declaration, not to the token the parser happens to be on now.
+            let at = if self.pending_items.is_empty() {
+                self.src_pos(self.pos)
+            } else {
+                item_pos.last().copied().flatten()
+            };
             items.push(self.parse_item()?);
+            item_pos.push(at);
         }
         self.eat(&Token::EndModule)?;
+
+        // Each port where the header names it: the first identifier token with its name after
+        // the module name.
+        let port_pos = ports
+            .iter()
+            .map(|p| {
+                (module_pos + 2..header_end)
+                    .find(|&t| matches!(self.toks.get(t), Some(Token::Ident(n)) if n == p))
+                    .and_then(|t| self.src_pos(t))
+            })
+            .collect();
 
         Ok(ModuleAst {
             name,
             ports,
             items,
             exprs: std::mem::take(&mut self.exprs),
+            expr_pos: std::mem::take(&mut self.expr_pos),
+            item_pos,
+            port_pos,
+            files: self.files.clone(),
             settings,
         })
     }
@@ -2094,13 +2232,15 @@ impl Parser<'_> {
                          side of `<+` — it is read-only (LRM §5.4.3)"
                     ));
                 }
+                let at = self.src_pos(self.pos);
                 let target = self.parse_access()?;
                 self.eat(&Token::Contribute)?;
                 let value = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Contribute { target, value })
+                Ok(Stmt::Contribute { target, value, at })
             }
             Some(Token::Ident(_)) => {
+                let at = self.src_pos(self.pos);
                 let lhs = self.expect_ident()?;
                 // `lhs[index] = rhs;` / `lhs[i][j] = rhs;` assigns one element of a 1-D or § 2-D
                 // array variable; each index must be a compile-time-constant or genvar
@@ -2109,18 +2249,29 @@ impl Parser<'_> {
                 self.eat(&Token::Assign)?;
                 let rhs = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Assign { lhs, index, rhs })
+                Ok(Stmt::Assign {
+                    lhs,
+                    index,
+                    rhs,
+                    at,
+                })
             }
             // `electrical`/`thermal`/`ground` reused as a plain variable name (see
             // `ident_like_keyword`'s doc comment) — an assignment target here, never a
             // declaration start (that only ever happens in `parse_item`).
             Some(t) if ident_like_keyword(t).is_some() => {
+                let at = self.src_pos(self.pos);
                 let lhs = self.expect_ident()?;
                 let index = self.parse_index_list()?;
                 self.eat(&Token::Assign)?;
                 let rhs = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
-                Ok(Stmt::Assign { lhs, index, rhs })
+                Ok(Stmt::Assign {
+                    lhs,
+                    index,
+                    rhs,
+                    at,
+                })
             }
             Some(&Token::Keyword(kw)) => match kw.as_str() {
                 "while" => self.parse_while(),
@@ -2266,6 +2417,7 @@ impl Parser<'_> {
 
     /// Parse a bare `lhs = rhs` assignment with no trailing terminator (for `for` headers).
     fn parse_assignment(&mut self) -> Result<Stmt, FrontendError> {
+        let at = self.src_pos(self.pos);
         let lhs = self.expect_ident()?;
         self.eat(&Token::Assign)?;
         let rhs = self.parse_expr()?;
@@ -2273,6 +2425,7 @@ impl Parser<'_> {
             lhs,
             index: Vec::new(),
             rhs,
+            at,
         })
     }
 
@@ -2301,7 +2454,11 @@ impl Parser<'_> {
             args.push(self.parse_net_arg()?);
         }
         self.eat(&Token::RParen)?;
-        Ok(Access { kind, args })
+        Ok(Access {
+            func: name,
+            kind,
+            args,
+        })
     }
 
     /// Parse a port-current probe, `name(<port>)` (§ port-current probe, LRM §5.4.3) — an
@@ -2336,7 +2493,10 @@ impl Parser<'_> {
             let then_ = self.parse_expr()?;
             self.eat(&Token::Colon)?;
             let else_ = self.parse_expr()?;
-            Ok(self.push(ExprAst::Cond { cond, then_, else_ }))
+            let r = self.push(ExprAst::Cond { cond, then_, else_ });
+            let at = self.expr_pos.get(cond.0 as usize).copied().flatten();
+            self.set_expr_pos(r, at);
+            Ok(r)
         } else {
             Ok(cond)
         }
@@ -2350,12 +2510,23 @@ impl Parser<'_> {
             }
             self.pos += 1;
             let rhs = self.parse_bin(rbp)?;
+            let at = self.expr_pos.get(lhs.0 as usize).copied().flatten();
             lhs = self.push(ExprAst::Binary(op, lhs, rhs));
+            self.set_expr_pos(lhs, at);
         }
         Ok(lhs)
     }
 
     fn parse_unary(&mut self) -> Result<ExprRef, FrontendError> {
+        let start = self.pos;
+        let r = self.parse_unary_at()?;
+        let at = self.src_pos(start);
+        self.set_expr_pos(r, at);
+        Ok(r)
+    }
+
+    /// [`Self::parse_unary`], which records where the result starts.
+    fn parse_unary_at(&mut self) -> Result<ExprRef, FrontendError> {
         match self.peek() {
             Some(Token::Minus) => {
                 self.pos += 1;
@@ -2581,7 +2752,7 @@ mod tests {
     /// number and is checkable directly.
     #[test]
     fn a_located_parse_error_names_the_line_and_quotes_it() {
-        let src = "module m(a);\n    electrical a;\n    analog begin\n        I(a) <+ ;\n    end\nendmodule\n";
+        let src = "module m(a); inout a;\n    electrical a;\n    analog begin\n        I(a) <+ ;\n    end\nendmodule\n";
         let (tokens, offsets) = crate::lexer::lex_spanned(src).expect("lex");
         let err = parse_with_disciplines_located(&tokens, Some((src, &offsets)))
             .expect_err("`<+ ;` is not an expression");
@@ -2594,7 +2765,7 @@ mod tests {
     /// location is strictly additive and `parse`'s own callers keep working unchanged.
     #[test]
     fn an_unlocated_parse_error_falls_back_to_a_token_index() {
-        let src = "module m(a);\n    electrical a;\n    analog begin\n        I(a) <+ ;\n    end\nendmodule\n";
+        let src = "module m(a); inout a;\n    electrical a;\n    analog begin\n        I(a) <+ ;\n    end\nendmodule\n";
         let tokens = lex(src).expect("lex");
         let err = parse(&tokens).expect_err("`<+ ;` is not an expression");
         let msg = err.to_string();
@@ -2608,7 +2779,7 @@ mod tests {
     #[test]
     fn a_value_in_a_port_connection_names_the_parameter_override_fix() {
         let src =
-            "module top(a);\n    electrical a;\n    child c1 (.opt(a), .therm_en(1));\nendmodule\n";
+            "module top(a); inout a;\n    electrical a;\n    child c1 (.opt(a), .therm_en(1));\nendmodule\n";
         let (tokens, offsets) = crate::lexer::lex_spanned(src).expect("lex");
         let err = parse_with_disciplines_located(&tokens, Some((src, &offsets)))
             .expect_err("a port takes a net, not a number");
@@ -2623,8 +2794,9 @@ mod tests {
     #[test]
     fn a_long_offending_line_is_truncated_in_the_diagnostic() {
         let filler = "a + ".repeat(80);
-        let src =
-            format!("module m(a);\n    electrical a;\n    analog I(a) <+ {filler};\nendmodule\n");
+        let src = format!(
+            "module m(a); inout a;\n    electrical a;\n    analog I(a) <+ {filler};\nendmodule\n"
+        );
         let (tokens, offsets) = crate::lexer::lex_spanned(&src).expect("lex");
         let err = parse_with_disciplines_located(&tokens, Some((&src, &offsets)))
             .expect_err("a trailing `+` has no operand");
@@ -2694,7 +2866,7 @@ mod tests {
         // Ohm's law, then the thermal-noise contribution (T5.2).
         assert_eq!(analog.len(), 2);
         match &analog[0] {
-            Stmt::Contribute { target, value } => {
+            Stmt::Contribute { target, value, .. } => {
                 assert_eq!(target.kind, AccessKind::Flow);
                 assert_eq!(target.args[0].name, "p");
                 assert_eq!(target.args[1].name, "n");
@@ -2826,7 +2998,7 @@ mod tests {
         // `laplace_nd(sig, {1}, {1, tau})` — the exact `external/photonic/PhotoDetector.va`
         // idiom (coefficient-list arguments to a Laplace-domain filter builtin).
         let m = parse_src(
-            "module t(a, b); electrical a, b; \
+            "module t(a, b); inout a, b; electrical a, b; \
              analog I(a, b) <+ laplace_nd(V(a, b), {1}, {1, 2, 3}); endmodule",
         );
         let call = analog_body(&m)
@@ -3136,7 +3308,7 @@ mod tests {
     #[test]
     fn a_port_named_electrical_is_still_a_port_name() {
         let m = parse_src(
-            "module m(electrical); inout electrical; electrical electrical; \
+            "module m(electrical); inout electrical; inout electrical; electrical electrical; \
              analog V(electrical) <+ 0.0; endmodule",
         );
         assert!(m
@@ -3588,7 +3760,7 @@ mod tests {
         // (the first step is the only step) and wrong in transient, where initialization then
         // re-ran at every timepoint.
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(initial_step) begin x = 1.0; end I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(initial_step) begin x = 1.0; end I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         match &body[0] {
@@ -3612,7 +3784,7 @@ mod tests {
     #[test]
     fn a_bare_cross_trigger_parses_into_a_guarded_body() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0, 1)) begin x = 1.0; end I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(cross(V(a) - 1.0, 1)) begin x = 1.0; end I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         match &body[0] {
@@ -3649,14 +3821,14 @@ mod tests {
             args.len()
         };
         assert_eq!(
-            args_of("module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule"),
+            args_of("module t(a, b); inout a, b; electrical a, b; analog begin @(cross(V(a) - 1.0)) x = 1.0; I(a, b) <+ x; end endmodule"),
             1,
             "one written argument stays one argument"
         );
         // All five of `cross`'s arguments survive — the `enable` in last position especially,
         // which used to be dropped and with it the ability to switch the event off.
         assert_eq!(
-            args_of("module t(a, b); electrical a, b; analog begin @(cross(V(a) - 1.0, 1, 1n, 1u, 0)) x = 1.0; I(a, b) <+ x; end endmodule"),
+            args_of("module t(a, b); inout a, b; electrical a, b; analog begin @(cross(V(a) - 1.0, 1, 1n, 1u, 0)) x = 1.0; I(a, b) <+ x; end endmodule"),
             5,
             "every argument reaches elaboration"
         );
@@ -3700,7 +3872,7 @@ mod tests {
             ),
         ] {
             let m = parse_src(&format!(
-                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+                "module t(a, b); inout a, b; electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
             ));
             let body = analog_body(&m);
             let Stmt::If { cond, then_, else_ } = &body[0] else {
@@ -3722,7 +3894,7 @@ mod tests {
             ("cross(V(a)) or final_step(\"tran\")", "@("),
         ] {
             let err = parse_err(&format!(
-                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+                "module t(a, b); inout a, b; electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
             ));
             assert_refusal(&err, named);
         }
@@ -3733,7 +3905,7 @@ mod tests {
     #[test]
     fn a_bare_timer_trigger_parses_into_a_guarded_body() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(timer(1.0, 2.0)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(timer(1.0, 2.0)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         let Stmt::If { cond, .. } = &body[0] else {
@@ -3752,7 +3924,7 @@ mod tests {
     #[test]
     fn the_other_monitored_events_are_still_refused() {
         let err = parse_err(
-            "module t(a, b); electrical a, b; analog begin @(absdelta(V(a), 0.1)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(absdelta(V(a), 0.1)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         assert_refusal(&err, "absdelta");
     }
@@ -3762,7 +3934,7 @@ mod tests {
     #[test]
     fn a_bare_above_trigger_parses_with_its_own_argument_list() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(above(V(a) - 1.0, 1n)) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(above(V(a) - 1.0, 1n)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         let Stmt::If { cond, .. } = &body[0] else {
@@ -3783,7 +3955,7 @@ mod tests {
     #[test]
     fn a_final_step_trigger_desugars_to_a_guarded_if() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(final_step) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(final_step) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         match &body[0] {
@@ -3803,8 +3975,8 @@ mod tests {
     #[test]
     fn an_or_list_of_step_events_composes() {
         for src in [
-            "module t(a, b); electrical a, b; analog begin @(initial_step or final_step) x = 1.0; I(a, b) <+ x; end endmodule",
-            "module t(a, b); electrical a, b; analog begin @(final_step or initial_step) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(initial_step or final_step) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(final_step or initial_step) x = 1.0; I(a, b) <+ x; end endmodule",
         ] {
             let m = parse_src(src);
             let body = analog_body(&m);
@@ -3840,7 +4012,7 @@ mod tests {
             ("initial_step(\"dc\")", "initial_step"),
         ] {
             let err = parse_err(&format!(
-                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+                "module t(a, b); inout a, b; electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
             ));
             assert_refusal(&err, event);
         }
@@ -3857,7 +4029,7 @@ mod tests {
             "final_step or initial_instance",
         ] {
             let err = parse_err(&format!(
-                "module t(a, b); electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
+                "module t(a, b); inout a, b; electrical a, b; analog begin @({trigger}) x = 1.0; I(a, b) <+ x; end endmodule"
             ));
             assert_refusal(&err, "@(");
         }
@@ -3869,7 +4041,7 @@ mod tests {
     #[test]
     fn an_unimplemented_step_scoped_trigger_still_parses() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin @(initial_model) x = 1.0; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin @(initial_model) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         let body = analog_body(&m);
         assert!(matches!(body[0], Stmt::Assign { .. }));
@@ -3878,7 +4050,7 @@ mod tests {
     #[test]
     fn system_task_statement_with_string_arg() {
         let m = parse_src(
-            r#"module t(a, b); electrical a, b; analog begin $strobe("v=%E", V(a, b)); I(a, b) <+ 0.0; end endmodule"#,
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin $strobe("v=%E", V(a, b)); I(a, b) <+ 0.0; end endmodule"#,
         );
         let body = analog_body(&m);
         match &body[0] {
@@ -3897,7 +4069,7 @@ mod tests {
         // `bound_step(step);` is a bare statement (a transient-timestep hint), not a value —
         // parsed the same way as a system-task call.
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin bound_step(1n); I(a, b) <+ 0.0; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin bound_step(1n); I(a, b) <+ 0.0; end endmodule",
         );
         match &analog_body(&m)[0] {
             Stmt::Task { name, args } => {
@@ -3911,7 +4083,7 @@ mod tests {
     #[test]
     fn named_block_with_local_var_decls() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; analog begin : blk real x, y; x = V(a, b); y = x; I(a, b) <+ y; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin : blk real x, y; x = V(a, b); y = x; I(a, b) <+ y; end endmodule",
         );
         let body = analog_body(&m);
         match &body[0] {
@@ -3929,7 +4101,7 @@ mod tests {
     #[test]
     fn branch_declaration_parses() {
         let m = parse_src(
-            "module t(a, b); electrical a, b; branch (a, b) br1, br2; analog begin I(br1) <+ V(br1); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; branch (a, b) br1, br2; analog begin I(br1) <+ V(br1); end endmodule",
         );
         let (terminals, names) = m
             .items
@@ -4087,9 +4259,9 @@ mod tests {
     #[test]
     fn two_modules_in_one_file_both_parse() {
         let toks = lex(
-            "module leg(p, n); electrical p, n; parameter real r = 1000; \
+            "module leg(p, n); inout p, n; electrical p, n; parameter real r = 1000; \
              analog I(p, n) <+ V(p, n) / r; endmodule \
-             module top(a, b); electrical a, b; leg l1(a, b); endmodule",
+             module top(a, b); inout a, b; electrical a, b; leg l1(a, b); endmodule",
         )
         .expect("lex");
         let modules = parse(&toks).expect("parse");
@@ -4130,6 +4302,12 @@ mod tests {
             toks,
             pos: 0,
             exprs: Vec::new(),
+            expr_pos: Vec::new(),
+            files: Vec::new(),
+            line_origin: Vec::new(),
+            last_line: 0,
+            line_starts: Vec::new(),
+            line_ascii: Vec::new(),
             natures: HashMap::new(),
             disciplines: HashMap::new(),
             known_access,
@@ -4148,7 +4326,7 @@ mod tests {
                     abstol = 1e-12; endnature \
                     nature Voltage; units = \"V\"; access = V; endnature \
                     discipline electrical; potential Voltage; flow Current; enddiscipline \
-                    module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+                    module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
         let toks = lex(src).expect("lex");
         let mut p = make_parser(&toks);
         p.parse_preamble().expect("parse preamble");
@@ -4175,7 +4353,7 @@ mod tests {
         let src = "nature Current\n units = \"A\";\n access = I;\n endnature \
                     nature Voltage\n units = \"V\";\n access = V;\n endnature \
                     discipline electrical\n potential Voltage;\n flow Current;\n enddiscipline \
-                    module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+                    module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
         let toks = lex(src).expect("lex");
         let mut p = make_parser(&toks);
         p.parse_preamble().expect("parse preamble");
@@ -4192,7 +4370,7 @@ mod tests {
         let m = parse_src(
             "nature Magneto_Motive_Force; units = \"A*turn\"; access = MMF; endnature \
              discipline magnetic; potential Magneto_Motive_Force; enddiscipline \
-             module t(a, b); electrical a, b; analog MMF(a, b) <+ 0.0; endmodule",
+             module t(a, b); inout a, b; electrical a, b; analog MMF(a, b) <+ 0.0; endmodule",
         );
         assert_eq!(m.name, "t");
         assert!(matches!(analog_body(&m)[0], Stmt::Contribute { .. }));
@@ -4206,7 +4384,7 @@ mod tests {
         let m = parse_src(
             "nature Opt_field; units = \"sqrt(W)\"; access = E; endnature \
              discipline optical; potential Opt_field; enddiscipline \
-             module t(a, b); optical a, b; analog E(a) <+ E(b); endmodule",
+             module t(a, b); inout a, b; optical a, b; analog E(a) <+ E(b); endmodule",
         );
         assert_eq!(m.name, "t");
         let nets = m
@@ -4227,7 +4405,9 @@ mod tests {
     #[test]
     fn bare_v_i_recognized_with_no_discipline_block_at_all() {
         // No preamble whatsoever: the always-on baseline alone must still be enough.
-        let m = parse_src("module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule");
+        let m = parse_src(
+            "module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ V(a, b); endmodule",
+        );
         assert!(matches!(analog_body(&m)[0], Stmt::Contribute { .. }));
     }
 
@@ -4274,7 +4454,7 @@ mod tests {
         // identifier throughout `ekv3_noise.va`/`ekv3_oppoints.va` — all three `` `include ``d
         // into the same compilation unit as `external/ekv3.va`.
         let m = parse_src(
-            "module t(a, b); electrical a, b; real thermal, electrical, ground; \
+            "module t(a, b); inout a, b; electrical a, b; real thermal, electrical, ground; \
              analog begin thermal = 1.0; ground = thermal * 2.0; \
              I(a, b) <+ ground + electrical; end endmodule",
         );
@@ -4466,7 +4646,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("h.vams"), "\n\n\n").unwrap();
-        let src = "`include \"h.vams\"\nmodule m(p, n);\n  electrical p, n;\n  analog I(p, n) <+ V(p, n) +;\nendmodule\n";
+        let src = "`include \"h.vams\"\nmodule m(p, n); inout p, n;\n  electrical p, n;\n  analog I(p, n) <+ V(p, n) +;\nendmodule\n";
         let pre = crate::preprocess::preprocess_named(src, std::slice::from_ref(&dir), "m.va")
             .0
             .unwrap();

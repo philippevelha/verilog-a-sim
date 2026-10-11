@@ -240,6 +240,8 @@ fn elaborate_inner(
     include_dirs: &[std::path::PathBuf],
 ) -> Result<Module, FrontendError> {
     let mut e = Elaborator {
+        cur_at: None,
+        net_disc: net_disciplines(ast),
         ast,
         library,
         stack,
@@ -355,6 +357,14 @@ fn combine_idx(dyn_dim: usize, k: i64, other_idx: Option<i64>) -> Vec<i64> {
 }
 
 struct Elaborator<'a> {
+    /// Where the pass in progress is, as `file:line:col`: the item (or port) it is working
+    /// on. The fallback location for an error nothing more specific located — see
+    /// [`Self::run`]. Reset between passes, so one pass's last item is never blamed for the
+    /// next pass's error.
+    cur_at: Option<crate::ast::SrcPos>,
+    /// Each declared net's discipline, built once: [`Self::check_access_discipline`] consults
+    /// it for every access in the module.
+    net_disc: HashMap<&'a str, &'a ast::Discipline>,
     ast: &'a ModuleAst,
     /// Every module parsed from the same compilation unit (including `ast` itself), used to
     /// resolve [`Item::Instance`] references (§ module instantiation).
@@ -436,23 +446,63 @@ struct Elaborator<'a> {
 }
 
 impl Elaborator<'_> {
+    /// Run every pass. An error is located on its way out: by the innermost expression or
+    /// statement that has a position (`lower_expr`, `const_eval`, `lower_stmt`), else by the
+    /// item or port the failing pass was on ([`Self::cur_at`]). Until 2.23.1 no elaboration
+    /// error carried a location at all.
     fn run(&mut self) -> Result<(), FrontendError> {
+        let result = self.run_passes();
+        result.map_err(|e| locate(e, || self.cur_at.map(|p| self.ast.describe(p))))
+    }
+
+    fn run_passes(&mut self) -> Result<(), FrontendError> {
         // Parameters first: a vector net's `[msb:lsb]` range may reference one (§ vector nets).
         self.collect_params()?;
+        self.cur_at = None;
         self.collect_genvars();
         self.collect_nodes()?;
+        self.cur_at = None;
         self.collect_ground()?;
+        self.cur_at = None;
         self.resolve_ports()?;
+        self.cur_at = None;
         self.collect_branches()?;
+        self.cur_at = None;
         self.collect_functions()?;
+        self.cur_at = None;
         self.collect_var_decls()?;
+        self.cur_at = None;
         self.collect_vars()?;
         // Every parent-scope naming environment (nodes, params, genvars, vars, branches,
         // functions) is fully populated by this point, regardless of source order — so
         // instances may freely appear before or after the parent constructs they connect to.
         self.collect_instances()?;
+        self.cur_at = None;
         self.lower_analog()?;
         Ok(())
+    }
+
+    /// Where item `idx` starts. Kept unformatted: it is recorded for every item of every pass
+    /// and needed only when one fails.
+    fn item_at(&self, idx: usize) -> Option<crate::ast::SrcPos> {
+        self.ast.item_pos.get(idx).copied().flatten()
+    }
+
+    /// Where statement `stmt` is: its own position for an assignment or contribution, else the
+    /// expression that heads it (an `if`'s condition, a `case`'s selector, a task's first
+    /// argument), which is on the line the statement starts on.
+    fn stmt_at(&self, stmt: &Stmt) -> Option<String> {
+        let head = match stmt {
+            Stmt::Assign { at, .. } | Stmt::Contribute { at, .. } => {
+                return at.map(|p| self.ast.describe(p))
+            }
+            Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::For { cond, .. } => *cond,
+            Stmt::Repeat { count, .. } => *count,
+            Stmt::Case { selector, .. } => *selector,
+            Stmt::Task { args, .. } => *args.first()?,
+            Stmt::Block(_) | Stmt::VarDecl { .. } => return None,
+        };
+        self.ast.expr_at(head)
     }
 
     /// Register explicitly declared module-level variables (`real q, v;`) and array variables
@@ -464,7 +514,8 @@ impl Elaborator<'_> {
     /// [`Self::collect_vars_stmt`]).
     fn collect_var_decls(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Var { names, .. } = item {
                 for entry in names {
                     self.declare_var_entry(entry)?;
@@ -544,7 +595,8 @@ impl Elaborator<'_> {
     /// defined later in source resolves as unknown (forward references are unsupported in v0).
     fn collect_functions(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             let f = match item {
                 Item::Function(f) => f,
                 _ => continue,
@@ -582,14 +634,34 @@ impl Elaborator<'_> {
             // Every assignment target must be one of the above. Until 2.18.1 an undeclared
             // target was declared on the spot, the same leniency the analog block had (see
             // [`Self::collect_vars`]), so a misspelt local compiled as a second variable.
-            let mut targets = Vec::new();
-            collect_assign_targets(&f.body, &mut targets);
-            if let Some(name) = targets.iter().find(|t| !local.contains_key(*t)) {
-                return Err(elab(format!(
-                    "analog function `{}` assigns `{name}`, which is neither its name, one of its \
-                     arguments, nor declared inside it; declare it with `real {name};`",
-                    f.name
-                )));
+            // A `real t;` inside a named block of the body is a declaration too; lowering
+            // scopes it to its block. Until 2.23.1 this check missed that and rejected it.
+            let mut block_decls = HashSet::new();
+            walk_stmts(&f.body, &mut |st| {
+                if let Stmt::VarDecl { names } = st {
+                    block_decls.extend(names.iter().map(|e| e.name.clone()));
+                }
+            });
+            let mut undeclared = None;
+            walk_stmts(&f.body, &mut |st| {
+                if let Stmt::Assign { lhs, at, .. } = st {
+                    if undeclared.is_none()
+                        && !local.contains_key(lhs)
+                        && !block_decls.contains(lhs)
+                    {
+                        undeclared = Some((lhs.clone(), *at));
+                    }
+                }
+            });
+            if let Some((name, at)) = undeclared {
+                return Err(locate(
+                    elab(format!(
+                        "analog function `{}` assigns `{name}`, which is neither its name, one of \
+                         its arguments, nor declared inside it; declare it with `real {name};`",
+                        f.name
+                    )),
+                    || at.map(|p| ast.describe(p)),
+                ));
             }
 
             // Lower the body with the function scope swapped in, then restore. The block-scope
@@ -631,7 +703,8 @@ impl Elaborator<'_> {
     // --- pass 1: nodes ---------------------------------------------------------------
 
     fn collect_nodes(&mut self) -> Result<(), FrontendError> {
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Net { discipline, nets } = item {
                 let disc = match discipline {
                     ast::Discipline::Electrical => Discipline::Electrical,
@@ -704,7 +777,8 @@ impl Elaborator<'_> {
     /// names is electrically the same global reference node (LRM §3.6.4), so this merges them
     /// rather than leaving them as distinct nodes that happen to both read as zero.
     fn collect_ground(&mut self) -> Result<(), FrontendError> {
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Ground { names } = item {
                 for name in names {
                     let id = *self.nodes.get(name).ok_or_else(|| {
@@ -757,7 +831,8 @@ impl Elaborator<'_> {
     /// interned in `collect_nodes`), a stated simplification for a wiring convention
     /// (`va-netlist`) that doesn't exist yet to have an opinion on connection order.
     fn resolve_ports(&mut self) -> Result<(), FrontendError> {
-        for port in &self.ast.ports {
+        for (port_idx, port) in self.ast.ports.iter().enumerate() {
+            self.cur_at = self.ast.port_pos.get(port_idx).copied().flatten();
             // § `$port_connected`: the parent named this port in an empty connection slot, so
             // it is unconnected for *this* instantiation. Recorded by index, which is what
             // `Expr::PortConnected` carries.
@@ -828,7 +903,8 @@ impl Elaborator<'_> {
     /// `V(name)` and a positional access `V(a, b)` refer to the same branch.
     fn collect_branches(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Branch { terminals, names } = item {
                 let id = self.resolve_branch(terminals)?;
                 for name in names {
@@ -846,7 +922,8 @@ impl Elaborator<'_> {
     /// instantiation) — either way validated against the declared `from` range, so an override
     /// is held to the same bound as an ordinary default.
     fn collect_params(&mut self) -> Result<(), FrontendError> {
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             match item {
                 Item::Param {
                     name,
@@ -947,6 +1024,12 @@ impl Elaborator<'_> {
     /// as constant here, matching the rule that a genvar expression may reference other
     /// genvars as well as literals and parameters.
     fn const_eval(&self, r: ExprRef) -> Result<f64, FrontendError> {
+        self.const_eval_inner(r)
+            .map_err(|e| locate(e, || self.ast.expr_at(r)))
+    }
+
+    /// [`Self::const_eval`], unlocated.
+    fn const_eval_inner(&self, r: ExprRef) -> Result<f64, FrontendError> {
         match self.ast.expr(r) {
             ExprAst::Number(n) => Ok(*n),
             ExprAst::Ident(name) => {
@@ -1316,7 +1399,8 @@ impl Elaborator<'_> {
     /// § event control), so "prepended, in source order" is the closest sound DC reading.
     fn lower_module_var_inits(&mut self) -> Result<(), FrontendError> {
         let ast = self.ast;
-        for item in &ast.items {
+        for (item_idx, item) in ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Var { names, .. } = item {
                 for entry in names {
                     if let Some(init) = entry.init {
@@ -1331,6 +1415,11 @@ impl Elaborator<'_> {
     }
 
     fn lower_stmt(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
+        self.lower_stmt_inner(stmt)
+            .map_err(|e| locate(e, || self.stmt_at(stmt)))
+    }
+
+    fn lower_stmt_inner(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
         match stmt {
             Stmt::Block(body) => {
                 // A `begin ... end` is a scope (§ block scoping): declarations inside it shadow
@@ -1430,7 +1519,7 @@ impl Elaborator<'_> {
             // and the ones `crate::unimplemented_task_warnings` reports at compile time —
             // `$monitor` and file output — have no effect.
             Stmt::Task { .. } => Ok(va_ir::Stmt::Block(Vec::new())),
-            Stmt::Contribute { target, value } => {
+            Stmt::Contribute { target, value, .. } => {
                 // Constant/genvar-indexed terminals (or none at all) resolve straight to a
                 // single fixed branch, as always. A runtime-indexed vector-net terminal
                 // (§ dynamic vector-net/array-variable indexing) has no single `BranchId` to
@@ -1454,7 +1543,9 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            Stmt::Assign { lhs, index, rhs } => {
+            Stmt::Assign {
+                lhs, index, rhs, ..
+            } => {
                 // Restricted assignment (§ generate loops): a genvar may only be written by
                 // the header of the `for` loop it drives, which `Stmt::For` below intercepts
                 // and unrolls directly — it never reaches this generic path. Any other
@@ -1697,7 +1788,14 @@ impl Elaborator<'_> {
         })
     }
 
+    /// Lower expression `r`; an error is located at `r` unless a sub-expression already
+    /// located it more precisely.
     fn lower_expr(&mut self, r: ExprRef) -> Result<ExprId, FrontendError> {
+        self.lower_expr_inner(r)
+            .map_err(|e| locate(e, || self.ast.expr_at(r)))
+    }
+
+    fn lower_expr_inner(&mut self, r: ExprRef) -> Result<ExprId, FrontendError> {
         // `self.ast` is a shared reference; copy it locally so the read borrow is of the
         // external `ModuleAst`, not of `self`, leaving `self` free to mutate.
         let ast = self.ast;
@@ -2730,12 +2828,104 @@ impl Elaborator<'_> {
     }
 
     fn lower_access(&mut self, access: &ast::Access) -> Result<Access, FrontendError> {
+        self.check_access_discipline(access)?;
         let kind = match access.kind {
             ast::AccessKind::Potential => AccessKind::Potential,
             ast::AccessKind::Flow => AccessKind::Flow,
         };
         let branch = self.resolve_branch(&access.args)?;
         Ok(Access { kind, branch })
+    }
+
+    /// Reject an access function that is not the one its nets' discipline defines:
+    /// `Temp(p, n)` on `electrical` nets, `V(t)` on a `thermal` one.
+    ///
+    /// Until 2.23.2 nothing checked this. The access *kind* (potential or flow) came from the
+    /// name alone, so `Temp(p, n) <+ V(p, n)` on electrical nets compiled as a voltage
+    /// contribution and `va-cli sim` failed later with "singular matrix" — the right verdict,
+    /// with a reason that sent the user looking at the circuit instead of the model.
+    ///
+    /// A net's accesses come from its discipline: the `access` of its potential and flow
+    /// natures when the discipline was declared in a parsed `discipline` block, else `V`/`I`
+    /// for `electrical` and `Temp`/`Pwr` for `thermal`. A net whose discipline is unknown, or
+    /// whose natures name no access function, is not checked: there is nothing to check it
+    /// against, and guessing would reject valid models.
+    fn check_access_discipline(&self, access: &ast::Access) -> Result<(), FrontendError> {
+        // A named branch stands for its declared terminals.
+        let nets: Vec<&str> = match access.args.as_slice() {
+            [only] if only.index.is_empty() && self.named_branches.contains_key(&only.name) => self
+                .ast
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Branch { terminals, names } if names.contains(&only.name) => {
+                        Some(terminals.iter().map(|t| t.name.as_str()).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            args => args.iter().map(|a| a.name.as_str()).collect(),
+        };
+        for net in nets {
+            let Some(discipline) = self.net_disc.get(net) else {
+                continue;
+            };
+            let disc_name = match discipline {
+                ast::Discipline::Electrical => "electrical",
+                ast::Discipline::Thermal => "thermal",
+                ast::Discipline::Custom(name) => name.as_str(),
+            };
+            let Some((potential, flow)) = self.discipline_accesses(disc_name) else {
+                continue;
+            };
+            let expected = match access.kind {
+                ast::AccessKind::Potential => &potential,
+                ast::AccessKind::Flow => &flow,
+            };
+            let Some(expected) = expected else {
+                continue;
+            };
+            if *expected != access.func {
+                let quantity = match access.kind {
+                    ast::AccessKind::Potential => "potential",
+                    ast::AccessKind::Flow => "flow",
+                };
+                let defined = [potential.as_deref(), flow.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                return Err(elab(format!(
+                    "`{}(...)` is not an access function of discipline `{disc_name}`, which net \
+                     `{net}` is declared with: its access functions are {defined}; write \
+                     `{expected}(...)` for its {quantity}",
+                    access.func
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The potential and flow access-function names of discipline `name`, as far as they are
+    /// known; `None` when nothing is.
+    fn discipline_accesses(&self, name: &str) -> Option<(Option<String>, Option<String>)> {
+        let access_of = |nature: Option<&String>| {
+            nature
+                .and_then(|n| self.natures.get(n))
+                .and_then(|n| n.access.clone())
+        };
+        if let Some(d) = self.disciplines.get(name) {
+            let found = (access_of(d.potential.as_ref()), access_of(d.flow.as_ref()));
+            if found.0.is_some() || found.1.is_some() {
+                return Some(found);
+            }
+        }
+        match name {
+            "electrical" => Some((Some("V".to_string()), Some("I".to_string()))),
+            "thermal" => Some((Some("Temp".to_string()), Some("Pwr".to_string()))),
+            _ => None,
+        }
     }
 
     fn resolve_branch(&mut self, args: &[ast::NetArg]) -> Result<BranchId, FrontendError> {
@@ -3422,8 +3612,8 @@ impl Elaborator<'_> {
     /// `ddt` arrived through an assignment rather than being written in the condition itself —
     /// the source-level variable that carries it.
     ///
-    /// **Limitation**: [`FrontendError::Elaborate`] carries no source span (no elaboration error
-    /// in this crate does), so the message locates the problem by name, not by line.
+    /// The message names the variable that carries the `ddt`; the line comes from
+    /// [`Self::lower_stmt`], which locates the error at the contribution (2.23.1).
     fn ddt_guard_message(&self, port: &str, guard: ExprId, tainted: &HashSet<u32>) -> String {
         let via = match self.first_tainted_var(guard, tainted) {
             Some(id) => match self.vars.iter().find(|(_, v)| **v == id) {
@@ -3967,7 +4157,8 @@ impl Elaborator<'_> {
     /// submodule and inline it into `self.out` (see [`Self::inline_instance`]).
     fn collect_instances(&mut self) -> Result<(), FrontendError> {
         let mut seen_names = std::collections::HashSet::new();
-        for item in &self.ast.items {
+        for (item_idx, item) in self.ast.items.iter().enumerate() {
+            self.cur_at = self.item_at(item_idx);
             if let Item::Instance {
                 module,
                 name,
@@ -4403,6 +4594,37 @@ fn elab(msg: String) -> FrontendError {
     FrontendError::Elaborate(msg)
 }
 
+/// `e`, located `at` (a `file:line:col`) unless it already is. An elaboration error is
+/// located by prefixing `at …: `, the shape preprocessor errors take; a refusal by its `at`
+/// field. Applied from the inside out — an expression before its statement, a statement before
+/// its item — so the first, most precise location wins and the outer ones leave it alone.
+///
+/// `at` is a closure so a caller pays for formatting a location only when it is used: `const_eval`
+/// fails routinely and recoverably (a caller probing whether an expression is constant), and
+/// formatting on every such failure tripled `check`'s time on the benchmark models.
+fn locate(e: FrontendError, at: impl FnOnce() -> Option<String>) -> FrontendError {
+    let unlocated = match &e {
+        FrontendError::Elaborate(m) => !m.starts_with("at "),
+        FrontendError::Refused(r) => r.at.is_none(),
+        _ => false,
+    };
+    if !unlocated {
+        return e;
+    }
+    let Some(at) = at() else {
+        return e;
+    };
+    match e {
+        FrontendError::Elaborate(m) if !m.starts_with("at ") => {
+            FrontendError::Elaborate(format!("at {at}: {m}"))
+        }
+        FrontendError::Refused(r) if r.at.is_none() => {
+            FrontendError::Refused(r.at(format!("at {at}")))
+        }
+        e => e,
+    }
+}
+
 /// A lowered construct whose meaning is keyed by the *call site* it was written at, and which a
 /// runtime loop therefore cannot legally repeat — what
 /// [`Elaborator::reject_call_site_state_in_loop`] looks for.
@@ -4451,6 +4673,49 @@ fn call_site_state_operator(b: Builtin) -> Option<&'static str> {
 /// ascending-index-order lists ([`Elaborator::resolve_ports`], [`Elaborator::resolve_conn_nodes`]),
 /// so a width mismatch here means the connection's own width — not just port count — disagrees
 /// with the module's declared port width.
+/// A warning for each port of `ast` that the module never gives a direction
+/// (`input`/`output`/`inout`), located at the port's name in the header.
+///
+/// A warning, not an error. The model is elaborated exactly as if the port were declared
+/// `inout`, the only direction an analog terminal behaves as here. Whether the omission is
+/// legal Verilog-A is unsettled in this project: IEEE 1364 requires every listed port to be
+/// declared with a direction, while `docs/token-reference.md` once quoted the LRM as making
+/// `inout` the default for analog ports, and the LRM text was not available to settle it.
+/// 2.23.2 made it an error; 2.23.3 made it this warning, so a model that relies on the default
+/// still runs and its author is still told.
+///
+/// The caller decides where the warnings go (`va-cli` prints them beside its other warnings);
+/// elaboration itself never prints.
+pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<String> {
+    let directed: HashSet<&str> = ast
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Direction { nets, .. } => Some(nets.iter().map(String::as_str)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    ast.ports
+        .iter()
+        .enumerate()
+        .filter(|(_, port)| !directed.contains(port.as_str()))
+        .map(|(i, port)| {
+            let at = ast
+                .port_pos
+                .get(i)
+                .copied()
+                .flatten()
+                .map_or_else(String::new, |p| format!("at {}: ", ast.describe(p)));
+            format!(
+                "{at}module `{}`: port `{port}` has no direction; it is treated as `inout`. \
+                 Declare it `inout {port};` (or `input` / `output`) to be explicit",
+                ast.name
+            )
+        })
+        .collect()
+}
+
 /// Map every net name a module declares to the discipline it was declared with
 /// (§ port-connection discipline checking).
 ///
@@ -4698,35 +4963,37 @@ fn remap_stmt(
 
 /// Collect every assignment-target name in a statement list (recursing through control flow),
 /// used to discover a function's local variables before lowering its body.
-fn collect_assign_targets(stmts: &[Stmt], out: &mut Vec<String>) {
+/// Call `f` on every statement in `stmts`, nested ones included, in source order.
+fn walk_stmts(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
     for stmt in stmts {
+        f(stmt);
         match stmt {
-            Stmt::Assign { lhs, .. } => out.push(lhs.clone()),
-            Stmt::VarDecl { names } => out.extend(names.iter().map(|entry| entry.name.clone())),
-            Stmt::Block(body) => collect_assign_targets(body, out),
-            Stmt::If { then_, else_, .. } => {
-                collect_assign_targets(then_, out);
-                collect_assign_targets(else_, out);
+            Stmt::Block(body) | Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                walk_stmts(body, f)
             }
-            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
-                collect_assign_targets(body, out)
+            Stmt::If { then_, else_, .. } => {
+                walk_stmts(then_, f);
+                walk_stmts(else_, f);
             }
             Stmt::For {
                 init, step, body, ..
             } => {
-                collect_assign_targets(std::slice::from_ref(&**init), out);
-                collect_assign_targets(std::slice::from_ref(&**step), out);
-                collect_assign_targets(body, out);
+                walk_stmts(std::slice::from_ref(&**init), f);
+                walk_stmts(std::slice::from_ref(&**step), f);
+                walk_stmts(body, f);
             }
             Stmt::Case { arms, default, .. } => {
                 for arm in arms {
-                    collect_assign_targets(&arm.body, out);
+                    walk_stmts(&arm.body, f);
                 }
                 if let Some(body) = default {
-                    collect_assign_targets(body, out);
+                    walk_stmts(body, f);
                 }
             }
-            Stmt::Contribute { .. } | Stmt::Task { .. } => {}
+            Stmt::Assign { .. }
+            | Stmt::Contribute { .. }
+            | Stmt::Task { .. }
+            | Stmt::VarDecl { .. } => {}
         }
     }
 }
@@ -5372,7 +5639,7 @@ mod tests {
     #[test]
     fn a_block_local_declaration_shadows_only_within_its_block() {
         let m = elaborate_src(
-            "module shadow(p, n);
+            "module shadow(p, n); inout p, n;
              electrical p, n;
              parameter real k = 1000.0;
              real g;
@@ -5421,7 +5688,7 @@ mod tests {
     #[test]
     fn a_declaration_in_an_if_arm_body_does_not_leak_past_the_arm() {
         let m = elaborate_src(
-            "module armshadow(p, n);
+            "module armshadow(p, n); inout p, n;
              electrical p, n;
              parameter real k = 1000.0;
              real g;
@@ -5458,7 +5725,7 @@ mod tests {
     #[test]
     fn a_declaration_in_a_loop_body_does_not_leak_past_the_loop() {
         let m = elaborate_src(
-            "module loopshadow(p, n);
+            "module loopshadow(p, n); inout p, n;
              electrical p, n;
              parameter real k = 1000.0;
              real g;
@@ -5494,7 +5761,7 @@ mod tests {
     #[test]
     fn inside_the_block_the_shadowing_declaration_wins() {
         let m = elaborate_src(
-            "module shadow(p, n);
+            "module shadow(p, n); inout p, n;
              electrical p, n;
              parameter real k = 1000.0;
              real g;
@@ -5522,7 +5789,7 @@ mod tests {
     #[test]
     fn sibling_blocks_declaring_the_same_name_get_distinct_variables() {
         let m = elaborate_src(
-            "module siblings(p, n);
+            "module siblings(p, n); inout p, n;
              electrical p, n;
              real g;
              analog begin
@@ -5554,7 +5821,7 @@ mod tests {
     #[test]
     fn a_block_local_declaration_without_a_collision_still_elaborates() {
         let m = elaborate_src(
-            "module noshadow(p, n);
+            "module noshadow(p, n); inout p, n;
              electrical p, n;
              parameter real k = 1000.0;
              real g;
@@ -5745,7 +6012,7 @@ mod tests {
         let src = "nature Voltage; units = \"V\"; access = V; abstol = 1e-6; endnature \
                    nature Current; units = \"A\"; access = I; abstol = 1e-12; endnature \
                    discipline electrical; potential Voltage; flow Current; enddiscipline \
-                   module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+                   module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
         let toks = lex(src).expect("lex");
         let (asts, natures, disciplines) = parse_with_disciplines(&toks).expect("parse");
         let ast = &asts[0];
@@ -5761,8 +6028,9 @@ mod tests {
         // Regression: `elaborate`/`elaborate_with_library` (no discipline/nature tables
         // supplied) must keep their exact prior behavior — every node's `abstol` stays `None`,
         // even for an ordinary `electrical` net with no preamble at all.
-        let m =
-            elaborate_src("module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule");
+        let m = elaborate_src(
+            "module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ V(a, b); endmodule",
+        );
         assert_eq!(m.nodes[0].abstol, None);
         assert_eq!(m.nodes[1].abstol, None);
     }
@@ -5773,7 +6041,7 @@ mod tests {
         // must fail closed (`None`), not panic or fall back to the flow nature's own abstol.
         let src = "nature Current; units = \"A\"; access = I; abstol = 1e-12; endnature \
                    discipline electrical; flow Current; enddiscipline \
-                   module t(a, b); electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
+                   module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ V(a, b); endmodule";
         let toks = lex(src).expect("lex");
         let (asts, natures, disciplines) = parse_with_disciplines(&toks).expect("parse");
         let ast = &asts[0];
@@ -5788,7 +6056,7 @@ mod tests {
         // analog block's own statements, and `amplitude` (no initializer) must not emit
         // anything at all.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; \
+            "module t(a, b); inout a, b; electrical a, b; \
              parameter real wavelength = 1550.0; \
              real laser_freq = 3.0e8 / wavelength; \
              real amplitude; \
@@ -5811,7 +6079,7 @@ mod tests {
     fn block_local_var_initializer_lowers_to_an_assign() {
         // `real x = 1.0;` inside the analog block itself, not at module scope.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; \
+            "module t(a, b); inout a, b; electrical a, b; \
              analog begin real x = 1.0; I(a, b) <+ x; end endmodule",
         );
         // The top-level `analog begin...end` block is flattened (§ lower_analog), so the
@@ -5831,7 +6099,7 @@ mod tests {
     /// Elaborate one `laplace_*` contribution and return its `(builtin, args)`.
     fn laplace_call(call: &str) -> (Builtin, Vec<va_ir::ExprId>, va_ir::Module) {
         let m = elaborate_src(&format!(
-            "module t(a, b); electrical a, b; analog I(a, b) <+ {call}; endmodule"
+            "module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ {call}; endmodule"
         ));
         let found = m.exprs.iter().find_map(|e| match e {
             Expr::Call(
@@ -5874,7 +6142,7 @@ mod tests {
         // would freeze a filter's poles at their declared defaults and silently ignore a
         // netlist override, so they are lowered as expressions and evaluated per instance.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; parameter real tau = 1e-6;              analog I(a, b) <+ laplace_nd(V(a, b), {1}, {1, tau}); endmodule",
+            "module t(a, b); inout a, b; electrical a, b; parameter real tau = 1e-6;              analog I(a, b) <+ laplace_nd(V(a, b), {1}, {1, tau}); endmodule",
         );
         let args = m
             .exprs
@@ -5911,7 +6179,7 @@ mod tests {
         // Zero/pole arrays hold flattened `(re, im)` pairs, so an odd length is malformed. The
         // check stays at elaboration — where a source file can still be named — even though
         // `va-codegen` re-checks it (§ `lower::laplace_term_shape`).
-        let src = "module t(a, b); electrical a, b; \
+        let src = "module t(a, b); inout a, b; electrical a, b; \
                     analog I(a, b) <+ laplace_zp(V(a, b), {1, 0, 2}, {1, 0}); endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
@@ -5931,7 +6199,7 @@ mod tests {
     /// `default_transition`, an omitted start time is 0, and the argument count is checked.
     #[test]
     fn zi_filters_lower_with_their_sampling_arguments() {
-        let src = "`default_transition 3n\nmodule t(a, b); electrical a, b; parameter real T = 1e-6; \
+        let src = "`default_transition 3n\nmodule t(a, b); inout a, b; electrical a, b; parameter real T = 1e-6; \
                    analog I(a, b) <+ zi_nd(V(a, b), {0.2}, {1, -0.8}, T) + zi_zp(V(a, b), {0.5, 0.0}, {0.25, 0.0}, T, 1n, 2u); endmodule";
         // Through the preprocessor, so the `default_transition` directive is honoured.
         let m = crate::compile(src).expect("compiles").modules.remove(0);
@@ -5977,11 +6245,11 @@ mod tests {
         assert_eq!(&a[3..], &[2.0, 0.5, 0.0, 0.25, 0.0]);
 
         // Argument-count and pair errors are ordinary elaboration errors.
-        let bad = "module t(a, b); electrical a, b; analog I(a, b) <+ zi_nd(V(a, b), {1}, {1}); endmodule";
+        let bad = "module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ zi_nd(V(a, b), {1}, {1}); endmodule";
         let toks = lex(bad).expect("lex");
         let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
         assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
-        let bad = "module t(a, b); electrical a, b; analog I(a, b) <+ zi_zp(V(a, b), {0.5}, {0.25, 0.0}, 1e-6); endmodule";
+        let bad = "module t(a, b); inout a, b; electrical a, b; analog I(a, b) <+ zi_zp(V(a, b), {0.5}, {0.25, 0.0}, 1e-6); endmodule";
         let toks = lex(bad).expect("lex");
         let ast = parse(&toks).expect("parse").into_iter().next().unwrap();
         assert!(matches!(elaborate(&ast), Err(FrontendError::Elaborate(_))));
@@ -5992,7 +6260,7 @@ mod tests {
         // `aliasparam` introduces no new parameter: `Rtherm` and `Rth` must share a `ParamId`,
         // and a reference to the alias in the analog block lowers to that same expression.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; \
+            "module t(a, b); inout a, b; electrical a, b; \
              parameter real Rth = 1000 from (0:inf); \
              aliasparam Rtherm = Rth; \
              analog begin I(a, b) <+ V(a, b) / Rtherm; end endmodule",
@@ -6005,7 +6273,7 @@ mod tests {
 
     #[test]
     fn aliasparam_targeting_unknown_param_is_an_error() {
-        let src = "module t(a, b); electrical a, b; \
+        let src = "module t(a, b); inout a, b; electrical a, b; \
                    aliasparam alias = nope; \
                    analog begin I(a, b) <+ V(a, b); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
@@ -6036,7 +6304,7 @@ mod tests {
         // `$vt(T)` lowers to `Builtin::Vt` with one argument (the temperature expression),
         // whereas bare `$vt` lowers with none.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) / $vt(V(a, b)); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ V(a, b) / $vt(V(a, b)); end endmodule",
         );
         assert!(m
             .exprs
@@ -6044,7 +6312,7 @@ mod tests {
             .any(|e| matches!(e, Expr::Call(Builtin::Vt, args) if args.len() == 1)));
 
         // `$vt` with more than one argument is a arity error.
-        let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $vt(V(a, b), 1.0); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $vt(V(a, b), 1.0); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6053,7 +6321,7 @@ mod tests {
         assert!(elaborate(&ast).is_err());
 
         // `$temperature` takes no arguments.
-        let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $temperature(V(a, b)); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $temperature(V(a, b)); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6068,7 +6336,7 @@ mod tests {
         // and read it at load. It used to fold to a constant `0.0` here, which froze every
         // time-dependent model at t=0 the moment transient analysis existed.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + $abstime; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ V(a, b) + $abstime; end endmodule",
         );
         assert!(
             m.exprs
@@ -6080,7 +6348,7 @@ mod tests {
 
         // `$abstime` takes no arguments.
         let src =
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $abstime(1); end endmodule";
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $abstime(1); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6099,7 +6367,7 @@ mod tests {
     #[test]
     fn mfactor_lowers_to_a_builtin_rather_than_folding() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; parameter real r = 1; analog begin I(a, b) <+ $mfactor * V(a, b) / r; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; parameter real r = 1; analog begin I(a, b) <+ $mfactor * V(a, b) / r; end endmodule",
         );
         assert!(
             m.exprs.iter().any(
@@ -6114,7 +6382,7 @@ mod tests {
         );
 
         let src =
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $mfactor(1); end endmodule";
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $mfactor(1); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6131,7 +6399,7 @@ mod tests {
     #[test]
     fn param_given_lowers_to_a_marker_and_validates_the_name() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0)) I(a, b) <+ V(a, b); else I(a, b) <+ 2.0 * V(a, b); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0)) I(a, b) <+ V(a, b); else I(a, b) <+ 2.0 * V(a, b); end endmodule",
         );
         assert!(m
             .exprs
@@ -6139,7 +6407,7 @@ mod tests {
             .any(|e| matches!(e, va_ir::Expr::ParamGiven(p) if *p == ParamId(0))));
 
         // Names an undeclared parameter.
-        let src = "module t(a, b); electrical a, b; analog begin if ($param_given(nope)) I(a, b) <+ V(a, b); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; analog begin if ($param_given(nope)) I(a, b) <+ V(a, b); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6148,7 +6416,7 @@ mod tests {
         assert!(elaborate(&ast).is_err());
 
         // Not a bare identifier.
-        let src = "module t(a, b); electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0 + 1)) I(a, b) <+ V(a, b); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; parameter real vth0 = 0.5; analog begin if ($param_given(vth0 + 1)) I(a, b) <+ V(a, b); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6162,7 +6430,7 @@ mod tests {
     #[test]
     fn port_connected_lowers_to_a_marker_and_validates_the_name() {
         let m = elaborate_src(
-            "module t(a, b, dt); electrical a, b; thermal dt; analog begin if ($port_connected(dt) == 0) I(a, b) <+ V(a, b); else I(a, b) <+ 0; end endmodule",
+            "module t(a, b, dt); inout a, b, dt; electrical a, b; thermal dt; analog begin if ($port_connected(dt) == 0) I(a, b) <+ V(a, b); else I(a, b) <+ 0; end endmodule",
         );
         // This used to assert a folded `Const(0.0)` existed -- which the source's own `== 0`
         // and `<+ 0` literals satisfied on their own, so it would have kept passing whatever
@@ -6173,7 +6441,7 @@ mod tests {
             .any(|e| matches!(e, va_ir::Expr::PortConnected(i) if *i == 2)));
 
         // Names an undeclared port.
-        let src = "module t(a, b); electrical a, b; analog begin if ($port_connected(nope)) I(a, b) <+ V(a, b); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; analog begin if ($port_connected(nope)) I(a, b) <+ V(a, b); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6185,13 +6453,13 @@ mod tests {
     #[test]
     fn limit_folds_to_its_first_argument() {
         let m = elaborate_src(
-            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $limit(V(a, b), "pnjlim", 0.5, 1.0); end endmodule"#,
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $limit(V(a, b), "pnjlim", 0.5, 1.0); end endmodule"#,
         );
         // No trace of the limiting-function name/args survives lowering; the probe access does.
         assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Probe(_))));
 
         let src =
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $limit(); end endmodule";
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $limit(); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6206,7 +6474,7 @@ mod tests {
     #[test]
     fn limit_declares_its_junction_nodes() {
         let m = elaborate_src(
-            r#"module t(b, e, c); electrical b, e, c; real v; analog begin
+            r#"module t(b, e, c); inout b, e, c; electrical b, e, c; real v; analog begin
                  v = $limit(V(b, e), "pnjlim", 0.5, 1.0);
                  I(b, e) <+ exp(v);
                end endmodule"#,
@@ -6233,7 +6501,7 @@ mod tests {
 
         // Both polarity arms limit the same pair; the record is deduplicated.
         let both = elaborate_src(
-            r#"module t(b, e); electrical b, e; parameter real type_ = 1; real v; analog begin
+            r#"module t(b, e); inout b, e; electrical b, e; parameter real type_ = 1; real v; analog begin
                  if (type_ > 0) v = $limit(V(b, e), "pnjlim", 0.5, 1.0);
                  else v = $limit(V(e, b), "pnjlim", 0.5, 1.0);
                  I(b, e) <+ exp(v);
@@ -6253,7 +6521,7 @@ mod tests {
     #[test]
     fn limit_on_a_flow_access_declares_nothing() {
         let m = elaborate_src(
-            r#"module t(a, b); electrical a, b; analog begin
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin
                  I(a, b) <+ $limit(I(a, b), "pnjlim", 0.5, 1.0) + V(a, b);
                end endmodule"#,
         );
@@ -6273,7 +6541,7 @@ mod tests {
     fn rounding_builtins_map_and_fold() {
         // Lowered to their IR builtins in the analog block.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ floor(V(a, b)) + ceil(V(a, b)) + round(V(a, b)) + int(V(a, b)); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ floor(V(a, b)) + ceil(V(a, b)) + round(V(a, b)) + int(V(a, b)); end endmodule",
         );
         for bi in [
             va_ir::Builtin::Floor,
@@ -6325,7 +6593,7 @@ mod tests {
     #[test]
     fn limexp_maps_to_exp() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ limexp(V(a, b)); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ limexp(V(a, b)); end endmodule",
         );
         assert!(m
             .exprs
@@ -6363,7 +6631,7 @@ mod tests {
     fn declared_module_variable_is_registered_and_usable() {
         // `real q, v;` declared at module scope; both are usable in the analog block, and a
         // declared-but-unassigned variable still becomes an IR var.
-        let src = "module t(p, n); electrical p, n; real q, v; analog begin v = V(p, n); q = v; I(p, n) <+ q; end endmodule";
+        let src = "module t(p, n); inout p, n; electrical p, n; real q, v; analog begin v = V(p, n); q = v; I(p, n) <+ q; end endmodule";
         let m = elaborate_src(src);
         let names: Vec<&str> = m.vars.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"q"));
@@ -6376,7 +6644,7 @@ mod tests {
     #[test]
     fn system_task_statement_is_a_noop() {
         // `$strobe(...)` elaborates (lowers to an empty block) and does not affect the model.
-        let src = r#"module t(a, b); electrical a, b; analog begin $strobe("hi", V(a, b)); I(a, b) <+ V(a, b); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin $strobe("hi", V(a, b)); I(a, b) <+ V(a, b); end endmodule"#;
         let m = elaborate_src(src);
         // The contribution is present; the task contributed no further statement of substance.
         assert!(m
@@ -6388,8 +6656,7 @@ mod tests {
     #[test]
     fn string_in_numeric_context_is_rejected() {
         // A bare string where a value is expected is an elaboration error.
-        let src =
-            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ "oops"; end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ "oops"; end endmodule"#;
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -6403,7 +6670,7 @@ mod tests {
     fn block_local_variable_is_registered_and_lowered() {
         // A named block with a local `real x;` declaration; `x` becomes an IR variable and
         // the declaration lowers to a no-op (empty block).
-        let src = "module t(a, b); electrical a, b; analog begin : blk real x; x = V(a, b); I(a, b) <+ x; end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; analog begin : blk real x; x = V(a, b); I(a, b) <+ x; end endmodule";
         let m = elaborate_src(src);
         assert!(
             m.vars.iter().any(|d| d.name == "x"),
@@ -6411,6 +6678,49 @@ mod tests {
         );
         // The block lowers; the declaration contributes an empty block, not a statement error.
         assert!(!m.analog.is_empty());
+    }
+
+    /// Elaboration errors name `file:line:col`, at the innermost construct that has a
+    /// position: the identifier for an unresolved read, the statement for an undeclared
+    /// assignment target, the declaration for a duplicate parameter, the header for a port.
+    #[test]
+    fn elaboration_errors_are_located() {
+        let err = |src: &str| match crate::compile_named(src, &[], "m.va") {
+            Ok(_) => panic!("must not compile: {src}"),
+            Err(e) => e.to_string(),
+        };
+        let e = err("module m(p, n); inout p, n; electrical p, n;\n  analog I(p, n) <+ V(p, n) / Rx;\nendmodule\n");
+        assert!(e.contains("at m.va:2:31: unknown identifier `Rx`"), "{e}");
+        let e = err("module m(p, n); inout p, n; electrical p, n;\n  analog begin\n    g = 1.0;\n  end\nendmodule\n");
+        assert!(
+            e.contains("at m.va:3:5: variable `g` is assigned but never declared"),
+            "{e}"
+        );
+        let e = err("module m(p, n); inout p, n; electrical p, n;\n  parameter real R = 1;\n  parameter real R = 2;\n  analog I(p, n) <+ V(p, n) / R;\nendmodule\n");
+        assert!(
+            e.contains("at m.va:3:3: parameter `R` is declared more than once"),
+            "{e}"
+        );
+        let e = err("module m(p, n);\n  inout p, n;\n  analog I(p, n) <+ V(p, n);\nendmodule\n");
+        assert!(
+            e.contains("at m.va:1:10: port `p` has no discipline"),
+            "{e}"
+        );
+    }
+
+    /// An `analog function` may declare a local inside a named block of its body. 2.18.1's
+    /// undeclared-local check rejected that, because it only knew the declarations at the top of
+    /// the function.
+    #[test]
+    fn a_function_block_local_counts_as_declared() {
+        let src = "module t(a, b); inout a, b; electrical a, b;
+            analog function real f; input x; real x;
+                begin : body real t; t = 2.0 * x; f = t; end
+            endfunction
+            analog I(a, b) <+ f(V(a, b));
+        endmodule";
+        let m = elaborate_src(src);
+        assert_eq!(m.functions.len(), 1);
     }
 
     #[test]
@@ -6423,7 +6733,7 @@ mod tests {
         // later read of `MJSWG` in the same block must read that local variable back, not the
         // outer parameter's constant default (previously silently wrong once the assignment was
         // made to work at all, since `Ident` resolution checked `params` before `vars`).
-        let src = "module t(a, b); electrical a, b; \
+        let src = "module t(a, b); inout a, b; electrical a, b; \
                     parameter real g = 0.5 from (0:1); \
                     analog begin : load \
                         real g; \
@@ -6480,7 +6790,7 @@ mod tests {
     #[test]
     fn named_branch_resolves_and_coincides_with_positional() {
         // `V(br)`/`I(br)` and `V(a,b)` all refer to the one declared branch.
-        let src = "module t(a, b); electrical a, b; branch (a, b) br; analog begin I(br) <+ V(a, b); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; branch (a, b) br; analog begin I(br) <+ V(a, b); end endmodule";
         let m = elaborate_src(src);
         assert_eq!(
             m.branches.len(),
@@ -6506,7 +6816,7 @@ mod tests {
         // `Builtin::WhiteNoise` call carrying its power argument (T5.2 — `va-codegen` needs the
         // argument to reach the noise channel; the *value* being zero outside noise analysis is
         // codegen's job, not a fold here).
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin", 1e-9) * V(a, b) + white_noise(1.0, "thermal"); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $simparam("gmin", 1e-9) * V(a, b) + white_noise(1.0, "thermal"); end endmodule"#;
         let m = elaborate_src(src);
         assert!(m
             .exprs
@@ -6533,12 +6843,12 @@ mod tests {
         );
 
         // The default may be any expression, not just a constant.
-        let src = r#"module t(a, b); electrical a, b; parameter real g = 1e-3; analog begin I(a, b) <+ $simparam("gmin", g) * V(a, b); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; parameter real g = 1e-3; analog begin I(a, b) <+ $simparam("gmin", g) * V(a, b); end endmodule"#;
         let m = elaborate_src(src);
         assert!(m.exprs.iter().any(|e| matches!(e, va_ir::Expr::Param(_))));
 
         // `flicker_noise(pwr, exp)` keeps both arguments, in order.
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ flicker_noise(1e-19, 1.0, "1overf"); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ flicker_noise(1e-19, 1.0, "1overf"); end endmodule"#;
         let m = elaborate_src(src);
         let flicker = m
             .exprs
@@ -6553,7 +6863,7 @@ mod tests {
         assert!(matches!(m.expr(flicker[1]), va_ir::Expr::Const(v) if *v == 1.0));
 
         // A noise call missing a required argument is a clear error, not a silent zero.
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ flicker_noise(1e-19); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ flicker_noise(1e-19); end endmodule"#;
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -6564,7 +6874,7 @@ mod tests {
 
         // `noise_table` lowers to its own builtin — never to a `WhiteNoise` call, whose flat
         // shape would be a different (and wrong) spectrum.
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) + noise_table({1.0, 2e-20, 10.0, 4e-20}); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ V(a, b) + noise_table({1.0, 2e-20, 10.0, 4e-20}); end endmodule"#;
         let m = elaborate_src(src);
         assert!(
             !m.exprs
@@ -6580,7 +6890,7 @@ mod tests {
         );
 
         // `$simparam` with no default is an error (unknown parameter).
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $simparam("gmin") * V(a, b); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $simparam("gmin") * V(a, b); end endmodule"#;
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -6607,7 +6917,7 @@ mod tests {
     /// the shape `va-codegen` reads (§ `va_ir::Builtin::NoiseTable`).
     #[test]
     fn noise_table_lowers_to_flattened_constant_pairs() {
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table({1.0, 2e-20, 10.0, 4e-20}, "tbl"); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ noise_table({1.0, 2e-20, 10.0, 4e-20}, "tbl"); end endmodule"#;
         let m = elaborate_src(src);
         let args = m
             .exprs
@@ -6633,7 +6943,7 @@ mod tests {
     /// silently invert every interpolated segment downstream).
     #[test]
     fn noise_table_is_sorted_into_ascending_frequency_at_elaboration() {
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table({100.0, 1e-22, 1.0, 1e-20, 10.0, 1e-21}); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ noise_table({100.0, 1e-22, 1.0, 1e-20, 10.0, 1e-21}); end endmodule"#;
         let m = elaborate_src(src);
         let args = m
             .exprs
@@ -6659,7 +6969,7 @@ mod tests {
     /// is valid for one is valid for the other.
     #[test]
     fn noise_table_log_lowers_to_its_own_builtin() {
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table_log({1.0, 1.0, 1e6, 1e-6}); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ noise_table_log({1.0, 1.0, 1e6, 1e-6}); end endmodule"#;
         let m = elaborate_src(src);
         let args = m
             .exprs
@@ -6688,7 +6998,7 @@ mod tests {
             crate::keywords::Keyword::from_ident("noise_table_log").map(|k| k.as_str()),
             Some("noise_table_log")
         );
-        let src = "module t(a, b); electrical a, b; real noise_table_log; \
+        let src = "module t(a, b); inout a, b; electrical a, b; real noise_table_log; \
                    analog begin I(a, b) <+ V(a, b); end endmodule";
         let toks = lex(src).expect("lex");
         assert!(
@@ -6702,7 +7012,7 @@ mod tests {
     /// `noise_table`.
     #[test]
     fn noise_table_log_shares_the_validator_and_is_named_in_its_own_diagnostics() {
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table_log({1.0, 2e-20, 1.0, 4e-20}); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ noise_table_log({1.0, 2e-20, 1.0, 4e-20}); end endmodule"#;
         let msg = elaborate_err(src);
         assert!(msg.contains("unique"), "got: {msg}");
         assert!(
@@ -6733,7 +7043,7 @@ mod tests {
         ];
         for (call, needle) in cases {
             let src = format!(
-                "module t(a, b); electrical a, b; analog begin I(a, b) <+ {call}; end endmodule"
+                "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ {call}; end endmodule"
             );
             let msg = elaborate_err(&src);
             assert!(
@@ -6750,7 +7060,7 @@ mod tests {
     /// table can also be built programmatically by a caller of that ABI.
     #[test]
     fn an_empty_noise_table_cannot_be_written_and_fails_at_the_parser() {
-        let src = r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ noise_table({}); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ noise_table({}); end endmodule"#;
         let toks = lex(src).expect("lex");
         assert!(
             parse(&toks).is_err(),
@@ -6770,7 +7080,7 @@ mod tests {
     /// `Const`, because the sort and the uniqueness check need a number.
     #[test]
     fn a_noise_table_may_be_built_from_parameter_expressions() {
-        let src = "module t(a, b); electrical a, b; parameter real R = 1000.0; \
+        let src = "module t(a, b); inout a, b; electrical a, b; parameter real R = 1000.0; \
                    analog begin I(a, b) <+ noise_table({1.0, 4.0*1.380649e-23*300.15/R, \
                    1e6, 4.0*1.380649e-23*300.15/R}); end endmodule";
         let m = elaborate_src(src);
@@ -6806,7 +7116,7 @@ mod tests {
     /// constant is evaluated (per instance rather than per file), not whether it is one.
     #[test]
     fn a_noise_table_power_that_reads_a_probe_is_refused() {
-        let src = "module t(a, b); electrical a, b; \
+        let src = "module t(a, b); inout a, b; electrical a, b; \
                    analog begin I(a, b) <+ noise_table({1.0, V(a, b) * 1e-20}); end endmodule";
         let err = elaborate_err(src);
         assert!(
@@ -6824,7 +7134,7 @@ mod tests {
             "$rdist_chi_square(1, 2.5)",
         ] {
             let src = format!(
-                "module t(a, b); electrical a, b; analog begin I(a, b) <+ {call} * V(a, b); end endmodule"
+                "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ {call} * V(a, b); end endmodule"
             );
             let m = elaborate_src(&src);
             assert!(
@@ -6839,7 +7149,7 @@ mod tests {
     #[test]
     fn rdist_erlang_folds_to_its_mean_argument() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_erlang(1, 2, 7.0) * V(a, b); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_erlang(1, 2, 7.0) * V(a, b); end endmodule",
         );
         assert!(m
             .exprs
@@ -6852,7 +7162,7 @@ mod tests {
         // No single argument carries the mean directly, unlike the other rdist_* forms — it's
         // built as (start + end) / 2 in the IR itself.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_uniform(1, 2.0, 6.0) * V(a, b); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_uniform(1, 2.0, 6.0) * V(a, b); end endmodule",
         );
         assert!(m
             .exprs
@@ -6867,7 +7177,7 @@ mod tests {
     #[test]
     fn rdist_t_folds_to_zero_and_type_string_is_never_evaluated() {
         let m = elaborate_src(
-            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_t(1, 5, "instance") * V(a, b); end endmodule"#,
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_t(1, 5, "instance") * V(a, b); end endmodule"#,
         );
         assert!(m
             .exprs
@@ -6878,7 +7188,7 @@ mod tests {
     #[test]
     fn rdist_wrong_arity_is_an_error() {
         // `$rdist_normal` needs 3 or 4 arguments (seed, mean, standard_deviation[, type]), not 2.
-        let src = "module t(a, b); electrical a, b; analog begin I(a, b) <+ $rdist_normal(1, 2.0) * V(a, b); end endmodule";
+        let src = "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_normal(1, 2.0) * V(a, b); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -6893,7 +7203,7 @@ mod tests {
         // fold `$simparam` gets in the analog block must also work in a parameter's own default
         // expression, which is evaluated by the separate, non-mutating `const_eval`.
         let m = elaborate_src(
-            r#"module t(a, b); parameter real GMIN = $simparam("gmin", 1.0e-15); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#,
+            r#"module t(a, b); inout a, b; parameter real GMIN = $simparam("gmin", 1.0e-15); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#,
         );
         assert!(m
             .params
@@ -6901,7 +7211,7 @@ mod tests {
             .any(|p| p.name == "GMIN" && p.default == 1.0e-15));
 
         // Without a default, still an error in a parameter context too.
-        let src = r#"module t(a, b); parameter real GMIN = $simparam("gmin"); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#;
+        let src = r#"module t(a, b); inout a, b; parameter real GMIN = $simparam("gmin"); electrical a, b; analog begin I(a, b) <+ GMIN * V(a, b); end endmodule"#;
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -6918,7 +7228,7 @@ mod tests {
         // It now reaches the IR with arity normalized, so no consumer re-derives the LRM's
         // defaults: an omitted `fall_time` is the *same expression* as `rise_time` (§4.5.5).
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; parameter real td = 1n; parameter real tr = 1n; \
+            "module t(a, b); inout a, b; electrical a, b; parameter real td = 1n; parameter real tr = 1n; \
              analog begin I(a, b) <+ transition(V(a, b), td, tr); end endmodule",
         );
         let args = m
@@ -6935,7 +7245,7 @@ mod tests {
 
         // No value argument at all is an error.
         let src =
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ transition(); end endmodule";
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ transition(); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -6951,7 +7261,7 @@ mod tests {
         // as the positive one (LRM §4.5.6's symmetric default), not a copied constant — so a
         // parameterised rate stays one expression in the arena.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; parameter real rate = 1e6; \
+            "module t(a, b); inout a, b; electrical a, b; parameter real rate = 1e6; \
              analog begin I(a, b) <+ slew(V(a, b), rate); end endmodule",
         );
         let args = m
@@ -6984,8 +7294,8 @@ mod tests {
                 .expect("an absdelay call survives elaboration")
         };
 
-        let m = elaborate_src("module t(a, b); electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
-        let args = args_of("module t(a, b); electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
+        let m = elaborate_src("module t(a, b); inout a, b; electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
+        let args = args_of("module t(a, b); inout a, b; electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
         assert_eq!(args.len(), 2, "absdelay normalizes to (value, delay)");
         assert!(matches!(m.expr(args[0]), va_ir::Expr::Probe(_)));
         // The delay is a real lowered expression now, not a discarded token.
@@ -6993,11 +7303,11 @@ mod tests {
 
         // A third `maxdelay` argument is accepted and dropped: only a time-domain
         // implementation needs it, to size a history buffer (stage 2 of the proposal).
-        assert_eq!(args_of("module t(a, b); electrical a, b; analog begin I(a, b) <+ absdelay(V(a, b), 1n, 5n); end endmodule").len(), 2, "maxdelay is dropped, not carried");
+        assert_eq!(args_of("module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ absdelay(V(a, b), 1n, 5n); end endmodule").len(), 2, "maxdelay is dropped, not carried");
 
         // No value argument at all is still an error.
         let toks = lex(
-            "module t(a, b); electrical a, b; analog begin I(a, b) <+ absdelay(); end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ absdelay(); end endmodule",
         )
         .expect("lex");
         let ast = parse(&toks)
@@ -7032,7 +7342,7 @@ mod tests {
             (konst(0) as u32, konst(1), konst(2))
         };
 
-        let head = "module t(a, b); electrical a, b; analog begin I(a, b) <+ ";
+        let head = "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ ";
         // Explicit magnitude and phase, analysis defaulting to "ac".
         assert_eq!(
             stim(&format!(
@@ -7059,7 +7369,7 @@ mod tests {
         // `bound_step(step);` used to be discarded with the system tasks. It now survives as a
         // statement carrying its argument, so the transient controller can honour it.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; \
+            "module t(a, b); inout a, b; electrical a, b; \
              analog begin bound_step(1n); I(a, b) <+ V(a, b); end endmodule",
         );
         assert_eq!(m.analog.len(), 2);
@@ -7070,7 +7380,7 @@ mod tests {
 
         // It is a statement, not a value: writing it in expression position is an error rather
         // than a silent zero.
-        let src = "module t(a, b); electrical a, b; \
+        let src = "module t(a, b); inout a, b; electrical a, b; \
                    analog begin I(a, b) <+ bound_step(1n) + V(a, b); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
@@ -7084,7 +7394,7 @@ mod tests {
     fn analysis_folds_to_dc_constant() {
         // `analysis("static")` is true in DC → folds to 1.0; `analysis("tran")` → 0.0.
         let m = elaborate_src(
-            r#"module t(a, b); electrical a, b; analog begin I(a, b) <+ analysis("static") ? 1.0 : 2.0; end endmodule"#,
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ analysis("static") ? 1.0 : 2.0; end endmodule"#,
         );
         // The selector folds to a constant 1.0 (no Call to `analysis` survives in the IR).
         assert!(m
@@ -7094,7 +7404,7 @@ mod tests {
 
         // A full end-to-end check: varistor's pattern `analysis("static") && expr` elaborates.
         let m = elaborate_src(
-            r#"module t(a, b); electrical a, b; analog begin if (analysis("tran") && V(a, b) > 1.0) $strobe("hi"); I(a, b) <+ V(a, b); end endmodule"#,
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin if (analysis("tran") && V(a, b) > 1.0) $strobe("hi"); I(a, b) <+ V(a, b); end endmodule"#,
         );
         assert!(m
             .analog
@@ -7112,7 +7422,7 @@ mod tests {
 
         // Lowered in the analog block to the corresponding IR BinOps.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; real x; analog begin x = V(a, b) > 0 && V(a, b) != 1; I(a, b) <+ x; end endmodule",
+            "module t(a, b); inout a, b; electrical a, b; real x; analog begin x = V(a, b) > 0 && V(a, b) != 1; I(a, b) <+ x; end endmodule",
         );
         assert!(m
             .exprs
@@ -7139,7 +7449,8 @@ mod tests {
     #[test]
     fn ddx_rejects_malformed_arguments() {
         // Wrong arity.
-        let src = "module t(a); electrical a; analog begin I(a) <+ ddx(V(a)); end endmodule";
+        let src =
+            "module t(a); inout a; electrical a; analog begin I(a) <+ ddx(V(a)); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -7149,7 +7460,7 @@ mod tests {
         assert!(elaborate(&ast).is_err());
 
         // Second argument isn't a probe at all.
-        let src = "module t(a); electrical a; analog begin I(a) <+ ddx(V(a), 1.0); end endmodule";
+        let src = "module t(a); inout a; electrical a; analog begin I(a) <+ ddx(V(a), 1.0); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -7160,7 +7471,7 @@ mod tests {
 
         // Second argument is a flow probe, not a potential one — not supported (flow probes
         // aren't independent unknowns in this codegen).
-        let src = "module t(a, b); electrical a, b; \
+        let src = "module t(a, b); inout a, b; electrical a, b; \
                    analog begin I(a,b) <+ ddx(V(a,b), I(a,b)); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
@@ -7204,7 +7515,7 @@ mod tests {
         // conventional name, seen directly in external/igbt3.va) now elaborates — a bare `vt`
         // and the `$vt` system function coexist without conflict.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; real vt, temperature; \
+            "module t(a, b); inout a, b; electrical a, b; real vt, temperature; \
              analog begin vt = $vt; temperature = $temperature; I(a, b) <+ vt + temperature; end endmodule",
         );
         assert!(m
@@ -7255,7 +7566,7 @@ mod tests {
         assert_eq!(m.params[0].default, 7.0);
 
         // In the analog block it lowers to Expr::Select.
-        let m = elaborate_src("module t(a, b); electrical a, b; analog begin I(a, b) <+ V(a, b) > 0 ? 1.0 : 2.0; end endmodule");
+        let m = elaborate_src("module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ V(a, b) > 0 ? 1.0 : 2.0; end endmodule");
         assert!(m
             .exprs
             .iter()
@@ -7445,7 +7756,7 @@ mod tests {
         // `out_val[2] = 5.0; I(a) <+ out_val[2];` — a literal (compile-time-constant) index
         // resolves to the same `VarId` on both the write and the read.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; real out_val[0:15]; \
+            "module t(a, b); inout a, b; electrical a, b; real out_val[0:15]; \
              analog begin out_val[2] = 5.0; I(a, b) <+ out_val[2]; end endmodule",
         );
         let write_id = match &m.analog[0] {
@@ -7468,7 +7779,7 @@ mod tests {
         // The direct real-corpus idiom (`external/verilogaLib-master/*_ideal.va`): a
         // genvar-driven loop writing/reading successive array-variable elements.
         let m = elaborate_src(
-            "module t(a); electrical a; real out_val[0:2]; genvar i; \
+            "module t(a); inout a; electrical a; real out_val[0:2]; genvar i; \
              analog begin \
                for (i = 0; i < 3; i = i + 1) begin \
                  out_val[i] = i; \
@@ -7508,7 +7819,7 @@ mod tests {
         // elaboration time, so it expands into a nested `Expr::Select` chain, one arm per
         // declared index of the array, guarded by `j == k` — the real-corpus idiom this closes
         // (`external/verilogaLib-master/adc_16bit_ideal.va`'s bit-serialization loop).
-        let src = "module t(a); electrical a; real out_val[0:3]; integer j; \
+        let src = "module t(a); inout a; electrical a; real out_val[0:3]; integer j; \
                    analog begin j = 3; I(a) <+ out_val[j]; end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
@@ -7546,7 +7857,7 @@ mod tests {
         // Statement-level sibling of the read case: `out_val[j] = v;` with a runtime `j`
         // expands into an if/else-if chain, one `Stmt::Assign` per declared index.
         let m = elaborate_src(
-            "module t(a); electrical a; real out_val[0:3]; integer j; \
+            "module t(a); inout a; electrical a; real out_val[0:3]; integer j; \
              analog begin j = 2; out_val[j] = 5.0; I(a) <+ out_val[0]; end endmodule",
         );
         match &m.analog[1] {
@@ -7565,7 +7876,7 @@ mod tests {
         // `adc_16bit_ideal.va`). A probe read expands into nested `Select`s of `Probe`s; a
         // contribution target expands into an if/else-if chain of `Contribute`s.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b, bus[0:1]; integer i; \
+            "module t(a, b); inout a, b; electrical a, b, bus[0:1]; integer i; \
              analog begin i = 1; I(a, b) <+ V(bus[i]); V(bus[i]) <+ V(a, b); end endmodule",
         );
         let read_value = match &m.analog[1] {
@@ -7988,7 +8299,7 @@ mod tests {
         // `tile[0][1] = 5.0; I(a,b) <+ tile[0][1];` — literal (compile-time-constant) indices
         // resolve to the same `VarId` on both the write and the read, named "tile[0][1]".
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; real tile[0:1][0:1]; \
+            "module t(a, b); inout a, b; electrical a, b; real tile[0:1][0:1]; \
              analog begin tile[0][1] = 5.0; I(a, b) <+ tile[0][1]; end endmodule",
         );
         let write_id = match &m.analog[0] {
@@ -8043,7 +8354,7 @@ mod tests {
     fn two_d_array_variable_runtime_index_in_one_dim_expands_to_a_select_chain() {
         // `tile[0][j]` with a runtime `j` and a constant first dimension: only the dynamic
         // dimension unrolls into a `Select` chain (not an O(range²) chain over both).
-        let src = "module t(a); electrical a; real tile[0:0][0:3]; integer j; \
+        let src = "module t(a); inout a; electrical a; real tile[0:0][0:3]; integer j; \
                    analog begin j = 2; I(a) <+ tile[0][j]; end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
@@ -8079,7 +8390,7 @@ mod tests {
         // rejected rather than expanded into an O(range²) chain (mirrors this file's existing
         // precedent of rejecting two dynamically-indexed *terminals* in one access — see
         // `dynamic_index_pos`'s doc comment).
-        let src = "module t(a); electrical a; real tile[0:1][0:1]; integer i, j; \
+        let src = "module t(a); inout a; electrical a; real tile[0:1][0:1]; integer i, j; \
                    analog begin i = 0; j = 1; I(a) <+ tile[i][j]; end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
@@ -8095,7 +8406,7 @@ mod tests {
         // `electrical [0:1][0:1] grid;` (§ 2-D vector net, a documented non-standard
         // extension) interns 4 nodes, named "grid[i][j]"; a fully 2-indexed probe resolves.
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; electrical [0:1][0:1] grid; \
+            "module t(a, b); inout a, b; electrical a, b; electrical [0:1][0:1] grid; \
              analog begin I(a, b) <+ V(grid[0][1]); end endmodule",
         );
         assert!(m.nodes.iter().any(|n| n.name == "grid[0][0]"));
@@ -8127,7 +8438,8 @@ mod tests {
 
     #[test]
     fn two_d_vector_net_cannot_be_used_as_a_port() {
-        let src = "module t(grid); electrical [0:1][0:1] grid; analog begin end endmodule";
+        let src =
+            "module t(grid); inout grid; electrical [0:1][0:1] grid; analog begin end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -8145,7 +8457,8 @@ mod tests {
 
     #[test]
     fn two_d_vector_net_runtime_index_in_one_dim_expands_to_a_select_chain() {
-        let src = "module t(a, b); electrical a, b; electrical [0:0][0:1] grid; integer i; \
+        let src =
+            "module t(a, b); inout a, b; electrical a, b; electrical [0:0][0:1] grid; integer i; \
                    analog begin i = 1; I(a, b) <+ V(grid[0][i]); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
@@ -8165,10 +8478,10 @@ mod tests {
     fn two_d_vector_net_slice_is_rejected() {
         for src in [
             // A bare slice on a declared-2-D vector net.
-            "module t(a, b); electrical a, b; electrical [0:1][0:1] grid; \
+            "module t(a, b); inout a, b; electrical a, b; electrical [0:1][0:1] grid; \
              analog begin I(a, b) <+ V(grid[0:1]); end endmodule",
             // An index combined with a trailing slice.
-            "module t(a, b); electrical a, b; electrical [0:1][0:1] grid; \
+            "module t(a, b); inout a, b; electrical a, b; electrical [0:1][0:1] grid; \
              analog begin I(a, b) <+ V(grid[0][0:1]); end endmodule",
         ] {
             let toks = lex(src).expect("lex");
@@ -8186,7 +8499,7 @@ mod tests {
         // The motivating "2-D reticule" case: two nested genvar-driven generate loops build a
         // 2x2 grid of tile values, each addressed by `tile[i][j]`.
         let m = elaborate_src(
-            "module reticule(a); electrical a; real tile[0:1][0:1]; genvar i, j; \
+            "module reticule(a); inout a; electrical a; real tile[0:1][0:1]; genvar i, j; \
              analog begin \
                for (i = 0; i < 2; i = i + 1) begin \
                  for (j = 0; j < 2; j = j + 1) begin \
@@ -8256,7 +8569,7 @@ mod tests {
     #[test]
     fn analog_function_lowers_and_call_resolves() {
         // The function lowers to a Function node; a call to it lowers to Expr::CallUser.
-        let src = "module t(p, n); electrical p, n; analog function real sq; input x; real x; sq = x * x; endfunction analog begin I(p, n) <+ sq(V(p, n)); end endmodule";
+        let src = "module t(p, n); inout p, n; electrical p, n; analog function real sq; input x; real x; sq = x * x; endfunction analog begin I(p, n) <+ sq(V(p, n)); end endmodule";
         let m = elaborate_src(src);
         assert_eq!(m.functions.len(), 1);
         let f = &m.functions[0];
@@ -8275,7 +8588,7 @@ mod tests {
     fn unknown_function_call_is_rejected() {
         // A call to a name that is neither a built-in nor a user function is an error.
         let src =
-            "module t(p, n); electrical p, n; analog begin I(p, n) <+ nope(V(p, n)); end endmodule";
+            "module t(p, n); inout p, n; electrical p, n; analog begin I(p, n) <+ nope(V(p, n)); end endmodule";
         let toks = lex(src).expect("lex");
         let ast = parse(&toks)
             .expect("parse")
@@ -8334,12 +8647,13 @@ mod tests {
 
     // --- module instantiation (§ module instantiation) --------------------------------
 
-    const LEG: &str = "module leg(p, n); electrical p, n; parameter real r = 1000; \
+    const LEG: &str = "module leg(p, n); inout p, n; electrical p, n; parameter real r = 1000; \
                         analog I(p, n) <+ V(p, n) / r; endmodule ";
 
     #[test]
     fn instance_flattens_ports_by_position() {
-        let src = format!("{LEG} module top(a, b); electrical a, b; leg l1(a, b); endmodule");
+        let src =
+            format!("{LEG} module top(a, b); inout a, b; electrical a, b; leg l1(a, b); endmodule");
         let m = elaborate_top(&src, "top");
         // `leg`'s two ports both alias an already-declared parent node, so no new node is
         // created for the instance — `top` still has exactly its own two declared nodes.
@@ -8358,7 +8672,7 @@ mod tests {
     #[test]
     fn instance_shares_a_parent_declared_internal_node() {
         let src = format!(
-            "{LEG} module divider(a, b, mid); electrical a, b, mid; \
+            "{LEG} module divider(a, b, mid); inout a, b, mid; electrical a, b, mid; \
              leg l1(a, mid); leg l2(mid, b); endmodule"
         );
         let m = elaborate_top(&src, "divider");
@@ -8371,7 +8685,7 @@ mod tests {
     #[test]
     fn instance_param_override_bakes_in_constant() {
         let src =
-            format!("{LEG} module top(a, b); electrical a, b; leg #(.r(2000)) l1(a, b); endmodule");
+            format!("{LEG} module top(a, b); inout a, b; electrical a, b; leg #(.r(2000)) l1(a, b); endmodule");
         let m = elaborate_top(&src, "top");
         assert!(
             m.exprs
@@ -8389,8 +8703,9 @@ mod tests {
 
     #[test]
     fn named_connections_are_order_independent() {
-        let src =
-            format!("{LEG} module top(a, b); electrical a, b; leg l1(.n(b), .p(a)); endmodule");
+        let src = format!(
+            "{LEG} module top(a, b); inout a, b; electrical a, b; leg l1(.n(b), .p(a)); endmodule"
+        );
         let m = elaborate_top(&src, "top");
         assert_eq!(m.nodes.len(), 2);
         assert_eq!(m.branches.len(), 1);
@@ -8401,7 +8716,7 @@ mod tests {
         // The exact `external/photonic/Attenuator.va`/`CartesianMultiplier.va` shape: a 2-wide
         // vector port connected once to a same-width bare vector net (`transfer`, no index) and
         // once to a `[msb:lsb]` slice of a wider one (`in[0:1]` out of a 4-wide `in`).
-        const MUL: &str = "module mul(x, y); electrical [0:1] x, y; \
+        const MUL: &str = "module mul(x, y); inout x, y; electrical [0:1] x, y; \
                             analog begin V(x[0]) <+ V(y[0]); V(x[1]) <+ V(y[1]); end endmodule ";
         let src = format!(
             "{MUL} module top(); electrical [0:1] transfer; electrical [0:3] in; \
@@ -8425,7 +8740,8 @@ mod tests {
 
     #[test]
     fn vector_port_instance_width_mismatch_is_an_error() {
-        const MUL: &str = "module mul(x, y); electrical [0:1] x, y; analog begin end endmodule ";
+        const MUL: &str =
+            "module mul(x, y); inout x, y; electrical [0:1] x, y; analog begin end endmodule ";
         let src = format!(
             "{MUL} module top(); electrical [0:2] a; electrical [0:1] b; \
              mul m1(a, b); endmodule"
@@ -8439,7 +8755,7 @@ mod tests {
 
     #[test]
     fn unknown_module_reference_errors() {
-        let src = "module top(a, b); electrical a, b; nope n1(a, b); endmodule";
+        let src = "module top(a, b); inout a, b; electrical a, b; nope n1(a, b); endmodule";
         let toks = lex(src).expect("lex");
         let asts = parse(&toks).expect("parse");
         assert!(elaborate_with_library(&asts[0], &asts).is_err());
@@ -8447,7 +8763,7 @@ mod tests {
 
     #[test]
     fn self_instantiation_is_a_cycle_error() {
-        let src = "module top(a, b); electrical a, b; top t1(a, b); endmodule";
+        let src = "module top(a, b); inout a, b; electrical a, b; top t1(a, b); endmodule";
         let toks = lex(src).expect("lex");
         let asts = parse(&toks).expect("parse");
         assert!(elaborate_with_library(&asts[0], &asts).is_err());
@@ -8455,8 +8771,8 @@ mod tests {
 
     #[test]
     fn transitive_instantiation_cycle_errors() {
-        let src = "module a_mod(p, n); electrical p, n; b_mod b1(p, n); endmodule \
-                   module b_mod(p, n); electrical p, n; a_mod a1(p, n); endmodule";
+        let src = "module a_mod(p, n); inout p, n; electrical p, n; b_mod b1(p, n); endmodule \
+                   module b_mod(p, n); inout p, n; electrical p, n; a_mod a1(p, n); endmodule";
         let toks = lex(src).expect("lex");
         let asts = parse(&toks).expect("parse");
         let a = asts
@@ -8468,7 +8784,7 @@ mod tests {
 
     #[test]
     fn mismatched_port_count_errors() {
-        let src = format!("{LEG} module top(a); electrical a; leg l1(a); endmodule");
+        let src = format!("{LEG} module top(a); inout a; electrical a; leg l1(a); endmodule");
         let toks = lex(&src).expect("lex");
         let asts = parse(&toks).expect("parse");
         let top = asts.iter().find(|m| m.name == "top").expect("top present");
@@ -8478,7 +8794,7 @@ mod tests {
     #[test]
     fn unknown_named_port_errors() {
         let src =
-            format!("{LEG} module top(a, b); electrical a, b; leg l1(.p(a), .bogus(b)); endmodule");
+            format!("{LEG} module top(a, b); inout a, b; electrical a, b; leg l1(.p(a), .bogus(b)); endmodule");
         let toks = lex(&src).expect("lex");
         let asts = parse(&toks).expect("parse");
         let top = asts.iter().find(|m| m.name == "top").expect("top present");
@@ -8487,7 +8803,9 @@ mod tests {
 
     #[test]
     fn mixed_positional_and_named_connections_errors() {
-        let src = format!("{LEG} module top(a, b); electrical a, b; leg l1(a, .n(b)); endmodule");
+        let src = format!(
+            "{LEG} module top(a, b); inout a, b; electrical a, b; leg l1(a, .n(b)); endmodule"
+        );
         let toks = lex(&src).expect("lex");
         let asts = parse(&toks).expect("parse");
         let top = asts.iter().find(|m| m.name == "top").expect("top present");
@@ -8497,7 +8815,7 @@ mod tests {
     #[test]
     fn unknown_param_override_errors() {
         let src = format!(
-            "{LEG} module top(a, b); electrical a, b; leg #(.bogus(1.0)) l1(a, b); endmodule"
+            "{LEG} module top(a, b); inout a, b; electrical a, b; leg #(.bogus(1.0)) l1(a, b); endmodule"
         );
         let toks = lex(&src).expect("lex");
         let asts = parse(&toks).expect("parse");
@@ -8508,7 +8826,7 @@ mod tests {
     #[test]
     fn duplicate_instance_name_errors() {
         let src = format!(
-            "{LEG} module top(a, b); electrical a, b; leg l1(a, b); leg l1(a, b); endmodule"
+            "{LEG} module top(a, b); inout a, b; electrical a, b; leg l1(a, b); leg l1(a, b); endmodule"
         );
         let toks = lex(&src).expect("lex");
         let asts = parse(&toks).expect("parse");
@@ -8522,7 +8840,7 @@ mod tests {
         // the same branch once `gnd` is declared ground — proving `collect_ground` reused
         // `gnd`'s own `NodeId` as the reference node rather than creating a separate one.
         let m = elaborate_src(
-            "module t(a); electrical a, gnd; ground gnd; analog begin I(a, gnd) <+ V(a, gnd); I(a) <+ V(a); end endmodule",
+            "module t(a); inout a; electrical a, gnd; ground gnd; analog begin I(a, gnd) <+ V(a, gnd); I(a) <+ V(a); end endmodule",
         );
         assert_eq!(m.branches.len(), 1);
     }
@@ -8530,7 +8848,7 @@ mod tests {
     #[test]
     fn ground_merges_multiple_named_nets_into_one_reference_node() {
         let m = elaborate_src(
-            "module t(a); electrical a, gnd1, gnd2; ground gnd1, gnd2; analog begin I(a, gnd1) <+ V(a, gnd1); I(a, gnd2) <+ V(a, gnd2); end endmodule",
+            "module t(a); inout a; electrical a, gnd1, gnd2; ground gnd1, gnd2; analog begin I(a, gnd1) <+ V(a, gnd1); I(a, gnd2) <+ V(a, gnd2); end endmodule",
         );
         assert_eq!(m.branches.len(), 1);
     }
@@ -8538,7 +8856,7 @@ mod tests {
     #[test]
     fn ground_of_an_undeclared_net_errors() {
         let src =
-            "module t(a); electrical a; ground nope; analog begin I(a) <+ V(a); end endmodule";
+            "module t(a); inout a; electrical a; ground nope; analog begin I(a) <+ V(a); end endmodule";
         let ast = parse(&lex(src).expect("lex"))
             .expect("parse")
             .into_iter()
@@ -8868,7 +9186,7 @@ mod tests {
     #[test]
     fn an_analog_operator_in_a_while_loop_is_rejected() {
         let err = elaborate_err(
-            "module t(a, b); electrical a, b; integer i; real acc; \
+            "module t(a, b); inout a, b; electrical a, b; integer i; real acc; \
              analog begin \
                acc = 0.0; i = 0; \
                while (i < 2) begin acc = acc + 1e-9 * ddt(V(a, b)); i = i + 1; end \
@@ -8890,7 +9208,7 @@ mod tests {
     #[test]
     fn a_filter_in_a_non_genvar_for_loop_is_rejected() {
         let err = elaborate_err(
-            "module t(a, b); electrical a, b; integer j; real v[0:3]; \
+            "module t(a, b); inout a, b; electrical a, b; integer j; real v[0:3]; \
              analog begin \
                for (j = 0; j < 4; j = j + 1) v[j] = 1.0; \
                for (j = 0; j < 4; j = j + 1) I(a, b) <+ transition(v[j], 0.0, 1u, 1u); \
@@ -8907,7 +9225,7 @@ mod tests {
     #[test]
     fn an_analog_operator_in_a_loop_header_is_rejected_too() {
         let err = elaborate_err(
-            "module t(a, b); electrical a, b; integer i; \
+            "module t(a, b); inout a, b; electrical a, b; integer i; \
              analog begin \
                i = 0; \
                while (ddt(V(a, b)) > 0.0) i = i + 1; \
@@ -8921,7 +9239,7 @@ mod tests {
     #[test]
     fn an_analog_operator_in_a_repeat_loop_is_rejected() {
         let err = elaborate_err(
-            "module t(a, b); electrical a, b; real acc; \
+            "module t(a, b); inout a, b; electrical a, b; real acc; \
              analog begin \
                acc = 0.0; \
                repeat (3) acc = acc + 1e-9 * ddt(V(a, b)); \
@@ -8940,7 +9258,7 @@ mod tests {
     #[test]
     fn a_monitored_event_inside_a_loop_is_rejected() {
         let err = elaborate_err(
-            "module t(a, b); electrical a, b; integer i; real acc; \
+            "module t(a, b); inout a, b; electrical a, b; integer i; real acc; \
              analog begin \
                acc = 0.0; i = 0; \
                while (i < 2) begin @(cross(V(a, b), 1)) acc = acc + 1.0; i = i + 1; end \
@@ -8963,7 +9281,7 @@ mod tests {
     #[test]
     fn a_genvar_for_loop_may_contain_analog_operators() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; genvar k; \
+            "module t(a, b); inout a, b; electrical a, b; genvar k; \
              analog begin \
                for (k = 0; k < 3; k = k + 1) I(a, b) <+ 1e-9 * ddt(V(a, b)); \
              end endmodule",
@@ -8985,7 +9303,7 @@ mod tests {
     #[test]
     fn a_contribution_in_a_runtime_loop_is_still_allowed() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; integer i; \
+            "module t(a, b); inout a, b; electrical a, b; integer i; \
              analog begin \
                for (i = 0; i < 3; i = i + 1) I(a, b) <+ 1e-3 * V(a, b); \
              end endmodule",
@@ -9011,7 +9329,7 @@ mod tests {
     #[test]
     fn a_step_event_inside_a_loop_is_still_allowed() {
         let m = elaborate_src(
-            "module t(a, b); electrical a, b; integer i; real acc; \
+            "module t(a, b); inout a, b; electrical a, b; integer i; real acc; \
              analog begin \
                acc = 0.0; i = 0; \
                while (i < 2) begin @(initial_step) acc = 1.0; i = i + 1; end \
