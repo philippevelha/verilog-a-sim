@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn default_transition_fills_an_omitted_or_zero_rise_time() {
         let src = "`default_transition 100n
-module t(p, n);
+module t(p, n); inout p, n;
   electrical p, n;
   analog V(p, n) <+ transition(1.0, 0) + transition(2.0, 0, 5n);
 endmodule
@@ -329,7 +329,7 @@ endmodule
         // No directive: an omitted rise time is 0 here, which `va-codegen` turns into the
         // LRM's "negligible but non-zero" ramp at load, where the time scale is known.
         let design = super::compile(
-            "module t(p, n); electrical p, n; analog V(p, n) <+ transition(1.0, 0); endmodule",
+            "module t(p, n); inout p, n; electrical p, n; analog V(p, n) <+ transition(1.0, 0); endmodule",
         )
         .unwrap();
         let m = &design.modules[0];
@@ -342,7 +342,7 @@ endmodule
     /// there, cannot. The one shape a keyword region is useful for in a Verilog-A file.
     #[test]
     fn a_1364_keyword_region_wraps_an_analog_module() {
-        let src = "`default_discipline electrical\n`begin_keywords \"1364-2005\"\nmodule top(sin, flow);\n  inout sin, flow;\n  leg l1(sin, flow);\nendmodule\n`end_keywords\nmodule leg(p, n);\n  electrical p, n;\n  analog I(p, n) <+ V(p, n) / 1000.0;\nendmodule\n";
+        let src = "`default_discipline electrical\n`begin_keywords \"1364-2005\"\nmodule top(sin, flow);\n  inout sin, flow;\n  leg l1(sin, flow);\nendmodule\n`end_keywords\nmodule leg(p, n); inout p, n;\n  electrical p, n;\n  analog I(p, n) <+ V(p, n) / 1000.0;\nendmodule\n";
         let design = super::compile(src).expect("compiles");
         let top = design
             .modules
@@ -464,7 +464,7 @@ endmodule
     /// The no-effect directives reach the caller as warnings, not as silence.
     #[test]
     fn no_effect_directives_surface_as_warnings() {
-        let design = super::compile("`timescale 1ns/1ps\nmodule t(p, n); electrical p, n; analog I(p, n) <+ V(p, n); endmodule\n").unwrap();
+        let design = super::compile("`timescale 1ns/1ps\nmodule t(p, n); inout p, n; electrical p, n; analog I(p, n) <+ V(p, n); endmodule\n").unwrap();
         assert_eq!(design.warnings.len(), 1);
         assert!(design.warnings[0].starts_with("`timescale has no effect in Verilog-A"));
     }

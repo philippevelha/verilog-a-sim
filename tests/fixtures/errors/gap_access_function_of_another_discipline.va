@@ -1,7 +1,0 @@
-// expect: ok
-// gap: `Temp` is the thermal discipline's potential access, used here on `electrical` nets; this is accepted, and `va-cli sim` then fails with "singular matrix" instead of naming the mismatch
-module r(p, n);
-  inout p, n;
-  electrical p, n;
-  analog Temp(p, n) <+ V(p, n);
-endmodule

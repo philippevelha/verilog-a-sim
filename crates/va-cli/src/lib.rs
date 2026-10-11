@@ -616,6 +616,9 @@ fn compile_model_library_with_context(
     // Pass 2: elaborate each module against every module in the library.
     let mut modules = Vec::with_capacity(library.len());
     for ast in &library {
+        for w in va_frontend::elaborate::port_direction_warnings(ast) {
+            eprintln!("[va-cli] warning: {w}");
+        }
         // The include path goes to elaboration too, not just to the preprocessor: a
         // `$table_model` data file is found the same way a `` `include `` is.
         let m = va_frontend::elaborate::elaborate_unit(
@@ -1412,6 +1415,9 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         }
         let mut all_ok = true;
         for ast in &library[range] {
+            for w in va_frontend::elaborate::port_direction_warnings(ast) {
+                println!("  [warn ] {file}: {w}");
+            }
             match va_frontend::elaborate::elaborate_unit(
                 ast,
                 &library,
@@ -4109,15 +4115,15 @@ mod tests {
         };
         let plain = write(
             "plain.va",
-            "module plain(p, n); electrical p, n; analog I(p, n) <+ V(p, n) / 1000.0; endmodule",
+            "module plain(p, n); inout p, n; electrical p, n; analog I(p, n) <+ V(p, n) / 1000.0; endmodule",
         );
         let wrapper = write(
             "wrapper.va",
-            "module wrapper(a, b); electrical a, b; plain inner(a, b); endmodule",
+            "module wrapper(a, b); inout a, b; electrical a, b; plain inner(a, b); endmodule",
         );
         let folded = write(
             "folded.va",
-            "module folded(p, n); electrical p, n; \
+            "module folded(p, n); inout p, n; electrical p, n; \
              analog I(p, n) <+ absdelay(V(p, n), 1e-6); endmodule",
         );
         let (_, files) = compile_model_library(&dir.display().to_string()).expect("compiles");
@@ -4257,7 +4263,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("divider.va"),
-            "module divider(p, n); electrical p, n; \
+            "module divider(p, n); inout p, n; electrical p, n; \
              analog I(p, n) <+ 1.0 / V(p, n); endmodule",
         )
         .unwrap();
@@ -4323,7 +4329,7 @@ mod tests {
         // merely consistent. Into 1 kΩ: V(out) = -1000*I.
         let rate = 1.0; // A/s, the limit
         let design = compile_model(
-            "module slewramp(p, n); electrical p, n; \
+            "module slewramp(p, n); inout p, n; electrical p, n; \
              parameter real k = 10.0; parameter real rate = 1.0; \
              analog I(p, n) <+ slew(k * $abstime, rate); endmodule",
             "slewramp",
@@ -4396,7 +4402,7 @@ mod tests {
     fn a_model_declared_junction_limits_that_node_and_leaves_the_others_alone() {
         // `p`/`n`: 1 kΩ driven at 100 V. `a`/`c`: a diode, fed from the same 100 V rail through
         // an external 100 kΩ, so it sits at a genuine forward operating point.
-        const SRC: &str = "module mixed(a, c, p, n); electrical a, c, p, n; \
+        const SRC: &str = "module mixed(a, c, p, n); inout a, c, p, n; electrical a, c, p, n; \
              parameter real Is = 1e-15; parameter real vt = 0.025852; \
              parameter real R = 1000.0; real vd; \
              analog begin \
@@ -4464,7 +4470,7 @@ mod tests {
     fn a_model_reading_abstime_ramps_in_transient_and_reads_zero_in_dc() {
         // I(p,n) <+ V(p,n)/R + k*$abstime — a 1 mA/ms current ramp in parallel with 1 kΩ.
         let design = compile_model(
-            "module ramp(p, n); electrical p, n; \
+            "module ramp(p, n); inout p, n; electrical p, n; \
              parameter real r = 1000; parameter real k = 1.0; \
              analog I(p, n) <+ V(p, n) / r + k * $abstime; endmodule",
             "ramp",
@@ -4523,7 +4529,7 @@ mod tests {
     fn a_model_branching_on_analysis_solves_differently_in_dc_and_transient() {
         // A 1 kΩ resistor in DC; the same resistor plus a 1 mA offset in transient.
         let design = compile_model(
-            r#"module gated(p, n); electrical p, n;
+            r#"module gated(p, n); inout p, n; electrical p, n;
                analog begin
                  I(p, n) <+ V(p, n) / 1000.0;
                  if (analysis("tran")) I(p, n) <+ 1e-3;
@@ -4589,13 +4595,13 @@ mod tests {
         let top_path = dir.join("top.va");
         std::fs::write(
             &leg_path,
-            "module leg(p, n); electrical p, n; parameter real r = 1000; \
+            "module leg(p, n); inout p, n; electrical p, n; parameter real r = 1000; \
              analog I(p, n) <+ V(p, n) / r; endmodule",
         )
         .unwrap();
         std::fs::write(
             &top_path,
-            "module top(a, b); electrical a, b; leg l1(a, b); endmodule",
+            "module top(a, b); inout a, b; electrical a, b; leg l1(a, b); endmodule",
         )
         .unwrap();
 
@@ -4625,7 +4631,7 @@ mod tests {
         let top_path = dir.join("top.va");
         std::fs::write(
             &top_path,
-            "module top(a, b); electrical a, b; leg l1(a, b); endmodule",
+            "module top(a, b); inout a, b; electrical a, b; leg l1(a, b); endmodule",
         )
         .unwrap();
 
@@ -4656,7 +4662,7 @@ mod tests {
         // been supported since `Dual` gained its charge channel.)
         std::fs::write(
             &path,
-            "module m(p, n); electrical p, n; parameter real c = 1e-12; \
+            "module m(p, n); inout p, n; electrical p, n; parameter real c = 1e-12; \
              analog I(p, n) <+ ddt(ddt(c * V(p, n))); endmodule",
         )
         .unwrap();
@@ -4698,7 +4704,7 @@ mod tests {
     #[test]
     fn a_noise_source_reaching_a_contribution_through_a_variable_is_refused() {
         let msg = build_msg(
-            "module nz(p, n);
+            "module nz(p, n); inout p, n;
              electrical p, n;
              parameter real g = 1e-3;
              real n1;
@@ -4718,7 +4724,7 @@ mod tests {
     #[test]
     fn a_top_level_noise_source_still_builds() {
         build_msg(
-            "module nz(p, n);
+            "module nz(p, n); inout p, n;
              electrical p, n;
              parameter real g = 1e-3;
              analog begin
@@ -5295,7 +5301,7 @@ R2 out gnd 1000
     #[test]
     fn an_ac_stim_reaching_a_contribution_through_a_variable_is_refused() {
         let msg = build_msg(
-            "module stim(p, n);
+            "module stim(p, n); inout p, n;
              electrical p, n;
              real s;
              analog begin
@@ -5320,7 +5326,7 @@ R2 out gnd 1000
     #[test]
     fn a_second_derivative_reaching_the_charge_channel_through_a_variable_is_refused() {
         let msg = build_msg(
-            "module sd(p, n);
+            "module sd(p, n); inout p, n;
              electrical p, n;
              parameter real c0 = 1e-6;
              real x;
@@ -5342,7 +5348,7 @@ R2 out gnd 1000
     #[test]
     fn an_ordinary_variable_is_not_tainted() {
         build_msg(
-            "module plain(p, n);
+            "module plain(p, n); inout p, n;
              electrical p, n;
              parameter real g = 1e-3;
              real y;
@@ -5378,7 +5384,7 @@ R2 out gnd 1000
     /// zero and a broken primal reconstruction would sail through.
     #[test]
     fn a_ddt_assigned_in_an_if_arm_under_parameter_guards_is_contributed_as_a_rate() {
-        let src = "module thermal(p, n);
+        let src = "module thermal(p, n); inout p, n;
                    electrical p, n;
                    parameter real cth = 1e-9;
                    parameter real flsh = 1;
@@ -5438,7 +5444,7 @@ R2 out gnd 1000
     /// diagnostic. LRM §4.5.15 forbids exactly this.
     #[test]
     fn an_escaping_ddt_under_a_solution_dependent_guard_is_still_refused() {
-        let src = "module bad(p, n);
+        let src = "module bad(p, n); inout p, n;
                    electrical p, n;
                    parameter real c0 = 1e-9;
                    real i_c;
@@ -5471,7 +5477,7 @@ R2 out gnd 1000
     /// frontend; what changed is which pass gets to this particular shape first.
     #[test]
     fn an_escaping_ddt_inside_a_loop_body_is_still_refused() {
-        let src = "module loopy(p, n);
+        let src = "module loopy(p, n); inout p, n;
                    electrical p, n;
                    parameter real c0 = 1e-9;
                    integer k;
@@ -5502,7 +5508,7 @@ R2 out gnd 1000
     /// above could be passing because all `ddt`-via-variable support had been broken.
     #[test]
     fn a_ddt_assigned_outside_any_branch_still_reaches_the_charge_channel() {
-        let src = "module cap(p, n);
+        let src = "module cap(p, n); inout p, n;
                    electrical p, n;
                    parameter real cth = 1e-9;
                    real i_cth;
@@ -5550,14 +5556,14 @@ R2 out gnd 1000
         // 1. A whole, self-contained model.
         std::fs::write(
             dir.join("whole.va"),
-            "module whole(p, n); electrical p, n; parameter real r = 1000;              analog I(p, n) <+ V(p, n) / r; endmodule",
+            "module whole(p, n); inout p, n; electrical p, n; parameter real r = 1000;              analog I(p, n) <+ V(p, n) / r; endmodule",
         )
         .unwrap();
         // 2. The truncated-vendor-distribution shape: ports declared inline, body `include`d,
         //    include absent. This elaborates cleanly — and says nothing true about coverage.
         std::fs::write(
             dir.join("hollow.va"),
-            "module hollow(p, n);
+            "module hollow(p, n); inout p, n;
              electrical p, n;
              `include \"body_that_was_never_shipped.include\"
              endmodule
@@ -5603,7 +5609,7 @@ R2 out gnd 1000
         std::fs::write(
             dir.join("truncated.va"),
             "`include \"macrodefs_that_never_shipped.include\"
-             module truncated(p, n);
+             module truncated(p, n); inout p, n;
              electrical p, n;
              analog I(p, n) <+ `GMIN * V(p, n);
              endmodule
@@ -5614,7 +5620,7 @@ R2 out gnd 1000
         // a real defect in the file and must stay in the self-contained denominator.
         std::fs::write(
             dir.join("genuinely_broken.va"),
-            "module genuinely_broken(p, n);
+            "module genuinely_broken(p, n); inout p, n;
              electrical p, n;
              analog I(p, n) <+ `NEVER_DEFINED * V(p, n);
              endmodule
@@ -6085,7 +6091,8 @@ X1 out gnd offsetcap
         // A model using none of them is not refused.
         let plain = vec![(
             "r.va".to_string(),
-            "module r(p,n); electrical p,n; analog I(p,n) <+ V(p,n); endmodule".to_string(),
+            "module r(p,n); inout p, n; electrical p,n; analog I(p,n) <+ V(p,n); endmodule"
+                .to_string(),
         )];
         refuse_transient_approximations(&plain).expect("an ordinary model is fine");
 
@@ -7804,9 +7811,10 @@ endmodule
     #[test]
     fn an_ordinary_error_is_not_mistaken_for_a_refusal() {
         // A genuine syntax error: malformed source, not a recognised-and-declined construct.
-        let malformed = va_frontend::compile("module m(a, b); electrical a b; endmodule")
-            .err()
-            .expect("this does not parse");
+        let malformed =
+            va_frontend::compile("module m(a, b); inout a, b; electrical a b; endmodule")
+                .err()
+                .expect("this does not parse");
         assert!(
             refusal_block(&anyhow::Error::new(malformed)).is_none(),
             "a parse error is not a refusal: telling a user their correct model was declined, \
@@ -8064,7 +8072,7 @@ endmodule
 
         // A comment mentioning it, and an identifier containing it, are both ignored: the
         // lexer skips the first and yields an `Ident` (not a `Keyword`) for the second.
-        let decoy = "// absdelay is not used here\nmodule m(a);\nelectrical a;\nreal absdelay_count;\nanalog absdelay_count = 1.0;\nendmodule\n";
+        let decoy = "// absdelay is not used here\nmodule m(a); inout a;\nelectrical a;\nreal absdelay_count;\nanalog absdelay_count = 1.0;\nendmodule\n";
         assert!(
             approximations_in(decoy).is_empty(),
             "a comment or a longer identifier must not trigger the warning"

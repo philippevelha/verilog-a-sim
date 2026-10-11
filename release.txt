@@ -22,6 +22,132 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.23.3 - 2026-10-10
+--------------------
+These three entries were developed on 2.18.2 as 2.18.3, 2.18.4 and 2.18.5 (their commit
+subjects keep those numbers) and renumbered when the branch was merged with 2.23.0+1.
+Measured after that merge: `cargo test --workspace` 965 passed, 0 failed; `cargo xtask validate`
+28 checked, 0 failed, convergence 28/28; `check models` 68/68 (two models came with 2.23.0+1,
+and neither draws the direction warning or the access check), `check benchmark/models` 25/25,
+`check external` 8/9. The figures in each entry below are from before the merge.
+
+**A port without a direction is a warning, not an error.** 2.23.2 rejected it, but the rule
+behind that is unsettled here. IEEE 1364 requires a direction for every listed port, while
+`docs/token-reference.md` once quoted the LRM as making `inout` the default for analog ports,
+and the LRM was not available to check. A model that relies on the default now runs, and its
+author is told, at the port's name:
+  `[va-cli] warning: at r.va:5:10: module `r`: port `p` has no direction; it is treated as
+  `inout`. Declare it `inout p;` (or `input` / `output`) to be explicit`
+`check` prints the same text as a `[warn ]` line, and the file still counts as a pass (exit 0).
+"Treated as `inout`" is exact: elaboration does not read port directions at all, so every port
+is an inout node.
+
+The warning comes from `va_frontend::elaborate::port_direction_warnings(&ModuleAst)`. It is a
+function the caller prints from, the shape the other model warnings already have: `va_ir::Module`
+is a frozen interface, and elaboration does not print. The error corpus learned a third kind of
+entry, `expect: ok` with a `warning:` line, which asserts the warning text on a `[warn ]` line
+(and `at:` its location). `elab_port_without_direction.va` became
+`warn_port_without_direction.va`. The corpus runner no longer reads a `[warn ]` line as a
+failing verdict.
+
+Unchanged from 2.23.2: the access-function check (`Temp` on `electrical`) is still an error,
+and the 198 test models that 2.23.2 gave explicit `inout` declarations keep them (they are valid
+either way). No committed model triggers the warning (`check models` 66/66, `benchmark/models`
+25/25, `external` 8/9).
+
+To settle the rule: if the LRM requires the direction, `port_direction_warnings` can feed an
+error again; if it makes `inout` the default, the warning can go.
+
+Measured: `cargo test --workspace` 959 passed, 0 failed (the corpus: 36 files, 0 gaps, 0 poor
+messages, 1 warning case); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
+2.23.2 - 2026-10-10
+--------------------
+**The error corpus's last two gaps are closed; it now has none.**
+  * **A port with no direction is an error**, located at the port's name in the header: "port
+    `p` has no direction; declare it `inout p;` (or `input` / `output`)". It used to be
+    accepted.
+  * **An access function from the wrong discipline is an error.** `Temp(p, n)` on `electrical`
+    nets now reports "`Temp(...)` is not an access function of discipline `electrical`, which
+    net `p` is declared with: its access functions are `V` and `I`; write `V(...)` for its
+    potential". It used to compile as a voltage contribution, and `sim` then failed with
+    "singular matrix". The accesses come from the discipline's parsed natures when it was
+    declared in a `discipline` block, else V/I for electrical and Temp/Pwr for thermal. A named
+    branch is checked through its terminals. A net whose discipline names no access function is
+    not checked. The AST's `Access` now keeps the function's name (`func`) to make this possible.
+
+**The direction rule needs checking against the LRM, which is not in this repository.** The
+basis is IEEE 1364's rule that every listed port is declared input/output/inout (cited from
+memory as §12.3.3), plus Keysight ADS's Verilog-A reference. Against it,
+`docs/token-reference.md` used to quote the LRM as saying "`inout` is the default for analog
+bidirectional ports", which would make the omission legal. That quote could not be traced, so
+the doc no longer presents it as a quotation, and says so. If the local LRM does make `inout`
+the default, this check should become a warning; it is one `return Err` in `resolve_ports`.
+
+Cost:
+  * 198 inline test models in `va-frontend` and `va-cli` unit tests omitted their port
+    directions. A script added `inout <ports>;` after each such header (three parser-only tests
+    that index items by position were left as they were). No test's meaning changed, and every
+    test passes. **No committed model was affected**: `check models` 66/66, `check
+    benchmark/models` 25/25, `check external` 8/9, all unchanged. The local third-party
+    corpus is the place a model without directions would show up; it was not run here.
+  * The access check costs +0.5% instructions on `check benchmark/models`: each net's
+    discipline is looked up in a table built once per module.
+
+Measured: `cargo test --workspace` 959 passed, 0 failed (the error corpus, 36 files, 0 gaps,
+0 poor messages, is one of them); `cargo xtask validate` 28 checked, 0 failed, convergence
+28/28.
+
+
+2.23.1 - 2026-10-10
+--------------------
+**Elaboration errors name file:line:col.** Before this, no elaboration error carried a
+location: `unknown identifier `Rx`` left the user to search the model for it. Now it reads
+`at diode.va:7:31: unknown identifier `Rx``, pointing at the identifier itself.
+
+How: the parser records where each construct starts, as positions in the file the user wrote
+(through the preprocessor's line map, so `` `include `` and `` `line `` are undone):
+  * every expression, in `ModuleAst::expr_pos`, parallel to the expression arena;
+  * every module item, in `item_pos`, and every header port, in `port_pos`;
+  * `Stmt::Assign` and `Stmt::Contribute`, in a new `at` field (the AST is `va-frontend`'s own
+    type, not a frozen interface).
+Elaboration locates an error on its way out, innermost first: the expression being lowered or
+constant-folded, then the statement (its own position, or its condition/selector), then the
+item or port the pass was on. The first location wins. An elaboration-time refusal gets its
+`where:` the same way. All 23 `elab_*` corpus files now assert `at:`, and each points at the
+right line and column.
+
+**A regression from 2.18.1, fixed.** That version's undeclared-local check in an
+`analog function` only knew the declarations at the top of the function. So a local declared
+inside a named block of the body (`begin : b real t; t = 2.0 * x; f = t; end`) was rejected
+as undeclared, although it compiled before 2.18.1. It is accepted again, and simulates to the
+value it should (`f = 2x`, checked). The error for a genuinely undeclared local now points at
+the assignment, not at the `analog function` line.
+
+Cost, measured on `va-cli check benchmark/models` (the 25 big compact models, frontend only),
+against a 2.18.2 build:
+  * 3.68 -> 3.88 G instructions (+5.4%, callgrind), and 696 -> 766 ms best-of-10 wall time
+    (+10%; the mean is noisier on this machine).
+  * The first version cost 3x. Three fixes brought it down: columns are byte offsets on ASCII
+    lines instead of a character count from the line start (macro-expanded lines are long);
+    the line map is resolved to file indices once per file, not once per expression; and
+    locations are formatted only when an error needs one, not for every item on every pass.
+    What is left is the position tables themselves (16 bytes per expression, copied wherever a
+    `ModuleAst` is cloned) and the lookup per expression.
+  * This is a frontend cost, paid once per run; the crossbar deck in 2.18.0+4 simulates for
+    260-620 s.
+
+Limits: `va-codegen` errors (`[cgen ]`) are still unlocated, because the IR carries no
+positions; that would be a change to Interface α (CLAUDE.md §6). An expression the parser
+synthesizes rather than reads (event-trigger desugaring) has no position of its own and is
+located by its statement or item.
+
+Measured: `cargo test --workspace` 959 passed, 0 failed (957 + two elaboration-location
+tests); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28; `check models` 66/66,
+`check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+
+
 2.23.0+1 - 2026-10-10
 ----------------------
 **Docs only: `notes/rung-c-report.md`, the 2.23.0 rung C write-up as a standalone page.** It
