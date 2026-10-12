@@ -59,6 +59,7 @@ fn print_usage() {
          FLAGS:\n    \
          -h, --help    Print this help\n    \
          --model <model.va|dir>  A Verilog-A library; repeat it to compile several as one\n                                 (each file's `include resolves in its own library)\n    \
+         --define NAME[=VALUE]   Predefine a macro for every model (sim and check); NAME\n                                 alone means 1. Repeatable. __VAMS_ENABLE__ and\n                                 __VAMS_COMPACT_MODELING__ are always predefined.\n    \
          --plot <out.svg>        Write an SVG plot: transient waveform, .dc sweep, or AC Bode
     \n         --integration be|trap|gear  Integration method for a transient run.
                                  Default trapezoidal (second order)
@@ -121,6 +122,7 @@ fn print_usage() {
 /// command can gate a CI job or a script. Until 2.18.1 it exited 0 whatever it found, which made
 /// `va-cli check model.va && ...` proceed past a model that did not compile.
 fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
+    let args = &take_defines(args)?;
     let codegen = args.iter().any(|a| a == "--codegen");
     let paths: Vec<String> = args
         .iter()
@@ -139,6 +141,7 @@ fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
 
 /// The `sim` subcommand: run a netlist through the pipeline.
 fn cmd_sim(args: &[String]) -> Result<()> {
+    let args = &take_defines(args)?;
     let netlist = args.first().context("expected a netlist path")?;
     // `--threads <n>`: how many threads evaluate device instances (`va_core::par`). Without it,
     // rayon's default — `RAYON_NUM_THREADS`, else one per logical core. Speed only: every
@@ -317,6 +320,25 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         bail!("{errors} $error message(s) reported by the model(s) during the run");
     }
     result
+}
+
+/// Take every `--define NAME[=VALUE]` out of `args`, hand them to [`va_cli::set_defines`],
+/// and return the remaining arguments. `NAME` alone defines it as `1`, as a C compiler's `-D`
+/// does. Removed rather than left in place so `check` does not read a value as a model path.
+fn take_defines(args: &[String]) -> Result<Vec<String>> {
+    let (mut rest, mut defines) = (Vec::new(), Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a != "--define" {
+            rest.push(a.clone());
+            continue;
+        }
+        let d = it.next().context("--define expects NAME or NAME=VALUE")?;
+        let (name, value) = d.split_once('=').unwrap_or((d.as_str(), "1"));
+        defines.push((name.to_string(), value.to_string()));
+    }
+    va_cli::set_defines(defines);
+    Ok(rest)
 }
 
 /// Pull the value following `flag` out of `args`.

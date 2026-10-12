@@ -22,6 +22,82 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.2 - 2026-10-11
+--------------------
+**Predefined macros, and `va-cli --define`.** `__VAMS_ENABLE__` and
+`__VAMS_COMPACT_MODELING__` are defined (as `1`) before any source is read
+(`va_frontend::preprocess::PREDEFINED`). `va-cli sim|check --define NAME[=VALUE]` predefines
+more, repeatable, `NAME` alone meaning `1` (`PreprocessOptions::defines`,
+`preprocess_named_with`). Every LRM directive was already handled; these were the gap.
+
+  * Why: compact models guard the compact-modeling extensions with
+    `` `ifdef __VAMS_COMPACT_MODELING__ ``. Undefined, that branch was compiled out silently.
+    `external/mos11010.va` (MOS11) now compiles its correlated-noise network: 7 nodes, where
+    it had 4. Its noise analysis runs with it (a 1 kOhm-loaded MOS11, 1 kHz-1 MHz).
+  * Correction to what was said before the change: MOS11 does not compile in this repo
+    either way. It includes `discipline.h`/`constants.h`, which are not shipped, and uses
+    `P_EPS0` from the vendor's `constants.h`. The comparison above supplied
+    `P_EPS0=8.854187817e-12` (now possible with `--define`) and the standard headers in a
+    scratch copy.
+  * No other effect: `va-cli check --codegen` over `external/` (7/7) and `models/` (68/68)
+    gives line-identical reports before and after; no other model there uses the macros.
+  * A name that is not an identifier is refused before any source is read. A model may still
+    `` `undef `` either predefined macro. Function-like macros cannot be predefined.
+
+Measured: `cargo test --workspace` 970 passed (new: the predefined macros take their
+`` `ifdef `` branch, read 1 and can be undefined; caller defines are seen, replace a predefined
+one and have their names checked); `cargo xtask validate` 28/28; fmt and clippy clean.
+
+2.24.1+1 - 2026-10-11
+----------------------
+**Lockfile: `private-gemm-x86` 0.1.20 -> 0.1.22 (a `faer` dependency), because 0.1.20 was
+yanked.** `cargo deny`'s advisories check refuses yanked crates (`deny.toml`: `yanked = "deny"`),
+so CI's `cargo deny` job failed on every branch, `main` included. It only showed once the Actions
+runners came back (2026-10-11; before that every job died without a runner). `cargo update -p
+private-gemm-x86`, nothing else moves. No behaviour change: `deck-diff` between the two lockfiles
+gives 14 of 14 decks byte-identical (dense and sparse solves, PSP103 transients, diodes, the ring
+oscillator, Fig. 5, HiCUM).
+
+Measured: `cargo deny check` fails with 0.1.20 (the CI error, reproduced) and passes with 0.1.22;
+`cargo test --workspace` 968 passed; `cargo xtask validate` 28/28.
+
+2.24.1 - 2026-10-11
+--------------------
+**A transient run keeps only what it reports: memory no longer grows with the circuit.**
+`va_transient::integrator::run_recording` integrates as `run_with_events` does but stores only
+the unknowns asked for at each timepoint (`Waveform::columns` says which, `Waveform::value`
+reads by unknown index either way). `va-cli sim --tran` passes the quantities it prints, so
+`--report` now bounds memory as well as output. `run`, `run_with_events` and every library
+caller (va-harness, xtask, the tests) still get the whole vector.
+
+  * Why: every accepted timepoint stored the whole solution vector, 8 B per unknown. On the
+    MNIST crossbar with PSP103 (16 830 unknowns, 20 cycles) that reached ~3.5 GB a run, and
+    with four runs at once one was killed for memory (2.23.0+2). Memory, not cores, limited
+    parallel inference.
+  * Measured (digit 1, 32 quantities reported): rung C crossbar 418 -> 40 MB peak; PSP103
+    `--bypass` crossbar 590 MB peak, flat through the run (2.24.0 had reached 2.6 GB by 500 s
+    of its 713 s; its peak was not measured). Both outputs byte-identical to 2.24.0's. No
+    speed cost: Fig. 5 (PSP103, 1 thread, old and new alternated) 26.8 / 24.6 s -> 25.5 /
+    24.5 s, same output.
+  * A reported quantity with no unknown behind it (index `GROUND`, e.g. a model's own branch
+    to ground) never printed and still does not; va-cli drops it from the kept set.
+    `run_recording` itself refuses an out-of-range index (`TransientError::RecordOutOfRange`)
+    instead of skipping it. `deck-diff` caught the first version refusing them on 22 decks.
+  * Limitation: what is not reported is not kept, so it cannot be plotted or measured after
+    the run; ask for it in `--report`. The rest of a run's memory (matrix, JIT, bypass cache)
+    is unchanged.
+  * Also recorded (circuits/snn/transistor/README.md): no further switch parameters. Rung B's
+    one parameter costs ~25 % of run time; the edge effects stay unmodelled, and PSP103 is the
+    working reference until the real device model ships.
+
+Measured: `cargo test --workspace` 968 passed (new: recording keeps the kept unknowns'
+bits and refuses an unknown out of range; va-cli keeps a ground quantity unprinted, not
+refused); `cargo xtask validate` 28/28; fmt and clippy clean; `cargo xtask deck-diff` 2.24.0
+against this change: 63 decks compared identical, all those sorted before
+circuits/multiphysics/piezo_storage.net (the run hit a time limit there; the remaining 72 were
+still running at commit time, and their result is on the PR). The 13 slow decks deck-diff skips
+without --all were not run.
+
 2.24.0 - 2026-10-10
 --------------------
 **Rung B: the fitted access switch gets the triode's V_DS term, and rung C's +1.6 mV bias is

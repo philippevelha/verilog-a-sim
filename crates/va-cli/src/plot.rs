@@ -60,7 +60,7 @@ pub fn plot_transient(path: &str, quantities: &[Quantity], wf: &Waveform) -> Res
     let (mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY);
     for x in &wf.x {
         for q in quantities {
-            if let Some(&v) = x.get(q.index) {
+            if let Some(&v) = wf.column(q.index).and_then(|c| x.get(c)) {
                 y_min = y_min.min(v);
                 y_max = y_max.max(v);
             }
@@ -97,12 +97,12 @@ pub fn plot_transient(path: &str, quantities: &[Quantity], wf: &Waveform) -> Res
 
     for (i, q) in quantities.iter().enumerate() {
         let color = PALETTE[i % PALETTE.len()];
-        let idx = q.index;
+        let col = wf.column(q.index);
         chart
             .draw_series(LineSeries::new(
                 wf.t.iter()
                     .zip(&wf.x)
-                    .filter_map(|(&t, x)| x.get(idx).map(|&v| (t, v))),
+                    .filter_map(|(&t, x)| col.and_then(|c| x.get(c)).map(|&v| (t, v))),
                 &color,
             ))
             .with_context(|| format!("drawing {}", q.label))?
@@ -510,6 +510,7 @@ mod tests {
             stalled_steps: 0,
             bypass: None,
             finished: None,
+            columns: None,
         };
 
         let dir = std::env::temp_dir().join("va-cli-plot-test");
@@ -540,6 +541,7 @@ mod tests {
             stalled_steps: 0,
             bypass: None,
             finished: None,
+            columns: None,
         };
         let path = std::env::temp_dir()
             .join("va-cli-plot-test-empty.svg")

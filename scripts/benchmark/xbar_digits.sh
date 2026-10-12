@@ -9,8 +9,10 @@
 # .err (ending in `exit <status>`); a run whose .err already ends in `exit 0` is skipped, so the
 # same command resumes. Compare with circuits/snn/transistor/cmp_digits.py <runs-dir>.
 #
-# Memory, not cores, bounds <jobs>: the transient keeps every unknown at every timepoint, so a
-# 20-cycle PSP103 run (16 830 unknowns) ends near 3.5 GB. Four at once overran a 15 GB container.
+# Since 2.24.1 va-cli keeps only the reported unknowns at each timepoint, so a run's memory
+# no longer grows with the run: a 20-cycle PSP103 --bypass run peaks at 590 MB and stays flat.
+# Before, it held every unknown (16 830) at every timepoint, a full 20-cycle PSP103 run ended
+# near 3.5 GB, and four at once overran a 15 GB container.
 set -u
 [ $# -ge 5 ] || { sed -n 2,13p "$0"; exit 2; }
 DIR=$(cd "$1" && pwd) JOBS=$2 THREADS=$3 KIND=$4

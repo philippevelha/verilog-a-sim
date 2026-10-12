@@ -263,7 +263,16 @@ class of lexemes.
   `` `include `` nesting — and `` `line `` overrides it for what follows; every parse error now
   reads `file:line:column` (`diode.va:14:7`) instead of "at preprocessed line N", the `level`
   argument accepted and unused since include nesting is tracked directly. Any other
-  backtick-word is a macro usage; an undefined one is an error.
+  backtick-word is a macro usage; an undefined one is an error. **Predefined macros**
+  (2.24.2, `preprocess::PREDEFINED`): `__VAMS_ENABLE__` and `__VAMS_COMPACT_MODELING__` are
+  defined as `1` before any source is read, so `` `ifdef __VAMS_COMPACT_MODELING__ `` takes the
+  branch this tool supports (`ddx`, `$param_given`, `aliasparam`, `$simparam`, analog functions
+  with output arguments). Before 2.24.2 neither existed and such a branch was compiled out
+  without a word: `external/mos11010.va` lost its correlated-noise nodes (4 nodes instead of
+  7). A model may still `` `undef `` them. **Caller-defined macros**
+  (`preprocess::PreprocessOptions::defines`, `va-cli --define NAME[=VALUE]` on `sim` and
+  `check`, repeatable; `NAME` alone is `1`): object-like, defined after the predefined ones (so
+  one can replace them), before the source; a name that is not an identifier is an error.
 - **Expressions and Evaluation**: Not an expression construct at all; handled by a dedicated
   preprocessing pass before lexing "real" tokens (macro objects/functions expand recursively,
   conditionals are evaluated against the defined-macro set). An unresolved `` `include `` is

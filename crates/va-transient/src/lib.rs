@@ -28,4 +28,7 @@ pub enum TransientError {
     /// the iteration it ran in would have been accepted.
     #[error("$fatal at t={t:e}: {message}")]
     Fatal { t: f64, message: String },
+    /// [`integrator::run_recording`] was asked to keep an unknown the circuit does not have.
+    #[error("cannot record unknown {unknown}: the circuit has {dim} unknowns")]
+    RecordOutOfRange { unknown: usize, dim: usize },
 }

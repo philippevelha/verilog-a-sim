@@ -230,8 +230,14 @@ pub struct BypassStats {
 pub struct Waveform {
     /// Time points (s).
     pub t: Vec<f64>,
-    /// Solution vectors, one row per time point.
+    /// Solution vectors, one row per time point: the whole vector from [`run`] and
+    /// [`run_with_events`], only the [`Self::columns`] unknowns from [`run_recording`].
     pub x: Vec<Vec<f64>>,
+    /// `None` when every row of [`Self::x`] is the whole solution vector. `Some(c)` when the
+    /// run kept only some unknowns ([`run_recording`]): `c` is sorted and distinct, and
+    /// `x[k][j]` is unknown `c[j]` at `t[k]`. Read a value by unknown index with
+    /// [`Self::value`], which works either way.
+    pub columns: Option<Vec<usize>>,
     /// Detected crossings, in the order they occurred: `(watch_index, time)`, where
     /// `watch_index` indexes the [`EventQueue::watches`] slice passed to
     /// [`run_with_events`] (always empty for [`run`], which watches nothing).
@@ -264,6 +270,24 @@ pub struct Waveform {
     /// `Some` when a model's `$finish` or `$stop` ended the run at an accepted timepoint before
     /// `tstop` (LRM §9.7.1); the waveform ends at that point.
     pub finished: Option<Finished>,
+}
+
+impl Waveform {
+    /// Where unknown `unknown` sits in a row of [`Self::x`]: itself when every unknown was
+    /// kept, its place in [`Self::columns`] otherwise, `None` when the run did not keep it.
+    pub fn column(&self, unknown: usize) -> Option<usize> {
+        match &self.columns {
+            None => Some(unknown),
+            Some(c) => c.binary_search(&unknown).ok(),
+        }
+    }
+
+    /// Unknown `unknown` at the `row`-th time point, `None` when the row does not exist, the
+    /// unknown is out of range, or the run did not keep it.
+    pub fn value(&self, row: usize, unknown: usize) -> Option<f64> {
+        let x = self.x.get(row)?;
+        x.get(self.column(unknown)?).copied()
+    }
 }
 
 /// How many times one step may be re-taken to resolve a crossing before the run gives up and
@@ -1531,9 +1555,57 @@ pub fn run_with_events(
     cfg: TranConfig,
     events: &EventQueue,
 ) -> Result<Waveform, TransientError> {
+    integrate(instances, dim, x0, cfg, events, None)
+}
+
+/// [`run_with_events`], keeping only the unknowns in `keep` at each time point: the waveform's
+/// rows hold those (sorted, duplicates dropped) and [`Waveform::columns`] says which. The
+/// trajectory is the same, bit for bit, as [`run_with_events`]'s: only what is stored changes.
+///
+/// Why it exists: the full vector at every accepted point is `dim * 8` bytes a point, which on
+/// a 16 830-unknown crossbar over 20 cycles is ~3.5 GB, when the caller prints 32 of them
+/// (2.24.0's ten-digit runs, `circuits/snn/transistor/README.md`). `va-cli` passes the
+/// quantities it reports.
+///
+/// # Errors
+///
+/// [`TransientError::RecordOutOfRange`] if an entry of `keep` is not below `dim`, before any
+/// step is taken; otherwise as [`run_with_events`].
+pub fn run_recording(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    x0: Vec<f64>,
+    cfg: TranConfig,
+    events: &EventQueue,
+    keep: &[usize],
+) -> Result<Waveform, TransientError> {
+    if let Some(&unknown) = keep.iter().find(|&&k| k >= dim) {
+        return Err(TransientError::RecordOutOfRange { unknown, dim });
+    }
+    let mut columns = keep.to_vec();
+    columns.sort_unstable();
+    columns.dedup();
+    integrate(instances, dim, x0, cfg, events, Some(columns))
+}
+
+/// The integration behind [`run_with_events`] and [`run_recording`]; `columns` as
+/// [`Waveform::columns`], already sorted, distinct and in range.
+fn integrate(
+    instances: &[&dyn ModelInstance],
+    dim: usize,
+    x0: Vec<f64>,
+    cfg: TranConfig,
+    events: &EventQueue,
+    columns: Option<Vec<usize>>,
+) -> Result<Waveform, TransientError> {
+    let record = |x: &[f64]| match &columns {
+        None => x.to_vec(),
+        Some(c) => c.iter().map(|&i| x[i]).collect(),
+    };
     let mut waveform = Waveform {
         t: vec![cfg.tstart],
-        x: vec![x0.clone()],
+        x: vec![record(&x0)],
+        columns: columns.clone(),
         crossings: Vec::new(),
         model_crossings: Vec::new(),
         unresolved_events: 0,
@@ -2267,7 +2339,7 @@ pub fn run_with_events(
 
                 t = t_next;
                 waveform.t.push(t);
-                waveform.x.push(x.clone());
+                waveform.x.push(record(&x));
                 history.insert(0, (t, x.clone()));
                 history.truncate(if restart { 1 } else { history_cap });
 
@@ -2844,6 +2916,44 @@ mod tests {
         assert!(
             (v1_final - vs_val).abs() / vs_val < 1e-2,
             "should have settled near Vs: {v1_final}"
+        );
+    }
+
+    /// [`run_recording`] keeps only the unknowns asked for (sorted, duplicates dropped) and
+    /// changes nothing else: the same timepoints and, for each kept unknown, the same bits as
+    /// [`run_with_events`]. An unknown the circuit does not have is refused before any step.
+    #[test]
+    fn recording_some_unknowns_keeps_their_values_bit_for_bit() {
+        let rc = 1e-3;
+        let (vs, r, c) = rc_circuit(5.0);
+        let insts: [&dyn ModelInstance; 3] = [&vs, &r, &c];
+        let cfg = default_cfg(5.0 * rc, rc / 10.0, Method::Trapezoidal);
+        let events = EventQueue::new();
+        let full = run_with_events(&insts, 3, vec![5.0, 0.0, 0.0], cfg, &events).expect("runs");
+        let part =
+            run_recording(&insts, 3, vec![5.0, 0.0, 0.0], cfg, &events, &[2, 1, 2]).expect("runs");
+
+        assert_eq!(full.columns, None);
+        assert_eq!(part.columns, Some(vec![1, 2]));
+        assert_eq!(part.t, full.t);
+        assert!(part.x.iter().all(|row| row.len() == 2));
+        for (k, row) in full.x.iter().enumerate() {
+            for (u, &v) in row.iter().enumerate() {
+                let kept = part.value(k, u);
+                if u == 0 {
+                    assert_eq!(kept, None, "unknown 0 was not asked for");
+                } else {
+                    assert_eq!(kept.map(f64::to_bits), Some(v.to_bits()), "t[{k}], {u}");
+                }
+                assert_eq!(full.value(k, u), Some(v));
+            }
+        }
+
+        let err = run_recording(&insts, 3, vec![5.0, 0.0, 0.0], cfg, &events, &[1, 3])
+            .expect_err("unknown 3 does not exist");
+        assert!(
+            matches!(err, TransientError::RecordOutOfRange { unknown: 3, dim: 3 }),
+            "{err}"
         );
     }
 
