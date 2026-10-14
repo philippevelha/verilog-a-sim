@@ -858,7 +858,7 @@ pub fn run_sim(
     // What of the deck was recognised and not applied (an ngspice `.control` block, `.options`),
     // before any result, so a result is never read without it.
     for note in &net.notes {
-        eprintln!("[va-cli] note: {note}");
+        eprintln!("[va-cli] {note}");
     }
     let (compiled, library_files) = match model {
         Some(path) => {

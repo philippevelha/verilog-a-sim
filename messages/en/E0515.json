@@ -1,0 +1,9 @@
+{
+  "code": "E0515",
+  "rev": 1,
+  "message": "`.ends` with no open `.subckt`",
+  "description": "An `.ends` closes a subcircuit definition, and none is open here.",
+  "actions": [
+    "Remove the `.ends`, or add the `.subckt` it should close."
+  ]
+}

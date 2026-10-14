@@ -1,0 +1,9 @@
+{
+  "code": "E0520",
+  "rev": 1,
+  "message": "`.include {file}` needs the deck's own location to resolve against",
+  "description": "An included file is found relative to the deck that includes it, and this deck was given as text, without a location.",
+  "actions": [
+    "Run the deck from its file."
+  ]
+}

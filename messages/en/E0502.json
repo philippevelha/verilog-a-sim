@@ -1,0 +1,9 @@
+{
+  "code": "E0502",
+  "rev": 1,
+  "message": "unexpected token `{token}`: a model-referencing device takes only `name=value` parameter overrides after its model name",
+  "description": "After the model name, a device line may only override the model's parameters, each written `name=value`.",
+  "actions": [
+    "Write the extra token as `name=value`, or remove it."
+  ]
+}

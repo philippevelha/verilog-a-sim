@@ -1,0 +1,9 @@
+{
+  "code": "E0511",
+  "rev": 1,
+  "message": "bad coupling `{value}`",
+  "description": "The coupling coefficient of a `K` line is not a number.",
+  "actions": [
+    "Write the coefficient as a number between -1 and 1."
+  ]
+}

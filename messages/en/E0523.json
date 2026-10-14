@@ -1,0 +1,9 @@
+{
+  "code": "E0523",
+  "rev": 1,
+  "message": "`.control` is never closed by `.endc`",
+  "description": "An ngspice `.control` block runs to the end of the deck.",
+  "actions": [
+    "Add `.endc` after the block, or remove the block."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0530",
+  "rev": 1,
+  "message": "`{instance}` passes parameters to subcircuit `{name}`: subcircuit parameters are not supported",
+  "description": "This simulator flattens subcircuits without parameters.",
+  "actions": [
+    "Remove the parameters from the instance line, or write the subcircuit as a Verilog-A module."
+  ]
+}

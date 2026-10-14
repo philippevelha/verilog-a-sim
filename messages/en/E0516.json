@@ -1,0 +1,9 @@
+{
+  "code": "E0516",
+  "rev": 1,
+  "message": "subcircuit `{name}` is defined twice",
+  "description": "Two `.subckt` definitions have the same name (names are not case-sensitive).",
+  "actions": [
+    "Rename one of them, or remove the duplicate."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0513",
+  "rev": 1,
+  "message": "unsupported element `{name}`",
+  "description": "The first letter of an element's name says what it is. This simulator reads `R`, `C`, `L`, `K`, `E`, `F`, `G`, `H`, `D`, `M`, `Q`, `V`, and `X`/`N` for an instance of a Verilog-A model or a subcircuit.",
+  "actions": [
+    "Check the element's first letter.",
+    "For a device this simulator does not provide, write it as a Verilog-A model and instantiate it with an `X` line."
+  ]
+}

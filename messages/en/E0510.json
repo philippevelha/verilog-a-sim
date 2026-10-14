@@ -1,0 +1,9 @@
+{
+  "code": "E0510",
+  "rev": 1,
+  "message": "`{name}` names a model but connects no nodes (expected `X<name> <node>... <model>`)",
+  "description": "A model instance line lists the nodes it connects, then the model name.",
+  "actions": [
+    "List the nodes before the model name."
+  ]
+}

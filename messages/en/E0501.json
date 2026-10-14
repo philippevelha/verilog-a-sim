@@ -1,0 +1,9 @@
+{
+  "code": "E0501",
+  "rev": 1,
+  "message": "cannot read netlist `{path}`: {reason}",
+  "description": "The netlist file could not be opened or read.",
+  "actions": [
+    "Check the path and that the file exists and is readable."
+  ]
+}

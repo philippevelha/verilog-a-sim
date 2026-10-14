@@ -1,0 +1,9 @@
+{
+  "code": "E0518",
+  "rev": 1,
+  "message": "a `+` continuation line with no line before it to continue",
+  "description": "A line starting with `+` continues the previous line, and there is none.",
+  "actions": [
+    "Remove the `+`, or join the line to the one it belongs to."
+  ]
+}

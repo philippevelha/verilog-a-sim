@@ -1,0 +1,9 @@
+{
+  "code": "E0507",
+  "rev": 1,
+  "message": "unexpected token `{token}` after the value",
+  "description": "After the value, a resistor, capacitor or inductor line may only carry `IC=<value>`.",
+  "actions": [
+    "Remove the token, or write it as `IC=<value>`."
+  ]
+}

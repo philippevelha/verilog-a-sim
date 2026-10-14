@@ -558,6 +558,105 @@ pub const E0412: Code = Code::new("E0412");
 /// variable `{name}` is read before it is assigned
 pub const E0413: Code = Code::new("E0413");
 
+/// cannot read netlist `{path}`: {reason}
+pub const E0501: Code = Code::new("E0501");
+
+/// unexpected token `{token}`: a model-referencing device takes only `name=value` parameter overrides after its model name
+pub const E0502: Code = Code::new("E0502");
+
+/// bad value `{value}` for parameter `{name}`
+pub const E0503: Code = Code::new("E0503");
+
+/// parameter override `{token}` has no name
+pub const E0504: Code = Code::new("E0504");
+
+/// `{name}` needs at least {need} tokens, found {got}
+pub const E0505: Code = Code::new("E0505");
+
+/// bad value `{value}`
+pub const E0506: Code = Code::new("E0506");
+
+/// unexpected token `{token}` after the value
+pub const E0507: Code = Code::new("E0507");
+
+/// `IC=` is only meaningful on a reactive element, not on `{name}`
+pub const E0508: Code = Code::new("E0508");
+
+/// bad `IC=` value `{value}`
+pub const E0509: Code = Code::new("E0509");
+
+/// `{name}` names a model but connects no nodes (expected `X<name> <node>... <model>`)
+pub const E0510: Code = Code::new("E0510");
+
+/// bad coupling `{value}`
+pub const E0511: Code = Code::new("E0511");
+
+/// coupling `{value}` is outside [-1, 1]
+pub const E0512: Code = Code::new("E0512");
+
+/// unsupported element `{name}`
+pub const E0513: Code = Code::new("E0513");
+
+/// `.subckt` inside the definition of `{outer}`: nested subcircuit definitions are not supported
+pub const E0514: Code = Code::new("E0514");
+
+/// `.ends` with no open `.subckt`
+pub const E0515: Code = Code::new("E0515");
+
+/// subcircuit `{name}` is defined twice
+pub const E0516: Code = Code::new("E0516");
+
+/// `.subckt {name}` is never closed by `.ends`
+pub const E0517: Code = Code::new("E0517");
+
+/// a `+` continuation line with no line before it to continue
+pub const E0518: Code = Code::new("E0518");
+
+/// `.include` names no file
+pub const E0519: Code = Code::new("E0519");
+
+/// `.include {file}` needs the deck's own location to resolve against
+pub const E0520: Code = Code::new("E0520");
+
+/// `.include` nested more than {limit} deep (a cycle?)
+pub const E0521: Code = Code::new("E0521");
+
+/// cannot read `.include {file}` ({path}): {reason}
+pub const E0522: Code = Code::new("E0522");
+
+/// `.control` is never closed by `.endc`
+pub const E0523: Code = Code::new("E0523");
+
+/// `.subckt` names no subcircuit
+pub const E0524: Code = Code::new("E0524");
+
+/// `.subckt {name}` declares a parameter (`{param}`): subcircuit parameters are not supported
+pub const E0525: Code = Code::new("E0525");
+
+/// `.model` needs a name and a type (`.model <name> <module> …`)
+pub const E0526: Code = Code::new("E0526");
+
+/// `.model {name}`: expected `name=value`, found `{token}`
+pub const E0527: Code = Code::new("E0527");
+
+/// `.model {name}`: bad value `{value}` for `{key}`
+pub const E0528: Code = Code::new("E0528");
+
+/// `{card}` inside a subcircuit body is not supported
+pub const E0529: Code = Code::new("E0529");
+
+/// `{instance}` passes parameters to subcircuit `{name}`: subcircuit parameters are not supported
+pub const E0530: Code = Code::new("E0530");
+
+/// `{instance}` connects {got} net(s) but subcircuit `{name}` has {expected} port(s) ({ports})
+pub const E0531: Code = Code::new("E0531");
+
+/// subcircuit `{name}` instantiates itself (through {chain})
+pub const E0532: Code = Code::new("E0532");
+
+/// subcircuits nested more than {limit} deep
+pub const E0533: Code = Code::new("E0533");
+
 /// unknown subcommand `{name}`
 pub const E0701: Code = Code::new("E0701");
 
@@ -654,6 +753,15 @@ pub const W0104: Code = Code::new("W0104");
 /// module `{module}`: port `{port}` has no direction; it is treated as `inout`
 pub const W0301: Code = Code::new("W0301");
 
+/// `.nodeset` entry `{entry}` is not `V(<net>)=<value>`; skipped
+pub const W0501: Code = Code::new("W0501");
+
+/// ignored the ngspice `.control` block at lines {first}–{last}
+pub const W0502: Code = Code::new("W0502");
+
+/// not applied: `{card}`
+pub const W0503: Code = Code::new("W0503");
+
 /// Every code, so the catalogue and the code can be checked against each other.
 pub const ALL: &[Code] = &[
     E0000, E0001, E0101, E0102, E0103, E0104, E0105, E0106, E0107, E0108, E0109, E0110, E0111,
@@ -669,7 +777,10 @@ pub const ALL: &[Code] = &[
     E0365, E0366, E0367, E0368, E0369, E0370, E0371, E0372, E0373, E0374, E0375, E0376, E0377,
     E0378, E0379, E0380, E0381, E0382, E0383, E0384, E0385, E0386, E0387, E0388, E0389, E0390,
     E0391, E0392, E0393, E0394, E0395, E0401, E0402, E0403, E0404, E0405, E0406, E0407, E0408,
-    E0409, E0410, E0411, E0412, E0413, E0701, E0702, E0703, R0101, R0201, R0202, R0203, R0301,
-    R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404,
-    R0405, R0406, R0407, R0408, R0409, R0410, W0101, W0102, W0103, W0104, W0301,
+    E0409, E0410, E0411, E0412, E0413, E0501, E0502, E0503, E0504, E0505, E0506, E0507, E0508,
+    E0509, E0510, E0511, E0512, E0513, E0514, E0515, E0516, E0517, E0518, E0519, E0520, E0521,
+    E0522, E0523, E0524, E0525, E0526, E0527, E0528, E0529, E0530, E0531, E0532, E0533, E0701,
+    E0702, E0703, R0101, R0201, R0202, R0203, R0301, R0302, R0303, R0304, R0305, R0306, R0307,
+    R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409, R0410,
+    W0101, W0102, W0103, W0104, W0301, W0501, W0502, W0503,
 ];

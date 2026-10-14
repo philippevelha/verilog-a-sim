@@ -101,7 +101,7 @@ declares — keep them honest.
 | `va-core`       | shared* | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`                  |
 | `va-transient`  | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`          |
 | `va-acnoise`    | T5      | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`          |
-| `va-netlist`    | T6      | circuit-level netlist parser                      | `va-abi`                     |
+| `va-netlist`    | T6      | circuit-level netlist parser                      | `va-abi`, `va-diag`          |
 | `va-cli`        | T6      | binary front-door wiring the pipeline             | all                          |
 | `va-harness`    | T6      | golden-reference validation + metrics             | `va-cli`                     |
 | `xtask`         | infra   | dev automation (`cargo xtask ...`)                | (dev-only)                   |

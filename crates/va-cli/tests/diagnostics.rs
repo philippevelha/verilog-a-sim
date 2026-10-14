@@ -59,16 +59,49 @@ fn a_frontend_error_is_shown_under_its_own_code() {
     assert!(!err.contains("E0000"), "{err}");
 }
 
+/// A netlist error carries its `E05xx` code, located at `deck:line`, and a deck card that is
+/// recognised but not applied is a coded warning.
+#[test]
+fn a_netlist_error_and_warning_carry_their_codes() {
+    let dir = std::env::temp_dir().join(format!("va-cli-netlist-codes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let bad = dir.join("bad.net");
+    std::fs::write(&bad, "* deck\nR1 a 0 1k\nK1 L1 L2 1.5\n.op\n").expect("write");
+    let err = stderr(&va_cli(&["sim", bad.to_str().unwrap()]));
+    assert!(err.contains("error[E0512] at "), "{err}");
+    assert!(
+        err.contains("bad.net:3: coupling `1.5` is outside [-1, 1]"),
+        "{err}"
+    );
+
+    let ok = dir.join("ok.net");
+    std::fs::write(
+        &ok,
+        "* deck\nV1 a 0 1\nR1 a 0 1k\n.options reltol=1e-4\n.op\n",
+    )
+    .expect("write");
+    let out = va_cli(&["sim", ok.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("warning[W0503] at "),
+        "{}",
+        stderr(&out)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// An error with no code yet is `E0000`, and keeps its own wording and causes in full: the code
 /// adds nothing, so it must not take anything away either.
 #[test]
 fn an_uncoded_error_is_e0000_with_its_own_text() {
-    let out = va_cli(&["sim", "no/such/deck.net"]);
+    // An unreadable model file: a files-and-command-line error, not yet coded (step 3d).
+    let deck = concat!(env!("CARGO_MANIFEST_DIR"), "/../../circuits/divider.net");
+    let out = va_cli(&["sim", deck, "--model", "no/such/model.va"]);
     let err = stderr(&out);
     assert!(!out.status.success());
     assert!(err.contains("error[E0000]: "), "{err}");
     assert!(
-        err.contains("no/such/deck.net"),
+        err.contains("no/such/model.va"),
         "the original text is kept: {err}"
     );
 }

@@ -22,6 +22,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.28.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3b: the netlist.** Every error `va-netlist` raises carries an
+`E05xx` code (33: element syntax, values, `.subckt`/`.include`/`.model` structure, subcircuit
+flattening) and the three things a deck can say that are recognised but not applied are coded
+warnings: `W0501` a malformed `.nodeset` entry, `W0502` an ngspice `.control` block, `W0503`
+`.options`.
+  * `NetlistError::Parse` carries `diag: Diagnostic` instead of `message: String`, located at
+    `deck.net:12` for a line of the deck itself and at `line 12 (in `models.inc`, instance `x1`)`
+    for a line from an included file or a flattened subcircuit. `Netlist::notes` is
+    `Vec<Diagnostic>`; `va-cli` prints them as `warning[W0503] at deck.net:4: ...`.
+  * An unreadable deck is `E0501`, where 2.27.0 showed `E0000`: the `diagnostics` test that used
+    it as its example of an uncoded error now uses an unreadable model file, still `E0000`.
+  * A device's parameter-override errors keep the include/instance origin, which they lost
+    if raised inside `parse_param_overrides` (the origin was appended by the caller).
+  * New test `a_netlist_error_and_warning_carry_their_codes`. `va-netlist` depends on `va-diag`.
+
+Limits: `NetlistError::UnknownModel` is never raised and has no code. The netlist parser
+names unsupported elements (`unsupported element`) as errors, not refusals: refusals are for
+Verilog-A constructs.
+
+Measured: `cargo test --workspace` 983 passed, 0 failed (982 + the new test);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.27.0 - 2026-10-14
 --------------------
 **Coded diagnostics, step 3a: code generation.** Every error `va-codegen` raises now carries
