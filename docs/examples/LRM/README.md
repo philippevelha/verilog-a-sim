@@ -5,7 +5,7 @@ standard allows. They check that this simulator accepts what the LRM says is val
 what it says is not. Run one with:
 
 ```
-cargo run -p va-cli -- check examples/LRM/<file>.va --codegen
+cargo run -p va-cli -- check docs/examples/LRM/<file>.va --codegen
 ```
 
 Each file's header names its LRM section and where the example came from.

@@ -22,6 +22,13 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.28.0+2 - 2026-10-14
+----------------------
+**The LRM examples move to `docs/examples/LRM/`**, beside the project's other examples; 2.28.0+1
+put them in a new top-level `examples/`, which the project does not use. Same seven files, same
+verdicts (rechecked from the new path). No code changed.
+
+
 2.28.0+1 - 2026-10-14
 ----------------------
 **New `examples/LRM/`: LRM examples, starting with the seven from OpenVAF-Reloaded PR #35.**
