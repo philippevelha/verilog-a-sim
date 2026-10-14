@@ -177,3 +177,58 @@ breakpoints and the integrator restarts there (backward Euler, history cleared) 
 trapezoidal rule rang at the 2 ns corner and the run died of timestep underflow 0.1 ps after it;
 breakpoints closer than the minimum step merge; and the floor rule applies where PSP103's Newton
 gives out, not only at the minimum step.
+
+## The suite at 2.24.2 (2026-10-14, release build, Xeon 2.8 GHz, 4 vCPUs)
+
+Every deck once, one at a time on all 4 threads (`--threads 4`), default settings; the two
+transients also with `--bypass`. Wall time and peak resident memory of the `va-cli` process.
+Each `.op` is checked against its `.bench` logic (`check_iscas.py`, the seeded vector it was
+generated for); `c17_tran` by `check_c17.py tran`. `c17.net` and `c432_tran.net` have no check
+(no `.bench` for c17; `c432_tran` is a 1 ns timing deck whose inputs never settle for the 0.5 ns
+`check_iscas.py tran` needs). For reference, 2.4.0+1's times (2026-10-02) were measured on
+another, 8-thread machine, so read the two columns as roughly comparable, not to better than ~2×.
+
+| deck | 2.24.2 wall | peak memory | logic | 2.4.0+1 wall |
+|---|---:|---:|---|---:|
+| c17 `.op` | 0.3 s | 28 MB | — | — |
+| c432 | 9.1 s | 319 MB | PASS | 8 s |
+| c499 | 12.1 s | 508 MB | PASS | 11 s |
+| c880 | 13.1 s | 621 MB | PASS | 12 s |
+| c1355 | 15.9 s | 728 MB | PASS | 15 s |
+| c1908 | 26.4 s | 1.17 GB | PASS | 24 s |
+| c2670 | 53.0 s | 1.83 GB | PASS | 49 s |
+| c3540 | 128.7 s | 2.93 GB | PASS | 115 s |
+| c5315 | 180.6 s | 4.61 GB | PASS | 170 s |
+| c6288 | 100.6 s | 3.48 GB | PASS | 92 s |
+| c7552 (268 676 unknowns) | 295.3 s | 6.95 GB | PASS | 251 s |
+| c17_tran (13 524 points) | 39.7 s | 73 MB | PASS | 46 s |
+| c17_tran `--bypass` | 23.3 s | 74 MB | PASS | — |
+| c432_tran (2 532 points) | 330.4 s | 619 MB | — | 552 s |
+| c432_tran `--bypass` | 230.5 s | 629 MB | — | — |
+
+- **Every operating point is correct**, c432 to c7552, and so is `c17_tran` with and without
+  bypass (5 636 settled output samples over 11 input vectors, all correct).
+- **Bypass is the speed-up that works here: 1.7× on `c17_tran`, 1.4× on `c432_tran`**, with the
+  same timepoints. On `c432_tran` it moves no node by more than 1 µV against the plain run (8 099
+  nodes, 201 times).
+- **The operating points are where they were at 2.4.0+1**, on a slower 4-vCPU machine. Most of
+  their time is the `gmin` rescue (~300 Newton iterations, 1.27.0+5).
+
+**Two settings that do not help on ISCAS, measured while preparing this table** (both
+opt-in; neither is on by default):
+
+- **`VA_JIT=on` is a net loss.** It compiles the model's statically scheduled program to
+  machine code once per distinct parameter set (`va_codegen::SharedModel`), serially, ~0.8 s
+  each for PSP103. These decks have 6-15 sets (one per transistor size and card), so it costs
+  5-12 s up front and saves almost nothing: c17 0.3 -> 1.9 s, c880 12.0 -> 20.6 s, c2670 with
+  collapse 82.4 -> 92.4 s (13 sets, ~10.7 s of compile). At this size the time is in the sparse
+  solve and per-step bookkeeping, not in device evaluation (as 2.18.0+4 found at 70 k unknowns).
+- **`VA_COLLAPSE=on` breaks down from c1908 up.** It merges PSP103's shorted source/drain nodes
+  (c1908: 62 055 -> 10 731 unknowns) and helps the small circuits (c432 9.0 -> 6.0 s, c1355
+  16.7 -> 13.9 s, though memory already grows: c1355 0.73 -> 1.29 GB), then gets worse: c1908
+  27.1 s / 1.2 GB -> 65.2 s / 7.2 GB, c2670 48.3 s / 1.8 GB -> 85.5 s / 8.0 GB, and c3540 was
+  killed for memory at 13.6 GB. The smaller matrix
+  factors with far more fill: with the block-triangular path off (`VA_BTF=off`), the collapsed
+  c1908 ran past 10 minutes against 71 s with it on. Not diagnosed further (the fill was not
+  measured); collapse's own check (2.21.0+1) never ran the slow ISCAS decks. Until it is
+  understood, keep collapse off above ~10 k unknowns.

@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.2+1 - 2026-10-14
+----------------------
+**The ISCAS'85 suite at 2.24.2: every operating point correct, c7552 in 295 s; bypass is the
+setting that helps, the JIT and node collapse do not.** Docs only:
+circuits/benchmark/iscas85/README.md ("The suite at 2.24.2"). Release build, Xeon 2.8 GHz,
+4 vCPUs, one deck at a time on 4 threads.
+
+  * `.op`, default settings, all PASS against their `.bench` logic: c432 9.1 s, c499 12.1,
+    c880 13.1, c1355 15.9, c1908 26.4, c2670 53.0, c3540 128.7, c5315 180.6, c6288 100.6,
+    c7552 295.3 s (6.95 GB peak). Close to 2.4.0+1's figures from another 8-thread machine.
+  * Transients: c17_tran 39.7 s, 23.3 s with `--bypass` (both PASS, 13 524 points);
+    c432_tran 330.4 s, 230.5 s with `--bypass` (same 2 532 points, no node moved more than
+    1 uV). It is a timing deck with no logic check.
+  * `VA_JIT=on` is a net loss here: one serial ~0.8 s compile per distinct PSP103 parameter
+    set (6-15 per deck), for no measurable evaluation gain (c880 12.0 -> 20.6 s).
+  * `VA_COLLAPSE=on` helps up to c1355, then breaks down: c1908 27.1 s / 1.2 GB -> 65.2 s /
+    7.2 GB, c2670 to 8.0 GB, c3540 killed for memory at 13.6 GB. The collapsed matrix factors
+    with far more fill (not measured). Its 2.21.0+1 check never ran these decks. Keep it off
+    above ~10 k unknowns until that is understood.
+  * No OpenVAF/ngspice ISCAS timings are in the repository (they came with
+    `external/benchmarkExt/`, not in this checkout), so the side-by-side comparison is not
+    made here.
+
+Measured: the runs above, with the 2.24.2 release binary. No code change; 2.24.2's test and
+`validate` figures stand.
+
 2.24.2 - 2026-10-11
 --------------------
 **Predefined macros, and `va-cli --define`.** `__VAMS_ENABLE__` and
