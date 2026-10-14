@@ -95,6 +95,7 @@ declares — keep them honest.
 |-----------------|---------|----------------------------------------------------|------------------------------|
 | `va-ir`         | shared  | Interface α: elaborated IR data types             | — (leaf)                     |
 | `va-abi`        | shared  | Interface β: `ModelInstance`/`StampSink` + ref models | — (leaf)                 |
+| `va-diag`       | shared  | diagnostic codes (E/W/R/C), message catalogue, rendering | — (leaf)              |
 | `va-frontend`   | T1      | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`                      |
 | `va-codegen`    | T2      | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`            |
 | `va-core`       | shared* | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`                  |
@@ -114,7 +115,9 @@ validation). It is **not** a leaf like `va-ir`/`va-abi` — it still depends on 
 `shared` label here means "staff-owned," not "no internal dependencies."
 
 `va-ir` and `va-abi` are **leaf crates with no internal dependencies** — that is what makes
-them safe shared contracts. Do not add internal deps to them.
+them safe shared contracts. Do not add internal deps to them. `va-diag` (diagnostic codes and the
+message catalogue, 2.25.0) is a leaf for the same reason: any crate may come to depend on it, so
+it may depend on none of them. Its catalogue lives at the root, in `messages/` (§5).
 
 `docs/token-reference.md` is the reference document for `va-frontend` (T1): every lexer
 token and every parser construct, one by one, with its elaboration-vs-simulation-time status,
@@ -145,6 +148,7 @@ verilog-a-sim/
 │   └── token-reference.md     # T1: every lexer token & parser construct, one by one
 ├── crates/
 │   ├── va-ir/{Cargo.toml, src/lib.rs}
+│   ├── va-diag/{Cargo.toml, build.rs, src/{lib.rs, codes.rs}}
 │   ├── va-abi/
 │   │   ├── Cargo.toml
 │   │   └── src/{lib.rs, stamps.rs, instance.rs, reference/{mod.rs, resistor.rs, capacitor.rs, diode.rs}}
@@ -156,6 +160,7 @@ verilog-a-sim/
 │   ├── va-netlist/{Cargo.toml, src/{lib.rs, parser.rs}}
 │   ├── va-cli/{Cargo.toml, src/main.rs}
 │   └── va-harness/{Cargo.toml, src/{lib.rs, metrics.rs}}
+├── messages/                  # diagnostic catalogue: <lang>/<CODE>.json (see its README)
 ├── models/                    # Verilog-A model zoo (.va)
 │   ├── resistor.va
 │   ├── capacitor.va
@@ -281,6 +286,14 @@ this trait at bootstrap, so `va-core` has something real to solve on commit #1.
   the surrounding output so redirecting to a file does not separate a verdict from its reason.
   Gated by `every_refusal_says_what_was_refused_and_why`. A refusal that names the wrong
   construct is worse than a terse one.
+- **Every user-facing diagnostic carries a code** (`va_diag::codes`; 2.25.0): a letter for its
+  kind (`E` error, `W` warning, `R` refusal, `C` communication) and four digits, the first two
+  for the stage that raises it. Its text — the one-line message, what it means, what to do — is
+  in `messages/<lang>/<CODE>.json`, written and translated by people who need not edit Rust, and
+  shown by `va-cli --explain <CODE>`. A new diagnostic gets a new code and an English entry in
+  the same PR; `catalogue_is_consistent` fails otherwise. `E0000` is an error with no code yet:
+  existing ones are being converted stage by stage, and the count only goes down. A code is
+  permanent: never renumbered, never reused.
 - **Every public item has a doc comment**, and limitations are stated, not hidden.
 - **Small PRs, one crate each.** Touching another crate means an interface change (§6).
 - `cargo fmt` + `cargo clippy -- -D warnings` clean before every commit.

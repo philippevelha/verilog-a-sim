@@ -11,6 +11,7 @@
 
 use anyhow::{bail, Context, Result};
 use va_cli::{check_models, run_sim, Analysis, Solver};
+use va_diag::{codes, Catalogue, Diagnostic};
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -23,10 +24,65 @@ fn main() -> std::process::ExitCode {
         // not pretend to run it". Anything else is an ordinary error and prints the usual way.
         Err(e) => {
             if !va_cli::report_refusal(&e) {
-                eprintln!("Error: {e:?}");
+                eprintln!("{}", render_error(&e));
             }
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// The text for an error that is not a refusal, from the message catalogue (`va_diag`).
+///
+/// A coded error is found anywhere in the chain, so context added on its way up is kept, as
+/// `while:` lines. An error with no code is shown as `E0000` with its own wording and causes,
+/// exactly as before codes existed: the code says the catalogue has nothing to add, never that
+/// the cause is unknown.
+fn render_error(e: &anyhow::Error) -> String {
+    let catalogue = Catalogue::global();
+    let mut out = String::new();
+    for problem in catalogue.load_problems() {
+        out.push_str(&format!("warning: message catalogue: {problem}\n"));
+    }
+    match e.chain().find_map(|c| c.downcast_ref::<Diagnostic>()) {
+        Some(diag) => {
+            out.push_str(&catalogue.render(diag));
+            for context in e
+                .chain()
+                .take_while(|c| c.downcast_ref::<Diagnostic>().is_none())
+            {
+                out.push_str(&format!("\n  while: {context}"));
+            }
+        }
+        None => {
+            out.push_str(&catalogue.render(&Diagnostic::unknown(e)));
+            for cause in e.chain().skip(1) {
+                out.push_str(&format!("\n  caused by: {cause}"));
+            }
+        }
+    }
+    out
+}
+
+/// `va-cli --explain <CODE>`: what a diagnostic code means and what to do about it.
+fn cmd_explain(args: &[String]) -> Result<std::process::ExitCode> {
+    let Some(code) = args.first() else {
+        return Err(Diagnostic::new(codes::E0703)
+            .arg("option", "--explain")
+            .arg("value", "")
+            .arg("expected", "a code such as `E0301`")
+            .into());
+    };
+    let code = code.to_ascii_uppercase();
+    match Catalogue::global().explain(&code) {
+        Some(text) => {
+            print!("{text}");
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        None => Err(Diagnostic::new(codes::E0703)
+            .arg("option", "--explain")
+            .arg("value", &code)
+            .arg("expected", "a code that exists, such as `E0000`")
+            .into()),
     }
 }
 
@@ -38,13 +94,14 @@ fn run() -> Result<std::process::ExitCode> {
     match args.first().map(String::as_str) {
         Some("sim") => cmd_sim(&args[1..]).map(|()| std::process::ExitCode::SUCCESS),
         Some("check") => cmd_check(&args[1..]),
+        Some("--explain") => cmd_explain(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(std::process::ExitCode::SUCCESS)
         }
         Some(other) => {
             print_usage();
-            bail!("unknown subcommand `{other}`");
+            Err(Diagnostic::new(codes::E0701).arg("name", other).into())
         }
     }
 }
@@ -55,7 +112,8 @@ fn print_usage() {
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
          va-cli sim <netlist.net> [--model <model.va|dir>] [--ac|--tran|--noise] [--plot <out.svg>]\n    \
-         va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
+         va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n    \
+         va-cli --explain <CODE>                           What a diagnostic code (E0703,\n                                                      W0301, ...) means and what to do\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
          --model <model.va|dir>  A Verilog-A library; repeat it to compile several as one\n                                 (each file's `include resolves in its own library)\n    \
@@ -130,7 +188,7 @@ fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
         .cloned()
         .collect();
     if paths.is_empty() {
-        bail!("expected at least one model file or directory");
+        return Err(Diagnostic::new(codes::E0702).into());
     }
     Ok(if check_models(&paths, codegen)? == 0 {
         std::process::ExitCode::SUCCESS
@@ -202,7 +260,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
             "auto" => va_core::par::Mode::Auto,
             "always" => va_core::par::Mode::Always,
             "never" => va_core::par::Mode::Never,
-            other => bail!("VA_PARALLEL expects auto, always or never, got `{other}`"),
+            other => {
+                return Err(Diagnostic::new(codes::E0703)
+                    .arg("option", "the environment variable VA_PARALLEL")
+                    .arg("value", other)
+                    .arg("expected", "`auto`, `always` or `never`")
+                    .into())
+            }
         };
         va_core::par::set_mode(mode);
     }
@@ -212,7 +276,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         match v.to_string_lossy().as_ref() {
             "on" => va_cli::set_btf(true),
             "off" => va_cli::set_btf(false),
-            other => bail!("VA_BTF expects on or off, got `{other}`"),
+            other => {
+                return Err(Diagnostic::new(codes::E0703)
+                    .arg("option", "the environment variable VA_BTF")
+                    .arg("value", other)
+                    .arg("expected", "`on` or `off`")
+                    .into())
+            }
         }
     }
     // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
@@ -270,7 +340,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         None | Some("auto") => Solver::Auto,
         Some("dense") => Solver::Dense,
         Some("sparse") => Solver::Sparse,
-        Some(v) => bail!("unknown --solver `{v}` (expected `auto`, `dense`, or `sparse`)"),
+        Some(v) => {
+            return Err(Diagnostic::new(codes::E0703)
+                .arg("option", "--solver")
+                .arg("value", v)
+                .arg("expected", "`auto`, `dense` or `sparse`")
+                .into())
+        }
     };
 
     // `--logfull` switches on the per-iteration Newton trace for every DC solve this run does.

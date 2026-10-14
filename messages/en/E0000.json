@@ -1,0 +1,10 @@
+{
+  "code": "E0000",
+  "rev": 1,
+  "message": "{detail}",
+  "description": "This error has no code yet. The text above is the program's own wording, shown as it was produced. Codes are being added stage by stage, and every E0000 marks a place that has not been converted yet.\nThe error itself is real: the run failed for the reason given.",
+  "actions": [
+    "Read the message above: it usually names the file, the construct or the value involved.",
+    "If the message is unclear, report it together with the model or netlist that produced it, so it can be given a code and a proper explanation."
+  ]
+}

@@ -22,6 +22,48 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.25.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 1: the code system, the message catalogue and `va-cli --explain`.**
+Every user-facing diagnostic is to carry a code: `E` error, `W` warning, `R` refusal, `C`
+communication, then four digits whose first two name the stage (00 general, 01 preprocessor,
+02 parser, 03 elaboration, 04 codegen, 05 netlist, 06 numerical, 07 files and command line).
+`E0000` is an error with no code yet. A code is permanent: never renumbered, never reused.
+
+The text is not in the Rust source. Each code has `messages/<lang>/<CODE>.json` with a
+one-line `message` (with `{name}` placeholders the program fills), a `description` and a list of
+`actions`, so another team can write and translate it; `messages/README.md` is their guide.
+  * New leaf crate `va-diag`: `Code`, `Diagnostic` (an `Error` that carries a code, its arguments
+    and a location), the catalogue and rendering. The English catalogue is built into the binary,
+    so a copied `va-cli` still explains itself. `VA_MESSAGES_DIR` overlays edited text without a
+    rebuild.
+  * The language comes from `VA_LANG`, else the locale (`LANG=fr_FR.UTF-8` -> `fr`). A code
+    falls back to English when the language has no text for it, and to the program's own wording
+    when no language does. A translation made from an older English `rev` is used, with a note.
+  * `va-cli --explain <CODE>` prints the message, what it means and what to do. Every error is now
+    shown as `error[CODE]: ...` followed by the `--explain` hint.
+  * Seeded and wired: `E0701` unknown subcommand, `E0702` `check` with no models, `E0703` invalid
+    option or environment value (`--solver`, `VA_PARALLEL`, `VA_BTF`, `--explain` itself). Every
+    other error is `E0000`, shown with its own text and causes, exactly as before.
+  * `catalogue_is_consistent` checks every file against the code list: parses with exactly the
+    documented fields, name equals code, English has a `rev`, every defined code has English text
+    and nothing else does, translations carry `source_rev` and keep English's placeholders.
+  * CLAUDE.md gains `va-diag` in the crate table and a house rule: a new diagnostic gets a code
+    and an English entry in the same PR.
+
+Limits: the words around the catalogue text ("error", "What it means", the hint) are English in
+every language for now, and plurals are not modelled. Warnings, refusals and the frontend's
+errors are not converted yet: that is step 2, crate by crate, with the error corpus asserting
+codes. Until then almost every error a user meets is `E0000`.
+
+Cost: one new direct dependency, `serde_json` (pure Rust), which brings `itoa` and `zmij`; serde
+was already in the tree.
+
+Measured: `cargo test --workspace` 981 passed, 0 failed (7 new in `va-diag`, 4 new in
+`va-cli/tests/diagnostics.rs`); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28;
+`check models` 68/68, `check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+
+
 2.24.2 - 2026-10-11
 --------------------
 **Predefined macros, and `va-cli --define`.** `__VAMS_ENABLE__` and

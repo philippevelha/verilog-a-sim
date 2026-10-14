@@ -4,7 +4,7 @@ members = ["crates/*", "xtask"]
 
 [workspace.package]
 # Bump together with release.txt; the two must always agree.
-version = "2.24.2"
+version = "2.25.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/philippevelha/verilog-a-sim"
@@ -35,8 +35,13 @@ cranelift-jit = "0.131"
 cranelift-module = "0.131"
 cranelift-native = "0.131"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
+# The diagnostic catalogue (`va-diag`, 2.25.0): `messages/<lang>/<CODE>.json`, read with serde.
+# Pure Rust; serde itself was already in the tree.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Internal crates (path deps), referenced by sibling crates per the §3 table.
+va-diag = { path = "crates/va-diag" }
 va-ir = { path = "crates/va-ir" }
 va-abi = { path = "crates/va-abi" }
 va-frontend = { path = "crates/va-frontend" }

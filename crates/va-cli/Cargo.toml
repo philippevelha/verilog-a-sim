@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 rayon = { workspace = true }
 libm = { workspace = true }
+va-diag = { workspace = true }
 va-ir = { workspace = true }
 va-abi = { workspace = true }
 va-frontend = { workspace = true }
