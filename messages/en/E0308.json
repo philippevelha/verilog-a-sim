@@ -1,0 +1,9 @@
+{
+  "code": "E0308",
+  "rev": 1,
+  "message": "parameter `{name}` evaluates to {value}, not a finite number (a division by zero in its default expression?)",
+  "description": "A parameter's default value must be a finite number. This one evaluates to infinity or NaN, usually because of a division by zero, or the logarithm of zero or of a negative number.",
+  "actions": [
+    "Check the default expression, and the parameters it uses."
+  ]
+}

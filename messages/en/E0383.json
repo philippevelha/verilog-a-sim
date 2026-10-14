@@ -1,0 +1,9 @@
+{
+  "code": "E0383",
+  "rev": 1,
+  "message": "instance `{instance}` of `{module}` connects {got} port(s), but the module declares {expected}",
+  "description": "A positional connection list must connect every port of the module, in order.",
+  "actions": [
+    "Connect every port, or use named connections (`.p(net)`)."
+  ]
+}

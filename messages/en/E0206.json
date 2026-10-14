@@ -1,0 +1,10 @@
+{
+  "code": "E0206",
+  "rev": 1,
+  "message": "expected a statement, found {found}",
+  "description": "Inside an `analog` block or a `begin ... end`, the parser expected a statement (an assignment, a contribution `<+`, `if`, `case`, a loop, an event control, or a system task) and found something that cannot start one.",
+  "actions": [
+    "Check the statement at the position shown for a typo in its first word.",
+    "Look at the source at the position shown, and at the end of the line before it: a syntax error is often noticed one token after the actual mistake."
+  ]
+}

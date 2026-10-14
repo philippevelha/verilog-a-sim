@@ -1,0 +1,9 @@
+{
+  "code": "E0365",
+  "rev": 1,
+  "message": "`{name}` is a {dims}-D vector net; an access must index every dimension, e.g. {example}",
+  "description": "A probe needs a single node. A vector net names several, so each of its dimensions must be indexed.",
+  "actions": [
+    "Index the element you mean, as in the example."
+  ]
+}

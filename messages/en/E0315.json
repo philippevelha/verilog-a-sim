@@ -1,0 +1,9 @@
+{
+  "code": "E0315",
+  "rev": 1,
+  "message": "system function `${name}` is not constant in a parameter context",
+  "description": "A parameter's value is computed before simulation, and this system function's value is only known during simulation.",
+  "actions": [
+    "Read it in the analog block instead, and use a variable."
+  ]
+}

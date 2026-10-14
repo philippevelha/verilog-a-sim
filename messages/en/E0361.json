@@ -1,0 +1,10 @@
+{
+  "code": "E0361",
+  "rev": 1,
+  "message": "`{func}(...)` is not an access function of discipline `{discipline}`, which net `{net}` is declared with: its access functions are {defined}; write `{expected}(...)` for its {quantity}",
+  "description": "Each discipline names its access functions, for example `V` and `I` for `electrical`, `Temp` and `Pwr` for `thermal`. The function used belongs to another discipline.",
+  "actions": [
+    "Use the access function the message suggests.",
+    "If the net has the wrong discipline, correct its declaration."
+  ]
+}

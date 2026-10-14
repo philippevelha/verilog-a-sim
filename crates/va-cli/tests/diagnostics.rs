@@ -38,6 +38,27 @@ fn a_coded_error_names_its_code_and_where_to_read_more() {
     assert!(err.contains("error[E0702]"), "{err}");
 }
 
+/// A frontend error reaches the top level under its own code, located, with what `va-cli` was
+/// doing as context rather than as the headline.
+#[test]
+fn a_frontend_error_is_shown_under_its_own_code() {
+    let model = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/errors/elab_unknown_net.va"
+    );
+    let deck = concat!(env!("CARGO_MANIFEST_DIR"), "/../../circuits/divider.net");
+    let out = va_cli(&["sim", deck, "--model", model]);
+    let err = stderr(&out);
+    assert!(!out.status.success());
+    assert!(err.contains("error[E0366] at "), "{err}");
+    assert!(
+        err.contains("elab_unknown_net.va:8:10: unknown net `q`"),
+        "{err}"
+    );
+    assert!(err.contains("while: elaborating module `r`"), "{err}");
+    assert!(!err.contains("E0000"), "{err}");
+}
+
 /// An error with no code yet is `E0000`, and keeps its own wording and causes in full: the code
 /// adds nothing, so it must not take anything away either.
 #[test]

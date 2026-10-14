@@ -1,0 +1,10 @@
+{
+  "code": "E0102",
+  "rev": 1,
+  "message": "macro `{name} expects arguments",
+  "description": "The macro was defined with parameters (`` `define NAME(a, b) ... ``), so every use must supply them in parentheses, but this use has none.",
+  "actions": [
+    "Write the arguments after the name: `` `NAME(x, y) ``.",
+    "If you meant a different, argument-free macro, check the name."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0231",
+  "rev": 1,
+  "message": "`nature ... : {head}.{which}`: `{head}`'s {which} nature `{nature}` is not a previously declared nature",
+  "description": "The discipline names a `{which}` nature that is not declared, so there is nothing to derive from.",
+  "actions": [
+    "Declare the nature `{nature}` before this point, or include the header that declares it."
+  ]
+}

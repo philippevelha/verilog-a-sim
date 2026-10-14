@@ -1,0 +1,9 @@
+{
+  "code": "E0322",
+  "rev": 1,
+  "message": "`{name}`'s table must be a `{...}` array-literal coefficient/root list",
+  "description": "A noise table is written as an array literal of alternating frequencies and powers.",
+  "actions": [
+    "Write the table as `{f1, p1, f2, p2, …}`."
+  ]
+}

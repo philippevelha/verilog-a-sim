@@ -1,0 +1,9 @@
+{
+  "code": "R0310",
+  "rev": 1,
+  "message": "`$table_model` extrapolation `E`",
+  "description": "`E` makes a lookup outside the table a fatal error, and this engine has no channel to raise one from inside a model evaluation: `load` may not fail. Treating it as `C` would turn the diagnostic the model asked for into silence at exactly the point it wanted to be told.",
+  "actions": [
+    "Write `C` to clamp at the endpoint or `L` to continue the end slope, or widen the table to cover the range."
+  ]
+}

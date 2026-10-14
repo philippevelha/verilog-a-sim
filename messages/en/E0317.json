@@ -1,0 +1,9 @@
+{
+  "code": "E0317",
+  "rev": 1,
+  "message": "a probe is not constant in a parameter context",
+  "description": "A probe such as `V(p, n)` or `I(<p>)` has a value only during simulation; it cannot be used where a value known before simulation is required.",
+  "actions": [
+    "Compute the value in the analog block instead, and use a variable."
+  ]
+}

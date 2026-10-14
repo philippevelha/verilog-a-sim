@@ -38,18 +38,22 @@ fn main() -> std::process::ExitCode {
 /// exactly as before codes existed: the code says the catalogue has nothing to add, never that
 /// the cause is unknown.
 fn render_error(e: &anyhow::Error) -> String {
+    /// The coded diagnostic `c` is, or carries (a frontend error wraps one).
+    fn coded<'a>(c: &'a (dyn std::error::Error + 'static)) -> Option<&'a Diagnostic> {
+        c.downcast_ref::<Diagnostic>().or_else(|| {
+            c.downcast_ref::<va_frontend::FrontendError>()
+                .and_then(va_frontend::FrontendError::diagnostic)
+        })
+    }
     let catalogue = Catalogue::global();
     let mut out = String::new();
     for problem in catalogue.load_problems() {
         out.push_str(&format!("warning: message catalogue: {problem}\n"));
     }
-    match e.chain().find_map(|c| c.downcast_ref::<Diagnostic>()) {
+    match e.chain().find_map(coded) {
         Some(diag) => {
             out.push_str(&catalogue.render(diag));
-            for context in e
-                .chain()
-                .take_while(|c| c.downcast_ref::<Diagnostic>().is_none())
-            {
+            for context in e.chain().take_while(|c| coded(*c).is_none()) {
                 out.push_str(&format!("\n  while: {context}"));
             }
         }

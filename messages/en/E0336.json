@@ -1,0 +1,9 @@
+{
+  "code": "E0336",
+  "rev": 1,
+  "message": "wrong argument count for `{name}` in constant context",
+  "description": "In a constant expression (a parameter default, a range bound), this function is called with the wrong number of arguments.",
+  "actions": [
+    "Pass the number of arguments the function takes."
+  ]
+}

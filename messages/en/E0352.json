@@ -1,0 +1,9 @@
+{
+  "code": "E0352",
+  "rev": 1,
+  "message": "a string literal is only valid as a system-task argument",
+  "description": "Strings are used by system tasks such as `$strobe` and `$fopen`. In an expression, a value must be numeric.",
+  "actions": [
+    "Remove the string, or move it into a system task's argument list."
+  ]
+}

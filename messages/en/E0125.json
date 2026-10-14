@@ -1,0 +1,9 @@
+{
+  "code": "E0125",
+  "rev": 1,
+  "message": "`line expects a quoted file name after the line number",
+  "description": "The second part of a `` `line `` directive must be a file name in double quotes.",
+  "actions": [
+    "Quote the file name: `` `line 120 \"model.va\" 0 ``."
+  ]
+}

@@ -1,5 +1,6 @@
 // expect: elab
-// at: 7:21
+// code: E0342
+// at: 8:21
 // message: unknown function `foo`
 module r(p, n);
   inout p, n;

@@ -1,0 +1,9 @@
+{
+  "code": "E0393",
+  "rev": 1,
+  "message": "{file}:{line}: {columns} columns, but only a single dependent column is implemented — the LRM's `;N` selector that would choose among them is refused",
+  "description": "This simulator reads tables with one `x` column and one `y` column.",
+  "actions": [
+    "Remove the other columns from the file."
+  ]
+}

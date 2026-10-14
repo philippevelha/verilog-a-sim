@@ -1,0 +1,9 @@
+{
+  "code": "E0369",
+  "rev": 1,
+  "message": "index {index} is out of `{name}`'s declared dimension {dim} range [{lo}:{hi}]",
+  "description": "The index is outside the range declared for this dimension.",
+  "actions": [
+    "Use an index inside the declared range, or widen the range."
+  ]
+}

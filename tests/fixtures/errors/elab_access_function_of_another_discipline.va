@@ -1,5 +1,6 @@
 // expect: elab
-// at: 9:10
+// code: E0361
+// at: 10:10
 // message: `Temp(...)` is not an access function of discipline `electrical`
 // message: write `V(...)`
 // fixed: 2.23.2 (before: accepted; `va-cli sim` then failed with "singular matrix")

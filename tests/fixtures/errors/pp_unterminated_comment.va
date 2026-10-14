@@ -1,5 +1,6 @@
 // expect: pp
-// message: pp_unterminated_comment.va:6: this `/*` comment is never closed
+// code: E0126
+// message: pp_unterminated_comment.va:7: this `/*` comment is never closed
 // fixed: 2.18.2 (before: reported as a missing `endmodule` at the end of the file)
 module r(p, n);
   inout p, n;

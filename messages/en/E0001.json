@@ -1,0 +1,10 @@
+{
+  "code": "E0001",
+  "rev": 1,
+  "message": "internal error: {detail}",
+  "description": "The simulator reached a state its own code should have ruled out. This is a bug in the simulator, not a problem with the model or the netlist.",
+  "actions": [
+    "Report it, with the model and netlist that produced it and the full message above.",
+    "Until it is fixed, a small change to the construct named in the message may avoid it."
+  ]
+}

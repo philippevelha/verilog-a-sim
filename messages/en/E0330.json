@@ -1,0 +1,9 @@
+{
+  "code": "E0330",
+  "rev": 1,
+  "message": "variable `{name}` is assigned but never declared; declare it with `real {name};` (or `integer {name};`) at module scope or at the top of the enclosing named block",
+  "description": "Every variable must be declared before it is assigned. A misspelt name also gives this error.",
+  "actions": [
+    "Declare the variable, or correct the spelling if it is already declared under another name."
+  ]
+}

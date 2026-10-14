@@ -1,0 +1,10 @@
+{
+  "code": "R0303",
+  "rev": 1,
+  "message": "`$table_model` with {count} lookup expressions, i.e. a {count}-dimensional table",
+  "description": "Only one dimension is implemented. The LRM's recursive isoline scheme (§9.21) would return a number for any lookup point, and a wrong number here is indistinguishable from a right one: the model would simply converge to the wrong answer.",
+  "actions": [
+    "Reduce the data to one independent variable.",
+    "Or interpolate the other dimensions in Verilog-A and pass the result as the single lookup expression."
+  ]
+}

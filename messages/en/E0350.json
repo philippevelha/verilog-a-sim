@@ -1,0 +1,9 @@
+{
+  "code": "E0350",
+  "rev": 1,
+  "message": "`$param_given` names `{name}`, which is not a declared parameter of this module",
+  "description": "The argument must be a parameter declared in this module.",
+  "actions": [
+    "Check the spelling of the parameter name."
+  ]
+}

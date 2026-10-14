@@ -1,0 +1,9 @@
+{
+  "code": "E0124",
+  "rev": 1,
+  "message": "`line expects a line number, a quoted file name and a level",
+  "description": "`` `line `` resets the reported file and line number, and takes three parts: the line number, the file name in quotes, and a level (0, 1 or 2).",
+  "actions": [
+    "Write all three parts: `` `line 120 \"model.va\" 0 ``."
+  ]
+}

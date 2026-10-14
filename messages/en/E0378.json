@@ -1,0 +1,9 @@
+{
+  "code": "E0378",
+  "rev": 1,
+  "message": "duplicate instance name `{name}`",
+  "description": "Two instances in this module have the same name.",
+  "actions": [
+    "Rename one of them."
+  ]
+}

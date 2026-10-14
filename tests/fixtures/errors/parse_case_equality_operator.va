@@ -1,5 +1,6 @@
 // expect: parse
-// at: 10:29
+// code: E0215
+// at: 11:29
 // message: `===` is not part of Verilog-A
 // message: use `==`
 // fixed: 2.18.2 (before: `expected an expression, found Some(Assign)`, reading `===` as `==` and a stray `=`)

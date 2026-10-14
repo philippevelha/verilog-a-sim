@@ -1,0 +1,9 @@
+{
+  "code": "E0234",
+  "rev": 1,
+  "message": "expected a `nature` attribute or `endnature`, found {found}",
+  "description": "Inside `nature ... endnature`, each line sets an attribute (`units`, `access`, `abstol`, `idt_nature`, `ddt_nature`) and the block ends with `endnature`.",
+  "actions": [
+    "Check the attribute name, or add the missing `endnature`."
+  ]
+}

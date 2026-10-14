@@ -1,0 +1,9 @@
+{
+  "code": "E0112",
+  "rev": 1,
+  "message": "`endif without `ifdef",
+  "description": "An `` `endif `` appears with no conditional block open to close.",
+  "actions": [
+    "Remove the extra `` `endif ``, or add the `` `ifdef ``/`` `ifndef `` it was meant to close."
+  ]
+}

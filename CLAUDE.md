@@ -96,7 +96,7 @@ declares — keep them honest.
 | `va-ir`         | shared  | Interface α: elaborated IR data types             | — (leaf)                     |
 | `va-abi`        | shared  | Interface β: `ModelInstance`/`StampSink` + ref models | — (leaf)                 |
 | `va-diag`       | shared  | diagnostic codes (E/W/R/C), message catalogue, rendering | — (leaf)              |
-| `va-frontend`   | T1      | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`                      |
+| `va-frontend`   | T1      | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`, `va-diag`           |
 | `va-codegen`    | T2      | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`            |
 | `va-core`       | shared* | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`                  |
 | `va-transient`  | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`          |
@@ -282,7 +282,7 @@ this trait at bootstrap, so `va-core` has something real to solve on commit #1.
   parse/elaboration error, and never as a bare sentence: it carries **what** was refused,
   **where**, **why** it is refused rather than approximated — say what the wrong answer would
   have been — what to write **instead**, and where the limitation is **tracked**. `va-cli` prints
-  every one in the same `refused:`-marked block whichever layer raised it, on the same stream as
+  every one in the same `refused`-marked block (`refused[R0202]:` once coded) whichever layer raised it, on the same stream as
   the surrounding output so redirecting to a file does not separate a verdict from its reason.
   Gated by `every_refusal_says_what_was_refused_and_why`. A refusal that names the wrong
   construct is worse than a terse one.

@@ -92,7 +92,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ExprAst, ExprRef, Item, ModuleAst, Stmt};
 use crate::disciplines::{self, DisciplineDecl, NatureDecl};
-use crate::FrontendError;
+use crate::{codes, Diagnostic, FrontendError};
 use va_ir::{
     Access, AccessKind, ArgDir, Branch, BranchId, Builtin, CaseArm, Discipline, Expr, ExprId,
     FuncId, Function, Module, NodeDecl, NodeId, Param, ParamId, VarDecl, VarId,
@@ -537,16 +537,10 @@ impl Elaborator<'_> {
     fn declare_var_entry(&mut self, entry: &ast::VarEntry) -> Result<(), FrontendError> {
         let name = &entry.name;
         if self.params.contains_key(name) {
-            return Err(elab(format!(
-                "`{name}` is declared both as a parameter and as a variable in this module; \
-                 rename one of them"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0301).arg("name", name)));
         }
         if self.vars.contains_key(name) || self.var_arrays.contains_key(name) {
-            return Err(elab(format!(
-                "variable `{name}` is declared more than once in this module; remove one of \
-                 the declarations"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0302).arg("name", name)));
         }
         if entry.ranges.is_empty() {
             if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -655,11 +649,11 @@ impl Elaborator<'_> {
             });
             if let Some((name, at)) = undeclared {
                 return Err(locate(
-                    elab(format!(
-                        "analog function `{}` assigns `{name}`, which is neither its name, one of \
-                         its arguments, nor declared inside it; declare it with `real {name};`",
-                        f.name
-                    )),
+                    elab(
+                        Diagnostic::new(codes::E0303)
+                            .arg("function", &f.name)
+                            .arg("name", name),
+                    ),
                     || at.map(|p| ast.describe(p)),
                 ));
             }
@@ -781,11 +775,10 @@ impl Elaborator<'_> {
             self.cur_at = self.item_at(item_idx);
             if let Item::Ground { names } = item {
                 for name in names {
-                    let id = *self.nodes.get(name).ok_or_else(|| {
-                        elab(format!(
-                            "`ground {name}`: `{name}` is not a previously declared net"
-                        ))
-                    })?;
+                    let id = *self
+                        .nodes
+                        .get(name)
+                        .ok_or_else(|| elab(Diagnostic::new(codes::E0304).arg("name", name)))?;
                     match self.ground {
                         Some(gnd) => {
                             self.nodes.insert(name.clone(), gnd);
@@ -870,28 +863,27 @@ impl Elaborator<'_> {
             }
             if let Some(dims) = self.vectors.get(port) {
                 if dims.len() != 1 {
-                    return Err(elab(format!(
-                        "port `{port}` is a {}-D vector net (§ 2-D vector net extension); only \
-                         a 1-D vector net may be used as a port",
-                        dims.len()
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0305)
+                            .arg("port", port)
+                            .arg("dims", dims.len()),
+                    ));
                 }
                 let (lo, hi) = dims[0];
                 let mut ids = Vec::with_capacity((hi - lo + 1) as usize);
                 for k in lo..=hi {
                     let key = indexed_key(port, &[k]);
                     ids.push(*self.nodes.get(&key).ok_or_else(|| {
-                        elab(format!(
-                            "internal error: vector port node `{key}` was not interned"
+                        elab(Diagnostic::new(codes::E0001).arg(
+                            "detail",
+                            format!("vector port node `{key}` was not interned"),
                         ))
                     })?);
                 }
                 self.out.ports.push(ids);
                 continue;
             }
-            return Err(elab(format!(
-                "port `{port}` has no discipline declaration (e.g. `electrical {port};`)"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0306).arg("port", port)));
         }
         Ok(())
     }
@@ -937,10 +929,7 @@ impl Elaborator<'_> {
                     // overwrote the first, so the later default silently won — and which one
                     // "wins" in another simulator is not something a model should depend on.
                     if self.params.contains_key(name) {
-                        return Err(elab(format!(
-                            "parameter `{name}` is declared more than once in this module; \
-                             remove or rename one of the declarations"
-                        )));
+                        return Err(elab(Diagnostic::new(codes::E0307).arg("name", name)));
                     }
                     let (min, max) = match range {
                         Some(r) => (bound(self.const_eval(r.lo)?), bound(self.const_eval(r.hi)?)),
@@ -954,23 +943,30 @@ impl Elaborator<'_> {
                     // parameter can hold. Caught here, where the parameter can still be named,
                     // instead of as a non-finite residual at the first Newton iteration.
                     if !default_val.is_finite() {
-                        return Err(elab(format!(
-                            "parameter `{name}` evaluates to {default_val}, not a finite number \
-                             (a division by zero in its default expression?)"
-                        )));
+                        return Err(elab(
+                            Diagnostic::new(codes::E0308)
+                                .arg("name", name)
+                                .arg("value", default_val),
+                        ));
                     }
                     if let Some(min) = min {
                         if default_val < min {
-                            return Err(elab(format!(
-                                "parameter `{name}` value {default_val} is below its declared minimum {min}"
-                            )));
+                            return Err(elab(
+                                Diagnostic::new(codes::E0309)
+                                    .arg("name", name)
+                                    .arg("value", default_val)
+                                    .arg("min", min),
+                            ));
                         }
                     }
                     if let Some(max) = max {
                         if default_val > max {
-                            return Err(elab(format!(
-                                "parameter `{name}` value {default_val} is above its declared maximum {max}"
-                            )));
+                            return Err(elab(
+                                Diagnostic::new(codes::E0310)
+                                    .arg("name", name)
+                                    .arg("value", default_val)
+                                    .arg("max", max),
+                            ));
                         }
                     }
                     let id = ParamId(self.out.params.len() as u32);
@@ -998,15 +994,14 @@ impl Elaborator<'_> {
                 // must already be declared — forward references are unsupported in v0.
                 Item::AliasParam { name, target } => {
                     if self.params.contains_key(name) {
-                        return Err(elab(format!(
-                            "aliasparam `{name}` reuses the name of a parameter already declared \
-                             in this module"
-                        )));
+                        return Err(elab(Diagnostic::new(codes::E0311).arg("name", name)));
                     }
                     let id = *self.params.get(target).ok_or_else(|| {
-                        elab(format!(
-                            "aliasparam `{name}` targets unknown parameter `{target}`"
-                        ))
+                        elab(
+                            Diagnostic::new(codes::E0312)
+                                .arg("name", name)
+                                .arg("target", target),
+                        )
                     })?;
                     let val = self.param_vals[target];
                     self.params.insert(name.clone(), id);
@@ -1036,11 +1031,11 @@ impl Elaborator<'_> {
                 if let Some(v) = self.genvar_env.get(name) {
                     Ok(*v as f64)
                 } else {
-                    let v = self.param_vals.get(name).copied().ok_or_else(|| {
-                        elab(format!(
-                            "`{name}` is not a compile-time constant in this context"
-                        ))
-                    })?;
+                    let v = self
+                        .param_vals
+                        .get(name)
+                        .copied()
+                        .ok_or_else(|| elab(Diagnostic::new(codes::E0313).arg("name", name)))?;
                     // The value is now baked into whatever asked: recorded so a deck override
                     // of this parameter knows the module must be elaborated again.
                     self.elab_reads.borrow_mut().insert(name.clone());
@@ -1087,32 +1082,18 @@ impl Elaborator<'_> {
             // Without a default it is still an error, matching the LRM for an unknown parameter.
             ExprAst::SysFunc { name, args } if name == "simparam" => match args.get(1) {
                 Some(&default) => self.const_eval(default),
-                None => Err(elab(
-                    "$simparam without a default: the parameter is unknown in v0 (no simulator \
-                     parameters)"
-                        .to_string(),
-                )),
+                None => Err(elab(Diagnostic::new(codes::E0314))),
             },
-            ExprAst::SysFunc { name, .. } => Err(elab(format!(
-                "system function `${name}` is not constant in a parameter context"
-            ))),
-            ExprAst::Str(_) => Err(elab(
-                "a string literal is not valid in a parameter context".to_string(),
-            )),
-            ExprAst::Probe(_) => Err(elab(
-                "a branch probe is not constant in a parameter context".to_string(),
-            )),
-            ExprAst::PortProbe { .. } => Err(elab(
-                "a port-current probe is not constant in a parameter context".to_string(),
-            )),
-            ExprAst::IndexedIdent(name, _) => Err(elab(format!(
-                "array variable `{name}` is not constant in a parameter context"
-            ))),
-            ExprAst::ArrayLit(_) => Err(elab(
-                "an array-literal expression is not constant in a parameter context (only \
-                 valid as a Laplace/Z-domain filter argument)"
-                    .to_string(),
-            )),
+            ExprAst::SysFunc { name, .. } => {
+                Err(elab(Diagnostic::new(codes::E0315).arg("name", name)))
+            }
+            ExprAst::Str(_) => Err(elab(Diagnostic::new(codes::E0316))),
+            ExprAst::Probe(_) => Err(elab(Diagnostic::new(codes::E0317))),
+            ExprAst::PortProbe { .. } => Err(elab(Diagnostic::new(codes::E0317))),
+            ExprAst::IndexedIdent(name, _) => {
+                Err(elab(Diagnostic::new(codes::E0318).arg("name", name)))
+            }
+            ExprAst::ArrayLit(_) => Err(elab(Diagnostic::new(codes::E0319))),
         }
     }
 
@@ -1125,11 +1106,7 @@ impl Elaborator<'_> {
     fn array_lit_exprs(&mut self, r: ExprRef, what: &str) -> Result<Vec<ExprId>, FrontendError> {
         let elems = match self.ast.expr(r) {
             ExprAst::ArrayLit(elems) => elems.clone(),
-            _ => {
-                return Err(elab(format!(
-                    "{what} must be a `{{...}}` array-literal coefficient/root list"
-                )))
-            }
+            _ => return Err(elab(Diagnostic::new(codes::E0320).arg("list", what))),
         };
         elems.iter().map(|&e| self.lower_expr(e)).collect()
     }
@@ -1176,54 +1153,54 @@ impl Elaborator<'_> {
         what: &str,
     ) -> Result<Vec<(f64, ExprRef)>, FrontendError> {
         if let ExprAst::Str(_) = self.ast.expr(r) {
-            return Err(elab(format!(
-                "`{what}` with a file-name argument is not supported — give the table \
-                 inline as a `{{f1, p1, f2, p2, …}}` array literal"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0321).arg("name", what)));
         }
         let elems = match self.ast.expr(r) {
             ExprAst::ArrayLit(elems) => elems.clone(),
-            _ => {
-                return Err(elab(format!(
-                    "`{what}`'s table must be a `{{...}}` array-literal coefficient/root list"
-                )))
-            }
+            _ => return Err(elab(Diagnostic::new(codes::E0322).arg("name", what))),
         };
         if elems.len() % 2 != 0 {
-            return Err(elab(format!(
-                "`{what}`'s table must hold `(frequency, power)` pairs — got {} values (odd)",
-                elems.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0323)
+                    .arg("name", what)
+                    .arg("count", elems.len()),
+            ));
         }
         let mut points: Vec<(f64, ExprRef)> = Vec::with_capacity(elems.len() / 2);
         for pair in elems.chunks(2) {
             let f = self.const_eval(pair[0])?;
             if f < 0.0 || !f.is_finite() {
-                return Err(elab(format!(
-                    "`{what}` frequency {f} is not a finite, non-negative frequency in Hz"
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0324)
+                        .arg("name", what)
+                        .arg("frequency", f),
+                ));
             }
             let p = self.const_eval(pair[1]).map_err(|e| {
-                elab(format!(
-                    "`{what}` power at {f} Hz must be a constant expression (parameters, \
-                     literals and builtin functions): {e}"
-                ))
+                elab(
+                    Diagnostic::new(codes::E0325)
+                        .arg("name", what)
+                        .arg("frequency", f)
+                        .arg("error", e),
+                )
             })?;
             if p < 0.0 || !p.is_finite() {
-                return Err(elab(format!(
-                    "`{what}` power {p} at {f} Hz is not a finite, non-negative power \
-                     spectral density"
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0326)
+                        .arg("name", what)
+                        .arg("power", p)
+                        .arg("frequency", f),
+                ));
             }
             points.push((f, pair[1]));
         }
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         if let Some(w) = points.windows(2).find(|w| w[0].0 == w[1].0) {
-            return Err(elab(format!(
-                "`{what}` repeats the frequency {} Hz — the LRM requires each frequency in \
-                 a table to be unique",
-                w[0].0
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0327)
+                    .arg("name", what)
+                    .arg("frequency", w[0].0),
+            ));
         }
         Ok(points)
     }
@@ -1233,7 +1210,11 @@ impl Elaborator<'_> {
     fn const_eval_int(&self, r: ExprRef, what: &str) -> Result<i64, FrontendError> {
         let v = self.const_eval(r)?;
         if (v - v.round()).abs() > 1e-9 {
-            return Err(elab(format!("{what} must be an integer, got {v}")));
+            return Err(elab(
+                Diagnostic::new(codes::E0328)
+                    .arg("what", what)
+                    .arg("value", v),
+            ));
         }
         Ok(v.round() as i64)
     }
@@ -1266,16 +1247,9 @@ impl Elaborator<'_> {
     /// reader looking for a typo that is not there.
     fn undeclared_assign_target(&self, name: &str) -> FrontendError {
         if self.params.contains_key(name) {
-            elab(format!(
-                "`{name}` is a parameter, and a parameter cannot be assigned in the analog block; \
-                 declare a variable (`real {name}_eff;`) and assign that instead"
-            ))
+            elab(Diagnostic::new(codes::E0329).arg("name", name))
         } else {
-            elab(format!(
-                "variable `{name}` is assigned but never declared; declare it with \
-                 `real {name};` (or `integer {name};`) at module scope or at the top of the \
-                 enclosing named block"
-            ))
+            elab(Diagnostic::new(codes::E0330).arg("name", name))
         }
     }
 
@@ -1312,12 +1286,7 @@ impl Elaborator<'_> {
                     // pass already ran by the time this (analog-block) pass runs, so a
                     // block-local array range has nowhere sound to be declared into.
                     if !entry.ranges.is_empty() {
-                        return Err(elab(format!(
-                            "array variable `{}` must be declared at module scope, not inside \
-                             the analog block (block-local array variables are not yet \
-                             supported)",
-                            entry.name
-                        )));
+                        return Err(elab(Diagnostic::new(codes::E0331).arg("name", &entry.name)));
                     }
                 }
                 Ok(())
@@ -1486,13 +1455,21 @@ impl Elaborator<'_> {
             // `va_abi::StampSink`'s bound-step channel (§ `va_ir::Stmt::BoundStep`).
             Stmt::Task { name, args } if name == "bound_step" => {
                 let arg = *args.first().ok_or_else(|| {
-                    elab("`bound_step` requires a maximum-timestep argument".to_string())
+                    elab(
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "bound_step")
+                            .arg("signature", "(max_step)")
+                            .arg("expected", 1)
+                            .arg("got", args.len()),
+                    )
                 })?;
                 if args.len() > 1 {
                     return Err(elab(
-                        "`bound_step` takes exactly one argument (the maximum timestep in \
-                         seconds)"
-                            .to_string(),
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "bound_step")
+                            .arg("signature", "(max_step)")
+                            .arg("expected", 1)
+                            .arg("got", args.len()),
                     ));
                 }
                 Ok(va_ir::Stmt::BoundStep(self.lower_expr(arg)?))
@@ -1552,10 +1529,7 @@ impl Elaborator<'_> {
                 // assignment to a genvar name (elsewhere in the body, or as an ordinary
                 // `for`/`while` control variable) is rejected here.
                 if self.genvars.contains(lhs) {
-                    return Err(elab(format!(
-                        "genvar `{lhs}` may only be assigned in the header of the `for` loop \
-                         it drives (restricted assignment)"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0337).arg("name", lhs)));
                 }
                 if index.is_empty() {
                     let id = self
@@ -1686,20 +1660,11 @@ impl Elaborator<'_> {
         body: &[Stmt],
     ) -> Result<va_ir::Stmt, FrontendError> {
         if self.genvar_env.contains_key(genvar) {
-            return Err(elab(format!(
-                "nested generate loop reuses genvar `{genvar}`; a genvar's implicit localparam \
-                 cannot be redeclared while its enclosing loop is still active"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0338).arg("name", genvar)));
         }
         let step_rhs = match step {
             Stmt::Assign { lhs, rhs, .. } if lhs == genvar => *rhs,
-            _ => {
-                return Err(elab(format!(
-                    "genvar `{genvar}`'s `for` step must reassign `{genvar}` itself \
-                     (restricted assignment: a genvar may only be written by its own loop \
-                     header)"
-                )))
-            }
+            _ => return Err(elab(Diagnostic::new(codes::E0337).arg("name", genvar))),
         };
 
         // A pathologically malformed step/condition (e.g. a step that never advances toward
@@ -1720,10 +1685,11 @@ impl Elaborator<'_> {
             iterations += 1;
             if iterations > MAX_ITERATIONS {
                 self.genvar_env.remove(genvar);
-                return Err(elab(format!(
-                    "generate loop over genvar `{genvar}` did not terminate within \
-                     {MAX_ITERATIONS} iterations"
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0339)
+                        .arg("name", genvar)
+                        .arg("limit", MAX_ITERATIONS),
+                ));
             }
             out.extend(self.lower_stmts(body)?);
             value = self.const_eval_int(step_rhs, "genvar step value")?;
@@ -1743,40 +1709,37 @@ impl Elaborator<'_> {
             ExprAst::Str(s) => Some(s.clone()),
             _ => None,
         };
-        let name = args.first().and_then(string).ok_or_else(|| {
-            elab("`$fopen` takes a file name as a string literal: `$fopen(\"name\")`".to_string())
-        })?;
+        let name = args
+            .first()
+            .and_then(string)
+            .ok_or_else(|| elab(Diagnostic::new(codes::E0345)))?;
         let mode = match args.get(1) {
             None => None,
-            Some(r) => Some(string(r).ok_or_else(|| {
-                elab(
-                    "`$fopen`'s second argument is the type, a string literal such as \"w\""
-                        .to_string(),
-                )
-            })?),
+            Some(r) => Some(string(r).ok_or_else(|| elab(Diagnostic::new(codes::E0345)))?),
         };
         if args.len() > 2 {
-            return Err(elab("`$fopen` takes a name and at most a type".to_string()));
+            return Err(elab(
+                Diagnostic::new(codes::E0334)
+                    .arg("name", "$fopen")
+                    .arg("signature", "(name[, type])")
+                    .arg("min", 1)
+                    .arg("max", 2)
+                    .arg("got", args.len()),
+            ));
         }
         if let Some(m) = &mode {
             let m = m.replace('b', "");
             if m.starts_with('r') || m.contains('+') {
-                return Err(FrontendError::Refused(
-                    crate::Refusal::new(
-                        format!("`$fopen(\"{name}\", \"{m}\")`, a file opened for reading"),
-                        "no file-reading task or function ($fscanf, $fgets, ...) is \
-                         implemented, and the LRM (§9.5.9) asks a read rejected with its \
-                         iteration to be rewound; opening the file would only pretend to \
-                         support the reads that follow",
+                return Err(FrontendError::refused(
+                    crate::Refusal::coded(
+                        codes::R0301,
+                        &[("name", name.as_str()), ("mode", m.as_str())],
                     )
-                    .instead("open it for writing (\"w\") or appending (\"a\")")
                     .tracking("docs/token-reference.md, system tasks"),
                 ));
             }
             if !(m.starts_with('w') || m.starts_with('a')) {
-                return Err(elab(format!(
-                    "`$fopen` type \"{m}\" is not one of the LRM's (Table 9-24): \"w\", \"a\", \"r\" and their \"b\"/\"+\" forms"
-                )));
+                return Err(elab(Diagnostic::new(codes::E0346).arg("mode", m)));
             }
         }
         let mut out = vec![va_ir::TaskArg::Str(name)];
@@ -1816,12 +1779,9 @@ impl Elaborator<'_> {
                     Expr::Param(*p)
                 } else if self.genvars.contains(name) {
                     // Declared, so "unknown identifier" would send the reader hunting for a typo.
-                    return Err(elab(format!(
-                        "genvar `{name}` is read outside the `for` loop that drives it; a genvar \
-                         only has a value inside its own generate loop"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0340).arg("name", name)));
                 } else {
-                    return Err(elab(format!("unknown identifier `{name}`")));
+                    return Err(elab(Diagnostic::new(codes::E0341).arg("name", name)));
                 }
             }
             // `name[index]`: one element of an array variable (§ array variables). Constant/
@@ -1842,9 +1802,12 @@ impl Elaborator<'_> {
                 let mut rest = args.as_slice();
                 let Some((&input, tail)) = rest.split_first() else {
                     return Err(elab(
-                        "$table_model needs at least a lookup expression and a data source, as \
-                         `$table_model(x, \"file.tbl\")`"
-                            .to_string(),
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "$table_model")
+                            .arg("signature", "(x, \"file\"[, control])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
                     ));
                 };
                 rest = tail;
@@ -1855,40 +1818,16 @@ impl Elaborator<'_> {
                     .iter()
                     .position(|&r| matches!(self.ast.expr(r), ExprAst::Str(_)));
                 let Some(source_at) = source_at else {
-                    return Err(FrontendError::Refused(
-                        crate::Refusal::new(
-                            "`$table_model` with an array data source",
-                            "the LRM (§9.21) lets the table come from arrays as well as a file, \
-                             and only the file form is implemented. Reading the arrays would \
-                             mean folding a run-time array into a compile-time table, which is \
-                             a different feature from the one this implements",
-                        )
-                        .instead(
-                            "write the points to a file, one `x y` pair per line, and name it: \
-                             `$table_model(x, \"data.tbl\")`. For a noise PSD, `noise_table` \
-                             already takes an inline list",
-                        )
-                        .tracking("docs/token-reference.md, `$table_model`"),
+                    return Err(FrontendError::refused(
+                        crate::Refusal::coded(codes::R0302, &[])
+                            .tracking("docs/token-reference.md, `$table_model`"),
                     ));
                 };
                 if source_at > 0 {
-                    return Err(FrontendError::Refused(
-                        crate::Refusal::new(
-                            format!(
-                                "`$table_model` with {} lookup expressions, i.e. a \
-                                 {}-dimensional table",
-                                source_at + 1,
-                                source_at + 1
-                            ),
-                            "only one dimension is implemented. The LRM's recursive isoline \
-                             scheme (§9.21) would return a number for any lookup point, and a \
-                             wrong number here is indistinguishable from a right one — the \
-                             model would simply converge to the wrong answer",
-                        )
-                        .instead(
-                            "reduce the data to one independent variable, or interpolate the \
-                             other dimensions in Verilog-A and pass the result as the single \
-                             lookup expression",
+                    return Err(FrontendError::refused(
+                        crate::Refusal::coded(
+                            codes::R0303,
+                            &[("count", &(source_at + 1).to_string())],
                         )
                         .tracking("docs/token-reference.md, `$table_model`"),
                     ));
@@ -1897,23 +1836,21 @@ impl Elaborator<'_> {
                 let ExprAst::Str(file) = self.ast.expr(rest[source_at]) else {
                     unreachable!("position() matched Str");
                 };
-                let control =
-                    match rest.get(source_at + 1) {
-                        None => None,
-                        Some(&r) => match self.ast.expr(r) {
-                            ExprAst::Str(c) => Some(c.clone()),
-                            _ => return Err(elab(
-                                "$table_model's third argument is the control string and must be \
-                                 a string literal, as `\"1CC\"`"
-                                    .to_string(),
-                            )),
-                        },
-                    };
+                let control = match rest.get(source_at + 1) {
+                    None => None,
+                    Some(&r) => match self.ast.expr(r) {
+                        ExprAst::Str(c) => Some(c.clone()),
+                        _ => return Err(elab(Diagnostic::new(codes::E0347))),
+                    },
+                };
                 if rest.len() > source_at + 2 {
                     return Err(elab(
-                        "$table_model takes at most three arguments in one dimension: the lookup \
-                         expression, the data file, and the control string"
-                            .to_string(),
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "$table_model")
+                            .arg("signature", "(x, \"file\"[, control])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
                     ));
                 }
 
@@ -1956,11 +1893,7 @@ impl Elaborator<'_> {
                     _ => None,
                 });
                 let Some(queried) = queried else {
-                    return Err(elab(
-                        "`$simparam` takes a string parameter name as its first argument \
-                         (LRM §9.18)"
-                            .to_string(),
-                    ));
+                    return Err(elab(Diagnostic::new(codes::E0348)));
                 };
                 match (va_ir::SimParam::from_name(&queried), args.get(1)) {
                     (Some(p), _) => {
@@ -1969,22 +1902,14 @@ impl Elaborator<'_> {
                     }
                     (None, Some(&default)) => return self.lower_expr(default),
                     (None, None) => {
-                        return Err(FrontendError::Refused(
-                            crate::Refusal::new(
-                                format!("`$simparam(\"{queried}\")`, with no default value"),
-                                "this simulator does not know that parameter, and the LRM \
-                                 (§9.18) makes an unknown name with no default an error rather \
-                                 than a guess. Answering it with a plausible number would be \
-                                 worse: a simulation parameter is a promise about the solver's \
-                                 behaviour, and this engine would not keep one it never \
-                                 implemented",
+                        return Err(FrontendError::refused(
+                            crate::Refusal::coded(
+                                codes::R0304,
+                                &[
+                                    ("name", queried.as_str()),
+                                    ("known", &va_ir::SimParam::KNOWN_NAMES.join(", ")),
+                                ],
                             )
-                            .instead(format!(
-                                "supply a fallback - `$simparam(\"{queried}\", <value>)` is \
-                                 valid and returns it - or query one of the names this engine \
-                                 does know: {}",
-                                va_ir::SimParam::KNOWN_NAMES.join(", ")
-                            ))
                             .tracking("docs/token-reference.md, `$simparam`"),
                         ))
                     }
@@ -1999,21 +1924,20 @@ impl Elaborator<'_> {
             // `$fopen` inside a larger expression: its descriptor is produced by a side effect,
             // which this lowering only performs as `var = $fopen(...)`.
             ExprAst::SysFunc { name, .. } if name == "fopen" => {
-                return Err(FrontendError::Refused(
-                    crate::Refusal::new(
-                        "`$fopen(...)` used inside an expression",
-                        "opening a file is a side effect that has to happen once, at an \
-                         accepted point, and hand back a descriptor; this engine performs it \
-                         as a statement, so a `$fopen` nested in an expression would either be \
-                         repeated on every evaluation or yield no descriptor at all",
-                    )
-                    .instead("assign it on its own first: `fd = $fopen(\"name\");`, then use `fd`")
-                    .tracking("docs/token-reference.md, system tasks"),
+                return Err(FrontendError::refused(
+                    crate::Refusal::coded(codes::R0305, &[])
+                        .tracking("docs/token-reference.md, system tasks"),
                 ));
             }
             ExprAst::SysFunc { name, args } if name == "abstime" => {
                 if !args.is_empty() {
-                    return Err(elab("`$abstime` takes no arguments".to_string()));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "$abstime")
+                            .arg("signature", "")
+                            .arg("expected", 0)
+                            .arg("got", args.len()),
+                    ));
                 }
                 Expr::Call(Builtin::Abstime, Vec::new())
             }
@@ -2028,7 +1952,13 @@ impl Elaborator<'_> {
             // resolved.
             ExprAst::SysFunc { name, args } if name == "mfactor" => {
                 if !args.is_empty() {
-                    return Err(elab("`$mfactor` takes no arguments".to_string()));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "$mfactor")
+                            .arg("signature", "")
+                            .arg("expected", 0)
+                            .arg("got", args.len()),
+                    ));
                 }
                 Expr::Call(Builtin::Mfactor, Vec::new())
             }
@@ -2049,22 +1979,23 @@ impl Elaborator<'_> {
             ExprAst::SysFunc { name, args } if name == "param_given" => {
                 let &[param_ref] = args.as_slice() else {
                     return Err(elab(
-                        "`$param_given` takes exactly one argument: a parameter name".to_string(),
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "$param_given")
+                            .arg("signature", "(name)")
+                            .arg("expected", 1)
+                            .arg("got", args.len()),
                     ));
                 };
                 let param_name = match ast.expr(param_ref) {
                     ExprAst::Ident(n) => n,
                     _ => {
                         return Err(elab(
-                            "`$param_given`'s argument must be a bare parameter name".to_string(),
+                            Diagnostic::new(codes::E0349).arg("name", "$param_given"),
                         ))
                     }
                 };
                 let Some(&pid) = self.params.get(param_name) else {
-                    return Err(elab(format!(
-                        "`$param_given` names `{param_name}`, which is not a declared parameter \
-                         of this module"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0350).arg("name", param_name)));
                 };
                 Expr::ParamGiven(pid)
             }
@@ -2088,22 +2019,23 @@ impl Elaborator<'_> {
             ExprAst::SysFunc { name, args } if name == "port_connected" => {
                 let &[port_ref] = args.as_slice() else {
                     return Err(elab(
-                        "`$port_connected` takes exactly one argument: a port name".to_string(),
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "$port_connected")
+                            .arg("signature", "(name)")
+                            .arg("expected", 1)
+                            .arg("got", args.len()),
                     ));
                 };
                 let port_name = match ast.expr(port_ref) {
                     ExprAst::Ident(n) => n,
                     _ => {
                         return Err(elab(
-                            "`$port_connected`'s argument must be a bare port name".to_string(),
+                            Diagnostic::new(codes::E0349).arg("name", "$port_connected"),
                         ))
                     }
                 };
                 let Some(idx) = self.ast.ports.iter().position(|p| p == port_name) else {
-                    return Err(elab(format!(
-                        "`$port_connected` names `{port_name}`, which is not a declared port of \
-                         this module"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0351).arg("name", port_name)));
                 };
                 Expr::PortConnected(idx as u32)
             }
@@ -2130,7 +2062,13 @@ impl Elaborator<'_> {
             // and not the answer.
             ExprAst::SysFunc { name, args } if name == "limit" => {
                 let value = *args.first().ok_or_else(|| {
-                    elab("`$limit` requires at least an access argument".to_string())
+                    elab(
+                        Diagnostic::new(codes::E0335)
+                            .arg("name", "$limit")
+                            .arg("signature", "(access, ...)")
+                            .arg("min", 1)
+                            .arg("got", args.len()),
+                    )
                 })?;
                 let lowered = self.lower_expr(value)?;
                 self.record_limited_junctions(lowered);
@@ -2168,21 +2106,30 @@ impl Elaborator<'_> {
                 // absolute temperature `T`). Every other system function here takes none.
                 match builtin {
                     Builtin::Vt if ids.len() > 1 => {
-                        return Err(elab(format!("`${name}` takes at most one argument")))
+                        return Err(elab(
+                            Diagnostic::new(codes::E0334)
+                                .arg("name", format!("${name}"))
+                                .arg("signature", "(T)")
+                                .arg("min", 0)
+                                .arg("max", 1)
+                                .arg("got", ids.len()),
+                        ))
                     }
                     Builtin::Vt => {}
                     _ if !ids.is_empty() => {
-                        return Err(elab(format!("`${name}` takes no arguments")))
+                        return Err(elab(
+                            Diagnostic::new(codes::E0333)
+                                .arg("name", format!("${name}"))
+                                .arg("signature", "")
+                                .arg("expected", 0)
+                                .arg("got", ids.len()),
+                        ))
                     }
                     _ => {}
                 }
                 Expr::Call(builtin, ids)
             }
-            ExprAst::Str(_) => {
-                return Err(elab(
-                    "a string literal is only valid as a system-task argument".to_string(),
-                ))
-            }
+            ExprAst::Str(_) => return Err(elab(Diagnostic::new(codes::E0352))),
             ExprAst::Probe(access) => return self.lower_probe_expr(access),
             ExprAst::PortProbe { kind, port } => return self.lower_port_probe(*kind, port),
             // `analysis("name", …)` queries which analysis is running. It used to fold to a
@@ -2207,18 +2154,39 @@ impl Elaborator<'_> {
             // summed spectrum, not a per-source breakdown), which also keeps every `Expr::Call`
             // argument a real number rather than a string.
             ExprAst::Call { name, args } if name == "white_noise" => {
-                let pwr = *args
-                    .first()
-                    .ok_or_else(|| elab("`white_noise` requires a power argument".to_string()))?;
+                let pwr = *args.first().ok_or_else(|| {
+                    elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "white_noise")
+                            .arg("signature", "(pwr[, name])")
+                            .arg("min", 1)
+                            .arg("max", 2)
+                            .arg("got", args.len()),
+                    )
+                })?;
                 let pwr = self.lower_expr(pwr)?;
                 Expr::Call(Builtin::WhiteNoise, vec![pwr])
             }
             ExprAst::Call { name, args } if name == "flicker_noise" => {
-                let pwr = *args
-                    .first()
-                    .ok_or_else(|| elab("`flicker_noise` requires a power argument".to_string()))?;
+                let pwr = *args.first().ok_or_else(|| {
+                    elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "flicker_noise")
+                            .arg("signature", "(pwr, exp[, name])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
+                    )
+                })?;
                 let exp = *args.get(1).ok_or_else(|| {
-                    elab("`flicker_noise` requires a frequency-exponent argument".to_string())
+                    elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "flicker_noise")
+                            .arg("signature", "(pwr, exp[, name])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
+                    )
                 })?;
                 let pwr = self.lower_expr(pwr)?;
                 let exp = self.lower_expr(exp)?;
@@ -2238,9 +2206,16 @@ impl Elaborator<'_> {
             ExprAst::Call { name, args }
                 if matches!(name.as_str(), "noise_table" | "noise_table_log") =>
             {
-                let input = *args
-                    .first()
-                    .ok_or_else(|| elab(format!("`{name}` requires a table argument")))?;
+                let input = *args.first().ok_or_else(|| {
+                    elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", name)
+                            .arg("signature", "(table[, name])")
+                            .arg("min", 1)
+                            .arg("max", 2)
+                            .arg("got", args.len()),
+                    )
+                })?;
                 let points = self.noise_table_points(input, name)?;
                 let mut ids = Vec::with_capacity(points.len() * 2);
                 for (f, p) in points {
@@ -2296,11 +2271,7 @@ impl Elaborator<'_> {
             // turns into `va_ir::Stmt::BoundStep`. Reaching here means it was written where a
             // value is expected, which is not something to invent a value for.
             ExprAst::Call { name, .. } if name == "bound_step" => {
-                return Err(elab(
-                    "`bound_step` is a statement, not a value: write `bound_step(expr);` on its \
-                     own rather than inside an expression"
-                        .to_string(),
-                ))
+                return Err(elab(Diagnostic::new(codes::E0332)))
             }
             // `transition(value, delay, rise_time, fall_time)` and `slew(value, pos_rate,
             // neg_rate)` both smooth/limit a signal over time — genuinely time-domain
@@ -2319,10 +2290,14 @@ impl Elaborator<'_> {
             ExprAst::Call { name, args } if name == "@cross" => {
                 // `cross(expr, dir, time_tol, expr_tol, enable)` (LRM §5.10.1), positional.
                 if args.is_empty() || args.len() > 5 {
-                    return Err(elab(format!(
-                        "`cross` takes 1 to 5 arguments                          (expr, dir, time_tol, expr_tol, enable), got {}",
-                        args.len()
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "cross")
+                            .arg("signature", "(expr, dir, time_tol, expr_tol, enable)")
+                            .arg("min", 1)
+                            .arg("max", 5)
+                            .arg("got", args.len()),
+                    ));
                 }
                 // The monitored expression is lowered into the ordinary arena: it is a real
                 // expression of probes and parameters, evaluated by the model at every accepted
@@ -2335,9 +2310,7 @@ impl Elaborator<'_> {
                     None => 0, // the LRM's default: either edge
                 };
                 if !(-1..=1).contains(&dir) {
-                    return Err(elab(format!(
-                        "`cross`'s direction argument must be -1 (falling), 0 (either) or                          +1 (rising), got {dir}"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0353).arg("dir", dir)));
                 }
                 // Tolerances are lowered and kept, though this engine cannot yet act on them
                 // — `va-cli` warns when a site carries one. Keeping them is what lets the
@@ -2367,10 +2340,14 @@ impl Elaborator<'_> {
             // interpretation is exactly why the parser passes arguments through verbatim.
             ExprAst::Call { name, args } if name == "@above" => {
                 if args.is_empty() || args.len() > 4 {
-                    return Err(elab(format!(
-                        "`above` takes 1 to 4 arguments (expr, time_tol, expr_tol, enable),                          got {}",
-                        args.len()
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "above")
+                            .arg("signature", "(expr, time_tol, expr_tol, enable)")
+                            .arg("min", 1)
+                            .arg("max", 4)
+                            .arg("got", args.len()),
+                    ));
                 }
                 let expr = self.lower_expr(args[0])?;
                 let time_tol = args.get(1).map(|&r| self.lower_expr(r)).transpose()?;
@@ -2394,10 +2371,14 @@ impl Elaborator<'_> {
             ExprAst::Call { name, args } if name == "@timer" => {
                 // `timer(start, period, time_tol, enable)` (LRM §5.10.3), positional.
                 if args.is_empty() || args.len() > 4 {
-                    return Err(elab(format!(
-                        "`timer` takes 1 to 4 arguments (start, period, time_tol, enable),                          got {}",
-                        args.len()
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "timer")
+                            .arg("signature", "(start, period, time_tol, enable)")
+                            .arg("min", 1)
+                            .arg("max", 4)
+                            .arg("got", args.len()),
+                    ));
                 }
                 let start = self.lower_expr(args[0])?;
                 let period = match args.get(1) {
@@ -2441,9 +2422,15 @@ impl Elaborator<'_> {
             // `neg_rate` defaulting to `pos_rate` — the LRM's own rule that a single stated rate
             // limits both directions symmetrically.
             ExprAst::Call { name, args } if matches!(name.as_str(), "transition" | "slew") => {
-                let value = *args
-                    .first()
-                    .ok_or_else(|| elab(format!("`{name}` requires at least a value argument")))?;
+                let value = *args.first().ok_or_else(|| {
+                    elab(
+                        Diagnostic::new(codes::E0335)
+                            .arg("name", name)
+                            .arg("signature", "(value, ...)")
+                            .arg("min", 1)
+                            .arg("got", args.len()),
+                    )
+                })?;
                 let value = self.lower_expr(value)?;
                 let mut arg_or = |i: usize, default: f64| -> Result<ExprId, FrontendError> {
                     match args.get(i) {
@@ -2505,11 +2492,25 @@ impl Elaborator<'_> {
                 // an optical waveguide's `absdelay(OptE(fwd), length*n_g/c)` *is* its
                 // propagation delay, and folding made light cross the guide instantly.
                 let value = *args.first().ok_or_else(|| {
-                    elab("`absdelay` requires at least a value and a delay argument".to_string())
+                    elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "absdelay")
+                            .arg("signature", "(value, delay[, max_delay])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
+                    )
                 })?;
-                let delay = *args
-                    .get(1)
-                    .ok_or_else(|| elab("`absdelay` requires a delay argument".to_string()))?;
+                let delay = *args.get(1).ok_or_else(|| {
+                    elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "absdelay")
+                            .arg("signature", "(value, delay[, max_delay])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
+                    )
+                })?;
                 let value = self.lower_expr(value)?;
                 let delay = self.lower_expr(delay)?;
                 // A third `maxdelay` argument is accepted and dropped: it exists to size a
@@ -2541,11 +2542,14 @@ impl Elaborator<'_> {
                 let (value, num, den) = match (args.first(), args.get(1), args.get(2), args.len()) {
                     (Some(&v), Some(&n), Some(&d), 3..=4) => (v, n, d),
                     _ => {
-                        return Err(elab(format!(
-                            "`{name}` takes three or four arguments: value, then a \
-                             numerator/zero argument, then a denominator/pole argument, and an \
-                             optional tolerance, e.g. `{name}(sig, {{1}}, {{1, tau}})`"
-                        )))
+                        return Err(elab(
+                            Diagnostic::new(codes::E0334)
+                                .arg("name", name)
+                                .arg("signature", "(value, numerator, denominator[, tolerance])")
+                                .arg("min", 3)
+                                .arg("max", 4)
+                                .arg("got", args.len()),
+                        ))
                     }
                 };
                 let builtin = match name.as_str() {
@@ -2562,9 +2566,7 @@ impl Elaborator<'_> {
                 let num_ids = self.array_lit_exprs(num, "numerator/zero")?;
                 let den_ids = self.array_lit_exprs(den, "denominator/pole")?;
                 if num_ids.is_empty() || den_ids.is_empty() {
-                    return Err(elab(format!(
-                        "`{name}` needs at least one numerator/zero and one denominator/pole entry"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0354).arg("name", name)));
                 }
                 // A zero/pole array is flattened `(re, im)` pairs, so an odd count is
                 // malformed. `va-codegen` checks this too, but the diagnostic is worth keeping
@@ -2575,9 +2577,7 @@ impl Elaborator<'_> {
                 if (numer_is_zeros && num_ids.len() % 2 != 0)
                     || (denom_is_poles && den_ids.len() % 2 != 0)
                 {
-                    return Err(elab(format!(
-                        "`{name}`'s zero/pole array must hold an even number of values — they are flattened `(real, imaginary)` root pairs"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0355).arg("name", name)));
                 }
                 let value_id = self.lower_expr(value)?;
                 let mut ids = Vec::with_capacity(num_ids.len() + den_ids.len() + 2);
@@ -2598,23 +2598,27 @@ impl Elaborator<'_> {
             ExprAst::Call { name, args }
                 if matches!(name.as_str(), "zi_nd" | "zi_np" | "zi_zd" | "zi_zp") =>
             {
-                let (value, num, den, period) = match (
-                    args.first(),
-                    args.get(1),
-                    args.get(2),
-                    args.get(3),
-                    args.len(),
-                ) {
-                    (Some(&v), Some(&n), Some(&d), Some(&t), 4..=6) => (v, n, d, t),
-                    _ => {
-                        return Err(elab(format!(
-                            "`{name}` takes four to six arguments: value, then a \
-                                 numerator/zero argument, then a denominator/pole argument, the \
-                                 sample period T, and optionally a transition time and start \
-                                 time, e.g. `{name}(sig, {{1}}, {{1, -0.5}}, T)`"
-                        )))
-                    }
-                };
+                let (value, num, den, period) =
+                    match (
+                        args.first(),
+                        args.get(1),
+                        args.get(2),
+                        args.get(3),
+                        args.len(),
+                    ) {
+                        (Some(&v), Some(&n), Some(&d), Some(&t), 4..=6) => (v, n, d, t),
+                        _ => return Err(elab(
+                            Diagnostic::new(codes::E0334)
+                                .arg("name", name)
+                                .arg(
+                                    "signature",
+                                    "(value, numerator, denominator, T[, t_transition[, t_start]])",
+                                )
+                                .arg("min", 4)
+                                .arg("max", 6)
+                                .arg("got", args.len()),
+                        )),
+                    };
                 let builtin = match name.as_str() {
                     "zi_nd" => Builtin::ZiNd,
                     "zi_np" => Builtin::ZiNp,
@@ -2641,10 +2645,7 @@ impl Elaborator<'_> {
                 if (num_is_roots && num_ids.len() % 2 != 0)
                     || (den_is_roots && den_ids.len() % 2 != 0)
                 {
-                    return Err(elab(format!(
-                        "`{name}`: a zero/pole array is a list of (re, im) pairs and needs an \
-                         even number of entries"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0355).arg("name", name)));
                 }
                 let mut flat = vec![value_id, period_id, tt_id, t0_id];
                 flat.push(self.out.push_expr(Expr::Const(num_ids.len() as f64)));
@@ -2656,21 +2657,20 @@ impl Elaborator<'_> {
             // Z-domain filter's numerator/zero/denominator/pole argument (those cases read it
             // directly via `array_lit_first`/`array_lit_values`/the root-product helpers above,
             // never through `lower_expr`) — not a general-purpose value anywhere in the LRM.
-            ExprAst::ArrayLit(_) => {
-                return Err(elab(
-                    "an array-literal expression (`{...}`) is only valid as a Laplace/Z-domain \
-                     filter's numerator/zero/denominator/pole argument (§4.5.11/§4.5.12), not \
-                     as a general-purpose value"
-                        .to_string(),
-                ))
-            }
+            ExprAst::ArrayLit(_) => return Err(elab(Diagnostic::new(codes::E0356))),
             // `real(expr)` is a type-cast call, not the declaration keyword (that's `Item::Var`/
             // `Stmt::VarDecl` — a different grammar production entirely). Every value in this
             // project is already `f64`, so it's a complete no-op: fold transparently to `expr`.
             ExprAst::Call { name, args } if name == "real" => {
-                let value = *args
-                    .first()
-                    .ok_or_else(|| elab("`real` requires an argument".to_string()))?;
+                let value = *args.first().ok_or_else(|| {
+                    elab(
+                        Diagnostic::new(codes::E0333)
+                            .arg("name", "real")
+                            .arg("signature", "(value)")
+                            .arg("expected", 1)
+                            .arg("got", args.len()),
+                    )
+                })?;
                 return self.lower_expr(value);
             }
             // `ddx(expr, probe)` is the analog partial-derivative operator (LRM §4.5.13):
@@ -2685,29 +2685,18 @@ impl Elaborator<'_> {
                     (Some(&e), Some(&p), 2) => (e, p),
                     _ => {
                         return Err(elab(
-                            "`ddx` takes exactly two arguments: an expression and a \
-                             potential-probe access, e.g. `ddx(I(br), V(p, n))`"
-                                .to_string(),
+                            Diagnostic::new(codes::E0333)
+                                .arg("name", "ddx")
+                                .arg("signature", "(expr, V(p, n))")
+                                .arg("expected", 2)
+                                .arg("got", args.len()),
                         ))
                     }
                 };
                 let access = match ast.expr(probe_arg) {
                     ExprAst::Probe(access) if access.kind == ast::AccessKind::Potential => access,
-                    ExprAst::Probe(_) => {
-                        return Err(elab(
-                            "`ddx(..., I(...))` is not supported: differentiating with respect \
-                             to a branch current needs flow probes to be independent unknowns, \
-                             which they are not in this codegen"
-                                .to_string(),
-                        ))
-                    }
-                    _ => {
-                        return Err(elab(
-                            "`ddx`'s second argument must be a potential-probe access, e.g. \
-                             `V(p, n)`"
-                                .to_string(),
-                        ))
-                    }
+                    ExprAst::Probe(_) => return Err(elab(Diagnostic::new(codes::E0357))),
+                    _ => return Err(elab(Diagnostic::new(codes::E0358))),
                 };
                 let inner = self.lower_expr(expr_arg)?;
                 let ir_access = self.lower_access(access)?;
@@ -2722,11 +2711,13 @@ impl Elaborator<'_> {
                 if let Some(fid) = self.funcs.get(name).copied() {
                     let expected = self.out.functions[fid.0 as usize].args.len();
                     if ids.len() != expected {
-                        return Err(elab(format!(
-                            "analog function `{name}` declares {expected} argument(s), but this \
-                             call passes {}",
-                            ids.len()
-                        )));
+                        return Err(elab(
+                            Diagnostic::new(codes::E0333)
+                                .arg("name", name)
+                                .arg("signature", "")
+                                .arg("expected", expected)
+                                .arg("got", ids.len()),
+                        ));
                     }
                     Expr::CallUser(fid, ids)
                 } else {
@@ -2774,10 +2765,14 @@ impl Elaborator<'_> {
             _ => unreachable!("guarded by the caller's match arm"),
         };
         if args.len() < min_args || args.len() > min_args + 1 {
-            return Err(elab(format!(
-                "`${name}` takes {min_args} or {} arguments",
-                min_args + 1
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0334)
+                    .arg("name", format!("${name}"))
+                    .arg("signature", "")
+                    .arg("min", min_args)
+                    .arg("max", min_args + 1)
+                    .arg("got", args.len()),
+            ));
         }
         match name {
             // The uniform distribution's mean is the midpoint of its bounds — no single
@@ -2808,11 +2803,7 @@ impl Elaborator<'_> {
         for &a in args {
             match self.ast.expr(a) {
                 ExprAst::Str(s) => names.push(s.as_str()),
-                _ => {
-                    return Err(elab(format!(
-                        "`{who}` analysis-name arguments must be string literals"
-                    )))
-                }
+                _ => return Err(elab(Diagnostic::new(codes::E0359).arg("name", who))),
             }
         }
         // An unrecognized phase name is an error, not a mask of zero. Folding it to "matches
@@ -2820,10 +2811,12 @@ impl Elaborator<'_> {
         // diagnostic — and a misspelling like `"transient"` for `"tran"` is exactly the kind of
         // mistake that produces a plausible-looking but wrong waveform.
         va_ir::phase_mask(names).map_err(|bad| {
-            elab(format!(
-                "`{who}`: `{bad}` is not a Verilog-A analysis name (expected one of {})",
-                va_ir::ANALYSIS_PHASES.join(", ")
-            ))
+            elab(
+                Diagnostic::new(codes::E0360)
+                    .arg("name", who)
+                    .arg("analysis", bad)
+                    .arg("expected", va_ir::ANALYSIS_PHASES.join(", ")),
+            )
         })
     }
 
@@ -2896,12 +2889,15 @@ impl Elaborator<'_> {
                     .map(|f| format!("`{f}`"))
                     .collect::<Vec<_>>()
                     .join(" and ");
-                return Err(elab(format!(
-                    "`{}(...)` is not an access function of discipline `{disc_name}`, which net \
-                     `{net}` is declared with: its access functions are {defined}; write \
-                     `{expected}(...)` for its {quantity}",
-                    access.func
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0361)
+                        .arg("func", &access.func)
+                        .arg("discipline", disc_name)
+                        .arg("net", net)
+                        .arg("defined", defined)
+                        .arg("expected", expected)
+                        .arg("quantity", quantity),
+                ));
             }
         }
         Ok(())
@@ -3017,10 +3013,7 @@ impl Elaborator<'_> {
         for (d, &e) in idxs.iter().enumerate() {
             if self.const_eval(e).is_err() {
                 if dyn_dim.is_some() {
-                    return Err(elab(format!(
-                        "`{what}` has two dynamically-indexed dimensions in the same access; \
-                         at most one index position may be a genuinely runtime expression"
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0362).arg("name", what)));
                 }
                 dyn_dim = Some(d);
             }
@@ -3040,26 +3033,13 @@ impl Elaborator<'_> {
         if arg.slice.is_some() {
             if let Some(dims) = self.vectors.get(&arg.name) {
                 if dims.len() == 2 {
-                    return Err(elab(format!(
-                        "`{}[..]`: slicing a 2-D vector net is not supported (slicing is \
-                         single-dimension-only); index both dimensions instead, e.g. \
-                         `V({}[0][0])`",
-                        arg.name, arg.name
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0363).arg("name", &arg.name)));
                 }
             }
             if !arg.index.is_empty() {
-                return Err(elab(format!(
-                    "`{}[..]`: a `[lo:hi]` slice cannot be combined with an index — slicing is \
-                     single-dimension-only",
-                    arg.name
-                )));
+                return Err(elab(Diagnostic::new(codes::E0363).arg("name", &arg.name)));
             }
-            return Err(elab(format!(
-                "`{}[..]` is a vector slice; a branch access/declaration needs a single node, \
-                 e.g. `V({}[0])` (a slice is only valid as an instance port-connection argument)",
-                arg.name, arg.name
-            )));
+            return Err(elab(Diagnostic::new(codes::E0364).arg("name", &arg.name)));
         }
         if arg.index.is_empty() {
             if let Some(dims) = self.vectors.get(&arg.name) {
@@ -3068,18 +3048,18 @@ impl Elaborator<'_> {
                 } else {
                     format!("`V({}[0][0])`", arg.name)
                 };
-                return Err(elab(format!(
-                    "`{}` is a {}-D vector net; an access must index every dimension, e.g. {}",
-                    arg.name,
-                    dims.len(),
-                    example
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0365)
+                        .arg("name", &arg.name)
+                        .arg("dims", dims.len())
+                        .arg("example", example),
+                ));
             }
             return self
                 .nodes
                 .get(&arg.name)
                 .copied()
-                .ok_or_else(|| elab(format!("unknown net `{}` in branch access", arg.name)));
+                .ok_or_else(|| elab(Diagnostic::new(codes::E0366).arg("name", &arg.name)));
         }
         let idxs: Vec<i64> = arg
             .index
@@ -3097,30 +3077,36 @@ impl Elaborator<'_> {
     /// can resolve each concrete candidate index without an `ExprRef` for a literal — there is
     /// none, since a literal loop index doesn't come from the source AST.
     fn resolve_vector_node_at(&self, name: &str, idxs: &[i64]) -> Result<NodeId, FrontendError> {
-        let dims = self.vectors.get(name).ok_or_else(|| {
-            elab(format!(
-                "`{name}` is not a vector net (no bracketed `[msb:lsb]` range declared)"
-            ))
-        })?;
+        let dims = self
+            .vectors
+            .get(name)
+            .ok_or_else(|| elab(Diagnostic::new(codes::E0367).arg("name", name)))?;
         if dims.len() != idxs.len() {
-            return Err(elab(format!(
-                "`{name}` is declared with {} dimension(s) but accessed with {}",
-                dims.len(),
-                idxs.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0368)
+                    .arg("name", name)
+                    .arg("declared", dims.len())
+                    .arg("used", idxs.len()),
+            ));
         }
         for (d, (&(lo, hi), &idx)) in dims.iter().zip(idxs).enumerate() {
             if idx < lo || idx > hi {
-                return Err(elab(format!(
-                    "index {idx} is out of `{name}`'s declared dimension {d} range [{lo}:{hi}]"
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0369)
+                        .arg("index", idx)
+                        .arg("name", name)
+                        .arg("dim", d)
+                        .arg("lo", lo)
+                        .arg("hi", hi),
+                ));
             }
         }
         let key = indexed_key(name, idxs);
         self.nodes.get(&key).copied().ok_or_else(|| {
-            elab(format!(
-                "internal error: vector node `{key}` was not interned"
-            ))
+            elab(
+                Diagnostic::new(codes::E0001)
+                    .arg("detail", format!("vector node `{key}` was not interned")),
+            )
         })
     }
 
@@ -3139,20 +3125,11 @@ impl Elaborator<'_> {
         if let Some((msb, lsb)) = arg.slice {
             if let Some(dims) = self.vectors.get(&arg.name) {
                 if dims.len() == 2 {
-                    return Err(elab(format!(
-                        "`{}[..]`: slicing a 2-D vector net is not supported (slicing is \
-                         single-dimension-only); index both dimensions instead, e.g. \
-                         `{}[0][0]`",
-                        arg.name, arg.name
-                    )));
+                    return Err(elab(Diagnostic::new(codes::E0363).arg("name", &arg.name)));
                 }
             }
             if !arg.index.is_empty() {
-                return Err(elab(format!(
-                    "`{}[..]`: a `[lo:hi]` slice cannot be combined with an index — slicing is \
-                     single-dimension-only",
-                    arg.name
-                )));
+                return Err(elab(Diagnostic::new(codes::E0363).arg("name", &arg.name)));
             }
             let msb = self.const_eval_int(msb, "vector slice bound")?;
             let lsb = self.const_eval_int(lsb, "vector slice bound")?;
@@ -3171,12 +3148,11 @@ impl Elaborator<'_> {
         }
         if let Some(dims) = self.vectors.get(&arg.name) {
             if dims.len() != 1 {
-                return Err(elab(format!(
-                    "`{}` is a {}-D vector net; a bare (unindexed) port connection is only \
-                     supported for a 1-D vector net",
-                    arg.name,
-                    dims.len()
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0370)
+                        .arg("name", &arg.name)
+                        .arg("dims", dims.len()),
+                ));
             }
             let (lo, hi) = dims[0];
             return (lo..=hi)
@@ -3184,7 +3160,7 @@ impl Elaborator<'_> {
                 .collect();
         }
         Ok(vec![self.nodes.get(&arg.name).copied().ok_or_else(
-            || elab(format!("unknown net `{}` in port connection", arg.name)),
+            || elab(Diagnostic::new(codes::E0366).arg("name", &arg.name)),
         )?])
     }
 
@@ -3208,19 +3184,17 @@ impl Elaborator<'_> {
             let Some(dyn_dim) = self.dynamic_index_pos(&arg.name, &arg.index)? else {
                 continue;
             };
-            let dims = self.vectors.get(&arg.name).ok_or_else(|| {
-                elab(format!(
-                    "`{}` is not a vector net (no bracketed `[msb:lsb]` range declared)",
-                    arg.name
-                ))
-            })?;
+            let dims = self
+                .vectors
+                .get(&arg.name)
+                .ok_or_else(|| elab(Diagnostic::new(codes::E0367).arg("name", &arg.name)))?;
             if dims.len() != arg.index.len() {
-                return Err(elab(format!(
-                    "`{}` is declared with {} dimension(s) but accessed with {}",
-                    arg.name,
-                    dims.len(),
-                    arg.index.len()
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0368)
+                        .arg("name", &arg.name)
+                        .arg("declared", dims.len())
+                        .arg("used", arg.index.len()),
+                ));
             }
             let other_idx = if dims.len() == 2 {
                 Some(self.const_eval_int(arg.index[1 - dyn_dim], "vector index")?)
@@ -3406,28 +3380,22 @@ impl Elaborator<'_> {
         port: &str,
     ) -> Result<ExprId, FrontendError> {
         if kind != ast::AccessKind::Flow {
-            return Err(elab(format!(
-                "`V(<{port}>)` is invalid — a port-current probe is a flow access only \
-                 (LRM §5.4.3); use `I(<{port}>)`"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0371).arg("port", port)));
         }
         if !self.ast.ports.iter().any(|p| p == port) {
-            return Err(elab(format!(
-                "`{port}` is not a declared port of this module; a port-current probe can only \
-                 name one of this module's own ports"
-            )));
+            return Err(elab(Diagnostic::new(codes::E0372).arg("port", port)));
         }
         if let Some(dims) = self.vectors.get(port) {
-            return Err(elab(format!(
-                "`{port}` is a {}-D vector port; port-current probes are only supported for a \
-                 scalar port (v1 limitation)",
-                dims.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0373)
+                    .arg("port", port)
+                    .arg("dims", dims.len()),
+            ));
         }
         let node = *self
             .nodes
             .get(port)
-            .ok_or_else(|| elab(format!("port `{port}` has no discipline declaration")))?;
+            .ok_or_else(|| elab(Diagnostic::new(codes::E0306).arg("port", port)))?;
 
         // Which local variables can carry a `ddt` into a contribution's right-hand side. Computed
         // once here, over the analog block lowered so far, and threaded down through the fold so
@@ -3614,7 +3582,7 @@ impl Elaborator<'_> {
     ///
     /// The message names the variable that carries the `ddt`; the line comes from
     /// [`Self::lower_stmt`], which locates the error at the contribution (2.23.1).
-    fn ddt_guard_message(&self, port: &str, guard: ExprId, tainted: &HashSet<u32>) -> String {
+    fn ddt_guard_message(&self, port: &str, guard: ExprId, tainted: &HashSet<u32>) -> Diagnostic {
         let via = match self.first_tainted_var(guard, tainted) {
             Some(id) => match self.vars.iter().find(|(_, v)| **v == id) {
                 Some((name, _)) => format!("through variable `{name}`"),
@@ -3622,15 +3590,9 @@ impl Elaborator<'_> {
             },
             None => "written in the condition itself".to_string(),
         };
-        format!(
-            "`I(<{port}>)` can't sum a flow contribution whose enclosing `if` condition depends \
-             on `ddt` ({via}). The probe reports conduction current only (§ port-current probe), \
-             so a charge term is dropped from a contribution's *value* — but a condition is kept \
-             whole or not at all, so keeping this one would carry the `ddt` into the ordinary \
-             assignment that reads the probe, which no model wrote and `va-codegen` refuses. \
-             Compute the condition from a `ddt`-free expression, or read the branch current \
-             directly instead of probing the port."
-        )
+        Diagnostic::new(codes::E0374)
+            .arg("port", port)
+            .arg("via", via)
     }
 
     /// The first `ddt`-tainted local variable reachable in `expr`, for
@@ -3757,9 +3719,7 @@ impl Elaborator<'_> {
                         || self.branch_flow_touches(node, default);
                     if hit {
                         return Err(elab(
-                            "a port-current probe (§ port-current probe) can't sum a flow \
-                             contribution made inside a `case` arm — not yet supported"
-                                .to_string(),
+                            Diagnostic::new(codes::E0375).arg("construct", "`case` arm"),
                         ));
                     }
                 }
@@ -3767,11 +3727,7 @@ impl Elaborator<'_> {
                 | va_ir::Stmt::While { body, .. }
                 | va_ir::Stmt::Repeat { body, .. } => {
                     if self.branch_flow_touches(node, body) {
-                        return Err(elab(
-                            "a port-current probe (§ port-current probe) can't sum a flow \
-                             contribution made inside a loop — not yet supported"
-                                .to_string(),
-                        ));
+                        return Err(elab(Diagnostic::new(codes::E0375).arg("construct", "loop")));
                     }
                 }
                 // `bound_step` makes no contribution to any branch, so it adds no term here.
@@ -3847,32 +3803,10 @@ impl Elaborator<'_> {
             return Ok(());
         };
         Err(elab(match found {
-            CallSiteState::Operator(name) => format!(
-                "`{name}` inside a `{keyword}` loop: LRM §4.5.15 does not allow analog operators \
-                 in `repeat`, `while` or non-genvar `for` loops, because an operator keeps \
-                 internal state that has to be maintained once per solver iteration. Here that \
-                 state is one slot per call site written in the source, so N trips round this \
-                 loop do not get N histories — they share the single history of this one \
-                 `{name}`, and every trip but the last is overwritten by the next. Running it \
-                 anyway would answer with a filter fed by whichever value the loop happened to \
-                 pass last, not with the N filtered signals the model describes. Write the loop \
-                 as a generate loop instead — declare its control variable `genvar` rather than \
-                 `integer` — which is unrolled at elaboration into N distinct call sites, each \
-                 with its own state; that is exactly why the LRM (§5.9.3) permits analog \
-                 operators in an analog `for` and nowhere else. If the operator does not \
-                 actually vary with the loop, hoist it out of the loop instead"
-            ),
-            CallSiteState::Event => format!(
-                "a monitored event trigger (`@(cross(…))`/`@(above(…))`/`@(timer(…))`) inside a \
-                 `{keyword}` loop: LRM §5.9 does not allow event control statements in `repeat`, \
-                 `while` or non-genvar `for` loops. A monitored event here is a site registered \
-                 once, at elaboration, which the transient loop watches between timepoints; the \
-                 statement inside the loop only reads back whether that one site fired. So the \
-                 trigger would be monitored even on a solve where the loop never runs, and on a \
-                 timepoint where it did fire the body would run once per trip rather than once. \
-                 Put the loop inside the event instead of the event inside the loop: \
-                 `@(cross(…)) begin … end` may contain a loop"
-            ),
+            CallSiteState::Operator(name) => Diagnostic::new(codes::E0376)
+                .arg("name", name)
+                .arg("keyword", keyword),
+            CallSiteState::Event => Diagnostic::new(codes::E0377).arg("keyword", keyword),
         }))
     }
 
@@ -3982,29 +3916,35 @@ impl Elaborator<'_> {
     /// [`Self::resolve_vector_node_at`] is: a runtime-indexed expansion chain needs to resolve
     /// several concrete literal indices, none of which have an `ExprRef` of their own.
     fn resolve_array_var_at(&self, name: &str, idxs: &[i64]) -> Result<VarId, FrontendError> {
-        let dims = self.var_arrays.get(name).ok_or_else(|| {
-            elab(format!(
-                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
-            ))
-        })?;
+        let dims = self
+            .var_arrays
+            .get(name)
+            .ok_or_else(|| elab(Diagnostic::new(codes::E0367).arg("name", name)))?;
         if dims.len() != idxs.len() {
-            return Err(elab(format!(
-                "`{name}` is declared with {} dimension(s) but accessed with {}",
-                dims.len(),
-                idxs.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0368)
+                    .arg("name", name)
+                    .arg("declared", dims.len())
+                    .arg("used", idxs.len()),
+            ));
         }
         for (d, (&(lo, hi), &idx)) in dims.iter().zip(idxs).enumerate() {
             if idx < lo || idx > hi {
-                return Err(elab(format!(
-                    "index {idx} is out of `{name}`'s declared dimension {d} range [{lo}:{hi}]"
-                )));
+                return Err(elab(
+                    Diagnostic::new(codes::E0369)
+                        .arg("index", idx)
+                        .arg("name", name)
+                        .arg("dim", d)
+                        .arg("lo", lo)
+                        .arg("hi", hi),
+                ));
             }
         }
         let key = indexed_key(name, idxs);
         self.vars.get(&key).copied().ok_or_else(|| {
-            elab(format!(
-                "internal error: array variable node `{key}` was not interned"
+            elab(Diagnostic::new(codes::E0001).arg(
+                "detail",
+                format!("array variable node `{key}` was not interned"),
             ))
         })
     }
@@ -4020,17 +3960,17 @@ impl Elaborator<'_> {
         let Some(dyn_dim) = self.dynamic_index_pos(name, idxs)? else {
             return Ok(None);
         };
-        let dims = self.var_arrays.get(name).ok_or_else(|| {
-            elab(format!(
-                "`{name}` is not an array variable (no bracketed `[msb:lsb]` declaration)"
-            ))
-        })?;
+        let dims = self
+            .var_arrays
+            .get(name)
+            .ok_or_else(|| elab(Diagnostic::new(codes::E0367).arg("name", name)))?;
         if dims.len() != idxs.len() {
-            return Err(elab(format!(
-                "`{name}` is declared with {} dimension(s) but accessed with {}",
-                dims.len(),
-                idxs.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0368)
+                    .arg("name", name)
+                    .arg("declared", dims.len())
+                    .arg("used", idxs.len()),
+            ));
         }
         let other_idx = if dims.len() == 2 {
             Some(self.const_eval_int(idxs[1 - dyn_dim], "array variable index")?)
@@ -4167,7 +4107,7 @@ impl Elaborator<'_> {
             } = item
             {
                 if !seen_names.insert(name.clone()) {
-                    return Err(elab(format!("duplicate instance name `{name}`")));
+                    return Err(elab(Diagnostic::new(codes::E0378).arg("name", name)));
                 }
                 self.inline_instance(module, name, params, connections)?;
             }
@@ -4189,22 +4129,24 @@ impl Elaborator<'_> {
         if module_name == self.ast.name || self.stack.iter().any(|s| s == module_name) {
             let mut chain: Vec<&str> = self.stack.iter().map(String::as_str).collect();
             chain.push(&self.ast.name);
-            return Err(elab(format!(
-                "instantiation cycle: `{module_name}` (instantiated as `{inst_name}` inside \
-                 `{}`) already appears in the elaboration chain: {}",
-                self.ast.name,
-                chain.join(" -> ")
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0379)
+                    .arg("module", module_name)
+                    .arg("instance", inst_name)
+                    .arg("parent", &self.ast.name)
+                    .arg("chain", chain.join(" -> ")),
+            ));
         }
         let sub_ast = self
             .library
             .iter()
             .find(|m| m.name == module_name)
             .ok_or_else(|| {
-                elab(format!(
-                    "instance `{inst_name}` references unknown module `{module_name}` (no sibling \
-                 `module {module_name} ... endmodule` in this compilation unit)"
-                ))
+                elab(
+                    Diagnostic::new(codes::E0380)
+                        .arg("instance", inst_name)
+                        .arg("module", module_name),
+                )
             })?;
 
         let mut overrides: HashMap<String, f64> = HashMap::new();
@@ -4218,19 +4160,24 @@ impl Elaborator<'_> {
                 .find(|it| matches!(it, Item::Param { name, .. } if name == pname))
             {
                 None => {
-                    return Err(elab(format!(
-                        "instance `{inst_name}` overrides unknown parameter `{pname}` of module \
-                     `{module_name}`"
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0381)
+                            .arg("instance", inst_name)
+                            .arg("param", pname)
+                            .arg("module", module_name),
+                    ));
                 }
                 // A `localparam` is a module-internal constant, not part of the
                 // instantiation interface (LRM §3.4.2). Silently honouring the override
                 // would let a parent rewrite a constant the module's author declared
                 // precisely so that it could not be.
                 Some(Item::Param { is_local: true, .. }) => {
-                    return Err(elab(format!(
-                        "instance `{inst_name}` overrides `{pname}`, which module \n                         `{module_name}` declares as a `localparam` — a localparam is \n                         a module-internal constant and cannot be overridden"
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0382)
+                            .arg("instance", inst_name)
+                            .arg("param", pname)
+                            .arg("module", module_name),
+                    ));
                 }
                 Some(_) => {}
             }
@@ -4271,12 +4218,13 @@ impl Elaborator<'_> {
         )?;
 
         if connections.len() != sub.ports.len() {
-            return Err(elab(format!(
-                "instance `{inst_name}` of `{module_name}` connects {} port(s), but the module \
-                 declares {}",
-                connections.len(),
-                sub.ports.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0383)
+                    .arg("instance", inst_name)
+                    .arg("module", module_name)
+                    .arg("got", connections.len())
+                    .arg("expected", sub.ports.len()),
+            ));
         }
 
         let all_positional = connections
@@ -4286,9 +4234,9 @@ impl Elaborator<'_> {
             .iter()
             .all(|c| matches!(c, ast::PortConn::Named { .. }));
         if !all_positional && !all_named {
-            return Err(elab(format!(
-                "instance `{inst_name}`: cannot mix positional and named port connections"
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0384).arg("instance", inst_name),
+            ));
         }
 
         // § port-connection discipline checking: a port carries the discipline of the net it was
@@ -4340,15 +4288,20 @@ impl Elaborator<'_> {
                     .iter()
                     .position(|p| p == port)
                     .ok_or_else(|| {
-                        elab(format!(
-                            "instance `{inst_name}` of `{module_name}`: no port named `{port}`"
-                        ))
+                        elab(
+                            Diagnostic::new(codes::E0385)
+                                .arg("instance", inst_name)
+                                .arg("module", module_name)
+                                .arg("port", port),
+                        )
                     })?;
                 if covered[idx] {
-                    return Err(elab(format!(
-                        "instance `{inst_name}` of `{module_name}`: port `{port}` connected \
-                         more than once"
-                    )));
+                    return Err(elab(
+                        Diagnostic::new(codes::E0386)
+                            .arg("instance", inst_name)
+                            .arg("module", module_name)
+                            .arg("port", port),
+                    ));
                 }
                 covered[idx] = true;
                 // `.port()` — explicitly unconnected. Marked covered above (the slot *was*
@@ -4461,16 +4414,15 @@ impl Elaborator<'_> {
             return Ok(());
         }
         let show = discipline_name;
-        Err(elab(format!(
-            "instance `{inst_name}` of `{module_name}`: port `{port_label}` is `{}` but is \
-             connected to net `{}`, which is `{}`. Connecting them would make one node stand \
-             for two different physical quantities; wire the port to a `{}` net, or declare the \
-             two disciplines over the same natures if they really are the same physics.",
-            show(port_d),
-            net_arg.name,
-            show(net_d),
-            show(port_d),
-        )))
+        Err(elab(
+            Diagnostic::new(codes::E0387)
+                .arg("instance", inst_name)
+                .arg("module", module_name)
+                .arg("port", port_label)
+                .arg("port_discipline", show(port_d))
+                .arg("net", &net_arg.name)
+                .arg("net_discipline", show(net_d)),
+        ))
     }
 
     fn merge_submodule(&mut self, inst_name: &str, sub: Module, node_map: HashMap<NodeId, NodeId>) {
@@ -4590,13 +4542,12 @@ impl Elaborator<'_> {
 
 // --- free helpers --------------------------------------------------------------------
 
-fn elab(msg: String) -> FrontendError {
-    FrontendError::Elaborate(msg)
+fn elab(d: Diagnostic) -> FrontendError {
+    FrontendError::Elaborate(d)
 }
 
-/// `e`, located `at` (a `file:line:col`) unless it already is. An elaboration error is
-/// located by prefixing `at …: `, the shape preprocessor errors take; a refusal by its `at`
-/// field. Applied from the inside out — an expression before its statement, a statement before
+/// `e`, located `at` (a `file:line:col`) unless it already is: an elaboration error through its
+/// diagnostic's location, a refusal through its `at` field. Applied from the inside out — an expression before its statement, a statement before
 /// its item — so the first, most precise location wins and the outer ones leave it alone.
 ///
 /// `at` is a closure so a caller pays for formatting a location only when it is used: `const_eval`
@@ -4604,7 +4555,7 @@ fn elab(msg: String) -> FrontendError {
 /// formatting on every such failure tripled `check`'s time on the benchmark models.
 fn locate(e: FrontendError, at: impl FnOnce() -> Option<String>) -> FrontendError {
     let unlocated = match &e {
-        FrontendError::Elaborate(m) => !m.starts_with("at "),
+        FrontendError::Elaborate(d) => d.location().is_none(),
         FrontendError::Refused(r) => r.at.is_none(),
         _ => false,
     };
@@ -4615,11 +4566,9 @@ fn locate(e: FrontendError, at: impl FnOnce() -> Option<String>) -> FrontendErro
         return e;
     };
     match e {
-        FrontendError::Elaborate(m) if !m.starts_with("at ") => {
-            FrontendError::Elaborate(format!("at {at}: {m}"))
-        }
+        FrontendError::Elaborate(d) if d.location().is_none() => FrontendError::Elaborate(d.at(at)),
         FrontendError::Refused(r) if r.at.is_none() => {
-            FrontendError::Refused(r.at(format!("at {at}")))
+            FrontendError::refused((*r).at(format!("at {at}")))
         }
         e => e,
     }
@@ -4686,7 +4635,7 @@ fn call_site_state_operator(b: Builtin) -> Option<&'static str> {
 ///
 /// The caller decides where the warnings go (`va-cli` prints them beside its other warnings);
 /// elaboration itself never prints.
-pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<String> {
+pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<Diagnostic> {
     let directed: HashSet<&str> = ast
         .items
         .iter()
@@ -4701,17 +4650,13 @@ pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<String> {
         .enumerate()
         .filter(|(_, port)| !directed.contains(port.as_str()))
         .map(|(i, port)| {
-            let at = ast
-                .port_pos
-                .get(i)
-                .copied()
-                .flatten()
-                .map_or_else(String::new, |p| format!("at {}: ", ast.describe(p)));
-            format!(
-                "{at}module `{}`: port `{port}` has no direction; it is treated as `inout`. \
-                 Declare it `inout {port};` (or `input` / `output`) to be explicit",
-                ast.name
-            )
+            let d = Diagnostic::new(codes::W0301)
+                .arg("module", &ast.name)
+                .arg("port", port);
+            match ast.port_pos.get(i).copied().flatten() {
+                Some(p) => d.at(ast.describe(p)),
+                None => d,
+            }
         })
         .collect()
 }
@@ -4809,12 +4754,14 @@ fn bind_port_nodes(
     node_map: &mut HashMap<NodeId, NodeId>,
 ) -> Result<(), FrontendError> {
     if sub_nodes.len() != parent_nodes.len() {
-        return Err(elab(format!(
-            "instance `{inst_name}` of `{module_name}`: port `{port_label}` is {}-wide but the \
-             connection is {}-wide",
-            sub_nodes.len(),
-            parent_nodes.len()
-        )));
+        return Err(elab(
+            Diagnostic::new(codes::E0388)
+                .arg("instance", inst_name)
+                .arg("module", module_name)
+                .arg("port", port_label)
+                .arg("port_width", sub_nodes.len())
+                .arg("net_width", parent_nodes.len()),
+        ));
     }
     for (&sub_node, &parent_node) in sub_nodes.iter().zip(parent_nodes.iter()) {
         node_map.insert(sub_node, parent_node);
@@ -5123,14 +5070,16 @@ fn check_builtin_arity(name: &str, got: usize) -> Result<(), FrontendError> {
     if (min..=max).contains(&got) {
         return Ok(());
     }
-    let expected = match (min, max) {
-        (1, 1) => "exactly one argument".to_string(),
-        (a, b) if a == b => format!("exactly {a} arguments"),
-        (a, b) => format!("{a} to {b} arguments"),
+    let d = if min == max {
+        Diagnostic::new(codes::E0333).arg("expected", min)
+    } else {
+        Diagnostic::new(codes::E0334)
+            .arg("min", min)
+            .arg("max", max)
     };
-    Err(elab(format!(
-        "`{name}` takes {expected}, but this call passes {got}"
-    )))
+    Err(elab(
+        d.arg("name", name).arg("signature", "").arg("got", got),
+    ))
 }
 
 /// Map a call-syntax function name to a math [`Builtin`].
@@ -5172,7 +5121,7 @@ fn call_builtin(name: &str) -> Result<Builtin, FrontendError> {
         "atanh" => Builtin::Atanh,
         "ddt" => Builtin::Ddt,
         "idt" => Builtin::Idt,
-        other => return Err(elab(format!("unknown function `{other}`"))),
+        other => return Err(elab(Diagnostic::new(codes::E0342).arg("name", other))),
     })
 }
 
@@ -5197,25 +5146,15 @@ fn table_control_code(control: Option<&str>) -> Result<u32, FrontendError> {
     };
     let raw = raw.trim();
     if raw.contains(';') {
-        return Err(FrontendError::Refused(
-            crate::Refusal::new(
-                format!("`$table_model` control string `{raw}`, which selects a dependent column"),
-                "the `;N` selector picks one of several dependent columns in a file, and this                  reads exactly one `x y` pair per line. Ignoring it would silently return the                  wrong column",
-            )
-            .instead("give the file a single dependent column and drop the `;N`")
-            .tracking("docs/token-reference.md, `$table_model`"),
+        return Err(FrontendError::refused(
+            crate::Refusal::coded(codes::R0306, &[("control", raw)])
+                .tracking("docs/token-reference.md, `$table_model`"),
         ));
     }
     if raw.contains(',') {
-        return Err(FrontendError::Refused(
-            crate::Refusal::new(
-                format!(
-                    "`$table_model` control string `{raw}`, which describes more than one                      dimension"
-                ),
-                "a comma-separated control string gives one sub-string per independent                  variable, and only one dimension is implemented",
-            )
-            .instead("give a single sub-string, as `\"1CL\"`")
-            .tracking("docs/token-reference.md, `$table_model`"),
+        return Err(FrontendError::refused(
+            crate::Refusal::coded(codes::R0307, &[("control", raw)])
+                .tracking("docs/token-reference.md, `$table_model`"),
         ));
     }
     let mut chars = raw.chars();
@@ -5231,26 +5170,15 @@ fn table_control_code(control: Option<&str>) -> Result<u32, FrontendError> {
             2
         }
         Some(c @ ('2' | '3')) => {
-            return Err(FrontendError::Refused(
-                crate::Refusal::new(
-                    format!(
-                        "`$table_model` interpolation `{c}` ({} spline)",
-                        if c == '2' { "quadratic" } else { "cubic" }
-                    ),
-                    "only linear (`1`) and closest-point (`D`) are implemented. Substituting                      linear would not be a rounder answer but a different function — a spline                      and a chord agree only at the knots, and the derivative the Jacobian needs                      differs everywhere between them",
-                )
-                .instead("write `1` for linear or `D` for closest-point, or supply a finer table")
-                .tracking("docs/token-reference.md, `$table_model`"),
+            return Err(FrontendError::refused(
+                crate::Refusal::coded(codes::R0308, &[("char", &c.to_string())])
+                    .tracking("docs/token-reference.md, `$table_model`"),
             ));
         }
         Some(c @ ('I' | 'i')) => {
-            return Err(FrontendError::Refused(
-                crate::Refusal::new(
-                    format!("`$table_model` interpolation `{c}` (ignore this column)"),
-                    "marking a column ignored only means something for the multi-column source                      this does not read",
-                )
-                .instead("give the file one independent and one dependent column")
-                .tracking("docs/token-reference.md, `$table_model`"),
+            return Err(FrontendError::refused(
+                crate::Refusal::coded(codes::R0309, &[("char", &c.to_string())])
+                    .tracking("docs/token-reference.md, `$table_model`"),
             ));
         }
         // No interpolation character: the LRM's default is linear, and what follows is the
@@ -5262,20 +5190,11 @@ fn table_control_code(control: Option<&str>) -> Result<u32, FrontendError> {
         match c {
             Some('C') | Some('c') => Ok(1),
             Some('L') | Some('l') => Ok(2),
-            Some('E') | Some('e') => Err(FrontendError::Refused(
-                crate::Refusal::new(
-                    "`$table_model` extrapolation `E`",
-                    "`E` makes a lookup outside the table a fatal error, and this engine has no                      channel to raise one from inside a model evaluation — `load` may not fail.                      Treating it as `C` would turn the diagnostic the model asked for into                      silence at exactly the point it wanted to be told",
-                )
-                .instead(
-                    "write `C` to clamp at the endpoint or `L` to continue the end slope, or                      widen the table to cover the range",
-                )
-                .tracking("docs/token-reference.md, `$table_model`"),
+            Some('E') | Some('e') => Err(FrontendError::refused(
+                crate::Refusal::coded(codes::R0310, &[])
+                    .tracking("docs/token-reference.md, `$table_model`"),
             )),
-            Some(other) => Err(elab(format!(
-                "`{other}` is not a $table_model extrapolation character; the LRM's Table 9-31 \
-                 has `C` (constant), `L` (linear) and `E` (error)"
-            ))),
+            Some(other) => Err(elab(Diagnostic::new(codes::E0389).arg("char", other))),
             None => Ok(2), // LRM default
         }
     };
@@ -5287,10 +5206,7 @@ fn table_control_code(control: Option<&str>) -> Result<u32, FrontendError> {
         c => extrap(c)?,
     };
     if chars.next().is_some() {
-        return Err(elab(format!(
-            "$table_model control string `{raw}` has more than the three characters LRM §9.21.2 \
-             allows in one dimension"
-        )));
+        return Err(elab(Diagnostic::new(codes::E0390).arg("control", raw)));
     }
     Ok(interp * 100 + lo * 10 + hi)
 }
@@ -5325,10 +5241,11 @@ fn read_table_file(
             r
         });
     let Some(text) = text else {
-        return Err(elab(format!(
-            "$table_model cannot read `{name}`; looked in {}",
-            tried.join(", ")
-        )));
+        return Err(elab(
+            Diagnostic::new(codes::E0391)
+                .arg("file", name)
+                .arg("tried", tried.join(", ")),
+        ));
     };
 
     let mut pts: Vec<(f64, f64)> = Vec::new();
@@ -5342,24 +5259,28 @@ fn read_table_file(
             .filter(|t| !t.is_empty())
             .collect();
         let (Some(x), Some(y)) = (cols.first(), cols.get(1)) else {
-            return Err(elab(format!(
-                "{name}:{}: `{line}` is not an `x y` pair",
-                i + 1
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0392)
+                    .arg("file", name)
+                    .arg("line", i + 1)
+                    .arg("text", line),
+            ));
         };
         if cols.len() > 2 {
-            return Err(elab(format!(
-                "{name}:{}: {} columns, but only a single dependent column is implemented — the \
-                 LRM's `;N` selector that would choose among them is refused",
-                i + 1,
-                cols.len()
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0393)
+                    .arg("file", name)
+                    .arg("line", i + 1)
+                    .arg("columns", cols.len()),
+            ));
         }
         let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.parse::<f64>()) else {
-            return Err(elab(format!(
-                "{name}:{}: `{line}` is not two numbers",
-                i + 1
-            )));
+            return Err(elab(
+                Diagnostic::new(codes::E0392)
+                    .arg("file", name)
+                    .arg("line", i + 1)
+                    .arg("text", line),
+            ));
         };
         pts.push((x, y));
     }
@@ -5370,19 +5291,23 @@ fn read_table_file(
         match out.last() {
             Some(&(px, py)) if px == x && py == y => continue, // LRM: drop the duplicate
             Some(&(px, py)) if px == x => {
-                return Err(elab(format!(
-                    "{name}: two points at x = {x} with different values ({py} and {y}); a table \
-                     cannot have two answers at one point (LRM §9.21.1)"
-                )))
+                return Err(elab(
+                    Diagnostic::new(codes::E0394)
+                        .arg("file", name)
+                        .arg("x", x)
+                        .arg("y1", py)
+                        .arg("y2", y),
+                ))
             }
             _ => out.push((x, y)),
         }
     }
     if out.len() < 2 {
-        return Err(elab(format!(
-            "{name}: a $table_model table needs at least two distinct points, found {}",
-            out.len()
-        )));
+        return Err(elab(
+            Diagnostic::new(codes::E0395)
+                .arg("file", name)
+                .arg("count", out.len()),
+        ));
     }
     Ok(out)
 }
@@ -5392,7 +5317,7 @@ fn sysfunc_builtin(name: &str) -> Result<Builtin, FrontendError> {
     Ok(match name {
         "vt" => Builtin::Vt,
         "temperature" => Builtin::Temperature,
-        other => return Err(elab(format!("unknown system function `${other}`"))),
+        other => return Err(elab(Diagnostic::new(codes::E0343).arg("name", other))),
     })
 }
 
@@ -5426,11 +5351,7 @@ fn eval_binop(op: ast::BinOp, a: f64, b: f64) -> f64 {
 /// Evaluate a real math built-in numerically during constant folding.
 fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
     check_builtin_arity(name, args.len())?;
-    let arity_err = || {
-        elab(format!(
-            "wrong argument count for `{name}` in constant context"
-        ))
-    };
+    let arity_err = || elab(Diagnostic::new(codes::E0336).arg("name", name));
     let arg1 = || args.first().copied().ok_or_else(arity_err);
     let arg2 = || match (args.first(), args.get(1)) {
         (Some(x), Some(y)) => Ok((*x, *y)),
@@ -5478,7 +5399,7 @@ fn eval_const_call(name: &str, args: &[f64]) -> Result<f64, FrontendError> {
             let (x, y) = arg2()?;
             x.max(y)
         }
-        other => return Err(elab(format!("`{other}` is not constant-evaluable"))),
+        other => return Err(elab(Diagnostic::new(codes::E0344).arg("name", other))),
     })
 }
 
@@ -7016,7 +6937,7 @@ mod tests {
         let msg = elaborate_err(src);
         assert!(msg.contains("unique"), "got: {msg}");
         assert!(
-            msg.contains("noise_table_log"),
+            msg.to_string().contains("noise_table_log"),
             "the diagnostic should name the function written, got: {msg}"
         );
     }
@@ -7039,7 +6960,7 @@ mod tests {
             // A bare scalar is not a table at all.
             (r#"noise_table(1.0)"#, "array-literal"),
             // No argument at all.
-            (r#"noise_table()"#, "requires a table argument"),
+            (r#"noise_table()"#, "takes 1 to 2 arguments"),
         ];
         for (call, needle) in cases {
             let src = format!(
@@ -7047,7 +6968,7 @@ mod tests {
             );
             let msg = elaborate_err(&src);
             assert!(
-                msg.contains(needle),
+                msg.to_string().contains(needle),
                 "`{call}` should be rejected mentioning `{needle}`, got: {msg}"
             );
         }
@@ -7481,7 +7402,7 @@ mod tests {
             .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("flow"),
+                msg.to_string().contains("flow"),
                 "expected a flow-probe-specific message, got: {msg}"
             ),
             other => panic!("expected an elaboration error, got {other:?}"),
@@ -8285,7 +8206,7 @@ mod tests {
             .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("case"),
+                msg.to_string().contains("case"),
                 "expected a case-specific message, got: {msg}"
             ),
             other => panic!("expected an elaboration error, got {other:?}"),
@@ -8343,7 +8264,7 @@ mod tests {
             .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("dimension"),
+                msg.to_string().contains("dimension"),
                 "expected a dimension-count message, got: {msg}"
             ),
             other => panic!("expected an elaboration error, got {other:?}"),
@@ -8448,7 +8369,7 @@ mod tests {
             .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("2-D"),
+                msg.to_string().contains("2-D"),
                 "expected a 2-D-vector-net-specific message, got: {msg}"
             ),
             other => panic!("expected an elaboration error, got {other:?}"),
@@ -8545,7 +8466,7 @@ mod tests {
             .expect("at least one module");
         match elaborate(&ast) {
             Err(FrontendError::Elaborate(msg)) => assert!(
-                msg.contains("module scope"),
+                msg.to_string().contains("module scope"),
                 "expected a module-scope-specific message, got: {msg}"
             ),
             other => panic!("expected an elaboration error, got {other:?}"),
@@ -9108,7 +9029,7 @@ mod tests {
         let err = elaborate_with_library(ast, &asts).expect_err("`k` is a localparam");
         let msg = format!("{err}");
         assert!(
-            msg.contains("localparam") && msg.contains('k'),
+            msg.to_string().contains("localparam") && msg.contains('k'),
             "should name the parameter and say why: {msg}"
         );
     }
@@ -9269,10 +9190,8 @@ mod tests {
             err.contains("event") && err.contains("§5.9"),
             "the message must name the restriction it enforces; got: {err}"
         );
-        assert!(
-            err.contains("@(cross(…)) begin"),
-            "and must name the legal shape — the loop inside the event; got: {err}"
-        );
+        // The legal shape — the loop inside the event — is the catalogue entry's action.
+        assert!(err.contains("[E0377]"), "{err}");
     }
 
     /// The §5.9.3 exemption, and the reason it is sound here: a generate loop is unrolled at

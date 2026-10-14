@@ -1,0 +1,9 @@
+{
+  "code": "E0340",
+  "rev": 1,
+  "message": "genvar `{name}` is read outside the `for` loop that drives it; a genvar only has a value inside its own generate loop",
+  "description": "A genvar has a value only while its generate loop is being unrolled.",
+  "actions": [
+    "Use the genvar only inside its loop, or copy its value into an ordinary variable there."
+  ]
+}

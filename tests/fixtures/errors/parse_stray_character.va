@@ -1,5 +1,6 @@
 // expect: parse
-// at: 8:29
+// code: E0203
+// at: 9:29
 // message: found `#`
 // fixed: 2.18.2 (before: `found Some(Hash)`)
 module r(p, n);

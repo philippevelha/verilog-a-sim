@@ -1,0 +1,10 @@
+{
+  "code": "E0314",
+  "rev": 1,
+  "message": "`$simparam` without a default value cannot be evaluated in a parameter context",
+  "description": "In a parameter's default value, `$simparam` must give a default to fall back on, because simulator parameters are not known when parameters are evaluated.",
+  "actions": [
+    "Give a default: `$simparam(\"gmin\", 1e-12)`.",
+    "Or read `$simparam` in the analog block, where it is answered with the live value."
+  ]
+}

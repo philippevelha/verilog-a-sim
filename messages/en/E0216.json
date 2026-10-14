@@ -1,0 +1,9 @@
+{
+  "code": "E0216",
+  "rev": 1,
+  "message": "`{word}` is not part of Verilog-A: Annex C excludes it, because its don't-care matching works on four-state logic values (`x`, `z`) that an analog value cannot hold; use `case`",
+  "description": "`casex` and `casez` treat `x` and `z` bits as don't-care when matching. Verilog-A values are real numbers with no such bits, so the language excludes both.",
+  "actions": [
+    "Use `case`, and list the values to match explicitly."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0117",
+  "rev": 1,
+  "message": "`end_keywords without a matching `begin_keywords",
+  "description": "An `` `end_keywords `` appears with no `` `begin_keywords `` region open.",
+  "actions": [
+    "Remove it, or add the `` `begin_keywords \"...\" `` it was meant to close."
+  ]
+}

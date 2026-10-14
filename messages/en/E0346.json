@@ -1,0 +1,9 @@
+{
+  "code": "E0346",
+  "rev": 1,
+  "message": "`$fopen` type \"{mode}\" is not one of the LRM's (Table 9-24): \"w\", \"a\", \"r\" and their \"b\"/\"+\" forms",
+  "description": "The type string of `$fopen` is not one the LRM defines.",
+  "actions": [
+    "Use \"w\" to write, or \"a\" to append."
+  ]
+}

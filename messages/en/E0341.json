@@ -1,0 +1,10 @@
+{
+  "code": "E0341",
+  "rev": 1,
+  "message": "unknown identifier `{name}`",
+  "description": "The name is not declared as a parameter, variable, net or genvar in this module. It is often a misspelling, or a declaration that is missing or comes from a header that was not included.",
+  "actions": [
+    "Check the spelling.",
+    "Declare it, or `` `include `` the file that declares it."
+  ]
+}

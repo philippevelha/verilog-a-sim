@@ -1,0 +1,9 @@
+{
+  "code": "E0379",
+  "rev": 1,
+  "message": "instantiation cycle: `{module}` (instantiated as `{instance}` inside `{parent}`) already appears in the elaboration chain: {chain}",
+  "description": "A module instantiates itself, directly or through other modules, so the hierarchy would never end.",
+  "actions": [
+    "Remove the instance that closes the cycle."
+  ]
+}

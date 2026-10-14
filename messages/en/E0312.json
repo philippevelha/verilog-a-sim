@@ -1,0 +1,9 @@
+{
+  "code": "E0312",
+  "rev": 1,
+  "message": "aliasparam `{name}` targets unknown parameter `{target}`",
+  "description": "An `aliasparam` must name a parameter declared in the same module.",
+  "actions": [
+    "Check the spelling of the target parameter, and that it is declared in this module."
+  ]
+}

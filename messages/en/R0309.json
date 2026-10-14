@@ -1,0 +1,9 @@
+{
+  "code": "R0309",
+  "rev": 1,
+  "message": "`$table_model` interpolation `{char}` (ignore this column)",
+  "description": "Marking a column ignored only means something for the multi-column source this does not read.",
+  "actions": [
+    "Give the file one independent and one dependent column."
+  ]
+}

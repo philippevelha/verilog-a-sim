@@ -1,0 +1,9 @@
+{
+  "code": "E0326",
+  "rev": 1,
+  "message": "`{name}` power {power} at {frequency} Hz is not a finite, non-negative power spectral density",
+  "description": "A power spectral density cannot be negative or infinite.",
+  "actions": [
+    "Correct the power value."
+  ]
+}

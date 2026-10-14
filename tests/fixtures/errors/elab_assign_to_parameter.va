@@ -1,5 +1,6 @@
 // expect: elab
-// at: 9:16
+// code: E0329
+// at: 10:16
 // message: `R` is a parameter, and a parameter cannot be assigned
 // fixed: 2.18.1 (before: "assignment to unknown variable `R`", for a name that is declared)
 module r(p, n);

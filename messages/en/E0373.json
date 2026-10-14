@@ -1,0 +1,9 @@
+{
+  "code": "E0373",
+  "rev": 1,
+  "message": "`{port}` is a {dims}-D vector port; port-current probes are only supported for a scalar port (v1 limitation)",
+  "description": "This simulator implements port-current probes for scalar ports only.",
+  "actions": [
+    "Probe the branches connected to each element instead."
+  ]
+}

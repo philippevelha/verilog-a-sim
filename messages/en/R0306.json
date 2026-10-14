@@ -1,0 +1,9 @@
+{
+  "code": "R0306",
+  "rev": 1,
+  "message": "`$table_model` control string `{control}`, which selects a dependent column",
+  "description": "The `;N` selector picks one of several dependent columns in a file, and this reads exactly one `x y` pair per line. Ignoring it would silently return the wrong column.",
+  "actions": [
+    "Give the file a single dependent column and drop the `;N`."
+  ]
+}

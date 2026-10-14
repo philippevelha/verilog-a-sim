@@ -1,0 +1,10 @@
+{
+  "code": "E0209",
+  "rev": 1,
+  "message": "expected an identifier, but `{word}` is a reserved word",
+  "description": "A name was expected here, but the word written is reserved by Verilog-A and cannot be used as a name.",
+  "actions": [
+    "Rename it, for example by adding a suffix: `{word}_1`.",
+    "To keep the exact name, write it as an escaped identifier: a backslash before the name and a space after it."
+  ]
+}

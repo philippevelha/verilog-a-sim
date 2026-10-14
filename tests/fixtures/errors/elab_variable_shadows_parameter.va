@@ -1,5 +1,6 @@
 // expect: elab
-// at: 9:3
+// code: E0301
+// at: 10:3
 // message: `R` is declared both as a parameter and as a variable
 // fixed: 2.18.1 (before: the variable silently replaced the parameter in every read)
 module r(p, n);

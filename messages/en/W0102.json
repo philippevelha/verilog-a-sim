@@ -1,0 +1,9 @@
+{
+  "code": "W0102",
+  "rev": 1,
+  "message": "`celldefine has no effect in Verilog-A",
+  "description": "`celldefine and `endcelldefine tag a module as a library cell for delay-annotation (SDF) tools; a simulator has nothing to do with the tag. The directive is accepted and ignored, so the model runs exactly as it would without it.",
+  "actions": [
+    "Remove the directives, or leave them if the file is shared with digital Verilog tools."
+  ]
+}

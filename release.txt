@@ -22,6 +22,54 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.26.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 2: every diagnostic the frontend raises has a code.** The
+preprocessor, lexer, parser and elaboration now raise `va_diag::Diagnostic`s, not sentences:
+179 new codes, each with an English entry in `messages/en/` (message, what it means, what to do).
+A user who mistypes a net name now reads
+
+    error[E0366] at r.va:8:10: unknown net `q`
+      = for what this means and what to do: va-cli --explain E0366
+      while: elaborating module `r`
+
+where 2.25.0 printed `error[E0000]: elaborating module `r`` with the real problem as a cause.
+  * Codes by stage: 27 preprocessor (`E01xx`), 37 parser (`E02xx`), 95 elaboration (`E03xx`),
+    `E0001` for an internal error. Refusals `R0101`, `R0201`-`R0203`, `R0301`-`R0310`: a coded
+    refusal's what, why and instead come from the catalogue, so they are translatable too, and
+    its marker reads `refused[R0202]:`. Warnings: `W0101`-`W0104` for the four directives with no
+    Verilog-A effect, `W0301` for a port without a direction.
+  * `FrontendError`'s variants carry a `Diagnostic` instead of a `String`;
+    `FrontendError::diagnostic()` gets at it, and `va-cli` renders it with what it was doing
+    as `while:` context. `Preprocessed::warnings`, `CompiledDesign::warnings` and
+    `port_direction_warnings` are `Vec<Diagnostic>`. A refusal is boxed in its variant
+    (`FrontendError::refused(r)`), because the code pushed `Refusal` past clippy's size limit
+    for an error type.
+  * The error corpus asserts each file's code with a new `code:` header. All 36 files carry
+    one and none is `E0000`; the header line moved every `at:` down by one.
+  * A placeholder name must now start with a letter or `_`, so `{1, tau}` in a message is text.
+
+Design calls, and their cost:
+  * **Elaboration did not fit in 100 codes.** One code per message needed 104 in `E03xx`. The
+    two dozen argument-count messages are now three codes (`E0333` exact, `E0334` range, `E0335` at
+    least), as rustc does with E0061, each naming the signature: `` `cross(expr, dir, time_tol,
+    expr_tol, enable)` takes 1 to 5 arguments, but this call passes 6 ``. Nine near-duplicates
+    were merged too (unknown net in a probe or a connection, slice errors, ...). That leaves
+    `E0396`-`E0399`: **four free elaboration codes.** The next elaboration diagnostics need a
+    decision: an overflow range (`08xx` is unassigned) or five digits.
+  * Wording moved from the message into the entry's description and actions, so a few
+    messages are shorter. Five corpus `message:` lines changed with them: `` `exp` takes exactly
+    one argument `` is now `` `exp` takes 1 argument(s) ``, and an analog function's arity error
+    no longer says "analog function". Tests that checked the moved text now check the code.
+  * Some placeholders hold English words the program supplies (`{via}`, `{construct}`, `{what}`,
+    `{list}`): they are not translated yet. `messages/README.md` says so.
+
+Measured: `cargo test --workspace` 982 passed, 0 failed; `cargo xtask validate` 28 checked,
+0 failed, convergence 28/28; `check models` 68/68, `check benchmark/models` 25/25,
+`check external` 8/9 (unchanged; its failure is now `E0101`, an undefined macro). The local
+280-file corpus was not run here. Codegen, netlist and numerical errors are still `E0000`: step 3.
+
+
 2.25.0 - 2026-10-14
 --------------------
 **Coded diagnostics, step 1: the code system, the message catalogue and `va-cli --explain`.**

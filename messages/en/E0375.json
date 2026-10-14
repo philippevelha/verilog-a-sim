@@ -1,0 +1,9 @@
+{
+  "code": "E0375",
+  "rev": 1,
+  "message": "a port-current probe (§ port-current probe) can't sum a flow contribution made inside a {construct} — not yet supported",
+  "description": "The probe sums the contributions to a port's branches. This simulator cannot yet do that for a contribution inside a `case` statement or a loop.",
+  "actions": [
+    "Rewrite a `case` as `if`/`else`; use a generate loop (a `genvar` counter), which is unrolled; or probe the branch current directly."
+  ]
+}

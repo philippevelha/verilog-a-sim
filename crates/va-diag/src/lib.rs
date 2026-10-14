@@ -456,8 +456,23 @@ pub fn placeholders(template: &str) -> BTreeSet<String> {
     out
 }
 
+/// The placeholder names used anywhere in `entry`: its message, description and actions. A
+/// refusal's description and actions name the construct refused, so they carry placeholders too.
+pub fn entry_placeholders(entry: &Entry) -> BTreeSet<String> {
+    let mut out = placeholders(&entry.message);
+    out.extend(placeholders(&entry.description));
+    for action in &entry.actions {
+        out.extend(placeholders(action));
+    }
+    out
+}
+
+/// A placeholder name is a letter or `_`, then letters, digits or `_`. So `{1}` and `{1, tau}`,
+/// which Verilog-A array literals in a message are written as, stay literal text.
 fn is_placeholder_name(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The language the environment asks for: `VA_LANG`, else the locale's language
@@ -489,7 +504,7 @@ pub fn detect_language() -> String {
 /// is well formed; message, description and at least one action are present; English carries a
 /// `rev`; every code in [`codes::ALL`] has English text and every English file is such a code; a
 /// translation carries a `source_rev`, names a code English has, and uses exactly English's
-/// placeholders. An out-of-date translation is not a problem (it is shown with a note), so it is
+/// placeholders (in message, description and actions together). An out-of-date translation is not a problem (it is shown with a note), so it is
 /// reported by [`stale_translations`] instead.
 pub fn validate(root: &Path) -> Vec<String> {
     let mut problems = Vec::new();
@@ -595,11 +610,10 @@ pub fn validate(root: &Path) -> Vec<String> {
                      was made from)"
                 ));
             }
-            let (want, got) = (placeholders(&en.message), placeholders(&entry.message));
+            let (want, got) = (entry_placeholders(en), entry_placeholders(entry));
             if want != got {
                 problems.push(format!(
-                    "{lang}/{code}.json: the message uses placeholders {got:?}, but English uses \
-                     {want:?}"
+                    "{lang}/{code}.json: uses placeholders {got:?}, but English uses {want:?}"
                 ));
             }
         }

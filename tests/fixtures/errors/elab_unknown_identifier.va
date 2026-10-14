@@ -1,5 +1,6 @@
 // expect: elab
-// at: 7:31
+// code: E0341
+// at: 8:31
 // message: unknown identifier `Rx`
 module r(p, n);
   inout p, n;

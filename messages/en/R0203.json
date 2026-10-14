@@ -1,0 +1,9 @@
+{
+  "code": "R0203",
+  "rev": 1,
+  "message": "the reserved word `{word}`",
+  "description": "It begins a construct this implementation does not yet parse, and guessing at its meaning would silently change what the model says.",
+  "actions": [
+    "See `docs/token-reference.md` for this word's status, and `docs/roadmap.md` for whether it is planned."
+  ]
+}

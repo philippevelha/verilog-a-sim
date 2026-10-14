@@ -1,0 +1,9 @@
+{
+  "code": "R0301",
+  "rev": 1,
+  "message": "`$fopen(\"{name}\", \"{mode}\")`, a file opened for reading",
+  "description": "No file-reading task or function ($fscanf, $fgets, ...) is implemented, and the LRM (§9.5.9) asks a read rejected with its iteration to be rewound; opening the file would only pretend to support the reads that follow.",
+  "actions": [
+    "Open it for writing (\"w\") or appending (\"a\")."
+  ]
+}

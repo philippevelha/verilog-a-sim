@@ -1,0 +1,11 @@
+{
+  "code": "E0101",
+  "rev": 1,
+  "message": "undefined macro `{name}",
+  "description": "The source uses a text macro (`` `NAME ``) that no `` `define `` has defined at that point. Macros are often defined in a header that the model `` `include ``s; if that header was not found, every macro it defines is undefined.",
+  "actions": [
+    "Check the spelling of the macro name; macro names are case-sensitive.",
+    "If the macro comes from a header, check that its `` `include `` is found (a skipped include is reported separately), or pass the header's directory with `--model`.",
+    "Define it yourself with `` `define NAME value `` before its first use, or with `va-cli --define NAME=value`."
+  ]
+}

@@ -1,5 +1,6 @@
 // expect: elab
-// at: 7:3
+// code: E0380
+// at: 8:3
 // message: instance `x1` references unknown module `nosuch`
 module top(a, b);
   inout a, b;

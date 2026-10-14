@@ -1,0 +1,10 @@
+{
+  "code": "E0126",
+  "rev": 1,
+  "message": "this `/*` comment is never closed by `*/`, so everything after it is commented out",
+  "description": "A block comment opened with `/*` continues until the next `*/`. This one has none before the end of the file, so the rest of the file is part of the comment.",
+  "actions": [
+    "Close the comment with `*/` where you meant it to end.",
+    "If you meant a single-line comment, use `//` instead."
+  ]
+}

@@ -601,7 +601,7 @@ fn compile_model_library_with_context(
         .with_context(|| format!("preprocessing {name}"))?;
         // A directive the LRM gives no Verilog-A meaning is accepted and said so, once.
         for w in &pre.warnings {
-            eprintln!("[va-cli] warning: {name}: {w}");
+            eprintln!("[va-cli] {name}: {w}");
         }
         let expanded = &pre.text;
         let (tokens, offsets) =
@@ -639,7 +639,7 @@ fn compile_model_library_with_context(
     let mut modules = Vec::with_capacity(library.len());
     for ast in &library {
         for w in va_frontend::elaborate::port_direction_warnings(ast) {
-            eprintln!("[va-cli] warning: {w}");
+            eprintln!("[va-cli] {w}");
         }
         // The include path goes to elaboration too, not just to the preprocessor: a
         // `$table_model` data file is found the same way a `` `include `` is.
@@ -689,9 +689,10 @@ fn print_refusal_detail(err: &anyhow::Error) {
 /// 130-file corpus.
 fn refusal_headline(e: &va_frontend::FrontendError) -> String {
     match e {
-        va_frontend::FrontendError::Refused(r) => {
-            format!("refused: {}", r.what)
-        }
+        va_frontend::FrontendError::Refused(r) => match r.code {
+            Some(code) => format!("refused[{code}]: {}", r.what),
+            None => format!("refused: {}", r.what),
+        },
         other => other.to_string(),
     }
 }
@@ -7890,8 +7891,9 @@ endmodule
         ] {
             let block = refusal_block(&err)
                 .unwrap_or_else(|| panic!("{layer}: a refusal must be recognised as one: {err:#}"));
+            // `refused[R0202]:` once the refusal has a code, `refused:` until it has one.
             assert!(
-                block.starts_with("refused: "),
+                block.starts_with("refused: ") || block.starts_with("refused[R"),
                 "{layer}: must open with the greppable marker: {block}"
             );
             assert!(

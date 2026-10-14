@@ -68,12 +68,20 @@ Any other field is rejected, so a misspelt field name is caught rather than igno
 ### Placeholders
 
 `{value}`, `{option}`, `{name}` and so on stand for details the program supplies. The program
-decides which placeholders a code has; the English `message` shows them. Rules:
+decides which placeholders a code has; the English entry shows them. Rules:
 
-- Keep every placeholder of the English message, spelled exactly the same, in every
-  translation. You may move them anywhere in the sentence.
-- Do not add placeholders the English message does not have; they would show up literally.
-- `description` and `actions` are general text and take no placeholders.
+- Keep every placeholder of the English entry, spelled exactly the same, in every translation.
+  You may move them anywhere in the sentence.
+- Do not add placeholders the English entry does not have; they would show up literally.
+- Placeholders usually appear only in `message`. A refusal (`R` code) also fills them in its
+  `description` and `actions`, because its explanation names the construct the user wrote.
+  Elsewhere, `--explain` shows `description` and `actions` without an occurrence to fill them
+  from, so a placeholder there would show literally; keep those general.
+- A placeholder name starts with a letter or `_`. So `{1}` or `{1, tau}`, a Verilog-A array
+  literal quoted in a message, is plain text, not a placeholder.
+- Some placeholders hold a few English words supplied by the program rather than a name or a
+  number (`{via}` in `E0374`, `{construct}` in `E0375`, `{what}` and `{list}`). They are not
+  translated yet; keep them, and phrase the sentence so they read as a quotation.
 - Counts are not pluralised automatically, so phrase a sentence with a number so it reads
   correctly for any number ("declares 1 argument(s)", or "declares N, this call passes M").
 
@@ -156,5 +164,5 @@ cargo test -p va-diag
 
 This checks every file: that it parses with exactly the fields above, that its name is its code,
 that every code the program defines has English text and every English file is a code the
-program defines, and that every translation has a `source_rev` and keeps the English
-placeholders. Out-of-date translations are listed, not failed.
+program defines, and that every translation has a `source_rev` and uses exactly the English
+entry's placeholders. Out-of-date translations are listed, not failed.

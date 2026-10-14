@@ -1,0 +1,9 @@
+{
+  "code": "E0328",
+  "rev": 1,
+  "message": "{what} must be an integer, got {value}",
+  "description": "This value is used as an integer (a genvar, a vector range bound or an index), and the LRM requires it to be one.",
+  "actions": [
+    "Use an integer value or expression here."
+  ]
+}

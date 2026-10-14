@@ -1,0 +1,9 @@
+{
+  "code": "E0221",
+  "rev": 1,
+  "message": "unterminated `@(...)` event expression",
+  "description": "The parentheses of an event control `@( ... )` are never closed before the end of the file.",
+  "actions": [
+    "Close the event control's parentheses."
+  ]
+}

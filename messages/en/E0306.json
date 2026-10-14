@@ -1,0 +1,9 @@
+{
+  "code": "E0306",
+  "rev": 1,
+  "message": "port `{port}` has no discipline declaration (e.g. `electrical {port};`)",
+  "description": "Every port is a net, and a net needs a discipline, which says what physical quantities it carries (voltage and current for `electrical`). The direction declaration (`inout p;`) does not give one.",
+  "actions": [
+    "Add a discipline declaration for the port, for example `electrical p;`."
+  ]
+}

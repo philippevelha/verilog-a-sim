@@ -1,0 +1,9 @@
+{
+  "code": "E0392",
+  "rev": 1,
+  "message": "{file}:{line}: `{text}` is not an `x y` pair of numbers",
+  "description": "Each line of a table file holds an `x` value and a `y` value, both numbers.",
+  "actions": [
+    "Correct the line, or comment it out with `#`, `*` or `//`."
+  ]
+}

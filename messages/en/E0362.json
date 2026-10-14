@@ -1,0 +1,9 @@
+{
+  "code": "E0362",
+  "rev": 1,
+  "message": "`{name}` has two dynamically-indexed dimensions in the same access; at most one index position may be a genuinely runtime expression",
+  "description": "This simulator supports a run-time index in only one dimension of a 2-D access.",
+  "actions": [
+    "Make one of the two indices a constant or a genvar."
+  ]
+}

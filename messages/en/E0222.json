@@ -1,0 +1,9 @@
+{
+  "code": "E0222",
+  "rev": 1,
+  "message": "`{name}[..]`: a `[lo:hi]` slice must be the final bracket group",
+  "description": "A range `[lo:hi]` selects several elements, so nothing can be indexed after it.",
+  "actions": [
+    "Put the slice last: `{name}[i][lo:hi]`."
+  ]
+}

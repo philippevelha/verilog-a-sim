@@ -1,0 +1,10 @@
+{
+  "code": "E0111",
+  "rev": 1,
+  "message": "`else without `ifdef",
+  "description": "An `` `else `` appears outside any conditional block. It is only valid between an `` `ifdef ``/`` `ifndef `` and its `` `endif ``.",
+  "actions": [
+    "Add the opening `` `ifdef `` or `` `ifndef ``, or remove the stray `` `else ``.",
+    "Check whether an earlier `` `endif `` closed the block too soon."
+  ]
+}

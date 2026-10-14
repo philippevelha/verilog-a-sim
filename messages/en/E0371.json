@@ -1,0 +1,9 @@
+{
+  "code": "E0371",
+  "rev": 1,
+  "message": "`V(<{port}>)` is invalid — a port-current probe is a flow access only (LRM §5.4.3); use `I(<{port}>)`",
+  "description": "The `<port>` form measures the current flowing into a port. A port has no potential of its own in this form.",
+  "actions": [
+    "Write `I(<port>)` for the current, or `V(port)` for the port's potential."
+  ]
+}

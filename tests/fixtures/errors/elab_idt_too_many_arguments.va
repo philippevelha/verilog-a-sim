@@ -1,5 +1,6 @@
 // expect: elab
-// at: 8:21
+// code: E0334
+// at: 9:21
 // message: `idt` takes 1 to 4 arguments, but this call passes 5
 // fixed: 2.18.1
 module r(p, n);

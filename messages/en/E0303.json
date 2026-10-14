@@ -1,0 +1,10 @@
+{
+  "code": "E0303",
+  "rev": 1,
+  "message": "analog function `{function}` assigns `{name}`, which is neither its name, one of its arguments, nor declared inside it; declare it with `real {name};`",
+  "description": "An analog function can only write its own name (the return value), its `output`/`inout` arguments, and variables declared inside it. It cannot write the module's variables.",
+  "actions": [
+    "Declare the variable inside the function (`real x;` before its statements).",
+    "If it is meant to be returned, make it an `output` argument or the function's return value."
+  ]
+}

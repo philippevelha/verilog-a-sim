@@ -1,5 +1,6 @@
 // expect: elab
-// at: 7:3
+// code: E0309
+// at: 8:3
 // message: parameter `R` value -1 is below its declared minimum 0
 module r(p, n);
   inout p, n;

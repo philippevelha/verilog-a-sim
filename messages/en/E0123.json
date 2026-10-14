@@ -1,0 +1,9 @@
+{
+  "code": "E0123",
+  "rev": 1,
+  "message": "`default_transition {text}: a transition time must be non-negative and finite",
+  "description": "A transition time is a duration, so it cannot be negative, infinite or not-a-number.",
+  "actions": [
+    "Use a non-negative number, such as `` `default_transition 0 `` or `` `default_transition 10p ``."
+  ]
+}
