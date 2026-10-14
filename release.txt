@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.26.1 - 2026-10-14
+--------------------
+**A code's number within its stage is hexadecimal: `E0399`, then `E039A` to `E03FF`.** The
+code stays a letter and four characters; the first two are still the decimal stage, and the last
+two may now use upper-case `A`-`F`, which gives each stage and kind 256 codes instead of 100.
+Every existing code is unchanged, since a decimal number is also a hex number, and sorted as text
+the codes stay in numeric order. This answers 2.26.0's open question (elaboration had 4 codes
+left): it now has 106, and no stage needs an overflow range or a fifth digit.
+  * `va_diag::is_well_formed` accepts the hex form; lower case is still rejected in a catalogue
+    file, while `va-cli --explain e039a` upper-cases its argument as before.
+  * The merged argument-count codes (`E0333`-`E0335`) stay merged. Hex removes the reason they
+    were merged, but one code per kind of mistake, naming the signature, is how rustc does it,
+    and splitting them back would only add near-identical catalogue entries to translate.
+  * `codes.rs`, `messages/README.md` and CLAUDE.md §5 describe the format.
+
+Measured: `cargo test --workspace` 982 passed, 0 failed (the format test gained hex cases inside
+an existing test); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.26.0 - 2026-10-14
 --------------------
 **Coded diagnostics, step 2: every diagnostic the frontend raises has a code.** The

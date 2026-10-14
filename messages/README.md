@@ -87,7 +87,7 @@ decides which placeholders a code has; the English entry shows them. Rules:
 
 ## Codes
 
-A code is a letter and four digits.
+A code is a letter and four characters: `E0703`, `E03A2`.
 
 | Letter | Kind | Shown as |
 |--------|------|----------|
@@ -96,7 +96,10 @@ A code is a letter and four digits.
 | `R` | refusal: valid Verilog-A that this simulator deliberately declines to run | `refused[R…]` |
 | `C` | communication: information a user may act on | `note[C…]` |
 
-The first two digits say which stage of the program raised it:
+The first two digits say which stage of the program raised it. The last two are the number
+within the stage, in hexadecimal: `00` to `99`, then `9A` to `FF`, so a stage has room for 256
+codes of each kind. Write the letters `A` to `F` in upper case (`va-cli --explain` accepts either).
+
 
 | Range | Stage |
 |-------|-------|

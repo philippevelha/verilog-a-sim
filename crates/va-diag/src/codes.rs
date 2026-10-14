@@ -1,6 +1,6 @@
 //! Every diagnostic code the program can emit.
 //!
-//! A code is a letter and four digits. The letter is the kind:
+//! A code is a letter and four characters. The letter is the kind:
 //!
 //! | Letter | Kind | Meaning |
 //! |--------|------|---------|
@@ -9,7 +9,11 @@
 //! | `R` | refusal | valid Verilog-A this simulator deliberately declines to run (CLAUDE.md §5) |
 //! | `C` | communication | information a user may act on |
 //!
-//! The first two digits are the stage that raises it, the same for every letter:
+//! Two decimal digits for the stage that raises it, the same for every letter, then two
+//! hexadecimal digits for the number within the stage: `00` to `99` first, then `9A` to `FF`
+//! (upper case). That is 256 codes per stage and kind; 100 were not enough for elaboration.
+//! Sorted as text, the codes stay in numeric order (`E0399` < `E039A` < `E03A0`).
+//!
 //!
 //! | Range | Stage |
 //! |-------|-------|

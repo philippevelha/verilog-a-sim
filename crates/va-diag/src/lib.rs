@@ -49,7 +49,8 @@ use std::path::Path;
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 
-/// A diagnostic code: a kind letter and four digits, such as `E0301`.
+/// A diagnostic code: a kind letter, two decimal digits for the stage and two hexadecimal digits
+/// for the number within it, such as `E0301` or `E03A2`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct Code(&'static str);
 
@@ -113,12 +114,16 @@ impl Kind {
     }
 }
 
-/// Whether `s` is a well-formed code: one of `E`, `W`, `R`, `C`, then exactly four digits.
+/// Whether `s` is a well-formed code: one of `E`, `W`, `R`, `C`, then two decimal digits (the
+/// stage) and two upper-case hexadecimal digits (the number within it, `00` to `FF`).
 pub fn is_well_formed(s: &str) -> bool {
-    let mut chars = s.chars();
-    matches!(chars.next(), Some('E' | 'W' | 'R' | 'C'))
-        && s.len() == 5
-        && chars.all(|c| c.is_ascii_digit())
+    let b = s.as_bytes();
+    b.len() == 5
+        && matches!(b[0], b'E' | b'W' | b'R' | b'C')
+        && b[1..3].iter().all(u8::is_ascii_digit)
+        && b[3..]
+            .iter()
+            .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(c))
 }
 
 /// One occurrence of a coded problem: the code, the values its message mentions, and where.
@@ -549,7 +554,7 @@ pub fn validate(root: &Path) -> Vec<String> {
             }
             if !is_well_formed(&entry.code) {
                 problems.push(format!(
-                    "{shown}: `{}` is not a code (a letter E, W, R or C, then four digits)",
+                    "{shown}: `{}` is not a code (a letter E, W, R or C, two digits, then two hex digits)",
                     entry.code
                 ));
             }
@@ -693,7 +698,13 @@ mod tests {
             assert!(seen.insert(code.as_str()), "{code} is listed twice");
         }
         assert!(is_well_formed("R0402") && is_well_formed("C0601"));
-        for bad in ["E301", "E03010", "X0301", "e0301", "E03a1"] {
+        assert!(
+            is_well_formed("E039A") && is_well_formed("E03FF"),
+            "hex within a stage"
+        );
+        for bad in [
+            "E301", "E03010", "X0301", "e0301", "E03a1", "E0A01", "E03G0",
+        ] {
             assert!(!is_well_formed(bad), "{bad}");
         }
     }

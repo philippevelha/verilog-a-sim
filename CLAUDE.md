@@ -287,8 +287,9 @@ this trait at bootstrap, so `va-core` has something real to solve on commit #1.
   Gated by `every_refusal_says_what_was_refused_and_why`. A refusal that names the wrong
   construct is worse than a terse one.
 - **Every user-facing diagnostic carries a code** (`va_diag::codes`; 2.25.0): a letter for its
-  kind (`E` error, `W` warning, `R` refusal, `C` communication) and four digits, the first two
-  for the stage that raises it. Its text — the one-line message, what it means, what to do — is
+  kind (`E` error, `W` warning, `R` refusal, `C` communication), two decimal digits for the
+  stage that raises it, and two hexadecimal digits for the number within the stage (`E0399`,
+  then `E039A` … `E03FF`; 2.26.1). Its text — the one-line message, what it means, what to do — is
   in `messages/<lang>/<CODE>.json`, written and translated by people who need not edit Rust, and
   shown by `va-cli --explain <CODE>`. A new diagnostic gets a new code and an English entry in
   the same PR; `catalogue_is_consistent` fails otherwise. `E0000` is an error with no code yet:
