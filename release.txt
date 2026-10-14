@@ -22,6 +22,38 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.32.0 - 2026-10-14
+--------------------
+**A `cross` firing just before a `transition` ramp ends no longer kills the transient run.** The
+defect OpenVAF-Reloaded PR #48 fixed in its own simulator (its blocker 3), found here by running
+that PR's PLL scenario: a ramp ending at 0.50001 V through a `cross` at 0.5 V, the crossing
+20 fs before the ramp's end, died of a timestep underflow (`E0605`) at a 1 ns `.tran` step.
+How close was fatal scaled with the minimum step: 0.2 ps at a 10 ns step, 2 fs at 0.1 ns.
+  * Cause: `transition` bounded each step to an eighth of what **remained** of its ramp, so each
+    step covered 1/8 of the rest and the steps shrank geometrically toward every ramp's end,
+    down to the minimum timestep. A crossing inside that tail made the step passing it fail
+    its error test (the `cross` body's jump) at every size the controller still allowed.
+  * Fix: an eighth of the **whole** ramp, so a ramp is sampled at even steps, as a linear ramp
+    should be. The ramp's duration is a sixth state slot of each `transition` site (was five),
+    set when a new ramp latches. A model's `state_len` grows by one per `transition` call.
+  * Fewer timepoints as a side effect: the ramp deck at a 10 ns step goes from 2052 to 1350
+    points, an `if`/`case` model of a pulse from 899 to 822; no extra cost anywhere measured.
+  * New test `transition_cross.rs` runs the binary on four ramp levels (mid-ramp, 20 fs and 0.2 ps
+    before the end, exactly at the threshold); it fails with `E0605` without the fix.
+
+PR #48's other three blockers were checked and do not reproduce here: a self-rescheduling
+`@(timer(next_edge))` fires on time (10 edges in 10.5 µs, at exactly 1, 2, … µs), a 0.1 µs
+running-sum timer gives 200 edges with no step collapse, and `transition` in a `case` `default`
+arm compiles and switches correctly.
+
+Limits: no golden circuit uses `transition`, so `cargo xtask validate` does not cover this change;
+the transient unit tests that exercise `transition` all pass. The ramp's corners are still not
+breakpoints (the stated approximation, now rounded by at most an eighth of the ramp).
+
+Measured: `cargo test --workspace` 992 passed, 0 failed (991 + 1); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
 2.31.0 - 2026-10-14
 --------------------
 **Coded diagnostics, step 3d: `va-cli`'s own errors. Every error a user can reach now has a code.**

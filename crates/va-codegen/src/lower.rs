@@ -1015,7 +1015,8 @@ impl StatefulKind {
     pub fn width(self) -> usize {
         match self {
             StatefulKind::Slew => 2,
-            StatefulKind::Transition => 5,
+            // `(t_prev, y_prev, target, rate, t_start, ramp_duration)`.
+            StatefulKind::Transition => 6,
             StatefulKind::Zi { inputs, outputs } => 4 + inputs + outputs,
             // `(q_prev, rate_prev, q_prev2)`. The third slot exists for Gear/BDF2, whose
             // reconstruction is a three-point difference on the charge rather than a one-step

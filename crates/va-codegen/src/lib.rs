@@ -2977,14 +2977,28 @@ impl GeneratedModel {
             if call.kind != lower::StatefulKind::Transition {
                 continue;
             }
-            let (y, target, rate) = (
+            let (y, target, rate, duration) = (
                 next.get(call.base + 1).copied().unwrap_or(0.0),
                 next.get(call.base + 2).copied().unwrap_or(0.0),
                 next.get(call.base + 3).copied().unwrap_or(0.0),
+                next.get(call.base + 5).copied().unwrap_or(0.0),
             );
             // Still travelling, and at a finite rate: ask for a step that samples the ramp.
+            //
+            // An eighth of the **whole** ramp, not of what remains of it (2.32.0). The ramp is
+            // linear in time, so even steps sample it best; and an eighth of the remainder never
+            // arrives: each step covers 1/8 of what is left, so the steps shrink geometrically
+            // toward the corner and reach the minimum timestep at every ramp's end. Mostly that
+            // only cost steps, but a `cross` firing in that shrinking tail (a divider output
+            // settling a hair past a phase detector's threshold) made the step that passed it
+            // fail its error test at every size, and the run died of a timestep underflow —
+            // the same defect OpenVAF-Reloaded PR #48 fixed in its own `transition`.
             if y != target && rate.is_finite() && rate > 0.0 {
-                let span = (target - y).abs() / rate;
+                let span = if duration > 0.0 {
+                    duration
+                } else {
+                    (target - y).abs() / rate
+                };
                 let want = span / POINTS_PER_RAMP;
                 if want.is_finite() && want > 0.0 {
                     bound = Some(bound.map_or(want, |b: f64| b.min(want)));

@@ -1761,15 +1761,17 @@ fn eval_call(
                 ctx.state_set(base, 2, value.value);
                 ctx.state_set(base, 3, 0.0);
                 ctx.state_set(base, 4, ctx.analysis.time);
+                ctx.state_set(base, 5, 0.0);
                 return Ok(value);
             }
 
             let t = ctx.analysis.time;
             let (t_prev, y_prev) = (ctx.state_get(base, 0), ctx.state_get(base, 1));
-            let (mut target, mut rate, mut t_start) = (
+            let (mut target, mut rate, mut t_start, mut duration) = (
                 ctx.state_get(base, 2),
                 ctx.state_get(base, 3),
                 ctx.state_get(base, 4),
+                ctx.state_get(base, 5),
             );
 
             // A changed input starts a new transition: latch the target, the rate implied by
@@ -1795,6 +1797,9 @@ fn eval_call(
                 } else {
                     f64::INFINITY // no time axis at all (not transient): an instant jump
                 };
+                // The whole ramp's length, which `GeneratedModel::transition_step_bound` divides
+                // into even steps (2.32.0).
+                duration = span;
             }
 
             let y = if t < t_start {
@@ -1811,6 +1816,7 @@ fn eval_call(
             ctx.state_set(base, 2, target);
             ctx.state_set(base, 3, rate);
             ctx.state_set(base, 4, t_start);
+            ctx.state_set(base, 5, duration);
             // Zero gradient: the output is pinned to history and a latched target, not to `x`
             // at this instant. Once it reaches the target it stays there until the input
             // changes again, at which point the *next* evaluation re-latches.
