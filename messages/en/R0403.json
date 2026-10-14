@@ -1,0 +1,9 @@
+{
+  "code": "R0403",
+  "rev": 1,
+  "message": "white_noise/flicker_noise must be a top-level additive term of a contribution",
+  "description": "A noise source scaled or nested inside an expression would be dropped without a word, since its power spectral density scales as the square of any factor around it, and this simulator does not track that.",
+  "actions": [
+    "Write the noise source as one term of the contribution: `I(p, n) <+ white_noise(pwr);`, with any scaling inside its power argument."
+  ]
+}

@@ -1,0 +1,8 @@
+// expect: refused
+// code: R0409
+// message: a laplace denominator has d_0 = 0
+module integ(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ laplace_nd(V(p, n), {1.0}, {0.0, 1e-3});
+endmodule

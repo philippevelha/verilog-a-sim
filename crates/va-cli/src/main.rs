@@ -43,6 +43,10 @@ fn render_error(e: &anyhow::Error) -> String {
         c.downcast_ref::<Diagnostic>().or_else(|| {
             c.downcast_ref::<va_frontend::FrontendError>()
                 .and_then(va_frontend::FrontendError::diagnostic)
+                .or_else(|| {
+                    c.downcast_ref::<va_codegen::CodegenError>()
+                        .and_then(va_codegen::CodegenError::diagnostic)
+                })
         })
     }
     let catalogue = Catalogue::global();

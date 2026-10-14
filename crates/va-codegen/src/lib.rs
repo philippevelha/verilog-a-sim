@@ -55,7 +55,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use va_abi::{ModelInstance, StampSink, UnknownKind};
+use va_diag::{codes, Diagnostic};
 use va_ir::{Builtin, Expr, ExprId, Module};
+
+/// The diagnostic codes and type `CodegenError` carries, re-exported for callers.
+pub use va_diag;
 
 /// Thermal voltage `kT/q` at [`TEMP`], in volts. Matches `va_abi::reference::diode::VT_NOMINAL`
 /// so a generated diode reproduces the reference diode's stamps.
@@ -87,15 +91,20 @@ pub const MAX_LOOP_ITERATIONS: usize = 1_000_000;
 /// Errors raised while lowering/differentiating the IR.
 #[derive(Debug, Error)]
 pub enum CodegenError {
-    /// The IR used a construct this codegen subset does not yet support.
-    #[error("unsupported construct: {0}")]
-    Unsupported(String),
+    /// A construct this code generator recognises and declines (an `R04xx` refusal), which
+    /// `va-cli` reports as a refusal of the user's model.
+    #[error("{0}")]
+    Unsupported(Diagnostic),
 
-    /// An invariant of this crate's own was broken — a bug here, not a property of the model
-    /// being compiled, and deliberately not [`Self::Unsupported`], which `va-cli` reports as a
-    /// refusal of the user's model.
-    #[error("internal codegen error: {0}")]
-    Internal(String),
+    /// A model whose values make it meaningless with this instance's parameters (an `E04xx`
+    /// error): a zero denominator, a negative noise power. The model is wrong, not refused.
+    #[error("{0}")]
+    Invalid(Diagnostic),
+
+    /// An invariant of this crate's own was broken (`E0001`) — a bug here, not a property of the
+    /// model being compiled, and deliberately not [`Self::Unsupported`].
+    #[error("{0}")]
+    Internal(Diagnostic),
 
     /// `terminals` did not provide one global index per IR node.
     #[error("expected {expected} terminals (one per node), got {got}")]
@@ -107,10 +116,21 @@ pub enum CodegenError {
     },
 }
 
+impl CodegenError {
+    /// The coded diagnostic this error carries; `None` for [`Self::TerminalCount`], a misuse of
+    /// this crate's API by its caller rather than a property of a model.
+    pub fn diagnostic(&self) -> Option<&Diagnostic> {
+        match self {
+            CodegenError::Unsupported(d) | CodegenError::Invalid(d) | CodegenError::Internal(d) => {
+                Some(d)
+            }
+            CodegenError::TerminalCount { .. } => None,
+        }
+    }
+}
+
 fn loop_iteration_cap_exceeded() -> CodegenError {
-    CodegenError::Unsupported(format!(
-        "a loop did not terminate within {MAX_LOOP_ITERATIONS} iterations"
-    ))
+    CodegenError::Unsupported(Diagnostic::new(codes::R0408).arg("limit", MAX_LOOP_ITERATIONS))
 }
 
 /// Compile an elaborated IR module into a loadable model instance. `terminals` must have
@@ -1020,13 +1040,7 @@ impl GeneratedModel {
                         // here instead (§ `lower::noise_term_shape`'s own doc comment on why
                         // scaled/nested shapes aren't guessed at).
                         if lower::contains_noise_call(ctx.module, term.expr, &taint.noise) {
-                            return Err(CodegenError::Unsupported(
-                                "white_noise/flicker_noise must be a top-level additive term of \
-                                 a contribution (a scaled or nested noise call would be silently \
-                                 dropped, since its PSD scales as the square of any factor \
-                                 around it)"
-                                    .to_string(),
-                            ));
+                            return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0403)));
                         }
                         // Same trap, same treatment: an `ac_stim` still buried in a resistive
                         // term was not pulled into the excitation channel, and `ad::eval` gives
@@ -1038,20 +1052,12 @@ impl GeneratedModel {
                         if let Some(what) =
                             lower::buried_frequency_domain_call(ctx.module, term.expr)
                         {
-                            return Err(CodegenError::Unsupported(format!(
-                                "{what} must be a top-level additive term of a contribution \
-                                 (its gain is complex, so there is nowhere in an ordinary \
-                                 expression to put it)"
-                            )));
+                            return Err(CodegenError::Unsupported(
+                                Diagnostic::new(codes::R0402).arg("operator", what),
+                            ));
                         }
                         if lower::contains_ac_stim_call(ctx.module, term.expr, &taint.ac_stim) {
-                            return Err(CodegenError::Unsupported(
-                                "ac_stim must be a top-level additive term of a contribution (a \
-                                 scaled or nested ac_stim would be silently dropped, since its \
-                                 value is zero in every analysis and only the split-out \
-                                 excitation channel carries it)"
-                                    .to_string(),
-                            ));
+                            return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0404)));
                         }
                         // A resistive term whose value depends on a *time derivative* — a
                         // charge rate scaled by a bias-dependent coefficient, `c(x)·ddt(q(x))` —
@@ -1066,11 +1072,7 @@ impl GeneratedModel {
                         // a time derivative is a second derivative and has nowhere to go.
                         eval(ctx, term.expr)?;
                         if lower::contains_ddt_call(ctx.module, term.expr, &taint.ddt) {
-                            return Err(CodegenError::Unsupported(
-                                "ddt of a ddt is a second time derivative, which this project's single 
-                                 charge channel cannot express"
-                                    .to_string(),
-                            ));
+                            return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0401)));
                         }
                     }
                     for term in &c.ac_stim {
@@ -1121,11 +1123,11 @@ impl GeneratedModel {
                                         let Some(&p) = pair.get(1) else { continue };
                                         let p = eval(ctx, p)?.value;
                                         if p < 0.0 || !p.is_finite() {
-                                            return Err(CodegenError::Unsupported(format!(
-                                                "noise_table power {p} at {f} Hz is not a \
-                                                 finite, non-negative power spectral density \
-                                                 with this instance's parameters"
-                                            )));
+                                            return Err(CodegenError::Invalid(
+                                                Diagnostic::new(codes::E0404)
+                                                    .arg("power", p)
+                                                    .arg("frequency", f),
+                                            ));
                                         }
                                     }
                                 }
@@ -1450,23 +1452,23 @@ impl GeneratedModel {
         let tt = eval(ctx, term.tt)?.value;
         let t0 = eval(ctx, term.t0)?.value;
         if period.is_nan() || period <= 0.0 || !period.is_finite() {
-            return Err(CodegenError::Unsupported(format!(
-                "a zi_* sample period must be positive and finite, got {period}"
-            )));
+            return Err(CodegenError::Invalid(
+                Diagnostic::new(codes::E0405).arg("value", period),
+            ));
         }
         if tt.is_nan() || tt < 0.0 || !tt.is_finite() {
-            return Err(CodegenError::Unsupported(format!(
-                "a zi_* transition time must be non-negative and finite, got {tt}"
-            )));
+            return Err(CodegenError::Invalid(
+                Diagnostic::new(codes::E0406).arg("value", tt),
+            ));
         }
         let num = Self::eval_coeffs(ctx, &term.num).ok_or_else(|| {
-            CodegenError::Unsupported("a zi_* coefficient does not evaluate to a number".into())
+            CodegenError::Invalid(Diagnostic::new(codes::E0407).arg("filter", "zi_*"))
         })?;
         let den = Self::eval_coeffs(ctx, &term.den).ok_or_else(|| {
-            CodegenError::Unsupported("a zi_* coefficient does not evaluate to a number".into())
+            CodegenError::Invalid(Diagnostic::new(codes::E0407).arg("filter", "zi_*"))
         })?;
         let r = ad::zi_realization(&num, term.num_is_roots, &den, term.den_is_roots)
-            .map_err(CodegenError::Unsupported)?;
+            .map_err(CodegenError::Invalid)?;
         Ok((period, tt, t0, r))
     }
 
@@ -1922,12 +1924,10 @@ impl GeneratedModel {
     ) -> Result<LaplaceRealization, CodegenError> {
         let coeffs = |ids: &[va_ir::ExprId], is_roots: bool| -> Result<Vec<f64>, CodegenError> {
             let vals = Self::eval_coeffs(ctx, ids).ok_or_else(|| {
-                CodegenError::Unsupported(
-                    "a laplace coefficient does not evaluate to a number".to_string(),
-                )
+                CodegenError::Invalid(Diagnostic::new(codes::E0407).arg("filter", "laplace_*"))
             })?;
             if is_roots {
-                ad::expand_roots(&vals).map_err(CodegenError::Unsupported)
+                ad::expand_roots(&vals).map_err(CodegenError::Invalid)
             } else {
                 Ok(vals)
             }
@@ -1943,30 +1943,23 @@ impl GeneratedModel {
             num.pop();
         }
         if den.iter().all(|&d| d == 0.0) {
-            return Err(CodegenError::Unsupported(
-                "a laplace denominator is identically zero".to_string(),
-            ));
+            return Err(CodegenError::Invalid(Diagnostic::new(codes::E0409)));
         }
         if den[0] == 0.0 {
-            return Err(CodegenError::Unsupported(
-                "a laplace denominator has d_0 = 0 (a pole at s = 0): the filter integrates \
-                 its input and has no DC operating point — write the integration with `idt` \
-                 and the remaining factor as the laplace filter"
-                    .to_string(),
-            ));
+            return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0409)));
         }
         let m = den.len() - 1;
         let k = num.len() - 1;
         if k > m {
-            return Err(CodegenError::Unsupported(format!(
-                "a laplace numerator of degree {k} over a denominator of degree {m} is an \
-                 improper filter: it differentiates its input, which has no state-space \
-                 realization here — write the derivative as `ddt` of a proper filter"
-            )));
+            return Err(CodegenError::Unsupported(
+                Diagnostic::new(codes::R0410)
+                    .arg("num_degree", k)
+                    .arg("den_degree", m),
+            ));
         }
         if !num.iter().chain(&den).all(|c| c.is_finite()) {
-            return Err(CodegenError::Unsupported(
-                "a laplace coefficient is not finite".to_string(),
+            return Err(CodegenError::Invalid(
+                Diagnostic::new(codes::E0408).arg("filter", "laplace_*"),
             ));
         }
         let omega0 = if m == 0 {
@@ -4173,7 +4166,7 @@ mod tests {
 
         assert!(matches!(
             build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
+            Err(CodegenError::Invalid(_))
         ));
     }
 
@@ -4348,7 +4341,7 @@ mod tests {
         assert!(
             matches!(
                 build_instance(&m, &[0, 1], &mut 2),
-                Err(CodegenError::Unsupported(_))
+                Err(CodegenError::Invalid(_))
             ),
             "an error in the untaken-at-x=0 arm must still be caught eagerly"
         );
@@ -6292,7 +6285,7 @@ mod tests {
 
         assert!(matches!(
             build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
+            Err(CodegenError::Invalid(_))
         ));
     }
 
@@ -6377,7 +6370,7 @@ mod tests {
 
         assert!(matches!(
             build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
+            Err(CodegenError::Invalid(_))
         ));
     }
 
@@ -6433,7 +6426,7 @@ mod tests {
 
         assert!(matches!(
             build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
+            Err(CodegenError::Internal(_))
         ));
     }
 
@@ -6493,7 +6486,7 @@ mod tests {
 
         assert!(matches!(
             build_instance(&m, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
+            Err(CodegenError::Invalid(_))
         ));
     }
 
@@ -7021,7 +7014,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("pole at s = 0") && msg.contains("idt"),
+            msg.contains("pole at s = 0") && msg.contains("[R0409]"),
             "{msg}"
         );
         // deg N > deg D: an improper filter.
@@ -7030,7 +7023,7 @@ mod tests {
             panic!("an improper filter must be refused");
         };
         let msg = err.to_string();
-        assert!(msg.contains("improper") && msg.contains("ddt"), "{msg}");
+        assert!(msg.contains("improper") && msg.contains("[R0410]"), "{msg}");
         // A trailing zero coefficient is a declared-but-absent order: it builds, the surplus
         // state is pinned, and the effective filter is the lower-order one.
         let m = laplace_module("trail", &[1.0], &[1.0, 1e-3, 0.0], false, false);
@@ -7069,11 +7062,13 @@ mod tests {
         assert_eq!(r.delay, 1);
         assert!(ad::zi_realization(&[0.0, 0.0], true, &[1.0], false)
             .unwrap_err()
+            .to_string()
             .contains("advance"));
         // A lone complex root, and d_0 = 0.
         assert!(ad::zi_realization(&[1.0], false, &[0.5, 0.5], true).is_err());
         assert!(ad::zi_realization(&[1.0], false, &[0.0, 1.0], false)
             .unwrap_err()
+            .to_string()
             .contains("d_0 = 0"));
 
         // The gain: H(1) is the steady state; H(e^{jωT}) for the one-pole IIR.
@@ -8504,7 +8499,7 @@ mod tests {
         });
         assert!(matches!(
             build_instance(&odd, &[0, 1], &mut 2),
-            Err(CodegenError::Unsupported(_))
+            Err(CodegenError::Internal(_))
         ));
     }
 

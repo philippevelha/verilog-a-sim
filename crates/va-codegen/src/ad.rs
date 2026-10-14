@@ -17,6 +17,7 @@ use crate::CodegenError;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use va_diag::{codes, Diagnostic};
 use va_ir::{BinOp, Builtin, Expr, ExprId, Function, Module, Stmt, UnOp, VarId};
 
 /// A value carried with its gradient w.r.t. the active unknowns (a dual number), **split into
@@ -293,10 +294,7 @@ impl Dual {
     /// second time derivative, and `va_abi::StampSink` has exactly one charge channel.
     pub fn into_ddt(self, value: f64) -> Result<Dual, CodegenError> {
         if self.carries_charge() {
-            return Err(unsupported(
-                "ddt of a value that already depends on a time derivative is a second time \
-                 derivative, which this project's single charge channel cannot express",
-            ));
+            return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0401)));
         }
         Ok(Dual::from_parts(value, Grad::Zero, self.grad))
     }
@@ -969,11 +967,14 @@ impl Ctx<'_> {
         if let Some(bound) = self.vars.borrow().get(i).cloned().flatten() {
             return Ok(bound);
         }
-        self.static_vars
-            .get(i)
-            .cloned()
-            .flatten()
-            .ok_or_else(|| unsupported(&format!("variable #{} read before assignment", id.0)))
+        self.static_vars.get(i).cloned().flatten().ok_or_else(|| {
+            let name = self
+                .module
+                .vars
+                .get(i)
+                .map_or_else(|| format!("#{i}"), |v| v.name.clone());
+            CodegenError::Invalid(Diagnostic::new(codes::E0413).arg("name", name))
+        })
     }
 }
 
@@ -1006,7 +1007,7 @@ impl Cx {
 /// chain from; the AC path keeps evaluating the product, which is better conditioned. Complex
 /// roots must come in conjugate pairs for the product to be real; if it is not (to `1e-9` of
 /// the largest coefficient), that is an error rather than a silently discarded imaginary part.
-pub fn expand_roots(pairs: &[f64]) -> Result<Vec<f64>, String> {
+pub fn expand_roots(pairs: &[f64]) -> Result<Vec<f64>, Diagnostic> {
     let mut poly = vec![Cx(1.0, 0.0)];
     for pair in pairs.chunks_exact(2) {
         let r = Cx(pair[0], pair[1]);
@@ -1030,11 +1031,7 @@ pub fn expand_roots(pairs: &[f64]) -> Result<Vec<f64>, String> {
         .fold(0.0_f64, f64::max)
         .max(f64::MIN_POSITIVE);
     if poly.iter().any(|c| c.1.abs() > 1e-9 * scale) {
-        return Err(
-            "laplace zeros/poles must come in complex-conjugate pairs: their expanded \
-             polynomial is not real"
-                .to_string(),
-        );
+        return Err(Diagnostic::new(codes::E0410).arg("filter", "laplace_*"));
     }
     Ok(poly.into_iter().map(|c| c.0).collect())
 }
@@ -1069,10 +1066,13 @@ pub fn zi_realization(
     num_is_roots: bool,
     den: &[f64],
     den_is_roots: bool,
-) -> Result<ZiRealization, String> {
-    fn poly(vals: &[f64], is_roots: bool, what: &str) -> Result<(Vec<f64>, usize), String> {
+) -> Result<ZiRealization, Diagnostic> {
+    fn poly(vals: &[f64], is_roots: bool, what: &str) -> Result<(Vec<f64>, usize), Diagnostic> {
         if vals.is_empty() {
-            return Err(format!("a zi_* {what} list is empty"));
+            // `va-frontend` rejects an empty list before code generation sees it.
+            return Err(
+                Diagnostic::new(codes::E0001).arg("detail", format!("a zi_* {what} list is empty"))
+            );
         }
         if !is_roots {
             return Ok((vals.to_vec(), 0));
@@ -1100,10 +1100,7 @@ pub fn zi_realization(
             .fold(0.0_f64, f64::max)
             .max(f64::MIN_POSITIVE);
         if coeffs.iter().any(|c| c.1.abs() > 1e-9 * scale) {
-            return Err(format!(
-                "zi_* {what} roots must come in complex-conjugate pairs: their expanded \
-                 polynomial is not real"
-            ));
+            return Err(Diagnostic::new(codes::E0410).arg("filter", "zi_*"));
         }
         Ok((coeffs.into_iter().map(|c| c.0).collect(), origin))
     }
@@ -1118,23 +1115,13 @@ pub fn zi_realization(
         if den_is_roots { "pole" } else { "denominator" },
     )?;
     if den[0] == 0.0 {
-        return Err(
-            "a zi_* denominator has d_0 = 0: the difference equation cannot be solved for the \
-             current output sample"
-                .to_string(),
-        );
+        return Err(Diagnostic::new(codes::E0411));
     }
     if !num.iter().chain(&den).all(|c| c.is_finite()) {
-        return Err("a zi_* coefficient is not finite".to_string());
+        return Err(Diagnostic::new(codes::E0408).arg("filter", "zi_*"));
     }
     if num_origin > den_origin {
-        return Err(format!(
-            "a zi_* filter with {} more zero(s) at the origin than poles at the origin is an \
-             advance of {} sample(s), which no causal filter can produce (LRM 4.5.12: a root \
-             at the origin is the factor z)",
-            num_origin - den_origin,
-            num_origin - den_origin
-        ));
+        return Err(Diagnostic::new(codes::E0412).arg("count", num_origin - den_origin));
     }
     Ok(ZiRealization {
         num,
@@ -1265,7 +1252,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 .params
                 .get(p.0 as usize)
                 .copied()
-                .ok_or_else(|| unsupported("parameter index out of range"))?;
+                .ok_or_else(|| internal_error("parameter index out of range"))?;
             Ok(Dual::constant(v))
         }
         // `$param_given(p)`: resolved at the instantiation boundary, read here. Constant per
@@ -1317,13 +1304,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
                 let slot = *ctx
                     .branch_current_slots
                     .get(&access.branch.0)
-                    .ok_or_else(|| {
-                        unsupported(
-                            "flow probe `I(...)` is only supported for a branch that also \
-                             receives a potential contribution somewhere in the module \
-                             (codegen v0)",
-                        )
-                    })?;
+                    .ok_or_else(|| CodegenError::Unsupported(Diagnostic::new(codes::R0405)))?;
                 let g = ctx.terminals.get(slot).copied().unwrap_or(usize::MAX);
                 let value = ctx.x.get(g).copied().unwrap_or(0.0);
                 crate::counters::probe_alloc();
@@ -1352,9 +1333,7 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         Expr::Call(Builtin::Idt, _) => {
             crate::counters::ctx_map_lookup();
             let slot = *ctx.idt_slots.get(&expr.0).ok_or_else(|| {
-                unsupported(
-                    "idt accumulator not registered for this call site (internal codegen error)",
-                )
+                internal_error("idt accumulator not registered for this call site")
             })?;
             let value = ctx.node_voltage(slot);
             crate::counters::probe_alloc();
@@ -1503,7 +1482,7 @@ fn eval_call(
     let arg = |i: usize| -> Result<Dual, CodegenError> {
         let id = args
             .get(i)
-            .ok_or_else(|| unsupported("built-in called with too few arguments"))?;
+            .ok_or_else(|| internal_error("built-in called with too few arguments"))?;
         eval(ctx, *id)
     };
     Ok(match builtin {
@@ -1561,9 +1540,8 @@ fn eval_call(
             let mask = match args.first().map(|&a| ctx.module.expr(a)) {
                 Some(Expr::Const(m)) => *m as u32,
                 _ => {
-                    return Err(unsupported(
-                        "analysis() expects a single constant phase bitmask argument \
-                         (va-frontend folds its string arguments to one)",
+                    return Err(internal_error(
+                        "analysis() expects a single constant phase bitmask argument",
                     ))
                 }
             };
@@ -1585,25 +1563,22 @@ fn eval_call(
         // a real value and a real gradient. `crate::GeneratedModel::validate` rejects this at
         // build time so it never surfaces mid-solve.
         Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp => {
-            return Err(unsupported(
-                "a laplace_* filter must be a top-level additive term of a contribution (its \
-                 gain is complex, so there is nowhere in an ordinary expression to put it)",
+            return Err(CodegenError::Unsupported(
+                Diagnostic::new(codes::R0402).arg("operator", "laplace_*"),
             ))
         }
         // The Z-domain family too: complex gain in AC, and in transient a sampled history
         // that only the contribution-level stamp (`crate::GeneratedModel::stamp_zi`) carries.
         Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp => {
-            return Err(unsupported(
-                "a zi_* filter must be a top-level additive term of a contribution (its \
-                 gain is complex, so there is nowhere in an ordinary expression to put it)",
+            return Err(CodegenError::Unsupported(
+                Diagnostic::new(codes::R0402).arg("operator", "zi_*"),
             ))
         }
         // `absdelay` is in the same position and for the same reason: its gain
         // `exp(-jw*tau)` is complex, so a buried one has no real-valued answer either.
         Builtin::Absdelay => {
-            return Err(unsupported(
-                "absdelay must be a top-level additive term of a contribution (its gain \
-                 is complex, so there is nowhere in an ordinary expression to put it)",
+            return Err(CodegenError::Unsupported(
+                Diagnostic::new(codes::R0402).arg("operator", "absdelay"),
             ))
         }
         // `@(initial_step)`'s desugared condition. Pure solver knowledge, no state, no gradient.
@@ -1619,13 +1594,13 @@ fn eval_call(
             let sel = match args.first().map(|&a| ctx.module.expr(a)) {
                 Some(va_ir::Expr::Const(v)) => *v,
                 _ => {
-                    return Err(unsupported(
-                        "`$simparam` must carry its resolved parameter selector as a constant                          (an IR built by hand got this wrong; see `va_ir::Builtin::SimParam`)",
+                    return Err(internal_error(
+                        "`$simparam` must carry its resolved parameter selector as a constant",
                     ))
                 }
             };
             let Some(p) = va_ir::SimParam::from_selector(sel) else {
-                return Err(unsupported(
+                return Err(internal_error(
                     "`$simparam` carries a parameter selector no `va_ir::SimParam` uses",
                 ));
             };
@@ -1657,7 +1632,7 @@ fn eval_call(
             // Pairs start after the lookup expression and the control code.
             let pairs = &args[2..];
             if pairs.len() < 4 || !pairs.len().is_multiple_of(2) {
-                return Err(unsupported(
+                return Err(internal_error(
                     "table_model needs at least two (x, y) pairs after its control code",
                 ));
             }
@@ -1735,7 +1710,7 @@ fn eval_call(
             let (pos, neg) = (arg(1)?.value.abs(), arg(2)?.value.abs());
             crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
-                return Err(unsupported("slew call site has no state slot allocated"));
+                return Err(internal_error("slew call site has no state slot allocated"));
             };
             // A static solve, and the first transient point, settle immediately — the
             // LRM-correct steady state and the answer the old const-fold produced.
@@ -1772,7 +1747,7 @@ fn eval_call(
             let (delay, rise, fall) = (arg(1)?.value, arg(2)?.value.abs(), arg(3)?.value.abs());
             crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
-                return Err(unsupported(
+                return Err(internal_error(
                     "transition call site has no state slot allocated",
                 ));
             };
@@ -1864,9 +1839,7 @@ fn eval_call(
             let q = arg(0)?;
             crate::counters::ctx_map_lookup();
             let Some(&(_, base)) = ctx.state_slots.get(&expr_id) else {
-                return Err(unsupported(
-                    "ddt call site has no state slots allocated (internal codegen error)",
-                ));
+                return Err(internal_error("ddt call site has no state slots allocated"));
             };
             let q_prev = ctx.state_get(base, 0);
             let rate = if ctx.analysis.is_initial_step {
@@ -1894,9 +1867,8 @@ fn eval_call(
         // `idt` never reaches here — `eval`'s own `Expr::Call` match intercepts it before this
         // function is even called (see `eval`'s `Builtin::Idt` arm).
         Builtin::Idt => {
-            return Err(unsupported(
-                "idt must be lowered to its own accumulator unknown, not evaluated here \
-                 (internal codegen error)",
+            return Err(internal_error(
+                "idt must be lowered to its own accumulator unknown, not evaluated here",
             ))
         }
         // LRM §4.5.13: a noise function's *value* is zero in every analysis except noise. This
@@ -1942,20 +1914,21 @@ fn eval_call(
 /// [`Expr::Var`] check (anything else is rejected: there would be nowhere to write the result).
 fn call_function(ctx: &Ctx, func: &Function, args: &[ExprId]) -> Result<Dual, CodegenError> {
     if func.args.len() != args.len() {
-        return Err(unsupported(&format!(
+        return Err(internal_error(&format!(
             "function `{}` called with {} argument(s), expected {}",
             func.name,
             args.len(),
             func.args.len()
         )));
     }
-    for i in 0..func.args.len() {
-        let (param, arg_expr, dir) = (func.args[i], args[i], func.arg_dirs[i]);
+    for (i, (&param, &arg_expr)) in func.args.iter().zip(args).enumerate() {
+        let dir = func.arg_dirs[i];
         if dir != va_ir::ArgDir::Input && !matches!(ctx.module.expr(arg_expr), Expr::Var(_)) {
-            return Err(unsupported(&format!(
-                "function `{}`'s output/inout argument #{i} must be a plain variable",
-                func.name
-            )));
+            return Err(CodegenError::Invalid(
+                Diagnostic::new(codes::E0403)
+                    .arg("name", &func.name)
+                    .arg("index", i),
+            ));
         }
         if dir != va_ir::ArgDir::Output {
             let d = eval(ctx, arg_expr)?;
@@ -2001,10 +1974,7 @@ fn exec_stmt(ctx: &Ctx, stmt: &Stmt) -> Result<(), CodegenError> {
         // is a request to the simulator, which is a side effect a function has no channel for:
         // `call_function` returns a `Dual`, not a stamp sink. Accepting it silently would
         // discard a timestep bound the model author believes is in force.
-        Stmt::BoundStep(_) => Err(unsupported(
-            "bound_step is not allowed inside an analog function body (a function is pure; \
-             write it in the analog block instead)",
-        )),
+        Stmt::BoundStep(_) => Err(CodegenError::Invalid(Diagnostic::new(codes::E0401))),
         // A system task inside a function body runs as it would in the analog block: a model's
         // parameter checks often live in a function, and an `$error` there must not vanish.
         // Queued on the same context, so it reaches the sink with the block's own tasks.
@@ -2117,26 +2087,19 @@ fn exec_stmt(ctx: &Ctx, stmt: &Stmt) -> Result<(), CodegenError> {
             }
             Ok(())
         }
-        Stmt::Contribute { .. } => Err(unsupported(
-            "a `<+` contribution is not allowed inside an analog function body",
-        )),
+        Stmt::Contribute { .. } => Err(CodegenError::Invalid(Diagnostic::new(codes::E0402))),
     }
 }
 
 fn loop_iteration_cap_exceeded() -> CodegenError {
-    CodegenError::Unsupported(format!(
-        "a loop inside a function did not terminate within {} iterations",
-        crate::MAX_LOOP_ITERATIONS
-    ))
+    CodegenError::Unsupported(
+        Diagnostic::new(codes::R0408).arg("limit", crate::MAX_LOOP_ITERATIONS),
+    )
 }
 
 /// A broken invariant of this crate's own ([`CodegenError::Internal`]) — not a refusal.
 pub(crate) fn internal_error(msg: &str) -> CodegenError {
-    CodegenError::Internal(msg.to_string())
-}
-
-fn unsupported(msg: &str) -> CodegenError {
-    CodegenError::Unsupported(msg.to_string())
+    CodegenError::Internal(Diagnostic::new(codes::E0001).arg("detail", msg))
 }
 
 fn bool_to_f64(b: bool) -> f64 {

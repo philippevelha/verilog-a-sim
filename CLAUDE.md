@@ -97,7 +97,7 @@ declares — keep them honest.
 | `va-abi`        | shared  | Interface β: `ModelInstance`/`StampSink` + ref models | — (leaf)                 |
 | `va-diag`       | shared  | diagnostic codes (E/W/R/C), message catalogue, rendering | — (leaf)              |
 | `va-frontend`   | T1      | lexer, parser, AST, elaboration → `va-ir`         | `va-ir`, `va-diag`           |
-| `va-codegen`    | T2      | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`            |
+| `va-codegen`    | T2      | IR → automatic differentiation → model instances  | `va-ir`, `va-abi`, `va-diag` |
 | `va-core`       | shared* | MNA assembly, Newton, linear solve, convergence (DC) | `va-abi`                  |
 | `va-transient`  | T4      | integration, timestep/LTE, events                 | `va-core`, `va-abi`          |
 | `va-acnoise`    | T5      | AC linearization + noise (PSD, adjoint)           | `va-core`, `va-abi`          |
@@ -278,7 +278,7 @@ this trait at bootstrap, so `va-core` has something real to solve on commit #1.
   implementation recognises and deliberately declines — distinct from malformed input and from a
   numerical failure, and the distinction is the first thing a user debugging a failed run needs
   ("my model is wrong" and "this simulator won't run my correct model" call for opposite next
-  steps). Raise one as `va_frontend::Refusal` (or `CodegenError::Unsupported`), never as a plain
+  steps). Raise one as `va_frontend::Refusal` (or `CodegenError::Unsupported` with an `R04xx` code), never as a plain
   parse/elaboration error, and never as a bare sentence: it carries **what** was refused,
   **where**, **why** it is refused rather than approximated — say what the wrong answer would
   have been — what to write **instead**, and where the limitation is **tracked**. `va-cli` prints

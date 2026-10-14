@@ -1,0 +1,9 @@
+{
+  "code": "E0408",
+  "rev": 1,
+  "message": "a {filter} coefficient is not finite",
+  "description": "A coefficient of the filter is infinite or not a number with the instance's parameter values, often from a division by zero.",
+  "actions": [
+    "Check the filter's coefficient lists and the parameters they use."
+  ]
+}

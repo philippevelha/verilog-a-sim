@@ -710,8 +710,8 @@ fn refusal_headline(e: &va_frontend::FrontendError) -> String {
 /// Every refusal therefore reaches the user in **one shape, from whichever layer raised it**,
 /// opening with a greppable `refused:` marker and carrying what / where / why / instead /
 /// tracking. `va-frontend` supplies those as fields ([`va_frontend::Refusal`]);
-/// [`va_codegen::CodegenError::Unsupported`] states its reason inline in the message instead, so
-/// its `why` line says where to read it rather than inventing a second one.
+/// [`va_codegen::CodegenError::Unsupported`] carries a coded diagnostic, whose catalogue entry
+/// supplies the same fields.
 ///
 /// Returns `false` if `err` is an ordinary error, which is the caller's cue to report it the
 /// usual way — this function never prints anything for a non-refusal.
@@ -743,14 +743,17 @@ pub fn refusal_block(err: &anyhow::Error) -> Option<String> {
         if let Some(r) = cause.downcast_ref::<va_frontend::Refusal>() {
             return Some(r.to_string());
         }
-        if let Some(va_codegen::CodegenError::Unsupported(msg)) = cause.downcast_ref() {
-            return Some(format!(
-                "refused: {msg}\n  why:      stated above - `va-codegen` recognises this \
-                 construct but cannot lower it into a differentiable model instance, and an \
-                 instance with a wrong Jacobian would converge to a wrong answer rather than \
-                 fail\n  tracking: docs/roadmap.md, and `docs/token-reference.md` for this \
-                 construct's status"
-            ));
+        // A code-generation refusal: its what, why and instead are its catalogue entry's.
+        if let Some(va_codegen::CodegenError::Unsupported(d)) = cause.downcast_ref() {
+            let args: Vec<(&str, &str)> = d
+                .args()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let r = va_frontend::Refusal::coded(d.code(), &args).tracking(
+                "docs/roadmap.md, and `docs/token-reference.md` for this construct's status",
+            );
+            return Some(r.to_string());
         }
     }
     None

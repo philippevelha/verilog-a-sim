@@ -519,6 +519,45 @@ pub const E0394: Code = Code::new("E0394");
 /// {file}: a $table_model table needs at least two distinct points, found {count}
 pub const E0395: Code = Code::new("E0395");
 
+/// bound_step is not allowed inside an analog function body
+pub const E0401: Code = Code::new("E0401");
+
+/// a `<+` contribution is not allowed inside an analog function body
+pub const E0402: Code = Code::new("E0402");
+
+/// function `{name}`'s output/inout argument #{index} must be a plain variable
+pub const E0403: Code = Code::new("E0403");
+
+/// noise_table power {power} at {frequency} Hz is not a finite, non-negative power spectral density with this instance's parameters
+pub const E0404: Code = Code::new("E0404");
+
+/// a zi_* sample period must be positive and finite, got {value}
+pub const E0405: Code = Code::new("E0405");
+
+/// a zi_* transition time must be non-negative and finite, got {value}
+pub const E0406: Code = Code::new("E0406");
+
+/// a {filter} coefficient does not evaluate to a number
+pub const E0407: Code = Code::new("E0407");
+
+/// a {filter} coefficient is not finite
+pub const E0408: Code = Code::new("E0408");
+
+/// a laplace denominator is identically zero
+pub const E0409: Code = Code::new("E0409");
+
+/// {filter} zeros/poles must come in complex-conjugate pairs: their expanded polynomial is not real
+pub const E0410: Code = Code::new("E0410");
+
+/// a zi_* denominator has d_0 = 0: the difference equation cannot be solved for the current output sample
+pub const E0411: Code = Code::new("E0411");
+
+/// a zi_* filter with {count} more zero(s) at the origin than poles at the origin is an advance of {count} sample(s), which no causal filter can produce (LRM 4.5.12)
+pub const E0412: Code = Code::new("E0412");
+
+/// variable `{name}` is read before it is assigned
+pub const E0413: Code = Code::new("E0413");
+
 /// unknown subcommand `{name}`
 pub const E0701: Code = Code::new("E0701");
 
@@ -570,6 +609,36 @@ pub const R0309: Code = Code::new("R0309");
 /// `$table_model` extrapolation `E`
 pub const R0310: Code = Code::new("R0310");
 
+/// `ddt` of a value that already depends on a time derivative is a second time derivative
+pub const R0401: Code = Code::new("R0401");
+
+/// `{operator}` must be a top-level additive term of a contribution
+pub const R0402: Code = Code::new("R0402");
+
+/// white_noise/flicker_noise must be a top-level additive term of a contribution
+pub const R0403: Code = Code::new("R0403");
+
+/// ac_stim must be a top-level additive term of a contribution
+pub const R0404: Code = Code::new("R0404");
+
+/// flow probe `I(...)` is only supported for a branch that also receives a potential contribution somewhere in the module
+pub const R0405: Code = Code::new("R0405");
+
+/// a bare `I(...)` probe of a branch that receives no contribution anywhere is only supported when one terminal is the module's implicit ground reference
+pub const R0406: Code = Code::new("R0406");
+
+/// a ddt assigned to a variable inside an if/case/loop arm and contributed after that arm needs a controlling condition that is constant for the whole run (LRM 4.5.15)
+pub const R0407: Code = Code::new("R0407");
+
+/// a loop did not terminate within {limit} iterations
+pub const R0408: Code = Code::new("R0408");
+
+/// a laplace denominator has d_0 = 0 (a pole at s = 0): the filter integrates its input and has no DC operating point
+pub const R0409: Code = Code::new("R0409");
+
+/// a laplace numerator of degree {num_degree} over a denominator of degree {den_degree} is an improper filter
+pub const R0410: Code = Code::new("R0410");
+
 /// `timescale has no effect in Verilog-A
 pub const W0101: Code = Code::new("W0101");
 
@@ -599,7 +668,8 @@ pub const ALL: &[Code] = &[
     E0352, E0353, E0354, E0355, E0356, E0357, E0358, E0359, E0360, E0361, E0362, E0363, E0364,
     E0365, E0366, E0367, E0368, E0369, E0370, E0371, E0372, E0373, E0374, E0375, E0376, E0377,
     E0378, E0379, E0380, E0381, E0382, E0383, E0384, E0385, E0386, E0387, E0388, E0389, E0390,
-    E0391, E0392, E0393, E0394, E0395, E0701, E0702, E0703, R0101, R0201, R0202, R0203, R0301,
-    R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, W0101, W0102, W0103, W0104,
-    W0301,
+    E0391, E0392, E0393, E0394, E0395, E0401, E0402, E0403, E0404, E0405, E0406, E0407, E0408,
+    E0409, E0410, E0411, E0412, E0413, E0701, E0702, E0703, R0101, R0201, R0202, R0203, R0301,
+    R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404,
+    R0405, R0406, R0407, R0408, R0409, R0410, W0101, W0102, W0103, W0104, W0301,
 ];
