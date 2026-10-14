@@ -1,0 +1,17 @@
+// LRM 5.10.1 — two events ORed with the keyword or
+// Source: OpenVAF-Reloaded PR #35 (https://github.com/OpenVAF/OpenVAF-Reloaded/pull/35),
+// which closed this parser gap in OpenVAF. Kept here to check this simulator handles it too.
+module event_or(in, out, smpl);
+  input in, smpl;
+  output out;
+  electrical in, out, smpl;
+  parameter real thresh = 0.5;
+  parameter integer dir = 1;
+  parameter real en = 1.0;
+  parameter real tau = 1e-6;
+  real state, vout;
+  analog begin
+    @(initial_step or cross(V(smpl) - 2.5, +1)) vout = (V(in) > 2.5);
+    V(out) <+ vout;
+  end
+endmodule

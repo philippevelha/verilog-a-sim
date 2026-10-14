@@ -1,0 +1,17 @@
+// LRM 5.10.3.1 (A.6.5) — cross() with its two tolerance arguments omitted
+// Source: OpenVAF-Reloaded PR #35 (https://github.com/OpenVAF/OpenVAF-Reloaded/pull/35),
+// which closed this parser gap in OpenVAF. Kept here to check this simulator handles it too.
+module cross_null_tolerances(in, out, smpl);
+  input in, smpl;
+  output out;
+  electrical in, out, smpl;
+  parameter real thresh = 0.5;
+  parameter integer dir = 1;
+  parameter real en = 1.0;
+  parameter real tau = 1e-6;
+  real state, vout;
+  analog begin
+    @(cross(V(smpl) - thresh, dir, , , en)) state = V(in);
+    V(out) <+ state;
+  end
+endmodule

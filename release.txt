@@ -22,6 +22,24 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.28.0+1 - 2026-10-14
+----------------------
+**New `examples/LRM/`: LRM examples, starting with the seven from OpenVAF-Reloaded PR #35.**
+That PR closed parser gaps in OpenVAF for the event and filter syntax of LRM A.6.4/A.6.5; run
+through this simulator, the same examples show the same gaps, recorded in
+`examples/LRM/README.md`:
+  * omitted (null) arguments, `cross(e, dir, , , en)`, `timer(0, p, , en)`,
+    `laplace_nd(x, , den)`, are a syntax error (`E0207`) although the LRM allows them;
+  * a comma between events, `@(initial_step, cross(...))`, is refused (`R0201`) although it
+    means the same as `or`, which is accepted;
+  * `@(initial_step("tran") or final_step("tran"))` is refused (`R0202`), deliberately;
+  * `timer(0, 1e-6, 1e-9, )`, invalid, is rejected, but by the generic `E0207` rather than a
+    message naming the argument that may not be omitted.
+No code changed: the examples record the gaps, they do not close them.
+
+Measured: `cargo test --workspace` not rerun (no code change since 2.28.0: 983 passed, 0 failed).
+
+
 2.28.0 - 2026-10-14
 --------------------
 **Coded diagnostics, step 3b: the netlist.** Every error `va-netlist` raises carries an

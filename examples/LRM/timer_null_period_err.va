@@ -1,0 +1,13 @@
+// LRM 5.10.3.3 (A.6.5) — INVALID: timer()'s 4th argument may not be omitted.
+// Source: OpenVAF-Reloaded PR #35 (https://github.com/OpenVAF/OpenVAF-Reloaded/pull/35), whose
+// diagnostic is "argument 4 of 'timer' may not be omitted". A simulator must reject this.
+module timer_null_period_err(in, out);
+  input in;
+  output out;
+  electrical in, out;
+  real state;
+  analog begin
+    @(timer(0, 1e-6, 1e-9, )) state = V(in);
+    V(out) <+ state;
+  end
+endmodule

@@ -1,0 +1,14 @@
+// LRM 4.5.11 (A.6.4) — laplace_nd() with the numerator omitted: unity, H(s) = 1/D(s)
+// Source: OpenVAF-Reloaded PR #35 (https://github.com/OpenVAF/OpenVAF-Reloaded/pull/35),
+// which closed this parser gap in OpenVAF. Kept here to check this simulator handles it too.
+module laplace_null_zeros(in, out, smpl);
+  input in, smpl;
+  output out;
+  electrical in, out, smpl;
+  parameter real thresh = 0.5;
+  parameter integer dir = 1;
+  parameter real en = 1.0;
+  parameter real tau = 1e-6;
+  real state, vout;
+  analog V(out) <+ laplace_nd(V(in), , {1, tau});
+endmodule
