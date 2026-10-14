@@ -90,6 +90,34 @@ fn a_netlist_error_and_warning_carry_their_codes() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A numerical failure carries its `E06xx` code, and a non-finite value names the unknown whose
+/// equation went bad rather than a row number.
+#[test]
+fn a_numerical_failure_names_its_code_and_unknown() {
+    let dir = std::env::temp_dir().join(format!("va-cli-numerical-codes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let model = dir.join("bad.va");
+    std::fs::write(
+        &model,
+        "module bad(p, n); inout p, n; electrical p, n;\n\
+         analog I(p, n) <+ 1e-3 * ln(V(p, n));\nendmodule\n",
+    )
+    .expect("write");
+    let deck = dir.join("nf.net");
+    std::fs::write(&deck, "* ln(0)\nV1 a 0 1\nX1 a 0 bad\n.op\n").expect("write");
+    let out = va_cli(&[
+        "sim",
+        deck.to_str().unwrap(),
+        "--model",
+        model.to_str().unwrap(),
+    ]);
+    let err = stderr(&out);
+    assert!(!out.status.success());
+    assert!(err.contains("error[E0603]: "), "{err}");
+    assert!(err.contains("in the equation of `V(a)`"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// An error with no code yet is `E0000`, and keeps its own wording and causes in full: the code
 /// adds nothing, so it must not take anything away either.
 #[test]

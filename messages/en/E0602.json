@@ -1,0 +1,10 @@
+{
+  "code": "E0602",
+  "rev": 1,
+  "message": "singular matrix during linear solve",
+  "description": "The circuit's equations do not determine every unknown. This is a problem with the circuit's structure, not with a model's values: typically a node with no DC path to ground (only capacitors, or nothing at all), two ideal voltage sources in parallel, or a loop of voltage sources and inductors.",
+  "actions": [
+    "Look for a floating node, and give it a DC path to ground (a large resistor will do).",
+    "Look for voltage sources or inductors connected in a loop."
+  ]
+}

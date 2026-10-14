@@ -22,6 +22,33 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.30.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3c: numerical errors.** A failed solve is shown under an `E06xx` code:
+`E0601` Newton did not converge, `E0602` singular matrix, `E0603`/`E0604` a non-finite value or
+derivative, `E0605` time step underflow, `E0606` an unimplemented integration method, `E0607` a
+model's `$fatal` in transient and `E0608` in a static solve.
+  * The numerical crates are unchanged: `va-core` may depend on `va-abi` alone (CLAUDE.md §2),
+    and their errors are already typed, with exactly the fields the catalogue needs. The new
+    `va_cli::numerical_diagnostic` maps each variant to its code at the edge, the same way
+    whether a `CoreError` arrives bare or inside a transient or AC/noise error. A caller's misuse
+    of their APIs (`RecordOutOfRange`, `InvalidOutput`) is `E0001`.
+  * A non-finite value names the unknown, as before, but now in the coded message:
+    "error[E0603]: a model produced a non-finite value (NaN or inf) in the equation of `V(a)`
+    (unknown #0)", where 2.29.0 printed the core's sentence plus an uncoded context line.
+  * `va-cli`'s error rendering prefers a diagnostic attached as `anyhow` context over one
+    found in the chain, since `va-cli` attaches one only to say something more specific.
+  * Tests: `every_numerical_error_has_a_code` (every variant), and
+    `a_numerical_failure_names_its_code_and_unknown` (the binary, on `ln(V)` at 0 V).
+
+Limits: `E0606`'s `{method}` and `E0608`'s `{point}` are filled with the program's own words
+(`Gear`, `the operating point`), not yet translatable. Command-line, file, plot and harness
+errors are still `E0000`: step 3d.
+
+Measured: `cargo test --workspace` 989 passed, 0 failed (987 + 2); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
 2.29.0 - 2026-10-14
 --------------------
 **Omitted arguments and comma-separated events, the LRM syntax OpenVAF-Reloaded PR #35 added.**

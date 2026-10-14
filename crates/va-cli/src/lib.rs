@@ -2113,6 +2113,60 @@ fn nodeset_start(net: &Netlist, dim: usize) -> Result<Option<Vec<f64>>> {
     Ok(Some(x))
 }
 
+/// The coded diagnostic for an error raised by the numerical crates (`va-core`,
+/// `va-transient`, `va-acnoise`), or `None` for any other error.
+///
+/// The mapping lives here rather than in those crates because `va-core` may depend on
+/// `va-abi` alone (CLAUDE.md §2), and the three keep one shape between them: typed errors whose
+/// fields are exactly the placeholders the catalogue needs, so nothing is lost by coding them
+/// at the edge. A caller's misuse of their APIs (`RecordOutOfRange`, `InvalidOutput`) is
+/// `E0001`, an internal error, since only `va-cli` itself can cause one.
+pub fn numerical_diagnostic(e: &(dyn std::error::Error + 'static)) -> Option<va_diag::Diagnostic> {
+    use va_diag::{codes, Diagnostic};
+    let core = |c: &va_core::CoreError| match c {
+        va_core::CoreError::NoConvergence { iters, residual } => Diagnostic::new(codes::E0601)
+            .arg("iters", iters)
+            .arg("residual", format!("{residual:e}")),
+        va_core::CoreError::Singular => Diagnostic::new(codes::E0602),
+        va_core::CoreError::NonFinite { row, col: None } => {
+            Diagnostic::new(codes::E0603).arg("unknown", format!("unknown #{row}"))
+        }
+        va_core::CoreError::NonFinite { row, col: Some(c) } => Diagnostic::new(codes::E0604)
+            .arg("unknown", format!("unknown #{row}"))
+            .arg("column", c),
+    };
+    if let Some(c) = e.downcast_ref::<va_core::CoreError>() {
+        return Some(core(c));
+    }
+    if let Some(t) = e.downcast_ref::<va_transient::TransientError>() {
+        use va_transient::TransientError as T;
+        return Some(match t {
+            T::Core(c) => core(c),
+            T::TimestepUnderflow { t } => {
+                Diagnostic::new(codes::E0605).arg("time", format!("{t:e}"))
+            }
+            T::UnsupportedMethod { method } => {
+                Diagnostic::new(codes::E0606).arg("method", format!("{method:?}"))
+            }
+            T::Fatal { t, message } => Diagnostic::new(codes::E0607)
+                .arg("time", format!("{t:e}"))
+                .arg("message", message),
+            T::RecordOutOfRange { .. } => {
+                Diagnostic::new(codes::E0001).arg("detail", t.to_string())
+            }
+        });
+    }
+    if let Some(a) = e.downcast_ref::<va_acnoise::AcNoiseError>() {
+        return Some(match a {
+            va_acnoise::AcNoiseError::Core(c) => core(c),
+            va_acnoise::AcNoiseError::InvalidOutput { .. } => {
+                Diagnostic::new(codes::E0001).arg("detail", a.to_string())
+            }
+        });
+    }
+    None
+}
+
 /// If `err` is a [`va_core::CoreError::NonFinite`] (bare, or inside a
 /// [`va_transient::TransientError`]), wrap it with the *name* of the unknown whose equation
 /// went non-finite — `Popt(drop)` or `X3.b0`, not "row 7". The row is what the core can know;
@@ -2132,14 +2186,23 @@ fn name_non_finite_row(err: anyhow::Error, quantities: &[Quantity]) -> anyhow::E
     let Some(row) = row else {
         return err;
     };
+    // The same code `numerical_diagnostic` gives the bare error, now naming the unknown; as
+    // the outermost coded diagnostic in the chain, it is the one `va-cli` shows.
+    let Some(d) = err.chain().find_map(numerical_diagnostic) else {
+        return err;
+    };
     match quantities.iter().find(|q| q.index == row) {
-        Some(q) => err.context(format!(
-            "the non-finite value is in the equation of `{}` (unknown #{row}); look at the device(s) contributing to it",
-            q.label
-        )),
-        None => err.context(format!(
-            "the non-finite value is in the equation of unknown #{row}, which no reported quantity names"
-        )),
+        Some(q) => {
+            let named = va_diag::Diagnostic::new(d.code())
+                .arg("unknown", format!("`{}` (unknown #{row})", q.label));
+            let named = d
+                .args()
+                .iter()
+                .filter(|(k, _)| k != "unknown")
+                .fold(named, |n, (k, v)| n.arg(k, v));
+            err.context(named)
+        }
+        None => err,
     }
 }
 
@@ -7848,6 +7911,69 @@ endmodule
             let msg = format!("{err:#}");
             assert!(msg.contains("multiplicity"), "says what is wrong: {msg}");
         }
+    }
+
+    /// Every error the numerical crates raise has a code: each variant maps to its own `E06xx`,
+    /// a caller's misuse of their APIs to `E0001`, and the same `CoreError` maps the same way
+    /// whether it arrives bare or inside a transient or AC/noise error.
+    #[test]
+    fn every_numerical_error_has_a_code() {
+        use va_core::CoreError as C;
+        use va_transient::TransientError as T;
+        let code = |e: &(dyn std::error::Error + 'static)| {
+            numerical_diagnostic(e)
+                .map(|d| d.code().as_str().to_string())
+                .unwrap_or_default()
+        };
+        let cases: Vec<(Box<dyn std::error::Error>, &str)> = vec![
+            (
+                Box::new(C::NoConvergence {
+                    iters: 50,
+                    residual: 1e-3,
+                }),
+                "E0601",
+            ),
+            (Box::new(C::Singular), "E0602"),
+            (Box::new(C::NonFinite { row: 3, col: None }), "E0603"),
+            (
+                Box::new(C::NonFinite {
+                    row: 3,
+                    col: Some(1),
+                }),
+                "E0604",
+            ),
+            (Box::new(T::TimestepUnderflow { t: 1e-6 }), "E0605"),
+            (
+                Box::new(T::UnsupportedMethod {
+                    method: Method::Gear,
+                }),
+                "E0606",
+            ),
+            (
+                Box::new(T::Fatal {
+                    t: 1e-6,
+                    message: "x".into(),
+                }),
+                "E0607",
+            ),
+            (
+                Box::new(T::RecordOutOfRange { unknown: 9, dim: 2 }),
+                "E0001",
+            ),
+            (Box::new(T::Core(C::Singular)), "E0602"),
+            (
+                Box::new(va_acnoise::AcNoiseError::Core(C::Singular)),
+                "E0602",
+            ),
+            (
+                Box::new(va_acnoise::AcNoiseError::InvalidOutput { index: 9, dim: 2 }),
+                "E0001",
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(code(e.as_ref()), want, "{e}");
+        }
+        assert!(numerical_diagnostic(&std::io::Error::other("x")).is_none());
     }
 
     /// **Every refusal, from every layer, reaches the user saying what was refused and why.**

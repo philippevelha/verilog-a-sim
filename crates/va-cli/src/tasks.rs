@@ -339,7 +339,12 @@ pub(crate) fn at_static_point(
     for (kind, text) in sys.take_tasks() {
         emit(kind, &text, when);
         match kind {
-            TaskKind::Fatal(_) => anyhow::bail!("$fatal at {when}: {text}"),
+            TaskKind::Fatal(_) => {
+                return Err(va_diag::Diagnostic::new(va_diag::codes::E0608)
+                    .arg("point", when)
+                    .arg("message", &text)
+                    .into())
+            }
             TaskKind::Finish(_) | TaskKind::Stop(_) if finish.is_none() => {
                 finish = Some((kind, text));
             }

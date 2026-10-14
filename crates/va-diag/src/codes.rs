@@ -660,6 +660,30 @@ pub const E0532: Code = Code::new("E0532");
 /// subcircuits nested more than {limit} deep
 pub const E0533: Code = Code::new("E0533");
 
+/// Newton did not converge after {iters} iterations (residual {residual})
+pub const E0601: Code = Code::new("E0601");
+
+/// singular matrix during linear solve
+pub const E0602: Code = Code::new("E0602");
+
+/// a model produced a non-finite value (NaN or inf) in the equation of {unknown}
+pub const E0603: Code = Code::new("E0603");
+
+/// a model produced a non-finite derivative (NaN or inf) in the equation of {unknown}, with respect to unknown #{column}
+pub const E0604: Code = Code::new("E0604");
+
+/// time step underflow at t = {time} s
+pub const E0605: Code = Code::new("E0605");
+
+/// integration method `{method}` is not implemented
+pub const E0606: Code = Code::new("E0606");
+
+/// the model executed `$fatal` at t = {time} s: {message}
+pub const E0607: Code = Code::new("E0607");
+
+/// the model executed `$fatal` at {point}: {message}
+pub const E0608: Code = Code::new("E0608");
+
 /// unknown subcommand `{name}`
 pub const E0701: Code = Code::new("E0701");
 
@@ -783,7 +807,8 @@ pub const ALL: &[Code] = &[
     E0408, E0409, E0410, E0411, E0412, E0413, E0501, E0502, E0503, E0504, E0505, E0506, E0507,
     E0508, E0509, E0510, E0511, E0512, E0513, E0514, E0515, E0516, E0517, E0518, E0519, E0520,
     E0521, E0522, E0523, E0524, E0525, E0526, E0527, E0528, E0529, E0530, E0531, E0532, E0533,
-    E0701, E0702, E0703, R0101, R0201, R0202, R0203, R0301, R0302, R0303, R0304, R0305, R0306,
-    R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409,
-    R0410, W0101, W0102, W0103, W0104, W0301, W0501, W0502, W0503,
+    E0601, E0602, E0603, E0604, E0605, E0606, E0607, E0608, E0701, E0702, E0703, R0101, R0201,
+    R0202, R0203, R0301, R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401,
+    R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409, R0410, W0101, W0102, W0103, W0104,
+    W0301, W0501, W0502, W0503,
 ];

@@ -1,0 +1,10 @@
+{
+  "code": "E0605",
+  "rev": 1,
+  "message": "time step underflow at t = {time} s",
+  "description": "The transient analysis cut its time step below the minimum and still could not meet its error tolerance, or still could not converge. The circuit has an event faster than the simulator can resolve at this time, or a discontinuity no step can follow.",
+  "actions": [
+    "Look at what switches at that time: a source edge, a model's `if` on a threshold.",
+    "Give sources a finite rise and fall time; use `transition` in models instead of abrupt changes."
+  ]
+}

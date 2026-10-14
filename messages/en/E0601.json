@@ -1,0 +1,11 @@
+{
+  "code": "E0601",
+  "rev": 1,
+  "message": "Newton did not converge after {iters} iterations (residual {residual})",
+  "description": "The nonlinear solver did not find a solution within its iteration budget. The residual is how far the circuit's equations still were from being satisfied. Common causes are a model whose current changes very steeply (an exponential with no limiting), a node with no DC path to ground, or a starting point far from the solution.",
+  "actions": [
+    "Give Newton a better starting point with `.nodeset V(net)=value` for the nets you can estimate.",
+    "Check that every node has a DC path to ground.",
+    "In a model, limit steep exponentials (`limexp`, or `$limit` on the junction voltage)."
+  ]
+}

@@ -38,30 +38,47 @@ fn main() -> std::process::ExitCode {
 /// exactly as before codes existed: the code says the catalogue has nothing to add, never that
 /// the cause is unknown.
 fn render_error(e: &anyhow::Error) -> String {
-    /// The coded diagnostic `c` is, or carries (a frontend error wraps one).
-    fn coded<'a>(c: &'a (dyn std::error::Error + 'static)) -> Option<&'a Diagnostic> {
-        c.downcast_ref::<Diagnostic>().or_else(|| {
-            c.downcast_ref::<va_frontend::FrontendError>()
-                .and_then(va_frontend::FrontendError::diagnostic)
-                .or_else(|| {
-                    c.downcast_ref::<va_codegen::CodegenError>()
-                        .and_then(va_codegen::CodegenError::diagnostic)
-                })
-                .or_else(|| {
-                    c.downcast_ref::<va_netlist::NetlistError>()
-                        .and_then(va_netlist::NetlistError::diagnostic)
-                })
-        })
+    /// The coded diagnostic `c` is, or carries: a frontend, codegen or netlist error wraps one,
+    /// and a numerical error is given one by `va_cli::numerical_diagnostic`.
+    fn coded(c: &(dyn std::error::Error + 'static)) -> Option<Diagnostic> {
+        c.downcast_ref::<Diagnostic>()
+            .cloned()
+            .or_else(|| {
+                c.downcast_ref::<va_frontend::FrontendError>()
+                    .and_then(va_frontend::FrontendError::diagnostic)
+                    .cloned()
+            })
+            .or_else(|| {
+                c.downcast_ref::<va_codegen::CodegenError>()
+                    .and_then(va_codegen::CodegenError::diagnostic)
+                    .cloned()
+            })
+            .or_else(|| {
+                c.downcast_ref::<va_netlist::NetlistError>()
+                    .and_then(va_netlist::NetlistError::diagnostic)
+                    .cloned()
+            })
+            .or_else(|| va_cli::numerical_diagnostic(c))
     }
     let catalogue = Catalogue::global();
     let mut out = String::new();
     for problem in catalogue.load_problems() {
         out.push_str(&format!("warning: message catalogue: {problem}\n"));
     }
-    match e.chain().find_map(coded) {
+    // A diagnostic attached as context (`err.context(diag)`, which `va-cli` uses to name an
+    // unknown) is reachable through `anyhow`'s own downcast, not through a chain item; it is
+    // the more specific of the two, so it is preferred.
+    let attached = e.downcast_ref::<Diagnostic>().cloned();
+    match attached.or_else(|| e.chain().find_map(coded)) {
         Some(diag) => {
-            out.push_str(&catalogue.render(diag));
-            for context in e.chain().take_while(|c| coded(*c).is_none()) {
+            out.push_str(&catalogue.render(&diag));
+            // What `va-cli` was doing: the context above the diagnostic. A context layer
+            // holding a diagnostic displays as that diagnostic's headline.
+            let headline = diag.to_string();
+            for context in e
+                .chain()
+                .take_while(|c| coded(*c).is_none() && c.to_string() != headline)
+            {
                 out.push_str(&format!("\n  while: {context}"));
             }
         }
