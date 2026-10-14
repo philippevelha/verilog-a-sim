@@ -569,6 +569,11 @@ pub enum ExprAst {
     /// anywhere else it's an elaboration error. No `va-ir` representation exists for it (and
     /// none is needed): it never survives past elaboration as a runtime value.
     ArrayLit(Vec<ExprRef>),
+    /// An omitted ("null") argument, `cross(e, dir, , , en)` or `laplace_nd(x, , den)`. The
+    /// parser produces one only in the positions LRM A.6.4/A.6.5 allow it (see
+    /// `parser::null_allowed`); elaboration reads it as "argument not given" there, and an
+    /// omitted filter coefficient list as unity. It never reaches an ordinary expression.
+    Null,
 }
 
 /// Unary operators.

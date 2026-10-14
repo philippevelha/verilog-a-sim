@@ -526,6 +526,105 @@ endmodule
         assert!(refused(r#"fd = 1 + $fopen("x.txt");"#).contains("inside an expression"));
     }
 
+    fn event_module(trigger: &str) -> String {
+        format!(
+            "module m(a, b); inout a, b; electrical a, b; real s;\n\
+             analog begin @({trigger}) s = V(a); I(a, b) <+ s * V(a, b); end endmodule\n"
+        )
+    }
+
+    /// LRM A.6.5: a `cross`/`above`/`timer` argument the grammar marks `_or_null` may be left
+    /// out, and reads as not given; the LRM's own example (5.10.3.1) is the first case.
+    #[test]
+    fn omitted_event_arguments_read_as_not_given() {
+        use va_ir::EventSite;
+        let site = |trigger: &str| {
+            let design = super::compile(&event_module(trigger))
+                .unwrap_or_else(|e| panic!("`{trigger}` compiles: {e}"));
+            design.modules[0].event_sites[0]
+        };
+        let EventSite::Cross {
+            dir,
+            time_tol,
+            expr_tol,
+            enable,
+            ..
+        } = site("cross(V(a) - 0.5, 1, , , 1)")
+        else {
+            panic!("a cross site");
+        };
+        assert_eq!(dir, 1);
+        assert!(time_tol.is_none() && expr_tol.is_none() && enable.is_some());
+        let EventSite::Cross { dir, .. } = site("cross(V(a), , 1e-9)") else {
+            panic!("a cross site");
+        };
+        assert_eq!(dir, 0, "an omitted direction is the default, either edge");
+        let EventSite::Timer {
+            time_tol, enable, ..
+        } = site("timer(0, 1e-6, , 1)")
+        else {
+            panic!("a timer site");
+        };
+        assert!(time_tol.is_none() && enable.is_some());
+    }
+
+    /// An argument left out where the LRM requires it is `E0238`, naming the argument, not a
+    /// generic "expected an expression".
+    #[test]
+    fn an_argument_omitted_where_required_names_itself() {
+        for (src, needle) in [
+            (
+                event_module("timer(0, 1e-6, 1e-9, )"),
+                "argument 4 of `timer`",
+            ),
+            (
+                event_module("cross(V(a), 1, , , )"),
+                "argument 5 of `cross`",
+            ),
+            (event_module("above(, 1e-9)"), "argument 1 of `above`"),
+            (
+                "module m(a); inout a; electrical a; analog I(a) <+ exp(, 1); endmodule\n"
+                    .to_string(),
+                "argument 1 of `exp`",
+            ),
+            (
+                "module m(a, b); inout a, b; electrical a, b;\n\
+                 analog V(b) <+ zi_nd(V(a), {1}, {1}, ); endmodule\n"
+                    .to_string(),
+                "argument 4 of `zi_nd`",
+            ),
+        ] {
+            let Err(err) = super::compile(&src) else {
+                panic!("{needle}: must be rejected");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("[E0238]") && err.contains(needle),
+                "{needle}: {err}"
+            );
+        }
+    }
+
+    /// LRM 5.10.1: a comma between events means `or`, and compiles to the same thing.
+    #[test]
+    fn a_comma_between_events_is_or() {
+        let ir = |trigger: &str| {
+            let m = super::compile(&event_module(trigger))
+                .unwrap_or_else(|e| panic!("`{trigger}` compiles: {e}"))
+                .modules
+                .remove(0);
+            (format!("{:?}", m.analog), format!("{:?}", m.event_sites))
+        };
+        assert_eq!(
+            ir("initial_step, cross(V(a) - 2.5, 1)"),
+            ir("initial_step or cross(V(a) - 2.5, 1)")
+        );
+        assert_eq!(
+            ir("initial_step, final_step"),
+            ir("initial_step or final_step")
+        );
+    }
+
     /// The no-effect directives reach the caller as warnings, not as silence.
     #[test]
     fn no_effect_directives_surface_as_warnings() {

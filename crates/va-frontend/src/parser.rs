@@ -442,7 +442,7 @@ impl Parser<'_> {
         loop {
             match self.toks.get(i) {
                 Some(Token::RParen) => return Some(names),
-                Some(Token::Keyword(kw)) if kw.as_str() == "or" => {
+                t if is_event_separator(t) => {
                     names.push(step_event(i + 1)?);
                     i += 2;
                 }
@@ -571,8 +571,7 @@ impl Parser<'_> {
                 }
                 i += 1;
             } else if STEP_EVENTS.contains(&name.as_str())
-                && (next == Some(&Token::RParen)
-                    || matches!(next, Some(Token::Keyword(kw)) if kw.as_str() == "or"))
+                && (next == Some(&Token::RParen) || is_event_separator(next))
             {
                 i += 1;
             } else {
@@ -580,7 +579,7 @@ impl Parser<'_> {
             }
             match self.toks.get(i) {
                 Some(Token::RParen) => return true,
-                Some(Token::Keyword(kw)) if kw.as_str() == "or" => i += 1,
+                t if is_event_separator(t) => i += 1,
                 _ => return false,
             }
         }
@@ -612,9 +611,10 @@ impl Parser<'_> {
                 None => term,
                 Some(lhs) => self.push(ExprAst::Binary(BinOp::Or, lhs, term)),
             });
-            match self.peek() {
-                Some(Token::Keyword(kw)) if kw.as_str() == "or" => self.pos += 1,
-                _ => break,
+            if is_event_separator(self.peek()) {
+                self.pos += 1;
+            } else {
+                break;
             }
         }
         cond.map_or_else(|| self.err_here(Diagnostic::new(codes::E0220)), Ok)
@@ -635,13 +635,7 @@ impl Parser<'_> {
     /// `@` is not an identifier character, so no source can produce a call by either name.
     fn parse_event_trigger(&mut self, synthetic: &str) -> Result<ExprRef, FrontendError> {
         self.pos += 1; // the event keyword
-        self.eat(&Token::LParen)?;
-        let mut args = vec![self.parse_expr()?];
-        while self.at(&Token::Comma) {
-            self.pos += 1;
-            args.push(self.parse_expr()?);
-        }
-        self.eat(&Token::RParen)?;
+        let args = self.parse_call_args_of(synthetic)?;
         Ok(self.push(ExprAst::Call {
             name: synthetic.to_string(),
             args,
@@ -2267,7 +2261,7 @@ impl Parser<'_> {
                 "bound_step" => {
                     self.pos += 1;
                     let args = if self.at(&Token::LParen) {
-                        self.parse_call_args()?
+                        self.parse_call_args_of("bound_step")?
                     } else {
                         Vec::new()
                     };
@@ -2560,7 +2554,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 // `$vt`/`$temperature` take no args; `$simparam("name", default)` etc. do.
                 let args = if self.at(&Token::LParen) {
-                    self.parse_call_args()?
+                    self.parse_call_args_of(&format!("${name}"))?
                 } else {
                     Vec::new()
                 };
@@ -2634,7 +2628,7 @@ impl Parser<'_> {
 
     fn parse_call(&mut self, name: String) -> Result<ExprRef, FrontendError> {
         self.pos += 1; // name
-        let args = self.parse_call_args()?;
+        let args = self.parse_call_args_of(&name)?;
         Ok(self.push(ExprAst::Call { name, args }))
     }
 
@@ -2666,18 +2660,62 @@ impl Parser<'_> {
         Ok(args)
     }
 
-    fn parse_call_args(&mut self) -> Result<Vec<ExprRef>, FrontendError> {
+    /// Parse a call's parenthesised argument list, the cursor on its `(`. A call to `name`, whose arguments may be omitted ("null",
+    /// `f(a, , c)`) in the positions [`null_allowed`] lists. An omitted argument becomes
+    /// [`ExprAst::Null`]; one omitted anywhere else is `E0238`, naming the argument, rather than
+    /// the "expected an expression" a parser without the rule would give.
+    fn parse_call_args_of(&mut self, name: &str) -> Result<Vec<ExprRef>, FrontendError> {
         self.eat(&Token::LParen)?;
         let mut args = Vec::new();
         if !self.at(&Token::RParen) {
-            args.push(self.parse_expr()?);
-            while self.at(&Token::Comma) {
+            loop {
+                if self.at(&Token::Comma) || self.at(&Token::RParen) {
+                    let index = args.len() + 1;
+                    if !null_allowed(name, index) {
+                        return self.err_here(
+                            Diagnostic::new(codes::E0238)
+                                .arg("index", index)
+                                .arg("name", name.trim_start_matches('@')),
+                        );
+                    }
+                    args.push(self.push(ExprAst::Null));
+                } else {
+                    args.push(self.parse_expr()?);
+                }
+                if !self.at(&Token::Comma) {
+                    break;
+                }
                 self.pos += 1;
-                args.push(self.parse_expr()?);
             }
         }
         self.eat(&Token::RParen)?;
         Ok(args)
+    }
+}
+
+/// Whether argument `index` (1-based) of a call to `name` may be omitted, per LRM A.6.5 (the
+/// event functions: `analog_expression_or_null`/`constant_expression_or_null` in the grammar)
+/// and A.6.4 (the filters, whose coefficient vectors and tolerance are optional). The event
+/// functions arrive under their synthetic names (`@cross`). Every other argument of every other
+/// call must be written.
+fn null_allowed(name: &str, index: usize) -> bool {
+    match name {
+        "@cross" => (2..=4).contains(&index),
+        "@above" | "@timer" => (2..=3).contains(&index),
+        "laplace_nd" | "laplace_np" | "laplace_zd" | "laplace_zp" => (2..=4).contains(&index),
+        "zi_nd" | "zi_np" | "zi_zd" | "zi_zp" => matches!(index, 2 | 3 | 5),
+        _ => false,
+    }
+}
+
+/// Whether `tok` separates two events in an `@(...)` trigger: `or`, or a comma, which the LRM
+/// gives the same meaning (§5.10.1, "event_expression or event_expression | event_expression ,
+/// event_expression").
+fn is_event_separator(tok: Option<&Token>) -> bool {
+    match tok {
+        Some(Token::Comma) => true,
+        Some(Token::Keyword(kw)) => kw.as_str() == "or",
+        _ => false,
     }
 }
 

@@ -400,13 +400,15 @@ fn zi_term_shape(module: &Module, expr: ExprId, sign: f64) -> Result<Option<ZiTe
         ));
     }
     let (num, den) = rest.split_at(num_len);
-    if num.is_empty() || den.is_empty() {
+    let num_is_roots = matches!(builtin, Builtin::ZiZd | Builtin::ZiZp);
+    let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
+    // An empty root list is the empty product, unity (an omitted `zi_zd(x, , den, T)`, LRM
+    // A.6.4); an empty coefficient list is malformed IR.
+    if (num.is_empty() && !num_is_roots) || (den.is_empty() && !den_is_roots) {
         return Err(internal_error(
             "zi_* needs at least one numerator and one denominator entry",
         ));
     }
-    let num_is_roots = matches!(builtin, Builtin::ZiZd | Builtin::ZiZp);
-    let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
     if (num_is_roots && num.len() % 2 != 0) || (den_is_roots && den.len() % 2 != 0) {
         return Err(internal_error(
             "a zi_* zero/pole list must be an even number of (re, im) values",
@@ -485,7 +487,9 @@ fn laplace_term_shape(
         ));
     }
     let (num, den) = rest.split_at(num_len);
-    if num.is_empty() || den.is_empty() {
+    // An empty root list is the empty product, unity (an omitted `laplace_zp(x, , poles)`,
+    // LRM A.6.4); an empty coefficient list is malformed IR.
+    if (num.is_empty() && !num_is_roots) || (den.is_empty() && !den_is_roots) {
         return Err(internal_error(
             "laplace needs at least one numerator and one denominator entry",
         ));

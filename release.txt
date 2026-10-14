@@ -22,6 +22,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.29.0 - 2026-10-14
+--------------------
+**Omitted arguments and comma-separated events, the LRM syntax OpenVAF-Reloaded PR #35 added.**
+Of the seven `docs/examples/LRM/` cases, five valid ones were rejected; all five are now
+accepted, and the invalid one is rejected with a message that says why.
+  * **Null arguments** (LRM A.6.4/A.6.5): an argument may be left out where the grammar allows
+    it, `cross(e, dir, , , en)`, `timer(0, p, , en)`, `laplace_nd(x, , den)`. Allowed:
+    `cross`'s direction and two tolerances, `above`'s two tolerances, `timer`'s period and
+    tolerance, a Laplace filter's numerator, denominator and tolerance, a Z-domain filter's
+    numerator, denominator and transition time. The parser keeps the position as the new
+    `ExprAst::Null`; elaboration reads it as "not given". An omitted filter list means unity:
+    no roots, or the polynomial `1`.
+  * **Anywhere else** an omitted argument is the new `E0238`, "argument 4 of `timer` may not be
+    omitted", instead of `E0207` "expected an expression, found `)`". This covers every call,
+    `exp(, 1)` included. System tasks keep their own null-argument rule (`$strobe("a",,"b")`).
+  * **A comma between events** means `or` (LRM 5.10.1), and compiles to identical IR. It was
+    refused (`R0201`) with a message saying only an `or` list is honoured.
+  * Codegen accepts an empty root list (`laplace_zp(x, , poles)`, `zi_zd(x, , den, T)`): the
+    empty product. An empty coefficient list stays malformed IR.
+  * `or`'s row in `docs/token-reference.md` said it had no grammar production; it has been the
+    event separator since 2.16.0. Corrected, and the comma and null-argument rules added.
+
+Kept refused, on purpose: `@(initial_step("tran") or final_step("tran"))` (`R0202`). It parses;
+what it should mean (the body only at the first step of the named analysis) is a semantic
+question, and running it at every analysis's first step would run it where the model excluded it.
+
+Tests: `null_arguments.rs` builds each omitted-list filter beside the same filter with `{1}`
+written and asserts identical stamps (residual, Jacobian, charge, dcharge) at a bias point,
+for seven Laplace and Z-domain forms; it was checked to fail on a mismatched pair. Three
+frontend tests cover the event arguments, `E0238` and the comma. New corpus file
+`parse_required_argument_omitted.va` (39 files).
+
+Measured: `cargo test --workspace` 987 passed, 0 failed (983 + 4); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28; `check --codegen` models 68/68, benchmark/models 25/25,
+external 8/9 (unchanged).
+
+
 2.28.0+2 - 2026-10-14
 ----------------------
 **The LRM examples move to `docs/examples/LRM/`**, beside the project's other examples; 2.28.0+1

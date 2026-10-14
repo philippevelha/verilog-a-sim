@@ -1068,8 +1068,12 @@ pub fn zi_realization(
     den_is_roots: bool,
 ) -> Result<ZiRealization, Diagnostic> {
     fn poly(vals: &[f64], is_roots: bool, what: &str) -> Result<(Vec<f64>, usize), Diagnostic> {
+        if vals.is_empty() && is_roots {
+            // No roots: the empty product, unity (an omitted root list, LRM A.6.4).
+            return Ok((vec![1.0], 0));
+        }
         if vals.is_empty() {
-            // `va-frontend` rejects an empty list before code generation sees it.
+            // `va-frontend` rejects an empty coefficient list before code generation sees it.
             return Err(
                 Diagnostic::new(codes::E0001).arg("detail", format!("a zi_* {what} list is empty"))
             );

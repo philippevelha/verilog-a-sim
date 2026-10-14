@@ -1094,6 +1094,10 @@ impl Elaborator<'_> {
                 Err(elab(Diagnostic::new(codes::E0318).arg("name", name)))
             }
             ExprAst::ArrayLit(_) => Err(elab(Diagnostic::new(codes::E0319))),
+            // The parser allows a null argument only where a reader consumes it.
+            ExprAst::Null => Err(elab(
+                Diagnostic::new(codes::E0001).arg("detail", "a null argument reached const_eval"),
+            )),
         }
     }
 
@@ -1109,6 +1113,30 @@ impl Elaborator<'_> {
             _ => return Err(elab(Diagnostic::new(codes::E0320).arg("list", what))),
         };
         elems.iter().map(|&e| self.lower_expr(e)).collect()
+    }
+
+    /// A filter's coefficient or root list, as [`Self::array_lit_exprs`], with an omitted one
+    /// (`laplace_nd(x, , den)`, LRM A.6.4) read as unity: no roots for a root list (the empty
+    /// product), the constant polynomial `{1}` for a coefficient list.
+    fn filter_list(
+        &mut self,
+        r: ExprRef,
+        is_roots: bool,
+        what: &str,
+    ) -> Result<Vec<ExprId>, FrontendError> {
+        match self.ast.expr(r) {
+            ExprAst::Null if is_roots => Ok(Vec::new()),
+            ExprAst::Null => Ok(vec![self.out.push_expr(Expr::Const(1.0))]),
+            _ => self.array_lit_exprs(r, what),
+        }
+    }
+
+    /// Argument `i` of `args` if it was written, `None` if it is absent or omitted (a null
+    /// argument, `cross(e, dir, , , en)`), which every reader treats as "use the default".
+    fn given(&self, args: &[ExprRef], i: usize) -> Option<ExprRef> {
+        args.get(i)
+            .copied()
+            .filter(|&r| !matches!(self.ast.expr(r), ExprAst::Null))
     }
 
     /// Read, validate and sort a `noise_table()`/`noise_table_log()` argument into
@@ -2305,8 +2333,8 @@ impl Elaborator<'_> {
                 let expr = self.lower_expr(args[0])?;
                 // The direction is a compile-time constant in every LRM example, and has to be:
                 // it selects which edge to watch, not a value that varies with the solution.
-                let dir = match args.get(1) {
-                    Some(&r) => self.const_eval(r)? as i64,
+                let dir = match self.given(args, 1) {
+                    Some(r) => self.const_eval(r)? as i64,
                     None => 0, // the LRM's default: either edge
                 };
                 if !(-1..=1).contains(&dir) {
@@ -2315,10 +2343,19 @@ impl Elaborator<'_> {
                 // Tolerances are lowered and kept, though this engine cannot yet act on them
                 // — `va-cli` warns when a site carries one. Keeping them is what lets the
                 // bracketing retry loop land later without another interface change.
-                let time_tol = args.get(2).map(|&r| self.lower_expr(r)).transpose()?;
-                let expr_tol = args.get(3).map(|&r| self.lower_expr(r)).transpose()?;
+                let time_tol = self
+                    .given(args, 2)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
+                let expr_tol = self
+                    .given(args, 3)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
                 // `enable` *is* honoured: a site whose enable is zero registers nothing.
-                let enable = args.get(4).map(|&r| self.lower_expr(r)).transpose()?;
+                let enable = self
+                    .given(args, 4)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
                 let slot = self.out.event_sites.len() as u32;
                 self.out.event_sites.push(va_ir::EventSite::Cross {
                     expr,
@@ -2350,9 +2387,18 @@ impl Elaborator<'_> {
                     ));
                 }
                 let expr = self.lower_expr(args[0])?;
-                let time_tol = args.get(1).map(|&r| self.lower_expr(r)).transpose()?;
-                let expr_tol = args.get(2).map(|&r| self.lower_expr(r)).transpose()?;
-                let enable = args.get(3).map(|&r| self.lower_expr(r)).transpose()?;
+                let time_tol = self
+                    .given(args, 1)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
+                let expr_tol = self
+                    .given(args, 2)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
+                let enable = self
+                    .given(args, 3)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
                 let slot = self.out.event_sites.len() as u32;
                 self.out.event_sites.push(va_ir::EventSite::Cross {
                     expr,
@@ -2381,13 +2427,19 @@ impl Elaborator<'_> {
                     ));
                 }
                 let start = self.lower_expr(args[0])?;
-                let period = match args.get(1) {
-                    Some(&r) => self.lower_expr(r)?,
+                let period = match self.given(args, 1) {
+                    Some(r) => self.lower_expr(r)?,
                     // The LRM's default: a timer with no period fires once.
                     None => self.out.push_expr(Expr::Const(0.0)),
                 };
-                let time_tol = args.get(2).map(|&r| self.lower_expr(r)).transpose()?;
-                let enable = args.get(3).map(|&r| self.lower_expr(r)).transpose()?;
+                let time_tol = self
+                    .given(args, 2)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
+                let enable = self
+                    .given(args, 3)
+                    .map(|r| self.lower_expr(r))
+                    .transpose()?;
                 let slot = self.out.event_sites.len() as u32;
                 self.out.event_sites.push(va_ir::EventSite::Timer {
                     start,
@@ -2563,17 +2615,21 @@ impl Elaborator<'_> {
                 // pole moves with a netlist-overridden parameter is the normal case. The
                 // `Const(num_len)` separator is how a flat argument list says where the
                 // numerator ends (§ `va_ir::Builtin::LaplaceNd`).
-                let num_ids = self.array_lit_exprs(num, "numerator/zero")?;
-                let den_ids = self.array_lit_exprs(den, "denominator/pole")?;
-                if num_ids.is_empty() || den_ids.is_empty() {
+                let numer_is_zeros = matches!(name.as_str(), "laplace_zd" | "laplace_zp");
+                let denom_is_poles = matches!(name.as_str(), "laplace_np" | "laplace_zp");
+                let num_ids = self.filter_list(num, numer_is_zeros, "numerator/zero")?;
+                let den_ids = self.filter_list(den, denom_is_poles, "denominator/pole")?;
+                // An empty root list is the empty product, unity; an empty coefficient list is
+                // no polynomial at all.
+                if (num_ids.is_empty() && !numer_is_zeros)
+                    || (den_ids.is_empty() && !denom_is_poles)
+                {
                     return Err(elab(Diagnostic::new(codes::E0354).arg("name", name)));
                 }
                 // A zero/pole array is flattened `(re, im)` pairs, so an odd count is
                 // malformed. `va-codegen` checks this too, but the diagnostic is worth keeping
                 // here, where a source file can still be named — the same reason
                 // `noise_table`'s own well-formedness checks live at elaboration.
-                let numer_is_zeros = matches!(name.as_str(), "laplace_zd" | "laplace_zp");
-                let denom_is_poles = matches!(name.as_str(), "laplace_np" | "laplace_zp");
                 if (numer_is_zeros && num_ids.len() % 2 != 0)
                     || (denom_is_poles && den_ids.len() % 2 != 0)
                 {
@@ -2629,8 +2685,8 @@ impl Elaborator<'_> {
                 let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
                 let value_id = self.lower_expr(value)?;
                 let period_id = self.lower_expr(period)?;
-                let tt_id = match (args.get(4), self.ast.settings.default_transition) {
-                    (Some(&e), _) => self.lower_expr(e)?,
+                let tt_id = match (self.given(args, 4), self.ast.settings.default_transition) {
+                    (Some(e), _) => self.lower_expr(e)?,
                     (None, Some(t)) => self.out.push_expr(Expr::Const(t)),
                     (None, None) => self.out.push_expr(Expr::Const(0.0)),
                 };
@@ -2638,10 +2694,16 @@ impl Elaborator<'_> {
                     Some(&e) => self.lower_expr(e)?,
                     None => self.out.push_expr(Expr::Const(0.0)),
                 };
-                let num_ids =
-                    self.array_lit_exprs(num, if num_is_roots { "zero" } else { "numerator" })?;
-                let den_ids =
-                    self.array_lit_exprs(den, if den_is_roots { "pole" } else { "denominator" })?;
+                let num_ids = self.filter_list(
+                    num,
+                    num_is_roots,
+                    if num_is_roots { "zero" } else { "numerator" },
+                )?;
+                let den_ids = self.filter_list(
+                    den,
+                    den_is_roots,
+                    if den_is_roots { "pole" } else { "denominator" },
+                )?;
                 if (num_is_roots && num_ids.len() % 2 != 0)
                     || (den_is_roots && den_ids.len() % 2 != 0)
                 {
@@ -2658,6 +2720,12 @@ impl Elaborator<'_> {
             // directly via `array_lit_first`/`array_lit_values`/the root-product helpers above,
             // never through `lower_expr`) — not a general-purpose value anywhere in the LRM.
             ExprAst::ArrayLit(_) => return Err(elab(Diagnostic::new(codes::E0356))),
+            ExprAst::Null => {
+                return Err(elab(
+                    Diagnostic::new(codes::E0001)
+                        .arg("detail", "a null argument reached expression lowering"),
+                ))
+            }
             // `real(expr)` is a type-cast call, not the declaration keyword (that's `Item::Var`/
             // `Stmt::VarDecl` — a different grammar production entirely). Every value in this
             // project is already `f64`, so it's a complete no-op: fold transparently to `expr`.
