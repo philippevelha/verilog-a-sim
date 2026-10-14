@@ -693,6 +693,114 @@ pub const E0702: Code = Code::new("E0702");
 /// invalid value `{value}` for {option}; expected {expected}
 pub const E0703: Code = Code::new("E0703");
 
+/// cannot read directory `{path}`: {reason}
+pub const E0704: Code = Code::new("E0704");
+
+/// cannot read model file `{path}`: {reason}
+pub const E0705: Code = Code::new("E0705");
+
+/// no `.va`/`.vams` model files found in `{path}`
+pub const E0706: Code = Code::new("E0706");
+
+/// --plot needs a curve: a transient run (--tran), an AC sweep (--ac), a noise sweep (--noise) or a `.dc` sweep
+pub const E0707: Code = Code::new("E0707");
+
+/// cannot draw the plot `{path}`: {reason}
+pub const E0708: Code = Code::new("E0708");
+
+/// the deck requests the `.{card}` analysis; pass `--{card}` to run it
+pub const E0709: Code = Code::new("E0709");
+
+/// the requested analysis needs a `{card}` card, and the deck has none that parses
+pub const E0710: Code = Code::new("E0710");
+
+/// `{name}` must name exactly two inductors
+pub const E0711: Code = Code::new("E0711");
+
+/// `{name}` couples `{other}`, which is not an inductor
+pub const E0712: Code = Code::new("E0712");
+
+/// `{name}` couples `{other}` to itself
+pub const E0713: Code = Code::new("E0713");
+
+/// `{name}` names no controlling element
+pub const E0714: Code = Code::new("E0714");
+
+/// `{name}` is controlled by `{control}`, which has no branch current to sense
+pub const E0715: Code = Code::new("E0715");
+
+/// --report names `{name}`, which this circuit does not compute (it has: {known})
+pub const E0716: Code = Code::new("E0716");
+
+/// `.nodeset V({name})=...`: the deck has no net `{name}`
+pub const E0717: Code = Code::new("E0717");
+
+/// `.dc` sweeps unknown device `{name}`
+pub const E0718: Code = Code::new("E0718");
+
+/// `.dc` can only sweep a voltage source; `{name}` is a `{model}`
+pub const E0719: Code = Code::new("E0719");
+
+/// AC analysis needs at least one source with an `AC <magnitude>` spec; none of this deck's {count} voltage source(s) has one
+pub const E0720: Code = Code::new("E0720");
+
+/// the `.{card}` analysis was not run: a model's `$finish` ended the analysis at its operating point
+pub const E0721: Code = Code::new("E0721");
+
+/// `.noise` probes V({name}), which is not a net in this circuit (nets: {nets})
+pub const E0722: Code = Code::new("E0722");
+
+/// `.noise` names `{name}` as its input source, which is not a voltage source in this circuit (sources: {sources})
+pub const E0723: Code = Code::new("E0723");
+
+/// no device in this circuit contributes any noise, so the spectrum would be identically zero
+pub const E0724: Code = Code::new("E0724");
+
+/// `{name}` is a {count}-terminal device line, but `{model}` needs at least two nodes
+pub const E0725: Code = Code::new("E0725");
+
+/// `{name}` names model `{model}`, which matches both `{first}` and `{second}` ignoring case
+pub const E0726: Code = Code::new("E0726");
+
+/// parameter `{name}` matches both `{first}` and `{second}` of model `{model}` ignoring case
+pub const E0727: Code = Code::new("E0727");
+
+/// model `{model}` declares its own parameter `mult`, so `mult=` on a device line is ambiguous
+pub const E0728: Code = Code::new("E0728");
+
+/// instance multiplicity must be a positive, finite number, got `{name}={value}`
+pub const E0729: Code = Code::new("E0729");
+
+/// model `{model}` declares `{name}` as a `localparam`, which a deck cannot set
+pub const E0730: Code = Code::new("E0730");
+
+/// model `{model}` has no parameter `{name}` (it declares: {known})
+pub const E0731: Code = Code::new("E0731");
+
+/// model `{model}` declares {ports} port node(s), device connects {got}
+pub const E0732: Code = Code::new("E0732");
+
+/// model `{model}`: device connects {got} terminal(s), which ends part-way through {width}-wide port #{index}
+pub const E0733: Code = Code::new("E0733");
+
+/// model `{model}` declares {ports} port node(s), device connects {got}, and port #{index} (`{port}`) is not optional
+pub const E0734: Code = Code::new("E0734");
+
+/// device `{name}` needs a value
+pub const E0735: Code = Code::new("E0735");
+
+/// device `{name}` (model `bjt`) needs exactly 3 terminals (c, b, e), found {got}
+pub const E0736: Code = Code::new("E0736");
+
+/// device `{name}` references unknown model `{model}`
+pub const E0737: Code = Code::new("E0737");
+
+/// `sim` needs a netlist path
+pub const E0738: Code = Code::new("E0738");
+
+/// {count} `$error` message(s) reported by the model(s) during the run
+pub const E0739: Code = Code::new("E0739");
+
 /// `pragma protect`, an encrypted model envelope
 pub const R0101: Code = Code::new("R0101");
 
@@ -807,8 +915,11 @@ pub const ALL: &[Code] = &[
     E0408, E0409, E0410, E0411, E0412, E0413, E0501, E0502, E0503, E0504, E0505, E0506, E0507,
     E0508, E0509, E0510, E0511, E0512, E0513, E0514, E0515, E0516, E0517, E0518, E0519, E0520,
     E0521, E0522, E0523, E0524, E0525, E0526, E0527, E0528, E0529, E0530, E0531, E0532, E0533,
-    E0601, E0602, E0603, E0604, E0605, E0606, E0607, E0608, E0701, E0702, E0703, R0101, R0201,
-    R0202, R0203, R0301, R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401,
-    R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409, R0410, W0101, W0102, W0103, W0104,
-    W0301, W0501, W0502, W0503,
+    E0601, E0602, E0603, E0604, E0605, E0606, E0607, E0608, E0701, E0702, E0703, E0704, E0705,
+    E0706, E0707, E0708, E0709, E0710, E0711, E0712, E0713, E0714, E0715, E0716, E0717, E0718,
+    E0719, E0720, E0721, E0722, E0723, E0724, E0725, E0726, E0727, E0728, E0729, E0730, E0731,
+    E0732, E0733, E0734, E0735, E0736, E0737, E0738, E0739, R0101, R0201, R0202, R0203, R0301,
+    R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404,
+    R0405, R0406, R0407, R0408, R0409, R0410, W0101, W0102, W0103, W0104, W0301, W0501, W0502,
+    W0503,
 ];

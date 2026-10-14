@@ -9,7 +9,7 @@
 //! This binary only parses arguments and dispatches to [`va_cli::run_sim`]; the pipeline
 //! itself lives in the library so `va-harness` can drive it directly.
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use va_cli::{check_models, run_sim, Analysis, Solver};
 use va_diag::{codes, Catalogue, Diagnostic};
 
@@ -229,7 +229,9 @@ fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
 /// The `sim` subcommand: run a netlist through the pipeline.
 fn cmd_sim(args: &[String]) -> Result<()> {
     let args = &take_defines(args)?;
-    let netlist = args.first().context("expected a netlist path")?;
+    let netlist = args
+        .first()
+        .ok_or_else(|| va_diag::Diagnostic::new(va_diag::codes::E0738))?;
     // `--threads <n>`: how many threads evaluate device instances (`va_core::par`). Without it,
     // rayon's default — `RAYON_NUM_THREADS`, else one per logical core. Speed only: every
     // thread count gives the same bits.
@@ -242,7 +244,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
                 .parse::<f64>()
                 .ok()
                 .filter(|x| x.is_finite() && *x > 0.0)
-                .with_context(|| format!("{flag} expects a positive number, got `{v}`")),
+                .ok_or_else(|| {
+                    va_diag::Diagnostic::new(va_diag::codes::E0703)
+                        .arg("option", flag)
+                        .arg("value", &v)
+                        .arg("expected", "a positive number")
+                        .into()
+                }),
         }
     };
     va_cli::set_tran_tolerances(
@@ -271,15 +279,21 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         va_cli::set_bypass(Some(cfg));
     }
     if let Some(n) = parse_flag(args, "--threads") {
-        let n: usize = n
-            .parse()
-            .ok()
-            .filter(|&n| n > 0)
-            .with_context(|| format!("--threads expects a positive integer, got `{n}`"))?;
+        let n: usize = n.parse().ok().filter(|&n| n > 0).ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--threads")
+                .arg("value", &n)
+                .arg("expected", "a positive integer")
+        })?;
         rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build_global()
-            .context("setting up the evaluation thread pool")?;
+            .map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0001).arg(
+                    "detail",
+                    format!("setting up the evaluation thread pool: {e}"),
+                )
+            })?;
     }
     // `VA_PARALLEL=auto|always|never`: when instances are evaluated in parallel
     // (`va_core::par::Mode`). For verification — `always` makes a serial-vs-parallel
@@ -345,8 +359,11 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // -- see `va_cli::Integration`.
     let integration = match parse_flag(args, "--integration") {
         None => va_cli::Integration::default(),
-        Some(v) => va_cli::Integration::parse(&v).with_context(|| {
-            format!("unknown --integration `{v}` (expected `be`, `trap`, or `gear`)")
+        Some(v) => va_cli::Integration::parse(&v).ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--integration")
+                .arg("value", &v)
+                .arg("expected", "`be`, `trap` or `gear`")
         })?,
     };
 
@@ -422,7 +439,9 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // says the run was not clean.
     let errors = va_cli::task_errors();
     if result.is_ok() && errors > 0 {
-        bail!("{errors} $error message(s) reported by the model(s) during the run");
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0739)
+            .arg("count", errors)
+            .into());
     }
     result
 }
@@ -438,7 +457,12 @@ fn take_defines(args: &[String]) -> Result<Vec<String>> {
             rest.push(a.clone());
             continue;
         }
-        let d = it.next().context("--define expects NAME or NAME=VALUE")?;
+        let d = it.next().ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--define")
+                .arg("value", "")
+                .arg("expected", "NAME or NAME=VALUE")
+        })?;
         let (name, value) = d.split_once('=').unwrap_or((d.as_str(), "1"));
         defines.push((name.to_string(), value.to_string()));
     }
@@ -450,4 +474,36 @@ fn take_defines(args: &[String]) -> Result<Vec<String>> {
 fn parse_flag(args: &[String], flag: &str) -> Option<String> {
     let pos = args.iter().position(|a| a == flag)?;
     args.get(pos + 1).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_error;
+
+    /// An error with no code is `E0000`, and keeps its own wording and causes in full: the code
+    /// adds nothing, so it must not take anything away either. No error `va-cli` raises reaches
+    /// this since 2.31.0; it is the fallback for one added later without a code.
+    #[test]
+    fn an_uncoded_error_is_e0000_with_its_own_text() {
+        let e = anyhow::anyhow!("the root cause").context("what va-cli was doing");
+        let text = render_error(&e);
+        assert!(
+            text.contains("error[E0000]: what va-cli was doing"),
+            "{text}"
+        );
+        assert!(text.contains("caused by: the root cause"), "{text}");
+    }
+
+    /// A coded diagnostic under a context renders under its own code, the context as `while:`.
+    #[test]
+    fn a_coded_error_under_context_keeps_its_code() {
+        let e = anyhow::Error::new(va_diag::Diagnostic::new(va_diag::codes::E0602))
+            .context("DC operating-point solve failed");
+        let text = render_error(&e);
+        assert!(text.starts_with("error[E0602]: "), "{text}");
+        assert!(
+            text.contains("while: DC operating-point solve failed"),
+            "{text}"
+        );
+    }
 }

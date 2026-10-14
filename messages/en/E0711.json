@@ -1,0 +1,9 @@
+{
+  "code": "E0711",
+  "rev": 1,
+  "message": "`{name}` must name exactly two inductors",
+  "description": "A `K` line couples two inductors: `K1 L1 L2 0.9`.",
+  "actions": [
+    "Name the two inductors, then the coupling coefficient."
+  ]
+}

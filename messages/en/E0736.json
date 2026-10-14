@@ -1,0 +1,9 @@
+{
+  "code": "E0736",
+  "rev": 1,
+  "message": "device `{name}` (model `bjt`) needs exactly 3 terminals (c, b, e), found {got}",
+  "description": "The built-in bipolar transistor has a collector, a base and an emitter.",
+  "actions": [
+    "Connect three nodes, in the order collector, base, emitter."
+  ]
+}

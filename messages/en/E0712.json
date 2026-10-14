@@ -1,0 +1,9 @@
+{
+  "code": "E0712",
+  "rev": 1,
+  "message": "`{name}` couples `{other}`, which is not an inductor",
+  "description": "A `K` line can only couple inductors (`L` elements) of the deck.",
+  "actions": [
+    "Check the element names on the `K` line."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0707",
+  "rev": 1,
+  "message": "--plot needs a curve: a transient run (--tran), an AC sweep (--ac), a noise sweep (--noise) or a `.dc` sweep",
+  "description": "A DC operating point is a single point, so there is nothing to draw.",
+  "actions": [
+    "Add `--tran`, `--ac` or `--noise`, or give the deck a `.dc` sweep card."
+  ]
+}

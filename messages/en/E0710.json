@@ -1,0 +1,9 @@
+{
+  "code": "E0710",
+  "rev": 1,
+  "message": "the requested analysis needs a `{card}` card, and the deck has none that parses",
+  "description": "The command line asks for an analysis, and the deck has no card describing it, or one this simulator cannot read. Only the `dec` sweep type is supported for `.ac` and `.noise`, and `.noise` takes a single-node `V(<out>)` probe.",
+  "actions": [
+    "Add the card the message shows to the deck."
+  ]
+}

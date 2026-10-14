@@ -1,0 +1,9 @@
+{
+  "code": "E0716",
+  "rev": 1,
+  "message": "--report names `{name}`, which this circuit does not compute (it has: {known})",
+  "description": "A quantity named with `--report` is not one of the circuit's nets, branch currents or model quantities.",
+  "actions": [
+    "Use one of the names listed."
+  ]
+}

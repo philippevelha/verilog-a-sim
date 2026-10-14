@@ -38,7 +38,7 @@ pub use tasks::{
     suppressed_walk_warnings, task_errors,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::f64::consts::PI;
 use va_abi::reference::{
     diode::VT_NOMINAL, Bjt, Capacitor, Cccs, Ccvs, Diode, Inductor, Mutual, Resistor, VSource,
@@ -520,7 +520,11 @@ fn library_entry_files(path: &str) -> Result<(Vec<std::path::PathBuf>, std::path
     let p = std::path::Path::new(path);
     if p.is_dir() {
         let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(p)
-            .with_context(|| format!("reading model directory {path}"))?
+            .map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0704)
+                    .arg("path", path)
+                    .arg("reason", e)
+            })?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|f| {
                 matches!(
@@ -570,7 +574,9 @@ fn compile_model_library_with_context(
     for entry in path.split(MODEL_PATH_SEPARATOR).filter(|e| !e.is_empty()) {
         let (entry_files, dir) = library_entry_files(entry)?;
         if entry_files.is_empty() {
-            bail!("no `.va`/`.vams` model files found in {entry}");
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0706)
+                .arg("path", entry)
+                .into());
         }
         files.extend(entry_files.into_iter().map(|f| (f, dir.clone())));
         if !include_dirs.contains(&dir) {
@@ -578,7 +584,9 @@ fn compile_model_library_with_context(
         }
     }
     if files.is_empty() {
-        bail!("no `.va`/`.vams` model files found in {path}");
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0706)
+            .arg("path", path)
+            .into());
     }
 
     // Pass 1: parse every file, accumulating modules and the discipline/nature tables their
@@ -590,7 +598,11 @@ fn compile_model_library_with_context(
     let mut natures = std::collections::HashMap::new();
     for (f, dir) in &files {
         let name = f.display().to_string();
-        let src = std::fs::read_to_string(f).with_context(|| format!("reading model {name}"))?;
+        let src = std::fs::read_to_string(f).map_err(|e| {
+            va_diag::Diagnostic::new(va_diag::codes::E0705)
+                .arg("path", &name)
+                .arg("reason", e)
+        })?;
         let pre = va_frontend::preprocess::preprocess_named_with(
             &src,
             std::slice::from_ref(dir),
@@ -896,11 +908,7 @@ pub fn run_sim(
         && analysis != Analysis::Noise
         && !(analysis == Analysis::Dc && net.dc.is_some())
     {
-        bail!(
-            "--plot supports a transient run (--tran), an AC sweep (--ac), a noise sweep \
-             (--noise), or a `.dc` sweep; \
-             a DC operating point is a single point, not a curve"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0707).into());
     }
     let built = built?;
     let all_quantities = built.quantities.clone();
@@ -968,8 +976,11 @@ pub fn run_sim(
             // table of the same run disagreeing about which series exist would be worse than
             // either alone. It is also the practical way to plot a cross-domain result, whose
             // series differ by orders of magnitude and share no axis.
-            plot::plot_transient(path, &shown, &wf)
-                .with_context(|| format!("plotting to {path}"))?;
+            plot::plot_transient(path, &shown, &wf).map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0708)
+                    .arg("path", path)
+                    .arg("reason", format!("{e:#}"))
+            })?;
             eprintln!("[va-cli] wrote transient plot to {path}");
         }
     } else if analysis == Analysis::Ac {
@@ -977,8 +988,11 @@ pub fn run_sim(
         let shown = select_quantities(&all_quantities, report_only)?;
         report_ac(&shown, &response);
         if let Some(path) = plot {
-            plot::plot_ac(path, &shown, &response)
-                .with_context(|| format!("plotting to {path}"))?;
+            plot::plot_ac(path, &shown, &response).map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0708)
+                    .arg("path", path)
+                    .arg("reason", format!("{e:#}"))
+            })?;
             eprintln!("[va-cli] wrote AC plot to {path}");
         }
     } else if analysis == Analysis::Noise {
@@ -987,7 +1001,11 @@ pub fn run_sim(
         // so the table is consulted for that output's *units*, not to choose columns.
         report_noise(&net, &all_quantities, &spectrum);
         if let Some(path) = plot {
-            plot::plot_noise(path, &spectrum).with_context(|| format!("plotting to {path}"))?;
+            plot::plot_noise(path, &spectrum).map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0708)
+                    .arg("path", path)
+                    .arg("reason", format!("{e:#}"))
+            })?;
             eprintln!("[va-cli] wrote noise plot to {path}");
         }
     } else if let Some(sweep) = &net.dc {
@@ -995,8 +1013,11 @@ pub fn run_sim(
         let shown = select_quantities(&all_quantities, report_only)?;
         report_sweep(&shown, sweep, &points);
         if let Some(path) = plot {
-            plot::plot_sweep(path, &shown, sweep, &points)
-                .with_context(|| format!("plotting to {path}"))?;
+            plot::plot_sweep(path, &shown, sweep, &points).map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0708)
+                    .arg("path", path)
+                    .arg("reason", format!("{e:#}"))
+            })?;
             eprintln!("[va-cli] wrote sweep plot to {path}");
         }
     } else {
@@ -1032,8 +1053,11 @@ pub fn check_models(paths: &[String], codegen: bool) -> Result<usize> {
     for p in paths {
         let path = std::path::Path::new(p);
         if path.is_dir() {
-            collect_va_files(path, path, &mut files)
-                .with_context(|| format!("scanning directory {p}"))?;
+            collect_va_files(path, path, &mut files).map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0704)
+                    .arg("path", p)
+                    .arg("reason", e)
+            })?;
         } else {
             files.push((p.clone(), std::path::PathBuf::new()));
         }
@@ -1549,33 +1573,37 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
 /// run, and analyses the deck doesn't carry the parameters for.
 fn gate_analysis(net: &Netlist, analysis: Analysis) -> Result<()> {
     if net.analysis == AnalysisCard::Tran && analysis != Analysis::Transient {
-        bail!("deck requests transient analysis (`.tran`); pass `--tran` to run it");
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0709)
+            .arg("card", "tran")
+            .into());
     }
     if net.analysis == AnalysisCard::Ac && analysis != Analysis::Ac {
-        bail!("deck requests AC analysis (`.ac`); pass `--ac` to run it");
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0709)
+            .arg("card", "ac")
+            .into());
     }
     if net.analysis == AnalysisCard::Noise && analysis != Analysis::Noise {
-        bail!("deck requests noise analysis (`.noise`); pass `--noise` to run it");
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0709)
+            .arg("card", "noise")
+            .into());
     }
     if analysis == Analysis::Transient && net.tran.is_none() {
-        bail!(
-            "transient analysis requested but the deck has no parseable \
-             `.tran <tstep> <tstop>` card"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0710)
+            .arg("card", ".tran <tstep> <tstop>")
+            .into());
     }
     if analysis == Analysis::Ac && net.ac.is_none() {
-        bail!(
-            "AC analysis requested but the deck has no parseable \
-             `.ac dec <points-per-decade> <fstart> <fstop>` card (only the `dec` sweep type \
-             is supported)"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0710)
+            .arg("card", ".ac dec <points-per-decade> <fstart> <fstop>")
+            .into());
     }
     if analysis == Analysis::Noise && net.noise.is_none() {
-        bail!(
-            "noise analysis requested but the deck has no parseable \
-             `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` card (only the \
-             `dec` sweep type and a single-node `V(<out>)` probe are supported)"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0710)
+            .arg(
+                "card",
+                ".noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>",
+            )
+            .into());
     }
     Ok(())
 }
@@ -1840,27 +1868,39 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
             // inductances come from those elements, so it can only be built once they exist.
             let (a, b) = match dev.controls.as_slice() {
                 [a, b] => (a.as_str(), b.as_str()),
-                _ => bail!("`{}` must name exactly two inductors", dev.name),
+                _ => {
+                    return Err(va_diag::Diagnostic::new(va_diag::codes::E0711)
+                        .arg("name", &dev.name)
+                        .into())
+                }
             };
             let find = |want: &str| -> Result<(usize, f64)> {
                 let d = net
                     .devices
                     .iter()
                     .find(|d| d.name == want && d.model == "inductor")
-                    .with_context(|| {
-                        format!("`{}` couples `{want}`, which is not an inductor", dev.name)
+                    .ok_or_else(|| {
+                        va_diag::Diagnostic::new(va_diag::codes::E0712)
+                            .arg("name", &dev.name)
+                            .arg("other", want)
                     })?;
                 let branch = currents
                     .iter()
                     .find(|(name, _)| name == want)
                     .map(|(_, i)| *i)
-                    .with_context(|| format!("`{want}` has no branch row"))?;
+                    .ok_or_else(|| {
+                        va_diag::Diagnostic::new(va_diag::codes::E0001)
+                            .arg("detail", format!("`{want}` has no branch row"))
+                    })?;
                 Ok((branch, d.value.unwrap_or(0.0)))
             };
             let (b1, l1) = find(a)?;
             let (b2, l2) = find(b)?;
             if b1 == b2 {
-                bail!("`{}` couples `{a}` to itself", dev.name);
+                return Err(va_diag::Diagnostic::new(va_diag::codes::E0713)
+                    .arg("name", &dev.name)
+                    .arg("other", a)
+                    .into());
             }
             instances.push(Box::new(Mutual::from_coupling(
                 b1,
@@ -1874,20 +1914,17 @@ fn build_instances(net: &Netlist, compiled: &[Module]) -> Result<BuiltInstances>
         if !matches!(dev.model.as_str(), "cccs" | "ccvs") {
             continue;
         }
-        let ctl_name = dev
-            .controls
-            .first()
-            .map(String::as_str)
-            .with_context(|| format!("`{}` names no controlling element", dev.name))?;
+        let ctl_name = dev.controls.first().map(String::as_str).ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0714).arg("name", &dev.name)
+        })?;
         let ctl = currents
             .iter()
             .find(|(name, _)| name == ctl_name)
             .map(|(_, idx)| *idx)
-            .with_context(|| {
-                format!(
-                    "`{}` is controlled by `{ctl_name}`, which has no branch current to sense                      (only a voltage source, an inductor, or an `E`/`H` carries one)",
-                    dev.name
-                )
+            .ok_or_else(|| {
+                va_diag::Diagnostic::new(va_diag::codes::E0715)
+                    .arg("name", &dev.name)
+                    .arg("control", ctl_name)
             })?;
         let (p, n) = (dev.terminals[0], dev.terminals[1]);
         let gain = dev.value.unwrap_or(0.0);
@@ -1979,10 +2016,10 @@ pub fn select_quantities(all: &[Quantity], selectors: &[String]) -> Result<Vec<Q
         if hits.is_empty() {
             let mut known: Vec<&str> = all.iter().map(|q| q.label.as_str()).collect();
             known.sort_unstable();
-            bail!(
-                "--report names `{s}`, which this circuit does not compute (it has: {})",
-                known.join(", ")
-            );
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0716)
+                .arg("name", s)
+                .arg("known", known.join(", "))
+                .into());
         }
         for h in hits {
             if !out.iter().any(|q| q.index == h.index) {
@@ -2104,7 +2141,9 @@ fn nodeset_start(net: &Netlist, dim: usize) -> Result<Option<Vec<f64>>> {
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .map(|(_, i)| i)
         }) else {
-            bail!("`.nodeset V({name})=...`: the deck has no net `{name}`");
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0717)
+                .arg("name", name)
+                .into());
         };
         if let Some(slot) = x.get_mut(i) {
             *slot = *value;
@@ -2266,13 +2305,14 @@ fn solve_dc_sweep_impl(
         .devices
         .iter()
         .find(|d| d.name == sweep.source)
-        .with_context(|| format!("`.dc` sweeps unknown device `{}`", sweep.source))?;
+        .ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0718).arg("name", &sweep.source)
+        })?;
     if src.model != "vsource" {
-        bail!(
-            "`.dc` can only sweep a voltage source; `{}` is a `{}`",
-            sweep.source,
-            src.model
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0719)
+            .arg("name", &sweep.source)
+            .arg("model", &src.model)
+            .into());
     }
 
     let points = sweep_points(sweep.start, sweep.stop, sweep.step);
@@ -2282,10 +2322,13 @@ fn solve_dc_sweep_impl(
         .iter()
         .find(|s| s.name == sweep.source)
         .map(|s| (s.index, s.next_unknown_before, s.next_unknown_after))
-        .with_context(|| {
-            format!(
-                "`{}` was found in the deck but built no instance to re-point",
-                sweep.source
+        .ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0001).arg(
+                "detail",
+                format!(
+                    "`{}` was found in the deck but built no instance to re-point",
+                    sweep.source
+                ),
             )
         })?;
     let (slot_index, unknown_before, unknown_after) = slot;
@@ -2324,13 +2367,17 @@ fn solve_dc_sweep_impl(
         // circuit. It cannot happen for a source — its row count does not depend on its value —
         // which is exactly why it is worth saying so out loud rather than assuming it.
         if next_unknown != unknown_after {
-            bail!(
-                "`{}` claimed {} unknown(s) when first built and {} on rebuild at {value}; the \
-                 sweep cannot re-point a device whose row count depends on its value",
-                sweep.source,
-                unknown_after - unknown_before,
-                next_unknown - unknown_before
-            );
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0001)
+                .arg(
+                    "detail",
+                    format!(
+                        "`{}` claimed {} unknown(s) when first built and {} on rebuild at {value}",
+                        sweep.source,
+                        unknown_after - unknown_before,
+                        next_unknown - unknown_before
+                    ),
+                )
+                .into());
         }
         built.instances[slot_index] = instance;
 
@@ -2649,9 +2696,9 @@ fn solve_transient_impl(
     prebuilt: Option<BuiltInstances>,
     keep: Option<&[usize]>,
 ) -> Result<Waveform> {
-    let (tstep, tstop) = net
-        .tran
-        .context("transient analysis requires a `.tran <tstep> <tstop>` card")?;
+    let (tstep, tstop) = net.tran.ok_or_else(|| {
+        va_diag::Diagnostic::new(va_diag::codes::E0710).arg("card", ".tran <tstep> <tstop>")
+    })?;
     // Generated models are method-independent (§ `Integration`), so this selects the
     // integrator's method and nothing else. `Trapezoidal` stays the default: it is second order,
     // and it is what every committed transient golden was validated against.
@@ -2824,11 +2871,9 @@ fn ac_excitation(
         }
     }
     if driven == 0 {
-        bail!(
-            "AC analysis needs at least one source with an `AC <magnitude>` spec; none of this \
-             deck's {} voltage source(s) has one (the response would be identically zero)",
-            currents.len()
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0720)
+            .arg("count", currents.len())
+            .into());
     }
     Ok(excitation)
 }
@@ -2872,9 +2917,10 @@ fn solve_ac_impl(
     solver: Solver,
     prebuilt: Option<BuiltInstances>,
 ) -> Result<va_acnoise::ac::AcResponse> {
-    let card = net
-        .ac
-        .context("AC analysis requires an `.ac dec <points-per-decade> <fstart> <fstop>` card")?;
+    let card = net.ac.ok_or_else(|| {
+        va_diag::Diagnostic::new(va_diag::codes::E0710)
+            .arg("card", ".ac dec <points-per-decade> <fstart> <fstop>")
+    })?;
 
     let BuiltInstances {
         instances,
@@ -2886,9 +2932,9 @@ fn solve_ac_impl(
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (AC analysis linearizes about it)")?;
     if static_point_tasks(&refs, &op.x, dim, "the operating point")?.is_some() {
-        bail!(
-            "the AC sweep was not run: a model's $finish ended the analysis at its operating point"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0721)
+            .arg("card", "ac")
+            .into());
     }
     let excitation = ac_excitation(net, &currents, dim)?;
 
@@ -3041,15 +3087,16 @@ fn solve_noise_impl(
     solver: Solver,
     prebuilt: Option<BuiltInstances>,
 ) -> Result<va_acnoise::noise::NoiseSpectrum> {
-    let card = net.noise.as_ref().context(
-        "noise analysis requires a `.noise V(<out>) <source> dec <ppd> <fstart> <fstop>` card",
-    )?;
-    let output = *net.nodes.get(&card.output).with_context(|| {
-        format!(
-            "`.noise` probes V({}), which is not a net in this circuit (nets: {})",
-            card.output,
-            net.node_order.join(", ")
+    let card = net.noise.as_ref().ok_or_else(|| {
+        va_diag::Diagnostic::new(va_diag::codes::E0710).arg(
+            "card",
+            ".noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>",
         )
+    })?;
+    let output = *net.nodes.get(&card.output).ok_or_else(|| {
+        va_diag::Diagnostic::new(va_diag::codes::E0722)
+            .arg("name", &card.output)
+            .arg("nets", net.node_order.join(", "))
     })?;
 
     let BuiltInstances {
@@ -3067,29 +3114,30 @@ fn solve_noise_impl(
         .find(|(name, _)| *name == card.source)
         .map(|&(_, branch)| branch);
     if input.is_none() {
-        bail!(
-            "`.noise` names `{}` as its input source, which is not a voltage source in this \
-             circuit (sources: {})",
-            card.source,
-            if currents.is_empty() {
-                "none".to_string()
-            } else {
-                currents
-                    .iter()
-                    .map(|(n, _)| n.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0723)
+            .arg("name", &card.source)
+            .arg(
+                "sources",
+                if currents.is_empty() {
+                    "none".to_string()
+                } else {
+                    currents
+                        .iter()
+                        .map(|(n, _)| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            )
+            .into());
     }
 
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     let op = operating_point(&refs, dim, newton_cfg(solver))
         .context("DC operating-point solve failed (noise analysis linearizes about it)")?;
     if static_point_tasks(&refs, &op.x, dim, "the operating point")?.is_some() {
-        bail!(
-            "the noise analysis was not run: a model's $finish ended the analysis at its operating point"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0721)
+            .arg("card", "noise")
+            .into());
     }
 
     if !has_noise_sources(&refs, &op.x) {
@@ -3098,14 +3146,7 @@ fn solve_noise_impl(
         // `circuits/resistor_noise_va.net` gates a *compiled* model's own `white_noise()`
         // against golden — so the message was telling users something false about why their
         // spectrum was empty, and pointing them away from the real cause.
-        bail!(
-            "no device in this circuit contributes any noise, so the spectrum would be \
-             identically zero. A device is only a noise source if it says so: a resistor and \
-             the reference diode contribute thermal/shot noise inherently, and a compiled \
-             Verilog-A model contributes exactly what its own `white_noise()`/\
-             `flicker_noise()`/`noise_table()` calls declare — a model with none is silent by \
-             construction, not by omission in this simulator"
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0724).into());
     }
 
     let sweep = va_acnoise::ac::AcSweep {
@@ -3188,12 +3229,11 @@ fn build_instance(
     let two_terminals = || -> Result<(usize, usize)> {
         match dev.terminals.as_slice() {
             [p, n, ..] => Ok((*p, *n)),
-            _ => bail!(
-                "`{}` is a {}-terminal device line, but `{}` needs at least two nodes",
-                dev.name,
-                dev.terminals.len(),
-                dev.model
-            ),
+            _ => Err(va_diag::Diagnostic::new(va_diag::codes::E0725)
+                .arg("name", &dev.name)
+                .arg("count", dev.terminals.len())
+                .arg("model", &dev.model)
+                .into()),
         }
     };
 
@@ -3314,13 +3354,12 @@ fn base_module_for<'a>(compiled: &'a [Module], dev: &Device) -> Result<Option<&'
     // second match.
     let mut hits = hits.filter(|m| first.is_some_and(|f| f.name != m.name));
     if let Some(second) = hits.next() {
-        bail!(
-            "`{}` names model `{}`, which matches both `{}` and `{}` ignoring case — SPICE              names are case-insensitive, so the deck cannot say which; rename one module",
-            dev.name,
-            dev.model,
-            first.map(|m| m.name.as_str()).unwrap_or(""),
-            second.name
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0726)
+            .arg("name", &dev.name)
+            .arg("model", &dev.model)
+            .arg("first", first.map(|m| m.name.as_str()).unwrap_or(""))
+            .arg("second", &second.name)
+            .into());
     }
     Ok(first)
 }
@@ -3398,14 +3437,19 @@ fn elaboration_for<'a>(
         .filter(|m| m.name == base.name)
         .find(|m| elaborated_with(m, base, &values))
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "`{}` sets {}, which model `{}` fixes at elaboration, but the library holds no \
-                 elaboration of it with that value — compile the library with the deck that \
-                 places it (`va_cli::load`)",
-                dev.name,
-                describe_values(base, &values),
-                base.name
-            )
+            // Reachable only through the library API, by a caller that compiled the library
+            // without the deck (`va_cli::load` does both): an internal error to a user.
+            anyhow::Error::new(va_diag::Diagnostic::new(va_diag::codes::E0001).arg(
+                "detail",
+                format!(
+                    "`{}` sets {}, which model `{}` fixes at elaboration, but the library holds \
+                     no elaboration of it with that value — compile the library with the deck \
+                     that places it (`va_cli::load`)",
+                    dev.name,
+                    describe_values(base, &values),
+                    base.name
+                ),
+            ))
         })
 }
 
@@ -3460,9 +3504,12 @@ fn elaborate_for_devices(
             .iter()
             .find(|a| a.name == base.name)
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "module `{}` has no parsed source to elaborate again",
-                    base.name
+                va_diag::Diagnostic::new(va_diag::codes::E0001).arg(
+                    "detail",
+                    format!(
+                        "module `{}` has no parsed source to elaborate again",
+                        base.name
+                    ),
                 )
             })?;
         let overrides: std::collections::HashMap<String, f64> = values
@@ -3515,12 +3562,12 @@ fn spice_param_names(module: &Module, params: &[(String, f64)]) -> Result<Vec<(S
                 .filter(|p| p.name.eq_ignore_ascii_case(name));
             match (hits.next(), hits.next()) {
                 (Some(one), None) => Ok((one.name.clone(), *v)),
-                (Some(a), Some(b)) => bail!(
-                    "parameter `{name}` matches both `{}` and `{}` of model `{}` ignoring case —                      SPICE names are case-insensitive, so the deck cannot say which",
-                    a.name,
-                    b.name,
-                    module.name
-                ),
+                (Some(a), Some(b)) => Err(va_diag::Diagnostic::new(va_diag::codes::E0727)
+                    .arg("name", name)
+                    .arg("first", &a.name)
+                    .arg("second", &b.name)
+                    .arg("model", &module.name)
+                    .into()),
                 (None, _) => Ok((name.to_ascii_lowercase(), *v)),
             }
         })
@@ -3570,10 +3617,9 @@ fn split_multiplicity(module: &Module, overrides: &[(String, f64)]) -> Result<Sp
         let is_multiplicity = match name.as_str() {
             "mult" => {
                 if declares("mult") {
-                    bail!(
-                        "model `{}` declares its own parameter `mult`, so `mult=` on a device                          line is ambiguous: it could set that parameter or the instance                          multiplicity. Rename the model's parameter, or set the multiplicity                          with `m=` if the model declares no `m` either.",
-                        module.name
-                    );
+                    return Err(va_diag::Diagnostic::new(va_diag::codes::E0728)
+                        .arg("model", &module.name)
+                        .into());
                 }
                 true
             }
@@ -3583,9 +3629,10 @@ fn split_multiplicity(module: &Module, overrides: &[(String, f64)]) -> Result<Sp
         };
         if is_multiplicity {
             if !v.is_finite() || *v <= 0.0 {
-                bail!(
-                    "instance multiplicity must be a positive, finite number, got `{name}={v}`                      (it is a count of identical devices in parallel; LRM 6.3.6)"
-                );
+                return Err(va_diag::Diagnostic::new(va_diag::codes::E0729)
+                    .arg("name", name)
+                    .arg("value", v)
+                    .into());
             }
             multiplicity = Some(*v);
         } else {
@@ -3718,10 +3765,10 @@ fn compile_with_overrides(
             Some((i, param)) => {
                 let pid = va_ir::ParamId(i as u32);
                 if module.param_is_local(pid) {
-                    bail!(
-                        "model `{}` declares `{name}` as a `localparam`, which a deck cannot                          set — a localparam is a module-internal constant (LRM 3.4.2)",
-                        module.name
-                    );
+                    return Err(va_diag::Diagnostic::new(va_diag::codes::E0730)
+                        .arg("model", &module.name)
+                        .arg("name", name)
+                        .into());
                 }
                 param.default = *v;
                 m.mark_param_given(pid);
@@ -3729,21 +3776,24 @@ fn compile_with_overrides(
             None => {
                 let mut known: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
                 known.sort_unstable();
-                bail!(
-                    "model `{}` has no parameter `{name}` (it declares: {})",
-                    m.name,
-                    if known.is_empty() {
-                        "none".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                );
+                return Err(va_diag::Diagnostic::new(va_diag::codes::E0731)
+                    .arg("model", &m.name)
+                    .arg("name", name)
+                    .arg(
+                        "known",
+                        if known.is_empty() {
+                            "none".to_string()
+                        } else {
+                            known.join(", ")
+                        },
+                    )
+                    .into());
             }
         }
     }
 
     va_codegen::CompiledModel::new(&m)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(anyhow::Error::new)
         .with_context(|| format!("compiling model `{}`", module.name))
 }
 
@@ -3765,12 +3815,11 @@ fn compile_with_overrides(
 fn unconnected_ports(module: &Module, terminals: &[usize]) -> Result<Vec<usize>> {
     let port_nodes: Vec<NodeId> = module.ports.iter().flatten().copied().collect();
     if terminals.len() > port_nodes.len() {
-        bail!(
-            "model `{}` declares {} port node(s), device connects {}",
-            module.name,
-            port_nodes.len(),
-            terminals.len()
-        );
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0732)
+            .arg("model", &module.name)
+            .arg("ports", port_nodes.len())
+            .arg("got", terminals.len())
+            .into());
     }
     // § `$port_connected`: a deck line may stop short of the model's trailing ports, which is
     // SPICE's way of leaving an optional terminal (a self-heating `dt`) off — the model then
@@ -3795,26 +3844,26 @@ fn unconnected_ports(module: &Module, terminals: &[usize]) -> Result<Vec<usize>>
             continue;
         }
         if terminals.len() > covered {
-            bail!(
-                "model `{}`: device connects {} terminal(s), which ends part-way through                  {}-wide port #{} — a port is connected as a whole or not at all",
-                module.name,
-                terminals.len(),
-                port.len(),
-                i + 1
-            );
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0733)
+                .arg("model", &module.name)
+                .arg("got", terminals.len())
+                .arg("width", port.len())
+                .arg("index", i + 1)
+                .into());
         }
         if !module.queries_port_connected(i) {
-            bail!(
-                "model `{}` declares {} port node(s), device connects {} — and port #{}                  (`{}`) is not optional: the model never asks `$port_connected` about it",
-                module.name,
-                port_nodes.len(),
-                terminals.len(),
-                i + 1,
-                port
-                    .first()
-                    .map(|n| module.nodes[n.0 as usize].name.as_str())
-                    .unwrap_or("?")
-            );
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0734)
+                .arg("model", &module.name)
+                .arg("ports", port_nodes.len())
+                .arg("got", terminals.len())
+                .arg("index", i + 1)
+                .arg(
+                    "port",
+                    port.first()
+                        .map(|n| module.nodes[n.0 as usize].name.as_str())
+                        .unwrap_or("?"),
+                )
+                .into());
         }
         unconnected.push(i);
     }
@@ -3903,7 +3952,7 @@ fn build_from_model(
             name,
             &dropped,
         )
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(anyhow::Error::new)
         .with_context(|| format!("generating instance for model `{}`", module.name))?;
     // § instance multiplicity, LRM 6.3.6. The scaling is applied *outside* the instance rather
     // than inside the generated model, which is what makes it one rule for every model and keeps
@@ -3995,7 +4044,7 @@ fn reference_instance(dev: &Device) -> Result<Box<dyn ModelInstance>> {
     let n = dev.terminals[1];
     let value = || {
         dev.value
-            .with_context(|| format!("device `{}` needs a value", dev.name))
+            .ok_or_else(|| va_diag::Diagnostic::new(va_diag::codes::E0735).arg("name", &dev.name))
     };
 
     let inst: Box<dyn ModelInstance> = match dev.model.as_str() {
@@ -4007,19 +4056,19 @@ fn reference_instance(dev: &Device) -> Result<Box<dyn ModelInstance>> {
         // oscillator's own hand-built fixture (`va_transient::integrator`'s test module).
         "bjt" => {
             let &[c, b, e] = dev.terminals.as_slice() else {
-                bail!(
-                    "device `{}` (model `bjt`) needs exactly 3 terminals (c, b, e), found {}",
-                    dev.name,
-                    dev.terminals.len()
-                );
+                return Err(va_diag::Diagnostic::new(va_diag::codes::E0736)
+                    .arg("name", &dev.name)
+                    .arg("got", dev.terminals.len())
+                    .into());
             };
             Box::new(Bjt::new(b, c, e, 1e-15, 100.0, 1.0, VT_NOMINAL))
         }
-        other => bail!(
-            "device `{}` references unknown model `{other}` (no compiled `--model` matched, \
-             and it is not a built-in primitive)",
-            dev.name
-        ),
+        other => {
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E0737)
+                .arg("name", &dev.name)
+                .arg("model", other)
+                .into())
+        }
     };
     Ok(inst)
 }
@@ -9402,9 +9451,11 @@ X1 a gnd plain
         let err = solve_dc(&net, &design.modules).expect_err("two nodes into a three-port model");
         let msg = format!("{err:#}");
         assert!(msg.contains("plain"), "should name the model: {msg}");
+        // Why the omission was not accepted (the model never asks `$port_connected`) is the
+        // catalogue entry's description.
         assert!(
-            msg.contains("not optional") && msg.contains("$port_connected"),
-            "should say why the omission was not accepted: {msg}"
+            msg.contains("not optional") && msg.contains("[E0734]"),
+            "should say the port is not optional: {msg}"
         );
     }
 

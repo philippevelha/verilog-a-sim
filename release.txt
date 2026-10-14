@@ -22,6 +22,38 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.31.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3d: `va-cli`'s own errors. Every error a user can reach now has a code.**
+36 new `E07xx` codes (`E0704`-`E0739`) for the command line, files, plots and the deck/model
+wiring `va-cli` does itself: unreadable files and directories, a missing analysis card, an
+analysis the deck asks for but the command line does not, `K`/`F`/`H` couplings, `.dc`/`.noise`
+cards naming the wrong device, model parameters a deck cannot set, port-count mismatches, plots
+that cannot be drawn, `$error` counts.
+  * A sweep of every model directory, the error corpus, the LRM examples and a dozen failing
+    command lines shows 44 distinct codes and no `E0000`. `E0000` stays as the fallback for an
+    error added later without a code; `render_error`'s unit tests now check it, since no binary
+    path reaches it any more.
+  * Two places flattened a codegen error to text (`anyhow!("{e}")`), so under `sim` a codegen
+    refusal reached the user as an uncoded sentence instead of its refusal block. They now keep
+    the error's type.
+  * Options with a bad value (`--reltol x`, `--threads 0`, `--integration foo`, `--define`)
+    use `E0703`, the code step 1 gave invalid option values.
+  * Errors only a library caller can cause (`va_cli::load` skipped, a sweep source whose row
+    count changes on rebuild) are `E0001`, internal.
+  * The "while:" lines that say what `va-cli` was doing (`parsing deck.net`, `DC
+    operating-point solve failed`) are still in the program's own words; they are context, not
+    diagnostics, and are not translated yet.
+
+Not coded, by choice: `va-harness`'s `HarnessError`. It is printed only by `cargo xtask
+validate`, a developer tool, and its `Run` variant already carries the pipeline's coded text as
+a string. Coding it would take a stage of its own (`08xx`).
+
+Measured: `cargo test --workspace` 991 passed, 0 failed (989 + 2: the E0000 test moved from
+the binary to `render_error`, and a second checks a coded error under context);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.30.0 - 2026-10-14
 --------------------
 **Coded diagnostics, step 3c: numerical errors.** A failed solve is shown under an `E06xx` code:

@@ -1,0 +1,9 @@
+{
+  "code": "E0713",
+  "rev": 1,
+  "message": "`{name}` couples `{other}` to itself",
+  "description": "A `K` line names the same inductor twice.",
+  "actions": [
+    "Name two different inductors."
+  ]
+}

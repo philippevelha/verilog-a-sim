@@ -1,0 +1,9 @@
+{
+  "code": "E0706",
+  "rev": 1,
+  "message": "no `.va`/`.vams` model files found in `{path}`",
+  "description": "The directory given as a model library contains no Verilog-A source file.",
+  "actions": [
+    "Point at the directory holding the models, or name the model file itself."
+  ]
+}

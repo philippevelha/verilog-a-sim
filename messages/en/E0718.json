@@ -1,0 +1,9 @@
+{
+  "code": "E0718",
+  "rev": 1,
+  "message": "`.dc` sweeps unknown device `{name}`",
+  "description": "The `.dc` card names a source the deck does not contain.",
+  "actions": [
+    "Check the source name on the `.dc` card."
+  ]
+}

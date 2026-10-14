@@ -1,0 +1,9 @@
+{
+  "code": "E0733",
+  "rev": 1,
+  "message": "model `{model}`: device connects {got} terminal(s), which ends part-way through {width}-wide port #{index}",
+  "description": "A vector port is connected as a whole or not at all.",
+  "actions": [
+    "Connect every node of the vector port, or none of them."
+  ]
+}

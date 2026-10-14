@@ -1,0 +1,9 @@
+{
+  "code": "E0730",
+  "rev": 1,
+  "message": "model `{model}` declares `{name}` as a `localparam`, which a deck cannot set",
+  "description": "A `localparam` is a module-internal constant (LRM 3.4.2); its author declared it so that it could not be changed from outside.",
+  "actions": [
+    "Remove it from the device line, or make it a `parameter` in the model."
+  ]
+}

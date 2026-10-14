@@ -1658,14 +1658,14 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "va-abi"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "va-acnoise"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "libm",
  "thiserror 2.0.18",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "va-cli"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "anyhow",
  "libm",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "va-codegen"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "va-core"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "faer",
  "libm",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "va-diag"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "va-frontend"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "libm",
  "logos",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "va-harness"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "plotters",
  "thiserror 2.0.18",
@@ -1749,11 +1749,11 @@ dependencies = [
 
 [[package]]
 name = "va-ir"
-version = "2.29.0"
+version = "2.30.0"
 
 [[package]]
 name = "va-netlist"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "thiserror 2.0.18",
  "va-abi",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "va-transient"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "libm",
  "thiserror 2.0.18",
@@ -2040,7 +2040,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "xtask"
-version = "2.29.0"
+version = "2.30.0"
 dependencies = [
  "anyhow",
  "va-abi",

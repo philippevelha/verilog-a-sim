@@ -1,0 +1,9 @@
+{
+  "code": "E0739",
+  "rev": 1,
+  "message": "{count} `$error` message(s) reported by the model(s) during the run",
+  "description": "A model's `$error` reports an error without stopping the run (LRM 9.7.3). The results are printed, and the exit status says the run was not clean.",
+  "actions": [
+    "Read the `$error` messages above, and the model's conditions for them."
+  ]
+}

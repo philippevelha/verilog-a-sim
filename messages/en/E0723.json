@@ -1,0 +1,9 @@
+{
+  "code": "E0723",
+  "rev": 1,
+  "message": "`.noise` names `{name}` as its input source, which is not a voltage source in this circuit (sources: {sources})",
+  "description": "The input-referred noise is referred to a voltage source of the circuit.",
+  "actions": [
+    "Use one of the sources listed."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0738",
+  "rev": 1,
+  "message": "`sim` needs a netlist path",
+  "description": "The `sim` command runs a SPICE-style deck, named as its first argument.",
+  "actions": [
+    "Run `va-cli sim <deck.net> [--model <file.va>]`."
+  ]
+}

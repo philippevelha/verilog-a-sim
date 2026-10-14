@@ -118,20 +118,20 @@ fn a_numerical_failure_names_its_code_and_unknown() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// An error with no code yet is `E0000`, and keeps its own wording and causes in full: the code
-/// adds nothing, so it must not take anything away either.
+/// A file that cannot be read is coded (`E0705`), with the operating system's reason. Until
+/// 2.31.0 this was the binary's example of an uncoded error; the `E0000` fallback itself is
+/// checked by `render_error`'s unit test in `main.rs`.
 #[test]
-fn an_uncoded_error_is_e0000_with_its_own_text() {
-    // An unreadable model file: a files-and-command-line error, not yet coded (step 3d).
+fn an_unreadable_model_file_is_coded() {
     let deck = concat!(env!("CARGO_MANIFEST_DIR"), "/../../circuits/divider.net");
     let out = va_cli(&["sim", deck, "--model", "no/such/model.va"]);
     let err = stderr(&out);
     assert!(!out.status.success());
-    assert!(err.contains("error[E0000]: "), "{err}");
     assert!(
-        err.contains("no/such/model.va"),
-        "the original text is kept: {err}"
+        err.contains("error[E0705]: cannot read model file `no/such/model.va`: "),
+        "{err}"
     );
+    assert!(!err.contains("E0000"), "{err}");
 }
 
 /// `--explain` prints the description and the actions for any defined code, in any case, and

@@ -1,0 +1,10 @@
+{
+  "code": "E0708",
+  "rev": 1,
+  "message": "cannot draw the plot `{path}`: {reason}",
+  "description": "The plot could not be drawn or written. The reason says which: an unwritable path, or a result with nothing plottable (no positive frequency on a log axis, an empty waveform).",
+  "actions": [
+    "Check that the output directory exists and is writable.",
+    "If the result is empty, look at the analysis card and the run's own messages."
+  ]
+}

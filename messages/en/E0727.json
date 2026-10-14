@@ -1,0 +1,9 @@
+{
+  "code": "E0727",
+  "rev": 1,
+  "message": "parameter `{name}` matches both `{first}` and `{second}` of model `{model}` ignoring case",
+  "description": "SPICE names are not case-sensitive, so the deck cannot say which of the two parameters it sets.",
+  "actions": [
+    "Rename one of the model's parameters."
+  ]
+}
