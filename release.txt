@@ -83,6 +83,60 @@ Measured: `cargo test --workspace` 997 passed, 0 failed (992 + 5 new); `cargo xt
 checked, 0 failed, convergence 28/28.
 
 
+2.32.0+3 - 2026-10-15
+----------------------
+(Committed on a branch as 2.24.2+3; renumbered on merging after 2.32.0.)
+**scripts/benchmark/bench_c7552_tran_linux.sh: run the c7552 transient on your own Linux
+machine.** Script and docs only. It runs c7552_tran.net with default settings and with
+`--bypass` from a source checkout and writes `c7552_tran.txt`: wall time, peak memory, exit,
+timepoint count and the `check_iscas.py tran` check, for comparison with ngspice/OpenVAF's 20 min
+on an i7-9750H. It reports only the 3 719 checked nodes and caps each run at 3 h (`CAP=`). Why
+a script rather than a figure: the cloud run was lost to a container restart and then stopped,
+so there is still no completed c7552 transient. Smoke-tested here with `CAP=20` on 4 vCPUs:
+both runs stopped at the cap after 20.1 s, at 1 829 MB (default) and 1 453 MB (bypass).
+
+2.32.0+2 - 2026-10-15
+----------------------
+(Committed on a branch as 2.24.2+2; renumbered on merging after 2.32.0.)
+**circuits/benchmark/iscas85/c7552_tran.net: a c7552 transient deck, the size of the
+ngspice/OpenVAF c7552 transient.** Deck only, no code change. c7552.net with each of the 207
+inputs a PULSE (100 ps edges, period 2*(i%8+1) ns, edges staggered by (i%8)*100 ps) and
+`.tran 10p 10n`, checked with `check_iscas.py tran c7552.bench`. Derived from c7552.net rather
+than regenerated with gen_iscas.py because gen_iscas.py needs external/benchmarkExt/, which is
+not in every checkout. The cost: the staggered edges make the step control accept far more than
+the 1 000 print steps (~2 500 points after 2 h of a first, interrupted run), so this deck runs
+for hours. Leave out the default report: it keeps all 268 676 unknowns, ~2.15 MB per point, and
+heads for the memory limit. Pass `--report` with the checked nodes from `check_iscas.py report`
+instead. Timings are not in this entry; they follow when a run completes.
+
+2.32.0+1 - 2026-10-14
+----------------------
+**The ISCAS'85 suite at 2.24.2: every operating point correct, c7552 in 295 s; bypass is the
+setting that helps, the JIT and node collapse do not.** Docs only:
+circuits/benchmark/iscas85/README.md ("The suite at 2.24.2"). Release build, Xeon 2.8 GHz,
+4 vCPUs, one deck at a time on 4 threads. (Committed on a branch as 2.24.2+1 and renumbered
+when merged after main's 2.25.0-2.32.0; the figures are 2.24.2's, not re-measured at 2.32.0.)
+
+  * `.op`, default settings, all PASS against their `.bench` logic: c432 9.1 s, c499 12.1,
+    c880 13.1, c1355 15.9, c1908 26.4, c2670 53.0, c3540 128.7, c5315 180.6, c6288 100.6,
+    c7552 295.3 s (6.95 GB peak). Close to 2.4.0+1's figures from another 8-thread machine.
+  * Transients: c17_tran 39.7 s, 23.3 s with `--bypass` (both PASS, 13 524 points);
+    c432_tran 330.4 s, 230.5 s with `--bypass` (same 2 532 points, no node moved more than
+    1 uV). It is a timing deck with no logic check.
+  * `VA_JIT=on` is a net loss here: one serial ~0.8 s compile per distinct PSP103 parameter
+    set (6-15 per deck), for no measurable evaluation gain (c880 12.0 -> 20.6 s).
+  * `VA_COLLAPSE=on` helps up to c1355, then breaks down: c1908 27.1 s / 1.2 GB -> 65.2 s /
+    7.2 GB, c2670 to 8.0 GB, c3540 killed for memory at 13.6 GB. The collapsed matrix factors
+    with far more fill (not measured). Its 2.21.0+1 check never ran these decks. Keep it off
+    above ~10 k unknowns until that is understood.
+  * No OpenVAF/ngspice ISCAS timings are in the repository (they came with
+    `external/benchmarkExt/`, not in this checkout), so the side-by-side comparison is not
+    made here.
+
+Measured: the runs above, with the 2.24.2 release binary. No code change; 2.24.2's test and
+`validate` figures stand.
+
+
 2.32.0 - 2026-10-14
 --------------------
 **A `cross` firing just before a `transition` ramp ends no longer kills the transient run.** The

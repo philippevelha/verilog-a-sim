@@ -48,6 +48,17 @@ Each run writes **`benchmark.txt`** in the archive directory:
 `iscas_suite.txt`: wall time, exit code, output hash, and a logic check of every reported gate
 output with `check_iscas.py` (needs `python3`). ~19 min of operating points on an i7-1185G7.
 
+## c7552 transient: the OpenVAF comparison (Linux)
+
+`bench_c7552_tran_linux.sh` is run from the root of a source checkout (`bash
+scripts/benchmark/bench_c7552_tran_linux.sh`, which builds `va-cli` unless `VA=` names one). It
+runs `c7552_tran.net` with default settings and with `--bypass` and writes `c7552_tran.txt`:
+wall time, peak memory, exit code, timepoint count and the `check_iscas.py tran` logic check.
+The reference is ngspice with OpenVAF, 20 min for ~1 020 timepoints on an i7-9750H. Expect
+hours and 4–7 GB of RAM. Each run is capped at 3 h (`CAP=` changes it; a capped run reports
+`cap` with its time and memory but no waveform). No run has completed yet: a cloud run was
+lost to a container restart.
+
 ## Results received
 
 | File | Machine | Notes |
