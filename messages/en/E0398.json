@@ -1,0 +1,9 @@
+{
+  "code": "E0398",
+  "rev": 1,
+  "message": "`{name}`: type string \"{type}\" is neither \"global\" nor \"instance\"",
+  "description": "The optional last argument of a `$rdist_*` function says whether the draw is shared by every instance (\"global\", the default) or made separately for each one (\"instance\"), LRM 9.13.2 Table 9-2. Any other text is not a type this function knows, and guessing one would change which values the instances draw.",
+  "actions": [
+    "Write \"global\" or \"instance\", or leave the argument out for \"global\"."
+  ]
+}

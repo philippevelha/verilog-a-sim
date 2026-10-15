@@ -1660,6 +1660,43 @@ fn eval_call(
         } else {
             0.0
         }),
+        // `$rdist_*(seed, ...)` (LRM 9.13.2, 2.42.0): one draw (`crate::rdist`). A variable seed
+        // is `inout`: it is read, advanced by the draw and written back, so each evaluation
+        // continues one reproducible sequence. A variable starts each evaluation from its value
+        // at the last accepted timepoint (`lower::PersistentVar`), so every Newton iteration of
+        // one timepoint draws the same number and the sequence advances once per accepted point.
+        // Any other seed is read only: the same draw every time, per instance with `"instance"`.
+        // Zero gradient: the draw does not depend on the solution.
+        Builtin::Rdist => {
+            let selector = match args.first().map(|&a| ctx.module.expr(a)) {
+                Some(va_ir::Expr::Const(v)) => *v,
+                _ => {
+                    return Err(internal_error(
+                        "`$rdist_*` must carry its kind as a constant",
+                    ))
+                }
+            };
+            let kind = va_ir::RdistKind::from_selector(selector)
+                .ok_or_else(|| internal_error("`$rdist_*` carries an unknown kind"))?;
+            let (&seed_arg, p1, p2, per_instance) = match args {
+                [_, seed, p1, p2, inst] => (seed, *p1, *p2, *inst),
+                _ => return Err(internal_error("`$rdist_*` takes five IR arguments")),
+            };
+            let seed_var = match ctx.module.expr(seed_arg) {
+                va_ir::Expr::Var(v) => Some(*v),
+                _ => None,
+            };
+            let mut seed = crate::rdist_seed(eval(ctx, seed_arg)?.value);
+            if seed_var.is_none() && eval(ctx, per_instance)?.value != 0.0 {
+                seed ^= crate::rdist::instance_hash(ctx.instance_name);
+            }
+            let (p1, p2) = (eval(ctx, p1)?.value, eval(ctx, p2)?.value);
+            let value = crate::rdist::draw(kind, &mut seed, p1, p2);
+            if let Some(v) = seed_var {
+                ctx.set_var(v, Dual::constant(f64::from(seed)));
+            }
+            Dual::constant(value)
+        }
         // `$simparam("name")` (LRM 9.18), read from the analysis context. The argument is the
         // resolved selector, not a value to evaluate -- elaboration already decided that this
         // name is one this simulator knows, so there is no fallback to consider here.

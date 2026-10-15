@@ -44,6 +44,7 @@
 pub mod ad;
 pub mod counters;
 pub mod lower;
+pub mod rdist;
 mod sched;
 pub mod tape;
 mod tasks;
@@ -2466,7 +2467,88 @@ pub fn semantics_warnings(module: &Module) -> Vec<Diagnostic> {
                 .arg("count", delayed),
         );
     }
+    let mut free = 0;
+    let carried = lower::persistent_vars(module);
+    unguarded_rdist(module, &module.analog, false, &carried, &mut free);
+    if free > 0 {
+        out.push(
+            Diagnostic::new(codes::W0403)
+                .arg("module", &module.name)
+                .arg("count", free),
+        );
+    }
     out
+}
+
+/// Count the `$rdist_*` calls that `stmts` reaches outside any event body with a seed variable
+/// that carries over between timepoints (`W0403`, 2.42.0) -- one in `carried`, the persistence
+/// pass's set: read before it is assigned. A seed set before the draw on every evaluation
+/// redraws the same values each time and is not reported. An event body is the `if` an `@(...)`
+/// desugars to, recognised by its condition reading an event flag, `initial_step` or `final_step`.
+fn unguarded_rdist(
+    module: &Module,
+    stmts: &[va_ir::Stmt],
+    guarded: bool,
+    carried: &std::collections::BTreeSet<u32>,
+    count: &mut usize,
+) {
+    use va_ir::Stmt;
+    fn reaches(module: &Module, e: ExprId, pred: &dyn Fn(&Expr) -> bool) -> bool {
+        let node = module.expr(e);
+        pred(node)
+            || lower::expr_operands(node)
+                .into_iter()
+                .any(|c| reaches(module, c, pred))
+    }
+    let is_event = |e: &Expr| {
+        matches!(
+            e,
+            Expr::EventFired(_) | Expr::Call(Builtin::InitialStep | Builtin::FinalStep, _)
+        )
+    };
+    let is_free_draw = |e: &Expr| {
+        matches!(e, Expr::Call(Builtin::Rdist, args)
+            if matches!(args.get(1).map(|&a| module.expr(a)),
+                Some(Expr::Var(v)) if carried.contains(&v.0)))
+    };
+    let expr = |e: ExprId, count: &mut usize| {
+        if !guarded && reaches(module, e, &is_free_draw) {
+            *count += 1;
+        }
+    };
+    for st in stmts {
+        match st {
+            Stmt::Assign { rhs, .. } => expr(*rhs, count),
+            Stmt::Contribute { value, .. } => expr(*value, count),
+            Stmt::Block(b) => unguarded_rdist(module, b, guarded, carried, count),
+            Stmt::If { cond, then_, else_ } => {
+                let event = reaches(module, *cond, &is_event);
+                unguarded_rdist(module, then_, guarded || event, carried, count);
+                unguarded_rdist(module, else_, guarded, carried, count);
+            }
+            Stmt::While { body, .. } | Stmt::Repeat { body, .. } => {
+                unguarded_rdist(module, body, guarded, carried, count)
+            }
+            Stmt::For { body, .. } => unguarded_rdist(module, body, guarded, carried, count),
+            Stmt::Case { arms, default, .. } => {
+                for arm in arms {
+                    unguarded_rdist(module, &arm.body, guarded, carried, count);
+                }
+                unguarded_rdist(module, default, guarded, carried, count);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A seed value as the 32-bit integer the `$rdist_*` generators advance (`crate::rdist`):
+/// truncated toward zero and wrapped, as storing it into a Verilog `integer` does.
+pub(crate) fn rdist_seed(v: f64) -> i32 {
+    if v.is_finite() {
+        v.trunc() as i64 as i32
+    } else {
+        0
+    }
 }
 
 /// Switch compiling the static program to machine code on or off for the whole process,

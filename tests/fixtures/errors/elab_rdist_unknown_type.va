@@ -1,0 +1,10 @@
+// expect: elab
+// code: E0398
+// at: 9:31
+// message: type string "each" is neither "global" nor "instance"
+// fixed: 2.42.0 (before: the type string was parsed and ignored, and the call folded to its mean)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ V(p, n) / $rdist_normal(1, 1k, 50, "each");
+endmodule

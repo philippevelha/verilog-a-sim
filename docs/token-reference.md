@@ -201,16 +201,21 @@ class of lexemes.
   previous-iteration history to limit against in the first place — but the access it names is
   **recorded**, not discarded: it declares a junction, and `va_ir::Module::limited_junctions`
   carries that declaration to `va-core`'s limiter (2026-09-09; see the `$limit` section below); `$rdist_uniform`/`$rdist_normal`/`$rdist_exponential`/`$rdist_poisson`/
-  `$rdist_chi_square`/`$rdist_t`/`$rdist_erlang` (LRM §9.13.2, the repeatable seeded
-  random-distribution family) fold to their own distribution's *mean* — `(start+end)/2` for
-  `rdist_uniform` (built as a real `Add`/`Div` IR pair, since no single argument carries it), the
-  bare `mean`/`degree_of_freedom` argument for every other form except `rdist_t` (`0.0`, the only
-  well-defined center for a distribution symmetric about zero) — rather than an arbitrary `0.0`
-  the way the noise-source builtins below do, since v0 has no simulator random-number generator
-  to actually draw a sample from at all (the same "no meaningful DC value" gap `white_noise`/
-  `flicker_noise`/`noise_table` have); `seed` (always first) and an optional trailing
-  `type_string` (`"global"`/`"instance"`, LRM Table 9-2) are both parsed but never evaluated
-  (`Elaborator::fold_rdist`); a `Stmt::Task` (`$strobe`, `$finish`, …) lowers to
+  `$rdist_chi_square`/`$rdist_t`/`$rdist_erlang` (LRM §9.13.2) **draw since 2.42.0** (they
+  folded to the distribution's mean before, so every Monte Carlo draw was the nominal value):
+  `va_ir::Builtin::Rdist`, evaluated by `va_codegen::rdist`, which follows the IEEE 1364-2005
+  §17.9.3 reference routines (32-bit LCG, polar-method normal; bit-exact agreement with another
+  simulator not checked). A seed variable is `inout`: each draw advances it and writes it back.
+  Because a variable starts every evaluation from its value at the last accepted timepoint (0
+  in a static analysis), every Newton iteration of one timepoint draws the same number and the
+  sequence advances once per accepted point. A non-variable seed draws the same value every
+  time, different per instance with `"instance"` (the instance name is mixed in); `"global"`
+  is the default, and any other type string is `E0398`. Usage: draw a Monte Carlo value in
+  `@(initial_step)`, or a random signal in `@(timer(...))` smoothed by `transition`; a draw with
+  a seed variable outside any event body jumps at every step, which the step controller cannot
+  integrate (E0605), and is warned about at compile time (`W0403`). Limits: not in parameter
+  defaults (`E0315`, not a constant); `$random` and the integer `$dist_*` are not implemented;
+  `$rdist_poisson` returns its count as a real; a `Stmt::Task` (`$strobe`, `$finish`, …) lowers to
   `va_ir::Stmt::Task` since 2.8.0 (see "System tasks"; `$monitor` and the file family since
   2.12.0), except `$discontinuity`, which is parsed and has no effect. `$simparam` gets its default-argument fold in *two* places,
   not one: `lower_expr` (the dynamic analog-block path) and the separate, non-mutating

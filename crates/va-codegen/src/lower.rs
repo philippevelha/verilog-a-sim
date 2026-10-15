@@ -3187,6 +3187,12 @@ pub fn persistent_vars(module: &Module) -> BTreeSet<u32> {
                 }
             }
         }
+        // A `$rdist_*` seed variable is `inout`: the draw writes it (2.42.0).
+        if let Expr::Call(Builtin::Rdist, args) = e {
+            if let Some(Expr::Var(v)) = args.get(1).map(|&a| module.expr(a)) {
+                ever_assigned.insert(v.0);
+            }
+        }
     }
     marked.retain(|v| ever_assigned.contains(v));
     marked
@@ -3656,7 +3662,7 @@ pub fn invariance(
 
 /// The operands of an expression node — exhaustive, so a new variant with operands cannot be
 /// silently treated as a leaf.
-fn expr_operands(e: &Expr) -> Vec<ExprId> {
+pub(crate) fn expr_operands(e: &Expr) -> Vec<ExprId> {
     match e {
         Expr::Const(_)
         | Expr::Param(_)
@@ -4048,6 +4054,11 @@ fn reads_only_x(module: &Module) -> bool {
             | Builtin::NoiseTableLog,
             _,
         ) => true,
+        // A `$rdist_*` draw with a constant seed is the same number every time; one with a
+        // seed variable advances it, so two evaluations differ (2.42.0).
+        Expr::Call(Builtin::Rdist, args) => {
+            !matches!(args.get(1).map(|&a| module.expr(a)), Some(Expr::Var(_)))
+        }
         Expr::Call(b, _) => builtin_is_bias_free(*b),
         Expr::EventFired(_) => false,
         _ => true,
@@ -4118,6 +4129,9 @@ fn builtin_is_bias_free(builtin: Builtin) -> bool {
         | Builtin::FinalStep => false,
         // `$simparam` is not constant across a run: `gmin` changes under gmin stepping.
         Builtin::SimParam => false,
+        // A random draw: with a variable seed it advances the seed, so two evaluations differ.
+        // (A constant seed is pure; the caller that can see the arguments says so.)
+        Builtin::Rdist => false,
         // Noise sources are stamped into the noise channel, not evaluated for a value.
         Builtin::WhiteNoise
         | Builtin::FlickerNoise

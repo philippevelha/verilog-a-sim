@@ -1094,6 +1094,81 @@ pub enum Builtin {
     /// have to be found by counting backwards (Interface α change, 2026-09-22 — see
     /// `docs/interfaces.md`).
     TableModel,
+    /// `$rdist_uniform/normal/exponential/poisson/chi_square/t/erlang(seed, ...[, type])`
+    /// (LRM 9.13.2), a random draw (§6 change, 2026-10-15, additive; folded to the
+    /// distribution's mean before 2.42.0).
+    ///
+    /// Arguments: `[Const(kind), seed, p1, p2, Const(per_instance)]`. `kind` is an
+    /// [`RdistKind`] selector (the [`Builtin::SimParam`] trick). `seed` is the caller's seed:
+    /// an [`Expr::Var`] is `inout` -- the draw advances it and writes it back, so successive
+    /// draws walk one reproducible sequence -- and any other expression is read only, so it
+    /// draws the same value every time. `p1`/`p2` are the distribution's parameters in LRM
+    /// order (`p2` is `Const(0)` for a one-parameter distribution). `per_instance` is `1` for the
+    /// `"instance"` type string, which mixes the instance's name into a non-variable seed so
+    /// each instance draws differently, and `0` for `"global"` (the default).
+    Rdist,
+}
+
+/// Which distribution a [`Builtin::Rdist`] draws from, as the number its first argument carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RdistKind {
+    /// `$rdist_uniform(seed, start, end)`.
+    Uniform,
+    /// `$rdist_normal(seed, mean, standard_deviation)`.
+    Normal,
+    /// `$rdist_exponential(seed, mean)`.
+    Exponential,
+    /// `$rdist_poisson(seed, mean)`.
+    Poisson,
+    /// `$rdist_chi_square(seed, degree_of_freedom)`.
+    ChiSquare,
+    /// `$rdist_t(seed, degree_of_freedom)`.
+    T,
+    /// `$rdist_erlang(seed, k_stage, mean)`.
+    Erlang,
+}
+
+impl RdistKind {
+    /// The kind a `$rdist_*` system function name (without `$`) selects.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "rdist_uniform" => RdistKind::Uniform,
+            "rdist_normal" => RdistKind::Normal,
+            "rdist_exponential" => RdistKind::Exponential,
+            "rdist_poisson" => RdistKind::Poisson,
+            "rdist_chi_square" => RdistKind::ChiSquare,
+            "rdist_t" => RdistKind::T,
+            "rdist_erlang" => RdistKind::Erlang,
+            _ => return None,
+        })
+    }
+
+    /// How many distribution parameters follow the seed.
+    pub fn parameter_count(self) -> usize {
+        match self {
+            RdistKind::Uniform | RdistKind::Normal | RdistKind::Erlang => 2,
+            _ => 1,
+        }
+    }
+
+    /// This kind as the number [`Builtin::Rdist`] carries.
+    pub fn to_selector(self) -> f64 {
+        f64::from(self as u8)
+    }
+
+    /// The kind a [`Builtin::Rdist`] selector names.
+    pub fn from_selector(v: f64) -> Option<Self> {
+        Some(match v {
+            0.0 => RdistKind::Uniform,
+            1.0 => RdistKind::Normal,
+            2.0 => RdistKind::Exponential,
+            3.0 => RdistKind::Poisson,
+            4.0 => RdistKind::ChiSquare,
+            5.0 => RdistKind::T,
+            6.0 => RdistKind::Erlang,
+            _ => return None,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------------------

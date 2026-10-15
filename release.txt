@@ -22,6 +22,41 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0 - 2026-10-15
+--------------------
+**`$rdist_*` draws random numbers.** `$rdist_uniform`, `_normal`, `_exponential`, `_poisson`,
+`_chi_square`, `_t` and `_erlang` used to fold to the distribution's mean at elaboration, so
+every Monte Carlo draw was the nominal value, without a word. They now draw (LRM 9.13.2).
+  * The generators are IEEE 1364-2005 §17.9.3's routines (32-bit LCG, then polar normal,
+    inversion, etc.), in the new `va-codegen` module `rdist`. Their moments and reproducibility
+    are unit-tested.
+  * A seed that is an `integer` variable is advanced at every draw and written back. Variables
+    keep their value between timepoints, so a draw in `@(initial_step)` is a Monte Carlo value
+    fixed for the run, and a draw in `@(timer(...))` is a sample-and-hold signal. Draws in a loop
+    walk one sequence (2000 normal(5, 2) draws: mean within 0.2 of 5). The same seed gives the
+    same run.
+  * A constant seed draws the same value every time. The trailing type string picks whether
+    that value is shared by every instance (`"global"`, the default) or differs per instance
+    (`"instance"`, which hashes in the instance name). Any other string is `E0398`.
+  * A draw whose seed variable carries over between timepoints, made outside any event body,
+    jumps at every accepted step. A transient run cannot integrate that and ends in timestep
+    underflow (`E0605`), so it is warned about at compile time: `W0403`, which says to move the
+    draw into `@(initial_step)` or `@(timer(...))`.
+  * **Interface α change** (§6): `Builtin::Rdist` and `RdistKind`, purely additive, recorded in
+    `docs/interfaces.md`. Interface β is unchanged.
+
+Limits: the IEEE routines were written from the standard's text, and bit-for-bit agreement with
+another simulator's sequence is unchecked, so a seed's values match this simulator's own earlier
+runs, not necessarily another tool's. `$rdist_poisson` and `$rdist_erlang` return reals. A draw
+in a parameter default is still refused as non-constant (`E0315`). `$random` and the integer
+`$dist_*` functions are not implemented.
+
+Measured: `cargo test --workspace` 1031 passed, 0 failed (1026 + 5 in `va-cli/tests/rdist.rs`;
+the four frontend fold-to-mean tests are replaced by lowering tests; the error corpus gains
+`elab_rdist_unknown_type.va` and is 47 files); `cargo xtask validate` 28 checked, 0 failed,
+convergence 28/28.
+
+
 2.41.0 - 2026-10-15
 --------------------
 **`idt(x, ic, assert)`: the reset works.** While `assert` is non-zero the output is held at `ic`

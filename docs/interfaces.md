@@ -354,6 +354,23 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > data file is resolved exactly as an `` `include `` is. The older entry points still exist and
 > pass an empty path, which resolves a relative name against the working directory alone.
 
+> ### 2026-10-15 — `Builtin::Rdist` and `RdistKind`: random draws (2.42.0)
+>
+> **Added** `Builtin::Rdist` and the selector enum `RdistKind`. Purely additive: one more
+> builtin, which a consumer that does not know it never meets, because only a model calling
+> `$rdist_*` produces it. Made at the project owner's request.
+>
+> **The bug it closes.** `$rdist_*` folded to its distribution's mean at elaboration, so every
+> Monte Carlo draw was the nominal value: a model that meant to scatter a resistor around 1 kΩ
+> got exactly 1 kΩ in every instance and every run, without a word.
+>
+> **What it carries.** `[Const(kind), seed, p1, p2, Const(per_instance)]`. A seed that is an
+> `Expr::Var` is `inout`: the consumer advances it and writes it back. Any other seed is read
+> only. `per_instance` (`"instance"`) mixes the instance's name into a non-variable seed.
+> The generators are `va-codegen`'s `rdist` module.
+>
+> **Interface β is unchanged.**
+
 > ### 2026-10-15 — `Module::integer_params`: which parameters are `parameter integer` (2.40.0)
 >
 > **Added** `Module::integer_params: Vec<ParamId>` and `Module::param_is_integer`. Purely

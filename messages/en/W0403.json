@@ -1,0 +1,10 @@
+{
+  "code": "W0403",
+  "rev": 1,
+  "message": "module `{module}`: {count} `$rdist_*` draw(s) with a seed variable outside an event body draw anew at every accepted timepoint",
+  "description": "A `$rdist_*` call with a seed variable advances the seed each time it runs. Outside an `@(...)` body it runs at every evaluation, and this simulator advances the seed once per accepted timepoint, so in a transient run the value jumps to a new random number at every step. That has no waveform independent of the step sizes, and the step controller, seeing a jump at every step size, ends the run with a timestep underflow (E0605). In a static analysis it is one draw and harmless.",
+  "actions": [
+    "To draw once (a Monte Carlo parameter), draw inside `@(initial_step)`: `@(initial_step) r = $rdist_normal(seed, 1k, 50);`.",
+    "For a random signal, draw at known instants and smooth the steps: `@(timer(0, tclk)) u = $rdist_uniform(seed, 0, 1); V(out) <+ transition(u, 0, tr);`."
+  ]
+}

@@ -2366,7 +2366,7 @@ impl Elaborator<'_> {
                         | "rdist_erlang"
                 ) =>
             {
-                return self.fold_rdist(name, args);
+                return self.lower_rdist(name, args);
             }
             ExprAst::SysFunc { name, args } => {
                 let builtin = sysfunc_builtin(name)?;
@@ -3199,49 +3199,57 @@ impl Elaborator<'_> {
         Ok(self.out.push_expr(expr))
     }
 
-    /// Fold a `$rdist_*` call (LRM §9.13.2) to its distribution's mean, per the doc comment on
-    /// this function's call site in [`Self::lower_expr`]. Every form takes `seed` first (parsed
-    /// but never evaluated — v0 never calls twice, so there is nothing to seed) and an optional
-    /// trailing `type_string` last (LRM Table 9-2's `"global"`/`"instance"`; likewise parsed but
-    /// never evaluated — a string literal isn't a valid expression to lower at all).
-    fn fold_rdist(&mut self, name: &str, args: &[ExprRef]) -> Result<ExprId, FrontendError> {
-        let (min_args, mean_idx) = match name {
-            "rdist_uniform" => (3, None),   // seed, start, end[, type]
-            "rdist_normal" => (3, Some(1)), // seed, mean, standard_deviation[, type]
-            "rdist_exponential" | "rdist_poisson" | "rdist_chi_square" | "rdist_t" => (2, Some(1)), // seed, mean/degree_of_freedom[, type]
-            "rdist_erlang" => (3, Some(2)), // seed, k_stage, mean[, type]
-            _ => unreachable!("guarded by the caller's match arm"),
+    /// Lower a `$rdist_*(seed, p1[, p2][, type_string])` call (LRM 9.13.2) to
+    /// [`Builtin::Rdist`] (2.42.0; folded to the distribution's mean before). The seed is lowered
+    /// as written: a variable stays an [`Expr::Var`], which the evaluator treats as `inout` and
+    /// advances, and anything else is read only. A trailing string is the type: `"global"` (the
+    /// default) or `"instance"`, which gives each instance its own draw for a non-variable seed.
+    fn lower_rdist(&mut self, name: &str, args: &[ExprRef]) -> Result<ExprId, FrontendError> {
+        let kind = va_ir::RdistKind::from_name(name)
+            .ok_or_else(|| elab(Diagnostic::new(codes::E0343).arg("name", name)))?;
+        let n = 1 + kind.parameter_count();
+        let (args, type_string) = match args.split_last() {
+            Some((&last, rest)) if matches!(self.ast.expr(last), ExprAst::Str(_)) => {
+                let ExprAst::Str(t) = self.ast.expr(last) else {
+                    unreachable!("matched just above")
+                };
+                (rest, Some(t.clone()))
+            }
+            _ => (args, None),
         };
-        if args.len() < min_args || args.len() > min_args + 1 {
+        if args.len() != n {
             return Err(elab(
                 Diagnostic::new(codes::E0334)
                     .arg("name", format!("${name}"))
                     .arg("signature", "")
-                    .arg("min", min_args)
-                    .arg("max", min_args + 1)
-                    .arg("got", args.len()),
+                    .arg("min", n)
+                    .arg("max", n + 1)
+                    .arg("got", args.len() + usize::from(type_string.is_some())),
             ));
         }
-        match name {
-            // The uniform distribution's mean is the midpoint of its bounds — no single
-            // argument carries it directly, unlike every other form here.
-            "rdist_uniform" => {
-                let start = self.lower_expr(args[1])?;
-                let end = self.lower_expr(args[2])?;
-                let sum = self
-                    .out
-                    .push_expr(Expr::Binary(va_ir::BinOp::Add, start, end));
-                let two = self.out.push_expr(Expr::Const(2.0));
-                Ok(self
-                    .out
-                    .push_expr(Expr::Binary(va_ir::BinOp::Div, sum, two)))
+        let per_instance = match type_string.as_deref() {
+            None | Some("global") => 0.0,
+            Some("instance") => 1.0,
+            Some(other) => {
+                return Err(elab(
+                    Diagnostic::new(codes::E0398)
+                        .arg("name", format!("${name}"))
+                        .arg("type", other),
+                ))
             }
-            // A Student's t distribution is symmetric about zero (the only case with a
-            // well-defined mean, degrees of freedom > 1) — there's no argument to read a center
-            // from at all.
-            "rdist_t" => Ok(self.out.push_expr(Expr::Const(0.0))),
-            _ => self.lower_expr(args[mean_idx.expect("every other rdist_* form names its mean")]),
-        }
+        };
+        let selector = self.out.push_expr(Expr::Const(kind.to_selector()));
+        let seed = self.lower_expr(args[0])?;
+        let p1 = self.lower_expr(args[1])?;
+        let p2 = match args.get(2) {
+            Some(&p) => self.lower_expr(p)?,
+            None => self.out.push_expr(Expr::Const(0.0)),
+        };
+        let inst = self.out.push_expr(Expr::Const(per_instance));
+        Ok(self.out.push_expr(Expr::Call(
+            Builtin::Rdist,
+            vec![selector, seed, p1, p2, inst],
+        )))
     }
 
     /// Whether an `analysis(...)` call is active under v0's DC-only model: true if any
@@ -7557,64 +7565,80 @@ mod tests {
         );
     }
 
+    /// The `Builtin::Rdist` call `src`'s analog block makes, as `(kind, args)`.
+    fn rdist_call(src: &str) -> (va_ir::Module, Vec<va_ir::ExprId>) {
+        let m = elaborate_src(src);
+        let args = m
+            .exprs
+            .iter()
+            .find_map(|e| match e {
+                va_ir::Expr::Call(Builtin::Rdist, a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("a $rdist_* call lowers to Builtin::Rdist");
+        (m, args)
+    }
+
+    /// Every `$rdist_*` lowers to one `Builtin::Rdist` (2.42.0; folded to its mean before):
+    /// `[Const(kind), seed, p1, p2, Const(per_instance)]`, `p2` a `Const(0)` for a
+    /// one-parameter distribution.
     #[test]
-    fn rdist_normal_exponential_poisson_chi_square_fold_to_their_mean_argument() {
-        for call in [
-            "$rdist_normal(1, 2.5, 1.0)",
-            "$rdist_exponential(1, 2.5)",
-            "$rdist_poisson(1, 2.5)",
-            "$rdist_chi_square(1, 2.5)",
+    fn every_rdist_lowers_to_a_draw_with_its_kind_and_parameters() {
+        for (call, kind, params) in [
+            ("$rdist_uniform(1, 2.0, 6.0)", va_ir::RdistKind::Uniform, 2),
+            ("$rdist_normal(1, 2.0, 0.5)", va_ir::RdistKind::Normal, 2),
+            (
+                "$rdist_exponential(1, 3.0)",
+                va_ir::RdistKind::Exponential,
+                1,
+            ),
+            ("$rdist_poisson(1, 4.0)", va_ir::RdistKind::Poisson, 1),
+            ("$rdist_chi_square(1, 5)", va_ir::RdistKind::ChiSquare, 1),
+            ("$rdist_t(1, 5)", va_ir::RdistKind::T, 1),
+            ("$rdist_erlang(1, 3, 2.0)", va_ir::RdistKind::Erlang, 2),
         ] {
-            let src = format!(
+            let (m, args) = rdist_call(&format!(
                 "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ {call} * V(a, b); end endmodule"
-            );
-            let m = elaborate_src(&src);
+            ));
+            assert_eq!(args.len(), 5, "{call}");
             assert!(
-                m.exprs
-                    .iter()
-                    .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 2.5)),
-                "{call} should fold to a Const(2.5) mean"
+                matches!(m.expr(args[0]), va_ir::Expr::Const(v) if *v == kind.to_selector()),
+                "{call}"
+            );
+            assert_eq!(kind.parameter_count(), params, "{call}");
+            if params == 1 {
+                assert!(
+                    matches!(m.expr(args[3]), va_ir::Expr::Const(v) if *v == 0.0),
+                    "{call}"
+                );
+            }
+            assert!(
+                matches!(m.expr(args[4]), va_ir::Expr::Const(v) if *v == 0.0),
+                "{call}"
             );
         }
     }
 
+    /// A seed variable stays a variable (the evaluator advances it); `"instance"` sets the
+    /// per-instance flag; any other type string is `E0398`.
     #[test]
-    fn rdist_erlang_folds_to_its_mean_argument() {
-        let m = elaborate_src(
-            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_erlang(1, 2, 7.0) * V(a, b); end endmodule",
+    fn rdist_keeps_a_seed_variable_and_reads_its_type_string() {
+        let (m, args) = rdist_call(
+            r#"module t(a, b); inout a, b; electrical a, b; integer s; analog begin s = 1; I(a, b) <+ $rdist_t(s, 5, "instance") * V(a, b); end endmodule"#,
         );
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 7.0)));
-    }
-
-    #[test]
-    fn rdist_uniform_folds_to_the_midpoint_of_its_bounds() {
-        // No single argument carries the mean directly, unlike the other rdist_* forms — it's
-        // built as (start + end) / 2 in the IR itself.
-        let m = elaborate_src(
-            "module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_uniform(1, 2.0, 6.0) * V(a, b); end endmodule",
-        );
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Add, _, _))));
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Binary(va_ir::BinOp::Div, _, _))));
-    }
-
-    #[test]
-    fn rdist_t_folds_to_zero_and_type_string_is_never_evaluated() {
-        let m = elaborate_src(
-            r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_t(1, 5, "instance") * V(a, b); end endmodule"#,
-        );
-        assert!(m
-            .exprs
-            .iter()
-            .any(|e| matches!(e, va_ir::Expr::Const(v) if *v == 0.0)));
+        assert!(matches!(m.expr(args[1]), va_ir::Expr::Var(_)));
+        assert!(matches!(m.expr(args[4]), va_ir::Expr::Const(v) if *v == 1.0));
+        let toks = lex(
+            r#"module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ $rdist_t(1, 5, "each") * V(a, b); end endmodule"#,
+        )
+        .expect("lex");
+        let ast = parse(&toks)
+            .expect("parse")
+            .into_iter()
+            .next()
+            .expect("a module");
+        let err = elaborate(&ast).expect_err("an unknown type string is an error");
+        assert!(err.to_string().contains("\"each\""), "{err}");
     }
 
     #[test]
