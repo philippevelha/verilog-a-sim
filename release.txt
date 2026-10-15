@@ -22,8 +22,9 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
-2.24.2+3 - 2026-10-15
+2.32.0+3 - 2026-10-15
 ----------------------
+(Committed on a branch as 2.24.2+3; renumbered on merging after 2.32.0.)
 **scripts/benchmark/bench_c7552_tran_linux.sh: run the c7552 transient on your own Linux
 machine.** Script and docs only. It runs c7552_tran.net with default settings and with
 `--bypass` from a source checkout and writes `c7552_tran.txt`: wall time, peak memory, exit,
@@ -33,8 +34,9 @@ a script rather than a figure: the cloud run was lost to a container restart and
 so there is still no completed c7552 transient. Smoke-tested here with `CAP=20` on 4 vCPUs:
 both runs stopped at the cap after 20.1 s, at 1 829 MB (default) and 1 453 MB (bypass).
 
-2.24.2+2 - 2026-10-15
+2.32.0+2 - 2026-10-15
 ----------------------
+(Committed on a branch as 2.24.2+2; renumbered on merging after 2.32.0.)
 **circuits/benchmark/iscas85/c7552_tran.net: a c7552 transient deck, the size of the
 ngspice/OpenVAF c7552 transient.** Deck only, no code change. c7552.net with each of the 207
 inputs a PULSE (100 ps edges, period 2*(i%8+1) ns, edges staggered by (i%8)*100 ps) and
@@ -46,12 +48,13 @@ for hours. Leave out the default report: it keeps all 268 676 unknowns, ~2.15 MB
 heads for the memory limit. Pass `--report` with the checked nodes from `check_iscas.py report`
 instead. Timings are not in this entry; they follow when a run completes.
 
-2.24.2+1 - 2026-10-14
+2.32.0+1 - 2026-10-14
 ----------------------
 **The ISCAS'85 suite at 2.24.2: every operating point correct, c7552 in 295 s; bypass is the
 setting that helps, the JIT and node collapse do not.** Docs only:
 circuits/benchmark/iscas85/README.md ("The suite at 2.24.2"). Release build, Xeon 2.8 GHz,
-4 vCPUs, one deck at a time on 4 threads.
+4 vCPUs, one deck at a time on 4 threads. (Committed on a branch as 2.24.2+1 and renumbered
+when merged after main's 2.25.0-2.32.0; the figures are 2.24.2's, not re-measured at 2.32.0.)
 
   * `.op`, default settings, all PASS against their `.bench` logic: c432 9.1 s, c499 12.1,
     c880 13.1, c1355 15.9, c1908 26.4, c2670 53.0, c3540 128.7, c5315 180.6, c6288 100.6,
@@ -71,6 +74,325 @@ circuits/benchmark/iscas85/README.md ("The suite at 2.24.2"). Release build, Xeo
 
 Measured: the runs above, with the 2.24.2 release binary. No code change; 2.24.2's test and
 `validate` figures stand.
+
+2.32.0 - 2026-10-14
+--------------------
+**A `cross` firing just before a `transition` ramp ends no longer kills the transient run.** The
+defect OpenVAF-Reloaded PR #48 fixed in its own simulator (its blocker 3), found here by running
+that PR's PLL scenario: a ramp ending at 0.50001 V through a `cross` at 0.5 V, the crossing
+20 fs before the ramp's end, died of a timestep underflow (`E0605`) at a 1 ns `.tran` step.
+How close was fatal scaled with the minimum step: 0.2 ps at a 10 ns step, 2 fs at 0.1 ns.
+  * Cause: `transition` bounded each step to an eighth of what **remained** of its ramp, so each
+    step covered 1/8 of the rest and the steps shrank geometrically toward every ramp's end,
+    down to the minimum timestep. A crossing inside that tail made the step passing it fail
+    its error test (the `cross` body's jump) at every size the controller still allowed.
+  * Fix: an eighth of the **whole** ramp, so a ramp is sampled at even steps, as a linear ramp
+    should be. The ramp's duration is a sixth state slot of each `transition` site (was five),
+    set when a new ramp latches. A model's `state_len` grows by one per `transition` call.
+  * Fewer timepoints as a side effect: the ramp deck at a 10 ns step goes from 2052 to 1350
+    points, an `if`/`case` model of a pulse from 899 to 822; no extra cost anywhere measured.
+  * New test `transition_cross.rs` runs the binary on four ramp levels (mid-ramp, 20 fs and 0.2 ps
+    before the end, exactly at the threshold); it fails with `E0605` without the fix.
+
+PR #48's other three blockers were checked and do not reproduce here: a self-rescheduling
+`@(timer(next_edge))` fires on time (10 edges in 10.5 µs, at exactly 1, 2, … µs), a 0.1 µs
+running-sum timer gives 200 edges with no step collapse, and `transition` in a `case` `default`
+arm compiles and switches correctly.
+
+Limits: no golden circuit uses `transition`, so `cargo xtask validate` does not cover this change;
+the transient unit tests that exercise `transition` all pass. The ramp's corners are still not
+breakpoints (the stated approximation, now rounded by at most an eighth of the ramp).
+
+Measured: `cargo test --workspace` 992 passed, 0 failed (991 + 1); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
+2.31.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3d: `va-cli`'s own errors. Every error a user can reach now has a code.**
+36 new `E07xx` codes (`E0704`-`E0739`) for the command line, files, plots and the deck/model
+wiring `va-cli` does itself: unreadable files and directories, a missing analysis card, an
+analysis the deck asks for but the command line does not, `K`/`F`/`H` couplings, `.dc`/`.noise`
+cards naming the wrong device, model parameters a deck cannot set, port-count mismatches, plots
+that cannot be drawn, `$error` counts.
+  * A sweep of every model directory, the error corpus, the LRM examples and a dozen failing
+    command lines shows 44 distinct codes and no `E0000`. `E0000` stays as the fallback for an
+    error added later without a code; `render_error`'s unit tests now check it, since no binary
+    path reaches it any more.
+  * Two places flattened a codegen error to text (`anyhow!("{e}")`), so under `sim` a codegen
+    refusal reached the user as an uncoded sentence instead of its refusal block. They now keep
+    the error's type.
+  * Options with a bad value (`--reltol x`, `--threads 0`, `--integration foo`, `--define`)
+    use `E0703`, the code step 1 gave invalid option values.
+  * Errors only a library caller can cause (`va_cli::load` skipped, a sweep source whose row
+    count changes on rebuild) are `E0001`, internal.
+  * The "while:" lines that say what `va-cli` was doing (`parsing deck.net`, `DC
+    operating-point solve failed`) are still in the program's own words; they are context, not
+    diagnostics, and are not translated yet.
+
+Not coded, by choice: `va-harness`'s `HarnessError`. It is printed only by `cargo xtask
+validate`, a developer tool, and its `Run` variant already carries the pipeline's coded text as
+a string. Coding it would take a stage of its own (`08xx`).
+
+Measured: `cargo test --workspace` 991 passed, 0 failed (989 + 2: the E0000 test moved from
+the binary to `render_error`, and a second checks a coded error under context);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
+2.30.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3c: numerical errors.** A failed solve is shown under an `E06xx` code:
+`E0601` Newton did not converge, `E0602` singular matrix, `E0603`/`E0604` a non-finite value or
+derivative, `E0605` time step underflow, `E0606` an unimplemented integration method, `E0607` a
+model's `$fatal` in transient and `E0608` in a static solve.
+  * The numerical crates are unchanged: `va-core` may depend on `va-abi` alone (CLAUDE.md §2),
+    and their errors are already typed, with exactly the fields the catalogue needs. The new
+    `va_cli::numerical_diagnostic` maps each variant to its code at the edge, the same way
+    whether a `CoreError` arrives bare or inside a transient or AC/noise error. A caller's misuse
+    of their APIs (`RecordOutOfRange`, `InvalidOutput`) is `E0001`.
+  * A non-finite value names the unknown, as before, but now in the coded message:
+    "error[E0603]: a model produced a non-finite value (NaN or inf) in the equation of `V(a)`
+    (unknown #0)", where 2.29.0 printed the core's sentence plus an uncoded context line.
+  * `va-cli`'s error rendering prefers a diagnostic attached as `anyhow` context over one
+    found in the chain, since `va-cli` attaches one only to say something more specific.
+  * Tests: `every_numerical_error_has_a_code` (every variant), and
+    `a_numerical_failure_names_its_code_and_unknown` (the binary, on `ln(V)` at 0 V).
+
+Limits: `E0606`'s `{method}` and `E0608`'s `{point}` are filled with the program's own words
+(`Gear`, `the operating point`), not yet translatable. Command-line, file, plot and harness
+errors are still `E0000`: step 3d.
+
+Measured: `cargo test --workspace` 989 passed, 0 failed (987 + 2); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
+2.29.0 - 2026-10-14
+--------------------
+**Omitted arguments and comma-separated events, the LRM syntax OpenVAF-Reloaded PR #35 added.**
+Of the seven `docs/examples/LRM/` cases, five valid ones were rejected; all five are now
+accepted, and the invalid one is rejected with a message that says why.
+  * **Null arguments** (LRM A.6.4/A.6.5): an argument may be left out where the grammar allows
+    it, `cross(e, dir, , , en)`, `timer(0, p, , en)`, `laplace_nd(x, , den)`. Allowed:
+    `cross`'s direction and two tolerances, `above`'s two tolerances, `timer`'s period and
+    tolerance, a Laplace filter's numerator, denominator and tolerance, a Z-domain filter's
+    numerator, denominator and transition time. The parser keeps the position as the new
+    `ExprAst::Null`; elaboration reads it as "not given". An omitted filter list means unity:
+    no roots, or the polynomial `1`.
+  * **Anywhere else** an omitted argument is the new `E0238`, "argument 4 of `timer` may not be
+    omitted", instead of `E0207` "expected an expression, found `)`". This covers every call,
+    `exp(, 1)` included. System tasks keep their own null-argument rule (`$strobe("a",,"b")`).
+  * **A comma between events** means `or` (LRM 5.10.1), and compiles to identical IR. It was
+    refused (`R0201`) with a message saying only an `or` list is honoured.
+  * Codegen accepts an empty root list (`laplace_zp(x, , poles)`, `zi_zd(x, , den, T)`): the
+    empty product. An empty coefficient list stays malformed IR.
+  * `or`'s row in `docs/token-reference.md` said it had no grammar production; it has been the
+    event separator since 2.16.0. Corrected, and the comma and null-argument rules added.
+
+Kept refused, on purpose: `@(initial_step("tran") or final_step("tran"))` (`R0202`). It parses;
+what it should mean (the body only at the first step of the named analysis) is a semantic
+question, and running it at every analysis's first step would run it where the model excluded it.
+
+Tests: `null_arguments.rs` builds each omitted-list filter beside the same filter with `{1}`
+written and asserts identical stamps (residual, Jacobian, charge, dcharge) at a bias point,
+for seven Laplace and Z-domain forms; it was checked to fail on a mismatched pair. Three
+frontend tests cover the event arguments, `E0238` and the comma. New corpus file
+`parse_required_argument_omitted.va` (39 files).
+
+Measured: `cargo test --workspace` 987 passed, 0 failed (983 + 4); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28; `check --codegen` models 68/68, benchmark/models 25/25,
+external 8/9 (unchanged).
+
+
+2.28.0+2 - 2026-10-14
+----------------------
+**The LRM examples move to `docs/examples/LRM/`**, beside the project's other examples; 2.28.0+1
+put them in a new top-level `examples/`, which the project does not use. Same seven files, same
+verdicts (rechecked from the new path). No code changed.
+
+
+2.28.0+1 - 2026-10-14
+----------------------
+**New `examples/LRM/`: LRM examples, starting with the seven from OpenVAF-Reloaded PR #35.**
+That PR closed parser gaps in OpenVAF for the event and filter syntax of LRM A.6.4/A.6.5; run
+through this simulator, the same examples show the same gaps, recorded in
+`examples/LRM/README.md`:
+  * omitted (null) arguments, `cross(e, dir, , , en)`, `timer(0, p, , en)`,
+    `laplace_nd(x, , den)`, are a syntax error (`E0207`) although the LRM allows them;
+  * a comma between events, `@(initial_step, cross(...))`, is refused (`R0201`) although it
+    means the same as `or`, which is accepted;
+  * `@(initial_step("tran") or final_step("tran"))` is refused (`R0202`), deliberately;
+  * `timer(0, 1e-6, 1e-9, )`, invalid, is rejected, but by the generic `E0207` rather than a
+    message naming the argument that may not be omitted.
+No code changed: the examples record the gaps, they do not close them.
+
+Measured: `cargo test --workspace` not rerun (no code change since 2.28.0: 983 passed, 0 failed).
+
+
+2.28.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3b: the netlist.** Every error `va-netlist` raises carries an
+`E05xx` code (33: element syntax, values, `.subckt`/`.include`/`.model` structure, subcircuit
+flattening) and the three things a deck can say that are recognised but not applied are coded
+warnings: `W0501` a malformed `.nodeset` entry, `W0502` an ngspice `.control` block, `W0503`
+`.options`.
+  * `NetlistError::Parse` carries `diag: Diagnostic` instead of `message: String`, located at
+    `deck.net:12` for a line of the deck itself and at `line 12 (in `models.inc`, instance `x1`)`
+    for a line from an included file or a flattened subcircuit. `Netlist::notes` is
+    `Vec<Diagnostic>`; `va-cli` prints them as `warning[W0503] at deck.net:4: ...`.
+  * An unreadable deck is `E0501`, where 2.27.0 showed `E0000`: the `diagnostics` test that used
+    it as its example of an uncoded error now uses an unreadable model file, still `E0000`.
+  * A device's parameter-override errors keep the include/instance origin, which they lost
+    if raised inside `parse_param_overrides` (the origin was appended by the caller).
+  * New test `a_netlist_error_and_warning_carry_their_codes`. `va-netlist` depends on `va-diag`.
+
+Limits: `NetlistError::UnknownModel` is never raised and has no code. The netlist parser
+names unsupported elements (`unsupported element`) as errors, not refusals: refusals are for
+Verilog-A constructs.
+
+Measured: `cargo test --workspace` 983 passed, 0 failed (982 + the new test);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
+2.27.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 3a: code generation.** Every error `va-codegen` raises now carries
+a code, and its catalogue text: 10 refusals `R0401`-`R0410` (a second time derivative, a filter or
+noise source buried inside an expression, a loop past its iteration cap, a laplace filter with a
+pole at s = 0 or an improper one, ...) and 13 model errors `E0401`-`E0413` (a contribution or
+`bound_step` inside an analog function, a zero denominator, non-conjugate roots, a zi_* advance,
+a variable read before it is assigned, ...).
+  * `CodegenError` changes shape: `Unsupported(Diagnostic)` is a refusal, the new
+    `Invalid(Diagnostic)` is a model error, `Internal(Diagnostic)` is `E0001`. Before, all three
+    kinds were `Unsupported(String)`, so `va-cli` reported a zero laplace denominator as a
+    refusal; now the model is said to be wrong, which it is. `CodegenError::diagnostic()` reaches
+    the code; `va-cli` renders a codegen refusal from its catalogue entry (what, why, instead).
+  * 31 messages that only a malformed IR can produce (a missing state slot, a filter call with
+    the wrong argument layout the frontend never emits) became `E0001` internal errors.
+  * A variable read before it is assigned was an "internal error: variable #0 read before
+    assignment", reachable from ordinary source (`real x; ... <+ x * V(p, n);`). It is `E0413` and
+    names the variable.
+  * `ad::expand_roots` and `ad::zi_realization` return a `Diagnostic` instead of a `String`.
+  * Two new corpus files, `cgen_variable_read_before_assignment.va` and
+    `refused_laplace_pole_at_zero.va`: the corpus is 38 files, all coded.
+  * `va-codegen` now depends on `va-diag` (CLAUDE.md §3 and the thesis map updated).
+
+Limits: a codegen diagnostic has no source location, because the IR carries none.
+`TerminalCount`, a caller's misuse of the API, has no code. Netlist, numerical and command-line
+errors are still `E0000`: steps 3b-3d.
+
+Measured: `cargo test --workspace` 982 passed, 0 failed (the two corpus files are inside the one
+corpus test); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28;
+`check --codegen` over models 68/68, benchmark/models 25/25, external 8/9 (unchanged).
+
+
+2.26.1 - 2026-10-14
+--------------------
+**A code's number within its stage is hexadecimal: `E0399`, then `E039A` to `E03FF`.** The
+code stays a letter and four characters; the first two are still the decimal stage, and the last
+two may now use upper-case `A`-`F`, which gives each stage and kind 256 codes instead of 100.
+Every existing code is unchanged, since a decimal number is also a hex number, and sorted as text
+the codes stay in numeric order. This answers 2.26.0's open question (elaboration had 4 codes
+left): it now has 106, and no stage needs an overflow range or a fifth digit.
+  * `va_diag::is_well_formed` accepts the hex form; lower case is still rejected in a catalogue
+    file, while `va-cli --explain e039a` upper-cases its argument as before.
+  * The merged argument-count codes (`E0333`-`E0335`) stay merged. Hex removes the reason they
+    were merged, but one code per kind of mistake, naming the signature, is how rustc does it,
+    and splitting them back would only add near-identical catalogue entries to translate.
+  * `codes.rs`, `messages/README.md` and CLAUDE.md §5 describe the format.
+
+Measured: `cargo test --workspace` 982 passed, 0 failed (the format test gained hex cases inside
+an existing test); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
+2.26.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 2: every diagnostic the frontend raises has a code.** The
+preprocessor, lexer, parser and elaboration now raise `va_diag::Diagnostic`s, not sentences:
+179 new codes, each with an English entry in `messages/en/` (message, what it means, what to do).
+A user who mistypes a net name now reads
+
+    error[E0366] at r.va:8:10: unknown net `q`
+      = for what this means and what to do: va-cli --explain E0366
+      while: elaborating module `r`
+
+where 2.25.0 printed `error[E0000]: elaborating module `r`` with the real problem as a cause.
+  * Codes by stage: 27 preprocessor (`E01xx`), 37 parser (`E02xx`), 95 elaboration (`E03xx`),
+    `E0001` for an internal error. Refusals `R0101`, `R0201`-`R0203`, `R0301`-`R0310`: a coded
+    refusal's what, why and instead come from the catalogue, so they are translatable too, and
+    its marker reads `refused[R0202]:`. Warnings: `W0101`-`W0104` for the four directives with no
+    Verilog-A effect, `W0301` for a port without a direction.
+  * `FrontendError`'s variants carry a `Diagnostic` instead of a `String`;
+    `FrontendError::diagnostic()` gets at it, and `va-cli` renders it with what it was doing
+    as `while:` context. `Preprocessed::warnings`, `CompiledDesign::warnings` and
+    `port_direction_warnings` are `Vec<Diagnostic>`. A refusal is boxed in its variant
+    (`FrontendError::refused(r)`), because the code pushed `Refusal` past clippy's size limit
+    for an error type.
+  * The error corpus asserts each file's code with a new `code:` header. All 36 files carry
+    one and none is `E0000`; the header line moved every `at:` down by one.
+  * A placeholder name must now start with a letter or `_`, so `{1, tau}` in a message is text.
+
+Design calls, and their cost:
+  * **Elaboration did not fit in 100 codes.** One code per message needed 104 in `E03xx`. The
+    two dozen argument-count messages are now three codes (`E0333` exact, `E0334` range, `E0335` at
+    least), as rustc does with E0061, each naming the signature: `` `cross(expr, dir, time_tol,
+    expr_tol, enable)` takes 1 to 5 arguments, but this call passes 6 ``. Nine near-duplicates
+    were merged too (unknown net in a probe or a connection, slice errors, ...). That leaves
+    `E0396`-`E0399`: **four free elaboration codes.** The next elaboration diagnostics need a
+    decision: an overflow range (`08xx` is unassigned) or five digits.
+  * Wording moved from the message into the entry's description and actions, so a few
+    messages are shorter. Five corpus `message:` lines changed with them: `` `exp` takes exactly
+    one argument `` is now `` `exp` takes 1 argument(s) ``, and an analog function's arity error
+    no longer says "analog function". Tests that checked the moved text now check the code.
+  * Some placeholders hold English words the program supplies (`{via}`, `{construct}`, `{what}`,
+    `{list}`): they are not translated yet. `messages/README.md` says so.
+
+Measured: `cargo test --workspace` 982 passed, 0 failed; `cargo xtask validate` 28 checked,
+0 failed, convergence 28/28; `check models` 68/68, `check benchmark/models` 25/25,
+`check external` 8/9 (unchanged; its failure is now `E0101`, an undefined macro). The local
+280-file corpus was not run here. Codegen, netlist and numerical errors are still `E0000`: step 3.
+
+
+2.25.0 - 2026-10-14
+--------------------
+**Coded diagnostics, step 1: the code system, the message catalogue and `va-cli --explain`.**
+Every user-facing diagnostic is to carry a code: `E` error, `W` warning, `R` refusal, `C`
+communication, then four digits whose first two name the stage (00 general, 01 preprocessor,
+02 parser, 03 elaboration, 04 codegen, 05 netlist, 06 numerical, 07 files and command line).
+`E0000` is an error with no code yet. A code is permanent: never renumbered, never reused.
+
+The text is not in the Rust source. Each code has `messages/<lang>/<CODE>.json` with a
+one-line `message` (with `{name}` placeholders the program fills), a `description` and a list of
+`actions`, so another team can write and translate it; `messages/README.md` is their guide.
+  * New leaf crate `va-diag`: `Code`, `Diagnostic` (an `Error` that carries a code, its arguments
+    and a location), the catalogue and rendering. The English catalogue is built into the binary,
+    so a copied `va-cli` still explains itself. `VA_MESSAGES_DIR` overlays edited text without a
+    rebuild.
+  * The language comes from `VA_LANG`, else the locale (`LANG=fr_FR.UTF-8` -> `fr`). A code
+    falls back to English when the language has no text for it, and to the program's own wording
+    when no language does. A translation made from an older English `rev` is used, with a note.
+  * `va-cli --explain <CODE>` prints the message, what it means and what to do. Every error is now
+    shown as `error[CODE]: ...` followed by the `--explain` hint.
+  * Seeded and wired: `E0701` unknown subcommand, `E0702` `check` with no models, `E0703` invalid
+    option or environment value (`--solver`, `VA_PARALLEL`, `VA_BTF`, `--explain` itself). Every
+    other error is `E0000`, shown with its own text and causes, exactly as before.
+  * `catalogue_is_consistent` checks every file against the code list: parses with exactly the
+    documented fields, name equals code, English has a `rev`, every defined code has English text
+    and nothing else does, translations carry `source_rev` and keep English's placeholders.
+  * CLAUDE.md gains `va-diag` in the crate table and a house rule: a new diagnostic gets a code
+    and an English entry in the same PR.
+
+Limits: the words around the catalogue text ("error", "What it means", the hint) are English in
+every language for now, and plurals are not modelled. Warnings, refusals and the frontend's
+errors are not converted yet: that is step 2, crate by crate, with the error corpus asserting
+codes. Until then almost every error a user meets is `E0000`.
+
+Cost: one new direct dependency, `serde_json` (pure Rust), which brings `itoa` and `zmij`; serde
+was already in the tree.
+
+Measured: `cargo test --workspace` 981 passed, 0 failed (7 new in `va-diag`, 4 new in
+`va-cli/tests/diagnostics.rs`); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28;
+`check models` 68/68, `check benchmark/models` 25/25, `check external` 8/9 (unchanged).
+
 
 2.24.2 - 2026-10-11
 --------------------
