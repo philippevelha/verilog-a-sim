@@ -22,6 +22,19 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.2+2 - 2026-10-15
+----------------------
+**circuits/benchmark/iscas85/c7552_tran.net: a c7552 transient deck, the size of the
+ngspice/OpenVAF c7552 transient.** Deck only, no code change. c7552.net with each of the 207
+inputs a PULSE (100 ps edges, period 2*(i%8+1) ns, edges staggered by (i%8)*100 ps) and
+`.tran 10p 10n`, checked with `check_iscas.py tran c7552.bench`. Derived from c7552.net rather
+than regenerated with gen_iscas.py because gen_iscas.py needs external/benchmarkExt/, which is
+not in every checkout. The cost: the staggered edges make the step control accept far more than
+the 1 000 print steps (~2 500 points after 2 h of a first, interrupted run), so this deck runs
+for hours. Leave out the default report: it keeps all 268 676 unknowns, ~2.15 MB per point, and
+heads for the memory limit. Pass `--report` with the checked nodes from `check_iscas.py report`
+instead. Timings are not in this entry; they follow when a run completes.
+
 2.24.2+1 - 2026-10-14
 ----------------------
 **The ISCAS'85 suite at 2.24.2: every operating point correct, c7552 in 295 s; bypass is the
