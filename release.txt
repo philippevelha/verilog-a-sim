@@ -22,6 +22,17 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.24.2+3 - 2026-10-15
+----------------------
+**scripts/benchmark/bench_c7552_tran_linux.sh: run the c7552 transient on your own Linux
+machine.** Script and docs only. It runs c7552_tran.net with default settings and with
+`--bypass` from a source checkout and writes `c7552_tran.txt`: wall time, peak memory, exit,
+timepoint count and the `check_iscas.py tran` check, for comparison with ngspice/OpenVAF's 20 min
+on an i7-9750H. It reports only the 3 719 checked nodes and caps each run at 3 h (`CAP=`). Why
+a script rather than a figure: the cloud run was lost to a container restart and then stopped,
+so there is still no completed c7552 transient. Smoke-tested here with `CAP=20` on 4 vCPUs:
+both runs stopped at the cap after 20.1 s, at 1 829 MB (default) and 1 453 MB (bypass).
+
 2.24.2+2 - 2026-10-15
 ----------------------
 **circuits/benchmark/iscas85/c7552_tran.net: a c7552 transient deck, the size of the
