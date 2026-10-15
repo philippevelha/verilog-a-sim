@@ -2654,23 +2654,38 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
-    /// `a >>> b` (LRM 4.2.1, 2.36.0): an arithmetic right shift, which on a signed integer is
-    /// division by `2^b` rounded toward minus infinity -- written here as
-    /// `floor(int(a) / 2 ** int(b))`, so it needs no IR operator of its own and folds in a
-    /// parameter default like any other expression. Exact while `|a| < 2^53`. The operands are
-    /// truncated first, as `<<`/`>>` truncate theirs. (`>>` is a logical shift, which fills
-    /// with zeros; the two differ only for a negative `a`.)
+    /// `a >>> b` (LRM 4.2.1, 2.36.0): an arithmetic right shift of Verilog's 32-bit `integer`,
+    /// which is division by `2^b` rounded toward minus infinity, written here as
+    ///
+    /// ```text
+    /// floor((a << 0) / 2 ** (b < 0 || b > 31 ? 32 : int(b)))
+    /// ```
+    ///
+    /// so it needs no IR operator of its own and folds in a parameter default like any other
+    /// expression. `a << 0` is `a` truncated and wrapped into 32 bits, as every bitwise operator
+    /// takes it (2.38.0). A count outside 0-31 shifts every bit out, leaving the sign: dividing a
+    /// 32-bit value by `2^32` and flooring gives exactly -1 or 0. (`>>` is the logical shift,
+    /// which fills with zeros; the two differ only for a negative `a`.)
     fn arithmetic_shift_right(&mut self, a: ExprRef, b: ExprRef) -> ExprRef {
-        let a = self.push(ExprAst::Call {
-            name: "int".into(),
-            args: vec![a],
-        });
-        let b = self.push(ExprAst::Call {
+        let zero = self.push(ExprAst::Number(0.0));
+        let a = self.push(ExprAst::Binary(BinOp::Shl, a, zero));
+        let count = self.push(ExprAst::Call {
             name: "int".into(),
             args: vec![b],
         });
+        let lo = self.push(ExprAst::Number(0.0));
+        let hi = self.push(ExprAst::Number(31.0));
+        let below = self.push(ExprAst::Binary(BinOp::Lt, count, lo));
+        let above = self.push(ExprAst::Binary(BinOp::Gt, count, hi));
+        let out_of_range = self.push(ExprAst::Binary(BinOp::Or, below, above));
+        let all = self.push(ExprAst::Number(32.0));
+        let count = self.push(ExprAst::Cond {
+            cond: out_of_range,
+            then_: all,
+            else_: count,
+        });
         let two = self.push(ExprAst::Number(2.0));
-        let scale = self.push(ExprAst::Binary(BinOp::Pow, two, b));
+        let scale = self.push(ExprAst::Binary(BinOp::Pow, two, count));
         let quotient = self.push(ExprAst::Binary(BinOp::Div, a, scale));
         self.push(ExprAst::Call {
             name: "floor".into(),

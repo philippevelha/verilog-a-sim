@@ -1402,7 +1402,7 @@ pub(crate) fn apply_unary(op: UnOp, d: Dual) -> Dual {
         UnOp::Not => Dual::constant(bool_to_f64(d.value == 0.0)),
         // Bitwise NOT, like the comparison/logical operators above, is an integer
         // operation with no continuous derivative — zero-gradient.
-        UnOp::BitNot => Dual::constant(!to_i64(d.value) as f64),
+        UnOp::BitNot => Dual::constant(f64::from(!to_i32(d.value))),
     }
 }
 
@@ -1431,11 +1431,12 @@ pub(crate) fn apply_binary(op: BinOp, a: Dual, b: Dual) -> Dual {
         BinOp::Or => Dual::constant(bool_to_f64(a.value != 0.0 || b.value != 0.0)),
         // Bitwise/shift operators are integer operations with no continuous derivative,
         // same treatment as the comparison operators above: zero-gradient.
-        BinOp::BitAnd => Dual::constant((to_i64(a.value) & to_i64(b.value)) as f64),
-        BinOp::BitOr => Dual::constant((to_i64(a.value) | to_i64(b.value)) as f64),
-        BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64),
-        BinOp::BitXnor => Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64),
-        BinOp::Shl => Dual::constant(to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64),
+        // All on Verilog's 32-bit `integer` (`to_i32`, 2.38.0).
+        BinOp::BitAnd => Dual::constant(f64::from(to_i32(a.value) & to_i32(b.value))),
+        BinOp::BitOr => Dual::constant(f64::from(to_i32(a.value) | to_i32(b.value))),
+        BinOp::BitXor => Dual::constant(f64::from(to_i32(a.value) ^ to_i32(b.value))),
+        BinOp::BitXnor => Dual::constant(f64::from(!(to_i32(a.value) ^ to_i32(b.value)))),
+        BinOp::Shl => Dual::constant(shift_left_32(a.value, b.value)),
         BinOp::Shr => Dual::constant(shift_right_32(a.value, b.value)),
     }
 }
@@ -2183,6 +2184,26 @@ fn to_i64(v: f64) -> i64 {
     v.trunc() as i64
 }
 
+/// A value as Verilog's 32-bit `integer` holds it (2.38.0): truncated toward zero, then wrapped
+/// into 32 bits two's complement, as storing it into an `integer` does. Every bitwise and shift
+/// operator works on this, so `1 << 31` is -2147483648 and `~0` is -1, as in Verilog; before
+/// 2.38.0 they worked on 64 bits (2.37.0 for `>>`). Kept identical to its twin in `va-frontend`'s constant folder (`elaborate::to_i32`).
+fn to_i32(v: f64) -> i32 {
+    to_i64(v) as i32
+}
+
+/// Verilog's `a << n` on an `integer`: bits shifted past bit 31 are lost (`1 << 31` is
+/// -2147483648, `1 << 32` is 0). A count of 32 or more, or a negative one (unsigned in
+/// Verilog, so huge), shifts every bit out: 0. Before 2.38.0, a 64-bit shift (`1 << 40` was
+/// 2^40) with the count taken modulo 64.
+fn shift_left_32(a: f64, n: f64) -> f64 {
+    let n = to_i64(n);
+    if !(0..32).contains(&n) {
+        return 0.0;
+    }
+    f64::from(to_i32(a).wrapping_shl(n as u32))
+}
+
 /// Verilog's `a >> n` on an `integer` (2.37.0): a logical shift of the 32-bit two's-complement
 /// pattern, read back as a signed integer, so `-8 >> 1` is `32'h7FFF_FFFC` = 2147483644 and
 /// `-8 >> 0` stays -8. A count of 32 or more shifts every bit out, and a negative count -- an
@@ -2195,7 +2216,7 @@ fn shift_right_32(a: f64, n: f64) -> f64 {
     if !(0..32).contains(&n) {
         return 0.0;
     }
-    f64::from(((to_i64(a) as i32 as u32) >> n) as i32)
+    f64::from((to_i32(a) as u32 >> n) as i32)
 }
 
 #[cfg(test)]

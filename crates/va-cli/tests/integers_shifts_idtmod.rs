@@ -268,3 +268,44 @@ fn logical_right_shift_is_32_bit() {
         assert_eq!(op_value(&out, node), want, "V({node}): {out}");
     }
 }
+
+/// Every bitwise and shift operator works on Verilog's 32-bit `integer` (2.38.0; 64-bit before,
+/// so `1 << 31` was 2147483648 and `1 << 40` was 2^40). Run time and parameter defaults alike.
+#[test]
+fn bitwise_and_shift_operators_are_32_bit() {
+    let out = op(
+        "bits32",
+        "integer n; parameter integer p = 1 << 31; parameter integer q = ~0;",
+        "  n = -1;",
+        &[
+            ("a", "1 << 31"),
+            ("b", "1 << 32"),
+            ("c", "3 << n"),
+            ("d", "~0"),
+            ("e", "4294967295 & 255"),
+            ("f", "2147483648 | 0"),
+            ("g", "p"),
+            ("h", "q"),
+            ("i", "-8 >>> 40"),
+            ("j", "8 >>> n"),
+            ("k", "4294967288 >>> 1"),
+            ("l", "(1 << 30) ^ ~0"),
+        ],
+    );
+    for (node, want) in [
+        ("a", -2147483648.0),
+        ("b", 0.0),
+        ("c", 0.0),
+        ("d", -1.0),
+        ("e", 255.0),
+        ("f", -2147483648.0),
+        ("g", -2147483648.0),
+        ("h", -1.0),
+        ("i", -1.0),
+        ("j", 0.0),
+        ("k", -4.0),
+        ("l", -1073741825.0),
+    ] {
+        assert_eq!(op_value(&out, node), want, "V({node}): {out}");
+    }
+}

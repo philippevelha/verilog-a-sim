@@ -405,18 +405,18 @@ class of lexemes.
   exactly like the arithmetic operators.
 - **Declaration and Assignment**: N/A.
 - **Expressions and Evaluation**: There is no bit-vector type in this project — every value is
-  `f64` — so each of these truncates its operand(s) to `i64` (`to_i64`, shared with `int()`/
-  `floor()`'s float↔integer bridging elsewhere), performs the bitwise/shift operation, and casts
-  the result back to `f64`. `>>` is a *logical* (zero-fill) shift of Verilog's 32-bit `integer`, read
-  back as signed (since 2.37.0; a 64-bit shift before): `-8 >> 1` is `32'h7FFF_FFFC` =
-  2147483644, and a count of 32 or more, or a negative one (unsigned in Verilog), gives 0. The
-  other bitwise operators and `<<` still work on 64 bits; for operands and results inside the
-  32-bit range they agree with Verilog, and `1 << 31` or `1 << 40` do not (Verilog wraps to
-  -2147483648 and 0). The arithmetic shifts are
-  implemented since 2.36.0 (a parse error before): `<<<` is `<<`, and `a >>> b` fills with the
-  sign bit, which the parser writes as `floor(int(a) / 2 ** int(b))` (`-8 >>> 1` is `-4`, `-8 >> 1`
-  is 2147483644), so it needs no IR operator of its own and folds in a
-  parameter default. Exact for `|a| < 2^53`. `^~` and `~^` are accepted as
+  `f64` — so each of these works on Verilog's 32-bit `integer` (since 2.38.0; 64-bit before, 2.37.0 for
+  `>>`): its operands are truncated toward zero and wrapped into 32 bits two's complement
+  (`to_i32`, as storing into an `integer` does), the operation runs on those 32 bits, and the
+  signed result is cast back to `f64`. So `1 << 31` is -2147483648, `1 << 32` is 0, `~0` is -1
+  and `4294967295 & 255` is 255. `>>` is a *logical* (zero-fill) shift, read back as signed:
+  `-8 >> 1` is `32'h7FFF_FFFC` = 2147483644. A shift count of 32 or more, or a negative one
+  (unsigned in Verilog, so huge), shifts every bit out: 0 for `<<`/`>>`, the sign (-1 or 0)
+  for `>>>`. The arithmetic shifts are implemented since 2.36.0 (a parse error before): `<<<`
+  is `<<`, and the parser writes `a >>> b` as
+  `floor((a << 0) / 2 ** (b < 0 || b > 31 ? 32 : int(b)))`, where `a << 0` is the 32-bit
+  wrap, so it needs no IR operator of its own and folds in a parameter default (`-8 >>> 1` is
+  `-4`). `^~` and `~^` are accepted as
   two spellings of the same XNOR operator (`BinOp::BitXnor`), matching the LRM. Both the dynamic
   path (`va-codegen`'s AD) and the constant-folding path (`Elaborator::const_eval`/`eval_binop`)
   treat these as **zero-gradient** where AD is concerned — like the comparison operators, a

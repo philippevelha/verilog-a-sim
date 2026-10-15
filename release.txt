@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.38.0 - 2026-10-15
+--------------------
+**Every bitwise and shift operator works on Verilog's 32-bit `integer`.** 2.37.0 did it for
+`>>`; this does `<<`, `&`, `|`, `^`, `^~`, `~` and `>>>`. Operands are truncated toward zero and
+wrapped into 32 bits two's complement, as storing into an `integer` does, and the signed result
+comes back. They worked on 64 bits.
+  * `1 << 31` is -2147483648 (was 2147483648), `1 << 32` is 0 (was 2^32), `~0` is -1 (same),
+    `4294967295 & 255` is 255, `2147483648 | 0` is -2147483648, `(1 << 30) ^ ~0` is
+    -1073741825.
+  * A `<<` count of 32 or more, or a negative one (unsigned in Verilog), gives 0, as `>>` has
+    since 2.37.0; the 64-bit shift took the count modulo 64.
+  * `>>>` wraps its operand the same way and fills with the sign for a count outside 0-31
+    (`-8 >>> 40` is -1, `8 >>> -1` is 0). Its parser rewrite is now
+    `floor((a << 0) / 2 ** (b < 0 || b > 31 ? 32 : int(b)))`, `a << 0` being the 32-bit wrap.
+  * One `to_i32` conversion in each evaluator (`va_codegen::ad` at run time,
+    `va_frontend::elaborate` for parameter defaults), each pointing at its twin.
+
+**This changes results** only where an operand or a result leaves the 32-bit range, or a count
+leaves 0-31. The one use in the shipped models, `rc_logger.va`'s `mcd | 1` on a file
+descriptor, stays inside it.
+
+Measured: `cargo test --workspace` 1020 passed, 0 failed (1019 + 1,
+`bitwise_and_shift_operators_are_32_bit`, checking run time and parameter defaults);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.37.0 - 2026-10-15
 --------------------
 **`>>` shifts Verilog's 32-bit `integer`.** A logical shift of the 32-bit two's-complement
@@ -39,7 +65,7 @@ simulator. It was a 64-bit shift, giving 2^63 - 4 (9223372036854775804).
 non-negative operand below 2^31 and a count in range nothing changes. No `.va` file in
 `models/`, `external/` or `docs/examples/` uses `>>`.
 
-Limits: `<<` and `&`/`|`/`^`/`~` still work on 64 bits. They agree with Verilog while operands
+Limits (closed in 2.38.0): `<<` and `&`/`|`/`^`/`~` still work on 64 bits. They agree with Verilog while operands
 and results stay in the 32-bit range; `1 << 31` gives 2147483648 here and -2147483648 in
 Verilog, and `1 << 40` gives 2^40 here and 0 in Verilog.
 
