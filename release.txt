@@ -22,6 +22,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.41.0 - 2026-10-15
+--------------------
+**`idt(x, ic, assert)`: the reset works.** While `assert` is non-zero the output is held at `ic`
+(0 when omitted), and the integral restarts from `ic` when it drops (LRM 4.5.4). Refused since
+2.36.0 (`R0411`, now retired) and an internal error before that.
+  * The accumulator keeps integrating; the reset acts on the call's value through three slots
+    of per-call state, `(base, ic_held, reset_on)`. Released, the output is
+    `ic_held + Y - base`, the integral since the release.
+  * The output jumps where the reset switches, which the step controller rejects inside a step
+    (the first version underflowed at the reset edge). So the reset level switches only where
+    a watch on it fires on the event channel, past the module's own event sites: the jump
+    lands in the event re-solve at an accepted point, as an `@(cross(...))` body's does. The
+    watch asks for the crossing to be located to `tstep/1000`.
+  * A reset driven by the output itself (`idt(x, 0, V(out) > 1)`, the relaxation oscillator)
+    first flipped back and forth inside one Newton solve and did not converge. A firing now
+    toggles the committed level instead of reading the iterate. At the switching-on point the
+    output is `ic` either way, so the level committed there is the reset as it reads at the
+    converged point: a reset that released itself restarts the integral at once. If the level
+    and the reset still disagree at an accepted point, a timer fires at the next step.
+  * Measured: a 1 V/us integral with a 1.0-1.2 us reset pulse holds `ic` through the pulse,
+    switching at 1.000558 and 1.2015 us (the 1 ns edges' 0.5 V crossings), and ends at
+    1.798531 V = 3 - 1.2015 + `ic`; the self-resetting version is a sawtooth resetting at
+    1.000099 and 2.000150 us (period 1 us).
+  * `va-transient` now gives its event polls the deck's `tstep`, as every load already had; the
+    reset watch's tolerance needed it. 25 decks run against 2.40.0 give byte-identical output.
+
+Limits: a reset pulse narrower than one step can be missed, as a `cross` can; the restart is
+located to `tstep/1000`, not exactly; `abstol` is still not applied.
+
+Measured: `cargo test --workspace` 1026 passed, 0 failed (1024 + 2 in `va-cli/tests/idt_reset.rs`;
+one test rewritten from the refusal to the value; the error corpus drops `refused_idt_reset.va`
+and is 46 files); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.40.0 - 2026-10-15
 --------------------
 **The rest of integer typing: `**`, 32-bit overflow, and device-line integer parameters.**

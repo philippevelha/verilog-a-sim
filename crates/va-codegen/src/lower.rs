@@ -815,6 +815,10 @@ pub struct IdtAccumulator {
     /// so the integral starts from `ic` (LRM 4.5.4; before 2.34.0 `ic` was ignored and an open
     /// integrator's operating point was singular).
     pub ic: Option<ExprId>,
+    /// `idt`'s reset (`assert`), when written and not a literal `0` (2.41.0). A static analysis
+    /// then pins the accumulator at `ic` -- 0 when `ic` is omitted -- like an `ic` alone does;
+    /// the reset itself acts in transient, on the call's value (`StatefulKind::IdtReset`).
+    pub reset: Option<ExprId>,
     /// Local terminal slot (past every node and [`BranchCurrent`] slot) allocated for this
     /// accumulator's own unknown.
     pub local_slot: usize,
@@ -834,6 +838,13 @@ pub struct IdtWrap {
     pub offset: ExprId,
     /// The window's width.
     pub modulus: ExprId,
+}
+
+/// The reset argument of an `idt` call, when it can fire: the third argument, unless it is a
+/// literal `0` (which never resets, and so needs no state).
+pub(crate) fn idt_reset(module: &Module, args: &[ExprId]) -> Option<ExprId> {
+    let &a = args.get(2)?;
+    (!matches!(module.expr(a), Expr::Const(v) if *v == 0.0)).then_some(a)
 }
 
 /// Find the `floor((idt(...) - offset) / modulus)` shape `idtmod` lowers to.
@@ -1071,6 +1082,14 @@ pub enum StatefulKind {
     /// `charge_term_shape` happened to recognise a given site — a coupling that would otherwise
     /// silently change a model's `state_len` when an unrelated recognizer widened.
     Ddt,
+    /// `idt(x, ic, assert)` with a reset that can fire (2.41.0) — 3 slots: `(base, ic_held,
+    /// reset_on)`: the integral and `ic` at the last point where the reset held, and whether it
+    /// holds now. While it holds the output is `ic`; once released, `ic_held + Y - base`, so the
+    /// integral restarts from `ic` (see `crate::ad`'s `Builtin::Idt` arm). `event_slot` is the
+    /// event-channel slot that watches the reset, past the module's own event sites: the reset
+    /// switches only when that event fires, so the output's jump happens in the integrator's
+    /// event re-solve at an accepted point, never inside a step.
+    IdtReset { event_slot: usize },
 }
 
 impl StatefulKind {
@@ -1090,6 +1109,7 @@ impl StatefulKind {
             // method a model is later evaluated under, which is what makes a compiled model
             // method-agnostic.
             StatefulKind::Ddt => 3,
+            StatefulKind::IdtReset { .. } => 3,
         }
     }
 }
@@ -1148,11 +1168,18 @@ fn stmts_contain_laplace(stmts: &[LoweredStmt]) -> bool {
 fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
     let mut calls = Vec::new();
     let mut next = 0usize;
+    let mut resets = 0usize;
     for (i, expr) in module.exprs.iter().enumerate() {
         let kind = match expr {
             Expr::Call(Builtin::Slew, _) => StatefulKind::Slew,
             Expr::Call(Builtin::Transition, _) => StatefulKind::Transition,
             Expr::Call(Builtin::Ddt, _) => StatefulKind::Ddt,
+            Expr::Call(Builtin::Idt, args) if idt_reset(module, args).is_some() => {
+                resets += 1;
+                StatefulKind::IdtReset {
+                    event_slot: module.event_sites.len() + resets - 1,
+                }
+            }
             Expr::Call(
                 b @ (Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp),
                 args,
@@ -1237,23 +1264,17 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         let Expr::Call(Builtin::Idt, args) = module.expr(call) else {
             unreachable!("collect_idt_calls_in_stmts only ever collects `Idt` call sites");
         };
-        // `idt(expr [, ic [, assert [, abstol]]])` (2.36.0; before, any third argument was an
-        // internal error). `abstol` only tunes the solver's tolerance for this unknown and is
-        // not applied. `assert`, the reset, is honoured only as a literal `0` (never reset):
-        // holding the output at `ic` while keeping the integral's history needs per-site state
-        // this accumulator does not have, so anything else is refused rather than ignored.
+        // `idt(expr [, ic [, assert [, abstol]]])`. `abstol` only tunes the solver's tolerance
+        // for this unknown and is not applied. `assert`, the reset, acts on the call's value
+        // through per-site state (2.41.0; refused 2.36.0-2.40.x, an internal error before).
         if args.is_empty() || args.len() > 4 {
             return Err(internal_error("idt expects one to four arguments"));
-        }
-        if let Some(&a) = args.get(2) {
-            if !matches!(module.expr(a), Expr::Const(v) if *v == 0.0) {
-                return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0411)));
-            }
         }
         idt_accumulators.push(IdtAccumulator {
             expr_id: call.0,
             arg: args[0],
             ic: args.get(1).copied(),
+            reset: idt_reset(module, args),
             local_slot: next_slot,
         });
         next_slot += 1;

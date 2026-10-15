@@ -1659,7 +1659,9 @@ fn integrate(
     let mut event_prev = poll_events(
         instances,
         &x,
-        &AnalysisCtx::transient(cfg.tstart).with_initial_step(true),
+        &AnalysisCtx::transient(cfg.tstart)
+            .with_tstep(cfg.tstep)
+            .with_initial_step(true),
         &state.committed,
         &state.offsets,
     );
@@ -2106,7 +2108,7 @@ fn integrate(
                 let poll = poll_events(
                     instances,
                     &x_primary,
-                    &AnalysisCtx::transient(t_next),
+                    &AnalysisCtx::transient(t_next).with_tstep(cfg.tstep),
                     &state.committed,
                     &state.offsets,
                 );
@@ -2354,7 +2356,7 @@ fn integrate(
                     poll_events(
                         instances,
                         &x,
-                        &AnalysisCtx::transient(t),
+                        &AnalysisCtx::transient(t).with_tstep(cfg.tstep),
                         &state.committed,
                         &state.offsets,
                     )

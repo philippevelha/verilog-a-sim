@@ -1348,18 +1348,74 @@ pub fn eval(ctx: &Ctx, expr: ExprId) -> Result<Dual, CodegenError> {
         // call's *value* at all (only `crate::GeneratedModel::stamp_idt_accumulators` evaluates
         // it, to stamp the accumulator's own row). `expr` is this call's own id, exactly the key
         // `lower::lower` registered it under in `ctx.idt_slots`.
-        Expr::Call(Builtin::Idt, _) => {
+        Expr::Call(Builtin::Idt, args) => {
             crate::counters::ctx_map_lookup();
             let slot = *ctx.idt_slots.get(&expr.0).ok_or_else(|| {
                 internal_error("idt accumulator not registered for this call site")
             })?;
             let value = ctx.node_voltage(slot);
             crate::counters::probe_alloc();
-            Ok(Dual::from_parts(
-                value,
-                probe_grad(count, slot, None),
-                Grad::Zero,
-            ))
+            let y = Dual::from_parts(value, probe_grad(count, slot, None), Grad::Zero);
+            // `idt(x, ic, assert)` with a reset that can fire (LRM 4.5.4, 2.41.0). The
+            // accumulator `Y` integrates `x` throughout; the reset acts on the value. While it is
+            // high the output is `ic`, and the state remembers `Y` and `ic` there; once it drops,
+            // the output is `ic_held + Y - base`, the integral restarted from `ic`. The restart
+            // is anchored at the last accepted point where the reset was high, so it is at most
+            // one timestep early. Static analyses read `Y`, which their row pins at `ic`.
+            if let Some(&(crate::lower::StatefulKind::IdtReset { event_slot }, base)) =
+                ctx.state_slots.get(&expr.0)
+            {
+                if ctx.analysis.kind != va_abi::AnalysisKind::Transient {
+                    return Ok(y);
+                }
+                let ic = match args.get(1) {
+                    Some(&ic) => eval(ctx, ic)?,
+                    None => Dual::constant(0.0),
+                };
+                // The reset level switches only where its watch fired, so it is constant across
+                // a step and its jump lands in the event re-solve at an accepted point. A firing
+                // means the level must change since the last accepted point, so it toggles the
+                // committed level -- decided without reading the current iterate, which a reset
+                // driven by the output itself (`idt(x, 0, V(out) > 1)`, a relaxation oscillator)
+                // would otherwise flip back and forth inside one Newton solve. The run's first
+                // point reads the reset directly.
+                let fired = ctx.events_fired.get(event_slot).copied().unwrap_or(false);
+                let committed = ctx.state_get(base, 2) != 0.0;
+                let reset_on = if ctx.analysis.is_initial_step {
+                    match args.get(2) {
+                        Some(&a) => eval(ctx, a)?.value != 0.0,
+                        None => false,
+                    }
+                } else if fired {
+                    !committed
+                } else {
+                    committed
+                };
+                if reset_on {
+                    ctx.state_set(base, 0, y.value);
+                    ctx.state_set(base, 1, ic.value);
+                    // Switching on: the output here is `ic` however the reset reads, so the
+                    // level committed can be the reset as it reads at the converged point. A
+                    // reset that released itself -- `V(out) > 1` once `out` is back at `ic` --
+                    // then restarts the integral right here instead of one step later.
+                    let still_on = if fired && !committed {
+                        match args.get(2) {
+                            Some(&a) => eval(ctx, a)?.value != 0.0,
+                            None => false,
+                        }
+                    } else {
+                        true
+                    };
+                    ctx.state_set(base, 2, if still_on { 1.0 } else { 0.0 });
+                    return Ok(ic);
+                }
+                ctx.state_set(base, 2, 0.0);
+                let (held_base, held_ic) = (ctx.state_get(base, 0), ctx.state_get(base, 1));
+                ctx.state_set(base, 0, held_base);
+                ctx.state_set(base, 1, held_ic);
+                return Ok(y.add(&Dual::constant(held_ic - held_base)));
+            }
+            Ok(y)
         }
         Expr::Call(builtin, args) => eval_call(ctx, expr, *builtin, args),
         Expr::CallUser(fid, args) => {

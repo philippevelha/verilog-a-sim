@@ -2227,6 +2227,8 @@ impl GeneratedModel {
                     Ok(v) => Some(v),
                     Err(_) => continue,
                 },
+                // A reset needs a value to reset to: `ic` defaults to 0 then (2.41.0).
+                None if acc.reset.is_some() => Some(Dual::constant(0.0)),
                 None => None,
             };
             if let (Some(ic), va_abi::AnalysisKind::Dc) = (&ic, ctx.analysis.kind) {
@@ -2558,7 +2560,9 @@ impl ModelInstance for GeneratedModel {
     /// One event slot per `@(...)` site the source declared (`va_ir::Module::event_sites`),
     /// across both kinds — the slot numbering the consumer's fired-flag buffer is indexed by.
     fn event_count(&self) -> usize {
-        self.shared.module.event_sites.len()
+        // The module's own sites, then one watch per `idt` reset (2.41.0,
+        // `lower::StatefulKind::IdtReset`).
+        self.shared.module.event_sites.len() + self.idt_resets().count()
     }
 
     /// Register each event site at this accepted timepoint — Interface β's event-registration
@@ -2615,6 +2619,7 @@ impl ModelInstance for GeneratedModel {
         if self.shared.module.event_sites.is_empty()
             && self.shared.lowered.zi_terms.is_empty()
             && self.shared.lowered.idt_wraps.is_empty()
+            && self.idt_resets().next().is_none()
         {
             return;
         }
@@ -2631,6 +2636,28 @@ impl ModelInstance for GeneratedModel {
             );
         }
         let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
+        // Each `idt` reset is watched like a `cross` on "is it non-zero", in both directions
+        // (2.41.0): where it switches, the event fires and the reset changes level in the
+        // re-solve at that accepted point (`crate::ad`'s `Builtin::Idt` arm).
+        for (slot, reset, base) in self.idt_resets() {
+            let want = value_of(reset) != 0.0;
+            // Located to a thousandth of the deck's `tstep`, the scale `transition` calls
+            // negligible, so the reset applies where it switched rather than up to a step late.
+            let mut spec = va_abi::CrossSpec::cross(va_abi::CrossDir::Either);
+            if actx.tstep > 0.0 {
+                spec.tol.time = Some(actx.tstep * 1e-3);
+            }
+            sink.monitor(slot, if want { 0.5 } else { -0.5 }, spec);
+            // The committed level disagrees with the reset at this accepted point -- the reset
+            // was released inside the re-solve that applied it, as a self-resetting integrator's
+            // is: nothing will cross again, so ask for a firing at the next step instead.
+            if let Some(&on) = state.get(base + 2) {
+                if (on != 0.0) != want {
+                    let t = actx.time;
+                    sink.timer(slot, t + t.abs().max(1e-30) * 1e-12);
+                }
+            }
+        }
         // An `idtmod`'s next wrap (2.36.0), predicted from the integral and its rate now, as a
         // breakpoint: the output jumps by `modulus` there, which the step controller accepts
         // only right after a breakpoint, where the history is cut. Placed a little *short* of
@@ -3117,6 +3144,27 @@ impl GeneratedModel {
             }
         }
         bound
+    }
+
+    /// Every `idt` reset that can fire, as `(event slot, reset expression, first state slot)`
+    /// (2.41.0).
+    fn idt_resets(&self) -> impl Iterator<Item = (usize, ExprId, usize)> + '_ {
+        let module = &self.shared.module;
+        self.shared
+            .lowered
+            .stateful_calls
+            .iter()
+            .filter_map(move |call| match call.kind {
+                lower::StatefulKind::IdtReset { event_slot } => {
+                    match module.expr(ExprId(call.expr_id)) {
+                        Expr::Call(Builtin::Idt, args) => {
+                            Some((event_slot, *args.get(2)?, call.base))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
     }
 
     fn transition_step_bound(&self, ctx: &Ctx) -> Option<f64> {

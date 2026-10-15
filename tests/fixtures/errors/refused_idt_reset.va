@@ -1,9 +1,0 @@
-// expect: refused
-// code: R0411
-// message: `idt` with a reset (`assert`) argument other than 0
-// fixed: 2.36.0 (before: an internal error, E0001)
-module r(p, n);
-  inout p, n;
-  electrical p, n;
-  analog V(p, n) <+ idt(I(p, n), 0.0, V(p, n) > 1.0);
-endmodule

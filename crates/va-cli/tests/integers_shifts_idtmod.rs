@@ -245,16 +245,15 @@ fn idtmod_operating_point_is_ic_folded_into_the_window_and_without_a_modulus_it_
 }
 
 #[test]
-fn idt_takes_a_never_resetting_assert_and_an_abstol_and_refuses_a_real_reset() {
-    // Before 2.36.0 any third argument was an internal error (`E0001`).
+fn idt_takes_a_never_resetting_assert_and_an_abstol_and_a_real_reset() {
+    // Before 2.36.0 any third argument was an internal error (`E0001`); 2.36.0-2.40.x refused a
+    // reset that could fire (`R0411`). Since 2.41.0 it is implemented: at the operating point
+    // the output is `ic` either way (see `idt_reset.rs` for transient).
     let out = op("idt3", "", "", &[("a", "idt(0, 0.5, 0, 1e-9)")]);
     assert!((op_value(&out, "a") - 0.5).abs() < 1e-12, "{out}");
     let out = op("idt-reset", "", "", &[("a", "idt(0, 0.5, V(a) > 1)")]);
-    assert!(
-        out.contains("R0411"),
-        "a reset that can fire is refused: {out}"
-    );
-    assert!(!out.contains("E0001"), "{out}");
+    assert!(!out.contains("R0411") && !out.contains("E0001"), "{out}");
+    assert!((op_value(&out, "a") - 0.5).abs() < 1e-12, "{out}");
 }
 
 /// `>>` is a logical shift of Verilog's 32-bit `integer`, read back as signed (2.37.0; it was a
