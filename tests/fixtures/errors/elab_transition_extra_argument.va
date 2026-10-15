@@ -1,0 +1,10 @@
+// expect: elab
+// code: E0334
+// at: 9:21
+// message: takes 1 to 5 arguments, but this call passes 6
+// fixed: 2.33.0 (before: the sixth argument was accepted and ignored)
+module r(p, n, q);
+  inout p, n, q;
+  electrical p, n, q;
+  analog V(q, n) <+ transition(V(p, n), 0, 1n, 1n, 1p, 7);
+endmodule

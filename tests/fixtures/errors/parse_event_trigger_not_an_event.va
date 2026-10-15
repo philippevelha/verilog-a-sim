@@ -1,0 +1,15 @@
+// expect: parse
+// code: E0239
+// at: 12:7
+// message: `@(foo)` is not an analog event
+// fixed: 2.33.0 (before: the trigger was skipped and `k = 1` ran at every evaluation)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  real k;
+  analog begin
+    k = 0;
+    @(foo) k = 1;
+    I(p, n) <+ (1 + k) * V(p, n);
+  end
+endmodule

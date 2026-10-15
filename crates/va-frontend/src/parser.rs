@@ -296,6 +296,10 @@ struct Parser<'a> {
 /// and the set they refuse can never drift apart.
 const STEP_EVENTS: [&str; 2] = ["initial_step", "final_step"];
 
+/// Where the `string`-variable limitation is tracked, for its refusal (`R0204`).
+const STRING_VARIABLES_TRACKING: &str =
+    "docs/proposals/openvaf-shared-defects.md, section 3 (wrong-construct diagnostics)";
+
 /// The **monitored** events this engine schedules, each with the synthetic call name its
 /// trigger is parsed into (`@` is not an identifier character, so no source can write one).
 /// Elaboration registers a `va_ir::EventSite` for each and reads it back as `EventFired`.
@@ -622,6 +626,44 @@ impl Parser<'_> {
             } else {
                 return Some(name);
             }
+            if is_event_separator(self.toks.get(i)) {
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+    }
+
+    /// The first term of the trigger starting at `self.pos` that is not one of the global
+    /// events this parser runs unconditionally (`initial_instance`, `initial_model`, and bare
+    /// step events), as source text for a diagnostic; `None` when every term is one. The
+    /// scheduled events never reach here (they were parsed or refused earlier), so anything
+    /// returned is not an analog event: Verilog-A has no named events, and `posedge`/`negedge`
+    /// are digital (LRM Annex C).
+    fn non_event_term_in_trigger(&self) -> Option<String> {
+        const GLOBAL: [&str; 4] = [
+            "initial_instance",
+            "initial_model",
+            "initial_step",
+            "final_step",
+        ];
+        let mut i = self.pos;
+        loop {
+            let tok = self.toks.get(i)?;
+            let name = match tok {
+                Token::Keyword(kw) => kw.as_str().to_string(),
+                Token::Ident(id) => id.clone(),
+                Token::RParen => return None,
+                other => return Some(other.describe()),
+            };
+            let next = self.toks.get(i + 1);
+            if !GLOBAL.contains(&name.as_str())
+                || !(next == Some(&Token::RParen) || is_event_separator(next))
+            {
+                // Name the whole term when it is a bare word, else the word it starts with.
+                return Some(name);
+            }
+            i += 1;
             if is_event_separator(self.toks.get(i)) {
                 i += 1;
             } else {
@@ -1542,6 +1584,11 @@ impl Parser<'_> {
             .unwrap_or(0);
         let settings = crate::preprocess::settings_at(self.directives, start);
         let module_pos = self.pos;
+        // `paramset` is Verilog-AMS (LRM 6.4), outside Verilog-A. Before 2.33.0 it read as
+        // "expected `module`".
+        if matches!(self.peek(), Some(Token::Ident(id)) if id == "paramset") {
+            return self.err_here(Diagnostic::new(codes::E023B));
+        }
         self.eat(&Token::Module)?;
         let name = self.expect_ident()?;
 
@@ -1738,6 +1785,16 @@ impl Parser<'_> {
         // a misspelling (`electical`) or a missing `` `include "disciplines.vams" ``, and the
         // generic "expected `(`" says neither.
         if params.is_empty() && matches!(self.peek(), Some(Token::Comma | Token::Semicolon)) {
+            // `string name;` is a string variable (Verilog-AMS 2.4), which this engine does not
+            // implement. Until 2.33.0 it fell through to the discipline error below, which sent
+            // the reader looking for a `string` discipline.
+            if module == "string" {
+                return Err(FrontendError::refused(
+                    Refusal::coded(codes::R0204, &[("name", name.as_str())])
+                        .at(self.location_of(module_pos))
+                        .tracking(STRING_VARIABLES_TRACKING),
+                ));
+            }
             let hint = closest(
                 &module,
                 ["electrical", "thermal"]
@@ -2195,6 +2252,14 @@ impl Parser<'_> {
                         );
                     }
                 }
+                // Anything that is not an analog event at all -- `@(foo)`, a variable, a
+                // `posedge` -- is an error. Before 2.33.0 it was skipped like the global events
+                // below and its body ran at every evaluation, silently.
+                if step_events.is_none() {
+                    if let Some(term) = self.non_event_term_in_trigger() {
+                        return self.err_here(Diagnostic::new(codes::E0239).arg("trigger", term));
+                    }
+                }
                 self.skip_balanced_parens()?;
                 let body = self.parse_stmt()?;
                 if let Some(names) = step_events {
@@ -2270,6 +2335,15 @@ impl Parser<'_> {
                 let value = self.parse_expr()?;
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::Contribute { target, value, at })
+            }
+            // `break;` / `continue;` are SystemVerilog, not Verilog-A. Before 2.33.0 they read
+            // as an assignment missing its `=`.
+            Some(Token::Ident(word))
+                if matches!(word.as_str(), "break" | "continue")
+                    && self.nth(1) == Some(&Token::Semicolon) =>
+            {
+                let word = word.clone();
+                self.err_here(Diagnostic::new(codes::E023A).arg("statement", word))
             }
             Some(Token::Ident(_)) => {
                 let at = self.src_pos(self.pos);

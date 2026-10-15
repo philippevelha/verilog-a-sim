@@ -3812,6 +3812,29 @@ fn compile_with_overrides(
         }
     }
 
+    // A device line's value must respect the parameter's declared range exactly as a default
+    // does (elaboration checks those, `E0309`/`E0310`). Before 2.33.0 it was never checked, and
+    // `r=-5` on a `from (0:inf)` resistor simply solved.
+    for p in &m.params {
+        let (lo, hi) = (
+            p.min.unwrap_or(f64::NEG_INFINITY),
+            p.max.unwrap_or(f64::INFINITY),
+        );
+        if !(p.default >= lo && p.default <= hi) {
+            let fmt = |v: f64| match v {
+                f64::INFINITY => "inf".to_string(),
+                f64::NEG_INFINITY => "-inf".to_string(),
+                v => v.to_string(),
+            };
+            return Err(va_diag::Diagnostic::new(va_diag::codes::E073A)
+                .arg("model", &m.name)
+                .arg("name", &p.name)
+                .arg("value", p.default)
+                .arg("range", format!("[{}:{}]", fmt(lo), fmt(hi)))
+                .into());
+        }
+    }
+
     va_codegen::CompiledModel::new(&m)
         .map_err(anyhow::Error::new)
         .with_context(|| format!("compiling model `{}`", module.name))

@@ -1,0 +1,9 @@
+{
+  "code": "E023B",
+  "rev": 1,
+  "message": "`paramset` is Verilog-AMS, not Verilog-A",
+  "description": "A `paramset` (Verilog-AMS LRM 6.4) defines a named set of parameter values for a module. It is outside the Verilog-A language this simulator implements. Until 2.33.0 this was reported as \"expected `module`\".",
+  "actions": [
+    "Set the values on each instance line instead (`X1 a b r rr=2k`), or give the module the defaults the paramset would have set."
+  ]
+}

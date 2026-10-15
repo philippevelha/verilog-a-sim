@@ -1,0 +1,10 @@
+{
+  "code": "R0204",
+  "rev": 1,
+  "message": "`string {name}`: string variables are not implemented",
+  "description": "`string` declares a string variable (Verilog-AMS 2.4), which this simulator does not implement: there is no string value type in its IR. Approximating it, for example as a number, would print or compare the wrong thing. Until 2.33.0 this was reported as a missing `string` discipline.",
+  "actions": [
+    "Write the text directly where it is used, e.g. `$strobe(\"label: %g\", x);`.",
+    "To choose between texts, choose between whole statements: `if (mode == 1) $strobe(\"fast\"); else $strobe(\"slow\");`."
+  ]
+}

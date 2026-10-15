@@ -503,7 +503,9 @@ class of lexemes.
   desugared into a guarded `if` whose condition the solver answers. The old flattening to "runs
   unconditionally" survives only for the simulator-specific `initial_instance`/`initial_model`,
   and `va-cli` refuses those in a transient run rather than let the flattening produce a wrong
-  waveform.
+  waveform. Any other trigger (`@(foo)`, a variable, `posedge x`) is **`E0239`** since 2.33.0:
+  it is not an analog event (Verilog-A has no named events; `posedge`/`negedge` are digital),
+  and until then it was flattened the same way, so its statement ran at every evaluation.
 - **Declaration and Assignment**: `@(event_expr) statement`.
 - **Expressions and Evaluation**: A recognised bare trigger is parsed properly — `cross`/`above`/
   `timer` keep every LRM argument and become a `va_ir::EventSite`; `initial_step`/`final_step`
@@ -1439,8 +1441,12 @@ including the ones with no implemented behavior at all.
   construct, why (it would fold to its undelayed input — a plausible waveform that is wrong),
   what to do instead (run DC/AC/noise, which are unaffected) and where it is tracked.
 - **Declaration and Assignment**: Called as `absdelay(value, delay[, max_delay])` — `value`
-  and `delay` are lowered and kept; `max_delay` is parsed and dropped, since only a time-domain
-  implementation needs it to size a history buffer.
+  and `delay` are lowered and kept. Since 2.33.0 the delay is clamped into `[0, max_delay]`
+  where it is used (`max_delay` bounds it and is not carried further; LRM 4.5.9 has no negative
+  delay), and a delay whose value is known when the model is compiled is checked instead:
+  outside that range it is **`E0396`**. Before, a negative delay was a phase advance in AC and
+  `max_delay` was dropped. A fourth argument is `E0334`. A value set from the deck is clamped,
+  not reported.
 - **Expressions and Evaluation**: `[value, delay]` in the IR. AC evaluates `delay` per point
   (a parameter expression, as the corpus writes it: `length * groupIndex / \`P_C`, the group
   delay of a waveguide). The `ω → 0` limit of the `C` term is `−τ`, taken as a limit rather
@@ -1926,7 +1932,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `scalared` | Reserved, no grammar production (net-vector storage-layout hint) | N/A | N/A | Digital structural only | No C analogue |
 | `sin` | Dynamic/static dual, §1.5 | `sin(x)` call | Sine | Analog expr / const context | C `sin()` |
 | `sinh` | Dynamic/static dual, §1.5 | `sinh(x)` call | Hyperbolic sine | Analog expr / const context | C `sinh()` |
-| `slew` | **Simulation-time** (Tier B, 2026-08-07) — evaluated against Interface β's state channel; `transition` is an approximation (no exact corner breakpoints) (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
+| `slew` | **Simulation-time** (Tier B, 2026-08-07; more than three arguments is `E0334` since 2.33.0, accepted and ignored before) — evaluated against Interface β's state channel; `transition` is an approximation (no exact corner breakpoints) (fixed — see §1.5 `Transition`/`Slew`); settles to input at DC | `slew(value, pos_rate[, neg_rate])` call | Identity on `value`; rates parsed, never evaluated | Analog-block only | No C analogue |
 | `small` | Reserved, no grammar production (net-strength charge-storage keyword) | N/A | N/A | Digital net-strength only | No C analogue |
 | `specify` | Reserved, no grammar production (opens a timing-check block, paired with `endspecify`) | N/A | N/A | Digital timing-check only | No C analogue |
 | `specparam` | Reserved, no grammar production (a parameter usable only inside a `specify` block) | N/A | N/A | Digital timing-check only | No C analogue |
@@ -1945,7 +1951,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `tran` | Reserved, no grammar production (bidirectional pass-switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif0` | Reserved, no grammar production (bidirectional pass switch, active-low enable) | N/A | N/A | Digital/switch-level only | No C analogue |
 | `tranif1` | Reserved, no grammar production (bidirectional pass switch, active-high enable) | N/A | N/A | Digital/switch-level only | No C analogue |
-| `transition` | **Simulation-time** (Tier B, 2026-08-07) — evaluated against Interface β's state channel; `transition` is an approximation (no exact corner breakpoints) (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
+| `transition` | **Simulation-time** (Tier B, 2026-08-07; more than five arguments is `E0334` since 2.33.0, accepted and ignored before) — evaluated against Interface β's state channel; `transition` is an approximation (no exact corner breakpoints) (fixed — see §1.5 `Transition`; previously rejected at elaboration, confirmed live at the time by `va-cli check` failing exactly here on `external/verilogaLib-master/comparator_dynamic.va`, which now passes) | `transition(value, delay[, rise[, fall]])` call | Identity on `value`; `delay`/`rise`/`fall` parsed, never evaluated | Analog-block only | No C analogue |
 | `tri` | Reserved, no grammar production (default-strength tri-state net type) | N/A | N/A | Digital structural only | No C analogue |
 | `tri0` | Reserved, no grammar production (net type: pulls to 0 when undriven) | N/A | N/A | Digital structural only | No C analogue |
 | `tri1` | Reserved, no grammar production (net type: pulls to 1 when undriven) | N/A | N/A | Digital structural only | No C analogue |
@@ -2156,10 +2162,14 @@ integer(...); for (i=0; i<N; i=i+1) begin if ((digital >> i) & 1) out_val[i] = h
   expands the same way into an if/else-if chain of `Stmt::Assign`s. `rhs`/the read index are each
   lowered exactly once and the resulting `ExprId` shared across every arm — not re-lowered per
   arm — so the expansion costs `O(range)` arena nodes, not `O(range)` re-evaluations of a
-  possibly-expensive sub-expression. **Limitation**: a runtime index outside the array's declared
-  range at simulation time silently resolves to the `hi` arm rather than erroring — there is no
-  runtime-error concept in this IR/ABI; every corpus model driving this path bounds its own loop
-  to the array's declared range, so the fallback is never actually reached in practice.
+  possibly-expensive sub-expression. Since 2.33.0 an unconditionally evaluated runtime index outside the declared range
+  reports a `$error` (the run ends with `E0739`) naming the array, the index and the range, from a
+  check elaboration emits just before the statement; the access still uses the `hi` element so
+  the solve can go on. **Limitation**: an access inside a conditionally evaluated operand (a `?:`
+  arm, the right side of `&&`/`||`) or in a loop header gets no check, because a check placed
+  before the statement would run whether or not the access did; there an out-of-range index
+  still resolves to `hi` silently. The same applies to a runtime-indexed vector-net probe or
+  contribution.
 - **Structural and Analog Usage**: Declaration is module-level only (`Item::Var`); a block-local
   attempt (`Stmt::VarDecl`) is rejected with a specific error — by the time the analog-block
   pass runs, module-level declarations are already finalized, so there is nowhere sound left to

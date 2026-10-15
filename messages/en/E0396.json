@@ -1,0 +1,10 @@
+{
+  "code": "E0396",
+  "rev": 1,
+  "message": "`absdelay` delay {delay} is outside [0:{max}]",
+  "description": "LRM 4.5.9: the delay of `absdelay(value, delay[, max_delay])` is non-negative and at most `max_delay`. Until 2.33.0 neither was checked: a negative delay became a phase advance in AC, and `max_delay` was ignored. This delay is known when the model is compiled, so it is checked now; a delay that varies during the run is clamped into [0:max_delay] instead.",
+  "actions": [
+    "Make the delay non-negative, or raise `max_delay` if the delay is meant to reach this value.",
+    "If a negative value is a model quantity that can legitimately go below zero, clamp it yourself: `absdelay(x, max(td, 0))`."
+  ]
+}

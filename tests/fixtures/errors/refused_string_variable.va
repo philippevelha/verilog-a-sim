@@ -1,0 +1,11 @@
+// expect: refused
+// code: R0204
+// at: 9:3
+// message: string variables are not implemented
+// fixed: 2.33.0 (before: a missing `string` discipline, E0217)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  string label;
+  analog I(p, n) <+ V(p, n);
+endmodule

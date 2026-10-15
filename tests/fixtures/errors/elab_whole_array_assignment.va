@@ -1,0 +1,16 @@
+// expect: elab
+// code: E0397
+// at: 13:5
+// message: `h` is an array; assign its elements one at a time
+// fixed: 2.33.0 (before: "variable `h` is assigned but never declared", E0330)
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  real g[0:1], h[0:1];
+  analog begin
+    g[0] = 1;
+    g[1] = 2;
+    h = g;
+    I(p, n) <+ h[1] * V(p, n);
+  end
+endmodule

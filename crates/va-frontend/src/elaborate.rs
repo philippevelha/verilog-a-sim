@@ -256,6 +256,8 @@ fn elaborate_inner(
         param_vals: HashMap::new(),
         vars: HashMap::new(),
         block_scopes: Vec::new(),
+        index_guards: Vec::new(),
+        conditional_depth: 0,
         funcs: HashMap::new(),
         branches: HashMap::new(),
         named_branches: HashMap::new(),
@@ -410,6 +412,14 @@ struct Elaborator<'a> {
     /// [`Self::vars`], so an inner declaration shadows an outer variable *or* a module
     /// parameter for exactly the extent of its own block — and not one statement further.
     block_scopes: Vec<HashMap<String, VarId>>,
+    /// Range checks for the runtime-indexed array and vector accesses of the statement being
+    /// lowered, emitted just before it (§ `Self::push_index_guard`).
+    index_guards: Vec<va_ir::Stmt>,
+    /// How many conditionally evaluated operands (`?:` arms, the right side of `&&`/`||`)
+    /// enclose the expression being lowered. An access inside one gets no range check: the
+    /// guard would run whether or not the access does, and `i < 4 ? g[i] : 0` must not report
+    /// `i = 4`.
+    conditional_depth: usize,
     funcs: HashMap<String, FuncId>,
     branches: HashMap<(u32, u32), BranchId>,
     /// Named branches declared with `branch (a, b) name;`, resolved to their [`BranchId`].
@@ -1274,7 +1284,11 @@ impl Elaborator<'_> {
     /// parameter gets its own message: it *is* declared, and "unknown variable" would send the
     /// reader looking for a typo that is not there.
     fn undeclared_assign_target(&self, name: &str) -> FrontendError {
-        if self.params.contains_key(name) {
+        // A whole array on the left (`h = g;`): Verilog-A assigns arrays element by element.
+        // Before 2.33.0 this said `h` was never declared.
+        if self.var_arrays.contains_key(name) {
+            elab(Diagnostic::new(codes::E0397).arg("name", name))
+        } else if self.params.contains_key(name) {
             elab(Diagnostic::new(codes::E0329).arg("name", name))
         } else {
             elab(Diagnostic::new(codes::E0330).arg("name", name))
@@ -1412,8 +1426,65 @@ impl Elaborator<'_> {
     }
 
     fn lower_stmt(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
-        self.lower_stmt_inner(stmt)
-            .map_err(|e| locate(e, || self.stmt_at(stmt)))
+        let outer = std::mem::take(&mut self.index_guards);
+        let lowered = self
+            .lower_stmt_inner(stmt)
+            .map_err(|e| locate(e, || self.stmt_at(stmt)));
+        let guards = std::mem::replace(&mut self.index_guards, outer);
+        let lowered = lowered?;
+        // A loop header's checks are dropped: placed before the loop they would test the
+        // index once, with whatever value it held before the loop ran. A block's own
+        // statements carry their own.
+        let guarded = matches!(
+            stmt,
+            Stmt::Assign { .. }
+                | Stmt::Contribute { .. }
+                | Stmt::Task { .. }
+                | Stmt::If { .. }
+                | Stmt::Case { .. }
+                | Stmt::VarDecl { .. }
+        );
+        if guards.is_empty() || !guarded {
+            return Ok(lowered);
+        }
+        let mut block = guards;
+        block.push(lowered);
+        Ok(va_ir::Stmt::Block(block))
+    }
+
+    /// Queue a range check for a runtime index `idx` into `name`'s declared `[lo:hi]`, to run
+    /// before the statement being lowered: an out-of-range index reports `$error` and the access
+    /// goes on to use element `hi`, as it always has (the IR has no other way to keep the solve
+    /// going). Before 2.33.0 the access used `hi` and said nothing. Skipped inside a
+    /// conditionally evaluated operand (§ `Self::conditional_depth`).
+    fn push_index_guard(&mut self, idx: ExprId, name: &str, lo: i64, hi: i64) {
+        if self.conditional_depth > 0 {
+            return;
+        }
+        let lo_c = self.out.push_expr(Expr::Const(lo as f64));
+        let hi_c = self.out.push_expr(Expr::Const(hi as f64));
+        let below = self
+            .out
+            .push_expr(Expr::Binary(va_ir::BinOp::Lt, idx, lo_c));
+        let above = self
+            .out
+            .push_expr(Expr::Binary(va_ir::BinOp::Gt, idx, hi_c));
+        let cond = self
+            .out
+            .push_expr(Expr::Binary(va_ir::BinOp::Or, below, above));
+        let message = format!(
+            "index %g is outside `{name}`'s declared range [{lo}:{hi}]; element {hi} was used \
+             instead. Guard the index, e.g. `if (i >= {lo} && i <= {hi})`."
+        );
+        self.index_guards.push(va_ir::Stmt::If {
+            cond,
+            then_: vec![va_ir::Stmt::Task {
+                kind: va_ir::TaskKind::Error,
+                args: vec![va_ir::TaskArg::Str(message), va_ir::TaskArg::Expr(idx)],
+                target: None,
+            }],
+            else_: Vec::new(),
+        });
     }
 
     fn lower_stmt_inner(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
@@ -2474,6 +2545,23 @@ impl Elaborator<'_> {
             // `neg_rate` defaulting to `pos_rate` — the LRM's own rule that a single stated rate
             // limits both directions symmetrically.
             ExprAst::Call { name, args } if matches!(name.as_str(), "transition" | "slew") => {
+                // An argument past the last one the LRM defines was accepted and ignored until
+                // 2.33.0, so a misplaced comma went unreported.
+                let (max, signature) = if name == "slew" {
+                    (3, "(value[, max_pos_slew_rate[, max_neg_slew_rate]])")
+                } else {
+                    (5, "(value[, delay[, rise_time[, fall_time[, time_tol]]]])")
+                };
+                if args.len() > max {
+                    return Err(elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", name)
+                            .arg("signature", signature)
+                            .arg("min", 1)
+                            .arg("max", max)
+                            .arg("got", args.len()),
+                    ));
+                }
                 let value = *args.first().ok_or_else(|| {
                     elab(
                         Diagnostic::new(codes::E0335)
@@ -2563,10 +2651,54 @@ impl Elaborator<'_> {
                             .arg("got", args.len()),
                     )
                 })?;
+                if args.len() > 3 {
+                    return Err(elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "absdelay")
+                            .arg("signature", "(value, delay[, max_delay])")
+                            .arg("min", 2)
+                            .arg("max", 3)
+                            .arg("got", args.len()),
+                    ));
+                }
+                // LRM 4.5.9: the delay is non-negative and may not exceed `max_delay`. Before
+                // 2.33.0 neither was checked: AC turned a negative delay into a phase *advance*,
+                // and `max_delay` was dropped. A delay known at elaboration is checked here; one
+                // that varies is clamped into `[0, max_delay]` where it is used.
+                // The check reads parameters without recording them as fixed at elaboration
+                // (`elab_reads`): it is advisory, and the delay must stay settable from a deck,
+                // where a bad value is clamped instead.
+                let reads_before = self.elab_reads.borrow().clone();
+                let max_delay = args.get(2).map(|&m| (m, self.const_eval(m).ok()));
+                let fixed_delay = self.const_eval(delay).ok();
+                *self.elab_reads.borrow_mut() = reads_before;
+                if let Some(d) = fixed_delay {
+                    let max = max_delay.and_then(|(_, v)| v).unwrap_or(f64::INFINITY);
+                    if !(d >= 0.0 && d <= max) {
+                        let max = if max.is_finite() {
+                            format!("{max:e}")
+                        } else {
+                            "inf".into()
+                        };
+                        return Err(elab(
+                            Diagnostic::new(codes::E0396)
+                                .arg("delay", format!("{d:e}"))
+                                .arg("max", max),
+                        ));
+                    }
+                }
                 let value = self.lower_expr(value)?;
-                let delay = self.lower_expr(delay)?;
-                // A third `maxdelay` argument is accepted and dropped: it exists to size a
-                // history buffer, which only a time-domain implementation needs (stage 2).
+                let mut delay = self.lower_expr(delay)?;
+                let zero = self.out.push_expr(Expr::Const(0.0));
+                let negative = self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Lt, delay, zero));
+                delay = self.out.push_expr(Expr::Select(negative, zero, delay));
+                if let Some((m, _)) = max_delay {
+                    let m = self.lower_expr(m)?;
+                    let over = self.out.push_expr(Expr::Binary(va_ir::BinOp::Gt, delay, m));
+                    delay = self.out.push_expr(Expr::Select(over, m, delay));
+                }
                 Expr::Call(Builtin::Absdelay, vec![value, delay])
             }
             // `laplace_nd(value, num, den[, tol])` / `laplace_np(value, num, pole[, tol])` /
@@ -2806,13 +2938,21 @@ impl Elaborator<'_> {
             ExprAst::Binary(op, l, rhs) => {
                 let op = map_binop(*op);
                 let l = self.lower_expr(*l)?;
-                let rhs = self.lower_expr(*rhs)?;
-                Expr::Binary(op, l, rhs)
+                // `&&`/`||` short-circuit: their right side is evaluated conditionally.
+                let short = matches!(op, va_ir::BinOp::And | va_ir::BinOp::Or);
+                self.conditional_depth += usize::from(short);
+                let rhs = self.lower_expr(*rhs);
+                self.conditional_depth -= usize::from(short);
+                Expr::Binary(op, l, rhs?)
             }
             ExprAst::Cond { cond, then_, else_ } => {
                 let cond = self.lower_expr(*cond)?;
-                let then_ = self.lower_expr(*then_)?;
-                let else_ = self.lower_expr(*else_)?;
+                self.conditional_depth += 1;
+                let arms = self
+                    .lower_expr(*then_)
+                    .and_then(|t| Ok((t, self.lower_expr(*else_)?)));
+                self.conditional_depth -= 1;
+                let (then_, else_) = arms?;
                 Expr::Select(cond, then_, else_)
             }
         };
@@ -3318,6 +3458,7 @@ impl Elaborator<'_> {
             ast::AccessKind::Flow => AccessKind::Flow,
         };
         let idx = self.lower_expr(idx_expr)?;
+        self.push_index_guard(idx, &name, lo, hi);
         let other = if access.args.len() >= 2 {
             Some(self.resolve_net_arg(&access.args[1 - pos])?)
         } else {
@@ -3381,6 +3522,7 @@ impl Elaborator<'_> {
         } = dyn_term;
         let name = name.as_str();
         let idx = self.lower_expr(idx_expr)?;
+        self.push_index_guard(idx, name, lo, hi);
         let value = self.lower_expr(value)?;
         let other = if args.len() >= 2 {
             Some(self.resolve_net_arg(&args[1 - pos])?)
@@ -4081,6 +4223,7 @@ impl Elaborator<'_> {
             return Ok(self.out.push_expr(Expr::Var(id)));
         };
         let idx = self.lower_expr(idxs[dyn_dim])?;
+        self.push_index_guard(idx, name, lo, hi);
         let mut chain: Option<ExprId> = None;
         for k in (lo..=hi).rev() {
             let full = combine_idx(dyn_dim, k, other_idx);
@@ -4125,6 +4268,7 @@ impl Elaborator<'_> {
             return Ok(va_ir::Stmt::Assign { lhs: id, rhs });
         };
         let idx = self.lower_expr(idxs[dyn_dim])?;
+        self.push_index_guard(idx, name, lo, hi);
         let rhs = self.lower_expr(rhs)?;
         let mut chain: Option<va_ir::Stmt> = None;
         for k in (lo..=hi).rev() {
@@ -7287,12 +7431,17 @@ mod tests {
         let args = args_of("module t(a, b); inout a, b; electrical a, b; parameter real td = 1n; analog begin I(a, b) <+ absdelay(V(a, b), td); end endmodule");
         assert_eq!(args.len(), 2, "absdelay normalizes to (value, delay)");
         assert!(matches!(m.expr(args[0]), va_ir::Expr::Probe(_)));
-        // The delay is a real lowered expression now, not a discarded token.
-        assert!(matches!(m.expr(args[1]), va_ir::Expr::Param(_)));
+        // The delay is a real lowered expression now, not a discarded token: the parameter,
+        // clamped at zero (2.33.0; LRM 4.5.9 has no negative delay).
+        let va_ir::Expr::Select(_, zero, delay) = m.expr(args[1]) else {
+            panic!("the delay is clamped: {:?}", m.expr(args[1]));
+        };
+        assert!(matches!(m.expr(*zero), va_ir::Expr::Const(z) if *z == 0.0));
+        assert!(matches!(m.expr(*delay), va_ir::Expr::Param(_)));
 
-        // A third `maxdelay` argument is accepted and dropped: only a time-domain
-        // implementation needs it, to size a history buffer (stage 2 of the proposal).
-        assert_eq!(args_of("module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ absdelay(V(a, b), 1n, 5n); end endmodule").len(), 2, "maxdelay is dropped, not carried");
+        // A third `maxdelay` argument is not carried as an argument: it bounds the delay
+        // expression instead (2.33.0), so the call still has two.
+        assert_eq!(args_of("module t(a, b); inout a, b; electrical a, b; analog begin I(a, b) <+ absdelay(V(a, b), 1n, 5n); end endmodule").len(), 2, "maxdelay bounds the delay, not carried");
 
         // No value argument at all is still an error.
         let toks = lex(
@@ -7801,6 +7950,26 @@ mod tests {
         assert!(elaborate(&ast).is_err());
     }
 
+    /// The statement a runtime-indexed access sits in, without the range checks
+    /// (`Elaborator::push_index_guard`) emitted ahead of it: those make it a `Block` of guard
+    /// `If`s, each reporting `$error`, followed by the statement itself.
+    fn unguard(stmt: &va_ir::Stmt) -> &va_ir::Stmt {
+        match stmt {
+            va_ir::Stmt::Block(body) if body.len() >= 2 => {
+                let (last, guards) = body.split_last().expect("non-empty");
+                for g in guards {
+                    assert!(
+                        matches!(g, va_ir::Stmt::If { then_, .. }
+                            if matches!(then_.as_slice(), [va_ir::Stmt::Task { kind: va_ir::TaskKind::Error, .. }])),
+                        "expected a range check, got {g:?}"
+                    );
+                }
+                last
+            }
+            other => other,
+        }
+    }
+
     #[test]
     fn array_variable_runtime_index_expands_to_a_select_chain() {
         // § dynamic vector-net/array-variable indexing: `out_val[j]` where `j` is an ordinary
@@ -7817,7 +7986,7 @@ mod tests {
             .next()
             .expect("at least one module");
         let m = elaborate(&ast).expect("elaborates");
-        let value = match &m.analog[1] {
+        let value = match unguard(&m.analog[1]) {
             va_ir::Stmt::Contribute { value, .. } => *value,
             other => panic!("expected a contribution, got {other:?}"),
         };
@@ -7849,7 +8018,7 @@ mod tests {
             "module t(a); inout a; electrical a; real out_val[0:3]; integer j; \
              analog begin j = 2; out_val[j] = 5.0; I(a) <+ out_val[0]; end endmodule",
         );
-        match &m.analog[1] {
+        match unguard(&m.analog[1]) {
             va_ir::Stmt::If { then_, else_, .. } => {
                 assert!(matches!(then_.as_slice(), [va_ir::Stmt::Assign { .. }]));
                 assert!(matches!(else_.as_slice(), [va_ir::Stmt::If { .. }]));
@@ -7868,12 +8037,12 @@ mod tests {
             "module t(a, b); inout a, b; electrical a, b, bus[0:1]; integer i; \
              analog begin i = 1; I(a, b) <+ V(bus[i]); V(bus[i]) <+ V(a, b); end endmodule",
         );
-        let read_value = match &m.analog[1] {
+        let read_value = match unguard(&m.analog[1]) {
             va_ir::Stmt::Contribute { value, .. } => *value,
             other => panic!("expected a contribution, got {other:?}"),
         };
         assert!(matches!(m.expr(read_value), va_ir::Expr::Select(_, _, _)));
-        match &m.analog[2] {
+        match unguard(&m.analog[2]) {
             va_ir::Stmt::If { then_, else_, .. } => {
                 assert!(matches!(then_.as_slice(), [va_ir::Stmt::Contribute { .. }]));
                 assert!(matches!(else_.as_slice(), [va_ir::Stmt::Contribute { .. }]));
@@ -8352,7 +8521,7 @@ mod tests {
             .next()
             .expect("at least one module");
         let m = elaborate(&ast).expect("elaborates");
-        let value = match &m.analog[1] {
+        let value = match unguard(&m.analog[1]) {
             va_ir::Stmt::Contribute { value, .. } => *value,
             other => panic!("expected a contribution, got {other:?}"),
         };
@@ -8456,7 +8625,7 @@ mod tests {
             .next()
             .expect("at least one module");
         let m = elaborate(&ast).expect("elaborates");
-        let value = match &m.analog[1] {
+        let value = match unguard(&m.analog[1]) {
             va_ir::Stmt::Contribute { value, .. } => *value,
             other => panic!("expected a contribution, got {other:?}"),
         };

@@ -1,0 +1,15 @@
+// expect: parse
+// code: E023B
+// at: 12:1
+// message: `paramset` is Verilog-AMS, not Verilog-A
+// fixed: 2.33.0 (before: "expected `module`, found identifier `paramset`")
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real rr = 1k;
+  analog I(p, n) <+ V(p, n) / rr;
+endmodule
+paramset rfast r;
+  parameter real x = 2k;
+  .rr = x;
+endparamset

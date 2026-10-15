@@ -1,0 +1,10 @@
+// expect: elab
+// code: E0396
+// at: 9:21
+// message: `absdelay` delay -1e-9 is outside [0:inf]
+// fixed: 2.33.0 (before: accepted; AC turned the negative delay into a phase advance)
+module r(p, n, q);
+  inout p, n, q;
+  electrical p, n, q;
+  analog V(q, n) <+ absdelay(V(p, n), -1n);
+endmodule

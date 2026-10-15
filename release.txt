@@ -22,6 +22,56 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.33.0 - 2026-10-15
+--------------------
+**Five silent wrong answers become errors, and four errors that named the wrong construct now
+name the right one.** Batch A of `docs/proposals/openvaf-shared-defects.md` (items 3-7 and its
+section 3): defects this simulator shares with OpenVAF-Reloaded. Each message says what to write
+instead; the workaround is repeated here for anyone still on 2.32.x.
+  * `@(foo)`, `@(x)`, `@(posedge x)`: not analog events, so the trigger was skipped and its
+    statement ran at **every** evaluation. Now `E0239`.
+    Workaround: write `@(cross(sig - level, +1))`, `@(above(...))`, `@(timer(...))` or
+    `@(initial_step)`; or drop the `@(...)` if every evaluation is what was meant.
+  * A device-line value outside the parameter's declared `from`/`exclude` range (`X1 a 0 rr
+    r=-5` against `from (0:inf)`) ran with that value. Now `E073A`, before anything is solved.
+    The range is checked with inclusive ends (the IR keeps no open/closed flag), so
+    `from (0:inf)` still admits exactly 0.
+    Workaround, and the way to catch exactly-0 too: in the model,
+    `@(initial_step) if (!(r > 0)) $error("r = %g is outside (0:inf)", r);` (the run then ends
+    with `E0739`).
+  * A runtime array or vector index outside its declared range read (or wrote) the last element.
+    Now a `$error` naming the array, the index and the range, from a check elaboration emits
+    before the statement; the access still uses the last element so the solve goes on, and the
+    run ends with `E0739`. Not checked inside a `?:` arm, the right side of `&&`/`||`, or a loop
+    header, where a check placed before the statement would run when the access does not
+    (`i <= 3 ? g[i] : 0` must stay quiet at `i = 7`).
+    Workaround: `if (i >= lo && i <= hi)` around the access.
+  * `absdelay`: a negative delay became a phase advance in AC, and `max_delay` was dropped. A
+    delay known when the model is compiled must now lie in `[0, max_delay]` (`E0396`); one that
+    varies, or comes from the deck, is clamped into it (LRM 4.5.9).
+    Workaround: `absdelay(x, min(max(td, 0), tmax))`.
+  * A surplus argument to `transition` (more than 5), `slew` (3) or `absdelay` (3) was accepted
+    and ignored. Now `E0334`. Workaround: remove it.
+  * Wrong-construct diagnostics: `string s;` said "no discipline `string`" and is now refused as
+    an unimplemented string variable (`R0204`; write the text in the `$strobe` itself);
+    `break;`/`continue;` said "expected `=`" and are now `E023A` (fold the exit into the loop
+    condition); `h = g;` on arrays said "`h` never declared" and is now `E0397` (assign element
+    by element); `paramset` said "expected `module`" and is now `E023B` (set values on the
+    instance line).
+
+Seven new codes: `E0239`, `E023A`, `E023B`, `E0396`, `E0397`, `E073A`, `R0204`, each with a
+catalogue entry and an error-corpus file (the corpus is 46 files). None of the 84 `.va` files
+in `models/`, `external/` and `docs/examples/` trips any of them.
+
+**This changes results** only for models that hit one of the above, which now stop with a
+message instead of running. Six elaboration tests asserting the IR shape of runtime indexing
+and `absdelay` were updated for the guard blocks and the delay clamp.
+
+Measured: `cargo test --workspace` 1003 passed, 0 failed (997 + 6 in
+`va-cli/tests/silent_wrong_answers.rs`); `cargo xtask validate` 28 checked, 0 failed,
+convergence 28/28.
+
+
 2.32.1+1 - 2026-10-15
 ----------------------
 **A plan for the defects we share with OpenVAF-Reloaded:

@@ -237,6 +237,15 @@ pub const E0237: Code = Code::new("E0237");
 /// argument {index} of `{name}` may not be omitted
 pub const E0238: Code = Code::new("E0238");
 
+/// `@({trigger})` is not an analog event
+pub const E0239: Code = Code::new("E0239");
+
+/// `{statement}` is not a Verilog-A statement
+pub const E023A: Code = Code::new("E023A");
+
+/// `paramset` is Verilog-AMS, not Verilog-A
+pub const E023B: Code = Code::new("E023B");
+
 /// `{name}` is declared both as a parameter and as a variable in this module; rename one of them
 pub const E0301: Code = Code::new("E0301");
 
@@ -522,6 +531,12 @@ pub const E0394: Code = Code::new("E0394");
 /// {file}: a $table_model table needs at least two distinct points, found {count}
 pub const E0395: Code = Code::new("E0395");
 
+/// `absdelay` delay {delay} is outside [0:{max}]
+pub const E0396: Code = Code::new("E0396");
+
+/// `{name}` is an array; assign its elements one at a time
+pub const E0397: Code = Code::new("E0397");
+
 /// bound_step is not allowed inside an analog function body
 pub const E0401: Code = Code::new("E0401");
 
@@ -801,6 +816,9 @@ pub const E0738: Code = Code::new("E0738");
 /// {count} `$error` message(s) reported by the model(s) during the run
 pub const E0739: Code = Code::new("E0739");
 
+/// device line sets `{model}`'s parameter `{name}` to {value}, outside its declared range {range}
+pub const E073A: Code = Code::new("E073A");
+
 /// `pragma protect`, an encrypted model envelope
 pub const R0101: Code = Code::new("R0101");
 
@@ -812,6 +830,9 @@ pub const R0202: Code = Code::new("R0202");
 
 /// the reserved word `{word}`
 pub const R0203: Code = Code::new("R0203");
+
+/// `string {name}`: string variables are not implemented
+pub const R0204: Code = Code::new("R0204");
 
 /// `$fopen("{name}", "{mode}")`, a file opened for reading
 pub const R0301: Code = Code::new("R0301");
@@ -904,22 +925,22 @@ pub const ALL: &[Code] = &[
     E0125, E0126, E0127, E0201, E0202, E0203, E0204, E0205, E0206, E0207, E0208, E0209, E0210,
     E0211, E0212, E0213, E0214, E0215, E0216, E0217, E0218, E0219, E0220, E0221, E0222, E0223,
     E0224, E0225, E0226, E0227, E0228, E0229, E0230, E0231, E0232, E0233, E0234, E0235, E0236,
-    E0237, E0238, E0301, E0302, E0303, E0304, E0305, E0306, E0307, E0308, E0309, E0310, E0311,
-    E0312, E0313, E0314, E0315, E0316, E0317, E0318, E0319, E0320, E0321, E0322, E0323, E0324,
-    E0325, E0326, E0327, E0328, E0329, E0330, E0331, E0332, E0333, E0334, E0335, E0336, E0337,
-    E0338, E0339, E0340, E0341, E0342, E0343, E0344, E0345, E0346, E0347, E0348, E0349, E0350,
-    E0351, E0352, E0353, E0354, E0355, E0356, E0357, E0358, E0359, E0360, E0361, E0362, E0363,
-    E0364, E0365, E0366, E0367, E0368, E0369, E0370, E0371, E0372, E0373, E0374, E0375, E0376,
-    E0377, E0378, E0379, E0380, E0381, E0382, E0383, E0384, E0385, E0386, E0387, E0388, E0389,
-    E0390, E0391, E0392, E0393, E0394, E0395, E0401, E0402, E0403, E0404, E0405, E0406, E0407,
-    E0408, E0409, E0410, E0411, E0412, E0413, E0501, E0502, E0503, E0504, E0505, E0506, E0507,
-    E0508, E0509, E0510, E0511, E0512, E0513, E0514, E0515, E0516, E0517, E0518, E0519, E0520,
-    E0521, E0522, E0523, E0524, E0525, E0526, E0527, E0528, E0529, E0530, E0531, E0532, E0533,
-    E0601, E0602, E0603, E0604, E0605, E0606, E0607, E0608, E0701, E0702, E0703, E0704, E0705,
-    E0706, E0707, E0708, E0709, E0710, E0711, E0712, E0713, E0714, E0715, E0716, E0717, E0718,
-    E0719, E0720, E0721, E0722, E0723, E0724, E0725, E0726, E0727, E0728, E0729, E0730, E0731,
-    E0732, E0733, E0734, E0735, E0736, E0737, E0738, E0739, R0101, R0201, R0202, R0203, R0301,
-    R0302, R0303, R0304, R0305, R0306, R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404,
-    R0405, R0406, R0407, R0408, R0409, R0410, W0101, W0102, W0103, W0104, W0301, W0501, W0502,
-    W0503,
+    E0237, E0238, E0239, E023A, E023B, E0301, E0302, E0303, E0304, E0305, E0306, E0307, E0308,
+    E0309, E0310, E0311, E0312, E0313, E0314, E0315, E0316, E0317, E0318, E0319, E0320, E0321,
+    E0322, E0323, E0324, E0325, E0326, E0327, E0328, E0329, E0330, E0331, E0332, E0333, E0334,
+    E0335, E0336, E0337, E0338, E0339, E0340, E0341, E0342, E0343, E0344, E0345, E0346, E0347,
+    E0348, E0349, E0350, E0351, E0352, E0353, E0354, E0355, E0356, E0357, E0358, E0359, E0360,
+    E0361, E0362, E0363, E0364, E0365, E0366, E0367, E0368, E0369, E0370, E0371, E0372, E0373,
+    E0374, E0375, E0376, E0377, E0378, E0379, E0380, E0381, E0382, E0383, E0384, E0385, E0386,
+    E0387, E0388, E0389, E0390, E0391, E0392, E0393, E0394, E0395, E0396, E0397, E0401, E0402,
+    E0403, E0404, E0405, E0406, E0407, E0408, E0409, E0410, E0411, E0412, E0413, E0501, E0502,
+    E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0512, E0513, E0514, E0515,
+    E0516, E0517, E0518, E0519, E0520, E0521, E0522, E0523, E0524, E0525, E0526, E0527, E0528,
+    E0529, E0530, E0531, E0532, E0533, E0601, E0602, E0603, E0604, E0605, E0606, E0607, E0608,
+    E0701, E0702, E0703, E0704, E0705, E0706, E0707, E0708, E0709, E0710, E0711, E0712, E0713,
+    E0714, E0715, E0716, E0717, E0718, E0719, E0720, E0721, E0722, E0723, E0724, E0725, E0726,
+    E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734, E0735, E0736, E0737, E0738, E0739,
+    E073A, R0101, R0201, R0202, R0203, R0204, R0301, R0302, R0303, R0304, R0305, R0306, R0307,
+    R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409, R0410,
+    W0101, W0102, W0103, W0104, W0301, W0501, W0502, W0503,
 ];

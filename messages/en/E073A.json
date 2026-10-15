@@ -1,0 +1,10 @@
+{
+  "code": "E073A",
+  "rev": 1,
+  "message": "device line sets `{model}`'s parameter `{name}` to {value}, outside its declared range {range}",
+  "description": "The model declares a range for this parameter with `from`/`exclude`, and the value given on the device line (or a `.param` it uses) is outside it. A model's own default is checked when it is compiled; until 2.33.0 a value from the deck was not, and the run went ahead with a value the model says it cannot handle. The range is checked with inclusive ends: an exclusive bound such as `from (0:inf)` still lets exactly 0 through.",
+  "actions": [
+    "Change the value on the device line.",
+    "To also catch an excluded end point, or values computed inside the model, add a check to the model itself: `@(initial_step) if (!(r > 0)) $error(\"r = %g is outside (0:inf)\", r);` -- the run then ends with E0739."
+  ]
+}

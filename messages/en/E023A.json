@@ -1,0 +1,10 @@
+{
+  "code": "E023A",
+  "rev": 1,
+  "message": "`{statement}` is not a Verilog-A statement",
+  "description": "`break` and `continue` come from SystemVerilog; Verilog-A loops have no early exit. Until 2.33.0 this was reported as an assignment missing its `=`.",
+  "actions": [
+    "For `break`: fold the exit into the loop condition, e.g. `for (i = 0; i < n && !done; i = i + 1)` and set `done = 1` where the `break` was.",
+    "For `continue`: wrap the rest of the loop body in `if (!skip) begin ... end`."
+  ]
+}

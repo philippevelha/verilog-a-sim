@@ -1,0 +1,9 @@
+{
+  "code": "E0397",
+  "rev": 1,
+  "message": "`{name}` is an array; assign its elements one at a time",
+  "description": "Verilog-A has no whole-array assignment: `h = g;` with `h` declared as an array is not a statement the language defines. Until 2.33.0 this was reported as an assignment to an undeclared variable.",
+  "actions": [
+    "Assign each element, e.g. in a loop: `for (i = 0; i < N; i = i + 1) h[i] = g[i];`."
+  ]
+}

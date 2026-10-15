@@ -1,7 +1,8 @@
 # Plan: defects we share with OpenVAF-Reloaded
 
 **Status: proposed, 2026-10-15 (2.32.1+1).** A plan, not a change: no code moves with this
-document.
+document. **Batch A (items 3-7 and the diagnostics of section 3) landed in 2.33.0**; each item
+below still describes the workaround, which is what to tell a user on an older version.
 
 In October 2026 we read 36 OpenVAF-Reloaded pull requests, each fixing a defect in their compiler
 or simulator, and asked of each one whether this simulator has the same defect. The defects that
@@ -204,7 +205,7 @@ Not shared defects, but they turned up on the same day and belong in the same qu
 
 ## 4. Proposed order
 
-1. **Batch A: the cheap silent ones.** Items 3, 4, 5, 6 and 7, plus the diagnostic wording in §3.
+1. **Batch A: the cheap silent ones — done in 2.33.0.** Items 3, 4, 5, 6 and 7, plus the diagnostic wording in §3.
    Each is small, local to one crate, and turns a silent wrong answer into a coded message.
    One release.
 2. **Batch B: `idt(x, ic)`** (item 1). The highest-impact defect and the only one that blocks

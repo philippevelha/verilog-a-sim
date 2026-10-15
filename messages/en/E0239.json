@@ -1,0 +1,11 @@
+{
+  "code": "E0239",
+  "rev": 1,
+  "message": "`@({trigger})` is not an analog event",
+  "description": "An event control `@(...)` in an analog block takes analog events only: `cross(...)`, `above(...)`, `timer(...)`, `initial_step`, `final_step`, `initial_instance`, `initial_model`, or an `or` list of them. `{trigger}` is none of these. Verilog-A has no named events, and `posedge`/`negedge` are digital (LRM Annex C). Until 2.33.0 such a trigger was skipped and its statement ran at every evaluation, as if the `@(...)` were not there, without a word.",
+  "actions": [
+    "If the statement should run whenever a signal crosses a level, write `@(cross(signal - level, +1))` (or `above(...)` to also fire at the operating point).",
+    "If it should run once at the start, write `@(initial_step)`.",
+    "If it should run at every evaluation, remove the `@(...)`: that is what the model did before this error existed."
+  ]
+}
