@@ -1,0 +1,9 @@
+{
+  "code": "E0108",
+  "rev": 1,
+  "message": "cannot predefine macro `{name}`: a macro name is a letter or `_` followed by letters, digits, `_` or `$`",
+  "description": "A macro was predefined from the command line (`--define`) with a name that is not a valid macro name.",
+  "actions": [
+    "Use a name made of letters, digits, `_` and `$`, starting with a letter or `_`: `--define USE_FAST=1`."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "R0304",
+  "rev": 1,
+  "message": "`$simparam(\"{name}\")`, with no default value",
+  "description": "This simulator does not know that parameter, and the LRM (§9.18) makes an unknown name with no default an error rather than a guess. Answering it with a plausible number would be worse: a simulation parameter is a promise about the solver's behaviour, and this engine would not keep one it never implemented.",
+  "actions": [
+    "Supply a fallback: `$simparam(\"{name}\", <value>)` is valid and returns it.",
+    "Or query one of the names this engine does know: {known}."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0207",
+  "rev": 1,
+  "message": "expected an expression, found {found}",
+  "description": "The parser expected a value here (a number, a name, a function call, a probe such as `V(p, n)`, or an operator expression) and found something that cannot start one.",
+  "actions": [
+    "Check for a missing operand, for example `a + ;` or `( )`.",
+    "Look at the source at the position shown, and at the end of the line before it: a syntax error is often noticed one token after the actual mistake."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0236",
+  "rev": 1,
+  "message": "`{name}(<...>)` (a port-current probe) may not be used on the left side of `<+` — it is read-only (LRM §5.4.3)",
+  "description": "A port-current probe `I(<port>)` reads the current flowing into a port. It can be read, but nothing can be contributed to it.",
+  "actions": [
+    "Contribute to a branch instead, for example `I(p, n) <+ ...`."
+  ]
+}

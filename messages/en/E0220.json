@@ -1,0 +1,9 @@
+{
+  "code": "E0220",
+  "rev": 1,
+  "message": "empty event trigger",
+  "description": "An event control `@( )` names no event.",
+  "actions": [
+    "Name at least one event inside the parentheses, or remove the event control."
+  ]
+}

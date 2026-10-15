@@ -1,0 +1,9 @@
+{
+  "code": "E0229",
+  "rev": 1,
+  "message": "`nature ... : {head}.{which}`: `{head}` is not a previously declared discipline",
+  "description": "`{head}.{which}` refers to a discipline's nature, but no discipline `{head}` is declared at that point.",
+  "actions": [
+    "Declare the discipline before this nature, or include the header that declares it."
+  ]
+}

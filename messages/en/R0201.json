@@ -1,0 +1,9 @@
+{
+  "code": "R0201",
+  "rev": 1,
+  "message": "`@(... {event} ...)`, an event trigger this engine does not schedule",
+  "description": "A trigger naming `{event}` is honoured only as an `or` list of `cross(...)`, `above(...)`, `timer(...)`, `initial_step` and `final_step`. Discarding it would run the body at every solve point instead of when the event fires: a wrong answer rather than a missing feature.",
+  "actions": [
+    "Write the trigger with those events only; `absdelta` is not implemented."
+  ]
+}

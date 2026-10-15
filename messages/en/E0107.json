@@ -1,0 +1,9 @@
+{
+  "code": "E0107",
+  "rev": 1,
+  "message": "`define missing a macro name",
+  "description": "A `` `define `` directive must name the macro it defines, and this one does not.",
+  "actions": [
+    "Write the name right after the directive: `` `define NAME value ``."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0212",
+  "rev": 1,
+  "message": "expected an access function, found {found}",
+  "description": "A branch access was expected here: an access function name applied to nets, such as `V(p, n)` or `I(br)`.",
+  "actions": [
+    "Write an access function such as `V(...)` or `I(...)`."
+  ]
+}

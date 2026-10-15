@@ -1,0 +1,9 @@
+{
+  "code": "E0215",
+  "rev": 1,
+  "message": "`{op}` is not part of Verilog-A: Annex C excludes the case-equality operators, which compare four-state logic values (`x`, `z`) that an analog value cannot hold; use `{instead}`",
+  "description": "`===` and `!==` compare digital values that can be unknown (`x`) or high-impedance (`z`). Verilog-A values are real numbers, so the language excludes these operators.",
+  "actions": [
+    "Use `{instead}`."
+  ]
+}

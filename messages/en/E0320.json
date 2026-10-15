@@ -1,0 +1,9 @@
+{
+  "code": "E0320",
+  "rev": 1,
+  "message": "the {list} argument must be a `{...}` array-literal coefficient/root list",
+  "description": "The coefficients or roots of a Laplace or Z-domain filter are written as an array literal, for example `{1, tau}`.",
+  "actions": [
+    "Write the list as an array literal, for example `laplace_nd(V(in), {1}, {1, tau})`."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0233",
+  "rev": 1,
+  "message": "nature `{name}` derives from `{parent}` and so always inherits its `access` function ({access}), which LRM §3.6.1.2 forbids it from changing to `{new_access}`",
+  "description": "A derived nature always has its parent's access function; the standard forbids changing it.",
+  "actions": [
+    "Remove the `access` attribute from the derived nature, or declare an independent nature instead of a derived one."
+  ]
+}

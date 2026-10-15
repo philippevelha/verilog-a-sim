@@ -1,0 +1,10 @@
+{
+  "code": "E0302",
+  "rev": 1,
+  "message": "variable `{name}` is declared more than once in this module; remove one of the declarations",
+  "description": "The same variable name is declared twice in one scope.",
+  "actions": [
+    "Remove the second declaration.",
+    "If the two were meant to be different variables, rename one."
+  ]
+}

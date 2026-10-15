@@ -1,0 +1,9 @@
+{
+  "code": "E0211",
+  "rev": 1,
+  "message": "expected a string literal, found {found}",
+  "description": "This position takes a text value in double quotes.",
+  "actions": [
+    "Write the value in double quotes, for example `\"V\"`."
+  ]
+}

@@ -1,5 +1,6 @@
 // expect: ok
-// at: 5:10
+// code: W0301
+// at: 6:10
 // warning: port `p` has no direction; it is treated as `inout`
 // fixed: 2.23.3 (2.23.2 made this an error; it is a warning while the LRM rule is unsettled, see release.txt)
 module r(p, n);

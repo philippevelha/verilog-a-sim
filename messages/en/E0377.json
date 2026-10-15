@@ -1,0 +1,9 @@
+{
+  "code": "E0377",
+  "rev": 1,
+  "message": "a monitored event trigger (`@(cross(…))`/`@(above(…))`/`@(timer(…))`) inside a `{keyword}` loop: LRM §5.9 does not allow event control statements in `repeat`, `while` or non-genvar `for` loops",
+  "description": "A monitored event is registered once, before simulation, and watched between time points; the statement inside the loop only reads whether it fired. The trigger would be watched even when the loop never runs, and when it fires the body would run once per trip rather than once.",
+  "actions": [
+    "Put the loop inside the event instead: `@(cross(…)) begin … end` may contain a loop."
+  ]
+}

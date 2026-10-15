@@ -1,0 +1,9 @@
+{
+  "code": "W0503",
+  "rev": 1,
+  "message": "not applied: `{card}`",
+  "description": "This simulator uses its own tolerances and `gmin` handling, not a deck's `.options`.",
+  "actions": [
+    "Remove the card, or leave it if the deck is shared with another simulator."
+  ]
+}

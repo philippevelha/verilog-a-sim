@@ -1,0 +1,10 @@
+{
+  "code": "E0213",
+  "rev": 1,
+  "message": "`{name}` is not a recognized access function",
+  "description": "Access functions (`V`, `I`, `Temp`, `Pwr`, ...) are defined by the natures of the disciplines in scope. `{name}` is not one of them, often because the header declaring its nature was not included.",
+  "actions": [
+    "Check the spelling against the natures in `disciplines.vams`.",
+    "`` `include \"disciplines.vams\" `` (or the header that declares the nature) before the module."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0355",
+  "rev": 1,
+  "message": "`{name}`'s zero/pole array must hold an even number of values — they are flattened `(real, imaginary)` root pairs",
+  "description": "Zeros and poles are complex numbers, written as a real part followed by an imaginary part, so the list has an even length.",
+  "actions": [
+    "Write each root as two values, real then imaginary: `{-1, 0, -2, 0}`."
+  ]
+}

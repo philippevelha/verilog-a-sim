@@ -1,0 +1,9 @@
+{
+  "code": "E0728",
+  "rev": 1,
+  "message": "model `{model}` declares its own parameter `mult`, so `mult=` on a device line is ambiguous",
+  "description": "`mult=` could set that parameter or the instance multiplicity.",
+  "actions": [
+    "Rename the model's parameter, or set the multiplicity with `m=` if the model declares no `m` either."
+  ]
+}

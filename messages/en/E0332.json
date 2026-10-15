@@ -1,0 +1,9 @@
+{
+  "code": "E0332",
+  "rev": 1,
+  "message": "`bound_step` is a statement, not a value: write `bound_step(expr);` on its own rather than inside an expression",
+  "description": "`bound_step` returns no value; it is used as a statement.",
+  "actions": [
+    "Move it to a statement of its own."
+  ]
+}

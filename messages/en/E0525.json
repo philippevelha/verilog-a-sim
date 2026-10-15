@@ -1,0 +1,10 @@
+{
+  "code": "E0525",
+  "rev": 1,
+  "message": "`.subckt {name}` declares a parameter (`{param}`): subcircuit parameters are not supported",
+  "description": "This simulator flattens subcircuits without parameters.",
+  "actions": [
+    "Remove the parameters, and write their values into the subcircuit's elements.",
+    "Or write the subcircuit as a Verilog-A module, whose parameters are supported."
+  ]
+}

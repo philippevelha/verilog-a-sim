@@ -1,5 +1,6 @@
 // expect: elab
-// at: 9:3
+// code: E0307
+// at: 10:3
 // message: parameter `R` is declared more than once
 // fixed: 2.18.1 (before: the second default silently won, R = 2k)
 module r(p, n);

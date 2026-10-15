@@ -1,0 +1,9 @@
+{
+  "code": "R0307",
+  "rev": 1,
+  "message": "`$table_model` control string `{control}`, which describes more than one dimension",
+  "description": "A comma-separated control string gives one sub-string per independent variable, and only one dimension is implemented.",
+  "actions": [
+    "Give a single sub-string, as `\"1CL\"`."
+  ]
+}

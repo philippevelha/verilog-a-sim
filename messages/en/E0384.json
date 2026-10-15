@@ -1,0 +1,9 @@
+{
+  "code": "E0384",
+  "rev": 1,
+  "message": "instance `{instance}`: cannot mix positional and named port connections",
+  "description": "An instance connects its ports either all by position or all by name.",
+  "actions": [
+    "Use named connections (`.p(net)`) for every port, or positional connections for every port."
+  ]
+}

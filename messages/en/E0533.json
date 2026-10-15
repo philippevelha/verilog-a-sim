@@ -1,0 +1,9 @@
+{
+  "code": "E0533",
+  "rev": 1,
+  "message": "subcircuits nested more than {limit} deep",
+  "description": "Subcircuit instances nest past the limit.",
+  "actions": [
+    "Flatten some levels of the hierarchy."
+  ]
+}

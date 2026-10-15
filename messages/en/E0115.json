@@ -1,0 +1,10 @@
+{
+  "code": "E0115",
+  "rev": 1,
+  "message": "reading `include {path}: {reason}",
+  "description": "The file named by an `` `include `` was found but could not be read.",
+  "actions": [
+    "Check that the file is readable (permissions) and is a text file.",
+    "The reason after the path is the operating system's own explanation."
+  ]
+}

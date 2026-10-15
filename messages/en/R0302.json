@@ -1,0 +1,10 @@
+{
+  "code": "R0302",
+  "rev": 1,
+  "message": "`$table_model` with an array data source",
+  "description": "The LRM (§9.21) lets the table come from arrays as well as a file, and only the file form is implemented. Reading the arrays would mean folding a run-time array into a compile-time table, which is a different feature from the one this implements.",
+  "actions": [
+    "Write the points to a file, one `x y` pair per line, and name it: `$table_model(x, \"data.tbl\")`.",
+    "For a noise PSD, `noise_table` already takes an inline list."
+  ]
+}

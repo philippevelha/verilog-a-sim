@@ -1,0 +1,9 @@
+{
+  "code": "E0368",
+  "rev": 1,
+  "message": "`{name}` is declared with {declared} dimension(s) but accessed with {used}",
+  "description": "The number of indices does not match the number of dimensions the net or variable was declared with.",
+  "actions": [
+    "Use one index per declared dimension."
+  ]
+}

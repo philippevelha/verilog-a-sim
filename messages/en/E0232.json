@@ -1,0 +1,9 @@
+{
+  "code": "E0232",
+  "rev": 1,
+  "message": "nature `{name}` derives from `{parent}` and so always inherits its `units` ({units}), which LRM §3.6.1.2 forbids it from defining or changing to \"{new_units}\"",
+  "description": "A derived nature always has its parent's units; the standard forbids changing them.",
+  "actions": [
+    "Remove the `units` attribute from the derived nature, or set it to the parent's units."
+  ]
+}

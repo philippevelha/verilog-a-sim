@@ -1,0 +1,9 @@
+{
+  "code": "E0118",
+  "rev": 1,
+  "message": "`begin_keywords expects a quoted version specifier",
+  "description": "`` `begin_keywords `` selects which language version's reserved words apply, and must name it in double quotes.",
+  "actions": [
+    "Write the version in double quotes, for example `` `begin_keywords \"VAMS-2.3\" ``."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0532",
+  "rev": 1,
+  "message": "subcircuit `{name}` instantiates itself (through {chain})",
+  "description": "A subcircuit contains an instance of itself, directly or through others, so flattening it would never end.",
+  "actions": [
+    "Remove the instance that closes the cycle."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0333",
+  "rev": 1,
+  "message": "`{name}{signature}` takes {expected} argument(s), but this call passes {got}",
+  "description": "The call passes a different number of arguments than the function, operator or task takes. The message shows the arguments it takes, when they have names.",
+  "actions": [
+    "Pass the arguments shown in the message, in that order."
+  ]
+}

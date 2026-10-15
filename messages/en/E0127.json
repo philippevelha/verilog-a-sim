@@ -1,0 +1,10 @@
+{
+  "code": "E0127",
+  "rev": 1,
+  "message": "this string literal is never closed: a string must end with `\"` on the line it starts",
+  "description": "A string literal opened with `\"` must be closed with `\"` on the same line. A string cannot span lines.",
+  "actions": [
+    "Add the closing `\"` on the same line.",
+    "To write a quote inside a string, escape it as `\\\"`; to continue a long string, split it into two strings."
+  ]
+}

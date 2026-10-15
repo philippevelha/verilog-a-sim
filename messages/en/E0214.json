@@ -1,0 +1,10 @@
+{
+  "code": "E0214",
+  "rev": 1,
+  "message": "reserved word `{word}` is not valid in an expression",
+  "description": "A reserved word that is not a function or operator was written where a value is expected.",
+  "actions": [
+    "If it was meant as a name, rename it (reserved words cannot be names).",
+    "Look at the source at the position shown, and at the end of the line before it: a syntax error is often noticed one token after the actual mistake."
+  ]
+}

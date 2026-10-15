@@ -1,0 +1,9 @@
+{
+  "code": "E0121",
+  "rev": 1,
+  "message": "`default_discipline {name} {qualifier}: a qualifier is not allowed in Verilog-A",
+  "description": "In Verilog-AMS, a qualifier after the discipline limits the default to one kind of discrete net. Annex C of the standard excludes discrete nets from Verilog-A, so the qualifier has nothing to apply to.",
+  "actions": [
+    "Write `` `default_discipline {name} `` without the qualifier; it then applies to every net declared without a discipline."
+  ]
+}

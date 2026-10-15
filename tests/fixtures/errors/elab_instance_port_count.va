@@ -1,5 +1,6 @@
 // expect: elab
-// at: 12:3
+// code: E0383
+// at: 13:3
 // message: instance `x1` of `r` connects 3 port(s), but the module declares 2
 module r(p, n);
   inout p, n;

@@ -1,0 +1,9 @@
+{
+  "code": "E0411",
+  "rev": 1,
+  "message": "a zi_* denominator has d_0 = 0: the difference equation cannot be solved for the current output sample",
+  "description": "The first denominator coefficient multiplies the current output sample; when it is zero, the filter does not define that sample.",
+  "actions": [
+    "Check the denominator list: its first coefficient must not be zero."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0105",
+  "rev": 1,
+  "message": "stray ` in source",
+  "description": "A backtick (`` ` ``) starts a compiler directive or a macro use, so it must be followed directly by a name. This one is followed by something else, such as a space or a digit.",
+  "actions": [
+    "Remove the stray backtick, or join it to the name it belongs to (`` `define ``, not `` ` define ``).",
+    "Inside a string, a backtick is fine; check that the string's quotes are balanced."
+  ]
+}

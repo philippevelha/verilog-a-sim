@@ -1,0 +1,9 @@
+{
+  "code": "E0226",
+  "rev": 1,
+  "message": "`{net_type}` is a discrete-domain net type, which LRM Annex C excludes from Verilog-A, so it may not qualify the port declaration `{dir} {net_type} ...`",
+  "description": "Net types such as `wire` and `tri` describe digital nets. Annex C excludes them from Verilog-A; a continuous net takes its type from its discipline.",
+  "actions": [
+    "Write `{dir} <discipline> ...` (for example `{dir} electrical ...`), or declare the direction and the discipline in two statements."
+  ]
+}

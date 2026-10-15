@@ -1,0 +1,9 @@
+{
+  "code": "E0307",
+  "rev": 1,
+  "message": "parameter `{name}` is declared more than once in this module; remove or rename one of the declarations",
+  "description": "The same parameter name is declared twice in one module.",
+  "actions": [
+    "Remove one declaration, or rename one if they were meant to be different parameters."
+  ]
+}

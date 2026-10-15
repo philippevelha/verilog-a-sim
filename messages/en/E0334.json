@@ -1,0 +1,9 @@
+{
+  "code": "E0334",
+  "rev": 1,
+  "message": "`{name}{signature}` takes {min} to {max} arguments, but this call passes {got}",
+  "description": "The call passes a number of arguments outside the range the function, operator or task accepts. Arguments in `[...]` in the message are optional.",
+  "actions": [
+    "Pass the arguments shown in the message, in that order."
+  ]
+}

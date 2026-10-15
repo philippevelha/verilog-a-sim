@@ -17,6 +17,7 @@ The header is the file's leading `// key: value` lines:
 | Key        | Meaning |
 |------------|---------|
 | `expect`   | Required. The verdict: `pp`, `lex`, `parse`, `elab`, `cgen` (the stage label `check` prints), `refused` (a deliberate refusal, see CLAUDE.md §5), or `ok` (accepted). |
+| `code`     | The diagnostic code the output must carry (`E0341`, `R0202`, `W0301`; see `messages/README.md`), matched as `[CODE]`. Give it for every rejected or warned file. |
 | `message`  | Text the output must contain. May repeat; every one must match. |
 | `at`       | `line:col` the output must name, matched as `:line:col`. Header lines count. |
 | `fixed`    | The version that started rejecting this file, and what happened before. Not asserted; it's there for the reader. |
@@ -48,5 +49,6 @@ unsettled, or which a simulator should run but flag. The `warning:` line is asse
 Name the file `<stage>_<what is wrong>.va` and keep it minimal: one mistake, in an otherwise
 valid model. That way the expected verdict is unambiguous. Assert the part of the message that
 names what the user wrote (the identifier, the function, the counts), not the boilerplate around
-it. Give every case an `at:` when the diagnostic is located; since 2.23.1 every stage's is,
+it; the boilerplate belongs to the catalogue entry, which another team may reword, and the `code:`
+line already pins which entry it is. Give every case an `at:` when the diagnostic is located; since 2.23.1 every stage's is,
 except `cgen`, whose input (the IR) carries no source positions.

@@ -1,0 +1,9 @@
+{
+  "code": "E0725",
+  "rev": 1,
+  "message": "`{name}` is a {count}-terminal device line, but `{model}` needs at least two nodes",
+  "description": "Every two-terminal device connects two nodes.",
+  "actions": [
+    "Add the missing node."
+  ]
+}

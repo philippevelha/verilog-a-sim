@@ -1,0 +1,9 @@
+{
+  "code": "E0347",
+  "rev": 1,
+  "message": "`$table_model`'s third argument is the control string and must be a string literal, as `\"1CC\"`",
+  "description": "The control string selects the interpolation and extrapolation, and must be a string literal.",
+  "actions": [
+    "Write it in quotes, for example `\"1LL\"`, or leave it out to use the default."
+  ]
+}

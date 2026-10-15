@@ -1,0 +1,9 @@
+{
+  "code": "E0517",
+  "rev": 1,
+  "message": "`.subckt {name}` is never closed by `.ends`",
+  "description": "The subcircuit definition runs to the end of the deck.",
+  "actions": [
+    "Add `.ends` after the subcircuit's last line."
+  ]
+}

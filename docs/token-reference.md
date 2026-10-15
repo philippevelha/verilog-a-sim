@@ -537,7 +537,17 @@ class of lexemes.
 - **Purpose and Static Nature**: Purely structural list separator.
 - **Declaration and Assignment**: Separates: port/net/variable/genvar name lists
   (`ident_list`), a branch's one-or-two terminals, a call/access-function's arguments, a
-  `case` arm's label list.
+  `case` arm's label list, and the events of an `@(...)` trigger, where it means the same as
+  `or` (LRM 5.10.1; 2.29.0).
+- **Omitted ("null") arguments** (2.29.0): two commas with nothing between them, or a comma
+  before the closing `)`, leave an argument out. The LRM allows it only where its grammar says
+  `_or_null` (A.6.5) or brackets an argument (A.6.4): `cross`'s direction and two tolerances,
+  `above`'s two tolerances, `timer`'s period and tolerance, a Laplace filter's numerator,
+  denominator and tolerance, a Z-domain filter's numerator, denominator and transition time.
+  There the parser keeps the position as `ExprAst::Null` and elaboration reads it as "not
+  given" (the default), with an omitted filter list meaning **unity**: no roots, or the
+  polynomial `1`. Anywhere else it is `E0238`, "argument N of `f` may not be omitted". System
+  *tasks* (`$strobe("a",,"b")`) have their own null-argument rule and are unaffected.
 - **Expressions and Evaluation**: Never itself evaluated; purely a delimiter consumed by
   `ident_list`/`parse_call_args`/`parse_access`/`parse_net_arg`-adjacent call sites.
 - **Structural and Analog Usage**: Both.
@@ -1889,7 +1899,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `not` | Reserved, no grammar production (digital *inverter gate* primitive — distinct from the `!` operator, `Token::Not`) | N/A | N/A | Digital gate level only | Loosely C's `!x` as a value, but as a timed gate instance instead of an operator |
 | `notif0` | Reserved, no grammar production (tristate inverter, active-low enable) | N/A | N/A | Digital gate level only | No C analogue |
 | `notif1` | Reserved, no grammar production (tristate inverter, active-high enable) | N/A | N/A | Digital gate level only | No C analogue |
-| `or` | Reserved, no grammar production (digital gate primitive — distinct from `\|\|`, `Token::OrOr`) | N/A | N/A | Digital gate level only | Loosely C's `\|\|` as a gate instance |
+| `or` | Event separator in an `@(...)` trigger (LRM 5.10.1): `@(initial_step or cross(...))` runs the body when any event fires; a comma means the same (2.29.0). Otherwise reserved, with no grammar production (the digital gate primitive, distinct from `\|\|`, `Token::OrOr`) | Structural (parse time) | Composes the events into `if (e1 \|\| e2 \|\| ...)` | Analog-block only (event control) | Loosely C's `\|\|` |
 | `output` | Dedicated token, §1.4 | — | — | — | — |
 | `parameter` | Dedicated token, §1.4 | — | — | — | — |
 | `pmos` | Reserved, no grammar production (PMOS switch primitive) | N/A | N/A | Digital/switch-level only | No C analogue |

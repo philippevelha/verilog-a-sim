@@ -1,0 +1,9 @@
+{
+  "code": "E0363",
+  "rev": 1,
+  "message": "`{name}[..]`: slicing is single-dimension-only, so a `[lo:hi]` slice cannot be combined with an index or applied to a 2-D vector net",
+  "description": "Slices are supported for 1-D vector nets only, and an access can slice or index, but not both.",
+  "actions": [
+    "Index every dimension, for example `{name}[0][0]`, or slice a 1-D vector net."
+  ]
+}

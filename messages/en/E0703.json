@@ -1,0 +1,11 @@
+{
+  "code": "E0703",
+  "rev": 1,
+  "message": "invalid value `{value}` for {option}; expected {expected}",
+  "description": "A command-line option or an environment variable was given a value it does not accept. The option, the value given and the accepted values are named in the message.",
+  "actions": [
+    "Use one of the accepted values listed in the message.",
+    "For an environment variable, unset it to get the default behaviour.",
+    "Run `va-cli --help` for what each option does."
+  ]
+}

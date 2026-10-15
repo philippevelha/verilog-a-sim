@@ -1,0 +1,9 @@
+{
+  "code": "W0101",
+  "rev": 1,
+  "message": "`timescale has no effect in Verilog-A",
+  "description": "Verilog-A has no delay controls (`#`) and `$abstime` is in seconds regardless (LRM 9.17), so the time unit `timescale sets is never read. The directive is accepted and ignored, so the model runs exactly as it would without it.",
+  "actions": [
+    "Remove the directive, or leave it if the file is shared with digital Verilog tools."
+  ]
+}

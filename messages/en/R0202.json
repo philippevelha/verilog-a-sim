@@ -1,0 +1,9 @@
+{
+  "code": "R0202",
+  "rev": 1,
+  "message": "`@({event} ...)` in a form this engine does not honour",
+  "description": "Discarding the trigger would run the body at every solve point instead of when the event fires. For the analysis-filter form that is sharper still: the filter says \"not in this analysis\", so dropping it runs the body precisely where the model excluded it, wrong in every analysis and not merely unimplemented.",
+  "actions": [
+    "Write the bare `@({event})`, or an `or` list of bare `initial_step`/`final_step`; both are honoured."
+  ]
+}

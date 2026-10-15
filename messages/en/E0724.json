@@ -1,0 +1,9 @@
+{
+  "code": "E0724",
+  "rev": 1,
+  "message": "no device in this circuit contributes any noise, so the spectrum would be identically zero",
+  "description": "A device is only a noise source if it says so: a resistor and the reference diode contribute thermal and shot noise, and a compiled Verilog-A model contributes exactly what its own `white_noise()`, `flicker_noise()` and `noise_table()` calls declare. A model with none is silent by construction.",
+  "actions": [
+    "Add noise sources to the models, or check that the circuit holds the devices you expect."
+  ]
+}

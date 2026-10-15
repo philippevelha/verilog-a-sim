@@ -1,0 +1,9 @@
+{
+  "code": "E0526",
+  "rev": 1,
+  "message": "`.model` needs a name and a type (`.model <name> <module> …`)",
+  "description": "A `.model` card names a model and the Verilog-A module (or built-in device) it configures.",
+  "actions": [
+    "Write `.model <name> <module> param=value ...`."
+  ]
+}

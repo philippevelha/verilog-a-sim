@@ -1,0 +1,9 @@
+{
+  "code": "E0345",
+  "rev": 1,
+  "message": "`$fopen` takes string literals: a file name, and optionally a type, as `$fopen(\"name\", \"w\")`",
+  "description": "The file name and the type given to `$fopen` must be string literals.",
+  "actions": [
+    "Write them in quotes: `fd = $fopen(\"out.txt\", \"w\");`."
+  ]
+}

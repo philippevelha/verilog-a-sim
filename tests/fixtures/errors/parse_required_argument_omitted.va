@@ -1,0 +1,13 @@
+// expect: parse
+// code: E0238
+// at: 10:28
+// message: argument 4 of `timer` may not be omitted
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  real s;
+  analog begin
+    @(timer(0, 1e-6, 1e-9, )) s = V(p, n);
+    I(p, n) <+ s;
+  end
+endmodule

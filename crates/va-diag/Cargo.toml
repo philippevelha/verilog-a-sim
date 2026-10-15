@@ -1,0 +1,13 @@
+[package]
+name = "va-diag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Coded diagnostics: E/W/R/C codes, the message catalogue, and rendering (leaf crate)."
+
+# va-diag is a LEAF crate: every other crate may come to depend on it, so it depends on none of
+# them (§3). Do NOT add internal `va-*` dependencies.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,9 @@
+{
+  "code": "E0390",
+  "rev": 1,
+  "message": "$table_model control string `{control}` has more than the three characters LRM §9.21.2 allows in one dimension",
+  "description": "In one dimension, the control string is one interpolation character and up to two extrapolation characters.",
+  "actions": [
+    "Shorten the control string, for example `\"1LL\"`."
+  ]
+}

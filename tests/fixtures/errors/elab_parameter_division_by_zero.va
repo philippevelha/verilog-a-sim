@@ -1,5 +1,6 @@
 // expect: elab
-// at: 8:3
+// code: E0308
+// at: 9:3
 // message: parameter `K` evaluates to inf
 // fixed: 2.18.1 (before: accepted; the simulation then failed on a non-finite residual)
 module r(p, n);

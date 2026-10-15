@@ -1,0 +1,9 @@
+{
+  "code": "E0721",
+  "rev": 1,
+  "message": "the `.{card}` analysis was not run: a model's `$finish` ended the analysis at its operating point",
+  "description": "A model called `$finish` while the operating point the analysis linearizes about was being solved, so the analysis itself never started.",
+  "actions": [
+    "Look at the model's condition for calling `$finish`."
+  ]
+}

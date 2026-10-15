@@ -1,5 +1,6 @@
 // expect: parse
-// at: 7:18
+// code: E0203
+// at: 8:18
 // message: expected `;` after identifier `n`, found `parameter`
 // fixed: 2.18.2 (before: blamed the line after, as `expected Semicolon, found Some(Parameter)`)
 module r(p, n);

@@ -1,0 +1,9 @@
+{
+  "code": "E0119",
+  "rev": 1,
+  "message": "`begin_keywords \"{spec}\": unknown version specifier; the LRM (10.6) defines \"VAMS-2.3\", \"1364-2005\", \"1364-2001\" and \"1364-1995\"",
+  "description": "The version named by `` `begin_keywords `` is not one the language standard defines, so the set of reserved words to use is unknown.",
+  "actions": [
+    "Use one of the versions listed in the message, spelled exactly."
+  ]
+}

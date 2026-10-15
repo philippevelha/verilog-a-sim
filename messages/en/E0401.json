@@ -1,0 +1,9 @@
+{
+  "code": "E0401",
+  "rev": 1,
+  "message": "bound_step is not allowed inside an analog function body",
+  "description": "An analog function computes a value and has no other effect; limiting the time step is an effect on the simulation.",
+  "actions": [
+    "Call `bound_step` in the analog block instead."
+  ]
+}

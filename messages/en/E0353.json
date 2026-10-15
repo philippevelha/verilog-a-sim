@@ -1,0 +1,9 @@
+{
+  "code": "E0353",
+  "rev": 1,
+  "message": "`cross`'s direction argument must be -1 (falling), 0 (either) or +1 (rising), got {dir}",
+  "description": "The second argument of `cross` says which crossings to detect.",
+  "actions": [
+    "Use -1, 0 or +1."
+  ]
+}

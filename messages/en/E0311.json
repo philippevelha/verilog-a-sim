@@ -1,0 +1,9 @@
+{
+  "code": "E0311",
+  "rev": 1,
+  "message": "aliasparam `{name}` reuses the name of a parameter already declared in this module",
+  "description": "An `aliasparam` gives an existing parameter a second name. That name must not already be a parameter.",
+  "actions": [
+    "Choose a name that is not yet used, or remove the `aliasparam`."
+  ]
+}

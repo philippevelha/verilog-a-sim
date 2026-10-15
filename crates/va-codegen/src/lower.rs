@@ -178,9 +178,10 @@
 //! — a function call is an expression-level construct, so it never needs anything from this
 //! module's statement-level extraction of the *analog block* (see `crate::ad::call_function`).
 
-use crate::CodegenError;
+use crate::{ad::internal_error, CodegenError};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use va_abi::noise::TableInterp;
+use va_diag::{codes, Diagnostic};
 use va_ir::{
     AccessKind, BinOp, BranchId, Builtin, Expr, ExprId, Module, NodeId, Stmt, UnOp, VarId,
 };
@@ -382,30 +383,34 @@ fn zi_term_shape(module: &Module, expr: ExprId, sign: f64) -> Result<Option<ZiTe
         args.get(3),
         args.get(4),
     ) else {
-        return Err(unsupported("zi_* call is missing its sampling arguments"));
+        return Err(internal_error(
+            "zi_* call is missing its sampling arguments",
+        ));
     };
     let Expr::Const(num_len) = module.expr(len_id) else {
-        return Err(unsupported(
+        return Err(internal_error(
             "zi_* call's numerator-length separator must be a constant",
         ));
     };
     let num_len = *num_len as usize;
     let rest = &args[5..];
     if num_len > rest.len() {
-        return Err(unsupported(
+        return Err(internal_error(
             "zi_* numerator length exceeds its argument list",
         ));
     }
     let (num, den) = rest.split_at(num_len);
-    if num.is_empty() || den.is_empty() {
-        return Err(unsupported(
+    let num_is_roots = matches!(builtin, Builtin::ZiZd | Builtin::ZiZp);
+    let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
+    // An empty root list is the empty product, unity (an omitted `zi_zd(x, , den, T)`, LRM
+    // A.6.4); an empty coefficient list is malformed IR.
+    if (num.is_empty() && !num_is_roots) || (den.is_empty() && !den_is_roots) {
+        return Err(internal_error(
             "zi_* needs at least one numerator and one denominator entry",
         ));
     }
-    let num_is_roots = matches!(builtin, Builtin::ZiZd | Builtin::ZiZp);
-    let den_is_roots = matches!(builtin, Builtin::ZiNp | Builtin::ZiZp);
     if (num_is_roots && num.len() % 2 != 0) || (den_is_roots && den.len() % 2 != 0) {
-        return Err(unsupported(
+        return Err(internal_error(
             "a zi_* zero/pole list must be an even number of (re, im) values",
         ));
     }
@@ -444,7 +449,7 @@ fn laplace_term_shape(
         // at all, the entire transfer function being `exp(-jw*tau)`.
         Expr::Call(Builtin::Absdelay, args) => {
             let (Some(&input), Some(&delay)) = (args.first(), args.get(1)) else {
-                return Err(unsupported(
+                return Err(internal_error(
                     "absdelay is missing its value or delay argument",
                 ));
             };
@@ -467,29 +472,31 @@ fn laplace_term_shape(
     // `[input, Const(num_len), …]` — the separator is a `Const` by construction (va-frontend
     // emits it), so anything else means the IR was built by hand.
     let (Some(&input), Some(&len_id)) = (args.first(), args.get(1)) else {
-        return Err(unsupported("laplace call is missing its argument list"));
+        return Err(internal_error("laplace call is missing its argument list"));
     };
     let Expr::Const(num_len) = module.expr(len_id) else {
-        return Err(unsupported(
+        return Err(internal_error(
             "laplace call's numerator-length separator must be a constant",
         ));
     };
     let num_len = *num_len as usize;
     let rest = &args[2..];
     if num_len > rest.len() {
-        return Err(unsupported(
+        return Err(internal_error(
             "laplace numerator length exceeds its argument list",
         ));
     }
     let (num, den) = rest.split_at(num_len);
-    if num.is_empty() || den.is_empty() {
-        return Err(unsupported(
+    // An empty root list is the empty product, unity (an omitted `laplace_zp(x, , poles)`,
+    // LRM A.6.4); an empty coefficient list is malformed IR.
+    if (num.is_empty() && !num_is_roots) || (den.is_empty() && !den_is_roots) {
+        return Err(internal_error(
             "laplace needs at least one numerator and one denominator entry",
         ));
     }
     // A root list is flattened `(re, im)` pairs, so an odd count means a malformed IR.
     if (num_is_roots && num.len() % 2 != 0) || (den_is_roots && den.len() % 2 != 0) {
-        return Err(unsupported(
+        return Err(internal_error(
             "a laplace zero/pole list must be an even number of (re, im) values",
         ));
     }
@@ -597,15 +604,15 @@ pub(crate) fn buried_frequency_domain_call(module: &Module, expr: ExprId) -> Opt
         Expr::Call(
             Builtin::LaplaceNd | Builtin::LaplaceNp | Builtin::LaplaceZd | Builtin::LaplaceZp,
             _,
-        ) => Some("a laplace_* filter"),
+        ) => Some("laplace_*"),
         Expr::Call(Builtin::ZiNd | Builtin::ZiNp | Builtin::ZiZd | Builtin::ZiZp, _) => {
-            Some("a zi_* filter")
+            Some("zi_*")
         }
         // Same restriction, same reason: a complex gain has nowhere to live in a `Dual`. It is
         // named separately rather than folded into the laplace message because the diagnostic is
         // read by someone who wrote `absdelay` and needs to see that word -- being told about
         // `laplace_*` sends them looking for a filter they never wrote.
-        Expr::Call(Builtin::Absdelay, _) => Some("`absdelay`"),
+        Expr::Call(Builtin::Absdelay, _) => Some("absdelay"),
         Expr::Call(_, args) => args
             .iter()
             .find_map(|&a| buried_frequency_domain_call(module, a)),
@@ -1008,7 +1015,8 @@ impl StatefulKind {
     pub fn width(self) -> usize {
         match self {
             StatefulKind::Slew => 2,
-            StatefulKind::Transition => 5,
+            // `(t_prev, y_prev, target, rate, t_start, ramp_duration)`.
+            StatefulKind::Transition => 6,
             StatefulKind::Zi { inputs, outputs } => 4 + inputs + outputs,
             // `(q_prev, rate_prev, q_prev2)`. The third slot exists for Gear/BDF2, whose
             // reconstruction is a three-point difference on the charge rather than a one-step
@@ -1166,7 +1174,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             unreachable!("collect_idt_calls_in_stmts only ever collects `Idt` call sites");
         };
         if args.is_empty() || args.len() > 2 {
-            return Err(unsupported("idt expects one or two arguments"));
+            return Err(internal_error("idt expects one or two arguments"));
         }
         idt_accumulators.push(IdtAccumulator {
             expr_id: call.0,
@@ -1206,11 +1214,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
             Some(g) if br.p == g && br.n != g => br.n,
             Some(g) if br.n == g && br.p != g => br.p,
             _ => {
-                return Err(unsupported(
-                    "a bare `I(...)` probe of a branch that receives no contribution anywhere \
-                     is only supported when one terminal is the module's implicit ground \
-                     reference",
-                ));
+                return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0406)));
             }
         };
 
@@ -2036,9 +2040,7 @@ fn lower_stmt(
                         // `classify_dynamic_rows`' one-shot verdict would additionally zero that
                         // row's history offset. This is also exactly what LRM §4.5.15 forbids.
                         None if dropped_ddt.contains_key(&id.0) => {
-                            return Err(unsupported(
-                                "a ddt assigned to a variable inside an if/case/loop arm and contributed after that arm needs a controlling condition that is constant for the whole run (LRM 4.5.15); this one depends on the solution, or the arm is a loop body, so the operator's history would not advance on the steps the arm is not taken. Move the ddt into the contribution itself, or make the condition parameter-only",
-                            ))
+                            return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0407)))
                         }
                         None => term.expr,
                     },
@@ -2575,7 +2577,7 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
             Ok(Some(NoiseTerm::White { pwr: args[0] }))
         }
         Expr::Call(Builtin::WhiteNoise, _) => {
-            Err(unsupported("white_noise expects exactly one argument"))
+            Err(internal_error("white_noise expects exactly one argument"))
         }
         Expr::Call(Builtin::FlickerNoise, args) if args.len() == 2 => {
             Ok(Some(NoiseTerm::Flicker {
@@ -2583,7 +2585,7 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
                 exp: args[1],
             }))
         }
-        Expr::Call(Builtin::FlickerNoise, _) => Err(unsupported(
+        Expr::Call(Builtin::FlickerNoise, _) => Err(internal_error(
             "flicker_noise expects exactly two arguments (power, exponent)",
         )),
         // The table's own well-formedness (pairs, uniqueness, sort order) was settled at
@@ -2599,9 +2601,8 @@ fn noise_term_shape(module: &Module, expr: ExprId) -> Result<Option<NoiseTerm>, 
             };
             Ok(Some(NoiseTerm::Table { call: expr, interp }))
         }
-        Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, _) => Err(unsupported(
-            "noise_table/noise_table_log expects an even number of arguments (alternating \
-             frequency and power)",
+        Expr::Call(Builtin::NoiseTable | Builtin::NoiseTableLog, _) => Err(internal_error(
+            "noise_table/noise_table_log expects an even number of arguments",
         )),
         _ => Ok(None),
     }
@@ -2627,13 +2628,12 @@ fn ac_stim_term_shape(
     match module.expr(expr) {
         Expr::Call(Builtin::AcStim, args) if args.len() == 3 => match module.expr(args[0]) {
             Expr::Const(mask) => Ok(Some((*mask as u32, args[1], args[2]))),
-            _ => Err(unsupported(
+            _ => Err(internal_error(
                 "ac_stim's analysis-name argument must fold to a constant phase bitmask",
             )),
         },
-        Expr::Call(Builtin::AcStim, _) => Err(unsupported(
-            "ac_stim expects exactly three arguments after elaboration \
-             (phase bitmask, magnitude, phase)",
+        Expr::Call(Builtin::AcStim, _) => Err(internal_error(
+            "ac_stim expects exactly three arguments after elaboration",
         )),
         _ => Ok(None),
     }
@@ -2809,7 +2809,7 @@ pub(crate) fn contains_noise_call(module: &Module, expr: ExprId, tainted: &HashS
 fn ddt_arg(module: &Module, expr: ExprId) -> Result<Option<ExprId>, CodegenError> {
     match module.expr(expr) {
         Expr::Call(Builtin::Ddt, args) if args.len() == 1 => Ok(Some(args[0])),
-        Expr::Call(Builtin::Ddt, _) => Err(unsupported("ddt expects exactly one argument")),
+        Expr::Call(Builtin::Ddt, _) => Err(internal_error("ddt expects exactly one argument")),
         _ => Ok(None),
     }
 }
@@ -3219,10 +3219,6 @@ fn da_stmt(
             da_stmt(module, step, &mut b, marked, memo);
         }
     }
-}
-
-fn unsupported(msg: &str) -> CodegenError {
-    CodegenError::Unsupported(msg.to_string())
 }
 
 // ---------------------------------------------------------------------------------------

@@ -1,0 +1,9 @@
+{
+  "code": "E0116",
+  "rev": 1,
+  "message": "unterminated `begin_keywords (missing `end_keywords)",
+  "description": "The file ends while a `` `begin_keywords `` region is still open. Each one must be closed by `` `end_keywords ``.",
+  "actions": [
+    "Add the missing `` `end_keywords ``."
+  ]
+}

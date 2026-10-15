@@ -1,0 +1,10 @@
+{
+  "code": "E0110",
+  "rev": 1,
+  "message": "`elsif without `ifdef",
+  "description": "An `` `elsif `` appears outside any conditional block. It is only valid between an `` `ifdef ``/`` `ifndef `` and its `` `endif ``.",
+  "actions": [
+    "Add the opening `` `ifdef `` or `` `ifndef ``, or remove the stray `` `elsif ``.",
+    "Check whether an earlier `` `endif `` closed the block too soon."
+  ]
+}

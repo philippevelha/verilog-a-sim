@@ -1,0 +1,9 @@
+{
+  "code": "E0310",
+  "rev": 1,
+  "message": "parameter `{name}` value {value} is above its declared maximum {max}",
+  "description": "The parameter's value is outside the range declared with `from [...]`.",
+  "actions": [
+    "Change the value, or the declared range if the range is wrong."
+  ]
+}

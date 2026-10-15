@@ -1,0 +1,9 @@
+{
+  "code": "E0323",
+  "rev": 1,
+  "message": "`{name}`'s table must hold `(frequency, power)` pairs — got {count} values (odd)",
+  "description": "A noise table lists frequency and power alternately, so it needs an even number of values. One value is missing or extra.",
+  "actions": [
+    "Check that every frequency has a power after it."
+  ]
+}

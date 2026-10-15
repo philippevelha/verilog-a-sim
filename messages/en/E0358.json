@@ -1,0 +1,9 @@
+{
+  "code": "E0358",
+  "rev": 1,
+  "message": "`ddx`'s second argument must be a potential-probe access, e.g. `V(p, n)`",
+  "description": "The unknown `ddx` differentiates with respect to is given as a probe.",
+  "actions": [
+    "Write the probe, for example `V(p, n)`, as the second argument."
+  ]
+}

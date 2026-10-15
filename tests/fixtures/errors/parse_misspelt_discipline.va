@@ -1,5 +1,6 @@
 // expect: parse
-// at: 8:3
+// code: E0218
+// at: 9:3
 // message: no discipline `electical` is declared
 // message: did you mean `electrical`?
 // fixed: 2.18.2 (before: read as a module instance: `expected LParen, found Some(Comma)` at the comma)

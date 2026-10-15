@@ -1,5 +1,6 @@
 // expect: elab
-// at: 7:10
+// code: E0366
+// at: 8:10
 // message: unknown net `q`
 module r(p, n);
   inout p, n;

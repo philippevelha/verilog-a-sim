@@ -1,5 +1,6 @@
 // expect: elab
-// at: 12:7
+// code: E0303
+// at: 13:7
 // message: analog function `f` assigns `t`
 // fixed: 2.18.1
 module r(p, n);

@@ -1,0 +1,10 @@
+{
+  "code": "E0387",
+  "rev": 1,
+  "message": "instance `{instance}` of `{module}`: port `{port}` is `{port_discipline}` but is connected to net `{net}`, which is `{net_discipline}`",
+  "description": "Connecting them would make one node stand for two different physical quantities.",
+  "actions": [
+    "Wire the port to a net of the port's discipline.",
+    "If the two really are the same physics, declare the two disciplines over the same natures."
+  ]
+}

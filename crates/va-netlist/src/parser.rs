@@ -75,6 +75,7 @@ use crate::{
 };
 use std::collections::HashMap;
 use va_abi::reference::GROUND;
+use va_diag::{codes, Diagnostic};
 
 /// Parse a netlist deck into a [`Netlist`].
 ///
@@ -101,12 +102,36 @@ pub fn parse(deck: &str) -> Result<Netlist, NetlistError> {
 pub fn parse_file(path: &std::path::Path) -> Result<Netlist, NetlistError> {
     let deck = std::fs::read_to_string(path).map_err(|e| NetlistError::Parse {
         line: 0,
-        message: format!("cannot read `{}`: {e}", path.display()),
+        diag: Diagnostic::new(codes::E0501)
+            .arg("path", path.display())
+            .arg("reason", e),
     })?;
+    // A line of the deck itself is located as `deck.net:12`; one from an included file or a
+    // subcircuit instance keeps the origin `parse_with_base` gave it.
     parse_with_base(
         &deck,
         Some(path.parent().unwrap_or(std::path::Path::new("."))),
     )
+    .map_err(|e| match e {
+        NetlistError::Parse { line, diag } if diag.location() == Some(&format!("line {line}")) => {
+            NetlistError::Parse {
+                line,
+                diag: diag.at(format!("{}:{line}", path.display())),
+            }
+        }
+        e => e,
+    })
+    .map(|mut net| {
+        // The same for a warning about a line of the deck itself.
+        for note in &mut net.notes {
+            if let Some(line) = note.location().and_then(|l| l.strip_prefix("line ")) {
+                if line.bytes().all(|b| b.is_ascii_digit()) {
+                    *note = note.clone().at(format!("{}:{line}", path.display()));
+                }
+            }
+        }
+        net
+    })
 }
 
 fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist, NetlistError> {
@@ -130,16 +155,13 @@ fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist
             parse_card(&mut net, stripped);
             continue;
         }
-        let device =
-            parse_device(&mut net, line, line_no, &expanded.models).map_err(|e| {
-                match (e, &src.origin) {
-                    (NetlistError::Parse { line, message }, Some(o)) => NetlistError::Parse {
-                        line,
-                        message: format!("{message} ({o})"),
-                    },
-                    (e, _) => e,
-                }
-            })?;
+        let device = parse_device(
+            &mut net,
+            line,
+            line_no,
+            src.origin.as_deref(),
+            &expanded.models,
+        )?;
         if let Some(nums) = pulse_numbers(line) {
             pending_pulses.push((net.devices.len(), nums));
         }
@@ -160,29 +182,32 @@ fn parse_with_base(deck: &str, base: Option<&std::path::Path>) -> Result<Netlist
 fn parse_param_overrides(
     rest: &[&str],
     line_no: usize,
+    origin: Option<&str>,
 ) -> Result<Vec<(String, f64)>, NetlistError> {
     let mut out = Vec::new();
     for tok in rest {
         let Some((name, value)) = tok.split_once('=') else {
-            return Err(NetlistError::Parse {
-                line: line_no,
-                message: format!(
-                    "unexpected token `{tok}`: a model-referencing device takes only \
-                     `name=value` parameter overrides after its model name"
-                ),
-            });
+            return Err(NetlistError::at_line(
+                line_no,
+                origin,
+                Diagnostic::new(codes::E0502).arg("token", tok),
+            ));
         };
         let Some(v) = parse_value(value) else {
-            return Err(NetlistError::Parse {
-                line: line_no,
-                message: format!("bad value `{value}` for parameter `{name}`"),
-            });
+            return Err(NetlistError::at_line(
+                line_no,
+                origin,
+                Diagnostic::new(codes::E0503)
+                    .arg("value", value)
+                    .arg("name", name),
+            ));
         };
         if name.is_empty() {
-            return Err(NetlistError::Parse {
-                line: line_no,
-                message: format!("parameter override `{tok}` has no name"),
-            });
+            return Err(NetlistError::at_line(
+                line_no,
+                origin,
+                Diagnostic::new(codes::E0504).arg("token", tok),
+            ));
         }
         out.push((name.to_string(), v));
     }
@@ -367,9 +392,9 @@ fn parse_nodeset(net: &mut Netlist, rest: &str) {
             .and_then(|(probe, value)| Some((parse_voltage_probe(probe)?, parse_value(value)?)));
         match parsed {
             Some(hint) => net.nodesets.push(hint),
-            None => net.notes.push(format!(
-                "`.nodeset` entry `{pair}` is not `V(<net>)=<value>`; skipped (a nodeset is                  only Newton's starting point, so the solve proceeds without this hint)"
-            )),
+            None => net
+                .notes
+                .push(Diagnostic::new(codes::W0501).arg("entry", pair)),
         }
     }
 }
@@ -413,25 +438,23 @@ fn parse_device(
     net: &mut Netlist,
     line: &str,
     line_no: usize,
+    origin: Option<&str>,
     models: &HashMap<String, ModelCard>,
 ) -> Result<Device, NetlistError> {
     let toks: Vec<&str> = line.split_whitespace().collect();
     let name = toks[0].to_string();
     let kind = name.chars().next().unwrap_or(' ').to_ascii_uppercase();
 
-    let err = |message: String| NetlistError::Parse {
-        line: line_no,
-        message,
-    };
+    let err = |d: Diagnostic| NetlistError::at_line(line_no, origin, d);
 
     // Minimum token count for the element kind about to be parsed (two terminals for most,
     // three for `M`).
     let need = |n: usize| -> Result<(), NetlistError> {
         if toks.len() < n {
-            Err(err(format!(
-                "`{name}` needs at least {n} tokens, found {}",
-                toks.len()
-            )))
+            Err(err(Diagnostic::new(codes::E0505)
+                .arg("name", &name)
+                .arg("need", n)
+                .arg("got", toks.len())))
         } else {
             Ok(())
         }
@@ -442,8 +465,8 @@ fn parse_device(
             need(4)?;
             let p = intern(net, toks[1]);
             let n = intern(net, toks[2]);
-            let value =
-                parse_value(toks[3]).ok_or_else(|| err(format!("bad value `{}`", toks[3])))?;
+            let value = parse_value(toks[3])
+                .ok_or_else(|| err(Diagnostic::new(codes::E0506).arg("value", toks[3])))?;
             let model = match kind {
                 'R' => "resistor",
                 'C' => "capacitor",
@@ -457,15 +480,14 @@ fn parse_device(
             let mut ic = None;
             for tok in &toks[4..] {
                 let Some(rest) = tok.strip_prefix("IC=").or_else(|| tok.strip_prefix("ic=")) else {
-                    return Err(err(format!("unexpected token `{tok}` after the value")));
+                    return Err(err(Diagnostic::new(codes::E0507).arg("token", tok)));
                 };
                 if kind == 'R' {
-                    return Err(err(format!(
-                        "`IC=` is only meaningful on a reactive element, not on `{name}`"
-                    )));
+                    return Err(err(Diagnostic::new(codes::E0508).arg("name", &name)));
                 }
                 ic = Some(
-                    parse_value(rest).ok_or_else(|| err(format!("bad `IC=` value `{rest}`")))?,
+                    parse_value(rest)
+                        .ok_or_else(|| err(Diagnostic::new(codes::E0509).arg("value", rest)))?,
                 );
             }
             Ok(Device {
@@ -503,14 +525,11 @@ fn parse_device(
             }
             // `X1 model` with no nodes at all is a mistake, not a zero-terminal instance.
             if end < 3 {
-                return Err(err(format!(
-                    "`{name}` names a model but connects no nodes (expected `X<name> <node>... \
-                     <model>`)"
-                )));
+                return Err(err(Diagnostic::new(codes::E0510).arg("name", &name)));
             }
             let written = toks[end - 1].to_string();
             let terminals: Vec<usize> = toks[1..end - 1].iter().map(|t| intern(net, t)).collect();
-            let line_params = parse_param_overrides(&toks[end..], line_no)?;
+            let line_params = parse_param_overrides(&toks[end..], line_no, origin)?;
             let (model, params, spice_names) = match apply_card(models, &written, &line_params) {
                 Some((module, params)) => (module, params, true),
                 None => (written, line_params, kind == 'N'),
@@ -533,13 +552,10 @@ fn parse_device(
         // empty and both references are resolved by `va-cli` like an `F`/`H` controller.
         'K' => {
             need(4)?;
-            let k =
-                parse_value(toks[3]).ok_or_else(|| err(format!("bad coupling `{}`", toks[3])))?;
+            let k = parse_value(toks[3])
+                .ok_or_else(|| err(Diagnostic::new(codes::E0511).arg("value", toks[3])))?;
             if !(-1.0..=1.0).contains(&k) {
-                return Err(err(format!(
-                    "coupling `{k}` is outside [-1, 1]: a coefficient beyond perfect coupling \
-                     would link more flux than either winding produces"
-                )));
+                return Err(err(Diagnostic::new(codes::E0512).arg("value", k)));
             }
             Ok(Device {
                 name,
@@ -562,8 +578,8 @@ fn parse_device(
             need(5)?;
             let p = intern(net, toks[1]);
             let n = intern(net, toks[2]);
-            let value =
-                parse_value(toks[4]).ok_or_else(|| err(format!("bad value `{}`", toks[4])))?;
+            let value = parse_value(toks[4])
+                .ok_or_else(|| err(Diagnostic::new(codes::E0506).arg("value", toks[4])))?;
             let model = if kind == 'F' { "cccs" } else { "ccvs" };
             Ok(Device {
                 name,
@@ -589,8 +605,8 @@ fn parse_device(
             let n = intern(net, toks[2]);
             let cp = intern(net, toks[3]);
             let cn = intern(net, toks[4]);
-            let value =
-                parse_value(toks[5]).ok_or_else(|| err(format!("bad value `{}`", toks[5])))?;
+            let value = parse_value(toks[5])
+                .ok_or_else(|| err(Diagnostic::new(codes::E0506).arg("value", toks[5])))?;
             let model = if kind == 'E' { "vcvs" } else { "vccs" };
             Ok(Device {
                 name,
@@ -619,7 +635,7 @@ fn parse_device(
                 waveform: None,
                 ac: None,
                 ic: None,
-                params: parse_param_overrides(&toks[4..], line_no)?,
+                params: parse_param_overrides(&toks[4..], line_no, origin)?,
                 controls: Vec::new(),
                 spice_names: false,
             })
@@ -642,7 +658,7 @@ fn parse_device(
                 waveform: None,
                 ac: None,
                 ic: None,
-                params: parse_param_overrides(&toks[5..], line_no)?,
+                params: parse_param_overrides(&toks[5..], line_no, origin)?,
                 controls: Vec::new(),
                 spice_names: false,
             })
@@ -685,12 +701,12 @@ fn parse_device(
                 waveform: None,
                 ac: None,
                 ic: None,
-                params: parse_param_overrides(&toks[5..], line_no)?,
+                params: parse_param_overrides(&toks[5..], line_no, origin)?,
                 controls: Vec::new(),
                 spice_names: false,
             })
         }
-        _ => Err(err(format!("unsupported element `{name}`"))),
+        _ => Err(err(Diagnostic::new(codes::E0513).arg("name", &name))),
     }
 }
 
@@ -1238,7 +1254,7 @@ R2 b 0 1k
             vec![("a".to_string(), 1.8), ("b".to_string(), 0.9)]
         );
         assert!(
-            net.notes.iter().any(|n| n.contains("I(a)=1")),
+            net.notes.iter().any(|n| n.to_string().contains("I(a)=1")),
             "{:?}",
             net.notes
         );

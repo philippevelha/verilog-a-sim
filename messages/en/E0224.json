@@ -1,0 +1,9 @@
+{
+  "code": "E0224",
+  "rev": 1,
+  "message": "indexing is capped at 2 dimensions",
+  "description": "Vector nets and array variables are supported with at most two dimensions, so at most two indices.",
+  "actions": [
+    "Restructure the access to use at most two indices."
+  ]
+}

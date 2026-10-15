@@ -1,0 +1,9 @@
+{
+  "code": "E0344",
+  "rev": 1,
+  "message": "`{name}` is not constant-evaluable",
+  "description": "This function cannot be computed before simulation, so it cannot be used in a parameter default or another constant expression.",
+  "actions": [
+    "Compute the value in the analog block instead, and use a variable."
+  ]
+}

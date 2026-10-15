@@ -1,0 +1,9 @@
+{
+  "code": "E0704",
+  "rev": 1,
+  "message": "cannot read directory `{path}`: {reason}",
+  "description": "A directory given on the command line could not be listed.",
+  "actions": [
+    "Check the path and that the directory is readable."
+  ]
+}

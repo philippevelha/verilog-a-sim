@@ -1,0 +1,9 @@
+{
+  "code": "E0313",
+  "rev": 1,
+  "message": "`{name}` is not a compile-time constant in this context",
+  "description": "This place needs a value known before simulation starts (a parameter default, a range bound, a vector index, a genvar loop bound). The name used is a variable or a net, whose value is only known while simulating.",
+  "actions": [
+    "Use a parameter, a literal or a constant expression here."
+  ]
+}

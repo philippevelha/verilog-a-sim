@@ -1,0 +1,9 @@
+{
+  "code": "E0381",
+  "rev": 1,
+  "message": "instance `{instance}` overrides unknown parameter `{param}` of module `{module}`",
+  "description": "The parameter override names a parameter the instantiated module does not declare.",
+  "actions": [
+    "Check the spelling against the module's parameter list."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0104",
+  "rev": 1,
+  "message": "macro expansion too deep (recursive macro?)",
+  "description": "Expanding a macro led to more than 64 nested expansions. This almost always means a macro uses itself, directly or through another macro, so its expansion never ends.",
+  "actions": [
+    "Find the macro whose body refers back to itself and break the cycle.",
+    "If the nesting is intentional and finite, simplify it: 64 levels is far beyond what real models use."
+  ]
+}

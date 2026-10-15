@@ -1,0 +1,10 @@
+{
+  "code": "E0122",
+  "rev": 1,
+  "message": "`default_transition expects a numeric literal (SI suffix allowed, e.g. `default_transition 1n), got `{text}`; an expression here is not supported",
+  "description": "`` `default_transition `` sets the default transition time of `transition()` filters, and must be given as a plain number, optionally with an SI suffix.",
+  "actions": [
+    "Write a number such as `` `default_transition 1n ``.",
+    "If the value comes from a parameter, pass it explicitly to each `transition()` call instead."
+  ]
+}

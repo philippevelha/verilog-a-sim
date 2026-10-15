@@ -1,0 +1,9 @@
+{
+  "code": "E0720",
+  "rev": 1,
+  "message": "AC analysis needs at least one source with an `AC <magnitude>` spec; none of this deck's {count} voltage source(s) has one",
+  "description": "Without an AC excitation the small-signal response is zero everywhere.",
+  "actions": [
+    "Give a source an AC magnitude: `V1 in 0 DC 0 AC 1`."
+  ]
+}

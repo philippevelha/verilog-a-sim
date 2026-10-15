@@ -1,0 +1,9 @@
+{
+  "code": "R0405",
+  "rev": 1,
+  "message": "flow probe `I(...)` is only supported for a branch that also receives a potential contribution somewhere in the module",
+  "description": "Reading the current of a branch needs that current as an unknown of the system, which this code generator creates only for a branch that has a potential (`V(...) <+`) contribution.",
+  "actions": [
+    "Probe a branch that has a potential contribution, or read the current from the contribution you wrote to it."
+  ]
+}

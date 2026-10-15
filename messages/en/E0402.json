@@ -1,0 +1,9 @@
+{
+  "code": "E0402",
+  "rev": 1,
+  "message": "a `<+` contribution is not allowed inside an analog function body",
+  "description": "An analog function computes a value and has no other effect; a contribution changes the circuit.",
+  "actions": [
+    "Return the value from the function, and contribute it in the analog block."
+  ]
+}

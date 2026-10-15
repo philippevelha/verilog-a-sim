@@ -1,5 +1,6 @@
 // expect: lex
-// at: 8:29
+// code: E0201
+// at: 9:29
 // message: unexpected character `£`
 // fixed: 2.18.2 (before: located by a byte offset into the preprocessed text, and the `£` printed as `Â` because the preprocessor copied it one byte at a time)
 module r(p, n);

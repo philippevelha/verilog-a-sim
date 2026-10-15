@@ -1,5 +1,6 @@
 // expect: elab
-// at: 7:22
+// code: E0316
+// at: 8:22
 // message: a string literal is not valid in a parameter context
 module r(p, n);
   inout p, n;

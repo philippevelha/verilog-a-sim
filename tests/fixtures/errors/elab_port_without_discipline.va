@@ -1,5 +1,6 @@
 // expect: elab
-// at: 4:10
+// code: E0306
+// at: 5:10
 // message: port `p` has no discipline declaration
 module r(p, n);
   inout p, n;

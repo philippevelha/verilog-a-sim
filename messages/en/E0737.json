@@ -1,0 +1,9 @@
+{
+  "code": "E0737",
+  "rev": 1,
+  "message": "device `{name}` references unknown model `{model}`",
+  "description": "No compiled `--model` module has this name, and it is not a built-in primitive.",
+  "actions": [
+    "Check the model name, or pass the Verilog-A file that defines it with `--model`."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0370",
+  "rev": 1,
+  "message": "`{name}` is a {dims}-D vector net; a bare (unindexed) port connection is only supported for a 1-D vector net",
+  "description": "A whole vector net can be connected to a port only when it has one dimension.",
+  "actions": [
+    "Connect a 1-D slice or the individual elements."
+  ]
+}

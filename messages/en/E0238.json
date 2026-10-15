@@ -1,0 +1,9 @@
+{
+  "code": "E0238",
+  "rev": 1,
+  "message": "argument {index} of `{name}` may not be omitted",
+  "description": "An argument is left empty (`f(a, , c)`). The LRM allows that only in a few places: the tolerance arguments of `cross`, `above` and `timer`, the direction of `cross` and the period of `timer`, the coefficient lists and tolerance of a Laplace filter, and the coefficient lists and transition time of a Z-domain filter. Everywhere else each argument must be written; this one is required.",
+  "actions": [
+    "Write the argument, or remove the extra comma if it was not meant to be there."
+  ]
+}

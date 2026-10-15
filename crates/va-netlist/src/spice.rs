@@ -37,6 +37,7 @@
 use crate::NetlistError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use va_diag::{codes, Diagnostic};
 
 /// One logical line after continuation-joining and include expansion, with where it came from.
 #[derive(Clone, Debug)]
@@ -67,7 +68,7 @@ pub(crate) struct Expanded {
     /// `.model` cards, keyed by lower-cased card name (SPICE names are case-insensitive).
     pub models: HashMap<String, ModelCard>,
     /// What was recognised and not applied (see [`crate::Netlist::notes`]).
-    pub notes: Vec<String>,
+    pub notes: Vec<Diagnostic>,
 }
 
 /// How deep `.include` may nest before it is taken to be a cycle.
@@ -97,24 +98,20 @@ pub(crate) fn expand(deck: &str, base: Option<&Path>) -> Result<Expanded, Netlis
                 if let Some(outer) = &open {
                     return Err(err(
                         &line,
-                        format!(
-                            "`.subckt` inside the definition of `{}`: nested subcircuit \
-                             definitions are not supported",
-                            outer.name
-                        ),
+                        Diagnostic::new(codes::E0514).arg("outer", &outer.name),
                     ));
                 }
                 open = Some(Subckt::from_header(&line)?);
             }
             ".ends" => {
                 let Some(done) = open.take() else {
-                    return Err(err(&line, "`.ends` with no open `.subckt`".to_string()));
+                    return Err(err(&line, Diagnostic::new(codes::E0515)));
                 };
                 let key = done.name.to_ascii_lowercase();
                 if subckts.contains_key(&key) {
                     return Err(err(
                         &line,
-                        format!("subcircuit `{}` is defined twice", done.name),
+                        Diagnostic::new(codes::E0516).arg("name", &done.name),
                     ));
                 }
                 subckts.insert(key, done);
@@ -133,10 +130,11 @@ pub(crate) fn expand(deck: &str, base: Option<&Path>) -> Result<Expanded, Netlis
         }
     }
     if let Some(sub) = open {
-        return Err(NetlistError::Parse {
-            line: sub.line,
-            message: format!("`.subckt {}` is never closed by `.ends`", sub.name),
-        });
+        return Err(NetlistError::at_line(
+            sub.line,
+            None,
+            Diagnostic::new(codes::E0517).arg("name", &sub.name),
+        ));
     }
 
     // Pass 2: flatten every subcircuit instance.
@@ -164,7 +162,7 @@ fn read_lines(
     file: Option<&str>,
     depth: usize,
     out: &mut Vec<Line>,
-    notes: &mut Vec<String>,
+    notes: &mut Vec<Diagnostic>,
 ) -> Result<(), NetlistError> {
     let origin = file.map(|f| format!("in `{f}`"));
     let mut in_control: Option<usize> = None;
@@ -184,12 +182,13 @@ fn read_lines(
         if let Some(start) = in_control {
             if lower.starts_with(".endc") {
                 in_control = None;
-                notes.push(format!(
-                    "ignored the ngspice `.control` block at lines {start}–{line_no}{}: it is a \
-                     script for ngspice's interpreter, not part of the circuit — write the \
-                     analysis as a dot-card (`.tran`, `.op`, …)",
-                    file.map(|f| format!(" of `{f}`")).unwrap_or_default()
-                ));
+                let d = Diagnostic::new(codes::W0502)
+                    .arg("first", start)
+                    .arg("last", line_no);
+                notes.push(match file {
+                    Some(f) => d.at(format!("`{f}`")),
+                    None => d,
+                });
             }
             continue;
         }
@@ -199,11 +198,11 @@ fn read_lines(
         }
         if let Some(rest) = trimmed.strip_prefix('+') {
             let Some(prev) = out.last_mut() else {
-                return Err(NetlistError::Parse {
-                    line: line_no,
-                    message: "a `+` continuation line with no line before it to continue"
-                        .to_string(),
-                });
+                return Err(NetlistError::at_line(
+                    line_no,
+                    origin.as_deref(),
+                    Diagnostic::new(codes::E0518),
+                ));
             };
             prev.text.push(' ');
             prev.text.push_str(rest.trim());
@@ -220,28 +219,25 @@ fn read_lines(
                 origin: origin.clone(),
             };
             if arg.is_empty() {
-                return Err(err(&here, "`.include` names no file".to_string()));
+                return Err(err(&here, Diagnostic::new(codes::E0519)));
             }
             let Some(dir) = base else {
-                return Err(err(
-                    &here,
-                    format!(
-                        "`.include {arg}` needs the deck's own location to resolve against; \
-                         parse the deck from its file (`va_netlist::parser::parse_file`)"
-                    ),
-                ));
+                return Err(err(&here, Diagnostic::new(codes::E0520).arg("file", arg)));
             };
             if depth >= MAX_INCLUDE_DEPTH {
                 return Err(err(
                     &here,
-                    format!("`.include` nested more than {MAX_INCLUDE_DEPTH} deep (a cycle?)"),
+                    Diagnostic::new(codes::E0521).arg("limit", MAX_INCLUDE_DEPTH),
                 ));
             }
             let path: PathBuf = dir.join(arg);
             let body = std::fs::read_to_string(&path).map_err(|e| {
                 err(
                     &here,
-                    format!("cannot read `.include {arg}` ({}): {e}", path.display()),
+                    Diagnostic::new(codes::E0522)
+                        .arg("file", arg)
+                        .arg("path", path.display())
+                        .arg("reason", e),
                 )
             })?;
             let label = path.display().to_string();
@@ -249,10 +245,11 @@ fn read_lines(
             continue;
         }
         if lower.starts_with(".option") {
-            notes.push(format!(
-                "not applied: `{trimmed}` — this simulator uses its own tolerances and `gmin` \
-                 handling, not a deck's `.options`"
-            ));
+            let d = Diagnostic::new(codes::W0503).arg("card", trimmed);
+            notes.push(match file {
+                Some(f) => d.at(format!("line {line_no} (in `{f}`)")),
+                None => d.at(format!("line {line_no}")),
+            });
             continue;
         }
         out.push(Line {
@@ -262,10 +259,11 @@ fn read_lines(
         });
     }
     if let Some(start) = in_control {
-        return Err(NetlistError::Parse {
-            line: start,
-            message: "`.control` is never closed by `.endc`".to_string(),
-        });
+        return Err(NetlistError::at_line(
+            start,
+            origin.as_deref(),
+            Diagnostic::new(codes::E0523),
+        ));
     }
     Ok(())
 }
@@ -283,7 +281,7 @@ impl Subckt {
     fn from_header(line: &Line) -> Result<Self, NetlistError> {
         let toks: Vec<&str> = line.text.split_whitespace().collect();
         let Some(name) = toks.get(1) else {
-            return Err(err(line, "`.subckt` names no subcircuit".to_string()));
+            return Err(err(line, Diagnostic::new(codes::E0524)));
         };
         let ports: Vec<String> = toks[2..].iter().map(|t| t.to_string()).collect();
         if let Some(p) = ports
@@ -292,10 +290,9 @@ impl Subckt {
         {
             return Err(err(
                 line,
-                format!(
-                    "`.subckt {name}` declares a parameter (`{p}`): subcircuit parameters are \
-                     not supported"
-                ),
+                Diagnostic::new(codes::E0525)
+                    .arg("name", name)
+                    .arg("param", p),
             ));
         }
         Ok(Self {
@@ -317,17 +314,16 @@ fn parse_model_card(line: &Line) -> Result<(String, ModelCard), NetlistError> {
     }
     let toks: Vec<&str> = text.split_whitespace().collect();
     let (Some(name), Some(module)) = (toks.get(1), toks.get(2)) else {
-        return Err(err(
-            line,
-            "`.model` needs a name and a type (`.model <name> <module> …`)".to_string(),
-        ));
+        return Err(err(line, Diagnostic::new(codes::E0526)));
     };
     let mut params = Vec::new();
     for tok in &toks[3..] {
         let Some((key, value)) = tok.split_once('=') else {
             return Err(err(
                 line,
-                format!("`.model {name}`: expected `name=value`, found `{tok}`"),
+                Diagnostic::new(codes::E0527)
+                    .arg("name", name)
+                    .arg("token", tok),
             ));
         };
         if key.eq_ignore_ascii_case("level") {
@@ -336,7 +332,10 @@ fn parse_model_card(line: &Line) -> Result<(String, ModelCard), NetlistError> {
         let Some(v) = crate::parser::parse_value(value) else {
             return Err(err(
                 line,
-                format!("`.model {name}`: bad value `{value}` for `{key}`"),
+                Diagnostic::new(codes::E0528)
+                    .arg("name", name)
+                    .arg("value", value)
+                    .arg("key", key),
             ));
         };
         params.push((key.to_string(), v));
@@ -373,10 +372,7 @@ impl Flatten<'_> {
         };
         if first.starts_with('.') {
             if path.is_some() {
-                return Err(err(
-                    line,
-                    format!("`{first}` inside a subcircuit body is not supported"),
-                ));
+                return Err(err(line, Diagnostic::new(codes::E0529).arg("card", first)));
             }
             out.push(line.clone());
             return Ok(());
@@ -439,41 +435,36 @@ impl Flatten<'_> {
         if toks.len() > model_at + 1 {
             return Err(err(
                 line,
-                format!(
-                    "`{inst}` passes parameters to subcircuit `{}`: subcircuit parameters are \
-                     not supported",
-                    sub.name
-                ),
+                Diagnostic::new(codes::E0530)
+                    .arg("instance", inst)
+                    .arg("name", &sub.name),
             ));
         }
         let actual = &toks[1..model_at];
         if actual.len() != sub.ports.len() {
             return Err(err(
                 line,
-                format!(
-                    "`{inst}` connects {} net(s) but subcircuit `{}` has {} port(s) ({})",
-                    actual.len(),
-                    sub.name,
-                    sub.ports.len(),
-                    sub.ports.join(" ")
-                ),
+                Diagnostic::new(codes::E0531)
+                    .arg("instance", inst)
+                    .arg("got", actual.len())
+                    .arg("name", &sub.name)
+                    .arg("expected", sub.ports.len())
+                    .arg("ports", sub.ports.join(" ")),
             ));
         }
         let key = sub.name.to_ascii_lowercase();
         if stack.contains(&key) {
             return Err(err(
                 line,
-                format!(
-                    "subcircuit `{}` instantiates itself (through {})",
-                    sub.name,
-                    stack.join(" → ")
-                ),
+                Diagnostic::new(codes::E0532)
+                    .arg("name", &sub.name)
+                    .arg("chain", stack.join(" → ")),
             ));
         }
         if stack.len() >= MAX_SUBCKT_DEPTH {
             return Err(err(
                 line,
-                format!("subcircuits nested more than {MAX_SUBCKT_DEPTH} deep"),
+                Diagnostic::new(codes::E0533).arg("limit", MAX_SUBCKT_DEPTH),
             ));
         }
         let inner_path = match path {
@@ -542,14 +533,8 @@ fn slots(letter: char, toks: &[&str]) -> (Vec<usize>, Vec<usize>) {
     }
 }
 
-fn err(line: &Line, message: String) -> NetlistError {
-    NetlistError::Parse {
-        line: line.line,
-        message: match &line.origin {
-            Some(o) => format!("{message} ({o})"),
-            None => message,
-        },
-    }
+fn err(line: &Line, d: Diagnostic) -> NetlistError {
+    NetlistError::at_line(line.line, line.origin.as_deref(), d)
 }
 
 #[cfg(test)]
@@ -567,7 +552,7 @@ mod tests {
 
     fn err_text(deck: &str) -> String {
         match parse(deck) {
-            Err(NetlistError::Parse { message, .. }) => message,
+            Err(NetlistError::Parse { diag, .. }) => diag.to_string(),
             other => panic!("expected a parse error, got {other:?}"),
         }
     }
@@ -658,8 +643,8 @@ mod tests {
         .expect("parses");
         assert_eq!(net.devices.len(), 2);
         assert_eq!(net.notes.len(), 2, "{:?}", net.notes);
-        assert!(net.notes.iter().any(|n| n.contains(".control")));
-        assert!(net.notes.iter().any(|n| n.contains(".options")));
+        assert!(net.notes.iter().any(|n| n.to_string().contains(".control")));
+        assert!(net.notes.iter().any(|n| n.to_string().contains(".options")));
     }
 
     /// `.global` nets are not scoped by the instance.
@@ -690,7 +675,7 @@ mod tests {
         assert_eq!(x.model, "RES");
         assert_eq!(x.params, vec![("r".to_string(), 2e3)]);
         std::fs::remove_dir_all(&dir).ok();
-        assert!(err_text(".include cards/a.inc\n").contains("parse_file"));
+        assert!(err_text(".include cards/a.inc\n").contains("[E0520]"));
     }
 
     /// Malformed structure is an error naming what is wrong, never a guess.

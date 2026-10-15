@@ -1,0 +1,9 @@
+{
+  "code": "E0514",
+  "rev": 1,
+  "message": "`.subckt` inside the definition of `{outer}`: nested subcircuit definitions are not supported",
+  "description": "This simulator reads one level of subcircuit definition; a definition inside another is not supported.",
+  "actions": [
+    "Move the inner `.subckt ... .ends` out, before or after the outer one. It can still be instantiated inside it."
+  ]
+}

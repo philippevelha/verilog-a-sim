@@ -1,0 +1,10 @@
+{
+  "code": "E0337",
+  "rev": 1,
+  "message": "genvar `{name}` may only be assigned by the step of the `for` loop it drives (restricted assignment)",
+  "description": "A genvar is the counter of a generate loop. Only that loop's header may change it, and the loop's step must update it.",
+  "actions": [
+    "Write the step as an assignment to the loop's genvar, for example `i = i + 1`.",
+    "Use an ordinary variable if you need to assign it in the body."
+  ]
+}

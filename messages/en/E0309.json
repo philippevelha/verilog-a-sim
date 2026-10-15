@@ -1,0 +1,9 @@
+{
+  "code": "E0309",
+  "rev": 1,
+  "message": "parameter `{name}` value {value} is below its declared minimum {min}",
+  "description": "The parameter's value is outside the range declared with `from [...]`.",
+  "actions": [
+    "Change the value, or the declared range if the range is wrong."
+  ]
+}

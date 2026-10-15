@@ -1,0 +1,9 @@
+{
+  "code": "E0714",
+  "rev": 1,
+  "message": "`{name}` names no controlling element",
+  "description": "A current-controlled source (`F`, `H`) senses the current of another element, named on its line.",
+  "actions": [
+    "Add the controlling element's name: `F1 a b V1 2`."
+  ]
+}

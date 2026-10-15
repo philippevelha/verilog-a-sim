@@ -1,0 +1,9 @@
+{
+  "code": "R0408",
+  "rev": 1,
+  "message": "a loop did not terminate within {limit} iterations",
+  "description": "A `while`, `for` or `repeat` loop in the analog block or in an analog function ran past the limit. This is usually an infinite loop, but a loop that is only very long is stopped too rather than left to hang the run.",
+  "actions": [
+    "Check the loop's condition and the statement that should end it."
+  ]
+}

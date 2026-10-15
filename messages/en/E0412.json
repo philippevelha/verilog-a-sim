@@ -1,0 +1,9 @@
+{
+  "code": "E0412",
+  "rev": 1,
+  "message": "a zi_* filter with {count} more zero(s) at the origin than poles at the origin is an advance of {count} sample(s), which no causal filter can produce (LRM 4.5.12)",
+  "description": "A root at the origin is a factor z, a one-sample advance. More such zeros than poles asks the filter for future input samples.",
+  "actions": [
+    "Remove zeros at the origin, or add poles at the origin to delay the output instead."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0386",
+  "rev": 1,
+  "message": "instance `{instance}` of `{module}`: port `{port}` connected more than once",
+  "description": "Each port can be connected once.",
+  "actions": [
+    "Remove the second connection."
+  ]
+}

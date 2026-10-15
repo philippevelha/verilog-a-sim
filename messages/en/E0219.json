@@ -1,0 +1,9 @@
+{
+  "code": "E0219",
+  "rev": 1,
+  "message": "expected an event in the trigger list, found {found}",
+  "description": "An event control `@(...)` lists one or more events (`cross(...)`, `above(...)`, `timer(...)`, `initial_step`, `final_step`) separated by `or`. Something else was found in the list.",
+  "actions": [
+    "Write the events separated by `or`: `@(initial_step or cross(V(p) - 0.5, +1))`."
+  ]
+}

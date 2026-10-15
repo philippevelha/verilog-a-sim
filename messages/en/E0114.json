@@ -1,0 +1,10 @@
+{
+  "code": "E0114",
+  "rev": 1,
+  "message": "`include cycle on {path}",
+  "description": "A file includes itself, directly or through other files it includes. Following it would never end.",
+  "actions": [
+    "Remove the `` `include `` that leads back to the file named.",
+    "If the file only needs to be read once, protect it with an include guard: `` `ifndef NAME `` / `` `define NAME `` ... `` `endif ``."
+  ]
+}

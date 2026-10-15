@@ -1,0 +1,9 @@
+{
+  "code": "E0354",
+  "rev": 1,
+  "message": "`{name}` needs at least one numerator/zero and one denominator/pole entry",
+  "description": "A filter's numerator and denominator lists must not be empty.",
+  "actions": [
+    "Give at least one entry in each list, for example `{1}`."
+  ]
+}

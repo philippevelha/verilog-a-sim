@@ -1,0 +1,9 @@
+{
+  "code": "E0331",
+  "rev": 1,
+  "message": "array variable `{name}` must be declared at module scope, not inside the analog block (block-local array variables are not yet supported)",
+  "description": "This simulator supports array variables declared at module level only.",
+  "actions": [
+    "Move the declaration out of the analog block, to module level."
+  ]
+}

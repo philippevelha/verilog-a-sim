@@ -1,5 +1,6 @@
 // expect: elab
-// at: 13:3
+// code: E0381
+// at: 14:3
 // message: instance `x1` overrides unknown parameter `Rz` of module `r`
 module r(p, n);
   inout p, n;

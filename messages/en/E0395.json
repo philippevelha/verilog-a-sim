@@ -1,0 +1,9 @@
+{
+  "code": "E0395",
+  "rev": 1,
+  "message": "{file}: a $table_model table needs at least two distinct points, found {count}",
+  "description": "Interpolation needs at least two points.",
+  "actions": [
+    "Add points to the table."
+  ]
+}

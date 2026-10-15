@@ -1,0 +1,10 @@
+{
+  "code": "E0603",
+  "rev": 1,
+  "message": "a model produced a non-finite value (NaN or inf) in the equation of {unknown}",
+  "description": "A model's contribution to this unknown's equation is not a number at the current trial point, so the solve stopped before the linear solve. The equations are not singular: a contribution divides by zero, or takes the log, square root or power of a value outside its domain. On Newton's first iteration every probe reads 0.0, which is the usual way to get there.",
+  "actions": [
+    "Look at the device(s) contributing to this unknown.",
+    "Guard such a probe in the model, e.g. `(x > 0.0) ? x : x_default`, or start from a better point with `.nodeset`."
+  ]
+}

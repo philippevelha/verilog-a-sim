@@ -1,0 +1,9 @@
+// expect: cgen
+// code: E0413
+// message: variable `x` is read before it is assigned
+module r(p, n);
+  inout p, n;
+  electrical p, n;
+  real x;
+  analog I(p, n) <+ x * V(p, n);
+endmodule

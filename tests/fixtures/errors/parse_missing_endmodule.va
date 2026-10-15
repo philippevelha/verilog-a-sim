@@ -1,7 +1,8 @@
 // expect: parse
-// at: 9:34
-// message: expected `endmodule` to close the module `r`
-// message: parse_missing_endmodule.va:6:1
+// code: E0205
+// at: 10:34
+// message: expected `endmodule` to close module `r`
+// message: parse_missing_endmodule.va:7:1
 // fixed: 2.18.2 (before: located as `preprocessed line 9`, ending `found None`)
 module r(p, n);
   inout p, n;

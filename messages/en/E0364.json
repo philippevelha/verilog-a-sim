@@ -1,0 +1,9 @@
+{
+  "code": "E0364",
+  "rev": 1,
+  "message": "`{name}[..]` is a vector slice; a branch access/declaration needs a single node, e.g. `V({name}[0])` (a slice is only valid as an instance port-connection argument)",
+  "description": "A probe or a branch connects single nodes. A slice names several.",
+  "actions": [
+    "Index one element, or use a loop over the elements."
+  ]
+}

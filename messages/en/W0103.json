@@ -1,0 +1,9 @@
+{
+  "code": "W0103",
+  "rev": 1,
+  "message": "`default_nettype has no effect in Verilog-A",
+  "description": "`default_nettype names a digital net type for implicitly declared nets (`wire`, `tri`, ...), which Annex C excludes from Verilog-A. An undeclared net in an instance connection is already an error here, which is what `default_nettype none asks for. The directive is accepted and ignored, so the model runs exactly as it would without it.",
+  "actions": [
+    "Remove the directive, or leave it if the file is shared with digital Verilog tools."
+  ]
+}

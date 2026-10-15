@@ -1,0 +1,10 @@
+{
+  "code": "E0204",
+  "rev": 1,
+  "message": "expected `end` to close the `begin` opened at {opened}, found {found}",
+  "description": "A block opened with `begin` must be closed with `end` before the enclosing construct ends. This one is still open when the module (or function) ends.",
+  "actions": [
+    "Add the missing `end` where the block should close.",
+    "If blocks are nested, check that each `begin` has its own `end`; the location given is the `begin` that is left open."
+  ]
+}

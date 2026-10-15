@@ -1,0 +1,9 @@
+{
+  "code": "E0407",
+  "rev": 1,
+  "message": "a {filter} coefficient does not evaluate to a number",
+  "description": "A coefficient or root of the filter could not be computed from the instance's parameter values.",
+  "actions": [
+    "Check the filter's coefficient lists and the parameters they use."
+  ]
+}

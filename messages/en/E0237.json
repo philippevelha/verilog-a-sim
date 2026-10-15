@@ -1,0 +1,9 @@
+{
+  "code": "E0237",
+  "rev": 1,
+  "message": "expected a `discipline` attribute or `enddiscipline`, found {found}",
+  "description": "Inside `discipline ... enddiscipline`, each line binds a nature (`potential`, `flow`) or sets the `domain`, and the block ends with `enddiscipline`.",
+  "actions": [
+    "Check the attribute name, or add the missing `enddiscipline`."
+  ]
+}

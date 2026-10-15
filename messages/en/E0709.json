@@ -1,0 +1,9 @@
+{
+  "code": "E0709",
+  "rev": 1,
+  "message": "the deck requests the `.{card}` analysis; pass `--{card}` to run it",
+  "description": "The deck's analysis card asks for an analysis other than the one the command line selected.",
+  "actions": [
+    "Add the flag the message names, or change the deck's card."
+  ]
+}

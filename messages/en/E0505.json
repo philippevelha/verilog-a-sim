@@ -1,0 +1,9 @@
+{
+  "code": "E0505",
+  "rev": 1,
+  "message": "`{name}` needs at least {need} tokens, found {got}",
+  "description": "The element line is too short: it is missing a node, a value or a model name.",
+  "actions": [
+    "Check the element's syntax: for example `R1 a b 1k`, `D1 a k dmodel`, `M1 d g s b nmodel`."
+  ]
+}

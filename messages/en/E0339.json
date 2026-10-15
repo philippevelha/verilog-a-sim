@@ -1,0 +1,9 @@
+{
+  "code": "E0339",
+  "rev": 1,
+  "message": "generate loop over genvar `{name}` did not terminate within {limit} iterations",
+  "description": "A generate loop is unrolled before simulation. This one ran past the limit, usually because its condition never becomes false.",
+  "actions": [
+    "Check the loop's condition and step."
+  ]
+}

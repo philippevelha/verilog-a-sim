@@ -1,6 +1,7 @@
 // expect: elab
-// at: 13:21
-// message: analog function `sq` declares 1 argument(s), but this call passes 2
+// code: E0333
+// at: 14:21
+// message: `sq` takes 1 argument(s), but this call passes 2
 // fixed: 2.18.1
 module r(p, n);
   inout p, n;

@@ -1,0 +1,9 @@
+{
+  "code": "E0120",
+  "rev": 1,
+  "message": "`default_nodetype is not a Verilog-AMS 2.4 directive (an obsolete AMS-1.x spelling); write `default_discipline <discipline> instead",
+  "description": "`` `default_nodetype `` was the name of this directive in early Verilog-AMS drafts. The current standard calls it `` `default_discipline ``.",
+  "actions": [
+    "Replace `` `default_nodetype `` with `` `default_discipline `` and keep the same discipline name."
+  ]
+}

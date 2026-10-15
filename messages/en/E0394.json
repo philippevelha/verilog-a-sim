@@ -1,0 +1,9 @@
+{
+  "code": "E0394",
+  "rev": 1,
+  "message": "{file}: two points at x = {x} with different values ({y1} and {y2}); a table cannot have two answers at one point (LRM §9.21.1)",
+  "description": "Two lines of the table have the same `x` but different `y`.",
+  "actions": [
+    "Remove or correct one of the two lines."
+  ]
+}

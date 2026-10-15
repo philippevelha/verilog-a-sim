@@ -1,0 +1,9 @@
+{
+  "code": "E0223",
+  "rev": 1,
+  "message": "`{name}` has more than 2 bracket groups; indexing/slicing is capped at 2 dimensions",
+  "description": "Vector nets and array variables are supported with at most two dimensions, so at most two bracket groups.",
+  "actions": [
+    "Restructure the access to use at most two indices."
+  ]
+}

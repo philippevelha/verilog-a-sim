@@ -1,0 +1,9 @@
+{
+  "code": "E0608",
+  "rev": 1,
+  "message": "the model executed `$fatal` at {point}: {message}",
+  "description": "A model's `$fatal` task stops the simulation at once (LRM 9.7.3), here during a static solve: the operating point, or one point of a DC sweep (shown as `source=value`).",
+  "actions": [
+    "Read the model's message, and look at the model's condition for calling `$fatal`."
+  ]
+}

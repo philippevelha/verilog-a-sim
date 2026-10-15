@@ -1,0 +1,9 @@
+{
+  "code": "E0406",
+  "rev": 1,
+  "message": "a zi_* transition time must be non-negative and finite, got {value}",
+  "description": "The transition time smooths the filter's output between samples, so it must be zero or positive.",
+  "actions": [
+    "Check the transition-time argument and the parameters it uses."
+  ]
+}

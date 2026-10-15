@@ -1,0 +1,9 @@
+{
+  "code": "E0318",
+  "rev": 1,
+  "message": "array variable `{name}` is not constant in a parameter context",
+  "description": "A variable's value is only known during simulation; it cannot be used where a value known before simulation is required.",
+  "actions": [
+    "Use a parameter or a literal instead."
+  ]
+}

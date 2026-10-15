@@ -1,0 +1,9 @@
+{
+  "code": "E0360",
+  "rev": 1,
+  "message": "`{name}`: `{analysis}` is not a Verilog-A analysis name (expected one of {expected})",
+  "description": "The analysis name is not one the LRM defines. A misspelt name is an error rather than \"no analysis\", because that would silently disable the code it guards.",
+  "actions": [
+    "Use one of the names listed."
+  ]
+}

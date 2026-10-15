@@ -607,18 +607,17 @@ pub fn lex_spanned_with(
                 offsets.push(span.start);
             }
             Err(()) => {
+                // The whole character at the error, from `source`: the error span can be one
+                // byte of a multi-byte character, which printed as a broken glyph.
+                let ch = source
+                    .get(span.start..)
+                    .and_then(|r| r.chars().next())
+                    .unwrap_or('?');
                 return Err(FrontendError::Lex {
                     offset: span.start,
-                    location: format!("byte {}", span.start),
-                    // The whole character at the error, from `source`: the error span can be
-                    // one byte of a multi-byte character, which printed as a broken glyph.
-                    message: format!(
-                        "unexpected character `{}`",
-                        source
-                            .get(span.start..)
-                            .and_then(|r| r.chars().next())
-                            .unwrap_or('?')
-                    ),
+                    diag: crate::Diagnostic::new(crate::codes::E0201)
+                        .arg("char", ch)
+                        .at(format!("byte {}", span.start)),
                 });
             }
         }
@@ -700,9 +699,7 @@ pub fn lex_located(
     line_map: &[crate::preprocess::SourceLoc],
 ) -> Result<(Vec<Token>, Vec<usize>), FrontendError> {
     lex_spanned_with(source, directives).map_err(|e| match e {
-        FrontendError::Lex {
-            offset, message, ..
-        } => {
+        FrontendError::Lex { offset, diag } => {
             let offset = offset.min(source.len());
             let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
             let line_idx = source[..offset].matches('\n').count();
@@ -711,10 +708,14 @@ pub fn lex_located(
                 Some(loc) => format!("{}:{}:{col}", loc.file, loc.line),
                 None => format!("preprocessed line {}, column {col}", line_idx + 1),
             };
+            // The lexer could only say "byte N"; this replaces it.
+            let mut located = crate::Diagnostic::new(diag.code()).at(location);
+            for (k, v) in diag.args() {
+                located = located.arg(k, v);
+            }
             FrontendError::Lex {
                 offset,
-                location,
-                message,
+                diag: located,
             }
         }
         other => other,

@@ -1,0 +1,9 @@
+{
+  "code": "E0729",
+  "rev": 1,
+  "message": "instance multiplicity must be a positive, finite number, got `{name}={value}`",
+  "description": "The multiplicity is the number of identical devices in parallel (LRM 6.3.6).",
+  "actions": [
+    "Give a positive number."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0342",
+  "rev": 1,
+  "message": "unknown function `{name}`",
+  "description": "The name is called as a function, but it is neither a built-in function nor an analog function declared in this module.",
+  "actions": [
+    "Check the spelling.",
+    "Declare the function with `analog function ... endfunction`."
+  ]
+}

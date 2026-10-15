@@ -1,0 +1,9 @@
+{
+  "code": "E0304",
+  "rev": 1,
+  "message": "`ground {name}`: `{name}` is not a previously declared net",
+  "description": "A `ground` declaration marks an existing net as the reference node. The net must be declared (with a discipline) before this point.",
+  "actions": [
+    "Declare the net first, for example `electrical gnd; ground gnd;`."
+  ]
+}

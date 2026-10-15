@@ -1,0 +1,9 @@
+{
+  "code": "R0401",
+  "rev": 1,
+  "message": "`ddt` of a value that already depends on a time derivative is a second time derivative",
+  "description": "A contribution or variable takes `ddt` of something that itself contains `ddt`, directly or through a variable. This simulator carries one charge channel per contribution, which expresses a first time derivative only; a second derivative has no place in it, and dropping either `ddt` would change what the model says.",
+  "actions": [
+    "Introduce an internal node for the first derivative and take `ddt` of its potential, for example `V(d) <+ ddt(x); I(p, n) <+ ddt(V(d));`."
+  ]
+}

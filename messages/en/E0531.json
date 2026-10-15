@@ -1,0 +1,9 @@
+{
+  "code": "E0531",
+  "rev": 1,
+  "message": "`{instance}` connects {got} net(s) but subcircuit `{name}` has {expected} port(s) ({ports})",
+  "description": "A subcircuit instance connects one net to each of the subcircuit's ports, in order.",
+  "actions": [
+    "Connect one net per port, in the order the `.subckt` line lists them."
+  ]
+}

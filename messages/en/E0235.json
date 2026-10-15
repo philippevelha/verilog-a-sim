@@ -1,0 +1,10 @@
+{
+  "code": "E0235",
+  "rev": 1,
+  "message": "`.{port}(...)`: a port connects to a net, not to a value",
+  "description": "In an instance's port list, each port is connected to a net. A value was written instead; this usually means a parameter override was put in the port list.",
+  "actions": [
+    "If `{port}` is a parameter of the instantiated module, override it in the `#(...)` list before the instance name: `#(.{port}(value)) name(...)`.",
+    "If it is a port, connect it to a net."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "R0308",
+  "rev": 1,
+  "message": "`$table_model` interpolation `{char}` (a spline)",
+  "description": "Only linear (`1`) and closest-point (`D`) are implemented. Substituting linear would not be a rounder answer but a different function: a spline and a chord agree only at the knots, and the derivative the Jacobian needs differs everywhere between them.",
+  "actions": [
+    "Write `1` for linear or `D` for closest-point, or supply a finer table."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0527",
+  "rev": 1,
+  "message": "`.model {name}`: expected `name=value`, found `{token}`",
+  "description": "After its name and type, a `.model` card lists parameters, each written `name=value`.",
+  "actions": [
+    "Write the parameter as `name=value`."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0327",
+  "rev": 1,
+  "message": "`{name}` repeats the frequency {frequency} Hz — the LRM requires each frequency in a table to be unique",
+  "description": "Two entries of the noise table have the same frequency, so the table would give two powers at one frequency.",
+  "actions": [
+    "Remove or correct one of the two entries."
+  ]
+}

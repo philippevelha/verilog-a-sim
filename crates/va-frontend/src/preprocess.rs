@@ -38,6 +38,7 @@
 //!   an error naming `` `default_discipline ``.
 
 use crate::FrontendError;
+use crate::{codes, Code, Diagnostic};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -112,7 +113,7 @@ pub struct Preprocessed {
     pub directives: Vec<DirectiveEvent>,
     /// Directives the LRM gives no Verilog-A meaning, reported once each: "`` `timescale `` has
     /// no effect in Verilog-A: …". A caller prints them; nothing downstream depends on them.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Diagnostic>,
     /// Where each line of `text` came from: `line_map[k]` is the origin of output line `k`
     /// (0-based) — the file it was read from and its 1-based line number there, with
     /// `` `include `` nesting and `` `line `` overrides (IEEE 1364-2005 §19.7) applied. This is
@@ -309,10 +310,7 @@ pub fn preprocess_named_with(
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
         if !valid {
             return (
-                Err(pp_err(&format!(
-                    "cannot predefine macro `{n}`: a macro name is a letter or `_` followed by \
-                     letters, digits, `_` or `$`"
-                ))),
+                Err(pp_err(Diagnostic::new(codes::E0108).arg("name", n))),
                 Vec::new(),
             );
         }
@@ -338,12 +336,10 @@ pub fn preprocess_named_with(
     };
     let mut result = pp.process_str(source);
     if result.is_ok() && !pp.cond.is_empty() {
-        result = Err(pp_err("unterminated `ifdef/`ifndef (missing `endif)"));
+        result = Err(pp_err(Diagnostic::new(codes::E0109)));
     }
     if result.is_ok() && pp.keyword_depth > 0 {
-        result = Err(pp_err(
-            "unterminated `begin_keywords (missing `end_keywords)",
-        ));
+        result = Err(pp_err(Diagnostic::new(codes::E0116)));
     }
     let skipped = std::mem::take(&mut pp.skipped_includes);
     (
@@ -385,7 +381,7 @@ struct Preprocessor {
     /// See [`Preprocessed::directives`].
     directives: Vec<DirectiveEvent>,
     /// See [`Preprocessed::warnings`].
-    warnings: Vec<String>,
+    warnings: Vec<Diagnostic>,
     /// Directive names already warned about, so a file that repeats `` `timescale `` gets one
     /// line, not one per occurrence.
     warned: Vec<&'static str>,
@@ -429,7 +425,7 @@ impl Preprocessor {
     /// Process a whole source string: strip comments, join line continuations, run each line.
     fn process_str(&mut self, source: &str) -> Result<(), FrontendError> {
         let file = self.frames.last().map_or("<input>", |f| f.file.as_str());
-        let stripped = strip_comments(source).map_err(|u| pp_err(&u.message(file)))?;
+        let stripped = strip_comments(source).map_err(|u| pp_err(u.diagnostic(file)))?;
         let lines: Vec<&str> = stripped.split('\n').collect();
         let mut i = 0;
         while i < lines.len() {
@@ -461,8 +457,8 @@ impl Preprocessor {
     /// keeps it: the included file's line is the one to look at.
     fn locate(&self, e: FrontendError) -> FrontendError {
         match (e, self.frames.last()) {
-            (FrontendError::Preprocess(m), Some(f)) if !m.starts_with("at ") => {
-                pp_err(&format!("at {}:{}: {m}", f.file, f.reported_line()))
+            (FrontendError::Preprocess(d), Some(f)) if d.location().is_none() => {
+                pp_err(d.at(format!("{}:{}", f.file, f.reported_line())))
             }
             (e, _) => e,
         }
@@ -499,7 +495,7 @@ impl Preprocessor {
                 "begin_keywords" => return self.do_begin_keywords(after),
                 "end_keywords" => {
                     if self.keyword_depth == 0 {
-                        return Err(pp_err("`end_keywords without a matching `begin_keywords"));
+                        return Err(pp_err(Diagnostic::new(codes::E0117)));
                     }
                     self.keyword_depth -= 1;
                     self.record(Directive::EndKeywords);
@@ -511,35 +507,13 @@ impl Preprocessor {
                     return Ok(());
                 }
                 // Directives the LRM gives no Verilog-A meaning: accepted, and said so.
-                "timescale" => {
-                    return self.warn_no_effect(
-                        "timescale",
-                        "Verilog-A has no delay controls (`#`) and `$abstime` is in seconds \
-                         regardless (LRM 9.17), so the time unit it sets is never read",
-                    )
-                }
+                "timescale" => return self.warn_no_effect("timescale", codes::W0101),
                 "celldefine" | "endcelldefine" => {
-                    return self.warn_no_effect(
-                        "celldefine",
-                        "it tags a module as a library cell for delay-annotation (SDF) tools; a \
-                         simulator has nothing to do with the tag",
-                    )
+                    return self.warn_no_effect("celldefine", codes::W0102)
                 }
-                "default_nettype" => {
-                    return self.warn_no_effect(
-                        "default_nettype",
-                        "it names a *digital* net type for implicitly declared nets (`wire`, \
-                         `tri`, …), which Annex C excludes from Verilog-A; an undeclared net in \
-                         an instance connection is already an error here, which is what \
-                         `default_nettype none` asks for",
-                    )
-                }
+                "default_nettype" => return self.warn_no_effect("default_nettype", codes::W0103),
                 "unconnected_drive" | "nounconnected_drive" => {
-                    return self.warn_no_effect(
-                        "unconnected_drive",
-                        "it drives unconnected *digital* input ports to a logic level; \
-                         Verilog-A ports are analog nets",
-                    )
+                    return self.warn_no_effect("unconnected_drive", codes::W0104)
                 }
                 // `pragma`: IEEE 1364-2005 §19.9 requires a tool to ignore pragmas it does not
                 // understand, so an unknown one is not even worth a warning. The one this
@@ -547,14 +521,10 @@ impl Preprocessor {
                 "pragma" => {
                     let (word, _) = split_ident(after.trim_start());
                     if word == "protect" {
-                        return Err(FrontendError::Refused(crate::Refusal::new(
-                            "`pragma protect`, an encrypted model envelope",
-                            "the text inside the envelope is ciphertext: a clean-room simulator \
-                             holds no vendor key, and lexing the bytes would produce an error \
-                             naming a garbage token rather than the real reason",
-                        )
-                        .instead("obtain the unencrypted source, or a model written for open tools")
-                        .tracking("docs/proposals/directives.md section 2.2")));
+                        return Err(FrontendError::refused(
+                            crate::Refusal::coded(codes::R0101, &[])
+                                .tracking("docs/proposals/directives.md section 2.2"),
+                        ));
                     }
                     return Ok(());
                 }
@@ -566,10 +536,7 @@ impl Preprocessor {
                 // Annex F change history. Accepting it silently would be worse than an error —
                 // a model relying on it expects a default discipline this engine would not apply.
                 "default_nodetype" | "default_nodeType" => {
-                    return Err(pp_err(
-                        "`default_nodetype is not a Verilog-AMS 2.4 directive (an obsolete \
-                         AMS-1.x spelling); write `default_discipline <discipline> instead",
-                    ))
+                    return Err(pp_err(Diagnostic::new(codes::E0120)))
                 }
                 // Not a directive: a leading macro usage. Fall through to expansion.
                 _ => {}
@@ -619,7 +586,7 @@ impl Preprocessor {
         let frame = self
             .cond
             .last_mut()
-            .ok_or_else(|| pp_err("`elsif without `ifdef"))?;
+            .ok_or_else(|| pp_err(Diagnostic::new(codes::E0110)))?;
         let take = frame.parent_active && !frame.any_taken && defined;
         frame.branch_active = take;
         frame.any_taken |= take;
@@ -630,7 +597,7 @@ impl Preprocessor {
         let frame = self
             .cond
             .last_mut()
-            .ok_or_else(|| pp_err("`else without `ifdef"))?;
+            .ok_or_else(|| pp_err(Diagnostic::new(codes::E0111)))?;
         frame.branch_active = frame.parent_active && !frame.any_taken;
         frame.any_taken = true;
         Ok(())
@@ -639,7 +606,7 @@ impl Preprocessor {
     fn do_endif(&mut self) -> Result<(), FrontendError> {
         self.cond
             .pop()
-            .ok_or_else(|| pp_err("`endif without `ifdef"))?;
+            .ok_or_else(|| pp_err(Diagnostic::new(codes::E0112)))?;
         Ok(())
     }
 
@@ -649,7 +616,7 @@ impl Preprocessor {
         let after = after.trim_start();
         let (name, rest) = split_ident(after);
         if name.is_empty() {
-            return Err(pp_err("`define missing a macro name"));
+            return Err(pp_err(Diagnostic::new(codes::E0107)));
         }
         // Function-like only when `(` immediately follows the name (no space).
         let (params, body) = if rest.starts_with('(') {
@@ -663,8 +630,7 @@ impl Preprocessor {
     }
 
     fn do_include(&mut self, after: &str) -> Result<(), FrontendError> {
-        let file =
-            parse_quoted(after).ok_or_else(|| pp_err("`include expects a quoted file name"))?;
+        let file = parse_quoted(after).ok_or_else(|| pp_err(Diagnostic::new(codes::E0113)))?;
         let Some(path) = self.resolve_include(&file) else {
             // Unresolved include: skipped (standard headers are built in), but recorded — see
             // `preprocess_reporting` for why a silent skip is not good enough.
@@ -674,10 +640,17 @@ impl Preprocessor {
             return Ok(());
         };
         if self.include_stack.contains(&path) {
-            return Err(pp_err(&format!("`include cycle on {}", path.display())));
+            return Err(pp_err(
+                Diagnostic::new(codes::E0114).arg("path", path.display()),
+            ));
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| pp_err(&format!("reading `include {}: {e}", path.display())))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            pp_err(
+                Diagnostic::new(codes::E0115)
+                    .arg("path", path.display())
+                    .arg("reason", e),
+            )
+        })?;
 
         // Resolve nested includes relative to this file's directory too.
         if let Some(dir) = path.parent() {
@@ -720,11 +693,11 @@ impl Preprocessor {
         }
         let (qualifier, _) = split_ident(rest.trim_start());
         if !qualifier.is_empty() {
-            return Err(pp_err(&format!(
-                "`default_discipline {name} {qualifier}: a qualifier scopes the default to a \
-                 discrete net kind, which Annex C excludes from Verilog-A; write \
-                 `default_discipline {name} for every net declared without a discipline"
-            )));
+            return Err(pp_err(
+                Diagnostic::new(codes::E0121)
+                    .arg("name", name)
+                    .arg("qualifier", qualifier),
+            ));
         }
         self.record(Directive::DefaultDiscipline(Some(name.to_string())));
         Ok(())
@@ -737,16 +710,10 @@ impl Preprocessor {
     fn do_default_transition(&mut self, after: &str) -> Result<(), FrontendError> {
         let text = self.expand(after.trim(), 0)?;
         let text = text.trim();
-        let value = crate::lexer::parse_scaled_number(text).ok_or_else(|| {
-            pp_err(&format!(
-                "`default_transition expects a numeric literal (SI suffix allowed, e.g. \
-                 `default_transition 1n), got `{text}`; an expression here is not supported"
-            ))
-        })?;
+        let value = crate::lexer::parse_scaled_number(text)
+            .ok_or_else(|| pp_err(Diagnostic::new(codes::E0122).arg("text", text)))?;
         if value < 0.0 || !value.is_finite() {
-            return Err(pp_err(&format!(
-                "`default_transition {text}: a transition time must be non-negative and finite"
-            )));
+            return Err(pp_err(Diagnostic::new(codes::E0123).arg("text", text)));
         }
         self.record(Directive::DefaultTransition(value));
         Ok(())
@@ -754,14 +721,9 @@ impl Preprocessor {
 
     /// `` `begin_keywords "version_specifier" `` (LRM 10.6).
     fn do_begin_keywords(&mut self, after: &str) -> Result<(), FrontendError> {
-        let spec = parse_quoted(after)
-            .ok_or_else(|| pp_err("`begin_keywords expects a quoted version specifier"))?;
-        let set = KeywordSet::from_spec(&spec).ok_or_else(|| {
-            pp_err(&format!(
-                "`begin_keywords \"{spec}\": unknown version specifier; the LRM (10.6) defines \
-                 \"VAMS-2.3\", \"1364-2005\", \"1364-2001\" and \"1364-1995\""
-            ))
-        })?;
+        let spec = parse_quoted(after).ok_or_else(|| pp_err(Diagnostic::new(codes::E0118)))?;
+        let set = KeywordSet::from_spec(&spec)
+            .ok_or_else(|| pp_err(Diagnostic::new(codes::E0119).arg("spec", &spec)))?;
         self.keyword_depth += 1;
         self.record(Directive::BeginKeywords(set));
         Ok(())
@@ -778,9 +740,8 @@ impl Preprocessor {
         );
         let number: usize = num
             .parse()
-            .map_err(|_| pp_err("`line expects a line number, a quoted file name and a level"))?;
-        let file = parse_quoted(rest)
-            .ok_or_else(|| pp_err("`line expects a quoted file name after the line number"))?;
+            .map_err(|_| pp_err(Diagnostic::new(codes::E0124)))?;
+        let file = parse_quoted(rest).ok_or_else(|| pp_err(Diagnostic::new(codes::E0125)))?;
         let Some(frame) = self.frames.last_mut() else {
             return Ok(());
         };
@@ -790,11 +751,11 @@ impl Preprocessor {
     }
 
     /// Accept a directive the LRM gives no Verilog-A meaning, saying so once per file.
-    fn warn_no_effect(&mut self, name: &'static str, why: &str) -> Result<(), FrontendError> {
+    /// The reason it has no effect is the catalogue entry's description, under `code`.
+    fn warn_no_effect(&mut self, name: &'static str, code: Code) -> Result<(), FrontendError> {
         if !self.warned.contains(&name) {
             self.warned.push(name);
-            self.warnings
-                .push(format!("`{name} has no effect in Verilog-A: {why}"));
+            self.warnings.push(Diagnostic::new(code));
         }
         Ok(())
     }
@@ -836,7 +797,7 @@ impl Preprocessor {
     /// verbatim.
     fn expand(&self, text: &str, depth: usize) -> Result<String, FrontendError> {
         if depth > 64 {
-            return Err(pp_err("macro expansion too deep (recursive macro?)"));
+            return Err(pp_err(Diagnostic::new(codes::E0104)));
         }
         let b = text.as_bytes();
         let mut out = String::new();
@@ -852,13 +813,13 @@ impl Preprocessor {
                 // A macro name immediately follows the backtick (no whitespace).
                 let (name, _) = split_ident(&text[i + 1..]);
                 if name.is_empty() {
-                    return Err(pp_err("stray ` in source"));
+                    return Err(pp_err(Diagnostic::new(codes::E0105)));
                 }
                 let name_end = i + 1 + name.len();
                 let mac = self
                     .macros
                     .get(name)
-                    .ok_or_else(|| pp_err(&format!("undefined macro `{name}")))?;
+                    .ok_or_else(|| pp_err(Diagnostic::new(codes::E0101).arg("name", name)))?;
                 match &mac.params {
                     Some(params) => {
                         // Function-like: arguments follow (after optional whitespace).
@@ -867,15 +828,16 @@ impl Preprocessor {
                             k += 1;
                         }
                         if k >= b.len() || b[k] as char != '(' {
-                            return Err(pp_err(&format!("macro `{name} expects arguments")));
+                            return Err(pp_err(Diagnostic::new(codes::E0102).arg("name", name)));
                         }
                         let (args, end) = split_args(text, k)?;
                         if args.len() != params.len() {
-                            return Err(pp_err(&format!(
-                                "macro `{name}: expected {} argument(s), got {}",
-                                params.len(),
-                                args.len()
-                            )));
+                            return Err(pp_err(
+                                Diagnostic::new(codes::E0103)
+                                    .arg("name", name)
+                                    .arg("expected", params.len())
+                                    .arg("got", args.len()),
+                            ));
                         }
                         let substituted = substitute_params(&mac.body, params, &args);
                         out.push_str(&self.expand(&substituted, depth + 1)?);
@@ -896,8 +858,8 @@ impl Preprocessor {
 
 // --- free helpers --------------------------------------------------------------------
 
-fn pp_err(msg: &str) -> FrontendError {
-    FrontendError::Preprocess(msg.to_string())
+fn pp_err(d: Diagnostic) -> FrontendError {
+    FrontendError::Preprocess(d)
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -961,7 +923,7 @@ fn split_args(text: &str, open: usize) -> Result<(Vec<String>, usize), FrontendE
         i += 1;
     }
     if depth != 0 {
-        return Err(pp_err("unbalanced `(` in macro/argument list"));
+        return Err(pp_err(Diagnostic::new(codes::E0106)));
     }
     let trimmed = cur.trim();
     if !trimmed.is_empty() || !args.is_empty() {
@@ -1056,16 +1018,12 @@ enum Unclosed {
 
 impl Unclosed {
     /// The diagnostic, located in `file`.
-    fn message(&self, file: &str) -> String {
+    fn diagnostic(&self, file: &str) -> Diagnostic {
         match self {
-            Unclosed::BlockComment(line) => format!(
-                "at {file}:{line}: this `/*` comment is never closed by `*/`, so everything \
-                 after it is commented out"
-            ),
-            Unclosed::String(line) => format!(
-                "at {file}:{line}: this string literal is never closed: a string must end with \
-                 `\"` on the line it starts"
-            ),
+            Unclosed::BlockComment(line) => {
+                Diagnostic::new(codes::E0126).at(format!("{file}:{line}"))
+            }
+            Unclosed::String(line) => Diagnostic::new(codes::E0127).at(format!("{file}:{line}")),
         }
     }
 }
@@ -1436,31 +1394,25 @@ x = `GMIN;
         let err = preprocess_full("`default_discipline logic wire\n", &[])
             .0
             .unwrap_err();
-        assert!(err.to_string().contains("Annex C"), "{err}");
+        // Annex C is named in the catalogue entry's description.
+        assert!(err.to_string().contains("[E0121]"), "{err}");
     }
 
     #[test]
     fn no_effect_directives_are_reported_once_each_and_the_text_is_untouched() {
         let pre = full("`timescale 1ns/1ps\n`celldefine\nmodule m; endmodule\n`endcelldefine\n`timescale 1ns/1ps\n`default_nettype none\n`unconnected_drive pull1\n`nounconnected_drive\n`pragma some_tool whatever\n");
         assert_eq!(pre.text.trim(), "module m; endmodule");
-        let names: Vec<&str> = pre
-            .warnings
-            .iter()
-            .map(|w| w.split(' ').next().unwrap())
-            .collect();
+        let codes: Vec<&str> = pre.warnings.iter().map(|w| w.code().as_str()).collect();
         assert_eq!(
-            names,
-            vec![
-                "`timescale",
-                "`celldefine",
-                "`default_nettype",
-                "`unconnected_drive"
-            ],
+            codes,
+            vec!["W0101", "W0102", "W0103", "W0104"],
             "one warning per directive, in first-seen order; an unknown pragma gets none: {:?}",
             pre.warnings
         );
         assert!(
-            pre.warnings[0].contains("is in seconds"),
+            pre.warnings[0]
+                .to_string()
+                .contains("`timescale has no effect"),
             "{}",
             pre.warnings[0]
         );

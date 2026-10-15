@@ -1,6 +1,7 @@
 // expect: elab
-// at: 8:22
-// message: `max` takes exactly 2 arguments, but this call passes 3
+// code: E0333
+// at: 9:22
+// message: `max` takes 2 argument(s), but this call passes 3
 // fixed: 2.18.1 (before: the third argument was ignored in the constant fold)
 module r(p, n);
   inout p, n;
