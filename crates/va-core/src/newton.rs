@@ -126,6 +126,21 @@ pub struct NewtonConfig {
     /// `stamp_lookups` ([`crate::counters`]). `None` (the default) reports `stamp_lookups` only.
     /// Read only when `log_full` is on.
     pub log_counters: Option<CounterSource>,
+    /// This operating point seeds a transient run: it is that run's first point, `t = 0`, so
+    /// models see `$analysis`'s DC phase with `initial_step` true but `final_step` **false**
+    /// (LRM 9.17.2, `final_step` is "the last point of the analysis", and a transient's last
+    /// point is its stop time). Without it, an `@(final_step)` body takes effect on the seed
+    /// and its result is printed as the transient's `t = 0` value. `false` (the default) is a
+    /// standalone operating point — `.op`, a `.dc` point — which *is* its analysis's last step.
+    pub transient_seed: bool,
+}
+
+impl NewtonConfig {
+    /// The analysis context every load and event poll of this solve sees, before the
+    /// per-iteration simulator parameters are attached.
+    pub fn analysis_ctx(&self) -> va_abi::AnalysisCtx {
+        va_abi::ANALYSIS_DC.with_final_step(!self.transient_seed)
+    }
 }
 
 /// A source of named running totals for [`NewtonConfig::log_counters`]: appends
@@ -147,6 +162,7 @@ impl Default for NewtonConfig {
             btf: true,
             log_full: false,
             log_counters: None,
+            transient_seed: false,
         }
     }
 }
@@ -456,6 +472,7 @@ impl Linear {
 
     /// The residual's infinity norm at trial point `x`, with `gmin` shunted — all
     /// [`damped_scale`] needs, and on the sparse path without a `dim²` buffer.
+    #[allow(clippy::too_many_arguments)]
     fn trial_residual_norm(
         &mut self,
         instances: &[&dyn ModelInstance],
@@ -464,16 +481,16 @@ impl Linear {
         fired: &va_abi::FiredEvents,
         gmin: f64,
         kinds: &[UnknownKind],
+        ctx: &va_abi::AnalysisCtx,
     ) -> f64 {
         match self {
             Linear::Dense => {
-                let mut sys =
-                    mna::assemble_with_events(instances, x, &va_abi::ANALYSIS_DC, dim, fired);
+                let mut sys = mna::assemble_with_events(instances, x, ctx, dim, fired);
                 sys.shunt_gmin(x, gmin, kinds);
                 inf_norm(&sys.residual)
             }
             Linear::Sparse { trial, .. } => {
-                sparse::assemble_into(instances, x, &va_abi::ANALYSIS_DC, fired, trial);
+                sparse::assemble_into(instances, x, ctx, fired, trial);
                 trial.shunt_gmin(x, gmin, kinds);
                 inf_norm(trial.residual_values())
             }
@@ -527,7 +544,9 @@ fn solve_from(
         // a point this same DC solve produced, and asks its own analysis's question later. The
         // *iteration number* is not fixed, which is exactly why `$simparam("iteration")` cannot
         // be answered anywhere earlier than here.
-        let ctx = va_abi::ANALYSIS_DC.with_sim(sim.at_iteration(iteration, gmin));
+        let ctx = cfg
+            .analysis_ctx()
+            .with_sim(sim.at_iteration(iteration, gmin));
         // Assemble, shunt, and solve J · dx = −f, dense or sparse.
         let (residual_norm, dx) =
             match linear.step(instances, &x, &ctx, dim, fired, gmin, kinds, &mut cost) {
@@ -782,8 +801,15 @@ fn damped_scale(
             .collect();
         // A non-finite residual (an exponential that overflowed at this trial point) is not an
         // improvement by any reading, and `<` against a NaN is false, so it backtracks.
-        if linear.trial_residual_norm(instances, &candidate, dim, fired, gmin, kinds)
-            < residual_norm
+        if linear.trial_residual_norm(
+            instances,
+            &candidate,
+            dim,
+            fired,
+            gmin,
+            kinds,
+            &cfg.analysis_ctx(),
+        ) < residual_norm
         {
             return scale;
         }

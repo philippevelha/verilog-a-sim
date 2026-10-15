@@ -285,8 +285,11 @@ pub struct Device {
 /// A time-domain source waveform beyond a bare DC value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Waveform {
-    /// `SIN(offset amplitude freq)`: `v(t) = offset + amplitude·sin(2π·freq·t)`. Delay/damping/
-    /// phase (SPICE's optional trailing `SIN` parameters) are not parsed in v0.
+    /// `SIN(offset amplitude freq [delay [damping [phase]]])`, SPICE's damped sine:
+    /// `v(t) = offset + amplitude·sin(phase)` before `delay`, then
+    /// `offset + amplitude·e^(−(t−delay)·damping)·sin(2π·freq·(t−delay) + phase)`, with `phase`
+    /// in degrees as SPICE writes it. The three trailing values default to zero; until 2.32.1
+    /// they were not parsed, so a delayed sine started at `t = 0` without a word.
     Sin {
         /// DC offset (V).
         offset: f64,
@@ -294,6 +297,12 @@ pub enum Waveform {
         amplitude: f64,
         /// Frequency (Hz).
         freq: f64,
+        /// Time before the sine starts (s).
+        delay: f64,
+        /// Exponential damping factor (1/s).
+        damping: f64,
+        /// Phase at the start of the sine (degrees).
+        phase: f64,
     },
     /// `PULSE(v1 v2 td tr tf pw per)`: SPICE's trapezoidal pulse train. Starts at `v1`, holds
     /// until `td`, ramps linearly to `v2` over `tr`, holds `v2` for `pw`, ramps back over `tf`,
@@ -393,6 +402,7 @@ mod tests {
                 offset,
                 amplitude,
                 freq,
+                ..
             }) => {
                 assert!((offset - 0.0).abs() < 1e-12);
                 assert!((amplitude - 5.0).abs() < 1e-12);

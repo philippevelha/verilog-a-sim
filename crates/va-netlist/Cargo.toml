@@ -10,3 +10,4 @@ description = "T6: circuit-level netlist parser producing wired model instances.
 va-diag = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }
+libm = { workspace = true }

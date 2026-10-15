@@ -2510,7 +2510,8 @@ impl ModelInstance for WaveformSource {
 /// none (a `SIN`, or past a `PWL`'s last point or a one-shot `PULSE`'s last edge).
 fn next_corner(waveform: &va_netlist::Waveform, t: f64) -> Option<f64> {
     match *waveform {
-        va_netlist::Waveform::Sin { .. } => None,
+        // A delayed sine is flat until `delay`, where its slope jumps.
+        va_netlist::Waveform::Sin { delay, .. } => (t < delay).then_some(delay),
         va_netlist::Waveform::Pwl { ref points } => {
             points.iter().map(|&(tp, _)| tp).find(|&tp| tp > t)
         }
@@ -2524,20 +2525,26 @@ fn next_corner(waveform: &va_netlist::Waveform, t: f64) -> Option<f64> {
         } => {
             // Corners within one cycle, relative to its start: edge starts and ends.
             let offsets = [0.0, tr, tr + pw, tr + pw + tf];
-            if t < td {
-                return Some(td);
+            // A corner within rounding of `t` is the instant already landed on, not one ahead:
+            // returning it would hand the integrator a breakpoint it merges with `t`, and since
+            // only the next corner is ever registered, every later one would be lost with it.
+            let ahead = |c: f64| c > t + 1e-12 * t.abs();
+            if !per.is_finite() || per <= 0.0 {
+                return std::iter::once(td)
+                    .chain(offsets.iter().map(|&o| td + o))
+                    .find(|&c| ahead(c));
             }
-            let (cycle, base) = if per > 0.0 {
-                let k = ((t - td) / per).floor();
-                (Some(per), td + k * per)
-            } else {
-                (None, td)
-            };
-            offsets
+            // The cycle `t` is in, and its neighbours: `floor((t - td) / per)` can land one
+            // cycle low when `t` sits exactly on a cycle start computed as `td + k * per`
+            // (2.32.1 — at 3.95 µs in a `PULSE(0 1 0.95u 1n 1n 0.5u 1u)`, which then skipped
+            // the 1 ns edge at 3.951 µs and stretched it over a 100 ns step).
+            let k = ((t - td) / per).floor().max(0.0);
+            [k - 1.0, k, k + 1.0, k + 2.0]
                 .iter()
-                .map(|&o| base + o)
-                .find(|&c| c > t)
-                .or_else(|| cycle.map(|per| base + per))
+                .filter(|&&j| j >= 0.0)
+                .flat_map(|&j| offsets.iter().map(move |&o| td + j * per + o))
+                .filter(|&c| ahead(c))
+                .min_by(f64::total_cmp)
         }
     }
 }
@@ -2549,7 +2556,19 @@ fn waveform_value(waveform: &va_netlist::Waveform, t: f64) -> f64 {
             offset,
             amplitude,
             freq,
-        } => offset + amplitude * libm::sin(2.0 * PI * freq * t),
+            delay,
+            damping,
+            phase,
+        } => {
+            let phase = phase.to_radians();
+            if t < delay {
+                offset + amplitude * libm::sin(phase)
+            } else {
+                let s = t - delay;
+                offset
+                    + amplitude * libm::exp(-s * damping) * libm::sin(2.0 * PI * freq * s + phase)
+            }
+        }
         va_netlist::Waveform::Pwl { ref points } => {
             // Held at the ends, linear between: the first segment whose end time is at or past
             // `t` is the one `t` falls in. A repeated time (a vertical step) makes a zero-width
@@ -2754,19 +2773,20 @@ fn solve_transient_impl(
         // at zero — see `va_netlist::parser`), so this is the operating point the run actually
         // starts from rather than some other bias.
         let start = nodeset_start(net, dim)?;
-        let (op, _) = va_core::dc::operating_point_continued(
-            &refs,
-            dim,
-            newton_cfg(solver),
-            None,
-            start.as_deref(),
-        )
-        .map_err(|e| name_non_finite_row(e.into(), &quantities))
-        .context(
-            "the operating-point solve that precedes a transient run failed; add `UIC` \
+        // This point is the run's `t = 0`, not the end of an analysis: `final_step` is false
+        // here, or an `@(final_step)` body would take effect at the start (2.32.1).
+        let seed_cfg = NewtonConfig {
+            transient_seed: true,
+            ..newton_cfg(solver)
+        };
+        let (op, _) =
+            va_core::dc::operating_point_continued(&refs, dim, seed_cfg, None, start.as_deref())
+                .map_err(|e| name_non_finite_row(e.into(), &quantities))
+                .context(
+                    "the operating-point solve that precedes a transient run failed; add `UIC` \
                      to the `.tran` card to start from the zero vector and each element's `IC=` \
                      instead",
-        )?;
+                )?;
         op.x
     };
 
@@ -5397,8 +5417,75 @@ R2 a gnd 3000
             offset: 0.0,
             amplitude: 1.0,
             freq: 1.0,
+            delay: 0.0,
+            damping: 0.0,
+            phase: 0.0,
         };
         assert_eq!(next_corner(&sin, 0.3), None);
+        let delayed = va_netlist::Waveform::Sin {
+            offset: 0.0,
+            amplitude: 1.0,
+            freq: 1.0,
+            delay: 2.0,
+            damping: 0.0,
+            phase: 0.0,
+        };
+        assert_eq!(
+            next_corner(&delayed, 0.3),
+            Some(2.0),
+            "a delayed sine starts at `delay`"
+        );
+        assert_eq!(next_corner(&delayed, 2.0), None);
+        // Before the delay it holds `offset + amplitude·sin(phase)`; then the damped sine runs.
+        let shaped = va_netlist::Waveform::Sin {
+            offset: 1.0,
+            amplitude: 2.0,
+            freq: 1.0,
+            delay: 2.0,
+            damping: 0.5,
+            phase: 90.0,
+        };
+        assert!((waveform_value(&shaped, 1.0) - 3.0).abs() < 1e-12);
+        let at = 2.25; // a quarter period after the delay: sin(π/2 + π/2) = 0
+        assert!((waveform_value(&shaped, at) - 1.0).abs() < 1e-12);
+        let at = 3.0; // one period: sin(2π + π/2) = 1, damped by e^(−0.5)
+        let want = 1.0 + 2.0 * libm::exp(-0.5);
+        assert!((waveform_value(&shaped, at) - want).abs() < 1e-12);
+    }
+
+    /// Landed on a cycle start computed as `td + k * per`, the next corner is that cycle's edge
+    /// end, not the cycle start again (2.32.1). `floor((t - td) / per)` can put such a `t` one
+    /// cycle low; the old code then returned `base + per`, i.e. `t` itself, the integrator
+    /// merged it with `t`, and the next edge was stepped over.
+    #[test]
+    fn a_corner_at_a_cycle_start_is_never_returned_again() {
+        let p = va_netlist::Waveform::Pulse {
+            v1: 0.0,
+            v2: 1.0,
+            td: 0.95e-6,
+            tr: 1e-9,
+            tf: 1e-9,
+            pw: 0.5e-6,
+            per: 1e-6,
+        };
+        let mut t = 0.0;
+        let mut corners = Vec::new();
+        while let Some(c) = next_corner(&p, t).filter(|&c| c < 6e-6) {
+            assert!(c > t, "a corner ahead of {t:e}, got {c:e}");
+            corners.push(c);
+            t = c;
+        }
+        // Four corners a cycle from 0.95 µs, the last cycle's two before 6 µs: 5 * 4 + 2.
+        assert_eq!(corners.len(), 22, "{corners:?}");
+        for k in 0..6 {
+            let start = 0.95e-6 + k as f64 * 1e-6;
+            let edge_end = corners.iter().any(|&c| (c - (start + 1e-9)).abs() < 1e-15);
+            assert!(
+                edge_end,
+                "the rising edge ending at {:e} is missing",
+                start + 1e-9
+            );
+        }
     }
 
     /// `PWL(t1 v1 t2 v2 …)` (added 2026-09-15 for the metering replay): held at the ends,
@@ -6391,9 +6478,11 @@ X1 out in gnd tr
     /// 1. A unity filter is a sample-and-hold: on a 1 V/µs ramp with `T = 1 µs` the output is
     ///    the staircase `floor(t/T)` volts, exactly, because the breakpoints land on every
     ///    sample instant.
-    /// 2. The one-pole IIR `y_k = a·y_{k−1} + (1−a)·x_k` on a unit step, first sample at
-    ///    `t0 = 0.5 µs` (the run's `t = 0` point is the cold-start seed, where a DC source
-    ///    still reads 0): the held value after the k-th sample is `1 − a^(k+1)`.
+    /// 2. The one-pole IIR `y_k = a·y_{k−1} + (1−a)·x_k` on a unit step at 0.1 µs, first sample
+    ///    at `t0 = 0.5 µs`: the held value after the k-th sample is `1 − a^(k+1)`. The step is
+    ///    in the deck, after `t = 0`: the run starts from its operating point, where the filter
+    ///    is in steady state on whatever the input is then (2.32.1), so a `DC 1` input would
+    ///    give a flat 1.
     /// 3. A `zi_np` conjugate pole pair on the same step, against the difference equation
     ///    iterated here — the root expansion and the two-deep output history.
     ///
@@ -6434,7 +6523,7 @@ X1 out in gnd tr
         let a = 0.8_f64;
         let pts = run(
             "`include \"disciplines.vams\"\nmodule iir(out, in, ref); inout out, in, ref; electrical out, in, ref;\n  parameter real a = 0.8;\n  analog V(out, ref) <+ zi_nd(V(in, ref), {1-a}, {1, -a}, 1u, 0, 0.5u);\nendmodule\n",
-            "V1 in gnd DC 1\nX1 out in gnd iir\n.tran 50n 8.5u\n.end\n",
+            "V1 in gnd PULSE(0 1 0.1u 1n 1n 100 200)\nX1 out in gnd iir\n.tran 50n 8.5u\n.end\n",
         );
         for k in 0..8 {
             let y = held_before(&pts, 0.5e-6 + (k as f64 + 1.0) * 1e-6);
@@ -6446,7 +6535,7 @@ X1 out in gnd tr
         //    y_k = x_k + y_{k−1} − 0.5·y_{k−2}.
         let pts = run(
             "`include \"disciplines.vams\"\nmodule zp(out, in, ref); inout out, in, ref; electrical out, in, ref;\n  analog V(out, ref) <+ zi_np(V(in, ref), {1}, {0.5, 0.5, 0.5, -0.5}, 1u, 0, 0.5u);\nendmodule\n",
-            "V1 in gnd DC 1\nX1 out in gnd zp\n.tran 50n 8.5u\n.end\n",
+            "V1 in gnd PULSE(0 1 0.1u 1n 1n 100 200)\nX1 out in gnd zp\n.tran 50n 8.5u\n.end\n",
         );
         let (mut y1, mut y2) = (0.0_f64, 0.0_f64);
         for k in 0..8 {
@@ -6458,6 +6547,33 @@ X1 out in gnd tr
         }
         // A fold to H(1) = 2 would have given a flat 2.0; the recurrence overshoots to 2.5.
         assert!((y1 - 2.0).abs() > 1e-3 || (y2 - 2.0).abs() > 1e-3);
+    }
+
+    /// A `zi_*` filter starts in the steady state of the operating point the run starts from:
+    /// every past input sample is the input's DC value `u` and every past output `H(1)·u`, so
+    /// a constant input gives a constant output from `t = 0`. Before 2.32.1 the histories
+    /// started at zero, and the output fell from the operating point's `H(1)·u = 2` to the
+    /// first impulse-response sample `1` and climbed back (1, 1.5, 1.75, ...).
+    #[test]
+    fn a_zi_filter_starts_in_the_steady_state_of_the_operating_point() {
+        let design = compile_model(
+            "`include \"disciplines.vams\"\nmodule zz(in, out); inout in, out; electrical in, out;\n  analog V(out) <+ zi_nd(V(in), {1}, {1, -0.5}, 1u);\nendmodule\n",
+            "zz",
+        );
+        let net = va_netlist::parser::parse(
+            "V1 in gnd DC 1\nX1 in out zz\nR1 out gnd 1k\n.tran 0.5u 3.5u\n.end\n",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let out = net.node_order.iter().position(|n| n == "out").unwrap();
+        for (t, row) in wf.t.iter().zip(&wf.x) {
+            assert!(
+                (row[out] - 2.0).abs() < 1e-9,
+                "H(1)·u = 2 at every point, got {} at t = {t:e}",
+                row[out]
+            );
+        }
     }
 
     /// `zi_*` in AC: `|H(e^{jωT})|` and its phase for the one-pole IIR against the closed
@@ -7643,6 +7759,49 @@ X1 a gnd fst
         );
     }
 
+    /// The operating point that seeds a transient run (no `UIC`) is the run's `t = 0`, not the
+    /// end of an analysis, so `@(final_step)` must not fire there. Before 2.32.1 it was solved
+    /// with the standalone `.op` context, whose `final_step` is true, and the body's effect was
+    /// printed as the transient's first point.
+    #[test]
+    fn final_step_does_not_fire_in_the_operating_point_that_seeds_a_transient() {
+        const SRC: &str = "
+module fso(p, n);
+  inout p, n;
+  electrical p, n;
+  real g;
+  analog begin
+    g = 1e-3;
+    @(final_step) g = 1.0;
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 4
+X1 a gnd fso
+.tran 10u 100u
+.end
+",
+        )
+        .expect("parses");
+        let wf =
+            solve_transient(&net, &design.modules, Integration::default()).expect("integrates");
+        let branch = net.node_order.len();
+        let current = |row: &Vec<f64>| row[branch].abs();
+        let first = current(&wf.x[0]);
+        assert!(
+            (first - 4e-3).abs() < 1e-9,
+            "the seed operating point is t = 0, not the final step: |I(V1)| = {first:e}"
+        );
+        let last = current(wf.x.last().expect("a last point"));
+        assert!(
+            (last - 4.0).abs() < 1e-6,
+            "the body still runs at tstop: {last:e}"
+        );
+    }
+
     /// The LRM's own two examples are the specification for the double-scaling warning, so they
     /// are the test: `badres` is caught, `parares` is not.
     ///
@@ -8203,6 +8362,41 @@ X1 a gnd fso
         assert!(
             (g - 1.0).abs() < 1e-9,
             "one solve point is its own final step: g = {g:e}"
+        );
+    }
+
+    /// `hypot` and `atan2` of two zeros have no derivative, and the operating point's first
+    /// Newton iterate is exactly there when the arguments scale a node voltage that starts at 0.
+    /// Before 2.32.1 the Jacobian got `0/0 = NaN` and the solve stopped at once (`E0604`).
+    #[test]
+    fn hypot_and_atan2_survive_a_zero_start() {
+        const SRC: &str = "
+module hz(a, c);
+  inout a, c;
+  electrical a, c;
+  analog I(c) <+ (V(c) - hypot(V(a)*3, V(a)*4) - atan2(V(a), V(a))) / 1k;
+endmodule
+";
+        let design = va_frontend::compile(SRC).expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 a gnd DC 1
+X1 a c hz
+.op
+.end
+",
+        )
+        .expect("parses");
+        let op = solve_dc(&net, &design.modules).expect("solves from x = 0");
+        let c = net
+            .node_order
+            .iter()
+            .position(|n| n == "c")
+            .expect("node c");
+        let want = 5.0 + std::f64::consts::FRAC_PI_4;
+        assert!(
+            (op.x[c] - want).abs() < 1e-9,
+            "V(c) = {}, want {want}",
+            op.x[c]
         );
     }
 

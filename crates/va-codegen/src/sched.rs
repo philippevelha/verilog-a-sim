@@ -1797,12 +1797,13 @@ fn exec_slices(
                     }
                     Bin::Hypot => {
                         let value = libm::hypot(sv, ov);
-                        rule!(|sg: f64, og: f64| (sv * sg + ov * og) / value);
+                        let inv = crate::ad::kink_reciprocal(value);
+                        rule!(|sg: f64, og: f64| (sv * sg + ov * og) * inv);
                         value
                     }
                     Bin::Atan2 => {
-                        let denom = sv * sv + ov * ov;
-                        rule!(|yg: f64, xg: f64| (ov * yg - sv * xg) / denom);
+                        let inv = crate::ad::kink_reciprocal(sv * sv + ov * ov);
+                        rule!(|yg: f64, xg: f64| (ov * yg - sv * xg) * inv);
                         libm::atan2(sv, ov)
                     }
                 };

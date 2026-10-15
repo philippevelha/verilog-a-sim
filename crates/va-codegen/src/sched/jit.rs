@@ -454,6 +454,15 @@ impl<'a, 'b> Emitter<'a, 'b> {
         self.b.ins().f64const(v)
     }
 
+    /// `crate::ad::kink_reciprocal` in emitted code: `1 / d`, or `0` where `d` is zero.
+    fn kink_reciprocal(&mut self, d: Value) -> Value {
+        let z = self.f(0.0);
+        let one = self.f(1.0);
+        let r = self.b.ins().fdiv(one, d);
+        let dz = self.b.ins().fcmp(FloatCC::Equal, d, z);
+        self.b.ins().select(dz, z, r)
+    }
+
     fn val(&mut self, r: u32) -> Value {
         self.b
             .ins()
@@ -768,14 +777,15 @@ impl<'a, 'b> Emitter<'a, 'b> {
             }
             Bin::Hypot => {
                 let value = self.call2(hypot, sv, ov);
+                let inv = self.kink_reciprocal(value);
                 (
                     value,
-                    vec![sv, ov, value],
+                    vec![sv, ov, inv],
                     Box::new(|e: &mut Self, c: &[Value], sg, og| {
                         let x = e.b.ins().fmul(c[0], sg);
                         let y = e.b.ins().fmul(c[1], og);
                         let s = e.b.ins().fadd(x, y);
-                        e.b.ins().fdiv(s, c[2])
+                        e.b.ins().fmul(s, c[2])
                     }),
                     false,
                 )
@@ -784,15 +794,16 @@ impl<'a, 'b> Emitter<'a, 'b> {
                 let a2 = self.b.ins().fmul(sv, sv);
                 let b2 = self.b.ins().fmul(ov, ov);
                 let denom = self.b.ins().fadd(a2, b2);
+                let inv = self.kink_reciprocal(denom);
                 let value = self.call2(atan2, sv, ov);
                 (
                     value,
-                    vec![sv, ov, denom],
+                    vec![sv, ov, inv],
                     Box::new(|e: &mut Self, c: &[Value], yg, xg| {
                         let x = e.b.ins().fmul(c[1], yg);
                         let y = e.b.ins().fmul(c[0], xg);
                         let d = e.b.ins().fsub(x, y);
-                        e.b.ins().fdiv(d, c[2])
+                        e.b.ins().fmul(d, c[2])
                     }),
                     false,
                 )

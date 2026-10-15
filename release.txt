@@ -22,6 +22,45 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.32.1 - 2026-10-15
+--------------------
+**Six defects of our own, found while checking the OpenVAF-Reloaded PRs against this simulator.**
+None was one of their bugs; each turned up in the reproducers written for theirs.
+  * `@(final_step)` fired at a transient's `t = 0`. The operating point that seeds a run (no
+    `UIC`) was solved with the standalone-`.op` context, where `final_step` is true, and printed
+    as the first point. `NewtonConfig::transient_seed` (default `false`) solves it with
+    `final_step` false; `va-cli` sets it for that one solve. `.op` and `.dc` points are their own
+    last step and are unchanged.
+  * `zi_*` filters started from zero histories, so the output fell from the operating point's
+    `H(1)·u` to the first impulse-response sample and climbed back (2, 1, 1.5, 1.75, ... for
+    `zi_nd(u, {1}, {1, -0.5}, T)`, `u = 1`). They now start in the operating point's steady state:
+    past inputs `u`, past outputs `H(1)·u`. A filter with a pole at `z = 1` has no steady state
+    and keeps zero histories.
+  * `hypot` and `atan2` had a `0/0 = NaN` derivative at the origin, where a zero start puts the
+    first Newton iterate when their arguments scale a node voltage: the solve stopped at once
+    (`E0604`). The subgradient `0` is used there, as `abs` does at its kink, in the
+    interpreter, the scheduled evaluator and the JIT.
+  * A periodic `PULSE` source could skip an edge: the next-corner search looked only at the
+    current cycle, so from just past a cycle's last corner it returned the cycle after next.
+    It now searches the neighbouring cycles too.
+  * `SIN`'s trailing delay, damping and phase were dropped, so a delayed sine started at once.
+    They are parsed (SPICE units: seconds, 1/s, degrees) and the DC value is the waveform's value
+    at `t = 0`, `offset + amplitude·sin(phase)`.
+  * A refused event list now names the term that cannot be scheduled (`cross(...) or
+    absdelta(...)` names `absdelta`, not `cross`), with `R0202` when that term is a step event.
+
+**This changes results** for decks using any of the six. One test changed: the one-pole and
+conjugate-pair `zi` checks in `zi_filters_follow_their_difference_equations_in_transient` fed a
+`DC 1` input and expected a step response, which only the zero histories produced. Their decks
+now step the input at 0.1 µs, so the run starts from 0 and the expected values are unchanged.
+
+Checked and **not** a defect: `@(above(...))` in a `.dc` sweep fires once, at the crossing, not at
+every point past the threshold. That is the LRM's rule and the v1.2.3 design.
+
+Measured: `cargo test --workspace` 997 passed, 0 failed (992 + 5 new); `cargo xtask validate` 28
+checked, 0 failed, convergence 28/28.
+
+
 2.32.0 - 2026-10-14
 --------------------
 **A `cross` firing just before a `transition` ramp ends no longer kills the transient run.** The

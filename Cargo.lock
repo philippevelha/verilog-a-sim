@@ -1755,6 +1755,7 @@ version = "2.32.0"
 name = "va-netlist"
 version = "2.32.0"
 dependencies = [
+ "libm",
  "thiserror 2.0.18",
  "va-abi",
  "va-diag",

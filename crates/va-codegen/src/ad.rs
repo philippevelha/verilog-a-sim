@@ -625,7 +625,8 @@ impl Dual {
     /// `d atan2 = (x·dy - y·dx) / (x²+y²)`.
     pub fn atan2(&self, x: &Dual) -> Dual {
         let (y, denom) = (self, self.value * self.value + x.value * x.value);
-        let rule = |yg: f64, xg: f64| (x.value * yg - y.value * xg) / denom;
+        let inv = kink_reciprocal(denom);
+        let rule = |yg: f64, xg: f64| (x.value * yg - y.value * xg) * inv;
         Dual::from_parts(
             libm::atan2(y.value, x.value),
             zip_with(&y.grad, &x.grad, rule),
@@ -634,10 +635,12 @@ impl Dual {
     }
 
     /// Euclidean norm `hypot(self, o) = √(self²+o²)`:
-    /// `d hypot = (self·dself + o·do) / hypot`.
+    /// `d hypot = (self·dself + o·do) / hypot`. At the origin, the cone's tip, there is no
+    /// derivative; the subgradient `0` is used, as [`Self::abs`] does at its kink.
     pub fn hypot(&self, o: &Dual) -> Dual {
         let value = libm::hypot(self.value, o.value);
-        let rule = |sg: f64, og: f64| (self.value * sg + o.value * og) / value;
+        let inv = kink_reciprocal(value);
+        let rule = |sg: f64, og: f64| (self.value * sg + o.value * og) * inv;
         Dual::from_parts(
             value,
             zip_with(&self.grad, &o.grad, rule),
@@ -696,6 +699,17 @@ fn probe_grad(count: usize, plus: usize, minus: Option<usize>) -> Grad {
 /// in the two partials — and that is what makes the `Zero`/`Zero` case answerable without
 /// materializing anything. That case is the common one: it is every constant folded against
 /// every other constant, 78–87% of the work in a CMC compact model (see [`Grad`]).
+/// `1 / d`, or `0` where `d` is zero: the scale of a derivative that is undefined at one point
+/// (the origin of `hypot` and `atan2`), where the subgradient `0` replaces a `0/0` that would
+/// put NaN in the Jacobian and stop Newton on its first iterate from a zero start.
+pub(crate) fn kink_reciprocal(d: f64) -> f64 {
+    if d == 0.0 {
+        0.0
+    } else {
+        1.0 / d
+    }
+}
+
 fn zip_with(a: &Grad, b: &Grad, f: impl Fn(f64, f64) -> f64) -> Grad {
     zip_owned(a.share(), b.share(), f)
 }
@@ -2866,6 +2880,13 @@ mod tests {
         let at = y.atan2(&x);
         assert!((at.grad_at(1) - 3.0 / denom).abs() < 1e-12);
         assert!((at.grad_at(0) + 4.0 / denom).abs() < 1e-12);
+
+        // At the origin neither has a derivative: the subgradient 0, never 0/0 = NaN, which
+        // would stop Newton on its first iterate from a zero start.
+        let (ox, oy) = (Dual::variable(0.0, 0, 2), Dual::variable(0.0, 1, 2));
+        for d in [ox.hypot(&oy), oy.atan2(&ox)] {
+            assert_eq!((d.value, d.grad_at(0), d.grad_at(1)), (0.0, 0.0, 0.0));
+        }
 
         // min/max select the active argument's value and gradient.
         let mn = x.min(&y);

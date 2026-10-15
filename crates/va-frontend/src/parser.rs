@@ -585,6 +585,51 @@ impl Parser<'_> {
         }
     }
 
+    /// The head word of the first term of the trigger starting at `self.pos` that this engine
+    /// cannot schedule: a term that is neither a scheduled event with its argument list nor a
+    /// bare step event. `None` when every term is schedulable, or a term has no head word. The
+    /// terms are the ones [`Parser::trigger_is_schedulable_list`] walks, split by `or` or `,`.
+    fn unschedulable_term_in_trigger(&self) -> Option<String> {
+        let mut i = self.pos;
+        loop {
+            let name = match self.toks.get(i)? {
+                Token::Keyword(kw) => kw.as_str().to_string(),
+                Token::Ident(id) => id.clone(),
+                _ => return None,
+            };
+            let next = self.toks.get(i + 1);
+            if SCHEDULED_EVENTS.iter().any(|(kw, _)| *kw == name) && next == Some(&Token::LParen) {
+                let mut depth = 0usize;
+                i += 1;
+                loop {
+                    match self.toks.get(i)? {
+                        Token::LParen => depth += 1,
+                        Token::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            } else if STEP_EVENTS.contains(&name.as_str())
+                && (next == Some(&Token::RParen) || is_event_separator(next))
+            {
+                i += 1;
+            } else {
+                return Some(name);
+            }
+            if is_event_separator(self.toks.get(i)) {
+                i += 1;
+            } else {
+                return None;
+            }
+        }
+    }
+
     /// Parse the `or` list [`Parser::trigger_is_schedulable_list`] accepted into one condition,
     /// leaving the trigger's closing `)` unconsumed: each scheduled event becomes its synthetic
     /// call (`@cross`, `@above`, `@timer`, each registering its own site at elaboration), each
@@ -2120,7 +2165,18 @@ impl Parser<'_> {
                 // (`absdelta`, which is unimplemented, or a malformed list) is refused:
                 // discarding the trigger runs the body unconditionally (§ v0.9.1).
                 if let Some(event) = self.monitored_event_in_trigger() {
-                    return self.refuse(codes::R0201, &[("event", event)], ANALOG_EVENTS_TRACKING);
+                    // Name the term that cannot be scheduled, not the first monitored event:
+                    // in `@(cross(...) or absdelta(...))` that is `absdelta`, and naming the
+                    // supported `cross` sent the reader to the wrong half (2.32.1).
+                    let culprit = self.unschedulable_term_in_trigger();
+                    // A step event that is not schedulable is an analysis-filtered one, with
+                    // its own refusal (`R0202`) and reasoning.
+                    let code = match culprit.as_deref() {
+                        Some(c) if STEP_EVENTS.contains(&c) => codes::R0202,
+                        _ => codes::R0201,
+                    };
+                    let event = culprit.as_deref().unwrap_or(event);
+                    return self.refuse(code, &[("event", event)], ANALOG_EVENTS_TRACKING);
                 }
                 let step_events = self.step_event_list();
                 // A step event written in a form this parser cannot honour: an analysis filter,
@@ -3941,6 +3997,42 @@ mod tests {
             "module t(a, b); inout a, b; electrical a, b; analog begin @(absdelta(V(a), 0.1)) x = 1.0; I(a, b) <+ x; end endmodule",
         );
         assert_refusal(&err, "absdelta");
+    }
+
+    /// A refused `or` list names the term that cannot be scheduled, not the first monitored
+    /// event in it (2.32.1): `cross` is supported, so naming it sent the reader to the wrong
+    /// half. An analysis-filtered step event gets its own refusal, `R0202`.
+    #[test]
+    fn a_refused_event_list_names_the_term_that_cannot_be_scheduled() {
+        let src = |trigger: &str| {
+            format!(
+                "module t(a, b); inout a, b; electrical a, b; analog begin @({trigger}) x = 1.0; \
+                 I(a, b) <+ x; end endmodule"
+            )
+        };
+        for (trigger, named, code) in [
+            ("cross(V(a), 1) or absdelta(V(a), 0.1)", "absdelta", "R0201"),
+            ("cross(V(a), 1) or ev", "ev", "R0201"),
+            (
+                "timer(1n) or cross(V(a), 1) or absdelta(V(a), 0.1)",
+                "absdelta",
+                "R0201",
+            ),
+            (
+                "final_step(\"tran\") or cross(V(a), 1)",
+                "final_step",
+                "R0202",
+            ),
+        ] {
+            let err = parse_err(&src(trigger));
+            assert_refusal(&err, named);
+            assert!(err.contains(&format!("[{code}]")), "{trigger}: {err}");
+            let first_line = err.lines().next().unwrap_or_default();
+            assert!(
+                !first_line.contains("cross") || named == "cross",
+                "{trigger}: must not name the supported `cross`: {first_line}"
+            );
+        }
     }
 
     /// A bare `@(above(...))` parses, and its argument list is `above`'s own — the second

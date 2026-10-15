@@ -1606,45 +1606,71 @@ impl GeneratedModel {
             };
             let tol = period * 1e-9;
 
-            let (y_held, y_prev, t_ramp) = if ctx.analysis.is_initial_step {
-                // Seed: histories are zero. Sample now if the first instant has arrived,
-                // otherwise hold zero until it does.
-                if t + tol >= t0 {
-                    let y0 = sample(u.value);
-                    shift_in(u.value);
-                    shift_out(y0);
-                    ctx.state_set(base, 0, t);
-                    ctx.state_set(base, 1, y0);
-                    ctx.state_set(base, 2, y0);
-                    ctx.state_set(base, 3, t - tt_eff);
-                    (y0, y0, t - tt_eff)
-                } else {
-                    ctx.state_set(base, 0, t0 - period);
-                    ctx.state_set(base, 1, 0.0);
-                    ctx.state_set(base, 2, 0.0);
-                    ctx.state_set(base, 3, t - tt_eff);
-                    (0.0, 0.0, t - tt_eff)
-                }
-            } else {
-                let t_last = ctx.state_get(base, 0);
-                let (held, prev, ramp) = (
-                    ctx.state_get(base, 1),
-                    ctx.state_get(base, 2),
-                    ctx.state_get(base, 3),
-                );
-                if t + tol >= t_last + period {
-                    let y_k = sample(u.value);
-                    shift_in(u.value);
-                    shift_out(y_k);
-                    ctx.state_set(base, 0, t_last + period);
-                    ctx.state_set(base, 1, y_k);
-                    ctx.state_set(base, 2, held);
-                    ctx.state_set(base, 3, t);
-                    (y_k, held, t)
-                } else {
-                    (held, prev, ramp)
-                }
+            // The DC gain `H(z = 1)`, when the filter has one (no pole at `z = 1`).
+            let dc_gain = {
+                let h = ad::zi_at(0.0, period, &r);
+                (h.0.is_finite() && h.1.is_finite()).then_some(h.0)
             };
+            let (y_held, y_prev, t_ramp) =
+                if let (true, Some(g)) = (ctx.analysis.is_initial_step, dc_gain) {
+                    // Seed from the operating point the run starts at: the filter has been sampling
+                    // this input forever, so every input sample in its history is `u` and every
+                    // output sample is `H(1)·u` -- what the DC solve already put on the output. With
+                    // zero histories instead (before 2.32.1) the output dropped from `H(1)·u` at
+                    // `t = 0` to the first impulse-response sample and re-converged from there.
+                    let y_ss = g * u.value;
+                    for m in 0..inputs {
+                        ctx.state_set(base, 4 + m, u.value);
+                    }
+                    for m in 0..outputs {
+                        ctx.state_set(base, 4 + inputs + m, y_ss);
+                    }
+                    let t_last = if t + tol >= t0 { t } else { t0 - period };
+                    ctx.state_set(base, 0, t_last);
+                    ctx.state_set(base, 1, y_ss);
+                    ctx.state_set(base, 2, y_ss);
+                    ctx.state_set(base, 3, t - tt_eff);
+                    (y_ss, y_ss, t - tt_eff)
+                } else if ctx.analysis.is_initial_step {
+                    // Seed of a filter with no DC gain (a pole at `z = 1`, an accumulator): there is
+                    // no steady state to start from, so the histories are zero. Sample now if the
+                    // first instant has arrived, otherwise hold zero until it does.
+                    if t + tol >= t0 {
+                        let y0 = sample(u.value);
+                        shift_in(u.value);
+                        shift_out(y0);
+                        ctx.state_set(base, 0, t);
+                        ctx.state_set(base, 1, y0);
+                        ctx.state_set(base, 2, y0);
+                        ctx.state_set(base, 3, t - tt_eff);
+                        (y0, y0, t - tt_eff)
+                    } else {
+                        ctx.state_set(base, 0, t0 - period);
+                        ctx.state_set(base, 1, 0.0);
+                        ctx.state_set(base, 2, 0.0);
+                        ctx.state_set(base, 3, t - tt_eff);
+                        (0.0, 0.0, t - tt_eff)
+                    }
+                } else {
+                    let t_last = ctx.state_get(base, 0);
+                    let (held, prev, ramp) = (
+                        ctx.state_get(base, 1),
+                        ctx.state_get(base, 2),
+                        ctx.state_get(base, 3),
+                    );
+                    if t + tol >= t_last + period {
+                        let y_k = sample(u.value);
+                        shift_in(u.value);
+                        shift_out(y_k);
+                        ctx.state_set(base, 0, t_last + period);
+                        ctx.state_set(base, 1, y_k);
+                        ctx.state_set(base, 2, held);
+                        ctx.state_set(base, 3, t);
+                        (y_k, held, t)
+                    } else {
+                        (held, prev, ramp)
+                    }
+                };
             let y = if tt_eff > 0.0 && t < t_ramp + tt_eff {
                 let frac = ((t - t_ramp) / tt_eff).clamp(0.0, 1.0);
                 y_prev + (y_held - y_prev) * frac

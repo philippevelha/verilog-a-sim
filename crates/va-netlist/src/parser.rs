@@ -40,15 +40,16 @@
 //!   (`crate::spice`); until 1.11.0 this bullet said `.subckt` was unsupported and `.model`
 //!   ignored. (Until 2026-09-11 it also claimed controlled sources, `X` and `K` were unparsed
 //!   — a premise that expired when they landed.)
-//! - A `V` source accepts `DC <value>`, `SIN(off amp freq)`, or `PULSE(v1 v2 …)`; no `PWL`,
-//!   `EXP`, or other SPICE waveforms. A waveform's value at `t = 0` (`SIN`'s offset, `PULSE`'s
-//!   `v1`) becomes the DC value (what a DC operating point needs) *and* the full waveform is
+//! - A `V` source accepts `DC <value>`, `SIN(off amp freq [td [theta [phase]]])`, or
+//!   `PULSE(v1 v2 …)`; no `PWL`, `EXP`, or other SPICE waveforms. A waveform's value at `t = 0`
+//!   (`SIN`'s offset plus `amp·sin(phase)`, `PULSE`'s `v1`) becomes the DC value (what a DC operating point needs) *and* the full waveform is
 //!   retained as [`crate::Device::waveform`] for a transient run to reproduce the actual time
 //!   dependence. A consumer turns that into an ordinary stateless `ModelInstance` reading the
 //!   current time off `va_abi::ModelInstance::load`'s analysis context (§6 change, 2026-08-06
 //!   — `va_cli::WaveformSource`); the two facts stay consistent because the DC value *is* the
-//!   waveform's value at `t = 0`, which is what a DC or AC solve reads. SPICE's optional
-//!   trailing `SIN` parameters (delay, damping, phase) are not parsed.
+//!   waveform's value at `t = 0`, which is what a DC or AC solve reads. `SIN`'s optional
+//!   trailing parameters (delay, damping in 1/s, phase in degrees) are parsed since 2.32.1 and
+//!   default to 0; before it they were dropped, so a delayed or phased sine started at once.
 //! - `.tran <tstep> <tstop> [UIC]` requests a transient run. **`UIC` decides where the
 //!   integration starts**: with it, from the zero vector plus each reactive element's `IC=`
 //!   (SPICE's "use initial conditions"); without it, from the DC operating point, which is
@@ -726,13 +727,29 @@ fn intern(net: &mut Netlist, name: &str) -> usize {
 
 /// Resolve a voltage source's DC value from its trailing tokens.
 ///
-/// Accepts `DC <value>`, a bare `<value>`, or `SIN(off amp freq …)` (whose offset is the DC
-/// value). Anything unrecognized defaults to `0.0`.
+/// Accepts `DC <value>`, a bare `<value>`, or `SIN(off amp freq …)` (whose value at `t = 0`,
+/// the offset plus `amp·sin(phase)`, is the DC value). Anything unrecognized defaults to `0.0`.
 fn parse_source_value(rest: &[&str]) -> f64 {
     match rest.first().copied() {
         None => 0.0,
         Some(t) if t.eq_ignore_ascii_case("dc") => {
             rest.get(1).and_then(|v| parse_value(v)).unwrap_or(0.0)
+        }
+        // A `SIN` with a phase is not at its offset at `t = 0`: its value there is
+        // `offset + amplitude·sin(phase)`, and the DC value must be that same number.
+        Some(t)
+            if t.to_ascii_uppercase().starts_with("SIN")
+                && parse_source_waveform(rest).is_some() =>
+        {
+            match parse_source_waveform(rest) {
+                Some(Waveform::Sin {
+                    offset,
+                    amplitude,
+                    phase,
+                    ..
+                }) => offset + amplitude * libm::sin(phase.to_radians()),
+                _ => 0.0,
+            }
         }
         Some(t)
             if t.to_ascii_uppercase().starts_with("SIN")
@@ -766,10 +783,13 @@ fn parse_source_waveform(rest: &[&str]) -> Option<Waveform> {
 
     if first.starts_with("SIN") {
         return match nums.as_slice() {
-            [offset, amplitude, freq, ..] => Some(Waveform::Sin {
+            [offset, amplitude, freq, rest @ ..] => Some(Waveform::Sin {
                 offset: *offset,
                 amplitude: *amplitude,
                 freq: *freq,
+                delay: rest.first().copied().unwrap_or(0.0),
+                damping: rest.get(1).copied().unwrap_or(0.0),
+                phase: rest.get(2).copied().unwrap_or(0.0),
             }),
             _ => None,
         };
@@ -935,6 +955,14 @@ mod tests {
     fn source_values() {
         assert_eq!(parse_source_value(&["DC", "1.0"]), 1.0);
         assert_eq!(parse_source_value(&["SIN(0", "5", "1k)"]), 0.0);
+        // With a phase the value at `t = 0` is `offset + amplitude·sin(phase)`, and so is the
+        // DC value (2.32.1); a delay alone does not move it.
+        let phased = parse_source_value(&["SIN(1", "2", "1k", "0", "0", "30)"]);
+        assert!(
+            (phased - 2.0).abs() < 1e-12,
+            "1 + 2·sin(30°) = 2, got {phased}"
+        );
+        assert_eq!(parse_source_value(&["SIN(1", "2", "1k", "1m)"]), 1.0);
         assert_eq!(parse_source_value(&["2.5"]), 2.5);
     }
 

@@ -255,7 +255,7 @@ fn solve_operating_point(
 ) -> Result<(OperatingPoint, AboveValues), CoreError> {
     let mut fired = va_abi::FiredEvents::new(instances);
     let mut x = newton::solve_with_events_from(instances, dim, cfg, &fired, start)?;
-    let mut values = poll_above(instances, &x);
+    let mut values = poll_above(instances, &x, &cfg.analysis_ctx());
 
     if !fired.is_empty() {
         for _ in 0..=fired.len() {
@@ -280,7 +280,7 @@ fn solve_operating_point(
                 break;
             }
             x = newton::solve_with_events_from(instances, dim, cfg, &fired, start)?;
-            values = poll_above(instances, &x);
+            values = poll_above(instances, &x, &cfg.analysis_ctx());
         }
     }
 
@@ -291,7 +291,11 @@ fn solve_operating_point(
 ///
 /// `None` for a slot that is not an `above` — a `cross` never fires in a static solve, and a
 /// `timer` has no value here — so those slots take part in nothing.
-fn poll_above(instances: &[&dyn ModelInstance], x: &[f64]) -> AboveValues {
+fn poll_above(
+    instances: &[&dyn ModelInstance],
+    x: &[f64],
+    ctx: &va_abi::AnalysisCtx,
+) -> AboveValues {
     instances
         .iter()
         .map(|inst| {
@@ -300,7 +304,7 @@ fn poll_above(instances: &[&dyn ModelInstance], x: &[f64]) -> AboveValues {
                 return Vec::new();
             }
             let mut sink = va_abi::events::RecordingEventSink::new();
-            inst.events(x, &va_abi::ANALYSIS_DC, &mut sink);
+            inst.events(x, ctx, &mut sink);
             let mut per_slot = vec![None; n];
             for (slot, value, spec) in sink.monitors {
                 if slot < n && spec.at_initialization {
