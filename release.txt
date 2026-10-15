@@ -22,6 +22,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.40.0 - 2026-10-15
+--------------------
+**The rest of integer typing: `**`, 32-bit overflow, and device-line integer parameters.**
+  * `**` over two integers is an integer, truncated: `2 ** 3` is 8, `2 ** -1` is 0,
+    `(-1) ** -1` is -1, `1 ** -5` is 1. A real operand keeps it real (`2.0 ** -1` is 0.5).
+  * Integer `+ - * / **` and unary minus wrap at 32 bits, as Verilog's `integer` does:
+    `2147483647 + 1` is -2147483648, `65536 * 65536` is 0, `-(-2147483648)` is itself. At run
+    time each integer result goes through `x << 0` (the 32-bit wrap since 2.38.0); in a
+    parameter default, the same rule in the constant folder. A real operand keeps the
+    arithmetic real (`2147483647 + 1.0` is 2147483648).
+  * A device-line value for a `parameter integer` is rounded half away from zero and wrapped
+    (`X1 ... n=2.5` gives 3, `n=-2.5` gives -3), before the 2.33.0 range check sees it. This needed
+    the IR to know a parameter's type: **Interface α change** (§6), `Module::integer_params` and
+    `Module::param_is_integer`, purely additive like `local_params`, recorded in
+    `docs/interfaces.md`. The golden-IR snapshots gain one empty `integer_params` line each.
+  * A non-finite value is never wrapped: the first version turned `parameter integer K = 1/0`
+    into a finite number, and the error corpus caught it (`E0308` must fire). The wrap now
+    passes inf/NaN through, so an integer division by zero still reports (`E0308` at
+    elaboration, `E0603` at run time, both tested).
+
+Impact on shipped models: instrumenting the build to list every integer operation it now wraps
+showed only generate-index arithmetic (`i + 1`, `j - 1` in `gray_scott.va`, `hh_cable.va`,
+`seu_parts.va`, `speaker_parts.va`), which never leaves 32 bits; no shipped model uses `**`
+outside a comment.
+
+Limit: exact while the real result stays below 2^53; a product of two large 32-bit integers can
+exceed that before it is wrapped.
+
+Measured: `cargo test --workspace` 1024 passed, 0 failed (1021 + 3:
+`integer_power_and_overflow_follow_32_bit_integers`, `a_deck_value_for_an_integer_parameter_rounds`,
+`an_integer_division_by_zero_still_reports`); `cargo xtask validate` 28 checked, 0 failed,
+convergence 28/28; clippy and fmt clean.
+
+
 2.39.0 - 2026-10-15
 --------------------
 **Integer typing: `7 / 2` is 3.** The front end keeps what is declared `integer` and applies

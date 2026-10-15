@@ -195,7 +195,8 @@ Not shared defects, but they turned up on the same day and belong in the same qu
   and `integer(x)` rounds as an integer assignment does. `%` is already right. **Fix:** integer
   typing in elaboration. **Done in 2.39.0**, with no interface change: a division of two
   integers is lowered to `int(a / b)` and a store into an integer to `round(...)`. (2.36.0 had
-  only warned, `W0302`, now retired.)
+  only warned, `W0302`, now retired.) 2.40.0 closed the rest: integer `**`, 32-bit wrap on
+  overflow, and rounding of a device-line value for a `parameter integer`.
 - **Wrong-construct diagnostics.** A `string` variable reports a discipline error (`E0217`),
   `break`/`continue` report `expected '='` (`E0202`), whole-array assignment reports `E0330`,
   `paramset` reports `E0202`. Each fails loudly, so nothing is computed wrongly, but each message

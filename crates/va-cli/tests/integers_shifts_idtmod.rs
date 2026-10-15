@@ -349,3 +349,86 @@ fn an_integer_function_argument_rounds_on_entry() {
         assert_eq!(op_value(&out, node), want, "V({node}): {out}");
     }
 }
+
+/// 2.40.0: `**` over integers is an integer (truncated: `2 ** -1` is 0), and integer
+/// `+ - * / **` and negation wrap at 32 bits, at run time and in parameter defaults.
+#[test]
+fn integer_power_and_overflow_follow_32_bit_integers() {
+    let out = op(
+        "pow-wrap",
+        "integer n, big; parameter integer p = 2147483647 + 1;",
+        "  n = 2; big = 2147483647;",
+        &[
+            ("a", "2 ** 3"),
+            ("b", "n ** -1"),
+            ("c", "(-1) ** -1"),
+            ("d", "2.0 ** -1"),
+            ("e", "big + 1"),
+            ("f", "-big - 2"),
+            ("g", "65536 * 65536"),
+            ("h", "p"),
+            ("i", "1 ** -5"),
+            ("j", "big + 1.0"),
+            ("k", "-(-2147483647 - 1)"),
+        ],
+    );
+    for (node, want) in [
+        ("a", 8.0),
+        ("b", 0.0),
+        ("c", -1.0),
+        ("d", 0.5), // a real base keeps it real
+        ("e", -2147483648.0),
+        ("f", 2147483647.0),
+        ("g", 0.0),
+        ("h", -2147483648.0),
+        ("i", 1.0),
+        ("j", 2147483648.0), // a real operand keeps it real
+        ("k", -2147483648.0),
+    ] {
+        assert_eq!(op_value(&out, node), want, "V({node}): {out}");
+    }
+}
+
+/// A device-line value for a `parameter integer` is rounded half away from zero (2.40.0,
+/// through `va_ir::Module::integer_params`), and a real parameter is not.
+#[test]
+fn a_deck_value_for_an_integer_parameter_rounds() {
+    let model = "module m(a, b); inout a, b; electrical a, b;
+  parameter integer n = 3; parameter real x = 3;
+  analog begin V(a) <+ n; V(b) <+ x; end
+endmodule
+";
+    for (n, want) in [("2.5", 3.0), ("-2.5", -3.0), ("2.4", 2.0)] {
+        let out = run(
+            "deck-int",
+            &[
+                ("m.va", model),
+                (
+                    "d.net",
+                    &format!("* d\nX1 a b m n={n} x=2.5\nR1 a 0 1k\nR2 b 0 1k\n.op\n"),
+                ),
+            ],
+            &["sim", "d.net", "--model", "m.va"],
+        );
+        assert_eq!(op_value(&out, "a"), want, "n={n}: {out}");
+        assert_eq!(
+            op_value(&out, "b"),
+            2.5,
+            "a real parameter is not rounded: {out}"
+        );
+    }
+}
+
+/// The 32-bit wrap leaves a non-finite value alone, so an integer division by zero is still
+/// reported (`E0603` at run time, `E0308` in a parameter default) instead of wrapping to a
+/// finite number.
+#[test]
+fn an_integer_division_by_zero_still_reports() {
+    let out = op(
+        "div0",
+        "integer n, d;",
+        "  n = 7; d = 0;",
+        &[("a", "n / d")],
+    );
+    assert!(out.contains("E0603"), "{out}");
+}

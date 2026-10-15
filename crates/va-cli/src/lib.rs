@@ -3777,6 +3777,9 @@ fn compile_with_overrides(
         param.default = v;
         m.mark_param_given(va_ir::ParamId(0));
     }
+    // A value set on a `parameter integer` is stored into an integer: rounded half away from
+    // zero and wrapped to 32 bits, as the frontend does for a default (2.40.0;
+    // `va_ir::Module::integer_params`).
     // Named overrides are applied after the positional value, so a line that somehow states
     // both has the explicit name win over the implicit position. An unknown name is an error:
     // dropping it silently would leave a deck looking like it set something it did not, and
@@ -3814,6 +3817,16 @@ fn compile_with_overrides(
                         },
                     )
                     .into());
+            }
+        }
+    }
+
+    for (i, p) in m.params.iter_mut().enumerate() {
+        if module.param_is_integer(va_ir::ParamId(i as u32)) {
+            let v = p.default.round();
+            // A non-finite value is left for the check that reports it.
+            if v.is_finite() {
+                p.default = f64::from(v as i64 as i32);
             }
         }
     }

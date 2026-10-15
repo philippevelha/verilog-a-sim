@@ -354,6 +354,24 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 > data file is resolved exactly as an `` `include `` is. The older entry points still exist and
 > pass an empty path, which resolves a relative name against the working directory alone.
 
+> ### 2026-10-15 — `Module::integer_params`: which parameters are `parameter integer` (2.40.0)
+>
+> **Added** `Module::integer_params: Vec<ParamId>` and `Module::param_is_integer`. Purely
+> additive, the same shape as `local_params`: an empty `Vec` by default, so every producer and
+> consumer keeps compiling, and only modules declaring a `parameter integer` gain a non-empty
+> list. Made at the project owner's request, with integer typing (2.39.0-2.40.0).
+>
+> **The bug it closes.** An integer parameter holds an integer: the frontend rounds a real
+> default or `#(...)` override half away from zero and wraps it to 32 bits (LRM 4.2.1.1). A
+> netlist device line's override, though, is applied by editing `Param::default` after
+> elaboration, where the parameter's type was gone, so `n=2.5` reached the model as 2.5.
+>
+> **What a consumer owes it.** Whoever sets `Param::default` from outside the module rounds and
+> wraps the value when `param_is_integer` says so (`va-cli` does, before its range check), and
+> leaves a non-finite value alone for the check that reports it.
+>
+> **Interface β is unchanged.**
+
 > ### 2026-10-04 — `Module::elaboration_params`: which parameters elaboration folded
 >
 > **Added** `Module::elaboration_params: Vec<ParamId>` and `Module::param_fixed_at_elaboration`,

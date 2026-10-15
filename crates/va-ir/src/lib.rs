@@ -141,6 +141,13 @@ pub struct Module {
     /// existed it meant a `localparam` was silently overridable, so the kind is recorded and
     /// both override paths refuse it. See [`Self::param_is_local`].
     pub local_params: Vec<ParamId>,
+    /// The parameters declared `parameter integer` (§6 change, 2026-10-15, additive). An integer
+    /// parameter holds an integer: a value set on it from outside the module -- a netlist
+    /// device line's `n=2.5`, which edits [`Param::default`] after elaboration -- is rounded
+    /// half away from zero and wrapped to 32 bits, as the frontend already does for a default
+    /// or a `#(...)` override. The setter is the one to apply it; see
+    /// [`Self::param_is_integer`].
+    pub integer_params: Vec<ParamId>,
     /// The parameters whose values elaboration **folded** — read as compile-time constants to
     /// size a vector net, bound a `generate` loop, choose a `generate` branch, compute another
     /// parameter's default, or anything else the LRM fixes at elaboration — sorted by id.
@@ -295,6 +302,12 @@ impl Module {
     /// instantiation.
     pub fn param_is_local(&self, p: ParamId) -> bool {
         self.local_params.contains(&p)
+    }
+
+    /// Whether parameter `p` was declared `parameter integer`, so a value set on it must be
+    /// rounded to an integer (see [`Self::integer_params`]).
+    pub fn param_is_integer(&self, p: ParamId) -> bool {
+        self.integer_params.contains(&p)
     }
 
     /// Whether the module scales a **flow** contribution by `$mfactor` itself — the

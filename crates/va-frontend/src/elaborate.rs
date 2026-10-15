@@ -724,7 +724,8 @@ impl Elaborator<'_> {
             for (a, &id) in f.args.iter().zip(&args) {
                 if self.integers.vars.contains(&id) && a.dir != ast::Direction::Output {
                     let read = self.out.push_expr(Expr::Var(id));
-                    let rhs = self.out.push_expr(Expr::Call(Builtin::Round, vec![read]));
+                    let rounded = self.out.push_expr(Expr::Call(Builtin::Round, vec![read]));
+                    let rhs = self.push_integer(rounded);
                     entry.push(va_ir::Stmt::Assign { lhs: id, rhs });
                 }
             }
@@ -1008,7 +1009,7 @@ impl Elaborator<'_> {
                     // rounded, half away from zero, as any store into an integer is (2.39.0).
                     let default_val = if *ty == ast::ParamType::Integer {
                         self.integers.params.insert(name.clone());
-                        default_val.round()
+                        wrap32(default_val.round())
                     } else {
                         default_val
                     };
@@ -1051,6 +1052,9 @@ impl Elaborator<'_> {
                     });
                     if *is_local {
                         self.out.local_params.push(id);
+                    }
+                    if *ty == ast::ParamType::Integer {
+                        self.out.integer_params.push(id);
                     }
                     // § `$param_given`: an instantiating parent that supplied a `#(...)`
                     // override for this name is exactly what "given" means, and this is the
@@ -1118,6 +1122,8 @@ impl Elaborator<'_> {
             ExprAst::Unary(op, e) => {
                 let v = self.const_eval(*e)?;
                 Ok(match op {
+                    // Integer negation wraps at 32 bits: `-(-2147483648)` is itself.
+                    ast::UnOp::Neg if self.is_integer(r) => wrap32(-v),
                     ast::UnOp::Neg => -v,
                     ast::UnOp::Not => bool_to_f64(v == 0.0),
                     ast::UnOp::BitNot => f64::from(!to_i32(v)),
@@ -1127,9 +1133,10 @@ impl Elaborator<'_> {
                 let a = self.const_eval(*l)?;
                 let b = self.const_eval(*rhs)?;
                 let v = eval_binop(*op, a, b);
-                // Integer division truncates (2.39.0, § `Integers`).
-                Ok(if self.divides_integers(*op, *l, *rhs) {
-                    v.trunc()
+                // Integer arithmetic (§ `Integers`): `/` and `**` truncate (2.39.0, 2.40.0), and
+                // every result wraps to 32 bits (2.40.0).
+                Ok(if self.integer_arithmetic(*op, r) {
+                    wrap32(v)
                 } else {
                     v
                 })
@@ -1534,8 +1541,8 @@ impl Elaborator<'_> {
                 | ast::BinOp::Sub
                 | ast::BinOp::Mul
                 | ast::BinOp::Div
-                | ast::BinOp::Mod => self.is_integer(*l) && self.is_integer(*rhs),
-                ast::BinOp::Pow => false,
+                | ast::BinOp::Mod
+                | ast::BinOp::Pow => self.is_integer(*l) && self.is_integer(*rhs),
                 _ => true,
             },
             ExprAst::Cond { then_, else_, .. } => {
@@ -1545,9 +1552,22 @@ impl Elaborator<'_> {
         }
     }
 
-    /// Whether `l op r` is a division of two integers, which truncates (§ `Integers`).
-    fn divides_integers(&self, op: ast::BinOp, l: ExprRef, r: ExprRef) -> bool {
-        op == ast::BinOp::Div && self.is_integer(l) && self.is_integer(r)
+    /// Whether `e`, whose operator is `op`, is integer arithmetic that needs converting to a
+    /// 32-bit integer (§ `Integers`): `+ - * / **` over integers. `/` and `**` truncate
+    /// (`7 / 2` is 3, `2 ** -1` is 0), and all of them wrap at 32 bits (`2147483647 + 1` is
+    /// -2147483648). `%` cannot leave the range and is left alone.
+    fn integer_arithmetic(&self, op: ast::BinOp, e: ExprRef) -> bool {
+        matches!(
+            op,
+            ast::BinOp::Add | ast::BinOp::Sub | ast::BinOp::Mul | ast::BinOp::Div | ast::BinOp::Pow
+        ) && self.is_integer(e)
+    }
+
+    /// `int(x) << 0`: `x` truncated toward zero and wrapped into 32 bits, in IR -- `<<` takes its
+    /// operand as a 32-bit integer (2.38.0), and a zero count changes nothing else.
+    fn push_integer(&mut self, x: ExprId) -> ExprId {
+        let zero = self.out.push_expr(Expr::Const(0.0));
+        self.out.push_expr(Expr::Binary(va_ir::BinOp::Shl, x, zero))
     }
 
     /// Lower `rhs` as the value stored into `lhs`: rounded to the nearest integer, half away from
@@ -1556,7 +1576,8 @@ impl Elaborator<'_> {
         let integer_target = self.integers.vars.contains(&lhs);
         let value = self.lower_expr(rhs)?;
         Ok(if integer_target && !self.is_integer(rhs) {
-            self.out.push_expr(Expr::Call(Builtin::Round, vec![value]))
+            let rounded = self.out.push_expr(Expr::Call(Builtin::Round, vec![value]));
+            self.push_integer(rounded)
         } else {
             value
         })
@@ -3129,13 +3150,18 @@ impl Elaborator<'_> {
                     Expr::Call(builtin, ids)
                 }
             }
-            ExprAst::Unary(op, e) => {
+            ExprAst::Unary(ast_op, e) => {
                 let inner = self.lower_expr(*e)?;
-                let op = match op {
+                let op = match ast_op {
                     ast::UnOp::Neg => va_ir::UnOp::Neg,
                     ast::UnOp::Not => va_ir::UnOp::Not,
                     ast::UnOp::BitNot => va_ir::UnOp::BitNot,
                 };
+                // Integer negation wraps at 32 bits too (2.40.0): `-(-2147483648)` is itself.
+                if *ast_op == ast::UnOp::Neg && self.is_integer(r) {
+                    let x = self.out.push_expr(Expr::Unary(op, inner));
+                    return Ok(self.push_integer(x));
+                }
                 Expr::Unary(op, inner)
             }
             ExprAst::Binary(ast_op, l_ref, r_ref) => {
@@ -3146,14 +3172,17 @@ impl Elaborator<'_> {
                 self.conditional_depth += usize::from(short);
                 let rhs = self.lower_expr(*r_ref);
                 self.conditional_depth -= usize::from(short);
-                let quotient = Expr::Binary(op, l, rhs?);
-                // A division of two integers truncates toward zero (2.39.0, § `Integers`):
-                // `int(a / b)`, exact for every quotient an `f64` holds exactly.
-                if self.divides_integers(*ast_op, *l_ref, *r_ref) {
-                    let q = self.out.push_expr(quotient);
-                    Expr::Call(Builtin::Int, vec![q])
+                let result = Expr::Binary(op, l, rhs?);
+                // Integer arithmetic (§ `Integers`): `+ - * / **` over integers become a 32-bit
+                // integer -- truncated (`7 / 2` is 3, 2.39.0; `2 ** -1` is 0) and wrapped
+                // (`2147483647 + 1` is -2147483648), 2.40.0. Exact while the real result is
+                // below 2^53, which a product of two 32-bit integers can exceed.
+                if self.integer_arithmetic(*ast_op, r) {
+                    let x = self.out.push_expr(result);
+                    let wrapped = self.push_integer(x);
+                    return Ok(wrapped);
                 } else {
-                    quotient
+                    result
                 }
             }
             ExprAst::Cond { cond, then_, else_ } => {
@@ -5434,11 +5463,23 @@ fn to_i32(v: f64) -> i32 {
     to_i64(v) as i32
 }
 
+/// `v` stored into a 32-bit `integer` without rounding: truncated and wrapped, as `v << 0` does at
+/// run time, with a non-finite `v` left as it is so a division by zero still reports (2.40.0).
+fn wrap32(v: f64) -> f64 {
+    shift_left_32(v, 0.0)
+}
+
 /// Verilog's `a << n` on an `integer`: bits shifted past bit 31 are lost (`1 << 31` is
 /// -2147483648, `1 << 32` is 0). A count of 32 or more, or a negative one (unsigned in
 /// Verilog, so huge), shifts every bit out: 0. Before 2.38.0, a 64-bit shift (`1 << 40` was
 /// 2^40) with the count taken modulo 64.
 fn shift_left_32(a: f64, n: f64) -> f64 {
+    // A non-finite operand stays non-finite (2.40.0): integer arithmetic wraps its result
+    // through `x << 0`, and an integer division by zero must still surface as one rather
+    // than wrap to a finite number -- Verilog's answer there is `x`, never a value.
+    if !a.is_finite() {
+        return a;
+    }
     let n = to_i64(n);
     if !(0..32).contains(&n) {
         return 0.0;

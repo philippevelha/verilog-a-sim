@@ -2197,6 +2197,12 @@ fn to_i32(v: f64) -> i32 {
 /// Verilog, so huge), shifts every bit out: 0. Before 2.38.0, a 64-bit shift (`1 << 40` was
 /// 2^40) with the count taken modulo 64.
 fn shift_left_32(a: f64, n: f64) -> f64 {
+    // A non-finite operand stays non-finite (2.40.0): integer arithmetic wraps its result
+    // through `x << 0`, and an integer division by zero must still surface as one rather
+    // than wrap to a finite number -- Verilog's answer there is `x`, never a value.
+    if !a.is_finite() {
+        return a;
+    }
     let n = to_i64(n);
     if !(0..32).contains(&n) {
         return 0.0;

@@ -743,15 +743,19 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   knows which variables, array elements, parameters and analog functions are `integer`, and an
   expression is integer when it is an integer literal (`2`, not `2.0` or `2k`), one of those, a
   genvar, `$rtoi`/`$random`/`$clog2`/`integer(...)`, a comparison, logical, bitwise or shift
-  result, or `+ - * / %`, unary minus or `?:` over integers. Two conversions follow (LRM 4.2.1),
+  result, or `+ - * / % **`, unary minus or `?:` over integers. Two conversions follow (LRM 4.2.1),
   written into the IR as `int(...)`/`round(...)` so no IR type is needed: a division of two
   integers truncates toward zero (`7 / 2` is 3, `-7 / 2` is -3, also in parameter defaults:
   `parameter real s = 7 / 2` is 3), and a value stored into an `integer` variable, array
   element, function return, `integer` function argument (on entry) or parameter is rounded half
   away from zero (`i = 3.7` stores 4,
-  `parameter integer r = 2.5` is 3). Limits: `**` is treated as real; `+ - *` are not wrapped
-  to 32 bits on overflow; a deck value for an `integer` parameter (`X1 ... n=2.5`) is not rounded, because
-  the IR's parameters carry no type. From 2.36.0 to 2.38.x a division of two integers was only
+  `parameter integer r = 2.5` is 3). Since 2.40.0 integer `+ - * / **` and negation also give
+  a 32-bit integer: `**` truncates (`2 ** 3` is 8, `2 ** -1` is 0, `(-1) ** -1` is -1), every
+  result wraps (`2147483647 + 1` is -2147483648, `65536 * 65536` is 0), and a device-line value
+  for a `parameter integer` (`X1 ... n=2.5`) is rounded too (3), through
+  `va_ir::Module::integer_params`. A non-finite result is left alone, so an integer division by
+  zero still reports (`E0603`, `E0308`). Limit: exact while the real result stays below 2^53, which a
+  product of two large 32-bit integers can exceed. From 2.36.0 to 2.38.x a division of two integers was only
   warned about (`W0302`, retired). `$rtoi` (truncate toward zero) and `$itor` (identity on this
   simulator's `f64` values) are implemented since 2.36.0, in expressions and parameter defaults — but an *array* declaration's range is genuinely load-bearing: it's
   const-evaluated and interns one `VarId` per index, named `"name[k]"`, exactly mirroring how a
