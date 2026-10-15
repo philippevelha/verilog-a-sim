@@ -1,0 +1,9 @@
+{
+  "code": "E0524",
+  "rev": 1,
+  "message": "`.subckt` names no subcircuit",
+  "description": "A subcircuit definition starts `.subckt <name> <port>...`.",
+  "actions": [
+    "Write the subcircuit's name and ports after `.subckt`."
+  ]
+}

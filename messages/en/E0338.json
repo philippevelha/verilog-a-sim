@@ -1,0 +1,9 @@
+{
+  "code": "E0338",
+  "rev": 1,
+  "message": "nested generate loop reuses genvar `{name}`; a genvar's implicit localparam cannot be redeclared while its enclosing loop is still active",
+  "description": "Two nested generate loops use the same genvar, so the inner one would overwrite the outer one's counter.",
+  "actions": [
+    "Use a different genvar for the inner loop."
+  ]
+}

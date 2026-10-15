@@ -1,0 +1,9 @@
+{
+  "code": "E0357",
+  "rev": 1,
+  "message": "`ddx(..., I(...))` is not supported: differentiating with respect to a branch current needs flow probes to be independent unknowns, which they are not in this codegen",
+  "description": "This simulator can differentiate with respect to node potentials only.",
+  "actions": [
+    "Differentiate with respect to a potential `V(...)` instead, if the model allows it."
+  ]
+}

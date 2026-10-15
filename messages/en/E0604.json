@@ -1,0 +1,10 @@
+{
+  "code": "E0604",
+  "rev": 1,
+  "message": "a model produced a non-finite derivative (NaN or inf) in the equation of {unknown}, with respect to unknown #{column}",
+  "description": "A model's contribution is finite here, but its derivative is not, so the solver cannot take a Newton step. This usually means a function used at a point where it is not differentiable, such as `sqrt(x)` or `pow(x, 0.5)` at x = 0.",
+  "actions": [
+    "Look at the device(s) contributing to this unknown.",
+    "Keep the argument away from the point, e.g. `sqrt(x + 1e-12)`, or start from a better point with `.nodeset`."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0391",
+  "rev": 1,
+  "message": "$table_model cannot read `{file}`; looked in {tried}",
+  "description": "The table file was not found, or could not be read, in any of the places searched.",
+  "actions": [
+    "Check the file name.",
+    "Pass the directory that holds it with `-I`."
+  ]
+}

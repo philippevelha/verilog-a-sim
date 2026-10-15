@@ -1,0 +1,9 @@
+{
+  "code": "E0113",
+  "rev": 1,
+  "message": "`include expects a quoted file name",
+  "description": "An `` `include `` directive must be followed by a file name in double quotes.",
+  "actions": [
+    "Write the file name in double quotes: `` `include \"disciplines.vams\" ``."
+  ]
+}

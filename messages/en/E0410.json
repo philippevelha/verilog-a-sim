@@ -1,0 +1,9 @@
+{
+  "code": "E0410",
+  "rev": 1,
+  "message": "{filter} zeros/poles must come in complex-conjugate pairs: their expanded polynomial is not real",
+  "description": "A filter with real coefficients has complex roots in conjugate pairs (`a+bj` and `a-bj`). These roots have no partner, so the filter they describe has complex coefficients, which a real circuit cannot realize.",
+  "actions": [
+    "Give every complex root its conjugate: `{-1, 2, -1, -2}`."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0719",
+  "rev": 1,
+  "message": "`.dc` can only sweep a voltage source; `{name}` is a `{model}`",
+  "description": "This simulator sweeps the value of a voltage source only.",
+  "actions": [
+    "Sweep a voltage source, or drive the device from one."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "R0305",
+  "rev": 1,
+  "message": "`$fopen(...)` used inside an expression",
+  "description": "Opening a file is a side effect that has to happen once, at an accepted point, and hand back a descriptor; this engine performs it as a statement, so a `$fopen` nested in an expression would either be repeated on every evaluation or yield no descriptor at all.",
+  "actions": [
+    "Assign it on its own first: `fd = $fopen(\"name\");`, then use `fd`."
+  ]
+}

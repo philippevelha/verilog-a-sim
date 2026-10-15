@@ -1,0 +1,10 @@
+{
+  "code": "E0701",
+  "rev": 1,
+  "message": "unknown subcommand `{name}`",
+  "description": "The first word after `va-cli` selects what to do, and the one given is not a subcommand va-cli knows. The available subcommands are `sim` (simulate a netlist) and `check` (compile models without simulating).",
+  "actions": [
+    "Check the spelling: `va-cli sim <netlist.net>` or `va-cli check <model.va|dir>`.",
+    "Run `va-cli --help` for the full usage."
+  ]
+}

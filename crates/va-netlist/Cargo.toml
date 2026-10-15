@@ -7,5 +7,6 @@ publish.workspace = true
 description = "T6: circuit-level netlist parser producing wired model instances."
 
 [dependencies]
+va-diag = { workspace = true }
 va-abi = { workspace = true }
 thiserror = { workspace = true }

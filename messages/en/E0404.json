@@ -1,0 +1,9 @@
+{
+  "code": "E0404",
+  "rev": 1,
+  "message": "noise_table power {power} at {frequency} Hz is not a finite, non-negative power spectral density with this instance's parameters",
+  "description": "A noise table's powers are computed from the instance's parameter values, and with these values one of them is negative, infinite or not a number.",
+  "actions": [
+    "Check the parameter values given to this instance, and the expression for the power at that frequency."
+  ]
+}

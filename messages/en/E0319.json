@@ -1,0 +1,9 @@
+{
+  "code": "E0319",
+  "rev": 1,
+  "message": "an array-literal expression is not constant in a parameter context (only valid as a Laplace/Z-domain filter argument)",
+  "description": "An array literal `{a, b, c}` is supported only as the coefficient or root list of a `laplace_*` or `zi_*` filter, or as a `noise_table` table.",
+  "actions": [
+    "Use a single value here."
+  ]
+}

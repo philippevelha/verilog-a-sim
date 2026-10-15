@@ -1,0 +1,9 @@
+{
+  "code": "E0343",
+  "rev": 1,
+  "message": "unknown system function `${name}`",
+  "description": "This system function is not part of Verilog-A, or this simulator does not implement it.",
+  "actions": [
+    "Check the spelling, and the list of system functions in `docs/token-reference.md`."
+  ]
+}

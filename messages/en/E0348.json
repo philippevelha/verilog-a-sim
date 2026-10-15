@@ -1,0 +1,9 @@
+{
+  "code": "E0348",
+  "rev": 1,
+  "message": "`$simparam` takes a string parameter name as its first argument (LRM §9.18)",
+  "description": "`$simparam` asks the simulator for one of its parameters, named by a string literal.",
+  "actions": [
+    "Write the name in quotes: `$simparam(\"gmin\", 1e-12)`."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0388",
+  "rev": 1,
+  "message": "instance `{instance}` of `{module}`: port `{port}` is {port_width}-wide but the connection is {net_width}-wide",
+  "description": "A vector port must be connected to a vector net (or slice) of the same width.",
+  "actions": [
+    "Connect a net or slice of the port's width."
+  ]
+}

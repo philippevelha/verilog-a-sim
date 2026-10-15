@@ -1,0 +1,9 @@
+{
+  "code": "E0230",
+  "rev": 1,
+  "message": "`nature ... : {head}.{which}`: discipline `{head}` binds no `{which}` nature",
+  "description": "The discipline named has no `{which}` nature to derive from.",
+  "actions": [
+    "Derive from the other nature of the discipline, or from a nature directly."
+  ]
+}

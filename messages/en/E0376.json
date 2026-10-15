@@ -1,0 +1,10 @@
+{
+  "code": "E0376",
+  "rev": 1,
+  "message": "`{name}` inside a `{keyword}` loop: LRM §4.5.15 does not allow analog operators in `repeat`, `while` or non-genvar `for` loops",
+  "description": "An analog operator keeps internal state, one slot per place it is written in the source. N trips round this loop do not get N histories: they share the single history of this one call, and every trip but the last is overwritten by the next. Running it anyway would answer with a filter fed by whichever value the loop happened to pass last, not with the N filtered signals the model describes.",
+  "actions": [
+    "Write the loop as a generate loop: declare its counter `genvar` rather than `integer`. It is unrolled into N separate calls, each with its own state (LRM §5.9.3).",
+    "If the operator does not vary with the loop, move it out of the loop."
+  ]
+}

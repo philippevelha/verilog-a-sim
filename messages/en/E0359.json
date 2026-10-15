@@ -1,0 +1,9 @@
+{
+  "code": "E0359",
+  "rev": 1,
+  "message": "`{name}` analysis-name arguments must be string literals",
+  "description": "The analyses are named by string literals, such as `\"dc\"` or `\"tran\"`.",
+  "actions": [
+    "Write each name in quotes."
+  ]
+}

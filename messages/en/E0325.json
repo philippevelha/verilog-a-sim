@@ -1,0 +1,9 @@
+{
+  "code": "E0325",
+  "rev": 1,
+  "message": "`{name}` power at {frequency} Hz must be a constant expression (parameters, literals and builtin functions): {error}",
+  "description": "The power values of a noise table must be known before simulation; they cannot depend on probes or variables.",
+  "actions": [
+    "Use parameters, literals and built-in functions only in the table."
+  ]
+}

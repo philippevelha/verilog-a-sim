@@ -1,0 +1,9 @@
+{
+  "code": "E0335",
+  "rev": 1,
+  "message": "`{name}{signature}` takes at least {min} argument(s), but this call passes {got}",
+  "description": "The call passes fewer arguments than the function, operator or task needs.",
+  "actions": [
+    "Pass the arguments shown in the message, in that order."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "code": "E0382",
+  "rev": 1,
+  "message": "instance `{instance}` overrides `{param}`, which module `{module}` declares as a `localparam` — a localparam is a module-internal constant and cannot be overridden",
+  "description": "A `localparam` is not part of a module's interface. Its author declared it so that it could not be changed from outside.",
+  "actions": [
+    "Remove the override.",
+    "If it should be adjustable, declare it as a `parameter` in the module."
+  ]
+}

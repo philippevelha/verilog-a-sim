@@ -1,0 +1,10 @@
+{
+  "code": "E0217",
+  "rev": 1,
+  "message": "`{discipline} {name}` reads as a net declaration, but no discipline `{discipline}` is declared (declare it in a `discipline` block, or `` `include `` the file that does)",
+  "description": "A line of the form `word name, ...;` declares nets of discipline `word`. No discipline of that name is known: it is misspelt, or the header that declares it was not included.",
+  "actions": [
+    "Check the spelling of the discipline.",
+    "`` `include \"disciplines.vams\" `` (or the header that declares it) before the module."
+  ]
+}

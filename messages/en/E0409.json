@@ -1,0 +1,9 @@
+{
+  "code": "E0409",
+  "rev": 1,
+  "message": "a laplace denominator is identically zero",
+  "description": "Every coefficient of the denominator is zero, so the filter divides by zero.",
+  "actions": [
+    "Check the denominator list and the parameters it uses."
+  ]
+}

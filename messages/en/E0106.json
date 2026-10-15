@@ -1,0 +1,10 @@
+{
+  "code": "E0106",
+  "rev": 1,
+  "message": "unbalanced `(` in macro/argument list",
+  "description": "The arguments of a macro use (or the parameter list of a `` `define ``) open a parenthesis that is never closed before the end of the line or file.",
+  "actions": [
+    "Close every `(` in the macro's argument list.",
+    "If the arguments span several lines inside a `` `define ``, end each continued line with `\\`."
+  ]
+}

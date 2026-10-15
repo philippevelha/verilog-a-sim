@@ -1,0 +1,10 @@
+{
+  "code": "E0109",
+  "rev": 1,
+  "message": "unterminated `ifdef/`ifndef (missing `endif)",
+  "description": "The file ends while a conditional block opened by `` `ifdef `` or `` `ifndef `` is still open. Every conditional block must be closed by `` `endif `` in the same file.",
+  "actions": [
+    "Add the missing `` `endif ``.",
+    "If the blocks are nested, check that each `` `ifdef ``/`` `ifndef `` has its own `` `endif ``."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0301",
+  "rev": 1,
+  "message": "`{name}` is declared both as a parameter and as a variable in this module; rename one of them",
+  "description": "A name can stand for one thing in a module. Here it is declared as a `parameter` and also as a variable (`real`, `integer`), so every later use of it would be ambiguous.",
+  "actions": [
+    "Rename the variable or the parameter, and update the uses that mean it."
+  ]
+}

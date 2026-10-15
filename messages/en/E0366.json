@@ -1,0 +1,9 @@
+{
+  "code": "E0366",
+  "rev": 1,
+  "message": "unknown net `{name}`",
+  "description": "A probe or a port connection names a net that is not declared in this module.",
+  "actions": [
+    "Check the spelling, or declare the net with a discipline, for example `electrical n1;`."
+  ]
+}

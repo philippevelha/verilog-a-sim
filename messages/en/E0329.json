@@ -1,0 +1,9 @@
+{
+  "code": "E0329",
+  "rev": 1,
+  "message": "`{name}` is a parameter, and a parameter cannot be assigned in the analog block; declare a variable (`real {name}_eff;`) and assign that instead",
+  "description": "Parameters are constants for the whole simulation. They can be read in the analog block but not assigned.",
+  "actions": [
+    "Declare a variable, assign it from the parameter, and use the variable from then on."
+  ]
+}

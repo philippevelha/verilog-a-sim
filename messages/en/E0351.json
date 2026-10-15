@@ -1,0 +1,9 @@
+{
+  "code": "E0351",
+  "rev": 1,
+  "message": "`$port_connected` names `{name}`, which is not a declared port of this module",
+  "description": "The argument must be one of this module's ports.",
+  "actions": [
+    "Check the spelling of the port name."
+  ]
+}

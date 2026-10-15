@@ -1,0 +1,9 @@
+{
+  "code": "E0228",
+  "rev": 1,
+  "message": "`nature ... : {head}.`: expected `potential` or `flow` after a discipline name",
+  "description": "A nature can derive from a discipline's potential or flow nature, written `discipline.potential` or `discipline.flow`.",
+  "actions": [
+    "Write `{head}.potential` or `{head}.flow`."
+  ]
+}

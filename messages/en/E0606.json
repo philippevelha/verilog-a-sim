@@ -1,0 +1,9 @@
+{
+  "code": "E0606",
+  "rev": 1,
+  "message": "integration method `{method}` is not implemented",
+  "description": "The transient analysis was asked for an integration method this simulator does not have.",
+  "actions": [
+    "Use the default method, or one listed by `va-cli --help`."
+  ]
+}

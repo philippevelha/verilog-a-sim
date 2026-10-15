@@ -1,0 +1,9 @@
+{
+  "code": "E0385",
+  "rev": 1,
+  "message": "instance `{instance}` of `{module}`: no port named `{port}`",
+  "description": "The named connection names a port the instantiated module does not have.",
+  "actions": [
+    "Check the spelling against the module's port list."
+  ]
+}

@@ -1,5 +1,6 @@
 // expect: elab
-// at: 9:3
+// code: E0302
+// at: 10:3
 // message: variable `g` is declared more than once
 // fixed: 2.18.1
 module r(p, n);

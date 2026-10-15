@@ -68,6 +68,7 @@ use crate::ast::{
 };
 use crate::disciplines::{DisciplineDecl, DomainKind, NatureDecl};
 use crate::lexer::Token;
+use crate::{codes, Code, Diagnostic};
 use crate::{FrontendError, Refusal};
 
 /// Parse a token stream into every module it defines, in source order. A stream that defines
@@ -330,6 +331,20 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// An `E0202`, "expected {expected}, found {found}", for a token spelled `what`.
+fn expected(what: impl ToString) -> Diagnostic {
+    Diagnostic::new(codes::E0202).arg("expected", what)
+}
+
+/// A location from [`Parser::location`] without its leading `at `: the form a [`Diagnostic`]
+/// carries, which its rendering prefixes with ` at ` itself.
+fn bare(location: String) -> String {
+    match location.strip_prefix("at ") {
+        Some(rest) => rest.to_string(),
+        None => location,
+    }
+}
+
 /// Byte offset of every line start in `src`.
 fn line_starts(src: &str) -> Vec<usize> {
     std::iter::once(0)
@@ -373,14 +388,14 @@ impl Parser<'_> {
             // A missing `;` is noticed at the *next* token, which is usually on the next line.
             // Reported there, the message blames a line that is fine; the `;` belongs after the
             // previous token, so that is where this points.
-            Err(FrontendError::Parse(format!(
-                "{}: expected `;` after {}, found {}",
-                self.location_after(self.pos - 1),
-                self.toks[self.pos - 1].describe(),
-                self.found()
-            )))
+            Err(FrontendError::Parse(
+                Diagnostic::new(codes::E0203)
+                    .at(bare(self.location_after(self.pos - 1)))
+                    .arg("after", self.toks[self.pos - 1].describe())
+                    .arg("found", self.found()),
+            ))
         } else {
-            self.err(format!("expected {}", t.describe()))
+            self.err(expected(t.describe()))
         }
     }
 
@@ -395,7 +410,7 @@ impl Parser<'_> {
             self.pos += 1;
             Ok(())
         } else {
-            self.err(format!("expected `{name}`"))
+            self.err(expected(format!("`{name}`")))
         }
     }
 
@@ -427,7 +442,7 @@ impl Parser<'_> {
         loop {
             match self.toks.get(i) {
                 Some(Token::RParen) => return Some(names),
-                Some(Token::Keyword(kw)) if kw.as_str() == "or" => {
+                t if is_event_separator(t) => {
                     names.push(step_event(i + 1)?);
                     i += 2;
                 }
@@ -556,8 +571,7 @@ impl Parser<'_> {
                 }
                 i += 1;
             } else if STEP_EVENTS.contains(&name.as_str())
-                && (next == Some(&Token::RParen)
-                    || matches!(next, Some(Token::Keyword(kw)) if kw.as_str() == "or"))
+                && (next == Some(&Token::RParen) || is_event_separator(next))
             {
                 i += 1;
             } else {
@@ -565,7 +579,7 @@ impl Parser<'_> {
             }
             match self.toks.get(i) {
                 Some(Token::RParen) => return true,
-                Some(Token::Keyword(kw)) if kw.as_str() == "or" => i += 1,
+                t if is_event_separator(t) => i += 1,
                 _ => return false,
             }
         }
@@ -581,7 +595,7 @@ impl Parser<'_> {
             let name = match self.peek() {
                 Some(Token::Keyword(kw)) => kw.as_str().to_string(),
                 Some(Token::Ident(id)) => id.clone(),
-                _ => return self.err("expected an event in the trigger list".to_string()),
+                _ => return self.err(Diagnostic::new(codes::E0219)),
             };
             let term = match SCHEDULED_EVENTS.iter().find(|(kw, _)| *kw == name) {
                 Some((_, synthetic)) => self.parse_event_trigger(synthetic)?,
@@ -597,12 +611,13 @@ impl Parser<'_> {
                 None => term,
                 Some(lhs) => self.push(ExprAst::Binary(BinOp::Or, lhs, term)),
             });
-            match self.peek() {
-                Some(Token::Keyword(kw)) if kw.as_str() == "or" => self.pos += 1,
-                _ => break,
+            if is_event_separator(self.peek()) {
+                self.pos += 1;
+            } else {
+                break;
             }
         }
-        cond.map_or_else(|| self.err("empty event trigger".to_string()), Ok)
+        cond.map_or_else(|| self.err_here(Diagnostic::new(codes::E0220)), Ok)
     }
 
     /// Parse an event trigger's arguments from just after the `@(`, leaving the trigger's
@@ -620,13 +635,7 @@ impl Parser<'_> {
     /// `@` is not an identifier character, so no source can produce a call by either name.
     fn parse_event_trigger(&mut self, synthetic: &str) -> Result<ExprRef, FrontendError> {
         self.pos += 1; // the event keyword
-        self.eat(&Token::LParen)?;
-        let mut args = vec![self.parse_expr()?];
-        while self.at(&Token::Comma) {
-            self.pos += 1;
-            args.push(self.parse_expr()?);
-        }
-        self.eat(&Token::RParen)?;
+        let args = self.parse_call_args_of(synthetic)?;
         Ok(self.push(ExprAst::Call {
             name: synthetic.to_string(),
             args,
@@ -648,31 +657,28 @@ impl Parser<'_> {
                 None => break,
             }
         }
-        self.err("unterminated `@(...)` event expression".to_string())
+        self.err_here(Diagnostic::new(codes::E0221))
     }
 
-    fn err<T>(&self, what: String) -> Result<T, FrontendError> {
+    /// A parse error `d` at the current token, with that token as the `{found}` argument.
+    fn err<T>(&self, d: Diagnostic) -> Result<T, FrontendError> {
         if let Some(e) = self.excluded_operator() {
             return e;
         }
-        Err(FrontendError::Parse(format!(
-            "{}: {}, found {}",
-            self.location(),
-            what,
-            self.found()
-        )))
+        Err(FrontendError::Parse(
+            d.at(bare(self.location())).arg("found", self.found()),
+        ))
     }
 
-    /// A construct opened at token `opener` that the source never closes with `closer`. The
-    /// error is located where the parser gave up, and names where the construct was opened,
-    /// because that is the line the user has to look at.
-    fn unclosed<T>(&self, opener: usize, what: &str, closer: &str) -> Result<T, FrontendError> {
-        let opened = self.location_of(opener);
-        Err(FrontendError::Parse(format!(
-            "{}: expected `{closer}` to close the {what} opened {opened}, found {}",
-            self.location(),
-            self.found()
-        )))
+    /// A construct opened at token `opener` that the source never closes. The error is located
+    /// where the parser gave up, and names where the construct was opened (`{opened}`), because
+    /// that is the line the user has to look at. `d` is the code for the construct.
+    fn unclosed<T>(&self, opener: usize, d: Diagnostic) -> Result<T, FrontendError> {
+        Err(FrontendError::Parse(
+            d.at(bare(self.location()))
+                .arg("opened", bare(self.location_of(opener)))
+                .arg("found", self.found()),
+        ))
     }
 
     /// The current token for a "found …" tail, as the user wrote it ([`Token::describe`]).
@@ -694,23 +700,21 @@ impl Parser<'_> {
     /// which was right for the event triggers and wrong for everything else.
     fn refuse<T>(
         &self,
-        what: impl Into<String>,
-        why: impl Into<String>,
-        instead: impl Into<String>,
+        code: Code,
+        args: &[(&str, &str)],
         tracking: &str,
     ) -> Result<T, FrontendError> {
-        Err(FrontendError::Refused(
-            Refusal::new(what, why)
+        Err(FrontendError::refused(
+            Refusal::coded(code, args)
                 .at(self.location())
-                .instead(instead)
                 .tracking(tracking),
         ))
     }
 
-    /// A parse error at the current location whose message already says what was found, so
-    /// it takes no `, found …` tail (contrast [`Self::err`]).
-    fn err_here<T>(&self, msg: String) -> Result<T, FrontendError> {
-        Err(FrontendError::Parse(format!("{}: {msg}", self.location())))
+    /// A parse error `d` at the current location, for a message that needs no `{found}`
+    /// (contrast [`Self::err`]).
+    fn err_here<T>(&self, d: Diagnostic) -> Result<T, FrontendError> {
+        Err(FrontendError::Parse(d.at(bare(self.location()))))
     }
 
     /// The error for a case-equality operator at the cursor, if there is one. Checked by both
@@ -722,11 +726,13 @@ impl Parser<'_> {
             Token::CaseNe => ("!==", "!="),
             _ => return None,
         };
-        Some(self.err_here(format!(
-            "`{op}` is not part of Verilog-A: Annex C excludes the case-equality operators, which \
-             compare four-state logic values (`x`, `z`) that an analog value cannot hold; use \
-             `{instead}`"
-        )))
+        Some(
+            self.err_here(
+                Diagnostic::new(codes::E0215)
+                    .arg("op", op)
+                    .arg("instead", instead),
+            ),
+        )
     }
 
     /// Where the parser is, phrased for a human if [`parse_with_disciplines_located`] supplied
@@ -818,11 +824,10 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(s)
             }
-            Some(Token::Keyword(kw)) => self.err(format!(
-                "expected an identifier, but `{}` is a reserved word",
-                kw.as_str()
-            )),
-            _ => self.err("expected an identifier".to_string()),
+            Some(Token::Keyword(kw)) => {
+                self.err(Diagnostic::new(codes::E0209).arg("word", kw.as_str()))
+            }
+            _ => self.err(Diagnostic::new(codes::E0208)),
         }
     }
 
@@ -852,15 +857,10 @@ impl Parser<'_> {
         let mut slice = None;
         while self.at(&Token::LBracket) {
             if slice.is_some() {
-                return self.err(format!(
-                    "`{name}[..]`: a `[lo:hi]` slice must be the final bracket group"
-                ));
+                return self.err(Diagnostic::new(codes::E0222).arg("name", &name));
             }
             if index.len() >= 2 {
-                return self.err(format!(
-                    "`{name}` has more than 2 bracket groups; indexing/slicing is capped at 2 \
-                     dimensions"
-                ));
+                return self.err(Diagnostic::new(codes::E0223).arg("name", &name));
             }
             self.pos += 1;
             let first = self.parse_expr()?;
@@ -886,7 +886,7 @@ impl Parser<'_> {
         let mut idxs = Vec::new();
         while self.at(&Token::LBracket) {
             if idxs.len() >= 2 {
-                return self.err("indexing is capped at 2 dimensions".to_string());
+                return self.err(Diagnostic::new(codes::E0224));
             }
             self.pos += 1;
             idxs.push(self.parse_expr()?);
@@ -919,7 +919,7 @@ impl Parser<'_> {
         let mut ranges = Vec::new();
         while self.at(&Token::LBracket) {
             if ranges.len() >= 2 {
-                return self.err("more than 2 declared dimensions; capped at 2".to_string());
+                return self.err(Diagnostic::new(codes::E0225));
             }
             ranges.push(
                 self.parse_bracket_range()?
@@ -1000,15 +1000,11 @@ impl Parser<'_> {
             Direction::Output => "output",
             Direction::Inout => "inout",
         };
-        // Built directly rather than through `Parser::err`, whose trailing ", found {token}" is
-        // pure noise here: the offending token is already named in the message.
-        Err(FrontendError::Parse(format!(
-            "at token {}: `{kw}` is a discrete-domain net type, which LRM Annex C excludes from \
-             Verilog-A, so it may not qualify the port declaration `{dir} {kw} ...`. A continuous \
-             net takes its type from a discipline instead: write `{dir} <discipline> ...`, or \
-             declare the direction and the discipline in two statements.",
-            self.pos
-        )))
+        self.err_here(
+            Diagnostic::new(codes::E0226)
+                .arg("net_type", kw)
+                .arg("dir", dir),
+        )
     }
 
     fn parse_net_item(&mut self, discipline: Discipline) -> Result<Item, FrontendError> {
@@ -1221,7 +1217,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(s)
             }
-            _ => self.err("expected a string literal".to_string()),
+            _ => self.err(Diagnostic::new(codes::E0211)),
         }
     }
 
@@ -1282,11 +1278,12 @@ impl Parser<'_> {
     fn parse_parent_nature(&mut self) -> Result<NatureDecl, FrontendError> {
         let head = self.expect_discipline_or_nature_name()?;
         if !self.at(&Token::Dot) {
-            return self.natures.get(&head).cloned().ok_or(()).or_else(|()| {
-                self.err(format!(
-                    "`nature ... : {head}`: `{head}` is not a previously declared nature"
-                ))
-            });
+            return self
+                .natures
+                .get(&head)
+                .cloned()
+                .ok_or(())
+                .or_else(|()| self.err(Diagnostic::new(codes::E0227).arg("head", &head)));
         }
         // `discipline_identifier . potential_or_flow`
         self.pos += 1; // consume `.`
@@ -1295,34 +1292,38 @@ impl Parser<'_> {
         } else if self.at_keyword("flow") {
             "flow"
         } else {
-            return self.err(format!(
-                "`nature ... : {head}.`: expected `potential` or `flow` after a discipline name"
-            ));
+            return self.err(Diagnostic::new(codes::E0228).arg("head", &head));
         };
         self.pos += 1;
         let Some(discipline) = self.disciplines.get(&head) else {
-            return self.err(format!(
-                "`nature ... : {head}.{which}`: `{head}` is not a previously declared discipline"
-            ));
+            return self.err(
+                Diagnostic::new(codes::E0229)
+                    .arg("head", &head)
+                    .arg("which", which),
+            );
         };
         let bound = match which {
             "potential" => discipline.potential.clone(),
             _ => discipline.flow.clone(),
         };
         let Some(nature_name) = bound else {
-            return self.err(format!(
-                "`nature ... : {head}.{which}`: discipline `{head}` binds no `{which}` nature"
-            ));
+            return self.err(
+                Diagnostic::new(codes::E0230)
+                    .arg("head", &head)
+                    .arg("which", which),
+            );
         };
         self.natures
             .get(&nature_name)
             .cloned()
             .ok_or(())
             .or_else(|()| {
-                self.err(format!(
-                    "`nature ... : {head}.{which}`: `{head}`'s {which} nature `{nature_name}` is \
-                     not a previously declared nature"
-                ))
+                self.err(
+                    Diagnostic::new(codes::E0231)
+                        .arg("head", &head)
+                        .arg("which", which)
+                        .arg("nature", &nature_name),
+                )
             })
     }
 
@@ -1356,7 +1357,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("expected `endnature`".to_string());
+                return self.err(expected("`endnature`"));
             }
             if self.at_keyword("units") {
                 self.pos += 1;
@@ -1366,15 +1367,18 @@ impl Parser<'_> {
                 // units; the derived nature always inherits its parent nature units."
                 if let Some(p) = &parent {
                     if p.units.as_deref() != Some(units.as_str()) {
-                        return self.err(format!(
-                            "nature `{name}` derives from `{}` and so always inherits its \
-                             `units` ({}), which LRM §3.6.1.2 forbids it from defining or \
-                             changing to \"{units}\"",
-                            p.name,
-                            p.units
-                                .as_deref()
-                                .map_or("unspecified".to_string(), |u| format!("\"{u}\"")),
-                        ));
+                        return self.err(
+                            Diagnostic::new(codes::E0232)
+                                .arg("name", &name)
+                                .arg("parent", &p.name)
+                                .arg(
+                                    "units",
+                                    p.units
+                                        .as_deref()
+                                        .map_or("unspecified".to_string(), |u| format!("\"{u}\"")),
+                                )
+                                .arg("new_units", &units),
+                        );
                     }
                 }
                 decl.units = Some(units);
@@ -1388,13 +1392,13 @@ impl Parser<'_> {
                 // parent nature."
                 if let Some(p) = &parent {
                     if p.access.as_deref() != Some(access.as_str()) {
-                        return self.err(format!(
-                            "nature `{name}` derives from `{}` and so always inherits its \
-                             `access` function ({}), which LRM §3.6.1.2 forbids it from \
-                             changing to `{access}`",
-                            p.name,
-                            p.access.as_deref().unwrap_or("unspecified"),
-                        ));
+                        return self.err(
+                            Diagnostic::new(codes::E0233)
+                                .arg("name", &name)
+                                .arg("parent", &p.name)
+                                .arg("access", p.access.as_deref().unwrap_or("unspecified"))
+                                .arg("new_access", &access),
+                        );
                     }
                 }
                 decl.access = Some(access);
@@ -1415,7 +1419,7 @@ impl Parser<'_> {
                 decl.ddt_nature = Some(self.expect_ident()?);
                 self.eat(&Token::Semicolon)?;
             } else {
-                return self.err("expected a `nature` attribute or `endnature`".to_string());
+                return self.err(Diagnostic::new(codes::E0234));
             }
         }
         self.eat_keyword("endnature")?;
@@ -1438,7 +1442,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("expected `enddiscipline`".to_string());
+                return self.err(expected("`enddiscipline`"));
             }
             if self.at_keyword("potential") {
                 self.pos += 1;
@@ -1463,8 +1467,7 @@ impl Parser<'_> {
                 });
                 self.eat(&Token::Semicolon)?;
             } else {
-                return self
-                    .err("expected a `discipline` attribute or `enddiscipline`".to_string());
+                return self.err(Diagnostic::new(codes::E0237));
             }
         }
         self.eat_keyword("enddiscipline")?;
@@ -1526,7 +1529,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.unclosed(module_pos, &format!("module `{name}`"), "endmodule");
+                return self.unclosed(module_pos, Diagnostic::new(codes::E0205).arg("name", &name));
             }
             // An item queued by a declaration that expanded into two belongs to that
             // declaration, not to the token the parser happens to be on now.
@@ -1674,7 +1677,7 @@ impl Parser<'_> {
                 let module = name.clone();
                 self.parse_instance(module)
             }
-            _ => self.err("expected a declaration or `analog` block".to_string()),
+            _ => self.err(Diagnostic::new(codes::E0210)),
         }
     }
 
@@ -1695,14 +1698,16 @@ impl Parser<'_> {
                 ["electrical", "thermal"]
                     .into_iter()
                     .chain(self.disciplines.keys().map(String::as_str)),
-            )
-            .map_or_else(String::new, |d| format!("; did you mean `{d}`?"));
-            return Err(FrontendError::Parse(format!(
-                "{}: `{module} {name}` reads as a net declaration, but no discipline `{module}` is \
-                 declared (declare it in a `discipline` block, or `` `include `` the file that \
-                 does){hint}",
-                self.location_of(module_pos)
-            )));
+            );
+            let d = match hint {
+                Some(d) => Diagnostic::new(codes::E0218).arg("suggestion", d),
+                None => Diagnostic::new(codes::E0217),
+            };
+            return Err(FrontendError::Parse(
+                d.arg("discipline", &module)
+                    .arg("name", &name)
+                    .at(bare(self.location_of(module_pos))),
+            ));
         }
         self.eat(&Token::LParen)?;
         let connections = self.parse_port_conn_list()?;
@@ -1773,11 +1778,7 @@ impl Parser<'_> {
             // (`external/verilogAlib/example_mzi_modulator.vams` connects `.therm_en(1)`, and
             // `therm_en` is a `parameter` of the instantiated module, not one of its ports).
             if matches!(self.peek(), Some(Token::Number(_))) {
-                return self.err(format!(
-                    "`.{port}(...)`: a port connects to a net, not to a value — if \
-                     `{port}` is a parameter of the instantiated module, override it in \
-                     the `#(...)` list before the instance name instead"
-                ));
+                return self.err(Diagnostic::new(codes::E0235).arg("port", &port));
             }
             // `.port()` — the LRM's explicitly-unconnected form, the standard way to leave
             // an optional terminal (a self-heating `dt`) off an instance. Distinct from
@@ -1815,7 +1816,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 true
             }
-            _ => return self.err("expected `parameter` or `localparam`".to_string()),
+            _ => return self.err(expected("`parameter` or `localparam`")),
         };
         let ty = match self.peek() {
             Some(Token::Real) => {
@@ -1913,7 +1914,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("expected `endfunction`".to_string());
+                return self.err(expected("`endfunction`"));
             }
             match self.peek() {
                 Some(Token::Input) | Some(Token::Output) | Some(Token::Inout) => {
@@ -1986,7 +1987,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(false)
             }
-            _ => self.err("expected `[` or `(` to open a range bound".to_string()),
+            _ => self.err(expected("`[` or `(`")),
         }
     }
 
@@ -2002,7 +2003,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 Ok(false)
             }
-            _ => self.err("expected `]` or `)` to close a range bound".to_string()),
+            _ => self.err(expected("`]` or `)`")),
         }
     }
 
@@ -2040,7 +2041,7 @@ impl Parser<'_> {
                     || self.at(&Token::EndModule)
                     || self.at_keyword("endfunction")
                 {
-                    return self.unclosed(begin_pos, "`begin`", "end");
+                    return self.unclosed(begin_pos, Diagnostic::new(codes::E0204));
                 }
                 stmts.push(self.parse_stmt()?);
             }
@@ -2119,21 +2120,7 @@ impl Parser<'_> {
                 // (`absdelta`, which is unimplemented, or a malformed list) is refused:
                 // discarding the trigger runs the body unconditionally (§ v0.9.1).
                 if let Some(event) = self.monitored_event_in_trigger() {
-                    return self.refuse(
-                        format!(
-                            "`@(... {event} ...)`, an event trigger this engine does not schedule"
-                        ),
-                        format!(
-                            "a trigger naming `{event}` is honoured only as an `or` list of \
-                             `cross(...)`, `above(...)`, `timer(...)`, `initial_step` and \
-                             `final_step`, and discarding it would run the body at every solve \
-                             point instead of when the event fires - a wrong answer rather than a \
-                             missing feature"
-                        ),
-                        "write the trigger with those events only; `absdelta` is not implemented"
-                            .to_string(),
-                        ANALOG_EVENTS_TRACKING,
-                    );
+                    return self.refuse(codes::R0201, &[("event", event)], ANALOG_EVENTS_TRACKING);
                 }
                 let step_events = self.step_event_list();
                 // A step event written in a form this parser cannot honour: an analysis filter,
@@ -2146,16 +2133,8 @@ impl Parser<'_> {
                 if step_events.is_none() {
                     if let Some(event) = self.step_event_in_trigger() {
                         return self.refuse(
-                            format!("`@({event} ...)` in a form this engine does not honour"),
-                            "discarding the trigger would run the body at every solve point \
-                             instead of when the event fires. For the analysis-filter form that \
-                             is sharper still: the filter says \"not in this analysis\", so \
-                             dropping it runs the body precisely where the model excluded it - \
-                             wrong in every analysis, not merely unimplemented",
-                            format!(
-                                "write the bare `@({event})`, or an `or` list of bare \
-                                 `initial_step`/`final_step`; both are honoured"
-                            ),
+                            codes::R0202,
+                            &[("event", event)],
                             ANALOG_EVENTS_TRACKING,
                         );
                     }
@@ -2227,10 +2206,7 @@ impl Parser<'_> {
                 // "shall not be used on the left side of `<+`" — so a `(` immediately followed
                 // by `<` here is a parse error, not a contribution target.
                 if self.nth(2) == Some(&Token::Lt) {
-                    return self.err(format!(
-                        "`{name}(<...>)` (a port-current probe) may not be used on the left \
-                         side of `<+` — it is read-only (LRM §5.4.3)"
-                    ));
+                    return self.err(Diagnostic::new(codes::E0236).arg("name", name));
                 }
                 let at = self.src_pos(self.pos);
                 let target = self.parse_access()?;
@@ -2285,7 +2261,7 @@ impl Parser<'_> {
                 "bound_step" => {
                     self.pos += 1;
                     let args = if self.at(&Token::LParen) {
-                        self.parse_call_args()?
+                        self.parse_call_args_of("bound_step")?
                     } else {
                         Vec::new()
                     };
@@ -2298,21 +2274,12 @@ impl Parser<'_> {
                 // Not a refusal: Annex C excludes these from Verilog-A, so the source is not
                 // valid Verilog-A, and "not yet parsed" would promise support that will never
                 // come. Until 2.18.2 they fell through to the refusal below.
-                kw @ ("casex" | "casez") => self.err_here(format!(
-                    "`{kw}` is not part of Verilog-A: Annex C excludes it, because its \
-                     don't-care matching works on four-state logic values (`x`, `z`) that an \
-                     analog value cannot hold; use `case`"
-                )),
-                other => self.refuse(
-                    format!("the reserved word `{other}`"),
-                    "it begins a construct this implementation does not yet parse, and guessing \
-                     at its meaning would silently change what the model says",
-                    "see `docs/token-reference.md` for this token's status, and \
-                     `docs/roadmap.md` for whether it is planned",
-                    "docs/token-reference.md",
-                ),
+                kw @ ("casex" | "casez") => {
+                    self.err_here(Diagnostic::new(codes::E0216).arg("word", kw))
+                }
+                other => self.refuse(codes::R0203, &[("word", other)], "docs/token-reference.md"),
             },
-            _ => self.err("expected a statement".to_string()),
+            _ => self.err(Diagnostic::new(codes::E0206)),
         }
     }
 
@@ -2325,7 +2292,7 @@ impl Parser<'_> {
         let mut stmts = Vec::new();
         while !self.at_keyword("endgenerate") {
             if self.peek().is_none() {
-                return self.err("expected `endgenerate`".to_string());
+                return self.err(expected("`endgenerate`"));
             }
             stmts.push(self.parse_stmt()?);
         }
@@ -2386,7 +2353,7 @@ impl Parser<'_> {
                 break;
             }
             if self.peek().is_none() {
-                return self.err("expected `endcase`".to_string());
+                return self.err(expected("`endcase`"));
             }
             if self.at_keyword("default") {
                 self.pos += 1;
@@ -2441,11 +2408,11 @@ impl Parser<'_> {
     fn parse_access(&mut self) -> Result<Access, FrontendError> {
         let name = match self.peek() {
             Some(Token::Ident(n)) => n.clone(),
-            _ => return self.err("expected an access function".to_string()),
+            _ => return self.err(Diagnostic::new(codes::E0212)),
         };
-        let kind = *self.known_access.get(&name).ok_or_else(|| {
-            FrontendError::Parse(format!("`{name}` is not a recognized access function"))
-        })?;
+        let Some(&kind) = self.known_access.get(&name) else {
+            return self.err_here(Diagnostic::new(codes::E0213).arg("name", &name));
+        };
         self.pos += 1;
         self.eat(&Token::LParen)?;
         let mut args = vec![self.parse_net_arg()?];
@@ -2469,11 +2436,11 @@ impl Parser<'_> {
     fn parse_port_probe(&mut self) -> Result<(AccessKind, String), FrontendError> {
         let name = match self.peek() {
             Some(Token::Ident(n)) => n.clone(),
-            _ => return self.err("expected an access function".to_string()),
+            _ => return self.err(Diagnostic::new(codes::E0212)),
         };
-        let kind = *self.known_access.get(&name).ok_or_else(|| {
-            FrontendError::Parse(format!("`{name}` is not a recognized access function"))
-        })?;
+        let Some(&kind) = self.known_access.get(&name) else {
+            return self.err_here(Diagnostic::new(codes::E0213).arg("name", &name));
+        };
         self.pos += 1;
         self.eat(&Token::LParen)?;
         self.eat(&Token::Lt)?;
@@ -2587,7 +2554,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 // `$vt`/`$temperature` take no args; `$simparam("name", default)` etc. do.
                 let args = if self.at(&Token::LParen) {
-                    self.parse_call_args()?
+                    self.parse_call_args_of(&format!("${name}"))?
                 } else {
                     Vec::new()
                 };
@@ -2652,18 +2619,16 @@ impl Parser<'_> {
                 if self.nth(1) == Some(&Token::LParen) {
                     self.parse_call(name)
                 } else {
-                    self.err(format!(
-                        "reserved word `{name}` is not valid in an expression"
-                    ))
+                    self.err(Diagnostic::new(codes::E0214).arg("word", &name))
                 }
             }
-            _ => self.err("expected an expression".to_string()),
+            _ => self.err(Diagnostic::new(codes::E0207)),
         }
     }
 
     fn parse_call(&mut self, name: String) -> Result<ExprRef, FrontendError> {
         self.pos += 1; // name
-        let args = self.parse_call_args()?;
+        let args = self.parse_call_args_of(&name)?;
         Ok(self.push(ExprAst::Call { name, args }))
     }
 
@@ -2695,18 +2660,62 @@ impl Parser<'_> {
         Ok(args)
     }
 
-    fn parse_call_args(&mut self) -> Result<Vec<ExprRef>, FrontendError> {
+    /// Parse a call's parenthesised argument list, the cursor on its `(`. A call to `name`, whose arguments may be omitted ("null",
+    /// `f(a, , c)`) in the positions [`null_allowed`] lists. An omitted argument becomes
+    /// [`ExprAst::Null`]; one omitted anywhere else is `E0238`, naming the argument, rather than
+    /// the "expected an expression" a parser without the rule would give.
+    fn parse_call_args_of(&mut self, name: &str) -> Result<Vec<ExprRef>, FrontendError> {
         self.eat(&Token::LParen)?;
         let mut args = Vec::new();
         if !self.at(&Token::RParen) {
-            args.push(self.parse_expr()?);
-            while self.at(&Token::Comma) {
+            loop {
+                if self.at(&Token::Comma) || self.at(&Token::RParen) {
+                    let index = args.len() + 1;
+                    if !null_allowed(name, index) {
+                        return self.err_here(
+                            Diagnostic::new(codes::E0238)
+                                .arg("index", index)
+                                .arg("name", name.trim_start_matches('@')),
+                        );
+                    }
+                    args.push(self.push(ExprAst::Null));
+                } else {
+                    args.push(self.parse_expr()?);
+                }
+                if !self.at(&Token::Comma) {
+                    break;
+                }
                 self.pos += 1;
-                args.push(self.parse_expr()?);
             }
         }
         self.eat(&Token::RParen)?;
         Ok(args)
+    }
+}
+
+/// Whether argument `index` (1-based) of a call to `name` may be omitted, per LRM A.6.5 (the
+/// event functions: `analog_expression_or_null`/`constant_expression_or_null` in the grammar)
+/// and A.6.4 (the filters, whose coefficient vectors and tolerance are optional). The event
+/// functions arrive under their synthetic names (`@cross`). Every other argument of every other
+/// call must be written.
+fn null_allowed(name: &str, index: usize) -> bool {
+    match name {
+        "@cross" => (2..=4).contains(&index),
+        "@above" | "@timer" => (2..=3).contains(&index),
+        "laplace_nd" | "laplace_np" | "laplace_zd" | "laplace_zp" => (2..=4).contains(&index),
+        "zi_nd" | "zi_np" | "zi_zd" | "zi_zp" => matches!(index, 2 | 3 | 5),
+        _ => false,
+    }
+}
+
+/// Whether `tok` separates two events in an `@(...)` trigger: `or`, or a comma, which the LRM
+/// gives the same meaning (§5.10.1, "event_expression or event_expression | event_expression ,
+/// event_expression").
+fn is_event_separator(tok: Option<&Token>) -> bool {
+    match tok {
+        Some(Token::Comma) => true,
+        Some(Token::Keyword(kw)) => kw.as_str() == "or",
+        _ => false,
     }
 }
 
@@ -2785,7 +2794,8 @@ mod tests {
             .expect_err("a port takes a net, not a number");
         let msg = err.to_string();
         assert!(msg.contains("`.therm_en(...)`"), "{msg}");
-        assert!(msg.contains("`#(...)`"), "{msg}");
+        // The `#(...)` fix is the catalogue entry's first action.
+        assert!(msg.contains("[E0235]"), "{msg}");
         assert!(msg.contains("preprocessed line 3"), "{msg}");
     }
 
@@ -3132,7 +3142,11 @@ mod tests {
     /// gap, which is precisely the impression these messages exist to prevent. Enforcing the
     /// shape in a test is what keeps the next refusal from regressing to a bare sentence.
     fn assert_refusal(err: &str, construct: &str) {
-        for field in ["refused:", "where:", "why:", "instead:", "tracking:"] {
+        assert!(
+            err.starts_with("refused"),
+            "a refusal opens with its marker: {err}"
+        );
+        for field in ["where:", "why:", "instead:", "tracking:"] {
             assert!(err.contains(field), "a refusal must carry `{field}`: {err}");
         }
         assert!(

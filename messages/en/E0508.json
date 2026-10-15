@@ -1,0 +1,9 @@
+{
+  "code": "E0508",
+  "rev": 1,
+  "message": "`IC=` is only meaningful on a reactive element, not on `{name}`",
+  "description": "An initial condition sets the starting state of a capacitor (its voltage) or an inductor (its current). A resistor has no state.",
+  "actions": [
+    "Remove `IC=` from the resistor."
+  ]
+}

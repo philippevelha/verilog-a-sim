@@ -1,0 +1,9 @@
+{
+  "code": "E0734",
+  "rev": 1,
+  "message": "model `{model}` declares {ports} port node(s), device connects {got}, and port #{index} (`{port}`) is not optional",
+  "description": "A device line may leave out trailing ports only if the model asks `$port_connected` about them; this one does not.",
+  "actions": [
+    "Connect the port."
+  ]
+}

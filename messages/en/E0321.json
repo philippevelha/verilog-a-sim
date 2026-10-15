@@ -1,0 +1,9 @@
+{
+  "code": "E0321",
+  "rev": 1,
+  "message": "`{name}` with a file-name argument is not supported — give the table inline as a `{f1, p1, f2, p2, …}` array literal",
+  "description": "The LRM lets a noise table be read from a file. This simulator implements only the inline form.",
+  "actions": [
+    "Write the table inline: `noise_table({1, 1e-20, 1e6, 1e-22})`."
+  ]
+}

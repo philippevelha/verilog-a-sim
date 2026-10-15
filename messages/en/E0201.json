@@ -1,0 +1,10 @@
+{
+  "code": "E0201",
+  "rev": 1,
+  "message": "unexpected character `{char}`",
+  "description": "The source contains a character that cannot start any token of Verilog-A: not part of an identifier, a number, an operator or punctuation. Common causes are a character pasted from a word processor (a typographic quote or dash), or a symbol from another language.",
+  "actions": [
+    "Delete or replace the character at the position shown.",
+    "Retype quotes and minus signs by hand if the line was copied from a document."
+  ]
+}

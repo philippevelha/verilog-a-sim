@@ -19,30 +19,36 @@ pub mod preprocess;
 
 use std::path::PathBuf;
 use thiserror::Error;
+pub use va_diag::{codes, Code, Diagnostic};
 
 /// Errors produced anywhere in the frontend pipeline.
+///
+/// Every variant but [`FrontendError::Refused`] carries a coded [`Diagnostic`] (2.26.0): its
+/// code, the details its message names, and where it happened. The text a user reads comes from
+/// the message catalogue (`messages/<lang>/<CODE>.json`, see `va_diag`), not from this crate, so
+/// it can be improved and translated without touching Rust. The variant still says which stage
+/// raised it; the code's two leading digits say the same (01 preprocessor, 02 lexer and parser,
+/// 03 elaboration).
 #[derive(Debug, Error)]
 pub enum FrontendError {
     /// The preprocessor hit a bad directive, undefined macro, or include problem.
-    #[error("preprocess error: {0}")]
-    Preprocess(String),
+    #[error("{0}")]
+    Preprocess(Diagnostic),
     /// The lexer hit a character it cannot tokenize.
-    #[error("lex error at {location}: {message}")]
+    #[error("{diag}")]
     Lex {
         /// Byte offset of the offending text in the (preprocessed) source that was lexed.
         offset: usize,
-        /// Where that is, for a reader: `file:line:col` when the preprocessor's line map was
+        /// The diagnostic. Its location is `file:line:col` when the preprocessor's line map was
         /// available ([`lexer::lex_located`]), else `byte N` of the lexed text.
-        location: String,
-        /// What was found.
-        message: String,
+        diag: Diagnostic,
     },
     /// The parser hit an unexpected token.
-    #[error("parse error: {0}")]
-    Parse(String),
+    #[error("{0}")]
+    Parse(Diagnostic),
     /// Elaboration could not lower the AST into the IR (e.g. unknown identifier).
-    #[error("elaboration error: {0}")]
-    Elaborate(String),
+    #[error("{0}")]
+    Elaborate(Diagnostic),
     /// A construct this implementation recognises and **deliberately declines** to support.
     ///
     /// Kept distinct from [`FrontendError::Parse`] and [`FrontendError::Elaborate`] because it
@@ -54,7 +60,27 @@ pub enum FrontendError {
     /// missing feature. Carrying that in the type rather than in prose is also what lets
     /// `va-cli` log every refusal in one marked, uniform shape (§ `va_cli::report_refusal`).
     #[error("{0}")]
-    Refused(Refusal),
+    Refused(Box<Refusal>),
+}
+
+impl FrontendError {
+    /// A refusal as an error. Boxed because a refusal is several strings, and every `Result`
+    /// in the frontend would otherwise carry that size on its success path too.
+    pub fn refused(r: Refusal) -> Self {
+        FrontendError::Refused(Box::new(r))
+    }
+
+    /// The coded diagnostic this error carries; `None` for a refusal, which carries its code
+    /// in [`Refusal::code`] instead.
+    pub fn diagnostic(&self) -> Option<&Diagnostic> {
+        match self {
+            FrontendError::Preprocess(d)
+            | FrontendError::Lex { diag: d, .. }
+            | FrontendError::Parse(d)
+            | FrontendError::Elaborate(d) => Some(d),
+            FrontendError::Refused(_) => None,
+        }
+    }
 }
 
 /// A recognised construct this implementation declines to support, and the reasoning a user
@@ -66,6 +92,9 @@ pub enum FrontendError {
 /// when the limitation might lift.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Refusal {
+    /// The refusal's code (`R0101`, ...), when it has one. A coded refusal's `what`, `why` and
+    /// `instead` come from the message catalogue ([`Refusal::coded`]).
+    pub code: Option<Code>,
     /// The construct, quoted as the user wrote it where possible — e.g. ``@(final_step("tran"))``.
     pub what: String,
     /// Why it is refused rather than approximated or ignored. This is the field that stops a
@@ -84,9 +113,41 @@ impl Refusal {
     /// A refusal of `what`, because `why`. Location and advice are added with the builders.
     pub fn new(what: impl Into<String>, why: impl Into<String>) -> Self {
         Refusal {
+            code: None,
             what: what.into(),
             why: why.into(),
             instead: None,
+            at: None,
+            tracking: None,
+        }
+    }
+
+    /// The refusal with code `code`, its text from the message catalogue: `what` is the entry's
+    /// message, `why` its description and `instead` its actions, each with `args` filled in.
+    /// With no catalogue text for the code (which `catalogue_is_consistent` rules out for a
+    /// defined code), `what` is the code itself, so the refusal is still shown.
+    pub fn coded(code: Code, args: &[(&str, &str)]) -> Self {
+        let args: Vec<(String, String)> = args
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let catalogue = va_diag::Catalogue::global();
+        let Some((entry, _)) = catalogue.lookup(code.as_str()) else {
+            return Refusal {
+                code: Some(code),
+                ..Refusal::new(code.as_str(), "(no text in the message catalogue)")
+            };
+        };
+        let instead: Vec<String> = entry
+            .actions
+            .iter()
+            .map(|a| va_diag::fill(a, &args))
+            .collect();
+        Refusal {
+            code: Some(code),
+            what: va_diag::fill(&entry.message, &args),
+            why: va_diag::fill(&entry.description, &args),
+            instead: (!instead.is_empty()).then(|| instead.join("\n")),
             at: None,
             tracking: None,
         }
@@ -116,17 +177,21 @@ impl Refusal {
 const REFUSAL_INDENT: &str = "            ";
 
 impl std::fmt::Display for Refusal {
-    /// One labelled field per line, opening with a stable `refused:` marker.
+    /// One labelled field per line, opening with a stable `refused` marker: `refused[R0101]:`
+    /// for a coded refusal, `refused:` for one not yet given a code.
     ///
     /// The marker is deliberately greppable: a run over a model library produces one of these
     /// per offending file, and "which constructs did this simulator decline, and why" should be
-    /// answerable with `grep refused:` over a captured log rather than by reading it.
+    /// answerable with `grep refused` over a captured log rather than by reading it.
     ///
     /// A field may itself be several lines — `what` is a list when one run refuses several
     /// constructs at once — so continuation lines are indented to hang under the field's text.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hang = |v: &str| v.replace('\n', &format!("\n{REFUSAL_INDENT}"));
-        write!(f, "refused: {}", hang(&self.what))?;
+        match self.code {
+            Some(code) => write!(f, "refused[{code}]: {}", hang(&self.what))?,
+            None => write!(f, "refused: {}", hang(&self.what))?,
+        }
         if let Some(at) = &self.at {
             write!(f, "\n  where:    {}", hang(at))?;
         }
@@ -156,7 +221,7 @@ pub struct CompiledDesign {
     /// Compiler directives the LRM gives no Verilog-A meaning, reported once each
     /// (`preprocess::Preprocessed::warnings`). Nothing in `modules` depends on them; a caller
     /// prints them so the user knows the directive was seen and why it changed nothing.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// Compile Verilog-A `source` into a [`CompiledDesign`], with no `` `include `` search path
@@ -461,11 +526,110 @@ endmodule
         assert!(refused(r#"fd = 1 + $fopen("x.txt");"#).contains("inside an expression"));
     }
 
+    fn event_module(trigger: &str) -> String {
+        format!(
+            "module m(a, b); inout a, b; electrical a, b; real s;\n\
+             analog begin @({trigger}) s = V(a); I(a, b) <+ s * V(a, b); end endmodule\n"
+        )
+    }
+
+    /// LRM A.6.5: a `cross`/`above`/`timer` argument the grammar marks `_or_null` may be left
+    /// out, and reads as not given; the LRM's own example (5.10.3.1) is the first case.
+    #[test]
+    fn omitted_event_arguments_read_as_not_given() {
+        use va_ir::EventSite;
+        let site = |trigger: &str| {
+            let design = super::compile(&event_module(trigger))
+                .unwrap_or_else(|e| panic!("`{trigger}` compiles: {e}"));
+            design.modules[0].event_sites[0]
+        };
+        let EventSite::Cross {
+            dir,
+            time_tol,
+            expr_tol,
+            enable,
+            ..
+        } = site("cross(V(a) - 0.5, 1, , , 1)")
+        else {
+            panic!("a cross site");
+        };
+        assert_eq!(dir, 1);
+        assert!(time_tol.is_none() && expr_tol.is_none() && enable.is_some());
+        let EventSite::Cross { dir, .. } = site("cross(V(a), , 1e-9)") else {
+            panic!("a cross site");
+        };
+        assert_eq!(dir, 0, "an omitted direction is the default, either edge");
+        let EventSite::Timer {
+            time_tol, enable, ..
+        } = site("timer(0, 1e-6, , 1)")
+        else {
+            panic!("a timer site");
+        };
+        assert!(time_tol.is_none() && enable.is_some());
+    }
+
+    /// An argument left out where the LRM requires it is `E0238`, naming the argument, not a
+    /// generic "expected an expression".
+    #[test]
+    fn an_argument_omitted_where_required_names_itself() {
+        for (src, needle) in [
+            (
+                event_module("timer(0, 1e-6, 1e-9, )"),
+                "argument 4 of `timer`",
+            ),
+            (
+                event_module("cross(V(a), 1, , , )"),
+                "argument 5 of `cross`",
+            ),
+            (event_module("above(, 1e-9)"), "argument 1 of `above`"),
+            (
+                "module m(a); inout a; electrical a; analog I(a) <+ exp(, 1); endmodule\n"
+                    .to_string(),
+                "argument 1 of `exp`",
+            ),
+            (
+                "module m(a, b); inout a, b; electrical a, b;\n\
+                 analog V(b) <+ zi_nd(V(a), {1}, {1}, ); endmodule\n"
+                    .to_string(),
+                "argument 4 of `zi_nd`",
+            ),
+        ] {
+            let Err(err) = super::compile(&src) else {
+                panic!("{needle}: must be rejected");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("[E0238]") && err.contains(needle),
+                "{needle}: {err}"
+            );
+        }
+    }
+
+    /// LRM 5.10.1: a comma between events means `or`, and compiles to the same thing.
+    #[test]
+    fn a_comma_between_events_is_or() {
+        let ir = |trigger: &str| {
+            let m = super::compile(&event_module(trigger))
+                .unwrap_or_else(|e| panic!("`{trigger}` compiles: {e}"))
+                .modules
+                .remove(0);
+            (format!("{:?}", m.analog), format!("{:?}", m.event_sites))
+        };
+        assert_eq!(
+            ir("initial_step, cross(V(a) - 2.5, 1)"),
+            ir("initial_step or cross(V(a) - 2.5, 1)")
+        );
+        assert_eq!(
+            ir("initial_step, final_step"),
+            ir("initial_step or final_step")
+        );
+    }
+
     /// The no-effect directives reach the caller as warnings, not as silence.
     #[test]
     fn no_effect_directives_surface_as_warnings() {
         let design = super::compile("`timescale 1ns/1ps\nmodule t(p, n); inout p, n; electrical p, n; analog I(p, n) <+ V(p, n); endmodule\n").unwrap();
         assert_eq!(design.warnings.len(), 1);
-        assert!(design.warnings[0].starts_with("`timescale has no effect in Verilog-A"));
+        assert_eq!(design.warnings[0].code(), super::codes::W0101);
     }
 }

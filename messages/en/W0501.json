@@ -1,0 +1,9 @@
+{
+  "code": "W0501",
+  "rev": 1,
+  "message": "`.nodeset` entry `{entry}` is not `V(<net>)=<value>`; skipped",
+  "description": "A nodeset is only Newton's starting point, so the solve proceeds without this hint, and a converged answer means the same with or without it.",
+  "actions": [
+    "Write the entry as `V(net)=value`."
+  ]
+}

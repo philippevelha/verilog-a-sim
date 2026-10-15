@@ -1,0 +1,10 @@
+{
+  "code": "E0205",
+  "rev": 1,
+  "message": "expected `endmodule` to close module `{name}` opened at {opened}, found {found}",
+  "description": "The file ends before the `endmodule` that closes the module named. Often an earlier unclosed `begin` or an unclosed comment has swallowed it.",
+  "actions": [
+    "Add `endmodule` at the end of the module.",
+    "If `endmodule` is there, look for an unclosed `begin` or `/*` before it."
+  ]
+}

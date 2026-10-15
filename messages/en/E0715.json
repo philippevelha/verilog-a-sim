@@ -1,0 +1,9 @@
+{
+  "code": "E0715",
+  "rev": 1,
+  "message": "`{name}` is controlled by `{control}`, which has no branch current to sense",
+  "description": "Only a voltage source, an inductor, or an `E`/`H` source carries a branch current that a current-controlled source can sense.",
+  "actions": [
+    "Sense the current of a voltage source; a zero-volt source in series with the branch works."
+  ]
+}

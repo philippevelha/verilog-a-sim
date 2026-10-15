@@ -1,0 +1,9 @@
+{
+  "code": "E0367",
+  "rev": 1,
+  "message": "`{name}` is indexed, but it is declared without a bracketed `[msb:lsb]` range",
+  "description": "The net or variable is indexed, but it was declared as a single (scalar) one.",
+  "actions": [
+    "Remove the index, or declare a range, for example `electrical [0:3] bus;` or `real x[0:3];`."
+  ]
+}

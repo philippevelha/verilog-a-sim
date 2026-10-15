@@ -1,0 +1,9 @@
+{
+  "code": "W0301",
+  "rev": 1,
+  "message": "module `{module}`: port `{port}` has no direction; it is treated as `inout`",
+  "description": "Every port is normally declared with a direction (`input`, `output` or `inout`). This one has none, so it is treated as `inout`, which is what an analog port almost always is. Whether the standard allows leaving it out is unsettled in this project, so this is a warning rather than an error.",
+  "actions": [
+    "Declare the direction explicitly, for example `inout p;`."
+  ]
+}

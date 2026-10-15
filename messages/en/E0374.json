@@ -1,0 +1,10 @@
+{
+  "code": "E0374",
+  "rev": 1,
+  "message": "`I(<{port}>)` can't sum a flow contribution whose enclosing `if` condition depends on `ddt` ({via})",
+  "description": "The probe reports conduction current only, so a charge term is dropped from a contribution's value. But a condition is kept whole or not at all, so keeping this one would carry the `ddt` into the ordinary assignment that reads the probe, which no model wrote and the code generator refuses.",
+  "actions": [
+    "Compute the condition from a `ddt`-free expression.",
+    "Or read the branch current directly instead of probing the port."
+  ]
+}

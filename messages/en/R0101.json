@@ -1,0 +1,9 @@
+{
+  "code": "R0101",
+  "rev": 1,
+  "message": "`pragma protect`, an encrypted model envelope",
+  "description": "The text inside the envelope is ciphertext. This simulator holds no vendor key, and lexing the encrypted bytes would only produce an error about a garbage token instead of the real reason.",
+  "actions": [
+    "Obtain the unencrypted source of the model, or a version of it written for open tools."
+  ]
+}

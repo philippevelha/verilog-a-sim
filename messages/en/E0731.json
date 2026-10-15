@@ -1,0 +1,9 @@
+{
+  "code": "E0731",
+  "rev": 1,
+  "message": "model `{model}` has no parameter `{name}` (it declares: {known})",
+  "description": "A device line sets a parameter the model does not declare.",
+  "actions": [
+    "Use one of the parameters listed."
+  ]
+}

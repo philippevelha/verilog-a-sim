@@ -1,0 +1,9 @@
+{
+  "code": "E0722",
+  "rev": 1,
+  "message": "`.noise` probes V({name}), which is not a net in this circuit (nets: {nets})",
+  "description": "The `.noise` card's output probe names a net the circuit does not have.",
+  "actions": [
+    "Use one of the nets listed."
+  ]
+}

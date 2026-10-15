@@ -1,0 +1,9 @@
+{
+  "code": "E0305",
+  "rev": 1,
+  "message": "port `{port}` is a {dims}-D vector net (§ 2-D vector net extension); only a 1-D vector net may be used as a port",
+  "description": "Two-dimensional vector nets are an extension of this simulator and can be used inside a module, but not as one of its ports.",
+  "actions": [
+    "Make the port a 1-D vector net, or split it into several ports."
+  ]
+}

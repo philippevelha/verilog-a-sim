@@ -1,0 +1,9 @@
+{
+  "code": "R0409",
+  "rev": 1,
+  "message": "a laplace denominator has d_0 = 0 (a pole at s = 0): the filter integrates its input and has no DC operating point",
+  "description": "A pole at the origin is an integrator, whose DC value is undefined; realized as a filter it would leave the operating point without a solution.",
+  "actions": [
+    "Write the integration with `idt`, and the remaining factor as the laplace filter."
+  ]
+}

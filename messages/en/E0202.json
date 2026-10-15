@@ -1,0 +1,10 @@
+{
+  "code": "E0202",
+  "rev": 1,
+  "message": "expected {expected}, found {found}",
+  "description": "The parser needed a particular token or keyword at this point, and the source has something else. Common causes are a missing keyword that closes a block (`endmodule`, `end`, `endcase`), an unbalanced parenthesis, or a typo in a keyword.",
+  "actions": [
+    "Write the expected token at the position shown.",
+    "Look at the source at the position shown, and at the end of the line before it: a syntax error is often noticed one token after the actual mistake."
+  ]
+}

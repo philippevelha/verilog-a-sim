@@ -1,0 +1,9 @@
+{
+  "code": "E0512",
+  "rev": 1,
+  "message": "coupling `{value}` is outside [-1, 1]",
+  "description": "A coupling coefficient beyond perfect coupling would link more flux than either winding produces.",
+  "actions": [
+    "Use a coefficient between -1 and 1."
+  ]
+}

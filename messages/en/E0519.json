@@ -1,0 +1,9 @@
+{
+  "code": "E0519",
+  "rev": 1,
+  "message": "`.include` names no file",
+  "description": "An `.include` card needs the name of the file to read.",
+  "actions": [
+    "Write the file name: `.include models.lib`."
+  ]
+}

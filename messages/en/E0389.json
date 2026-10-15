@@ -1,0 +1,9 @@
+{
+  "code": "E0389",
+  "rev": 1,
+  "message": "`{char}` is not a $table_model extrapolation character; the LRM's Table 9-31 has `C` (constant), `L` (linear) and `E` (error)",
+  "description": "The control string's extrapolation characters must be ones the LRM defines.",
+  "actions": [
+    "Use `C` or `L`."
+  ]
+}

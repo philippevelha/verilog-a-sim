@@ -9,8 +9,9 @@
 //! This binary only parses arguments and dispatches to [`va_cli::run_sim`]; the pipeline
 //! itself lives in the library so `va-harness` can drive it directly.
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use va_cli::{check_models, run_sim, Analysis, Solver};
+use va_diag::{codes, Catalogue, Diagnostic};
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -23,10 +24,94 @@ fn main() -> std::process::ExitCode {
         // not pretend to run it". Anything else is an ordinary error and prints the usual way.
         Err(e) => {
             if !va_cli::report_refusal(&e) {
-                eprintln!("Error: {e:?}");
+                eprintln!("{}", render_error(&e));
             }
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// The text for an error that is not a refusal, from the message catalogue (`va_diag`).
+///
+/// A coded error is found anywhere in the chain, so context added on its way up is kept, as
+/// `while:` lines. An error with no code is shown as `E0000` with its own wording and causes,
+/// exactly as before codes existed: the code says the catalogue has nothing to add, never that
+/// the cause is unknown.
+fn render_error(e: &anyhow::Error) -> String {
+    /// The coded diagnostic `c` is, or carries: a frontend, codegen or netlist error wraps one,
+    /// and a numerical error is given one by `va_cli::numerical_diagnostic`.
+    fn coded(c: &(dyn std::error::Error + 'static)) -> Option<Diagnostic> {
+        c.downcast_ref::<Diagnostic>()
+            .cloned()
+            .or_else(|| {
+                c.downcast_ref::<va_frontend::FrontendError>()
+                    .and_then(va_frontend::FrontendError::diagnostic)
+                    .cloned()
+            })
+            .or_else(|| {
+                c.downcast_ref::<va_codegen::CodegenError>()
+                    .and_then(va_codegen::CodegenError::diagnostic)
+                    .cloned()
+            })
+            .or_else(|| {
+                c.downcast_ref::<va_netlist::NetlistError>()
+                    .and_then(va_netlist::NetlistError::diagnostic)
+                    .cloned()
+            })
+            .or_else(|| va_cli::numerical_diagnostic(c))
+    }
+    let catalogue = Catalogue::global();
+    let mut out = String::new();
+    for problem in catalogue.load_problems() {
+        out.push_str(&format!("warning: message catalogue: {problem}\n"));
+    }
+    // A diagnostic attached as context (`err.context(diag)`, which `va-cli` uses to name an
+    // unknown) is reachable through `anyhow`'s own downcast, not through a chain item; it is
+    // the more specific of the two, so it is preferred.
+    let attached = e.downcast_ref::<Diagnostic>().cloned();
+    match attached.or_else(|| e.chain().find_map(coded)) {
+        Some(diag) => {
+            out.push_str(&catalogue.render(&diag));
+            // What `va-cli` was doing: the context above the diagnostic. A context layer
+            // holding a diagnostic displays as that diagnostic's headline.
+            let headline = diag.to_string();
+            for context in e
+                .chain()
+                .take_while(|c| coded(*c).is_none() && c.to_string() != headline)
+            {
+                out.push_str(&format!("\n  while: {context}"));
+            }
+        }
+        None => {
+            out.push_str(&catalogue.render(&Diagnostic::unknown(e)));
+            for cause in e.chain().skip(1) {
+                out.push_str(&format!("\n  caused by: {cause}"));
+            }
+        }
+    }
+    out
+}
+
+/// `va-cli --explain <CODE>`: what a diagnostic code means and what to do about it.
+fn cmd_explain(args: &[String]) -> Result<std::process::ExitCode> {
+    let Some(code) = args.first() else {
+        return Err(Diagnostic::new(codes::E0703)
+            .arg("option", "--explain")
+            .arg("value", "")
+            .arg("expected", "a code such as `E0301`")
+            .into());
+    };
+    let code = code.to_ascii_uppercase();
+    match Catalogue::global().explain(&code) {
+        Some(text) => {
+            print!("{text}");
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        None => Err(Diagnostic::new(codes::E0703)
+            .arg("option", "--explain")
+            .arg("value", &code)
+            .arg("expected", "a code that exists, such as `E0000`")
+            .into()),
     }
 }
 
@@ -38,13 +123,14 @@ fn run() -> Result<std::process::ExitCode> {
     match args.first().map(String::as_str) {
         Some("sim") => cmd_sim(&args[1..]).map(|()| std::process::ExitCode::SUCCESS),
         Some("check") => cmd_check(&args[1..]),
+        Some("--explain") => cmd_explain(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(std::process::ExitCode::SUCCESS)
         }
         Some(other) => {
             print_usage();
-            bail!("unknown subcommand `{other}`");
+            Err(Diagnostic::new(codes::E0701).arg("name", other).into())
         }
     }
 }
@@ -55,7 +141,8 @@ fn print_usage() {
         "va-cli — verilog-a-sim front door\n\n\
          USAGE:\n    \
          va-cli sim <netlist.net> [--model <model.va|dir>] [--ac|--tran|--noise] [--plot <out.svg>]\n    \
-         va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n\n\
+         va-cli check <model.va|dir> [more…] [--codegen]   Run the frontend (and, with\n                                                      --codegen, va-codegen) over models\n    \
+         va-cli --explain <CODE>                           What a diagnostic code (E0703,\n                                                      W0301, ...) means and what to do\n\n\
          FLAGS:\n    \
          -h, --help    Print this help\n    \
          --model <model.va|dir>  A Verilog-A library; repeat it to compile several as one\n                                 (each file's `include resolves in its own library)\n    \
@@ -130,7 +217,7 @@ fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
         .cloned()
         .collect();
     if paths.is_empty() {
-        bail!("expected at least one model file or directory");
+        return Err(Diagnostic::new(codes::E0702).into());
     }
     Ok(if check_models(&paths, codegen)? == 0 {
         std::process::ExitCode::SUCCESS
@@ -142,7 +229,9 @@ fn cmd_check(args: &[String]) -> Result<std::process::ExitCode> {
 /// The `sim` subcommand: run a netlist through the pipeline.
 fn cmd_sim(args: &[String]) -> Result<()> {
     let args = &take_defines(args)?;
-    let netlist = args.first().context("expected a netlist path")?;
+    let netlist = args
+        .first()
+        .ok_or_else(|| va_diag::Diagnostic::new(va_diag::codes::E0738))?;
     // `--threads <n>`: how many threads evaluate device instances (`va_core::par`). Without it,
     // rayon's default — `RAYON_NUM_THREADS`, else one per logical core. Speed only: every
     // thread count gives the same bits.
@@ -155,7 +244,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
                 .parse::<f64>()
                 .ok()
                 .filter(|x| x.is_finite() && *x > 0.0)
-                .with_context(|| format!("{flag} expects a positive number, got `{v}`")),
+                .ok_or_else(|| {
+                    va_diag::Diagnostic::new(va_diag::codes::E0703)
+                        .arg("option", flag)
+                        .arg("value", &v)
+                        .arg("expected", "a positive number")
+                        .into()
+                }),
         }
     };
     va_cli::set_tran_tolerances(
@@ -184,15 +279,21 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         va_cli::set_bypass(Some(cfg));
     }
     if let Some(n) = parse_flag(args, "--threads") {
-        let n: usize = n
-            .parse()
-            .ok()
-            .filter(|&n| n > 0)
-            .with_context(|| format!("--threads expects a positive integer, got `{n}`"))?;
+        let n: usize = n.parse().ok().filter(|&n| n > 0).ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--threads")
+                .arg("value", &n)
+                .arg("expected", "a positive integer")
+        })?;
         rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build_global()
-            .context("setting up the evaluation thread pool")?;
+            .map_err(|e| {
+                va_diag::Diagnostic::new(va_diag::codes::E0001).arg(
+                    "detail",
+                    format!("setting up the evaluation thread pool: {e}"),
+                )
+            })?;
     }
     // `VA_PARALLEL=auto|always|never`: when instances are evaluated in parallel
     // (`va_core::par::Mode`). For verification — `always` makes a serial-vs-parallel
@@ -202,7 +303,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
             "auto" => va_core::par::Mode::Auto,
             "always" => va_core::par::Mode::Always,
             "never" => va_core::par::Mode::Never,
-            other => bail!("VA_PARALLEL expects auto, always or never, got `{other}`"),
+            other => {
+                return Err(Diagnostic::new(codes::E0703)
+                    .arg("option", "the environment variable VA_PARALLEL")
+                    .arg("value", other)
+                    .arg("expected", "`auto`, `always` or `never`")
+                    .into())
+            }
         };
         va_core::par::set_mode(mode);
     }
@@ -212,7 +319,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         match v.to_string_lossy().as_ref() {
             "on" => va_cli::set_btf(true),
             "off" => va_cli::set_btf(false),
-            other => bail!("VA_BTF expects on or off, got `{other}`"),
+            other => {
+                return Err(Diagnostic::new(codes::E0703)
+                    .arg("option", "the environment variable VA_BTF")
+                    .arg("value", other)
+                    .arg("expected", "`on` or `off`")
+                    .into())
+            }
         }
     }
     // `--model` is optional: built-in primitives (R/C/D/V) are satisfied by the reference
@@ -246,8 +359,11 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // -- see `va_cli::Integration`.
     let integration = match parse_flag(args, "--integration") {
         None => va_cli::Integration::default(),
-        Some(v) => va_cli::Integration::parse(&v).with_context(|| {
-            format!("unknown --integration `{v}` (expected `be`, `trap`, or `gear`)")
+        Some(v) => va_cli::Integration::parse(&v).ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--integration")
+                .arg("value", &v)
+                .arg("expected", "`be`, `trap` or `gear`")
         })?,
     };
 
@@ -270,7 +386,13 @@ fn cmd_sim(args: &[String]) -> Result<()> {
         None | Some("auto") => Solver::Auto,
         Some("dense") => Solver::Dense,
         Some("sparse") => Solver::Sparse,
-        Some(v) => bail!("unknown --solver `{v}` (expected `auto`, `dense`, or `sparse`)"),
+        Some(v) => {
+            return Err(Diagnostic::new(codes::E0703)
+                .arg("option", "--solver")
+                .arg("value", v)
+                .arg("expected", "`auto`, `dense` or `sparse`")
+                .into())
+        }
     };
 
     // `--logfull` switches on the per-iteration Newton trace for every DC solve this run does.
@@ -317,7 +439,9 @@ fn cmd_sim(args: &[String]) -> Result<()> {
     // says the run was not clean.
     let errors = va_cli::task_errors();
     if result.is_ok() && errors > 0 {
-        bail!("{errors} $error message(s) reported by the model(s) during the run");
+        return Err(va_diag::Diagnostic::new(va_diag::codes::E0739)
+            .arg("count", errors)
+            .into());
     }
     result
 }
@@ -333,7 +457,12 @@ fn take_defines(args: &[String]) -> Result<Vec<String>> {
             rest.push(a.clone());
             continue;
         }
-        let d = it.next().context("--define expects NAME or NAME=VALUE")?;
+        let d = it.next().ok_or_else(|| {
+            va_diag::Diagnostic::new(va_diag::codes::E0703)
+                .arg("option", "--define")
+                .arg("value", "")
+                .arg("expected", "NAME or NAME=VALUE")
+        })?;
         let (name, value) = d.split_once('=').unwrap_or((d.as_str(), "1"));
         defines.push((name.to_string(), value.to_string()));
     }
@@ -345,4 +474,36 @@ fn take_defines(args: &[String]) -> Result<Vec<String>> {
 fn parse_flag(args: &[String], flag: &str) -> Option<String> {
     let pos = args.iter().position(|a| a == flag)?;
     args.get(pos + 1).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_error;
+
+    /// An error with no code is `E0000`, and keeps its own wording and causes in full: the code
+    /// adds nothing, so it must not take anything away either. No error `va-cli` raises reaches
+    /// this since 2.31.0; it is the fallback for one added later without a code.
+    #[test]
+    fn an_uncoded_error_is_e0000_with_its_own_text() {
+        let e = anyhow::anyhow!("the root cause").context("what va-cli was doing");
+        let text = render_error(&e);
+        assert!(
+            text.contains("error[E0000]: what va-cli was doing"),
+            "{text}"
+        );
+        assert!(text.contains("caused by: the root cause"), "{text}");
+    }
+
+    /// A coded diagnostic under a context renders under its own code, the context as `while:`.
+    #[test]
+    fn a_coded_error_under_context_keeps_its_code() {
+        let e = anyhow::Error::new(va_diag::Diagnostic::new(va_diag::codes::E0602))
+            .context("DC operating-point solve failed");
+        let text = render_error(&e);
+        assert!(text.starts_with("error[E0602]: "), "{text}");
+        assert!(
+            text.contains("while: DC operating-point solve failed"),
+            "{text}"
+        );
+    }
 }

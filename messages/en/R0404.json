@@ -1,0 +1,9 @@
+{
+  "code": "R0404",
+  "rev": 1,
+  "message": "ac_stim must be a top-level additive term of a contribution",
+  "description": "A scaled or nested `ac_stim` would be dropped without a word: its value is zero in every analysis, and only the separate excitation channel carries it.",
+  "actions": [
+    "Write `ac_stim` as one term of the contribution, with any scaling inside its magnitude argument."
+  ]
+}

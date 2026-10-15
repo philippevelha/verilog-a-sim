@@ -1,0 +1,10 @@
+{
+  "code": "E0227",
+  "rev": 1,
+  "message": "`nature ... : {head}`: `{head}` is not a previously declared nature",
+  "description": "A nature can derive from another nature (`nature N : Parent;`), which must already be declared at that point in the file.",
+  "actions": [
+    "Declare the parent nature before this one, or include the header that declares it.",
+    "Check the spelling of the parent nature."
+  ]
+}

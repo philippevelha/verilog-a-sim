@@ -1,0 +1,9 @@
+{
+  "code": "E0528",
+  "rev": 1,
+  "message": "`.model {name}`: bad value `{value}` for `{key}`",
+  "description": "A `.model` parameter's value is not a number. A value is a number with an optional SPICE scale suffix: `1k`, `2.2u`, `10meg`, `1e-9`.",
+  "actions": [
+    "Write the value as a number."
+  ]
+}

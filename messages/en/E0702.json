@@ -1,0 +1,10 @@
+{
+  "code": "E0702",
+  "rev": 1,
+  "message": "`check` needs at least one model file or directory",
+  "description": "`va-cli check` compiles Verilog-A models without simulating them, so it needs to be told which models. None was given: only flags, or nothing at all, followed `check`.",
+  "actions": [
+    "Name one or more `.va`/`.vams` files or directories: `va-cli check models/diode.va` or `va-cli check models/`.",
+    "Add `--codegen` to also check that each model can be compiled for simulation."
+  ]
+}

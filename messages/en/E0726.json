@@ -1,0 +1,9 @@
+{
+  "code": "E0726",
+  "rev": 1,
+  "message": "`{name}` names model `{model}`, which matches both `{first}` and `{second}` ignoring case",
+  "description": "SPICE names are not case-sensitive, so the deck cannot say which of the two modules it means.",
+  "actions": [
+    "Rename one of the modules."
+  ]
+}

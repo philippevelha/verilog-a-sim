@@ -1,0 +1,9 @@
+{
+  "code": "E0529",
+  "rev": 1,
+  "message": "`{card}` inside a subcircuit body is not supported",
+  "description": "Only element lines may appear between `.subckt` and `.ends`; analysis and option cards belong at the top level of the deck.",
+  "actions": [
+    "Move the card out of the subcircuit."
+  ]
+}

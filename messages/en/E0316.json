@@ -1,0 +1,9 @@
+{
+  "code": "E0316",
+  "rev": 1,
+  "message": "a string literal is not valid in a parameter context",
+  "description": "This parameter or constant expression is numeric, and a string cannot be used in it.",
+  "actions": [
+    "Use a number here, or declare the parameter as `parameter string`."
+  ]
+}

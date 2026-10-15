@@ -15,6 +15,9 @@
 //!   and printed, so the list of messages worth improving lives next to the inputs that show it.
 //! - `expect: ok` with a `warning:` line records questionable source that is accepted **with a
 //!   warning**; the warning text is asserted, on a `[warn ]` line.
+//!
+//! Every rejected or warned file also names its diagnostic `code:`, so a change that moves a
+//! problem to another code, or drops it back to the uncoded `E0000`, is noticed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,6 +37,8 @@ struct Expectation {
     poor: Option<String>,
     /// Text a `[warn ]` line must contain.
     warning: Option<String>,
+    /// The diagnostic code the output must carry, as `[CODE]`.
+    code: Option<String>,
 }
 
 fn read_expectation(path: &Path) -> Expectation {
@@ -54,6 +59,7 @@ fn read_expectation(path: &Path) -> Expectation {
             "gap" => e.gap = Some(value),
             "poor" => e.poor = Some(value),
             "warning" => e.warning = Some(value),
+            "code" => e.code = Some(value),
             "fixed" => {}
             other => panic!("{}: unknown header key `{other}`", path.display()),
         }
@@ -82,7 +88,7 @@ fn verdict(stdout: &str) -> String {
         if label == "ok" || label == "none" || label == "warn" {
             continue;
         }
-        return if tail.contains("refused: ") {
+        return if tail.contains("refused: ") || tail.contains("refused[R") {
             "refused".to_string()
         } else {
             label.to_string()
@@ -135,6 +141,11 @@ fn every_error_corpus_file_is_reported_as_its_header_says() {
                 out.status.code(),
                 if want_success { "0" } else { "1" }
             ));
+        }
+        if let Some(code) = &want.code {
+            if !stdout.contains(&format!("[{code}]")) {
+                problems.push(format!("does not carry the code `{code}`"));
+            }
         }
         for m in &want.messages {
             if !stdout.contains(m.as_str()) {

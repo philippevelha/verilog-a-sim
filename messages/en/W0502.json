@@ -1,0 +1,9 @@
+{
+  "code": "W0502",
+  "rev": 1,
+  "message": "ignored the ngspice `.control` block at lines {first}–{last}",
+  "description": "A `.control` block is a script for ngspice's interpreter, not part of the circuit.",
+  "actions": [
+    "Write the analysis as a dot-card (`.tran`, `.op`, …)."
+  ]
+}

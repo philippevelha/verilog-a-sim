@@ -1,0 +1,9 @@
+{
+  "code": "E0349",
+  "rev": 1,
+  "message": "`{name}`'s argument must be a bare name, as `{name}(x)`",
+  "description": "The argument of `$param_given` names a parameter, and that of `$port_connected` a port; it is not an expression.",
+  "actions": [
+    "Write the name alone, for example `$param_given(r)` or `$port_connected(p)`."
+  ]
+}

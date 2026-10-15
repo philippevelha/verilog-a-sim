@@ -1,0 +1,10 @@
+{
+  "code": "E0218",
+  "rev": 1,
+  "message": "`{discipline} {name}` reads as a net declaration, but no discipline `{discipline}` is declared; did you mean `{suggestion}`?",
+  "description": "A line of the form `word name, ...;` declares nets of discipline `word`. No discipline of that name is known, and a declared discipline has a very similar name, so this is most likely a misspelling.",
+  "actions": [
+    "Write `{suggestion}`.",
+    "If `{discipline}` is a discipline of its own, declare it in a `discipline` block or include the header that does."
+  ]
+}

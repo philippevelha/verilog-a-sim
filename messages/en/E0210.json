@@ -1,0 +1,10 @@
+{
+  "code": "E0210",
+  "rev": 1,
+  "message": "expected a declaration or an `analog` block, found {found}",
+  "description": "At module level, only declarations (ports, nets, parameters, variables, branches, functions, instances) and `analog` blocks are allowed. What is written here is none of them, often because a statement was placed outside the `analog` block.",
+  "actions": [
+    "Move statements and contributions inside `analog begin ... end`.",
+    "Look at the source at the position shown, and at the end of the line before it: a syntax error is often noticed one token after the actual mistake."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0717",
+  "rev": 1,
+  "message": "`.nodeset V({name})=...`: the deck has no net `{name}`",
+  "description": "A `.nodeset` hint names a net that does not exist in the circuit.",
+  "actions": [
+    "Check the net name."
+  ]
+}

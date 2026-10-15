@@ -12,16 +12,47 @@ mod spice;
 
 use std::collections::HashMap;
 use thiserror::Error;
+use va_diag::Diagnostic;
 
 /// Errors raised while parsing a netlist.
 #[derive(Debug, Error)]
 pub enum NetlistError {
-    /// A line could not be parsed into a known device or directive.
-    #[error("netlist parse error on line {line}: {message}")]
-    Parse { line: usize, message: String },
+    /// A line could not be parsed into a known device or directive. `diag` is the coded
+    /// diagnostic (an `E05xx`), located at the line, or at `file:line` once
+    /// [`parser::parse_file`] knows the deck's path.
+    #[error("{diag}")]
+    Parse {
+        /// The deck line (1-based; 0 when no line applies, e.g. an unreadable file).
+        line: usize,
+        /// What went wrong, with its code and location.
+        diag: Diagnostic,
+    },
     /// A device referenced a model name that was never declared.
     #[error("unknown model `{0}`")]
     UnknownModel(String),
+}
+
+impl NetlistError {
+    /// `d` at deck line `line`; `origin` says where the line came from when it is not the
+    /// deck's own (an included file, a subcircuit instance).
+    pub(crate) fn at_line(line: usize, origin: Option<&str>, d: Diagnostic) -> Self {
+        let at = match origin {
+            Some(o) => format!("line {line} ({o})"),
+            None => format!("line {line}"),
+        };
+        NetlistError::Parse {
+            line,
+            diag: d.at(at),
+        }
+    }
+
+    /// The coded diagnostic this error carries; `None` for [`Self::UnknownModel`].
+    pub fn diagnostic(&self) -> Option<&Diagnostic> {
+        match self {
+            NetlistError::Parse { diag, .. } => Some(diag),
+            NetlistError::UnknownModel(_) => None,
+        }
+    }
 }
 
 /// The analysis a deck requests via its dot-card (`.op`, `.tran`, …).
@@ -85,11 +116,11 @@ pub struct Netlist {
     /// `.noise V(<out>) <source> dec <points-per-decade> <fstart> <fstop>` spec (T5.2), on the
     /// same "must fully parse or it's `None`" terms as [`Self::ac`].
     pub noise: Option<NoiseCard>,
-    /// Constructs the deck contains that were recognised and **not applied**, one sentence each
-    /// saying what was skipped and why (an ngspice `.control` block, `.options`). Not errors: the
-    /// circuit itself parsed. `va-cli` prints them before solving, so a result is never read
-    /// without knowing what of the deck it ignored.
-    pub notes: Vec<String>,
+    /// Constructs the deck contains that were recognised and **not applied**, as coded warnings
+    /// (`W05xx`) saying what was skipped and why (an ngspice `.control` block, `.options`). Not
+    /// errors: the circuit itself parsed. `va-cli` prints them before solving, so a result is
+    /// never read without knowing what of the deck it ignored.
+    pub notes: Vec<Diagnostic>,
     /// `.nodeset V(<net>)=<value> ...` hints, in deck order: a **starting point** for the DC
     /// operating-point solve, not a constraint (1.30.0). `va-cli` starts Newton from these
     /// voltages (every other unknown from 0) and the solution is whatever Newton converges to

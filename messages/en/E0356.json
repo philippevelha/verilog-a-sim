@@ -1,0 +1,9 @@
+{
+  "code": "E0356",
+  "rev": 1,
+  "message": "an array-literal expression (`{...}`) is only valid as a Laplace/Z-domain filter's numerator/zero/denominator/pole argument (§4.5.11/§4.5.12), not as a general-purpose value",
+  "description": "This simulator supports array literals only as filter coefficient or root lists and as noise tables.",
+  "actions": [
+    "Use a single value here."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "W0104",
+  "rev": 1,
+  "message": "`unconnected_drive has no effect in Verilog-A",
+  "description": "`unconnected_drive and `nounconnected_drive drive unconnected digital input ports to a logic level; Verilog-A ports are analog nets. The directive is accepted and ignored, so the model runs exactly as it would without it.",
+  "actions": [
+    "Remove the directives, or leave them if the file is shared with digital Verilog tools."
+  ]
+}

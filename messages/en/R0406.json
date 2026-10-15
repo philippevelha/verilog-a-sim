@@ -1,0 +1,9 @@
+{
+  "code": "R0406",
+  "rev": 1,
+  "message": "a bare `I(...)` probe of a branch that receives no contribution anywhere is only supported when one terminal is the module's implicit ground reference",
+  "description": "Probing the current of a branch that nothing contributes to means adding a zero-volt source for it, which this code generator does only for a branch to ground.",
+  "actions": [
+    "Contribute `V(a, b) <+ 0;` to the branch, which makes its current an unknown that can be read."
+  ]
+}

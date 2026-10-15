@@ -1,0 +1,10 @@
+{
+  "code": "E0103",
+  "rev": 1,
+  "message": "macro `{name}: expected {expected} argument(s), got {got}",
+  "description": "A macro with parameters was used with a different number of arguments than its `` `define `` declares. A comma inside an argument that is not enclosed in parentheses is counted as a separator.",
+  "actions": [
+    "Pass exactly as many arguments as the definition has parameters.",
+    "Wrap an argument that itself contains a comma in parentheses."
+  ]
+}

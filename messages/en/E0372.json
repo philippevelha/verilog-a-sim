@@ -1,0 +1,9 @@
+{
+  "code": "E0372",
+  "rev": 1,
+  "message": "`{port}` is not a declared port of this module; a port-current probe can only name one of this module's own ports",
+  "description": "`I(<name>)` measures the current into one of this module's ports, and the name given is not a port.",
+  "actions": [
+    "Name one of the module's ports, or probe a branch instead, for example `I(a, b)`."
+  ]
+}

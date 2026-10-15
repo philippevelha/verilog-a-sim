@@ -9,5 +9,6 @@ description = "T1: Verilog-A lexer, parser, AST, and elaboration into va-ir (Int
 [dependencies]
 libm = { workspace = true }
 va-ir = { workspace = true }
+va-diag = { workspace = true }
 thiserror = { workspace = true }
 logos = { workspace = true }

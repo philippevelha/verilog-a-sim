@@ -1,0 +1,9 @@
+{
+  "code": "E0324",
+  "rev": 1,
+  "message": "`{name}` frequency {frequency} is not a finite, non-negative frequency in Hz",
+  "description": "Every frequency in a noise table must be zero or positive, and finite.",
+  "actions": [
+    "Correct the frequency value."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0504",
+  "rev": 1,
+  "message": "parameter override `{token}` has no name",
+  "description": "A parameter override is written `name=value`, and this one starts with `=`.",
+  "actions": [
+    "Put the parameter's name before the `=`."
+  ]
+}

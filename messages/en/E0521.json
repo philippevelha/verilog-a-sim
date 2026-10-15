@@ -1,0 +1,9 @@
+{
+  "code": "E0521",
+  "rev": 1,
+  "message": "`.include` nested more than {limit} deep (a cycle?)",
+  "description": "Included files include other files past the limit, which usually means a file includes itself, directly or through others.",
+  "actions": [
+    "Check the `.include` cards for a cycle."
+  ]
+}

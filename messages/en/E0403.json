@@ -1,0 +1,9 @@
+{
+  "code": "E0403",
+  "rev": 1,
+  "message": "function `{name}`'s output/inout argument #{index} must be a plain variable",
+  "description": "An `output` or `inout` argument receives a value from the function, so the call must pass a variable it can be written to, not an expression.",
+  "actions": [
+    "Pass a variable in that position, and use the variable afterwards."
+  ]
+}

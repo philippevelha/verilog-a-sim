@@ -1,0 +1,9 @@
+{
+  "code": "E0732",
+  "rev": 1,
+  "message": "model `{model}` declares {ports} port node(s), device connects {got}",
+  "description": "The device line connects more nodes than the model has ports.",
+  "actions": [
+    "Connect one node per port, in the order the module declares them."
+  ]
+}

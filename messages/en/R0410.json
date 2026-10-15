@@ -1,0 +1,9 @@
+{
+  "code": "R0410",
+  "rev": 1,
+  "message": "a laplace numerator of degree {num_degree} over a denominator of degree {den_degree} is an improper filter",
+  "description": "A numerator of higher degree than the denominator differentiates its input, which has no state-space realization in this simulator.",
+  "actions": [
+    "Write the derivative as `ddt` of a proper filter."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0405",
+  "rev": 1,
+  "message": "a zi_* sample period must be positive and finite, got {value}",
+  "description": "A Z-domain filter samples its input every period T, so T must be a positive number.",
+  "actions": [
+    "Check the period argument and the parameters it uses."
+  ]
+}

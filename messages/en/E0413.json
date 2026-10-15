@@ -1,0 +1,10 @@
+{
+  "code": "E0413",
+  "rev": 1,
+  "message": "variable `{name}` is read before it is assigned",
+  "description": "On the path the model takes at this point, the variable is read before any statement has given it a value. This simulator does not give variables a starting value, so it reports the read rather than guess one.",
+  "actions": [
+    "Assign the variable before it is read, on every path: for example `x = 0.0;` at the start of the analog block.",
+    "If it is assigned in one arm of an `if`, assign it in the other arm too."
+  ]
+}

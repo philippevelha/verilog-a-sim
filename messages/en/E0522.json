@@ -1,0 +1,9 @@
+{
+  "code": "E0522",
+  "rev": 1,
+  "message": "cannot read `.include {file}` ({path}): {reason}",
+  "description": "The included file could not be opened or read. It is looked for relative to the deck that includes it.",
+  "actions": [
+    "Check the file name, and that it sits where the path in the message says."
+  ]
+}

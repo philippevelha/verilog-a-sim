@@ -1,0 +1,10 @@
+{
+  "code": "R0402",
+  "rev": 2,
+  "message": "`{operator}` must be a top-level additive term of a contribution",
+  "description": "Its gain is a complex number that depends on frequency, so it can only be applied to a whole contribution, where it is realized as a filter with its own state. Inside an ordinary expression there is nowhere to put it.",
+  "actions": [
+    "Contribute the filter on its own, as one term of the `<+` right-hand side: `V(out) <+ {operator}(...);`.",
+    "If it must be scaled or combined, filter into an internal node first and use that node's potential in the expression."
+  ]
+}

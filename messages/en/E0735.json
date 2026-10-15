@@ -1,0 +1,9 @@
+{
+  "code": "E0735",
+  "rev": 1,
+  "message": "device `{name}` needs a value",
+  "description": "A resistor, capacitor, inductor or source line needs its value after its nodes.",
+  "actions": [
+    "Write the value: `R1 a b 1k`."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0705",
+  "rev": 1,
+  "message": "cannot read model file `{path}`: {reason}",
+  "description": "A Verilog-A file given with `--model` (or found in a model directory) could not be opened or read.",
+  "actions": [
+    "Check the path and that the file exists and is readable."
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "code": "E0203",
+  "rev": 1,
+  "message": "expected `;` after {after}, found {found}",
+  "description": "Every declaration and statement ends with `;`. One is missing after the token named, which is where this points. The parser only notices at the next token, which is often on the following line.",
+  "actions": [
+    "Add `;` at the end of the statement or declaration shown."
+  ]
+}

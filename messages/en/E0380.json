@@ -1,0 +1,10 @@
+{
+  "code": "E0380",
+  "rev": 1,
+  "message": "instance `{instance}` references unknown module `{module}` (no sibling `module {module} ... endmodule` in this compilation unit)",
+  "description": "The instantiated module is not defined in the files read.",
+  "actions": [
+    "Check the module name's spelling.",
+    "Add the file that defines it to the command line, or `` `include `` it."
+  ]
+}

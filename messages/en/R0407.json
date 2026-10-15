@@ -1,0 +1,10 @@
+{
+  "code": "R0407",
+  "rev": 1,
+  "message": "a ddt assigned to a variable inside an if/case/loop arm and contributed after that arm needs a controlling condition that is constant for the whole run (LRM 4.5.15)",
+  "description": "This condition depends on the solution, or the arm is a loop body, so the operator's history would not advance on the steps the arm is not taken, and the derivative it reports would be wrong.",
+  "actions": [
+    "Move the `ddt` into the contribution itself.",
+    "Or make the condition depend on parameters only."
+  ]
+}

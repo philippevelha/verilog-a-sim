@@ -1,0 +1,9 @@
+{
+  "code": "E0225",
+  "rev": 1,
+  "message": "more than 2 declared dimensions; capped at 2",
+  "description": "Vector nets and array variables are supported with at most two dimensions.",
+  "actions": [
+    "Declare at most two dimensions, for example by flattening two of them into one."
+  ]
+}

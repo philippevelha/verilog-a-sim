@@ -1,0 +1,9 @@
+{
+  "code": "E0208",
+  "rev": 1,
+  "message": "expected an identifier, found {found}",
+  "description": "A name was expected here (a module, net, parameter, variable or instance name) and the source has something else.",
+  "actions": [
+    "Write a name made of letters, digits, `_` and `$`, starting with a letter or `_`."
+  ]
+}
