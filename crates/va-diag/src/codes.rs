@@ -894,6 +894,9 @@ pub const R0409: Code = Code::new("R0409");
 /// a laplace numerator of degree {num_degree} over a denominator of degree {den_degree} is an improper filter
 pub const R0410: Code = Code::new("R0410");
 
+/// `idt` with a reset (`assert`) argument other than 0
+pub const R0411: Code = Code::new("R0411");
+
 /// `timescale has no effect in Verilog-A
 pub const W0101: Code = Code::new("W0101");
 
@@ -909,7 +912,10 @@ pub const W0104: Code = Code::new("W0104");
 /// module `{module}`: port `{port}` has no direction; it is treated as `inout`
 pub const W0301: Code = Code::new("W0301");
 
-/// module `{module}`: {count} `idt(x, ic)` call(s) hold their output at `ic` in static analyses
+/// module `{module}`: this divides two integers; Verilog-A truncates the quotient (7 / 2 = 3), this simulator does not (3.5)
+pub const W0302: Code = Code::new("W0302");
+
+/// module `{module}`: {count} `idt`/`idtmod` call(s) with an initial condition hold their output at `ic` in static analyses
 pub const W0401: Code = Code::new("W0401");
 
 /// module `{module}`: {count} `transition` call(s) with a delay pass every input change, a pulse too, `delay` later
@@ -948,5 +954,5 @@ pub const ALL: &[Code] = &[
     E0727, E0728, E0729, E0730, E0731, E0732, E0733, E0734, E0735, E0736, E0737, E0738, E0739,
     E073A, R0101, R0201, R0202, R0203, R0204, R0301, R0302, R0303, R0304, R0305, R0306, R0307,
     R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409, R0410,
-    W0101, W0102, W0103, W0104, W0301, W0401, W0402, W0501, W0502, W0503,
+    R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401, W0402, W0501, W0502, W0503,
 ];

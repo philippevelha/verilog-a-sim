@@ -1,8 +1,8 @@
 {
   "code": "W0401",
-  "rev": 1,
-  "message": "module `{module}`: {count} `idt(x, ic)` call(s) hold their output at `ic` in static analyses",
-  "description": "With an initial condition, `idt`'s output in every static analysis (`.op`, `.dc`, and the operating point a transient run starts from) is `ic` (LRM 4.5.4), and a transient run integrates from `ic`. The integrator's input is not driven to zero there, so a feedback loop around the integrator is open in those analyses: the operating point does not settle it. Until 2.34.0 `ic` was ignored: an integrator with no feedback around it made the operating point singular, and a transient started from 0, not `ic`.",
+  "rev": 2,
+  "message": "module `{module}`: {count} `idt`/`idtmod` call(s) with an initial condition hold their output at `ic` in static analyses",
+  "description": "With an initial condition, the output of `idt` (and of `idtmod`, which wraps it) in every static analysis (`.op`, `.dc`, and the operating point a transient run starts from) is `ic` (LRM 4.5.4), and a transient run integrates from `ic`. The integrator's input is not driven to zero there, so a feedback loop around the integrator is open in those analyses: the operating point does not settle it. Until 2.34.0 `ic` was ignored: an integrator with no feedback around it made the operating point singular, and a transient started from 0, not `ic`.",
   "actions": [
     "Keep `ic` if the integrator should start from a known value, as a VCO's phase or a filter's state usually should.",
     "Drop `ic` if the operating point should settle the integrator through its feedback loop, as the input of a servo or a PLL's loop filter usually should."

@@ -380,6 +380,12 @@ pub enum Token {
     /// `||`.
     #[token("||")]
     OrOr,
+    /// `<<<`, arithmetic left shift: the same as `<<` (LRM 4.2.1).
+    #[token("<<<")]
+    AShl,
+    /// `>>>`, arithmetic right shift: the sign bit fills in, so `-8 >>> 1` is `-4` (LRM 4.2.1).
+    #[token(">>>")]
+    AShr,
     /// `<<`, left shift.
     #[token("<<")]
     Shl,
@@ -658,6 +664,8 @@ impl Token {
             Token::Not => "!",
             Token::AndAnd => "&&",
             Token::OrOr => "||",
+            Token::AShl => "<<<",
+            Token::AShr => ">>>",
             Token::Shl => "<<",
             Token::Shr => ">>",
             Token::Amp => "&",

@@ -175,6 +175,7 @@ pub fn parse_unit(
         pos: 0,
         exprs: Vec::new(),
         expr_pos: Vec::new(),
+        integer_literals: std::collections::HashSet::new(),
         files: Vec::new(),
         line_origin: Vec::new(),
         last_line: 0,
@@ -239,6 +240,9 @@ struct Parser<'a> {
     src: Option<&'a str>,
     /// Byte offset of each token in `src`, parallel to `toks`. Present exactly when `src` is.
     offsets: Option<&'a [usize]>,
+    /// The numeric literals of the module being parsed that were written as plain integers,
+    /// for [`ModuleAst::integer_literals`].
+    integer_literals: std::collections::HashSet<u32>,
     /// Directives with text-stream scope, for [`ModuleAst::settings`].
     directives: &'a [crate::preprocess::DirectiveEvent],
     /// Origin of each expanded line, for [`Self::location`]; empty when unknown.
@@ -860,6 +864,36 @@ impl Parser<'_> {
             Some(&next) if next < line_end => self.location_at(next),
             _ => self.location_at(start + src[start..line_end].trim_end().len()),
         }
+    }
+
+    /// Whether number token `idx` was written as a plain integer (`7`, not `7.0`, `7e0` or `7k`:
+    /// a fraction, an exponent or a scale factor makes a literal real, LRM 2.6). `false` when
+    /// the source text is not available, so an unknown literal never counts as an integer.
+    fn is_integer_literal(&self, idx: usize) -> bool {
+        let (Some(src), Some(&start)) = (self.src, self.offsets.and_then(|o| o.get(idx))) else {
+            return false;
+        };
+        let text = src.get(start..).unwrap_or("");
+        let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0
+            && !matches!(
+                text.as_bytes().get(digits),
+                Some(
+                    b'.' | b'e'
+                        | b'E'
+                        | b'T'
+                        | b'G'
+                        | b'M'
+                        | b'K'
+                        | b'k'
+                        | b'm'
+                        | b'u'
+                        | b'n'
+                        | b'p'
+                        | b'f'
+                        | b'a'
+                )
+            )
     }
 
     /// [`Self::location`] for the start of token `idx`.
@@ -1652,6 +1686,7 @@ impl Parser<'_> {
             items,
             exprs: std::mem::take(&mut self.exprs),
             expr_pos: std::mem::take(&mut self.expr_pos),
+            integer_literals: std::mem::take(&mut self.integer_literals),
             item_pos,
             port_pos,
             files: self.files.clone(),
@@ -2605,13 +2640,42 @@ impl Parser<'_> {
             if lbp < min_bp {
                 break;
             }
+            let arithmetic_right = self.at(&Token::AShr);
             self.pos += 1;
             let rhs = self.parse_bin(rbp)?;
             let at = self.expr_pos.get(lhs.0 as usize).copied().flatten();
-            lhs = self.push(ExprAst::Binary(op, lhs, rhs));
+            lhs = if arithmetic_right {
+                self.arithmetic_shift_right(lhs, rhs)
+            } else {
+                self.push(ExprAst::Binary(op, lhs, rhs))
+            };
             self.set_expr_pos(lhs, at);
         }
         Ok(lhs)
+    }
+
+    /// `a >>> b` (LRM 4.2.1, 2.36.0): an arithmetic right shift, which on a signed integer is
+    /// division by `2^b` rounded toward minus infinity -- written here as
+    /// `floor(int(a) / 2 ** int(b))`, so it needs no IR operator of its own and folds in a
+    /// parameter default like any other expression. Exact while `|a| < 2^53`. The operands are
+    /// truncated first, as `<<`/`>>` truncate theirs. (`>>` is a logical shift, which fills
+    /// with zeros; the two differ only for a negative `a`.)
+    fn arithmetic_shift_right(&mut self, a: ExprRef, b: ExprRef) -> ExprRef {
+        let a = self.push(ExprAst::Call {
+            name: "int".into(),
+            args: vec![a],
+        });
+        let b = self.push(ExprAst::Call {
+            name: "int".into(),
+            args: vec![b],
+        });
+        let two = self.push(ExprAst::Number(2.0));
+        let scale = self.push(ExprAst::Binary(BinOp::Pow, two, b));
+        let quotient = self.push(ExprAst::Binary(BinOp::Div, a, scale));
+        self.push(ExprAst::Call {
+            name: "floor".into(),
+            args: vec![quotient],
+        })
     }
 
     fn parse_unary(&mut self) -> Result<ExprRef, FrontendError> {
@@ -2653,8 +2717,13 @@ impl Parser<'_> {
         match self.peek() {
             Some(Token::Number(n)) => {
                 let n = *n;
+                let integer = self.is_integer_literal(self.pos);
                 self.pos += 1;
-                Ok(self.push(ExprAst::Number(n)))
+                let r = self.push(ExprAst::Number(n));
+                if integer {
+                    self.integer_literals.insert(r.0);
+                }
+                Ok(r)
             }
             Some(Token::Inf) => {
                 self.pos += 1;
@@ -2869,8 +2938,9 @@ fn binop_binding(t: &Token) -> Option<(BinOp, u8, u8)> {
         Token::Le => (BinOp::Le, 13, 14),
         Token::Gt => (BinOp::Gt, 13, 14),
         Token::Ge => (BinOp::Ge, 13, 14),
-        Token::Shl => (BinOp::Shl, 15, 16),
-        Token::Shr => (BinOp::Shr, 15, 16),
+        Token::Shl | Token::AShl => (BinOp::Shl, 15, 16),
+        // `>>>` is desugared by the caller (`Parser::parse_bin`); the op here is a placeholder.
+        Token::Shr | Token::AShr => (BinOp::Shr, 15, 16),
         Token::Plus => (BinOp::Add, 17, 18),
         Token::Minus => (BinOp::Sub, 17, 18),
         Token::Star => (BinOp::Mul, 19, 20),
@@ -4483,6 +4553,7 @@ mod tests {
             pos: 0,
             exprs: Vec::new(),
             expr_pos: Vec::new(),
+            integer_literals: std::collections::HashSet::new(),
             files: Vec::new(),
             line_origin: Vec::new(),
             last_line: 0,

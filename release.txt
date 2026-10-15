@@ -22,6 +22,51 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.36.0 - 2026-10-15
+--------------------
+**Integer division warns (`W0302`); `<<<`, `>>>`, `idtmod`, `$rtoi` and `$itor` are implemented.**
+  * `W0302`, at the line, for each division of two integer-typed operands. Verilog-A truncates
+    such a quotient (7 / 2 = 3, -7 / 2 = -3, LRM 4.2.1); this simulator still divides in real
+    arithmetic (3.5), because the front end keeps no integer type. The message gives both
+    explicit spellings: `int(a / b)` or `$rtoi(a / b)` for the LRM's quotient (not `round`,
+    which gives 4), `a / 2.0` or `$itor(a) / b` for a real one. A division inside `int(...)` or
+    `$rtoi(...)` is not reported. Integer operands are literals written as integers (`2`, not
+    `2.0` or `2k`; the parser now records which, from the source text), `integer` variables and
+    parameters, genvars, `$rtoi`, and arithmetic on those. Conservative: a name a block or an
+    analog function declares again never counts. Across the 84 shipped `.va` files it fired
+    twice, both in our own `gray_scott.va` (`N / 2` with `parameter integer N`), now written
+    `int(N / 2)`: identical for the default even `N`, the LRM's answer for an odd one.
+  * `$rtoi(x)` truncates toward zero and `$itor(x)` is the identity on this simulator's `f64`
+    values (LRM 9.12), in expressions and parameter defaults. They were `E0343` (unknown).
+  * `<<<` is `<<`; `a >>> b` fills with the sign bit (`-8 >>> 1` is -4), written by the parser
+    as `floor(int(a) / 2 ** int(b))` so it needs no IR operator and folds in a parameter
+    default. Exact for `|a| < 2^53`. Both were parse errors.
+  * `idtmod(expr, ic, modulus, offset)` (LRM 4.5.4.1): `idt(expr, ic)` folded into
+    `[offset, offset + modulus)`, lowered onto the same accumulator, so it shares 2.34.0's `ic`
+    handling and `W0401` (whose message now names `idtmod` too; rev 2). The output's jump at a
+    wrap is a discontinuity in a node's potential, which the step controller rejected at every
+    step size (a bare `floor($abstime*1e6)` underflows the same way): each predicted wrap is now
+    reported as a breakpoint, at 99.9% of the predicted distance and re-predicted at every
+    accepted point, so the step that crosses it starts at one. Checked on a 1 V input (3 wraps
+    in 2.6 us, every interior point on the folded ramp to 1e-6), a 1 MHz +- 0.5 sine (5 wraps
+    in 5 us), a constant -2 MHz (10 wraps, downward) and a sign-changing sine.
+  * `idt(x, ic, assert[, abstol])`: any third argument was an internal error (`E0001`). A literal
+    `0` reset (never resets) is now accepted and `abstol` ignored; a reset that can fire is
+    refused (`R0411`), because holding the output while keeping the integral's history needs
+    per-call state the accumulator does not have. The refusal gives a latch-and-subtract
+    workaround for a reset edge.
+
+Limits: integer typing itself is still open (the warning reports, it does not truncate); it
+needs no frozen-interface change after all (`docs/proposals/openvaf-shared-defects.md` §3 is
+corrected). `idtmod`'s accumulator is not wrapped, so it grows without bound; `abstol` is not
+applied. `>>` stays a 64-bit logical shift, where Verilog's integers are 32-bit, so `-8 >> 1`
+differs from other simulators (a pre-existing gap, now recorded).
+
+Measured: `cargo test --workspace` 1018 passed, 0 failed (1012 + 6 in
+`va-cli/tests/integers_shifts_idtmod.rs`; the error corpus is 48 files);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.35.0 - 2026-10-15
 --------------------
 **`transition(x, delay, ...)` is a transport delay: a pulse shorter than the delay comes out

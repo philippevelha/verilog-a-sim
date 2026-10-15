@@ -398,7 +398,7 @@ class of lexemes.
   `~`) and shifts (`<<`, `>>`) — distinct tokens from these logical ones, added in a later pass
   once real corpus code (`(digital >> i) & 1`, an integer-accumulator idiom) needed them.
 
-### `Shl` (`<<`), `Shr` (`>>`), `Amp` (`&`), `Pipe` (`|`), `Caret` (`^`), `CaretTilde` (`^~`/`~^`), and unary `Tilde` (`~`)
+### `Shl` (`<<`), `Shr` (`>>`), `AShl` (`<<<`), `AShr` (`>>>`), `Amp` (`&`), `Pipe` (`|`), `Caret` (`^`), `CaretTilde` (`^~`/`~^`), and unary `Tilde` (`~`)
 
 - **Purpose and Static Nature**: Structural; static (const-evaluable in a parameter default or
   genvar loop header, e.g. `parameter integer mask = (1 << width) - 1;`) or dynamic per operand,
@@ -408,7 +408,11 @@ class of lexemes.
   `f64` — so each of these truncates its operand(s) to `i64` (`to_i64`, shared with `int()`/
   `floor()`'s float↔integer bridging elsewhere), performs the bitwise/shift operation, and casts
   the result back to `f64`. `>>` is a *logical* (zero-fill) shift — this project has no signed/
-  unsigned integer distinction to make an arithmetic shift matter. `^~` and `~^` are accepted as
+  unsigned integer distinction to make an arithmetic shift matter. The arithmetic shifts are
+  implemented since 2.36.0 (a parse error before): `<<<` is `<<`, and `a >>> b` fills with the
+  sign bit, which the parser writes as `floor(int(a) / 2 ** int(b))` (`-8 >>> 1` is `-4`, `>>`
+  gives a large positive number), so it needs no IR operator of its own and folds in a
+  parameter default. Exact for `|a| < 2^53`. `^~` and `~^` are accepted as
   two spellings of the same XNOR operator (`BinOp::BitXnor`), matching the LRM. Both the dynamic
   path (`va-codegen`'s AD) and the constant-folding path (`Elaborator::const_eval`/`eval_binop`)
   treat these as **zero-gradient** where AD is concerned — like the comparison operators, a
@@ -732,7 +736,13 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
 - **Expressions and Evaluation**: Declaring a scalar name with no initializer introduces it into
   scope with no initial value; it becomes assignable via `=`. The type itself is parsed and then
   *discarded* for a scalar — v0 performs no integer-vs-real type checking or truncation (a
-  stated limitation) — but an *array* declaration's range is genuinely load-bearing: it's
+  stated limitation: `7 / 2` of two integers is 3.5 here, 3 in Verilog-A). Since 2.36.0 each
+  division of two integer-typed operands is warned about (`W0302`, at its line), with the two
+  explicit spellings: `int(a / b)` or `$rtoi(a / b)` for the LRM's truncated quotient (not
+  `round`, which gives 4), `a / 2.0` or `$itor(a) / b` for a real one; a division written
+  inside `int(...)`/`$rtoi(...)` is not reported. `$rtoi` (truncate toward zero) and `$itor`
+  (identity on this simulator's `f64` values) are implemented since 2.36.0, in expressions and
+  parameter defaults — but an *array* declaration's range is genuinely load-bearing: it's
   const-evaluated and interns one `VarId` per index, named `"name[k]"`, exactly mirroring how a
   vector net expands (§2.18). An inline initializer lowers to a `Stmt::Assign`, prepended to the
   analog block (module-level) or emitted in place (block-local) — the LRM requires it to run
@@ -1867,7 +1877,8 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `highz0` | Reserved, no grammar production (net strength: high-impedance driving 0) | N/A | N/A | Digital net-strength only | No C analogue |
 | `highz1` | Reserved, no grammar production (net strength: high-impedance driving 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `hypot` | Dynamic/static dual, §1.5 | `hypot(x, y)` call | `sqrt(x²+y²)` | Analog expr / const context | C99 `hypot()` |
-| `idt` | Analog operator with internal state, §1.5 | `idt(expr[, ic])` | Time integral. Without `ic`, a static analysis drives `expr` to zero (the integrator must sit in a feedback loop). With `ic` (2.34.0, LRM 4.5.4): every static analysis holds the output at `ic` (the loop is open there), a transient integrates from `ic` whether it starts from the operating point or from `UIC`, and AC/noise are `1/(jω)` either way; `W0401` says so per module. Before 2.34.0 `ic` was ignored, so an open integrator's operating point was singular (`E0602`; `PSPNQS103VA` could not run at all). `idtmod` is not implemented (`E0342`). | Analog-block only | No C/digital-Verilog analogue |
+| `idt` | Analog operator with internal state, §1.5 | `idt(expr[, ic])` | Time integral. Without `ic`, a static analysis drives `expr` to zero (the integrator must sit in a feedback loop). With `ic` (2.34.0, LRM 4.5.4): every static analysis holds the output at `ic` (the loop is open there), a transient integrates from `ic` whether it starts from the operating point or from `UIC`, and AC/noise are `1/(jω)` either way; `W0401` says so per module. Before 2.34.0 `ic` was ignored, so an open integrator's operating point was singular (`E0602`; `PSPNQS103VA` could not run at all). `idtmod` is not implemented (`E0342`). Since 2.36.0 the third argument (`assert`, the reset) is accepted as a literal `0` and refused otherwise (`R0411`; any third argument was an internal error before), and the fourth (`abstol`) is accepted and not applied. | Analog-block only | No C/digital-Verilog analogue |
+| `idtmod` | Analog operator with internal state, §1.5 | `idtmod(expr[, ic[, modulus[, offset[, abstol]]]])` | **Implemented since 2.36.0** (`E0342` before): `idt(expr, ic)` folded into `[offset, offset + modulus)`, lowered onto the same accumulator as `offset + (y - offset) - modulus * floor((y - offset) / modulus)`, so it shares `idt`'s initial-condition handling and `W0401`; without a modulus it is `idt`. Each predicted wrap is reported as a breakpoint (at 99.9% of the predicted distance, re-predicted at every accepted point), because the output's jump is otherwise a discontinuity the step controller rejects at every step size. Limits: the accumulator is not wrapped, so it grows without bound (exact to about `2^53` / `modulus` periods); `abstol` is not applied. | Analog-block only | A phase accumulator modulo 2π, as in an NCO |
 | `idt_nature` | Same as `ddt_nature` (nature attribute, parsed but unused) | Nature attribute `idt_nature = other_nature;` | Read as a plain identifier, not yet consulted by anything | N/A (module preamble) | No C analogue |
 | `if` | Dedicated token, §1.4 | — | — | — | — |
 | `ifnone` | Reserved, no grammar production (specify-block conditional-path fallback) | N/A | N/A | Specify-block (timing-check) only | No C analogue |

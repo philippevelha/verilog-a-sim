@@ -1,0 +1,10 @@
+{
+  "code": "R0411",
+  "rev": 1,
+  "message": "`idt` with a reset (`assert`) argument other than 0",
+  "description": "The third argument of `idt(expr, ic, assert)` resets the integrator: while it is non-zero the output is held at `ic`, and integration resumes from `ic` when it returns to zero (LRM 4.5.4). Holding the output while keeping the integral's history needs per-call state this simulator's integrator does not have yet, and ignoring the reset would integrate straight through it, so the model is refused. A literal `0`, which never resets, is accepted.",
+  "actions": [
+    "If the reset is never used, write `0` or drop the argument.",
+    "To restart from `ic` at a reset edge, latch the integral there and subtract it: `y = idt(x); @(cross(rst - 0.5, +1)) base = y; V(out) <+ ic + y - base;`. This restarts at the edge but does not hold the output while the reset stays high."
+  ]
+}

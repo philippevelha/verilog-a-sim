@@ -80,8 +80,8 @@ module gray_scott(ref);
             for (j = 0; j < N; j = j + 1) begin : col
                 if (analysis("static")) begin
                     // Pearson's initial state, perturbed by a fixed hash of the cell's indices.
-                    inseed = ((i - N / 2) * (i - N / 2) < seed * seed
-                              && (j - N / 2) * (j - N / 2) < seed * seed) ? 1.0 : 0.0;
+                    inseed = ((i - int(N / 2)) * (i - int(N / 2)) < seed * seed
+                              && (j - int(N / 2)) * (j - int(N / 2)) < seed * seed) ? 1.0 : 0.0;
                     r = `GS_NOISE(i, j) - floor(`GS_NOISE(i, j)) - 0.5;
                     Rate(u[i][j]) <+ Cn(u[i][j])
                                      - ((inseed > 0.5) ? u_seed : u_bg) - amp * r;

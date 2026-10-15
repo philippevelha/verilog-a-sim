@@ -47,6 +47,11 @@ pub struct ModuleAst {
     pub exprs: Vec<ExprAst>,
     /// Where each expression starts, parallel to [`Self::exprs`].
     pub expr_pos: Vec<Option<SrcPos>>,
+    /// The [`ExprAst::Number`]s written as plain integers (`7`, not `7.0`), by [`ExprRef`]
+    /// index: the literal's value alone cannot say, and Verilog-A's integer division depends on
+    /// it (`crate::elaborate::integer_division_warnings`). Empty when the parser had no source
+    /// text, so an unknown literal never counts as an integer.
+    pub integer_literals: std::collections::HashSet<u32>,
     /// Where each item starts, parallel to [`Self::items`].
     pub item_pos: Vec<Option<SrcPos>>,
     /// Where each port is named in the module header, parallel to [`Self::ports`].

@@ -1094,6 +1094,15 @@ impl Elaborator<'_> {
                 Some(&default) => self.const_eval(default),
                 None => Err(elab(Diagnostic::new(codes::E0314))),
             },
+            // `$rtoi(x)` truncates toward zero, `$itor(x)` converts an integer to real (LRM 9.12;
+            // 2.36.0): with every value already an `f64`, the second is the identity.
+            ExprAst::SysFunc { name, args } if matches!(name.as_str(), "rtoi" | "itor") => {
+                let [x] = args.as_slice() else {
+                    return Err(elab(conversion_arity(name, args.len())));
+                };
+                let v = self.const_eval(*x)?;
+                Ok(if name == "rtoi" { v.trunc() } else { v })
+            }
             ExprAst::SysFunc { name, .. } => {
                 Err(elab(Diagnostic::new(codes::E0315).arg("name", name)))
             }
@@ -2028,6 +2037,18 @@ impl Elaborator<'_> {
                         .tracking("docs/token-reference.md, system tasks"),
                 ));
             }
+            // `$rtoi(x)` truncates toward zero, which is `int(x)`; `$itor(x)` is the identity on
+            // this simulator's `f64` values (LRM 9.12; 2.36.0, recommended by `W0302`).
+            ExprAst::SysFunc { name, args } if matches!(name.as_str(), "rtoi" | "itor") => {
+                let [x] = args.as_slice() else {
+                    return Err(elab(conversion_arity(name, args.len())));
+                };
+                let x = self.lower_expr(*x)?;
+                if name == "itor" {
+                    return Ok(x);
+                }
+                Expr::Call(Builtin::Int, vec![x])
+            }
             ExprAst::SysFunc { name, args } if name == "abstime" => {
                 if !args.is_empty() {
                     return Err(elab(
@@ -2544,6 +2565,57 @@ impl Elaborator<'_> {
             // arguments (`delay`/`rise`/`fall` defaulting to 0) and `slew` always three, with
             // `neg_rate` defaulting to `pos_rate` — the LRM's own rule that a single stated rate
             // limits both directions symmetrically.
+            // `idtmod(expr [, ic [, modulus [, offset [, abstol]]]])` (LRM 4.5.4.1, 2.36.0): the
+            // integral of `idt(expr, ic)` wrapped into `[offset, offset + modulus)` -- the phase of
+            // a VCO, typically `idtmod(freq, 0, 1)`. Lowered onto the same accumulator `idt` uses,
+            //
+            //     z = offset + (y - offset) - modulus * floor((y - offset) / modulus),  y = idt(...)
+            //
+            // so it inherits `idt`'s initial-condition handling (2.34.0, `W0401`) and needs no IR
+            // of its own. `floor` carries no gradient, so `dz/dy = 1`. Without a modulus it is
+            // `idt` itself. Limits: the accumulator itself is not wrapped, so it grows without
+            // bound (exact to about 2^53 / modulus periods); the wrap instants are not breakpoints,
+            // so the output's jump by `modulus` lands on whatever timepoint follows it; `abstol`
+            // is not applied.
+            ExprAst::Call { name, args } if name == "idtmod" => {
+                if args.is_empty() || args.len() > 5 {
+                    return Err(elab(
+                        Diagnostic::new(codes::E0334)
+                            .arg("name", "idtmod")
+                            .arg("signature", "(expr[, ic[, modulus[, offset[, abstol]]]])")
+                            .arg("min", 1)
+                            .arg("max", 5)
+                            .arg("got", args.len()),
+                    ));
+                }
+                let mut idt_args = vec![self.lower_expr(args[0])?];
+                if let Some(&ic) = args.get(1) {
+                    idt_args.push(self.lower_expr(ic)?);
+                }
+                let y = self.out.push_expr(Expr::Call(Builtin::Idt, idt_args));
+                let Some(&modulus) = args.get(2) else {
+                    return Ok(y);
+                };
+                let modulus = self.lower_expr(modulus)?;
+                let offset = match args.get(3) {
+                    Some(&o) => self.lower_expr(o)?,
+                    None => self.out.push_expr(Expr::Const(0.0)),
+                };
+                let shifted = self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Sub, y, offset));
+                let turns = self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Div, shifted, modulus));
+                let whole = self.out.push_expr(Expr::Call(Builtin::Floor, vec![turns]));
+                let wrapped = self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Mul, modulus, whole));
+                let within = self
+                    .out
+                    .push_expr(Expr::Binary(va_ir::BinOp::Sub, shifted, wrapped));
+                Expr::Binary(va_ir::BinOp::Add, offset, within)
+            }
             ExprAst::Call { name, args } if matches!(name.as_str(), "transition" | "slew") => {
                 // An argument past the last one the LRM defines was accepted and ignored until
                 // 2.33.0, so a misplaced comma went unreported.
@@ -4873,6 +4945,121 @@ pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// One `W0302` per division of two integer-typed operands in `ast` (2.36.0).
+///
+/// Verilog-A divides two integers as integers, truncating toward zero (`7 / 2` is `3`, LRM 4.2.1);
+/// this simulator has no integer type below the frontend and divides in real arithmetic (`3.5`).
+/// Until that changes, the warning says so where it happens, with the two ways to write the
+/// intent explicitly. An operand counts as integer when it is a literal written without a
+/// fraction, exponent or scale factor, a module-level `integer` variable, an `integer`
+/// parameter, a genvar, `$rtoi`/`$random`/`$clog2`/`integer(...)`, a comparison or logical or
+/// bitwise result, or arithmetic on integers. Conservative: a name that a block or an analog
+/// function declares again (whose type the AST does not keep) never counts, so a warning is
+/// never about a real quotient.
+pub fn integer_division_warnings(ast: &ModuleAst) -> Vec<Diagnostic> {
+    let mut integers: HashSet<&str> = HashSet::new();
+    let mut shadowed: HashSet<&str> = HashSet::new();
+    fn shadows<'a>(stmts: &'a [Stmt], out: &mut HashSet<&'a str>) {
+        for st in stmts {
+            match st {
+                Stmt::VarDecl { names } => out.extend(names.iter().map(|n| n.name.as_str())),
+                Stmt::Block(b) => shadows(b, out),
+                Stmt::If { then_, else_, .. } => {
+                    shadows(then_, out);
+                    shadows(else_, out);
+                }
+                Stmt::While { body, .. } | Stmt::Repeat { body, .. } => shadows(body, out),
+                Stmt::For { body, .. } => shadows(body, out),
+                Stmt::Case { arms, default, .. } => {
+                    for arm in arms {
+                        shadows(&arm.body, out);
+                    }
+                    if let Some(d) = default {
+                        shadows(d, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for item in &ast.items {
+        match item {
+            Item::Var {
+                ty: ast::ParamType::Integer,
+                names,
+            } => integers.extend(names.iter().map(|n| n.name.as_str())),
+            Item::Param {
+                ty: ast::ParamType::Integer,
+                name,
+                ..
+            } => {
+                integers.insert(name.as_str());
+            }
+            Item::Genvar { names } => integers.extend(names.iter().map(String::as_str)),
+            Item::Analog(st) => shadows(std::slice::from_ref(st), &mut shadowed),
+            Item::Function(f) => {
+                shadowed.insert(f.name.as_str());
+                shadowed.extend(f.declared.iter().map(String::as_str));
+                shadowed.extend(f.args.iter().map(|a| a.name.as_str()));
+            }
+            _ => {}
+        }
+    }
+    let is_int_name = |n: &str| integers.contains(n) && !shadowed.contains(n);
+    // `int(a / b)` and `$rtoi(a / b)` are the fix the warning recommends: their truncation
+    // gives exactly the LRM's integer quotient, so a division written inside one is not
+    // reported. (`floor` and `integer(...)` are not: they differ for a negative or a .5 quotient.)
+    let truncated: HashSet<u32> = ast
+        .exprs
+        .iter()
+        .filter_map(|e| match e {
+            ExprAst::Call { name, args } if name == "int" => args.first(),
+            ExprAst::SysFunc { name, args } if name == "rtoi" => args.first(),
+            _ => None,
+        })
+        .map(|r| r.0)
+        .collect();
+    // Memoised over the arena: operands always come before the expression using them.
+    let mut int = vec![false; ast.exprs.len()];
+    let mut out = Vec::new();
+    for (i, e) in ast.exprs.iter().enumerate() {
+        let at = |r: ExprRef| int.get(r.0 as usize).copied().unwrap_or(false);
+        let this = match e {
+            ExprAst::Number(_) => ast.integer_literals.contains(&(i as u32)),
+            ExprAst::Ident(n) => is_int_name(n),
+            ExprAst::IndexedIdent(n, _) => is_int_name(n),
+            ExprAst::SysFunc { name, .. } => matches!(name.as_str(), "rtoi" | "random" | "clog2"),
+            ExprAst::Call { name, .. } => name == "integer",
+            ExprAst::Unary(op, x) => match op {
+                ast::UnOp::Not => true,
+                ast::UnOp::Neg | ast::UnOp::BitNot => at(*x),
+            },
+            ExprAst::Binary(op, l, r) => match op {
+                ast::BinOp::Add
+                | ast::BinOp::Sub
+                | ast::BinOp::Mul
+                | ast::BinOp::Div
+                | ast::BinOp::Mod => at(*l) && at(*r),
+                ast::BinOp::Pow => false,
+                _ => true,
+            },
+            ExprAst::Cond { then_, else_, .. } => at(*then_) && at(*else_),
+            _ => false,
+        };
+        let divides_integers =
+            matches!(e, ExprAst::Binary(ast::BinOp::Div, l, r) if at(*l) && at(*r));
+        int[i] = this;
+        if divides_integers && !truncated.contains(&(i as u32)) {
+            let d = Diagnostic::new(codes::W0302).arg("module", &ast.name);
+            out.push(match ast.expr_pos.get(i).copied().flatten() {
+                Some(p) => d.at(ast.describe(p)),
+                None => d,
+            });
+        }
+    }
+    out
+}
+
 /// Map every net name a module declares to the discipline it was declared with
 /// (§ port-connection discipline checking).
 ///
@@ -5522,6 +5709,15 @@ fn read_table_file(
         ));
     }
     Ok(out)
+}
+
+/// `E0333` for a `$rtoi`/`$itor` call that does not pass exactly one argument.
+fn conversion_arity(name: &str, got: usize) -> Diagnostic {
+    Diagnostic::new(codes::E0333)
+        .arg("name", format!("${name}"))
+        .arg("signature", "(x)")
+        .arg("expected", 1)
+        .arg("got", got)
 }
 
 /// Map a system-function name (no leading `$`) to a [`Builtin`].

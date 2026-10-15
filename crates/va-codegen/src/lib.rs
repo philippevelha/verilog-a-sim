@@ -2612,7 +2612,10 @@ impl ModelInstance for GeneratedModel {
                 sink.breakpoint(next);
             }
         }
-        if self.shared.module.event_sites.is_empty() && self.shared.lowered.zi_terms.is_empty() {
+        if self.shared.module.event_sites.is_empty()
+            && self.shared.lowered.zi_terms.is_empty()
+            && self.shared.lowered.idt_wraps.is_empty()
+        {
             return;
         }
         let setup = self.setup();
@@ -2628,6 +2631,37 @@ impl ModelInstance for GeneratedModel {
             );
         }
         let value_of = |e| eval(&ctx, e).map(|d| d.value).unwrap_or(0.0);
+        // An `idtmod`'s next wrap (2.36.0), predicted from the integral and its rate now, as a
+        // breakpoint: the output jumps by `modulus` there, which the step controller accepts
+        // only right after a breakpoint, where the history is cut. Placed a little *short* of
+        // the predicted instant, because landing after the wrap would put the jump inside the
+        // step ending at the breakpoint; each accepted point re-predicts, so the breakpoints
+        // close in on the wrap in a few steps and the step that crosses it starts at one.
+        for wrap in &self.shared.lowered.idt_wraps {
+            let acc = &self.shared.lowered.idt_accumulators[wrap.accumulator];
+            let y = x
+                .get(self.terminals[acc.local_slot])
+                .copied()
+                .unwrap_or(0.0);
+            let (offset, modulus, rate) = (
+                value_of(wrap.offset),
+                value_of(wrap.modulus),
+                value_of(acc.arg),
+            );
+            if !(modulus > 0.0 && modulus.is_finite() && rate.is_finite() && rate != 0.0) {
+                continue;
+            }
+            let lower = offset + modulus * ((y - offset) / modulus).floor();
+            let distance = if rate > 0.0 {
+                lower + modulus - y
+            } else {
+                y - lower
+            };
+            let ahead = 0.999 * distance / rate.abs();
+            if ahead.is_finite() && ahead > 0.0 {
+                sink.breakpoint(actx.time + ahead);
+            }
+        }
         // A `zi_*` filter's next sample instant, `t0 + k·T` — pure arithmetic on `(t0, T,
         // now)`, the way a periodic `timer` stays stateless about its own schedule — asked for
         // as a breakpoint so the integrator lands on it and the sample is taken there, not

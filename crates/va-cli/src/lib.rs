@@ -650,7 +650,10 @@ fn compile_model_library_with_context(
     // Pass 2: elaborate each module against every module in the library.
     let mut modules = Vec::with_capacity(library.len());
     for ast in &library {
-        for w in va_frontend::elaborate::port_direction_warnings(ast) {
+        for w in va_frontend::elaborate::port_direction_warnings(ast)
+            .into_iter()
+            .chain(va_frontend::elaborate::integer_division_warnings(ast))
+        {
             eprintln!("[va-cli] {w}");
         }
         // The include path goes to elaboration too, not just to the preprocessor: a
@@ -1483,7 +1486,10 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         }
         let mut all_ok = true;
         for ast in &library[range] {
-            for w in va_frontend::elaborate::port_direction_warnings(ast) {
+            for w in va_frontend::elaborate::port_direction_warnings(ast)
+                .into_iter()
+                .chain(va_frontend::elaborate::integer_division_warnings(ast))
+            {
                 println!("  [warn ] {file}: {w}");
             }
             match va_frontend::elaborate::elaborate_unit(

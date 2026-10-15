@@ -820,6 +820,47 @@ pub struct IdtAccumulator {
     pub local_slot: usize,
 }
 
+/// An `idtmod` wrap (LRM 4.5.4.1, 2.36.0): `va-frontend` lowers `idtmod(x, ic, modulus,
+/// offset)` to `offset + (y - offset) - modulus * floor((y - offset) / modulus)` over
+/// `y = idt(x, ic)`, and this records the `floor` that makes its output jump. The jump is a
+/// discontinuity in a node's potential, which the step controller rejects at every step size
+/// unless a breakpoint declares it, so the instance reports the next wrap as one
+/// (`crate::GeneratedModel::events_with_state`).
+#[derive(Clone, Copy, Debug)]
+pub struct IdtWrap {
+    /// Index into [`Lowered::idt_accumulators`] of the integral being wrapped.
+    pub accumulator: usize,
+    /// The window's lower end.
+    pub offset: ExprId,
+    /// The window's width.
+    pub modulus: ExprId,
+}
+
+/// Find the `floor((idt(...) - offset) / modulus)` shape `idtmod` lowers to.
+fn idt_wraps(module: &Module, accumulators: &[IdtAccumulator]) -> Vec<IdtWrap> {
+    module
+        .exprs
+        .iter()
+        .filter_map(|e| {
+            let Expr::Call(Builtin::Floor, args) = e else {
+                return None;
+            };
+            let Expr::Binary(BinOp::Div, shifted, modulus) = module.expr(*args.first()?) else {
+                return None;
+            };
+            let Expr::Binary(BinOp::Sub, y, offset) = module.expr(*shifted) else {
+                return None;
+            };
+            let accumulator = accumulators.iter().position(|a| a.expr_id == y.0)?;
+            Some(IdtWrap {
+                accumulator,
+                offset: *offset,
+                modulus: *modulus,
+            })
+        })
+        .collect()
+}
+
 /// A branch that is **purely flow-defined** (never receives a potential contribution — a
 /// [`BranchCurrent`]-carrying branch already has a working auxiliary current unknown, see its
 /// doc comment) but is *also* read via a bare `I(...)` probe somewhere in the module — real
@@ -928,6 +969,9 @@ pub struct Lowered {
     /// encountered walking the analog block (the deterministic order their local terminal slots
     /// are allocated in, past every [`BranchCurrent`] slot).
     pub idt_accumulators: Vec<IdtAccumulator>,
+    /// Every `idtmod` wrap, as `va-frontend` lowers it (see [`IdtWrap`]): the accumulator it
+    /// wraps and the window, so the instance can ask for a breakpoint at the next wrap.
+    pub idt_wraps: Vec<IdtWrap>,
     /// One entry per purely-flow-defined branch that is also read via a bare `I(...)` probe
     /// somewhere in the module, in ascending [`BranchId`] order (the deterministic order their
     /// local terminal slots are allocated in, past every [`IdtAccumulator`] slot) — plus any
@@ -1193,8 +1237,18 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         let Expr::Call(Builtin::Idt, args) = module.expr(call) else {
             unreachable!("collect_idt_calls_in_stmts only ever collects `Idt` call sites");
         };
-        if args.is_empty() || args.len() > 2 {
-            return Err(internal_error("idt expects one or two arguments"));
+        // `idt(expr [, ic [, assert [, abstol]]])` (2.36.0; before, any third argument was an
+        // internal error). `abstol` only tunes the solver's tolerance for this unknown and is
+        // not applied. `assert`, the reset, is honoured only as a literal `0` (never reset):
+        // holding the output at `ic` while keeping the integral's history needs per-site state
+        // this accumulator does not have, so anything else is refused rather than ignored.
+        if args.is_empty() || args.len() > 4 {
+            return Err(internal_error("idt expects one to four arguments"));
+        }
+        if let Some(&a) = args.get(2) {
+            if !matches!(module.expr(a), Expr::Const(v) if *v == 0.0) {
+                return Err(CodegenError::Unsupported(Diagnostic::new(codes::R0411)));
+            }
         }
         idt_accumulators.push(IdtAccumulator {
             expr_id: call.0,
@@ -1356,6 +1410,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         taint: Taint::of(module, &module.analog),
         stmts,
         branch_currents,
+        idt_wraps: idt_wraps(module, &idt_accumulators),
         idt_accumulators,
         flow_current_accumulators,
         node_kcl_probes,
