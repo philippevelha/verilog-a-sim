@@ -22,6 +22,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.32.1+1 - 2026-10-15
+----------------------
+**A plan for the defects we share with OpenVAF-Reloaded:
+`docs/proposals/openvaf-shared-defects.md`.** Docs only, no behaviour change.
+  * Fourteen items ranked by impact (silent wrong answer above loud failure, common construct
+    above typo), each with whether a user can avoid it today by writing the model or deck
+    differently, and what fixing it takes.
+  * Top three: `idt(x, ic)` drops `ic` (operating point singular; only `UIC` plus `ic + idt(x)`
+    avoids it), a delayed `transition` drops a pending change (a pulse shorter than the delay
+    vanishes; no in-model fix while `absdelay` is refused in transient), and an invalid event
+    trigger such as `@(foo)` runs its body every evaluation.
+  * Four have exact workarounds (parameter ranges via an `$error` guard, array index guards,
+    `absdelay` clamping in AC, `<<<`/`>>>` rewrites). Two are LRM-permitted choices, not defects
+    (`cross` without `time_tol`, interrupted `transition` slope); one, `paramset`, is outside the
+    language.
+  * Also listed: integer division is real division (a documented limitation; `int(i / 2)` is the
+    workaround), and four diagnostics that name the wrong construct.
+  * Every behaviour the plan quotes was re-checked against 2.32.1.
+
+Measured: unchanged from 2.32.1 (no code change).
+
+
 2.32.1 - 2026-10-15
 --------------------
 **Six defects of our own, found while checking the OpenVAF-Reloaded PRs against this simulator.**
