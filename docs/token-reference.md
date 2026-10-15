@@ -1867,7 +1867,7 @@ first (and, for the ~90 with zero implemented behavior, only) treatment here.
 | `highz0` | Reserved, no grammar production (net strength: high-impedance driving 0) | N/A | N/A | Digital net-strength only | No C analogue |
 | `highz1` | Reserved, no grammar production (net strength: high-impedance driving 1) | N/A | N/A | Digital net-strength only | No C analogue |
 | `hypot` | Dynamic/static dual, §1.5 | `hypot(x, y)` call | `sqrt(x²+y²)` | Analog expr / const context | C99 `hypot()` |
-| `idt` | Analog operator with internal state, §1.5 | `idt(expr)` | Time integral | Analog-block only | No C/digital-Verilog analogue |
+| `idt` | Analog operator with internal state, §1.5 | `idt(expr[, ic])` | Time integral. Without `ic`, a static analysis drives `expr` to zero (the integrator must sit in a feedback loop). With `ic` (2.34.0, LRM 4.5.4): every static analysis holds the output at `ic` (the loop is open there), a transient integrates from `ic` whether it starts from the operating point or from `UIC`, and AC/noise are `1/(jω)` either way; `W0401` says so per module. Before 2.34.0 `ic` was ignored, so an open integrator's operating point was singular (`E0602`; `PSPNQS103VA` could not run at all). `idtmod` is not implemented (`E0342`). | Analog-block only | No C/digital-Verilog analogue |
 | `idt_nature` | Same as `ddt_nature` (nature attribute, parsed but unused) | Nature attribute `idt_nature = other_nature;` | Read as a plain identifier, not yet consulted by anything | N/A (module preamble) | No C analogue |
 | `if` | Dedicated token, §1.4 | — | — | — | — |
 | `ifnone` | Reserved, no grammar production (specify-block conditional-path fallback) | N/A | N/A | Specify-block (timing-check) only | No C analogue |

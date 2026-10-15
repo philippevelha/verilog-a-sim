@@ -162,12 +162,15 @@
 //!
 //! # Limitations
 //!
-//! - `idt`'s optional second (initial-condition) argument is accepted syntactically (so a
-//!   two-argument call doesn't fail to lower) but not applied: this project already starts every
-//!   transient run from the all-zero vector (no `.ic`/`UIC` support at all — `va-cli`'s module
-//!   doc comment), so an accumulator's initial value is whatever the DC operating point resolves
-//!   it to (in general *not* the declared `ic`), the same honest limitation as every other
-//!   reactive state in this codegen, not a special gap in `idt` specifically.
+//! - `idt`'s optional second (initial-condition) argument is applied since 2.34.0 (LRM 4.5.4):
+//!   every static analysis (`.op`, `.dc`, the operating point before a transient) stamps the
+//!   accumulator's row as `Y = ic`, so the output there is `ic`, and a transient run's seed
+//!   reports `ic` as the accumulator's charge, so the run integrates from `ic` whether it starts
+//!   from that operating point or from `UIC`'s zero vector. AC and noise are untouched (`jωY =
+//!   arg`). The cost the LRM accepts with it: in a static analysis the integrator's input is
+//!   *not* driven to zero, so a feedback loop around it is open there. Without `ic` the static
+//!   row is still `arg = 0`. Under `UIC` the printed `t = 0` row is still the zero vector, as
+//!   for every unknown `UIC` does not set.
 //! - The local-variable `ddt`-indirection tracking above only ever substitutes a *bare* variable
 //!   read (`Expr::Var`) that is itself one additive term; a variable read as part of a larger
 //!   sub-expression (e.g. `2*dqdt`) is not tracked back to its defining `ddt` call — no corpus
@@ -807,6 +810,11 @@ pub struct IdtAccumulator {
     pub expr_id: u32,
     /// `idt`'s first argument — the quantity being integrated.
     pub arg: ExprId,
+    /// `idt`'s initial condition, when written: a static analysis stamps the accumulator's row
+    /// as `Y = ic` instead of `arg = 0`, and a transient run's seed reports `ic` as its charge,
+    /// so the integral starts from `ic` (LRM 4.5.4; before 2.34.0 `ic` was ignored and an open
+    /// integrator's operating point was singular).
+    pub ic: Option<ExprId>,
     /// Local terminal slot (past every node and [`BranchCurrent`] slot) allocated for this
     /// accumulator's own unknown.
     pub local_slot: usize,
@@ -1179,6 +1187,7 @@ pub fn lower(module: &Module) -> Result<Lowered, CodegenError> {
         idt_accumulators.push(IdtAccumulator {
             expr_id: call.0,
             arg: args[0],
+            ic: args.get(1).copied(),
             local_slot: next_slot,
         });
         next_slot += 1;

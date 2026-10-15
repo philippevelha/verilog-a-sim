@@ -208,7 +208,7 @@ Not shared defects, but they turned up on the same day and belong in the same qu
 1. **Batch A: the cheap silent ones — done in 2.33.0.** Items 3, 4, 5, 6 and 7, plus the diagnostic wording in §3.
    Each is small, local to one crate, and turns a silent wrong answer into a coded message.
    One release.
-2. **Batch B: `idt(x, ic)`** (item 1). The highest-impact defect and the only one that blocks
+2. **Batch B: `idt(x, ic)`** (item 1) — **done in 2.34.0**, with the `W0401` warning. The highest-impact defect and the only one that blocks
    ordinary models outright.
 3. **Batch C: the `transition` queue** (item 2). Silent, and the queue needs a state-layout
    decision (fixed depth and refusal when full).

@@ -22,6 +22,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.34.0 - 2026-10-15
+--------------------
+**`idt(x, ic)` applies its initial condition (LRM 4.5.4), and warns that it does (`W0401`).**
+Item 1 of `docs/proposals/openvaf-shared-defects.md`, the highest-impact defect we share with
+OpenVAF-Reloaded. `ic` was parsed and ignored: an integrator with no feedback loop around it
+made every operating point singular (`E0602`), and a `UIC` run integrated from 0.
+  * Static analyses (`.op`, `.dc`, the operating point before a transient): the integrator's
+    row is `output = ic` instead of `input = 0`. The output is `ic`, and a bias-dependent `ic`
+    keeps its Jacobian coupling.
+  * Transient: integrates from `ic` whether the run starts from that operating point or from
+    `UIC`; the seed reports `ic` as the integrator's charge history. A varying `ic` sets only
+    the start (tested: `ic` stepping from 0.2 V to 0.9 V mid-run leaves the output at 0.2 V).
+  * AC and noise: unchanged, `1/(jω)` with or without `ic` (tested: a first-order loop
+    `idt(w(x - y), ic)` is 0.7071 at `ω = w`).
+  * Without `ic` nothing changes: the static row still drives the input to zero, which is what
+    lets a feedback loop settle the integrator at the operating point.
+  * `W0401`, once per module that writes `idt(x, ic)`: the output is held at `ic` in static
+    analyses, so a feedback loop around the integrator is **open** there. The message says when
+    to keep `ic` (a known start, a VCO's phase) and when to drop it (the operating point should
+    settle the loop). Printed by `sim` and `check`.
+
+What it unlocked: `benchmark/models/psp103/psp103_nqs.va` (`PSPNQS103VA`, nine `idt(x, ic)`
+calls in its NQS splines) was singular at every operating point, with NQS off or on, so it never
+ran. On `psp103_inverter_tran.net` it now runs: with NQS off it gives exactly `PSP103VA`'s
+waveform (1740 points, largest difference 0); with `SWNQS=1` it runs, from the same operating
+point. That NQS waveform has no reference to compare against yet.
+
+Limits: under `UIC` the printed `t = 0` row is still the zero vector, as for every unknown `UIC`
+does not set; the first step after it is right. `idtmod` remains unimplemented (`E0342`).
+
+Workaround on 2.33.x and earlier: `V(out) <+ ic + idt(x);` with `.tran ... UIC`; no workaround
+reaches the operating point.
+
+Measured: `cargo test --workspace` 1008 passed, 0 failed (1003 + 5 in
+`va-cli/tests/idt_initial_condition.rs`; one codegen unit test rewritten from "`ic` is
+ignored" to the new stamp); `cargo xtask validate` 28 checked, 0 failed, convergence 28/28.
+
+
 2.33.0 - 2026-10-15
 --------------------
 **Five silent wrong answers become errors, and four errors that named the wrong construct now

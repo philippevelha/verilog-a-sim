@@ -2217,6 +2217,26 @@ impl GeneratedModel {
             let g = self.terminals[acc.local_slot];
             // Post-validation this cannot fail; skip stamping if it somehow does, matching
             // `Self::stamp`'s own "cannot fail, bail without stamping if it somehow does" pattern.
+            let y = ctx.x.get(g).copied().unwrap_or(0.0);
+            // With an initial condition (LRM 4.5.4, 2.34.0): in a static analysis the output *is*
+            // `ic` -- the row is `Y = ic`, and the input is not driven to zero there. Without
+            // one, the static row is `arg = 0`, below, as always. `ic`'s own gradient is stamped
+            // so Newton sees a bias-dependent `ic` (PSP's NQS `Qp1_0`) as the coupling it is.
+            let ic = match acc.ic {
+                Some(ic) => match eval(ctx, ic) {
+                    Ok(v) => Some(v),
+                    Err(_) => continue,
+                },
+                None => None,
+            };
+            if let (Some(ic), va_abi::AnalysisKind::Dc) = (&ic, ctx.analysis.kind) {
+                sink.residual(g, y - ic.value);
+                sink.jacobian(g, g, 1.0);
+                for (slot, dg) in ic.grad() {
+                    sink.jacobian(g, self.terminals[slot], -dg);
+                }
+                continue;
+            }
             let Ok(d) = eval(ctx, acc.arg) else {
                 continue;
             };
@@ -2233,7 +2253,14 @@ impl GeneratedModel {
                 let gk = self.terminals[slot];
                 sink.dcharge(g, gk, -dg);
             }
-            sink.charge(g, ctx.x.get(g).copied().unwrap_or(0.0));
+            // The seed of a transient run is its charge history: from an operating point `Y`
+            // already is `ic`; from `UIC`'s zero vector it is not, and reporting `ic` here is
+            // what makes the first step integrate from `ic` rather than from 0.
+            let q = match &ic {
+                Some(ic) if ctx.analysis.is_initial_step => ic.value,
+                _ => y,
+            };
+            sink.charge(g, q);
             sink.dcharge(g, g, 1.0);
         }
     }
@@ -2394,6 +2421,26 @@ fn jit_enabled() -> bool {
 }
 
 static JIT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// One `W0401` warning per `idt(x, ic)` call in `module`: since 2.34.0 the initial condition is
+/// applied (LRM 4.5.4), which holds the integrator at `ic` in every static analysis and leaves
+/// any feedback loop around it open there. Worth saying, because a loop that used to be closed
+/// at the operating point (or singular, when there was none) now is not, and because `ic` was
+/// ignored before. The IR carries no source locations, so the warning names the module and the
+/// count rather than a line.
+pub fn idt_ic_warnings(module: &Module) -> Vec<Diagnostic> {
+    let count = module
+        .exprs
+        .iter()
+        .filter(|e| matches!(e, Expr::Call(Builtin::Idt, args) if args.len() == 2))
+        .count();
+    if count == 0 {
+        return Vec::new();
+    }
+    vec![Diagnostic::new(codes::W0401)
+        .arg("module", &module.name)
+        .arg("count", count)]
+}
 
 /// Switch compiling the static program to machine code on or off for the whole process,
 /// overriding `VA_JIT`. Results are meant to be bit-identical either way; this exists so
@@ -4521,9 +4568,10 @@ mod tests {
         assert!((sink.jac(2, 3) - -k).abs() < 1e-12);
     }
 
-    /// `idt(arg, ic)`'s second (initial-condition) argument must not fail to lower or load --
-    /// it's accepted syntactically (`lower::IdtAccumulator`'s doc comment) even though this v0
-    /// codegen doesn't apply it as a real initial value.
+    /// `idt(arg, ic)` in a static analysis: the output is `ic` -- the accumulator's row is
+    /// `Y = ic` instead of `arg = 0` (LRM 4.5.4, 2.34.0).
+    /// Before, `ic` was ignored and the row was `arg = 0`, which left the accumulator floating
+    /// and an open integrator's operating point singular.
     #[test]
     fn idt_with_initial_condition_argument_builds_and_loads() {
         let mut m = Module::new("idt_with_ic");
@@ -4567,16 +4615,20 @@ mod tests {
         let inst = build_instance(&m, &[0, 1], &mut 2).unwrap();
         let mut sink = DenseStamp::new(4);
         // p == n == 0, so the constraint row's structural `V(p)-V(n)` term drops out, isolating
-        // `idt`'s own contribution: it reads back as the accumulator's raw value (0.0 here,
-        // since the codegen doesn't seed it from `ic`) -- building and loading without erroring
-        // is the main point of this test.
+        // `idt`'s own contribution: the accumulator (global 3), at 0.3 here.
         inst.load(
-            &[0.0, 0.0, 0.0, 0.0],
+            &[0.0, 0.0, 0.0, 0.3],
             &ANALYSIS_DC,
             &mut va_abi::ModelState::stateless(),
             &mut sink,
         );
-        assert_eq!(sink.residual[2], 0.0);
+        assert!((sink.residual[2] - -0.3).abs() < 1e-12);
+        assert!((sink.jac(2, 3) - -1.0).abs() < 1e-12);
+        // The accumulator row: `Y = ic`, with no dependence on the integrand `V(p, n)`.
+        assert!((sink.residual[3] - (0.3 - 0.5)).abs() < 1e-12);
+        assert!((sink.jac(3, 3) - 1.0).abs() < 1e-12);
+        assert_eq!(sink.jac(3, 0), 0.0);
+        assert_eq!(sink.jac(3, 1), 0.0);
     }
 
     /// Two distinct `idt(...)` call sites -- even with syntactically identical arguments -- get
