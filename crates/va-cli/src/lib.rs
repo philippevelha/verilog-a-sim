@@ -663,7 +663,7 @@ fn compile_model_library_with_context(
             &include_dirs,
         )
         .with_context(|| format!("elaborating module `{}`", ast.name))?;
-        for w in va_codegen::idt_ic_warnings(&m) {
+        for w in va_codegen::semantics_warnings(&m) {
             eprintln!("[va-cli] {w}");
         }
         modules.push(m);
@@ -1494,7 +1494,7 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
                 &include_dirs,
             ) {
                 Ok(m) => {
-                    for w in va_codegen::idt_ic_warnings(&m) {
+                    for w in va_codegen::semantics_warnings(&m) {
                         println!("  [warn ] {file}: {w}");
                     }
                     // Scanning a model library is the case where a double-scaling `$mfactor` is

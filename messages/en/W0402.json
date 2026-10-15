@@ -1,0 +1,10 @@
+{
+  "code": "W0402",
+  "rev": 1,
+  "message": "module `{module}`: {count} `transition` call(s) with a delay pass every input change, a pulse too, `delay` later",
+  "description": "`transition(x, delay, ...)` with a delay is a transport delay: every change of `x` comes out `delay` later, in order, however soon the next one follows. A pulse shorter than the delay is therefore delayed, not removed, which differs from a digital inertial delay (Verilog's `#d` on a continuous assignment), where such a pulse is swallowed. Up to 8 changes can wait out one delay at a time; past that, the newest replaces the latest pending one. Until 2.35.0 a second change overwrote the first pending one, so a pulse shorter than the delay vanished.",
+  "actions": [
+    "If the delay is meant to pass every edge (a delay line, a propagation delay), nothing to do.",
+    "If short pulses are meant to be filtered out, filter them before the delay, for example with a `timer` or `cross` that only updates the target once the input has been stable for the minimum width; `transition` itself never removes a pulse."
+  ]
+}

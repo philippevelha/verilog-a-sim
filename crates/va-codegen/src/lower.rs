@@ -993,13 +993,24 @@ pub struct Lowered {
     pub invariance: Invariance,
 }
 
+/// How many changes of a `transition`'s input may wait out its delay at once (2.35.0). A
+/// transport delay passes every change, so the queue holds each one until it is due; past this
+/// many inside one delay, the newest replaces the latest pending one. Eight covers a pulse train
+/// four periods deep in the delay.
+pub const TRANSITION_QUEUE: usize = 8;
+
+/// The state slot of a `transition` site holding its pending-change count; the queue follows.
+pub const TRANSITION_PENDING: usize = 7;
+
 /// Which time-domain construct a [`StatefulCall`] is, and how many state slots it needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StatefulKind {
     /// `slew(value, pos_rate, neg_rate)` — 2 slots: `(t_prev, y_prev)`.
     Slew,
-    /// `transition(value, delay, rise, fall)` — 5 slots:
-    /// `(t_prev, y_prev, target, rate, t_start)`.
+    /// `transition(value, delay, rise, fall)` — `TRANSITION_PENDING + 1 + 2 ·
+    /// TRANSITION_QUEUE` slots: `(t_prev, y_prev, target, rate, t_start, ramp_duration,
+    /// last_input, pending_count)`, then up to [`TRANSITION_QUEUE`] pending changes as
+    /// `(start_time, value)` pairs, oldest first.
     Transition,
     /// A `zi_*` filter — `4 + inputs + outputs` slots: `(t_last_sample, y_held, y_prev,
     /// t_ramp_start, x_{k-1} … x_{k-inputs}, y_{k-1} … y_{k-outputs})`, where `inputs` is the
@@ -1023,8 +1034,9 @@ impl StatefulKind {
     pub fn width(self) -> usize {
         match self {
             StatefulKind::Slew => 2,
-            // `(t_prev, y_prev, target, rate, t_start, ramp_duration)`.
-            StatefulKind::Transition => 6,
+            // `(t_prev, y_prev, target, rate, t_start, ramp_duration, last_input,
+            // pending_count)` and the pending-change queue (2.35.0; six slots before).
+            StatefulKind::Transition => TRANSITION_PENDING + 1 + 2 * TRANSITION_QUEUE,
             StatefulKind::Zi { inputs, outputs } => 4 + inputs + outputs,
             // `(q_prev, rate_prev, q_prev2)`. The third slot exists for Gear/BDF2, whose
             // reconstruction is a three-point difference on the charge rather than a one-step

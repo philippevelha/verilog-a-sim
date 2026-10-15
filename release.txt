@@ -22,6 +22,40 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.35.0 - 2026-10-15
+--------------------
+**`transition(x, delay, ...)` is a transport delay: a pulse shorter than the delay comes out
+delayed instead of vanishing. `W0402` says so.** Item 2 of
+`docs/proposals/openvaf-shared-defects.md`, the defect OpenVAF-Reloaded PRs #44/#46 fixed in their
+own `transition`.
+  * Cause: a site held one pending change, and a second change arriving within the delay
+    overwrote it. A 0.5 ns pulse through a 2 ns delay produced nothing; a train of 0.3 ns pulses
+    every 0.6 ns produced nothing (0 of 4 pulses by 14 ns on 2.34.0, 4 of 4 now).
+  * Fix: each site queues up to 8 pending `(start, value)` changes; each starts in order, from
+    wherever the ramp before it had got, so an earlier ramp also keeps running during a later
+    change's delay (it used to freeze). The next pending start is reported as a breakpoint, so a
+    step cannot stride over a pulse waiting in the delay. A `transition` site's state grows from
+    6 to 24 slots.
+  * `W0402`, once per module with a delayed `transition` (a non-zero literal, or a parameter
+    whose default is not zero): every change passes `delay` later, a pulse too. This is unlike
+    Verilog's inertial `#d`, which swallows short pulses. The message says how to filter short
+    pulses yourself if that is what was meant.
+  * Zero delay is untouched: the `transition_cross` ramp deck gives the same 1350 points,
+    value for value, as on 2.34.0.
+
+Limits: more than 8 changes inside one delay — the newest replaces the latest pending one (the
+old behaviour, now only past that depth). The plan proposed a refusal there; the IR has no
+run-time refusal, so `W0402` states the limit instead. Ramp corners are still not breakpoints
+(the stated approximation); a delayed ramp's *start* now is.
+
+Workaround on 2.34.x and earlier: keep consecutive input changes at least `delay` apart, or move
+the delay into the stimulus (a `PULSE`'s own delay) when the input comes from the deck.
+
+Measured: `cargo test --workspace` 1012 passed, 0 failed (1008 + 4 in
+`va-cli/tests/transition_delay.rs`); `cargo xtask validate` 28 checked, 0 failed, convergence
+28/28.
+
+
 2.34.0 - 2026-10-15
 --------------------
 **`idt(x, ic)` applies its initial condition (LRM 4.5.4), and warns that it does (`W0401`).**

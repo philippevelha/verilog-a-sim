@@ -210,7 +210,10 @@ Not shared defects, but they turned up on the same day and belong in the same qu
    One release.
 2. **Batch B: `idt(x, ic)`** (item 1) — **done in 2.34.0**, with the `W0401` warning. The highest-impact defect and the only one that blocks
    ordinary models outright.
-3. **Batch C: the `transition` queue** (item 2). Silent, and the queue needs a state-layout
+3. **Batch C: the `transition` queue** (item 2) — **done in 2.35.0**, with the `W0402` warning.
+   One departure from §2.2: a full queue (more than 8 changes inside one delay) replaces the
+   latest pending change rather than refusing, because the IR has no run-time refusal; `W0402`
+   states the limit. Silent, and the queue needs a state-layout
    decision (fixed depth and refusal when full).
 4. **Later:** integer typing (§3, an interface change), `$rdist_*`, `<<<`/`>>>`,
    `$discontinuity`.

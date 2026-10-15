@@ -1769,6 +1769,7 @@ fn eval_call(
                     "transition call site has no state slot allocated",
                 ));
             };
+            use crate::lower::{TRANSITION_PENDING, TRANSITION_QUEUE};
             if ctx.analysis.is_initial_step {
                 ctx.state_set(base, 0, ctx.analysis.time);
                 ctx.state_set(base, 1, value.value);
@@ -1776,6 +1777,8 @@ fn eval_call(
                 ctx.state_set(base, 3, 0.0);
                 ctx.state_set(base, 4, ctx.analysis.time);
                 ctx.state_set(base, 5, 0.0);
+                ctx.state_set(base, 6, value.value);
+                ctx.state_set(base, TRANSITION_PENDING, 0.0);
                 return Ok(value);
             }
 
@@ -1787,15 +1790,57 @@ fn eval_call(
                 ctx.state_get(base, 4),
                 ctx.state_get(base, 5),
             );
+            let last_input = ctx.state_get(base, 6);
+            // The changes waiting out their delay, `(time it starts, value)`, oldest first.
+            // **A transport delay** (2.35.0): every change of the input comes out `delay`
+            // later, however soon the next one follows. Until 2.35.0 the site held one pending
+            // change and a second overwrote it, so a pulse shorter than the delay vanished --
+            // the defect OpenVAF-Reloaded PRs #44/#46 fixed in their own `transition`.
+            let held = (ctx.state_get(base, TRANSITION_PENDING) as usize).min(TRANSITION_QUEUE);
+            let mut pending: Vec<(f64, f64)> = (0..held)
+                .map(|k| {
+                    let at = TRANSITION_PENDING + 1 + 2 * k;
+                    (ctx.state_get(base, at), ctx.state_get(base, at + 1))
+                })
+                .collect();
+            if value.value != last_input {
+                let change = (t + delay, value.value);
+                if pending.len() < TRANSITION_QUEUE {
+                    pending.push(change);
+                } else if let Some(last) = pending.last_mut() {
+                    // Full: the newest change replaces the latest pending one -- the pre-2.35.0
+                    // behaviour, now only past this many changes inside one delay.
+                    *last = change;
+                }
+            }
 
-            // A changed input starts a new transition: latch the target, the rate implied by
-            // this step's full amplitude, and when it may begin.
-            if value.value != target {
-                let mut span = if value.value >= y_prev { rise } else { fall };
+            // Ramp from `y` at `from` toward the active target, up to `to`.
+            let advance = |y: f64, from: f64, to: f64, target: f64, rate: f64, t_start: f64| {
+                if to <= t_start {
+                    return y;
+                }
+                let dt = (to - from.max(t_start)).max(0.0);
+                let remaining = target - y;
+                y + (rate * dt).min(remaining.abs()) * remaining.signum()
+            };
+            let (mut y, mut at) = (y_prev, t_prev);
+            // Start every change that is due, in order, each from where the ramp before it got.
+            while let Some(k) = pending
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.0 <= t)
+                .min_by(|a, b| a.1 .0.total_cmp(&b.1 .0))
+                .map(|(k, _)| k)
+            {
+                let (begin, v) = pending.remove(k);
+                let begin = begin.max(at);
+                y = advance(y, at, begin, target, rate, t_start);
+                at = begin;
+                let mut span = if v >= y { rise } else { fall };
                 // LRM 4.5.8: a rise/fall time that is absent *or zero* means the
                 // `default_transition` value (elaboration substitutes that when a directive is
                 // in force), and with no directive "a negligible, but non-zero, transition time
-                // is used" — deliberately, because "forcing a zero-duration transition is
+                // is used" -- deliberately, because "forcing a zero-duration transition is
                 // undesirable because it could cause convergence problems". Before 2026-09-12
                 // this was an instant jump (`rate = ∞`), and a `transition` of a threshold
                 // comparison underflowed the timestep at the crossing. "Negligible" is scaled
@@ -1804,10 +1849,10 @@ fn eval_call(
                 if span == 0.0 && ctx.analysis.tstep > 0.0 {
                     span = ctx.analysis.tstep * 1e-3;
                 }
-                target = value.value;
-                t_start = t + delay;
+                target = v;
+                t_start = begin;
                 rate = if span > 0.0 {
-                    (target - y_prev).abs() / span
+                    (target - y).abs() / span
                 } else {
                     f64::INFINITY // no time axis at all (not transient): an instant jump
                 };
@@ -1815,15 +1860,7 @@ fn eval_call(
                 // into even steps (2.32.0).
                 duration = span;
             }
-
-            let y = if t < t_start {
-                y_prev // still inside `delay` — hold
-            } else {
-                let dt = (t - t_prev.max(t_start)).max(0.0);
-                let remaining = target - y_prev;
-                let step = (rate * dt).min(remaining.abs());
-                y_prev + step * remaining.signum()
-            };
+            let y = advance(y, at, t, target, rate, t_start);
 
             ctx.state_set(base, 0, t);
             ctx.state_set(base, 1, y);
@@ -1831,6 +1868,13 @@ fn eval_call(
             ctx.state_set(base, 3, rate);
             ctx.state_set(base, 4, t_start);
             ctx.state_set(base, 5, duration);
+            ctx.state_set(base, 6, value.value);
+            ctx.state_set(base, TRANSITION_PENDING, pending.len() as f64);
+            for (k, (begin, v)) in pending.iter().enumerate() {
+                let at = TRANSITION_PENDING + 1 + 2 * k;
+                ctx.state_set(base, at, *begin);
+                ctx.state_set(base, at + 1, *v);
+            }
             // Zero gradient: the output is pinned to history and a latched target, not to `x`
             // at this instant. Once it reaches the target it stays there until the input
             // changes again, at which point the *next* evaluation re-latches.

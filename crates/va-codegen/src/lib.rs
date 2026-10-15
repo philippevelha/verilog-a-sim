@@ -2422,24 +2422,49 @@ fn jit_enabled() -> bool {
 
 static JIT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// One `W0401` warning per `idt(x, ic)` call in `module`: since 2.34.0 the initial condition is
-/// applied (LRM 4.5.4), which holds the integrator at `ic` in every static analysis and leaves
-/// any feedback loop around it open there. Worth saying, because a loop that used to be closed
-/// at the operating point (or singular, when there was none) now is not, and because `ic` was
-/// ignored before. The IR carries no source locations, so the warning names the module and the
-/// count rather than a line.
-pub fn idt_ic_warnings(module: &Module) -> Vec<Diagnostic> {
-    let count = module
-        .exprs
-        .iter()
-        .filter(|e| matches!(e, Expr::Call(Builtin::Idt, args) if args.len() == 2))
-        .count();
-    if count == 0 {
-        return Vec::new();
+/// Warnings about what `module` means, as opposed to what is wrong with it: constructs whose
+/// LRM semantics are easy to misread, worth saying once per module at compile time. The IR
+/// carries no source locations, so each names the module and a count rather than a line.
+///
+/// - `W0401`, `idt(x, ic)`: since 2.34.0 the initial condition is applied (LRM 4.5.4), which
+///   holds the integrator at `ic` in every static analysis and leaves any feedback loop around
+///   it open there.
+/// - `W0402`, `transition(x, delay, ...)` with a delay that is not zero (a literal, or a
+///   parameter whose default is zero, counts as zero; a deck that sets that parameter later is
+///   not seen here): a transport delay since 2.35.0 -- every change of `x` passes, `delay` later, so a pulse shorter than
+///   the delay comes out delayed rather than removed (before, it vanished).
+pub fn semantics_warnings(module: &Module) -> Vec<Diagnostic> {
+    let count = |keep: &dyn Fn(&Expr) -> bool| module.exprs.iter().filter(|e| keep(e)).count();
+    let idt_ic = count(&|e| matches!(e, Expr::Call(Builtin::Idt, args) if args.len() == 2));
+    let delayed = count(&|e| match e {
+        Expr::Call(Builtin::Transition, args) => {
+            args.get(1).is_some_and(|&d| match module.expr(d) {
+                Expr::Const(v) => *v != 0.0,
+                Expr::Param(p) => module
+                    .params
+                    .get(p.0 as usize)
+                    .is_some_and(|p| p.default != 0.0),
+                _ => true,
+            })
+        }
+        _ => false,
+    });
+    let mut out = Vec::new();
+    if idt_ic > 0 {
+        out.push(
+            Diagnostic::new(codes::W0401)
+                .arg("module", &module.name)
+                .arg("count", idt_ic),
+        );
     }
-    vec![Diagnostic::new(codes::W0401)
-        .arg("module", &module.name)
-        .arg("count", count)]
+    if delayed > 0 {
+        out.push(
+            Diagnostic::new(codes::W0402)
+                .arg("module", &module.name)
+                .arg("count", delayed),
+        );
+    }
+    out
 }
 
 /// Switch compiling the static program to machine code on or off for the whole process,
@@ -2569,6 +2594,24 @@ impl ModelInstance for GeneratedModel {
         state: &[f64],
         sink: &mut dyn va_abi::EventSink,
     ) {
+        // A delayed `transition`'s next pending change, as a breakpoint so the integrator lands
+        // on its start: without it a step could stride over a whole pulse waiting out its delay
+        // (2.35.0). Read from the committed state; the ramp's corners are not breakpoints (the
+        // stated approximation, `crate::ad`'s `Builtin::Transition` arm).
+        for call in &self.shared.lowered.stateful_calls {
+            if call.kind != lower::StatefulKind::Transition {
+                continue;
+            }
+            let slot = |k: usize| state.get(call.base + k).copied().unwrap_or(0.0);
+            let held = (slot(lower::TRANSITION_PENDING) as usize).min(lower::TRANSITION_QUEUE);
+            let next = (0..held)
+                .map(|k| slot(lower::TRANSITION_PENDING + 1 + 2 * k))
+                .filter(|&begin| begin > actx.time)
+                .min_by(f64::total_cmp);
+            if let Some(next) = next {
+                sink.breakpoint(next);
+            }
+        }
         if self.shared.module.event_sites.is_empty() && self.shared.lowered.zi_terms.is_empty() {
             return;
         }
