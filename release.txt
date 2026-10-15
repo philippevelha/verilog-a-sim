@@ -22,6 +22,41 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.39.0 - 2026-10-15
+--------------------
+**Integer typing: `7 / 2` is 3.** The front end keeps what is declared `integer` and applies
+Verilog-A's two integer conversions (LRM 4.2.1), written into the IR as `int(...)` and
+`round(...)`, so no IR type or interface change was needed.
+  * A division of two integers truncates toward zero: `7 / 2` is 3, `-7 / 2` is -3. A real
+    operand keeps it real (`7 / 2.0`, `x / 2`, `7 / 2k` are 3.5). Also in parameter defaults,
+    where the division happens before the store: `parameter real s = 7 / 2` is 3.
+  * A value stored into an integer rounds half away from zero: `i = 3.7` stores 4,
+    `arr[1] = -2.5` stores -3, `parameter integer r = 2.5` is 3, an `integer` function's
+    return and its `integer` arguments on entry (`half(9.6)` sees 10).
+  * Integer is: a literal written as an integer (`2`, the parser's record from 2.36.0), an
+    `integer` variable, array element, parameter or function (module, block and function
+    scope, innermost declaration first), a genvar, `$rtoi`/`$random`/`$clog2`/`integer(...)`,
+    a comparison, logical, bitwise or shift result, and `+ - * / %`, unary minus and `?:` over
+    integers.
+  * `W0302` (2.36.0), which warned about integer division, is retired: it would now be wrong.
+    Its catalogue entry stays (codes are permanent) and says so; the corpus file for it is
+    removed (the corpus is 47 files).
+
+**This changes results** for models that divide two integers or store reals into integers.
+Measured on everything shipped: instrumenting the build to report each conversion it inserted,
+across the 84 `.va` files only two sites were touched, neither changing a value —
+`gray_scott.va`'s `int(N / 2)` (already explicit since 2.36.0) and `rc_logger.va`'s
+`level = floor(...)` (already whole). 25 decks run against 2.38.0 gave byte-identical output.
+
+Limits: `**` is treated as real; `+ - *` do not wrap at 32 bits on overflow; a deck value for an
+`integer` parameter (`n=2.5` on the instance line) is not rounded, because the IR's parameters
+carry no type.
+
+Measured: `cargo test --workspace` 1021 passed, 0 failed (one test rewritten from the warning to
+the values, one added: `an_integer_function_argument_rounds_on_entry`); `cargo xtask validate`
+28 checked, 0 failed, convergence 28/28; clippy and fmt clean.
+
+
 2.38.0 - 2026-10-15
 --------------------
 **Every bitwise and shift operator works on Verilog's 32-bit `integer`.** 2.37.0 did it for

@@ -739,14 +739,21 @@ All 21 (`module`, `analog`, `begin`, `end`, `endmodule`, `parameter`, `localpara
   identifiers.
 - **Expressions and Evaluation**: Declaring a scalar name with no initializer introduces it into
   scope with no initial value; it becomes assignable via `=`. The type itself is parsed and then
-  *discarded* for a scalar — v0 performs no integer-vs-real type checking or truncation (a
-  stated limitation: `7 / 2` of two integers is 3.5 here, 3 in Verilog-A). Since 2.36.0 each
-  division of two integer-typed operands is warned about (`W0302`, at its line), with the two
-  explicit spellings: `int(a / b)` or `$rtoi(a / b)` for the LRM's truncated quotient (not
-  `round`, which gives 4), `a / 2.0` or `$itor(a) / b` for a real one; a division written
-  inside `int(...)`/`$rtoi(...)` is not reported. `$rtoi` (truncate toward zero) and `$itor`
-  (identity on this simulator's `f64` values) are implemented since 2.36.0, in expressions and
-  parameter defaults — but an *array* declaration's range is genuinely load-bearing: it's
+  *kept* since 2.39.0 (it was discarded before, so `7 / 2` of two integers was 3.5): the elaborator
+  knows which variables, array elements, parameters and analog functions are `integer`, and an
+  expression is integer when it is an integer literal (`2`, not `2.0` or `2k`), one of those, a
+  genvar, `$rtoi`/`$random`/`$clog2`/`integer(...)`, a comparison, logical, bitwise or shift
+  result, or `+ - * / %`, unary minus or `?:` over integers. Two conversions follow (LRM 4.2.1),
+  written into the IR as `int(...)`/`round(...)` so no IR type is needed: a division of two
+  integers truncates toward zero (`7 / 2` is 3, `-7 / 2` is -3, also in parameter defaults:
+  `parameter real s = 7 / 2` is 3), and a value stored into an `integer` variable, array
+  element, function return, `integer` function argument (on entry) or parameter is rounded half
+  away from zero (`i = 3.7` stores 4,
+  `parameter integer r = 2.5` is 3). Limits: `**` is treated as real; `+ - *` are not wrapped
+  to 32 bits on overflow; a deck value for an `integer` parameter (`X1 ... n=2.5`) is not rounded, because
+  the IR's parameters carry no type. From 2.36.0 to 2.38.x a division of two integers was only
+  warned about (`W0302`, retired). `$rtoi` (truncate toward zero) and `$itor` (identity on this
+  simulator's `f64` values) are implemented since 2.36.0, in expressions and parameter defaults — but an *array* declaration's range is genuinely load-bearing: it's
   const-evaluated and interns one `VarId` per index, named `"name[k]"`, exactly mirroring how a
   vector net expands (§2.18). An inline initializer lowers to a `Stmt::Assign`, prepended to the
   analog block (module-level) or emitted in place (block-local) — the LRM requires it to run

@@ -193,10 +193,9 @@ Not shared defects, but they turned up on the same day and belong in the same qu
   ("v0 performs no integer-vs-real type checking or truncation"). **Workaround:** write the
   conversion: `int(i / 2)` truncates toward zero exactly as integer division does (`-7/2 → -3`),
   and `integer(x)` rounds as an integer assignment does. `%` is already right. **Fix:** integer
-  typing in elaboration. No interface change is needed after all: a division of two integers
-  can be lowered to `int(a / b)` with the IR that exists. Medium. **2.36.0 took the first step**:
-  `W0302` reports each division of two integer-typed operands with both explicit spellings, and
-  `$rtoi`/`$itor` exist to write them.
+  typing in elaboration. **Done in 2.39.0**, with no interface change: a division of two
+  integers is lowered to `int(a / b)` and a store into an integer to `round(...)`. (2.36.0 had
+  only warned, `W0302`, now retired.)
 - **Wrong-construct diagnostics.** A `string` variable reports a discipline error (`E0217`),
   `break`/`continue` report `expected '='` (`E0202`), whole-array assignment reports `E0330`,
   `paramset` reports `E0202`. Each fails loudly, so nothing is computed wrongly, but each message
@@ -218,9 +217,8 @@ Not shared defects, but they turned up on the same day and belong in the same qu
    states the limit. Silent, and the queue needs a state-layout
    decision (fixed depth and refusal when full).
 4. **Later:** `$rdist_*`, `$discontinuity`. Done in 2.36.0: `<<<`/`>>>`, `idtmod`, and for
-   integer division a warning (`W0302`) that names the explicit spellings instead of a type
-   system; integer typing itself stays open, and needs no interface change after all (the
-   front end can lower `a / b` of two integers to `int(a / b)` once it tracks types).
+   integer division a warning (`W0302`); 2.39.0 then implemented integer typing itself, with no
+   interface change, and retired the warning.
 5. **Documentation only:** items 8 and 9.
 
 Until a batch lands, the workarounds in §2 are what to tell a user, and the `refused`/error

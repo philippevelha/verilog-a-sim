@@ -49,7 +49,7 @@ pub struct ModuleAst {
     pub expr_pos: Vec<Option<SrcPos>>,
     /// The [`ExprAst::Number`]s written as plain integers (`7`, not `7.0`), by [`ExprRef`]
     /// index: the literal's value alone cannot say, and Verilog-A's integer division depends on
-    /// it (`crate::elaborate::integer_division_warnings`). Empty when the parser had no source
+    /// it (`crate::elaborate::Elaborator::is_integer`). Empty when the parser had no source
     /// text, so an unknown literal never counts as an integer.
     pub integer_literals: std::collections::HashSet<u32>,
     /// Where each item starts, parallel to [`Self::items`].
@@ -211,6 +211,9 @@ pub struct VarEntry {
     /// parser only looks for `= expr` when there was no `[...]` dimension. `None` for a
     /// declaration with no initializer.
     pub init: Option<ExprRef>,
+    /// Declared `integer` rather than `real` (2.39.0): integer division truncates, and a value
+    /// stored into it is rounded to an integer (LRM 4.2.1).
+    pub integer: bool,
 }
 
 /// A parameter's `from` value range, e.g. `from (0:inf)` or `from [0:c0)`.
@@ -391,6 +394,9 @@ pub struct AnalogFunction {
     /// argument type declarations (`input x; real x;`) and local variables alike. The types are
     /// not kept; the names are what lets elaboration tell a declared local from a typo.
     pub declared: Vec<String>,
+    /// The subset of [`Self::declared`] declared `integer` (arguments and locals alike), for
+    /// integer arithmetic (2.39.0).
+    pub integers: Vec<String>,
     /// Body statements.
     pub body: Vec<Stmt>,
 }

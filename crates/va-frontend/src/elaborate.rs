@@ -256,6 +256,7 @@ fn elaborate_inner(
         param_vals: HashMap::new(),
         vars: HashMap::new(),
         block_scopes: Vec::new(),
+        integers: Integers::default(),
         index_guards: Vec::new(),
         conditional_depth: 0,
         funcs: HashMap::new(),
@@ -304,6 +305,24 @@ struct DynamicTerminal {
 
 /// The `VarId` counterpart of [`DynamicTerminal`] — an array-variable index that is present but
 /// not compile-time-constant, one of the (up to 2) declared dimensions.
+/// What a module declares `integer` (2.39.0). Verilog-A's integer arithmetic differs from real
+/// arithmetic in two places this simulator honours: a division of two integers truncates toward
+/// zero (`7 / 2` is 3, LRM 4.2.1), and a value stored into an `integer` is rounded to the nearest
+/// one, half away from zero (`i = 3.7` stores 4, LRM 4.2.1.1). Everything is still an `f64`
+/// below the front end; the front end makes both conversions explicit in the IR (`int(...)`,
+/// `round(...)`), so no IR type is needed. See [`Elaborator::is_integer`].
+#[derive(Default)]
+struct Integers {
+    /// Integer variables, by id: module-level, block-local and analog-function scope alike.
+    vars: HashSet<VarId>,
+    /// Integer array variables, by name (each element is also in `vars`).
+    arrays: HashSet<String>,
+    /// `parameter integer` names.
+    params: HashSet<String>,
+    /// Analog functions declared `analog function integer`.
+    funcs: HashSet<String>,
+}
+
 struct DynamicVarIndex {
     /// Which index position is the dynamic one.
     dyn_dim: usize,
@@ -412,6 +431,8 @@ struct Elaborator<'a> {
     /// [`Self::vars`], so an inner declaration shadows an outer variable *or* a module
     /// parameter for exactly the extent of its own block — and not one statement further.
     block_scopes: Vec<HashMap<String, VarId>>,
+    /// What is declared `integer` (2.39.0; see [`Integers`]).
+    integers: Integers,
     /// Range checks for the runtime-indexed array and vector accesses of the statement being
     /// lowered, emitted just before it (§ `Self::push_index_guard`).
     index_guards: Vec<va_ir::Stmt>,
@@ -561,6 +582,9 @@ impl Elaborator<'_> {
                     name: entry.name.clone(),
                 });
                 slot.insert(id);
+                if entry.integer {
+                    self.integers.vars.insert(id);
+                }
             }
             return Ok(());
         }
@@ -576,7 +600,13 @@ impl Elaborator<'_> {
                 let id = VarId(self.out.vars.len() as u32);
                 self.out.vars.push(VarDecl { name: key });
                 slot.insert(id);
+                if entry.integer {
+                    self.integers.vars.insert(id);
+                }
             }
+        }
+        if entry.integer {
+            self.integers.arrays.insert(entry.name.clone());
         }
         self.var_arrays.insert(entry.name.clone(), dims);
         Ok(())
@@ -610,12 +640,19 @@ impl Elaborator<'_> {
             let mut local: HashMap<String, VarId> = HashMap::new();
             let ret = self.new_var(&f.name);
             local.insert(f.name.clone(), ret);
+            if f.ret_ty == ast::ParamType::Integer {
+                self.integers.vars.insert(ret);
+                self.integers.funcs.insert(f.name.clone());
+            }
 
             let mut args = Vec::with_capacity(f.args.len());
             let mut arg_dirs = Vec::with_capacity(f.args.len());
             for a in &f.args {
                 let id = self.new_var(&a.name);
                 local.insert(a.name.clone(), id);
+                if f.integers.contains(&a.name) {
+                    self.integers.vars.insert(id);
+                }
                 args.push(id);
                 arg_dirs.push(match a.dir {
                     ast::Direction::Input => ArgDir::Input,
@@ -633,6 +670,9 @@ impl Elaborator<'_> {
                         name: slot.key().clone(),
                     });
                     slot.insert(id);
+                    if f.integers.contains(name) {
+                        self.integers.vars.insert(id);
+                    }
                 }
             }
             // Every assignment target must be one of the above. Until 2.18.1 an undeclared
@@ -676,7 +716,22 @@ impl Elaborator<'_> {
             let body = self.lower_stmts(&f.body);
             self.vars = saved;
             self.block_scopes = saved_blocks;
-            let body = body?;
+            let mut body = body?;
+            // A value passed into an `integer` argument is stored into it, so it is rounded
+            // like any store (2.39.0, § `Integers`): `half(9.6)` sees 10. Written as the body's
+            // first statements; an `output` argument is only written by the body.
+            let mut entry = Vec::new();
+            for (a, &id) in f.args.iter().zip(&args) {
+                if self.integers.vars.contains(&id) && a.dir != ast::Direction::Output {
+                    let read = self.out.push_expr(Expr::Var(id));
+                    let rhs = self.out.push_expr(Expr::Call(Builtin::Round, vec![read]));
+                    entry.push(va_ir::Stmt::Assign { lhs: id, rhs });
+                }
+            }
+            if !entry.is_empty() {
+                entry.append(&mut body);
+                body = entry;
+            }
 
             let fid = FuncId(self.out.functions.len() as u32);
             self.out.functions.push(Function {
@@ -932,7 +987,7 @@ impl Elaborator<'_> {
                     default,
                     range,
                     is_local,
-                    ..
+                    ty,
                 } => {
                     // A second declaration of the same name is an error (the LRM allows one name,
                     // one declaration, per scope). Before 2.18.1 the map insert below simply
@@ -948,6 +1003,14 @@ impl Elaborator<'_> {
                     let default_val = match self.param_overrides.get(name) {
                         Some(&v) => v,
                         None => self.const_eval(*default)?,
+                    };
+                    // An integer parameter holds an integer: a real default or override is
+                    // rounded, half away from zero, as any store into an integer is (2.39.0).
+                    let default_val = if *ty == ast::ParamType::Integer {
+                        self.integers.params.insert(name.clone());
+                        default_val.round()
+                    } else {
+                        default_val
                     };
                     // `1/0` folds to infinity and `0.0/0.0` to NaN; neither is a value a
                     // parameter can hold. Caught here, where the parameter can still be named,
@@ -1063,7 +1126,13 @@ impl Elaborator<'_> {
             ExprAst::Binary(op, l, rhs) => {
                 let a = self.const_eval(*l)?;
                 let b = self.const_eval(*rhs)?;
-                Ok(eval_binop(*op, a, b))
+                let v = eval_binop(*op, a, b);
+                // Integer division truncates (2.39.0, § `Integers`).
+                Ok(if self.divides_integers(*op, *l, *rhs) {
+                    v.trunc()
+                } else {
+                    v
+                })
             }
             ExprAst::Call { name, args } => {
                 let vals: Result<Vec<f64>, _> = args.iter().map(|a| self.const_eval(*a)).collect();
@@ -1425,13 +1494,72 @@ impl Elaborator<'_> {
                 for entry in names {
                     if let Some(init) = entry.init {
                         let id = self.vars[&entry.name];
-                        let rhs = self.lower_expr(init)?;
+                        let rhs = self.lower_stored(id, init)?;
                         self.out.analog.push(va_ir::Stmt::Assign { lhs: id, rhs });
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether `r` is integer-valued under Verilog-A's typing (2.39.0, § `Integers`): an
+    /// integer literal (`2`, not `2.0` or `2k`, per the parser's [`ModuleAst::integer_literals`]),
+    /// a variable, array element, parameter or function declared `integer`, a genvar,
+    /// `$rtoi`/`$random`/`$clog2`/`integer(...)`, a comparison, logical, bitwise or shift result,
+    /// or `+ - * / %`, unary minus and `?:` over integers. `**` is treated as real. A name
+    /// resolves as it does for lowering: the innermost declaration wins.
+    fn is_integer(&self, r: ExprRef) -> bool {
+        let name_is_integer = |n: &str| {
+            if self.genvar_env.contains_key(n) || self.genvars.contains(n) {
+                return true;
+            }
+            match self.lookup_var(n) {
+                Some(id) => self.integers.vars.contains(&id),
+                None => self.integers.params.contains(n),
+            }
+        };
+        match self.ast.expr(r) {
+            ExprAst::Number(_) => self.ast.integer_literals.contains(&r.0),
+            ExprAst::Ident(n) => name_is_integer(n),
+            ExprAst::IndexedIdent(n, _) => self.integers.arrays.contains(n),
+            ExprAst::SysFunc { name, .. } => matches!(name.as_str(), "rtoi" | "random" | "clog2"),
+            ExprAst::Call { name, .. } => name == "integer" || self.integers.funcs.contains(name),
+            ExprAst::Unary(op, x) => match op {
+                ast::UnOp::Not | ast::UnOp::BitNot => true,
+                ast::UnOp::Neg => self.is_integer(*x),
+            },
+            ExprAst::Binary(op, l, rhs) => match op {
+                ast::BinOp::Add
+                | ast::BinOp::Sub
+                | ast::BinOp::Mul
+                | ast::BinOp::Div
+                | ast::BinOp::Mod => self.is_integer(*l) && self.is_integer(*rhs),
+                ast::BinOp::Pow => false,
+                _ => true,
+            },
+            ExprAst::Cond { then_, else_, .. } => {
+                self.is_integer(*then_) && self.is_integer(*else_)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `l op r` is a division of two integers, which truncates (§ `Integers`).
+    fn divides_integers(&self, op: ast::BinOp, l: ExprRef, r: ExprRef) -> bool {
+        op == ast::BinOp::Div && self.is_integer(l) && self.is_integer(r)
+    }
+
+    /// Lower `rhs` as the value stored into `lhs`: rounded to the nearest integer, half away from
+    /// zero, when `lhs` is an integer and `rhs` is not already one (LRM 4.2.1.1, 2.39.0).
+    fn lower_stored(&mut self, lhs: VarId, rhs: ExprRef) -> Result<ExprId, FrontendError> {
+        let integer_target = self.integers.vars.contains(&lhs);
+        let value = self.lower_expr(rhs)?;
+        Ok(if integer_target && !self.is_integer(rhs) {
+            self.out.push_expr(Expr::Call(Builtin::Round, vec![value]))
+        } else {
+            value
+        })
     }
 
     fn lower_stmt(&mut self, stmt: &Stmt) -> Result<va_ir::Stmt, FrontendError> {
@@ -1532,6 +1660,9 @@ impl Elaborator<'_> {
                     self.out.vars.push(VarDecl {
                         name: entry.name.clone(),
                     });
+                    if entry.integer {
+                        self.integers.vars.insert(id);
+                    }
                     match self.block_scopes.last_mut() {
                         Some(scope) => {
                             scope.insert(entry.name.clone(), id);
@@ -1550,7 +1681,7 @@ impl Elaborator<'_> {
                         let id = self
                             .lookup_var(&entry.name)
                             .expect("just bound by the loop above");
-                        let rhs = self.lower_expr(init)?;
+                        let rhs = self.lower_stored(id, init)?;
                         inits.push(va_ir::Stmt::Assign { lhs: id, rhs });
                     }
                 }
@@ -1650,7 +1781,7 @@ impl Elaborator<'_> {
                             return self.lower_fopen(id, args);
                         }
                     }
-                    let rhs = self.lower_expr(*rhs)?;
+                    let rhs = self.lower_stored(id, *rhs)?;
                     Ok(va_ir::Stmt::Assign { lhs: id, rhs })
                 } else {
                     // `lhs[index] = rhs;` / `lhs[i][j] = rhs;`: one element of a 1-D or § 2-D
@@ -3007,15 +3138,23 @@ impl Elaborator<'_> {
                 };
                 Expr::Unary(op, inner)
             }
-            ExprAst::Binary(op, l, rhs) => {
-                let op = map_binop(*op);
-                let l = self.lower_expr(*l)?;
+            ExprAst::Binary(ast_op, l_ref, r_ref) => {
+                let op = map_binop(*ast_op);
+                let l = self.lower_expr(*l_ref)?;
                 // `&&`/`||` short-circuit: their right side is evaluated conditionally.
                 let short = matches!(op, va_ir::BinOp::And | va_ir::BinOp::Or);
                 self.conditional_depth += usize::from(short);
-                let rhs = self.lower_expr(*rhs);
+                let rhs = self.lower_expr(*r_ref);
                 self.conditional_depth -= usize::from(short);
-                Expr::Binary(op, l, rhs?)
+                let quotient = Expr::Binary(op, l, rhs?);
+                // A division of two integers truncates toward zero (2.39.0, § `Integers`):
+                // `int(a / b)`, exact for every quotient an `f64` holds exactly.
+                if self.divides_integers(*ast_op, *l_ref, *r_ref) {
+                    let q = self.out.push_expr(quotient);
+                    Expr::Call(Builtin::Int, vec![q])
+                } else {
+                    quotient
+                }
             }
             ExprAst::Cond { cond, then_, else_ } => {
                 let cond = self.lower_expr(*cond)?;
@@ -4336,12 +4475,14 @@ impl Elaborator<'_> {
         }) = self.dynamic_var_index(name, idxs)?
         else {
             let id = self.resolve_var_array_index(name, idxs)?;
-            let rhs = self.lower_expr(rhs)?;
+            let rhs = self.lower_stored(id, rhs)?;
             return Ok(va_ir::Stmt::Assign { lhs: id, rhs });
         };
         let idx = self.lower_expr(idxs[dyn_dim])?;
         self.push_index_guard(idx, name, lo, hi);
-        let rhs = self.lower_expr(rhs)?;
+        // Every element shares the array's type, so the first one decides the rounding.
+        let first = self.resolve_array_var_at(name, &combine_idx(dyn_dim, lo, other_idx))?;
+        let rhs = self.lower_stored(first, rhs)?;
         let mut chain: Option<va_ir::Stmt> = None;
         for k in (lo..=hi).rev() {
             let full = combine_idx(dyn_dim, k, other_idx);
@@ -4943,121 +5084,6 @@ pub fn port_direction_warnings(ast: &ModuleAst) -> Vec<Diagnostic> {
             }
         })
         .collect()
-}
-
-/// One `W0302` per division of two integer-typed operands in `ast` (2.36.0).
-///
-/// Verilog-A divides two integers as integers, truncating toward zero (`7 / 2` is `3`, LRM 4.2.1);
-/// this simulator has no integer type below the frontend and divides in real arithmetic (`3.5`).
-/// Until that changes, the warning says so where it happens, with the two ways to write the
-/// intent explicitly. An operand counts as integer when it is a literal written without a
-/// fraction, exponent or scale factor, a module-level `integer` variable, an `integer`
-/// parameter, a genvar, `$rtoi`/`$random`/`$clog2`/`integer(...)`, a comparison or logical or
-/// bitwise result, or arithmetic on integers. Conservative: a name that a block or an analog
-/// function declares again (whose type the AST does not keep) never counts, so a warning is
-/// never about a real quotient.
-pub fn integer_division_warnings(ast: &ModuleAst) -> Vec<Diagnostic> {
-    let mut integers: HashSet<&str> = HashSet::new();
-    let mut shadowed: HashSet<&str> = HashSet::new();
-    fn shadows<'a>(stmts: &'a [Stmt], out: &mut HashSet<&'a str>) {
-        for st in stmts {
-            match st {
-                Stmt::VarDecl { names } => out.extend(names.iter().map(|n| n.name.as_str())),
-                Stmt::Block(b) => shadows(b, out),
-                Stmt::If { then_, else_, .. } => {
-                    shadows(then_, out);
-                    shadows(else_, out);
-                }
-                Stmt::While { body, .. } | Stmt::Repeat { body, .. } => shadows(body, out),
-                Stmt::For { body, .. } => shadows(body, out),
-                Stmt::Case { arms, default, .. } => {
-                    for arm in arms {
-                        shadows(&arm.body, out);
-                    }
-                    if let Some(d) = default {
-                        shadows(d, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    for item in &ast.items {
-        match item {
-            Item::Var {
-                ty: ast::ParamType::Integer,
-                names,
-            } => integers.extend(names.iter().map(|n| n.name.as_str())),
-            Item::Param {
-                ty: ast::ParamType::Integer,
-                name,
-                ..
-            } => {
-                integers.insert(name.as_str());
-            }
-            Item::Genvar { names } => integers.extend(names.iter().map(String::as_str)),
-            Item::Analog(st) => shadows(std::slice::from_ref(st), &mut shadowed),
-            Item::Function(f) => {
-                shadowed.insert(f.name.as_str());
-                shadowed.extend(f.declared.iter().map(String::as_str));
-                shadowed.extend(f.args.iter().map(|a| a.name.as_str()));
-            }
-            _ => {}
-        }
-    }
-    let is_int_name = |n: &str| integers.contains(n) && !shadowed.contains(n);
-    // `int(a / b)` and `$rtoi(a / b)` are the fix the warning recommends: their truncation
-    // gives exactly the LRM's integer quotient, so a division written inside one is not
-    // reported. (`floor` and `integer(...)` are not: they differ for a negative or a .5 quotient.)
-    let truncated: HashSet<u32> = ast
-        .exprs
-        .iter()
-        .filter_map(|e| match e {
-            ExprAst::Call { name, args } if name == "int" => args.first(),
-            ExprAst::SysFunc { name, args } if name == "rtoi" => args.first(),
-            _ => None,
-        })
-        .map(|r| r.0)
-        .collect();
-    // Memoised over the arena: operands always come before the expression using them.
-    let mut int = vec![false; ast.exprs.len()];
-    let mut out = Vec::new();
-    for (i, e) in ast.exprs.iter().enumerate() {
-        let at = |r: ExprRef| int.get(r.0 as usize).copied().unwrap_or(false);
-        let this = match e {
-            ExprAst::Number(_) => ast.integer_literals.contains(&(i as u32)),
-            ExprAst::Ident(n) => is_int_name(n),
-            ExprAst::IndexedIdent(n, _) => is_int_name(n),
-            ExprAst::SysFunc { name, .. } => matches!(name.as_str(), "rtoi" | "random" | "clog2"),
-            ExprAst::Call { name, .. } => name == "integer",
-            ExprAst::Unary(op, x) => match op {
-                ast::UnOp::Not => true,
-                ast::UnOp::Neg | ast::UnOp::BitNot => at(*x),
-            },
-            ExprAst::Binary(op, l, r) => match op {
-                ast::BinOp::Add
-                | ast::BinOp::Sub
-                | ast::BinOp::Mul
-                | ast::BinOp::Div
-                | ast::BinOp::Mod => at(*l) && at(*r),
-                ast::BinOp::Pow => false,
-                _ => true,
-            },
-            ExprAst::Cond { then_, else_, .. } => at(*then_) && at(*else_),
-            _ => false,
-        };
-        let divides_integers =
-            matches!(e, ExprAst::Binary(ast::BinOp::Div, l, r) if at(*l) && at(*r));
-        int[i] = this;
-        if divides_integers && !truncated.contains(&(i as u32)) {
-            let d = Diagnostic::new(codes::W0302).arg("module", &ast.name);
-            out.push(match ast.expr_pos.get(i).copied().flatten() {
-                Some(p) => d.at(ast.describe(p)),
-                None => d,
-            });
-        }
-    }
-    out
 }
 
 /// Map every net name a module declares to the discipline it was declared with

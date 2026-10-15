@@ -1,10 +1,9 @@
 {
   "code": "W0302",
-  "rev": 1,
+  "rev": 2,
   "message": "module `{module}`: this divides two integers; Verilog-A truncates the quotient (7 / 2 = 3), this simulator does not (3.5)",
-  "description": "In Verilog-A an integer divided by an integer is an integer: the quotient is truncated toward zero, so `7 / 2` is 3 and `-7 / 2` is -3 (LRM 4.2.1, as in C). This simulator has no integer type below its front end and divides in real arithmetic, so the same expression gives 3.5 here. Whether that is what the model means is exactly what the source does not say, so it is reported rather than guessed. An operand counts as an integer when it is an integer literal (`2`, not `2.0`), an `integer` variable or parameter, a genvar, `$rtoi(...)`, or arithmetic on those.",
+  "description": "Retired in 2.39.0, which implements integer division: a division of two integers now truncates as the LRM says, so there is nothing left to warn about and the code is no longer emitted. Codes are never reused. From 2.36.0 to 2.38.x it reported a division of two integer-typed operands, which this simulator then divided in real arithmetic (7 / 2 gave 3.5 instead of 3).",
   "actions": [
-    "If the integer quotient is meant (an index, a count, a bit position), write it explicitly: `int(a / b)` or `$rtoi(a / b)` truncate toward zero like the LRM. Not `round(a / b)`: that turns 3.5 into 4.",
-    "If the real quotient is meant, make one operand real so the source says so: `a / 2.0`, or `$itor(a) / b`. That also gives the same answer in every other simulator."
+    "Nothing to do on 2.39.0 or later. On 2.36.x-2.38.x, write `int(a / b)` for the integer quotient, or `a / 2.0` for a real one."
   ]
 }

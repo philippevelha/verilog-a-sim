@@ -60,38 +60,58 @@ fn op(tag: &str, decls: &str, prelude: &str, drives: &[(&str, &str)]) -> String 
     )
 }
 
+/// Integer typing (2.39.0, LRM 4.2.1): a division of two integers truncates toward zero, and a
+/// value stored into an integer rounds half away from zero. 2.36.0-2.38.x only warned
+/// (`W0302`, now retired) and divided in real arithmetic.
 #[test]
-fn dividing_two_integers_warns_and_says_what_each_reading_gives() {
-    let src = "module a(p); inout p; electrical p;
-  integer i; real x, y; parameter integer n = 7;
-  analog begin
-    i = 7; x = 7;
-    y = i / 2;
-    y = n / 2;
-    y = 7 / 2;
-    y = i / 2.0;
-    y = x / 2;
-    y = i / 2k;
-    y = int(i / 2);
-    y = $rtoi(n / 2);
-    I(p) <+ V(p) * y;
-  end
-endmodule
-";
-    let out = run("w0302", &[("a.va", src)], &["check", "a.va"]);
-    let lines: Vec<&str> = out.lines().filter(|l| l.contains("W0302")).collect();
-    // Lines 5-7 divide two integers; 8-10 have a real operand (`2.0`, `x`, the scale factor
-    // in `2k`); 11-12 are the explicit truncation the warning recommends.
-    let at: Vec<&str> = lines
-        .iter()
-        .filter_map(|l| l.split("at a.va:").nth(1)?.split(':').next())
-        .collect();
-    assert_eq!(at, ["5", "6", "7"], "{out}");
-    assert!(
-        lines[0].contains("7 / 2 = 3") && lines[0].contains("3.5"),
-        "{}",
-        lines[0]
+fn integers_divide_and_store_as_integers() {
+    let out = op(
+        "ints",
+        "integer n, q, arr[0:1]; real x;
+  parameter integer p = 7 / 2; parameter integer r = 2.5; parameter real s = 7 / 2;
+  analog function integer half; input v; integer v; half = v / 2; endfunction",
+        "  n = 7; x = 7; q = 3.7; arr[1] = -2.5;
+  begin : blk
+    integer t;
+    t = n / 2;
+    V(k) <+ t;
+  end",
+        &[
+            ("a", "n / 2"),
+            ("b", "-n / 2"),
+            ("c", "n / 2.0"),
+            ("d", "x / 2"),
+            ("e", "p"),
+            ("f", "r"),
+            ("g", "q"),
+            ("h", "arr[1]"),
+            ("i", "half(9)"),
+            ("j", "s"),
+            ("l", "7 / 2 * 2.0"),
+            ("m", "n / 2k"),
+            ("k", "0"),
+        ],
     );
+    assert!(!out.contains("W0302"), "the warning is retired: {out}");
+    for (node, want) in [
+        ("a", 3.0),  // integer / integer truncates
+        ("b", -3.0), // toward zero, not down
+        ("c", 3.5),  // a real operand makes it real
+        ("d", 3.5),
+        ("e", 3.0),  // in a parameter default too
+        ("f", 3.0),  // an integer parameter rounds 2.5 away from zero
+        ("g", 4.0),  // a store into an integer rounds
+        ("h", -3.0), // into an integer array element too
+        ("i", 4.0),  // an integer function's own arithmetic
+        ("j", 3.0),  // 7 / 2 is integer division before it reaches the real parameter
+        ("l", 6.0),
+        ("m", 0.0035), // `2k` is a real literal
+    ] {
+        assert_eq!(op_value(&out, node), want, "V({node}): {out}");
+    }
+    // A block-local `integer` is typed too. `V(k)` gets `t` inside the block and `0` after;
+    // the contributions add.
+    assert_eq!(op_value(&out, "k"), 3.0, "{out}");
 }
 
 #[test]
@@ -306,6 +326,26 @@ fn bitwise_and_shift_operators_are_32_bit() {
         ("k", -4.0),
         ("l", -1073741825.0),
     ] {
+        assert_eq!(op_value(&out, node), want, "V({node}): {out}");
+    }
+}
+
+/// A value passed into an `integer` function argument is stored into it, so it rounds
+/// (2.39.0): `half(9.6)` sees 10 and returns 5. A `real` argument is untouched.
+#[test]
+fn an_integer_function_argument_rounds_on_entry() {
+    let out = op(
+        "fnarg",
+        "analog function integer half; input v; integer v; half = v / 2; endfunction
+  analog function real twice; input w; real w; twice = 2 * w; endfunction",
+        "",
+        &[
+            ("a", "half(9.6)"),
+            ("b", "half(-9.6)"),
+            ("c", "twice(1.25)"),
+        ],
+    );
+    for (node, want) in [("a", 5.0), ("b", -5.0), ("c", 2.5)] {
         assert_eq!(op_value(&out, node), want, "V({node}): {out}");
     }
 }

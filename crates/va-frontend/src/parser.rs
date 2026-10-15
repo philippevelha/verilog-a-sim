@@ -1183,7 +1183,7 @@ impl Parser<'_> {
     /// net declaration, there is no shared prefix-range form here: a scalar/array `real`/
     /// `integer` never carries a width before the name list, only per-name array dimension(s)
     /// after it.
-    fn parse_var_entry(&mut self) -> Result<VarEntry, FrontendError> {
+    fn parse_var_entry(&mut self, integer: bool) -> Result<VarEntry, FrontendError> {
         let name = self.expect_ident()?;
         let ranges = self.parse_dim_list()?;
         let init = if ranges.is_empty() && self.at(&Token::Assign) {
@@ -1192,15 +1192,20 @@ impl Parser<'_> {
         } else {
             None
         };
-        Ok(VarEntry { name, ranges, init })
+        Ok(VarEntry {
+            name,
+            ranges,
+            init,
+            integer,
+        })
     }
 
-    /// A non-empty comma-separated list of [`Self::parse_var_entry`].
-    fn parse_var_entry_list(&mut self) -> Result<Vec<VarEntry>, FrontendError> {
-        let mut names = vec![self.parse_var_entry()?];
+    /// A non-empty comma-separated list of [`Self::parse_var_entry`], all of one base type.
+    fn parse_var_entry_list(&mut self, integer: bool) -> Result<Vec<VarEntry>, FrontendError> {
+        let mut names = vec![self.parse_var_entry(integer)?];
         while self.at(&Token::Comma) {
             self.pos += 1;
-            names.push(self.parse_var_entry()?);
+            names.push(self.parse_var_entry(integer)?);
         }
         Ok(names)
     }
@@ -1757,7 +1762,7 @@ impl Parser<'_> {
                     Some(Token::Integer) => ParamType::Integer,
                     _ => ParamType::Real,
                 };
-                let names = self.parse_var_entry_list()?;
+                let names = self.parse_var_entry_list(ty == ParamType::Integer)?;
                 self.eat(&Token::Semicolon)?;
                 Ok(Item::Var { ty, names })
             }
@@ -2045,6 +2050,7 @@ impl Parser<'_> {
 
         let mut args = Vec::new();
         let mut declared = Vec::new();
+        let mut integers = Vec::new();
         let mut body = Vec::new();
         loop {
             if self.at_keyword("endfunction") {
@@ -2066,10 +2072,15 @@ impl Parser<'_> {
                     self.eat(&Token::Semicolon)?;
                 }
                 // Argument/local type declarations: the names are kept (elaboration checks
-                // assignment targets against them); the types are not tracked.
+                // assignment targets against them), and the `integer` ones listed again for
+                // integer arithmetic (2.39.0).
                 Some(Token::Real) | Some(Token::Integer) => {
-                    self.pos += 1;
-                    declared.extend(self.ident_list()?);
+                    let integer = self.bump() == Some(&Token::Integer);
+                    let names = self.ident_list()?;
+                    if integer {
+                        integers.extend(names.iter().cloned());
+                    }
+                    declared.extend(names);
                     self.eat(&Token::Semicolon)?;
                 }
                 _ => body.push(self.parse_stmt()?),
@@ -2081,6 +2092,7 @@ impl Parser<'_> {
             ret_ty,
             args,
             declared,
+            integers,
             body,
         }))
     }
@@ -2322,8 +2334,8 @@ impl Parser<'_> {
             // A block-local variable declaration, `real x, y;` / `integer i;`, or array
             // declaration, `real out_val[0:15];` (§ array variables).
             Some(Token::Real) | Some(Token::Integer) => {
-                self.pos += 1; // base type (not retained)
-                let names = self.parse_var_entry_list()?;
+                let integer = self.bump() == Some(&Token::Integer);
+                let names = self.parse_var_entry_list(integer)?;
                 self.eat(&Token::Semicolon)?;
                 Ok(Stmt::VarDecl { names })
             }
