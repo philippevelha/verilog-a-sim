@@ -22,6 +22,22 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.32.1+2 - 2026-10-15
+----------------------
+**A proposal for licensed, protected models: `docs/proposals/protected-models.md`.** Docs only,
+no behaviour change; nothing in it is implemented.
+  * Our own models would ship as compiled WebAssembly inside a signed `.vam` file tied to one
+    license, loaded by a new `va-wasm-model` crate that implements `ModelInstance` from outside,
+    so Interface β is unchanged. The WASM runs sandboxed: no files, network or clock, with memory
+    and fuel limits, and every trap becomes an error.
+  * Stated plainly in the document: in an Apache-2.0 simulator no secret can live on the user's
+    side. Compilation raises the cost of recovering the equations but does not prevent it, the
+    model's behaviour can always be measured, and license checks can be patched out. Signing gives
+    integrity and attribution; the contract is the enforcement.
+  * NDA-bound third-party IP is explicitly out of scope, and `` `pragma protect `` stays a refusal.
+  * Rejected: encrypting in the open tool (key would be public), native `.so`/OSDI plugins, embedding
+    the IR, and per-licensee numeric watermarks (they would break reproducibility).
+
 2.32.1+1 - 2026-10-15
 ----------------------
 **A plan for the defects we share with OpenVAF-Reloaded:
