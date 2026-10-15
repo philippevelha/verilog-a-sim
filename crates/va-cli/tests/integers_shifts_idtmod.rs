@@ -236,3 +236,35 @@ fn idt_takes_a_never_resetting_assert_and_an_abstol_and_refuses_a_real_reset() {
     );
     assert!(!out.contains("E0001"), "{out}");
 }
+
+/// `>>` is a logical shift of Verilog's 32-bit `integer`, read back as signed (2.37.0; it was a
+/// 64-bit shift, so `-8 >> 1` gave 2^63 - 4). Checked at run time and in a parameter default,
+/// which take different paths (`ad::shift_right_32`, `elaborate::shift_right_32`).
+#[test]
+fn logical_right_shift_is_32_bit() {
+    let out = op(
+        "shr32",
+        "integer i, k; parameter integer p = -8 >> 1;",
+        "  i = -8; k = -1;",
+        &[
+            ("a", "i >> 1"),
+            ("b", "i >> 0"),
+            ("c", "16 >> 2"),
+            ("d", "i >> 32"),
+            ("e", "16 >> k"),
+            ("f", "p"),
+            ("g", "-1 >> 31"),
+        ],
+    );
+    for (node, want) in [
+        ("a", 2147483644.0),
+        ("b", -8.0),
+        ("c", 4.0),
+        ("d", 0.0),
+        ("e", 0.0),
+        ("f", 2147483644.0),
+        ("g", 1.0),
+    ] {
+        assert_eq!(op_value(&out, node), want, "V({node}): {out}");
+    }
+}

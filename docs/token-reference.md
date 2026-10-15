@@ -407,11 +407,15 @@ class of lexemes.
 - **Expressions and Evaluation**: There is no bit-vector type in this project — every value is
   `f64` — so each of these truncates its operand(s) to `i64` (`to_i64`, shared with `int()`/
   `floor()`'s float↔integer bridging elsewhere), performs the bitwise/shift operation, and casts
-  the result back to `f64`. `>>` is a *logical* (zero-fill) shift — this project has no signed/
-  unsigned integer distinction to make an arithmetic shift matter. The arithmetic shifts are
+  the result back to `f64`. `>>` is a *logical* (zero-fill) shift of Verilog's 32-bit `integer`, read
+  back as signed (since 2.37.0; a 64-bit shift before): `-8 >> 1` is `32'h7FFF_FFFC` =
+  2147483644, and a count of 32 or more, or a negative one (unsigned in Verilog), gives 0. The
+  other bitwise operators and `<<` still work on 64 bits; for operands and results inside the
+  32-bit range they agree with Verilog, and `1 << 31` or `1 << 40` do not (Verilog wraps to
+  -2147483648 and 0). The arithmetic shifts are
   implemented since 2.36.0 (a parse error before): `<<<` is `<<`, and `a >>> b` fills with the
-  sign bit, which the parser writes as `floor(int(a) / 2 ** int(b))` (`-8 >>> 1` is `-4`, `>>`
-  gives a large positive number), so it needs no IR operator of its own and folds in a
+  sign bit, which the parser writes as `floor(int(a) / 2 ** int(b))` (`-8 >>> 1` is `-4`, `-8 >> 1`
+  is 2147483644), so it needs no IR operator of its own and folds in a
   parameter default. Exact for `|a| < 2^53`. `^~` and `~^` are accepted as
   two spellings of the same XNOR operator (`BinOp::BitXnor`), matching the LRM. Both the dynamic
   path (`va-codegen`'s AD) and the constant-folding path (`Elaborator::const_eval`/`eval_binop`)

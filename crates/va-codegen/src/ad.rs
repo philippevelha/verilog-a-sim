@@ -1436,9 +1436,7 @@ pub(crate) fn apply_binary(op: BinOp, a: Dual, b: Dual) -> Dual {
         BinOp::BitXor => Dual::constant((to_i64(a.value) ^ to_i64(b.value)) as f64),
         BinOp::BitXnor => Dual::constant(!(to_i64(a.value) ^ to_i64(b.value)) as f64),
         BinOp::Shl => Dual::constant(to_i64(a.value).wrapping_shl(to_i64(b.value) as u32) as f64),
-        BinOp::Shr => {
-            Dual::constant((to_i64(a.value) as u64).wrapping_shr(to_i64(b.value) as u32) as f64)
-        }
+        BinOp::Shr => Dual::constant(shift_right_32(a.value, b.value)),
     }
 }
 
@@ -2183,6 +2181,21 @@ fn bool_to_f64(b: bool) -> f64 {
 /// bit-vector type in this project; every value is `f64`).
 fn to_i64(v: f64) -> i64 {
     v.trunc() as i64
+}
+
+/// Verilog's `a >> n` on an `integer` (2.37.0): a logical shift of the 32-bit two's-complement
+/// pattern, read back as a signed integer, so `-8 >> 1` is `32'h7FFF_FFFC` = 2147483644 and
+/// `-8 >> 0` stays -8. A count of 32 or more shifts every bit out, and a negative count -- an
+/// unsigned quantity in Verilog, so a huge one -- does too: both give 0. `a` is truncated toward
+/// zero and wrapped into 32 bits, as storing it in an `integer` would. Before 2.37.0 this was a
+/// 64-bit shift (`-8 >> 1` gave 2^63 - 4, and the count wrapped modulo 64). Kept identical to
+/// its twin in `va-frontend`'s constant folder (`elaborate::shift_right_32`).
+fn shift_right_32(a: f64, n: f64) -> f64 {
+    let n = to_i64(n);
+    if !(0..32).contains(&n) {
+        return 0.0;
+    }
+    f64::from(((to_i64(a) as i32 as u32) >> n) as i32)
 }
 
 #[cfg(test)]

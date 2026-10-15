@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.37.0 - 2026-10-15
+--------------------
+**`>>` shifts Verilog's 32-bit `integer`.** A logical shift of the 32-bit two's-complement
+pattern, read back as signed: `-8 >> 1` is `32'h7FFF_FFFC` = 2147483644, as in every Verilog
+simulator. It was a 64-bit shift, giving 2^63 - 4 (9223372036854775804).
+  * A count of 32 or more shifts every bit out (0); a negative count, which Verilog treats as an
+    unsigned and so huge one, gives 0 too. The 64-bit shift took the count modulo 64, so
+    `1 >> 64` gave 1.
+  * The operand is truncated toward zero and wrapped into 32 bits, as storing it in an
+    `integer` would.
+  * Same rule in both places `>>` is evaluated: at run time (`va_codegen::ad`) and when a
+    parameter default is folded (`va_frontend::elaborate`), one small helper in each.
+
+**This changes results** for a negative left operand or a count outside 0-31; for a
+non-negative operand below 2^31 and a count in range nothing changes. No `.va` file in
+`models/`, `external/` or `docs/examples/` uses `>>`.
+
+Limits: `<<` and `&`/`|`/`^`/`~` still work on 64 bits. They agree with Verilog while operands
+and results stay in the 32-bit range; `1 << 31` gives 2147483648 here and -2147483648 in
+Verilog, and `1 << 40` gives 2^40 here and 0 in Verilog.
+
+Measured: `cargo test --workspace` 1019 passed, 0 failed (1018 + 1,
+`logical_right_shift_is_32_bit`); `cargo xtask validate` 28 checked, 0 failed, convergence
+28/28.
+
+
 2.36.0 - 2026-10-15
 --------------------
 **Integer division warns (`W0302`); `<<<`, `>>>`, `idtmod`, `$rtoi` and `$itor` are implemented.**
