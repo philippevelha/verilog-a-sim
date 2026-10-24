@@ -1328,9 +1328,13 @@ including the ones with no implemented behavior at all.
   The value is a constant with respect to the solution vector, so it carries a **zero gradient**
   — verified against a central finite difference, per `CLAUDE.md` §5, not assumed.
 
-  `"ic"` and `"nodeset"` answer `false` in every analysis. That is a statement of fact, not an
-  approximation: this simulator has no initial-condition or nodeset phase, so no model can be
-  inside one.
+  `"ic"` answers `false` in every analysis. That is a statement of fact, not an approximation:
+  this simulator has no initial-condition phase, so no model can be inside one. `"nodeset"` also
+  answers `false`, but **since 2.43.0 that is a known gap**. `va-cli` now has SPICE's held nodeset
+  phase (a deck with `.nodeset` is solved first with those nets held, then released), and a model
+  asking `analysis("nodeset")` during the held solve gets `false` where SPICE answers true. The
+  analysis context has no field for "nodesets held", and adding one is an Interface β change
+  (`CLAUDE.md` §6), not yet made.
 - **Structural and Analog Usage**: Analog-block only.
 - **Comparison with Traditional Constructs**: Now closest to a plain runtime predicate on
   simulator state — `if (mode == TRANSIENT)` — rather than the compile-time `#ifdef` it used to

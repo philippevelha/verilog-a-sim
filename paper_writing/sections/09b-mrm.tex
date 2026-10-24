@@ -235,8 +235,13 @@ Laser power exposed a numerical trap that is common to every model of this kind,
 around it (Fig.~\ref{fig:mrm-eqc-power}). The ring's temperature follows the optical power with
 a 1\,\textmu s time constant, so during a 2.4\,ns eye pattern it is frozen at the DC operating
 point. Above about 1\,mW the thermal equation of a red-detuned ring has three roots. A DC solve
-started cold lands on the cold or the unstable middle root, and a \texttt{.nodeset} on the
-thermal node does not move it, because the optical field it would need starts at zero. Direct
+started cold lands on the cold or the unstable middle root. A \texttt{.nodeset} on the thermal
+node used only as a starting point does not move it, because the optical field it would need
+starts at zero. Since \vas{} 2.43.0 the nodeset is held for a first solve, as in SPICE. The
+field then settles at the held temperature, and a hot-root nodeset reaches the hot root, within
+1.1\,mK of the static equation at five bistable points between 2 and 8\,mW.
+\src{2.43.0 release entry; mrm\_eqc\_ls, .op}
+The study below predates it and does not depend on it. Direct
 self-heating runs therefore showed an apparent collapse of the eye with power that is a
 property of the solver's starting point, not of the ring. The frozen temperature is, however,
 exactly a laser offset. The eye at any power is then the self-heating-free eye at the same

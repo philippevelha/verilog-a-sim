@@ -19,10 +19,17 @@ constant τ_th ≈ 1 µs. An eye-diagram transient lasts a few nanoseconds. Thre
    static equation has three roots. The middle one is unstable, and a real device never sits
    on it.
 3. **The DC solve chooses a branch for you.** Newton started cold can land on the cold branch,
-   or on the unstable middle root. A `.nodeset` on the thermal net alone does not help. The
-   seeded temperature has no optical field to sustain it, because the field states start at
-   zero and can't be named in a netlist, so Newton's first step erases the seed. This was
-   measured: hot-root seeds of 7.96 K and 9.5 K gave the same 0.84 K point as no seed.
+   or on the unstable middle root. Before 2.43.0 a `.nodeset` on the thermal net did not help.
+   It was only Newton's starting point, the seeded temperature had no optical field to sustain
+   it (the field states start at zero and can't be named in a netlist), and Newton's first step
+   erased the seed: hot-root seeds of 7.96 K and 9.5 K gave the same 0.84 K point as no seed.
+   **Since 2.43.0 `.nodeset` holds the net first, as SPICE does**, so the field settles at the
+   held temperature before the release. A seed at the hot root now reaches it. Measured on
+   `mrm_eqc_ls` at five bistable points (2–8 mW): 4.9396/7.9576/9.4457/11.1146/14.4008 K against
+   the static equation's 4.9395/7.9573/9.4456/11.1135/14.4004 K. A seed near the unstable
+   middle root can still land on it: Newton does not know about stability. The method below is
+   still the way to sweep a parameter, because it says *which* branch is physical (the stability
+   filter, approach from the blue) instead of leaving that to the seed.
 
 The symptom is an eye that seems to "collapse" above some power, with a best laser position
 that jumps by hundreds of picometres. That is a solver artifact, not physics.

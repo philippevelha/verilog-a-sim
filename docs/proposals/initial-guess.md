@@ -32,7 +32,9 @@ started there, would the rescue still be needed?
   existing deck is bit-identical. A nodeset naming a net the deck does not have is an error; a
   malformed pair is skipped with a note.
   **Limitation, stated:** SPICE first solves with each nodeset node *held* at its value, then
-  releases it. This implements only the second half: the starting guess.
+  releases it. This implements only the second half: the starting guess. *(Closed in 2.43.0:
+  both halves now, `va-cli`'s `operating_point_nodeset`. The ISCAS measurements below were
+  taken with the start-only form; the held form was not re-measured on them.)*
 - **`gen_iscas.py ... --nodeset`** evaluates the `.bench` logic for the deck's starting vector
   and writes every net pin (driver and every load pin) at 0 or 1.8 V, plus `vdd`. A cell's
   internal nodes, such as a NAND's stack node, are left to Newton. The rest of the deck is

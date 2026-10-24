@@ -159,6 +159,14 @@ Timer resolution is 10 ms, so "<0.01 s" means below the resolution. Fixed start-
 
 On transient and DC sweeps, verilog-a-sim takes **about 10× longer per time point** than ngspice: about 60 µs vs 4–5 µs. It uses about 20 % less peak memory. The waveforms agree to 5–6e-5 relative.
 
+### 4b. t10: choosing the thermal branch with `.nodeset` (verilog-a-sim 2.43.0)
+
+`t10_nodeset.py` → `t10_nodeset.json`. The t8 ring with self-heating on, DC drives at the mean level, at five points where the static heating law has three roots (2–8 mW, laser 300–1000 pm red of t8's). For each, `.op` with no nodeset, with `.nodeset V(tdt)` at the hot root, and at the cold root.
+
+Since 2.43.0, `.nodeset` holds the net for a first solve and then releases it, as SPICE does. **A hot-root seed reaches the hot root**: 4.9396, 7.9576, 9.4457, 11.1146 and 14.4008 K, which is 0.03–1.10 mK from the python twin's roots. Before 2.43.0 the nodeset was only Newton's starting point, and all three runs landed on the cold branch at every point (measured on 2.42.0+16).
+
+Three caveats. A seed near the unstable middle root can land on it (5.06 K at 4 mW/500 pm, from a seed of 6 K). On the cold branch, the model and the twin differ by 13–38 mK (0.8370 vs 0.8181 K at 4 mW/500 pm), with or without a nodeset; this is not explained yet. And t8's power sweep predates this and does not use it: the frozen-temperature method still decides *which* branch is physical.
+
 ## 5. Compiler note (`compiler_note/`): an OpenVAF bug
 
 A `for` loop in the same analog block as the inductor's `ddt` makes **OpenVAF-reloaded

@@ -2088,17 +2088,11 @@ fn solve_dc_impl(
     let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
     // Events-aware: `above` fires in a static solve when its expression is already past the
     // threshold, and the body it guards changes the equations (§ `@(above)`).
-    let start = nodeset_start(net, dim)?;
-    let op = va_core::dc::operating_point_continued(
-        &refs,
-        dim,
-        newton_cfg(solver),
-        None,
-        start.as_deref(),
-    )
-    .map(|(op, _)| op)
-    .map_err(|e| name_non_finite_row(e.into(), &quantities))
-    .context("DC operating-point solve failed")?;
+    let holds = nodeset_holds(net, dim)?;
+    let op = operating_point_nodeset(&refs, dim, newton_cfg(solver), &holds)
+        .map(|(op, _)| op)
+        .map_err(|e| name_non_finite_row(e.into(), &quantities))
+        .context("DC operating-point solve failed")?;
     static_point_tasks(&refs, &op.x, dim, "the operating point")?;
     Ok(op)
 }
@@ -2122,24 +2116,50 @@ fn static_point_tasks(
     Ok(finish)
 }
 
-/// Newton's starting point from the deck's `.nodeset` cards (1.30.0): each named net at its
-/// value, every other unknown at 0. `None` when the deck has no nodeset — then the solve is
-/// exactly the zero-start one it always was (`operating_point_continued` with no start *is*
-/// `operating_point_with_events`), bit for bit.
-///
-/// A hint moves only where Newton starts, never what counts as converged, so a solve from a
-/// wrong hint is still a solution of the circuit — it may take longer, or on a circuit with
-/// several operating points (a latch) land on another one, which is what a nodeset is for.
+/// The conductance a held nodeset net is tied to its value through, in phase 1 of
+/// [`operating_point_nodeset`]: ngspice's (`cktload.c`, 1e10 on the diagonal and 1e10·value on
+/// the right-hand side). Large enough that the held net sits at its value to well under any
+/// tolerance whatever the circuit's own conductances (a thermal node's are ~1e-4 W/K), and the
+/// clamp is only ever a diagonal entry, which pivoting handles.
+const NODESET_HOLD_G: f64 = 1e10;
+
+/// One `.nodeset` net tied to its value through [`NODESET_HOLD_G`]: the residual
+/// `G·(x[i] − value)` (current leaving the net, the convention `stamp_conductance` uses) and
+/// its Jacobian `G`. An instance like any other, so the held solve goes through the same
+/// Newton, events and `gmin` rescue as every operating point, and nothing in `va-core` or
+/// Interface β had to change to hold a net.
+struct NodesetHold {
+    unknown: [usize; 1],
+    value: f64,
+}
+
+impl ModelInstance for NodesetHold {
+    fn unknowns(&self) -> &[usize] {
+        &self.unknown
+    }
+
+    fn load(
+        &self,
+        x: &[f64],
+        _ctx: &va_abi::AnalysisCtx,
+        _state: &mut va_abi::ModelState,
+        sink: &mut dyn va_abi::StampSink,
+    ) {
+        let i = self.unknown[0];
+        sink.residual(i, NODESET_HOLD_G * (x[i] - self.value));
+        sink.jacobian(i, i, NODESET_HOLD_G);
+    }
+}
+
+/// The deck's `.nodeset` cards (1.30.0) as holds, one per named net, in deck order (a net named
+/// twice keeps its last value, as it always has). Empty when the deck has no nodeset.
 ///
 /// # Errors
 ///
 /// A nodeset naming a net the deck does not have: a typo would otherwise be a hint silently
 /// dropped, and the cost it was written to save silently paid.
-fn nodeset_start(net: &Netlist, dim: usize) -> Result<Option<Vec<f64>>> {
-    if net.nodesets.is_empty() {
-        return Ok(None);
-    }
-    let mut x = vec![0.0; dim];
+fn nodeset_holds(net: &Netlist, dim: usize) -> Result<Vec<NodesetHold>> {
+    let mut holds: Vec<NodesetHold> = Vec::new();
     for (name, value) in &net.nodesets {
         let Some(&i) = net.nodes.get(name).or_else(|| {
             net.nodes
@@ -2151,11 +2171,72 @@ fn nodeset_start(net: &Netlist, dim: usize) -> Result<Option<Vec<f64>>> {
                 .arg("name", name)
                 .into());
         };
-        if let Some(slot) = x.get_mut(i) {
-            *slot = *value;
+        // A net with no unknown behind it (ground) has nothing to hold.
+        if i >= dim {
+            continue;
+        }
+        match holds.iter_mut().find(|h| h.unknown[0] == i) {
+            Some(h) => h.value = *value,
+            None => holds.push(NodesetHold {
+                unknown: [i],
+                value: *value,
+            }),
         }
     }
-    Ok(Some(x))
+    Ok(holds)
+}
+
+/// The DC operating point, honouring the deck's `.nodeset` cards the way SPICE does (2.43.0):
+/// **phase 1** solves with every nodeset net held at its value ([`NodesetHold`]), from a start
+/// at those values and 0 elsewhere; **phase 2** releases the holds and solves again from phase
+/// 1's solution. With no nodeset it is exactly the zero-start solve it always was, bit for bit.
+///
+/// Why hold rather than only start there, which is all 1.30.0 did: a start is erased by
+/// Newton's first step whenever the state that sustains the hinted value is not itself a net.
+/// In a self-heating micro-ring the temperature is a net but the optical field that heats it
+/// is internal and starts at 0, so a hot-branch seed went straight back to the cold branch
+/// (`docs/frozen-temperature-method.md`). Held, the field settles at the held temperature
+/// first, and phase 2 starts from a self-consistent point on the hinted branch.
+///
+/// The answer is still a solution of the circuit: phase 2 has no hold in it, so a nodeset
+/// chooses *which* operating point, never what counts as one. A hint near no solution costs
+/// iterations, as before. A hint next to an unstable root can still reach it, as a SPICE
+/// nodeset can: Newton does not know about stability.
+///
+/// If phase 1 fails (a held value the rest of the circuit cannot be solved around), the
+/// solve falls back to 1.30.0's start-only behaviour and says so (`W0701`), rather than
+/// failing a deck that solved before this change.
+///
+/// # Errors
+///
+/// As [`va_core::dc::operating_point_continued`], from phase 2 (or from the fallback).
+fn operating_point_nodeset(
+    refs: &[&dyn ModelInstance],
+    dim: usize,
+    cfg: NewtonConfig,
+    holds: &[NodesetHold],
+) -> std::result::Result<(va_core::dc::OperatingPoint, va_core::dc::AboveValues), va_core::CoreError>
+{
+    if holds.is_empty() {
+        return va_core::dc::operating_point_continued(refs, dim, cfg, None, None);
+    }
+    let mut start = vec![0.0; dim];
+    for h in holds {
+        start[h.unknown[0]] = h.value;
+    }
+    let mut held: Vec<&dyn ModelInstance> = refs.to_vec();
+    held.extend(holds.iter().map(|h| h as &dyn ModelInstance));
+    let from = match va_core::dc::operating_point_continued(&held, dim, cfg, None, Some(&start)) {
+        Ok((op, _)) => op.x,
+        Err(e) => {
+            eprintln!(
+                "[va-cli] {}",
+                va_diag::Diagnostic::new(va_diag::codes::W0701).arg("reason", e)
+            );
+            start
+        }
+    };
+    va_core::dc::operating_point_continued(refs, dim, cfg, None, Some(&from))
 }
 
 /// The coded diagnostic for an error raised by the numerical crates (`va-core`,
@@ -2778,21 +2859,20 @@ fn solve_transient_impl(
         // The sources read their own `t = 0` value here (a waveform's DC value *is* its value
         // at zero — see `va_netlist::parser`), so this is the operating point the run actually
         // starts from rather than some other bias.
-        let start = nodeset_start(net, dim)?;
+        let holds = nodeset_holds(net, dim)?;
         // This point is the run's `t = 0`, not the end of an analysis: `final_step` is false
         // here, or an `@(final_step)` body would take effect at the start (2.32.1).
         let seed_cfg = NewtonConfig {
             transient_seed: true,
             ..newton_cfg(solver)
         };
-        let (op, _) =
-            va_core::dc::operating_point_continued(&refs, dim, seed_cfg, None, start.as_deref())
-                .map_err(|e| name_non_finite_row(e.into(), &quantities))
-                .context(
-                    "the operating-point solve that precedes a transient run failed; add `UIC` \
+        let (op, _) = operating_point_nodeset(&refs, dim, seed_cfg, &holds)
+            .map_err(|e| name_non_finite_row(e.into(), &quantities))
+            .context(
+                "the operating-point solve that precedes a transient run failed; add `UIC` \
                      to the `.tran` card to start from the zero vector and each element's `IC=` \
                      instead",
-                )?;
+            )?;
         op.x
     };
 
@@ -5593,6 +5673,70 @@ R2 b gnd 1k
         );
         let err = solve_dc(&va_netlist::parser::parse(&typo).unwrap(), &[]).unwrap_err();
         assert!(format!("{err:#}").contains("no net `c`"), "{err:#}");
+    }
+
+    /// A held `.nodeset` (2.43.0) selects a branch that a starting point alone cannot, when
+    /// the state that sustains the hinted value is not a net. The micro-ring's mechanism in two
+    /// unknowns: a field `a` (internal, starts at 0) driven through a Lorentzian whose detuning
+    /// is set by the temperature `t`, and `t` heated by `a²`. At `a = 0` the heating's Jacobian
+    /// is 0, so Newton's first step from a seeded `t` and zero field sets `t` back to 0.
+    /// `t = k / (1 + (t − d)²)²` has three roots for k = 10, d = 8: ≈ 0.0024, ≈ 7.6, ≈ 8.3.
+    #[test]
+    fn a_held_nodeset_selects_a_branch_a_starting_point_cannot() {
+        let design = compile_model(
+            "`include \"disciplines.vams\"
+             module selfheat(t);
+             inout t;
+             electrical t, a;
+             parameter real k = 10.0;
+             parameter real d = 8.0;
+             analog begin
+                 I(a) <+ V(a) * (1.0 + (V(t) - d) * (V(t) - d)) - sqrt(k);
+                 I(t) <+ V(t) - V(a) * V(a);
+             end
+             endmodule
+",
+            "selfheat",
+        );
+        let deck = |hint: &str| {
+            va_netlist::parser::parse(&format!("X1 t selfheat\n{hint}.op\n.end\n")).unwrap()
+        };
+        let root = |t: f64| t - 10.0 / (1.0 + (t - 8.0) * (t - 8.0)).powi(2);
+        let t_of = |net: &Netlist, x: &[f64]| x[net.nodes["t"]];
+
+        let plain = deck("");
+        let cold = t_of(&plain, &solve_dc(&plain, &design.modules).unwrap().x);
+        assert!(
+            cold.abs() < 0.01 && root(cold).abs() < 1e-9,
+            "cold branch: t = {cold}"
+        );
+
+        let hinted = deck(".nodeset V(t)=8.3\n");
+        let hot = t_of(&hinted, &solve_dc(&hinted, &design.modules).unwrap().x);
+        assert!(
+            (hot - 8.3).abs() < 0.1 && root(hot).abs() < 1e-9,
+            "held nodeset: t = {hot}"
+        );
+
+        // The same hint as a starting point only (1.30.0's behaviour) lands on another root:
+        // measured, the unstable middle one (t = 7.618), 0.7 from the hot root.
+        let (instances, dim) = instances(&hinted, &design.modules).unwrap();
+        let refs: Vec<&dyn ModelInstance> = instances.iter().map(|b| b.as_ref()).collect();
+        let mut start = vec![0.0; dim];
+        start[hinted.nodes["t"]] = 8.3;
+        let (op, _) = va_core::dc::operating_point_continued(
+            &refs,
+            dim,
+            newton_cfg(Solver::Auto),
+            None,
+            Some(&start),
+        )
+        .unwrap();
+        let started = t_of(&hinted, &op.x);
+        assert!(
+            (started - hot).abs() > 0.1 && root(started).abs() < 1e-9,
+            "start-only gave t = {started} (the hot root is {hot}); this test no longer discriminates"
+        );
     }
 
     /// A noise source declared in a **potential** contribution reaches the output. Before

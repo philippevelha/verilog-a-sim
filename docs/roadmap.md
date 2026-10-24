@@ -5024,6 +5024,8 @@ to choose, as 2.0's was, and the list below is evidence for that choice, not a p
    default folded at elaboration. It solves now.
 5. **`.nodeset`'s held phase** (SPICE solves with the nodes clamped first). Worth doing only if a
    circuit with several operating points needs it; ISCAS'85 does not (initial-guess.md §4).
+   **Done in 2.43.0**: the self-heated micro-ring needed it (`docs/frozen-temperature-method.md`).
+   Left open: `analysis("nodeset")` is still false during the held solve (an Interface β field).
 6. **Keeping 2.0's reproducibility.** CI's `repro-compare` gate (Linux = macOS = Windows, 68
    decks) now fails on any divergence. A change that moves answers moves them on every platform
    or the gate says so. It covers the committed decks only, and the slow ISCAS'85 decks except

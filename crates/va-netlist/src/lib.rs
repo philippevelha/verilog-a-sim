@@ -121,14 +121,12 @@ pub struct Netlist {
     /// errors: the circuit itself parsed. `va-cli` prints them before solving, so a result is
     /// never read without knowing what of the deck it ignored.
     pub notes: Vec<Diagnostic>,
-    /// `.nodeset V(<net>)=<value> ...` hints, in deck order: a **starting point** for the DC
-    /// operating-point solve, not a constraint (1.30.0). `va-cli` starts Newton from these
-    /// voltages (every other unknown from 0) and the solution is whatever Newton converges to
-    /// from there — so a wrong hint costs iterations, never the answer's correctness.
-    ///
-    /// Limitation: SPICE solves once with each node *held* at its nodeset value and then
-    /// releases it; this is only the initial guess, which is the cheaper half of that. Names
-    /// are resolved by `va-cli` (a name that is not a net of the deck is an error there).
+    /// `.nodeset V(<net>)=<value> ...` hints, in deck order, for the DC operating-point solve.
+    /// Not a constraint on the answer. `va-cli` applies them as SPICE does (2.43.0): it solves
+    /// once with each named net *held* at its value, then releases the holds and solves again
+    /// from there. So the answer is always an operating point of the circuit; the hints choose
+    /// which one (1.30.0 used them only as Newton's starting point). Names are resolved by
+    /// `va-cli` (a name that is not a net of the deck is an error there).
     pub nodesets: Vec<(String, f64)>,
 }
 

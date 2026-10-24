@@ -62,10 +62,16 @@ impl AnalysisKind {
     /// | `"tran"` | [`Self::Transient`] |
     /// | `"ac"` | [`Self::Ac`] |
     /// | `"noise"` | [`Self::Noise`] |
-    /// | `"ic"`, `"nodeset"` | never — this simulator has no initial-condition or nodeset phase |
+    /// | `"ic"` | never — this simulator has no initial-condition phase |
+    /// | `"nodeset"` | never — **a known gap since 2.43.0**, see below |
     ///
-    /// `"ic"`/`"nodeset"` returning `false` is a statement of fact rather than an
-    /// approximation: those phases do not exist here at all, so no model can be inside one.
+    /// `"ic"` returning `false` is a statement of fact: that phase does not exist here, so no
+    /// model can be inside one. `"nodeset"` was the same until 2.43.0, when `va-cli` gained
+    /// SPICE's held nodeset phase (the first of the two solves of a deck with `.nodeset`). That
+    /// phase now exists but is not visible here. This type has no way to say "the nodeset nets
+    /// are held", so a model asking `analysis("nodeset")` during the held solve gets `false`
+    /// where SPICE answers true. Closing it needs a field on [`AnalysisCtx`], which is an
+    /// Interface β change (CLAUDE.md §6).
     /// Unknown names are rejected at elaboration, not silently answered `false` — a typo'd
     /// phase name would otherwise disable a branch forever with no diagnostic.
     ///
@@ -484,8 +490,10 @@ mod tests {
         assert!(!AnalysisKind::Ac.matches_phase("noise"));
     }
 
-    /// `"ic"`/`"nodeset"` are real LRM phase names for phases this simulator does not have.
-    /// False is the honest answer in every analysis — not an approximation to revisit.
+    /// `"ic"` is a real LRM phase name for a phase this simulator does not have; false is the
+    /// honest answer. `"nodeset"` is false too, but since 2.43.0 that is a known gap, not a
+    /// fact (see [`AnalysisKind::matches_phase`]): this test pins today's behaviour so that
+    /// closing the gap is a visible change.
     #[test]
     fn phases_this_simulator_has_no_equivalent_of_are_never_active() {
         for kind in [

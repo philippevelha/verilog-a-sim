@@ -22,6 +22,44 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.43.0 - 2026-10-24
+-------------------
+**`.nodeset` holds its nets first, as SPICE does.** A deck with `.nodeset` is now solved twice.
+Phase 1 holds each named net at its value through a 1e10 S conductance (ngspice's `cktload`
+value). Phase 2 releases the holds and solves from phase 1's solution. Before, the values were
+only Newton's starting point (1.30.0).
+  * Why: a start is erased by Newton's first step when the state that sustains the hinted value
+    is not a net. In the self-heated micro-ring the temperature is a net but the optical field
+    is internal and starts at 0, and heating goes as field squared, so its Jacobian is 0 there.
+    A hot-root seed went back to the cold branch every time (docs/frozen-temperature-method.md).
+  * Measured, `paper_writing/mrm_eqc/tests/t10_nodeset.py`: mrm_eqc_ls at five bistable points
+    (2-8 mW). A hot-root seed now reaches the hot root, 0.03-1.10 mK from an independent python
+    solution of the static equation. Before (2.42.0+16 binary), the no-seed, hot-seed and
+    cold-seed runs all landed on the cold branch.
+  * The answer is still an operating point of the circuit, since phase 2 has no hold. A seed
+    next to an unstable root can land on it (5.06 K at 4 mW, seed 6 K), as with SPICE.
+  * If phase 1 fails, the run falls back to the start-only solve and says so: new warning
+    `W0701`. The fallback is not exercised by a test.
+  * The hold is a `ModelInstance` appended to the instance list for phase 1, in `va-cli`. No
+    interface change.
+  * Known gap, stated in va-abi and token-reference.md: `analysis("nodeset")` still answers
+    false during the held solve. The analysis context has no "nodesets held" field, and adding
+    one is an Interface beta change (CLAUDE.md section 6), not made here.
+  * Cost: a deck with `.nodeset` pays one extra DC solve. A deck without one is unchanged (the
+    same call as before). The one committed deck with `.nodeset`,
+    circuits/multiphysics/seu_sram.net, keeps its latch states and its 1066-point time grid. It
+    is not bit-identical: 5 printed values move by 1e-14 V, from the different Newton path to
+    the same operating point.
+  * Docs: frozen-temperature-method.md, roadmap After-2.0 item 5 (done), initial-guess.md, the
+    paper (09b, Limitations), mrm_eqc README section 4b.
+  * Observed, not explained: on the cold branch the ring model and the python twin differ by
+    13-38 mK, with or without a nodeset.
+
+Measured: `cargo test --workspace` 1032 passed, 0 failed (1031 + the new
+`a_held_nodeset_selects_a_branch_a_starting_point_cannot`: a 2-unknown field/temperature model
+where start-only lands on the unstable middle root and the hold on the hot one); `cargo xtask
+validate` 28 checked, 0 failed, convergence 28/28; clippy and fmt clean.
+
 2.42.0+16 - 2026-10-24
 ----------------------
 **OpenVAF issue drafted; a for loop alone does not trigger the bug; ngspice commit softened.**

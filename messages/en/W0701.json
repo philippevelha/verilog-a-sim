@@ -1,0 +1,10 @@
+{
+  "code": "W0701",
+  "rev": 1,
+  "message": "`.nodeset`: the solve with the nodeset nets held did not converge ({reason}); the nodesets are used as a starting point only",
+  "description": "A `.nodeset` is applied in two phases, as in SPICE: the circuit is first solved with each nodeset net held at its value, then released and solved again from that point. When the held solve fails (the rest of the circuit cannot be solved around the held values), the second phase starts from the nodeset values instead, which is what `.nodeset` did before 2.43.0. The result is still an operating point of the circuit, but on a circuit with several operating points it may not be the one the nodesets point to.",
+  "actions": [
+    "Check that the nodeset values are consistent with each other and with the sources: a held value that forces a device far outside its model range can stop the held solve.",
+    "Set fewer nets: holding the one net that selects the operating point (a latch output, a ring temperature) is usually enough."
+  ]
+}

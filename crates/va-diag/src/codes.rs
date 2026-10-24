@@ -936,6 +936,9 @@ pub const W0502: Code = Code::new("W0502");
 /// not applied: `{card}`
 pub const W0503: Code = Code::new("W0503");
 
+/// `.nodeset`: the solve with the nodeset nets held did not converge ({reason}); the nodesets are used as a starting point only
+pub const W0701: Code = Code::new("W0701");
+
 /// Every code, so the catalogue and the code can be checked against each other.
 pub const ALL: &[Code] = &[
     E0000, E0001, E0101, E0102, E0103, E0104, E0105, E0106, E0107, E0108, E0109, E0110, E0111,
@@ -961,5 +964,5 @@ pub const ALL: &[Code] = &[
     E0739, E073A, R0101, R0201, R0202, R0203, R0204, R0301, R0302, R0303, R0304, R0305, R0306,
     R0307, R0308, R0309, R0310, R0401, R0402, R0403, R0404, R0405, R0406, R0407, R0408, R0409,
     R0410, R0411, W0101, W0102, W0103, W0104, W0301, W0302, W0401, W0402, W0403, W0501, W0502,
-    W0503,
+    W0503, W0701,
 ];
