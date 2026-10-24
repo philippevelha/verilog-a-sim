@@ -1,0 +1,2 @@
+* single-threaded device evaluation: for small circuits OpenMP sync costs more than it saves
+set num_threads=1

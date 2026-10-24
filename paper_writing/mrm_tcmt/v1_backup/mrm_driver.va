@@ -1,0 +1,56 @@
+// =============================================================================
+//  mrm_driver.va  --  Behavioural voltage-mode driver for a micro-ring modulator
+// =============================================================================
+//
+//  din  : logic input (threshold vth, soft decision of width vsharp)
+//  out  : driver output, Thevenin source with output resistance Rout
+//  ref  : output reference (ground / bias rail of the driver)
+//
+//  Transfer:  v_tgt = vlo + (vhi - vlo) * 0.5*(1 + tanh((V(din)-vth)/vsharp))
+//             -> two cascaded real poles (fp each) giving an overall -3 dB
+//                bandwidth f3db  (fp = f3db / sqrt(sqrt(2)-1))
+//             -> output stage: V(out,ref) = v_filt - Rout * I(out)
+//             optional constant pre-emphasis (kemph) implemented as a
+//             high-pass boost  v_filt + kemph * tau_e * d(v_filt)/dt,
+//             since OpenVAF does not support absdelay()-based FFE.
+//
+//  Typical use: drive the MRM cathode with vlo..vhi = 0..Vpp while the anode
+//  is held at 0 V (reverse bias = depletion-mode operation), or use a DC
+//  offset (vlo) to set the bias point.
+//
+//  Uses only ddt()/tanh(): compiles with OpenVAF (ngspice/Xyce OSDI) and
+//  commercial Verilog-A simulators.
+// =============================================================================
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module mrm_driver(din, out, ref);
+    input  din;
+    inout  out, ref;
+    electrical din, out, ref;
+    electrical n1, n2;                       // internal pole nodes
+
+    parameter real vlo    = 0.0    from (-inf:inf);  // V, output for logic 0
+    parameter real vhi    = 2.0    from (-inf:inf);  // V, output for logic 1
+    parameter real vth    = 0.5    from (-inf:inf);  // V, input threshold
+    parameter real vsharp = 0.02   from (0:inf);     // V, decision softness
+    parameter real f3db   = 30e9   from (0:inf);     // Hz, overall -3 dB bandwidth
+    parameter real Rout   = 50.0   from (0:inf);     // ohm, output resistance
+    parameter real kemph  = 0.0    from [0:inf);     // pre-emphasis strength
+    parameter real tau_e  = 10e-12 from (0:inf);     // s, emphasis time constant
+
+    real vtgt, tp, vf;
+
+    analog begin
+        vtgt = vlo + (vhi - vlo) * 0.5 * (1.0 + tanh((V(din) - vth) / vsharp));
+        tp   = sqrt(sqrt(2.0) - 1.0) / (6.283185307179586 * f3db);
+
+        // two real poles, written as KCL on 1-ohm normalised internal nodes
+        I(n1) <+ tp * ddt(V(n1)) + V(n1) - vtgt;
+        I(n2) <+ tp * ddt(V(n2)) + V(n2) - V(n1);
+
+        vf = V(n2) + kemph * tau_e * ddt(V(n2));
+        I(out, ref) <+ (V(out, ref) - vf) / Rout;
+    end
+endmodule

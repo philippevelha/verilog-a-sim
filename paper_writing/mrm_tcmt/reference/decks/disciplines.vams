@@ -1,0 +1,22 @@
+// Minimal electrical-only discipline/nature header for the model zoo — enough for
+// `models/*.va`'s `` `include "disciplines.vams" `` to resolve and give a real
+// `electrical` net a `NodeDecl.abstol` (§ nature-metadata wiring), rather than the ~700-line
+// full Accellera Annex B this project's parser doesn't need in full to bring up the zoo.
+// Values match the LRM's own standard defaults (Verilog-AMS 2.4.0, Annex B).
+
+nature Current;
+    units      = "A";
+    access     = I;
+    abstol     = 1e-12;
+endnature
+
+nature Voltage;
+    units      = "V";
+    access     = V;
+    abstol     = 1e-6;
+endnature
+
+discipline electrical;
+    potential Voltage;
+    flow      Current;
+enddiscipline

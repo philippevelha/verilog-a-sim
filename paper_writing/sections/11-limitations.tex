@@ -8,5 +8,11 @@ the 320-stage PSP103 inverter chain (\num{10566} unknowns) fails, undiagnosed;
 HiSIM2 produces a NaN on the first Newton iteration;
 \texttt{.nodeset} implements only the starting-guess phase;
 transient cost is evaluation-dominated (1\,ns of c432 in about 15\,min);
+on a small model the price of compiling the source on every run and of the evaluator against
+OpenVAF's native code is a factor 10--20 in wall time against ngspice (Section~\ref{sec:mrm}:
+1.96\,s against 0.18\,s, and 45.9\,s against 2.34\,s at tight tolerances), seconds rather than
+tenths of a second;
+\texttt{absdelay} is refused in transient, so delay-line forms such as Eq.~(4) of the
+carrier-injection ring model must be rewritten (here, in coupled-mode form);
 no golden reference for PSP103 circuits, so ISCAS'85 is checked against logic, not waveforms;
 language coverage is incomplete (token-reference numbers).}

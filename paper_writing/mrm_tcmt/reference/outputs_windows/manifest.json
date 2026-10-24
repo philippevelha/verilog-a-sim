@@ -1,0 +1,138 @@
+{
+  "created": "2026-10-24 10:44:56 +0200",
+  "host": {
+    "machine": "AMD64",
+    "cpus": 8,
+    "cpu": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+    "os": "Windows-11-10.0.26200-SP0"
+  },
+  "tools": {
+    "va-cli": "C:/Users/heltz/Documents/Research/ARCHYTAS_research/WPs/WP4/VASimile/target/release/va-cli.exe"
+  },
+  "models": {
+    "mrm_tcmt.va": "8c5bb48bb89ff459",
+    "mrm_driver.va": "c823820e6d0f1eba"
+  },
+  "notes": [
+    "Windows re-run, va-sim cases only; timing = Python perf_counter wall, rss = peak working set",
+    "va-sim timing includes parsing + compiling the Verilog-A each run"
+  ],
+  "cases": {
+    "va_dc_default": {
+      "simulator": "va-sim",
+      "deck": "va_dc.net",
+      "repeats": 5,
+      "command": "va-cli sim va_dc.net --model . --report tre,tim",
+      "wall_s_median": 0.19684079999569803,
+      "wall_s_min": 0.18217089999234304,
+      "wall_s_max": 0.2031456000113394,
+      "rss_mb_peak": 10.4765625,
+      "output_csv": "va_dc_default.csv.gz",
+      "output_sha256_16": "ee49788a4c32f3a5",
+      "stderr_tail": [
+        "[va-cli] circuit: 6 device(s) (1 compiled), 23 unknown(s) (10 net(s) + 13 auxiliary row(s)), 2001 points",
+        "[va-cli] estimate: 0.07-1.16 s of solve, 12.7 kB of matrix \u00e2\u20ac\u201d rough, dense LU scaled from bench-scale on an i7-1185G7",
+        "[va-cli] linear solve: dense LU (23 < 100 unknowns)"
+      ],
+      "points": 2001,
+      "x_first": 1549.6,
+      "x_last": 1550.6
+    },
+    "va_tran_default": {
+      "simulator": "va-sim",
+      "deck": "va_tran.net",
+      "repeats": 5,
+      "command": "va-cli sim va_tran.net --model . --tran --report kk,tre,tim",
+      "wall_s_median": 1.7375139000068884,
+      "wall_s_min": 1.7080576000007568,
+      "wall_s_max": 1.8081570000067586,
+      "rss_mb_peak": 12.58203125,
+      "output_csv": "va_tran_default.csv.gz",
+      "output_sha256_16": "162f60dd4771b4c2",
+      "stderr_tail": [
+        "[va-cli] circuit: 7 device(s) (2 compiled), 27 unknown(s) (11 net(s) + 16 auxiliary row(s)), ~20321 points (adaptive, 20321 is the card's floor)",
+        "[va-cli] estimate: 0.6-26.4 s of solve, 17.5 kB of matrix \u00e2\u20ac\u201d rough, dense LU scaled from bench-scale on an i7-1185G7",
+        "[va-cli] linear solve: dense LU (27 < 100 unknowns)"
+      ],
+      "points": 24650,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 1.09999999985434e-14,
+      "dt_median": 4.999999999997398e-13,
+      "dt_max": 5.00000000000567e-13,
+      "steps_below_1fs": 0
+    },
+    "va_tran_jit": {
+      "simulator": "va-sim",
+      "deck": "va_tran.net",
+      "repeats": 5,
+      "command": "VA_JIT=on va-cli sim va_tran.net --model . --tran --report kk,tre,tim",
+      "wall_s_median": 1.6542963999963831,
+      "wall_s_min": 1.6458624000078999,
+      "wall_s_max": 1.6690933000063524,
+      "rss_mb_peak": 19.203125,
+      "output_csv": "va_tran_jit.csv.gz",
+      "output_sha256_16": "162f60dd4771b4c2",
+      "stderr_tail": [
+        "[va-cli] circuit: 7 device(s) (2 compiled), 27 unknown(s) (11 net(s) + 16 auxiliary row(s)), ~20321 points (adaptive, 20321 is the card's floor)",
+        "[va-cli] estimate: 0.6-26.4 s of solve, 17.5 kB of matrix \u00e2\u20ac\u201d rough, dense LU scaled from bench-scale on an i7-1185G7",
+        "[va-cli] linear solve: dense LU (27 < 100 unknowns)"
+      ],
+      "points": 24650,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 1.09999999985434e-14,
+      "dt_median": 4.999999999997398e-13,
+      "dt_max": 5.00000000000567e-13,
+      "steps_below_1fs": 0
+    },
+    "va_tran_tight": {
+      "simulator": "va-sim",
+      "deck": "va_tran.net",
+      "repeats": 1,
+      "command": "VA_JIT=on va-cli sim va_tran.net --model . --tran --reltol 1e-7 --abstol 1e-10 --report kk,tre,tim",
+      "wall_s_median": 41.925053600003594,
+      "wall_s_min": 41.925053600003594,
+      "wall_s_max": 41.925053600003594,
+      "rss_mb_peak": 29.27734375,
+      "output_csv": "va_tran_tight.csv.gz",
+      "output_sha256_16": "6de50923fd56478b",
+      "stderr_tail": [
+        "[va-cli] circuit: 7 device(s) (2 compiled), 27 unknown(s) (11 net(s) + 16 auxiliary row(s)), ~20321 points (adaptive, 20321 is the card's floor)",
+        "[va-cli] estimate: 0.6-26.4 s of solve, 17.5 kB of matrix \u00e2\u20ac\u201d rough, dense LU scaled from bench-scale on an i7-1185G7",
+        "[va-cli] linear solve: dense LU (27 < 100 unknowns)"
+      ],
+      "points": 237229,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 4.999999999525905e-16,
+      "dt_median": 2.819999999999376e-14,
+      "dt_max": 5.00000000000567e-13,
+      "steps_below_1fs": 12698
+    }
+  },
+  "accuracy": {
+    "va_dc_default": {
+      "vs": "closed-form Lorentzian",
+      "max_abs_dP": 1.1601767502256166e-06
+    },
+    "va_tran_default": {
+      "vs": "stored ng_tran_tight",
+      "rms_dP_over_Pmean": 3.191603818863722e-05,
+      "max_dP_over_Pmean": 0.00011166025298993235,
+      "rms_dV_kk": 0.00019407065974055628
+    },
+    "va_tran_jit": {
+      "vs": "stored ng_tran_tight",
+      "rms_dP_over_Pmean": 3.191603818863722e-05,
+      "max_dP_over_Pmean": 0.00011166025298993235,
+      "rms_dV_kk": 0.00019407065974055628
+    },
+    "va_tran_tight": {
+      "vs": "stored ng_tran_tight",
+      "rms_dP_over_Pmean": 1.5319755289436551e-06,
+      "max_dP_over_Pmean": 1.0122658490302805e-05,
+      "rms_dV_kk": 1.4826565519885329e-05
+    }
+  }
+}

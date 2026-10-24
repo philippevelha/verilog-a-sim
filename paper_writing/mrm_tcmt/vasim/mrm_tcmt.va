@@ -1,0 +1,261 @@
+// =============================================================================
+//  mrm_tcmt.va  --  Silicon micro-ring / micro-disk modulator, Verilog-A
+//                   behavioural compact model (TCMT + lumped pn + thermal)
+// =============================================================================
+//
+//  OPTICAL  : temporal coupled-mode theory (TCMT), one resonant mode, complex
+//             envelope written as two real coupled ODEs (no clock, solver sets
+//             the time step). All-pass, or add-drop when a drop coupling is set.
+//
+//               da/dt  = ( j(w0 - wL) - 1/ti - 1/tc - 1/td ) a - j mu_c s_in
+//               s_thru = s_in - j mu_c a ,   s_drop = -j mu_d a
+//               mu_c^2 = 2/tc , mu_d^2 = 2/td ,  Q = w0 tau / 2
+//
+//             (same formulation as Little et al. JLT 1997 and as implemented by
+//              Saxena & Shawon, arXiv:2311.16174, Eqs. 2-3 and 8-11.)
+//
+//  ELECTRICAL (both modes):
+//             anode -Rs- ai -[Cj(V) || diode || tau_c*Id]- cathode
+//             anode -Cpad- cathode
+//             anode -Cox- sb -RSi- cathode       (substrate path; Cox=0 -> off)
+//
+//  TWO PARAMETERISATIONS, selected by 'mode':
+//    mode = 0  "physical": lambda0, FSR, Qi, Qc, Qd, eta_mod (pm/V) ...
+//              Carrier-induced shift tied to depletion charge:
+//                 dlam_e = -eta_mod * Qdep(Vj)/Cj0     (Qdep(0)=0)
+//              so eta_mod is the small-signal shift at 0 V and the large-signal
+//              nonlinearity follows the junction C-V law. Free-carrier
+//              absorption follows through r_abs = d(alpha)/(k0 d(n)).
+//    mode = 1  "measured fit": polynomials in reverse bias v = -Vj
+//                 lambda0(v) = lf0 + lf1 v + lf2 v^2           (nm, pm/V, pm/V^2)
+//                 tc(v) = tc0 + tc1 v + tc2 v^2 ,  ti(v) = tl0 + tl1 v + tl2 v^2
+//              i.e. Eqs. (13), (17), (18) of Saxena & Shawon. tc, ti are the
+//              AMPLITUDE decay times of the paper's Eq. (2).
+//
+//  THERMAL  : one-pole network Rth || Cth on thermal port dt (K above ambient).
+//             Sources: heater (eta_h * Vh^2/Rh, Rh = Rh0(1+TCR*dT)), and, if
+//             self_heat=1, junction dissipation + absorbed intracavity power.
+//             Shift dlam_dT*dT. A measured heater efficiency gamma (pm/mW) and
+//             time constant tau_h map as  Rth = gamma/(eta_h*dlam_dT),
+//             Cth = tau_h/Rth.
+//
+//  SIGNAL CONVENTIONS
+//    * Optical pins use the 'electrical' discipline; V(x_re)+jV(x_im) is the
+//      field envelope in sqrt(mW): |E|^2 = optical power in mW.
+//    * The envelope is referenced to the laser itself (lambda_ref = lambda_L),
+//      so a CW input is DC. V(wl) = laser wavelength in nm. One carrier per
+//      optical bus (WDM = one bus per wavelength).
+//    * Optical inputs: high impedance. Optical outputs: ideal V sources.
+//      Unidirectional; add-port input and back-reflections are not modelled.
+//    * Port dt: thermal discipline, tied to ambient internally; may be left
+//      floating or wired to other rings for thermal crosstalk.
+//
+//  NOT MODELLED: CW/CCW backscatter splitting, TPA/FCA/Kerr optical
+//    nonlinearities, wavelength dependence of Q and coefficients. Outside one
+//    resonance the response uses a periodic detuning map
+//    (FSR/pi) sin(pi (lambda_L - lambda_res)/FSR): exact near resonance, smooth
+//    and FSR-periodic far from it (approximates, does not equal, the Airy form).
+//
+//  PORTABILITY: only ddt(), limexp(), $limit(pnjlim), pow/sqrt/sin, standard
+//    disciplines and parameter ranges; no analog functions, and every ddt() is a
+//    contribution of its own (needed for verilog-a-sim's compiled path); no transition/laplace/absdelay/events/hierarchy, so it
+//    compiles with OpenVAF (ngspice/Xyce via OSDI) and commercial simulators.
+// =============================================================================
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+`define C0     2.99792458e8
+`define TWOPI  6.283185307179586
+`define PI_    3.141592653589793
+
+module mrm_tcmt(anode, cathode, htp, htn,
+                o_in_re, o_in_im, o_thru_re, o_thru_im, o_drop_re, o_drop_im,
+                wl, dt);
+
+    inout  anode, cathode;           // modulator pn junction (anode = p side)
+    inout  htp, htn;                 // integrated heater
+    input  o_in_re, o_in_im;         // optical in      [sqrt(mW)]
+    output o_thru_re, o_thru_im;     // optical through [sqrt(mW)]
+    output o_drop_re, o_drop_im;     // optical drop    [sqrt(mW)]
+    input  wl;                       // laser wavelength [V = nm]
+    inout  dt;                       // thermal node [K above ambient]
+
+    electrical anode, cathode, htp, htn, wl;
+    electrical o_in_re, o_in_im, o_thru_re, o_thru_im, o_drop_re, o_drop_im;
+    thermal    dt;
+    electrical ai, sb, yr, yi;       // internal: junction, substrate, cavity field
+
+    branch (anode, ai)      b_rs;
+    branch (ai, cathode)    b_j;
+    branch (anode, cathode) b_pad;
+    branch (anode, sb)      b_ox;
+    branch (sb, cathode)    b_si;
+    branch (htp, htn)       b_h;
+    branch (dt)             b_th;
+
+    // ------------------------------------------------------------ selector
+    parameter integer mode  = 0      from [0:1];     // 0 physical, 1 measured fit
+
+    // ------------------------------------------- optical, mode 0 (physical)
+    parameter real lambda0  = 1550.0 from (0:inf);   // nm, resonance @ V=0, dT=0
+    parameter real Qi       = 2.0e4  from (0:inf);   // intrinsic Q @ V=0
+    parameter real Qc       = 2.0e4  from (0:inf);   // through-bus coupling Q
+    parameter real eta_mod  = 20.0   from [0:inf);   // pm/V red shift per V reverse @0V
+    parameter real eta_inj  = 0.0    from [0:inf);   // pm/fC blue shift per injected charge
+    parameter real r_abs    = 0.15   from [0:inf);   // d(alpha)/(k0 d(n)), free carriers
+
+    // ------------------------------------------- optical, mode 1 (fit)
+    parameter real lf0      = 1550.0 from (0:inf);   // nm
+    parameter real lf1      = 20.0   from (-inf:inf);// pm/V
+    parameter real lf2      = 0.0    from (-inf:inf);// pm/V^2
+    parameter real tc0      = 20e-12 from (0:inf);   // s
+    parameter real tc1      = 0.0    from (-inf:inf);// s/V
+    parameter real tc2      = 0.0    from (-inf:inf);// s/V^2
+    parameter real tl0      = 20e-12 from (0:inf);   // s
+    parameter real tl1      = 0.0    from (-inf:inf);// s/V
+    parameter real tl2      = 0.0    from (-inf:inf);// s/V^2
+
+    // ------------------------------------------- optical, common
+    parameter real FSR      = 10.0   from (0:inf);   // nm
+    parameter real Qd       = 0.0    from [0:inf);   // drop coupling Q (0 = all-pass)
+    parameter real ilossdB  = 0.0    from [0:inf);   // extra loss on each output, dB
+
+    // ------------------------------------------- pn junction / parasitics
+    parameter real Rs       = 100.0  from (0:inf);   // ohm
+    parameter real Cj0      = 20e-15 from (0:inf);   // F
+    parameter real Vbi      = 0.8    from (0:inf);   // V
+    parameter real Mj       = 0.5    from (0:1);     // grading coefficient
+    parameter real FC       = 0.5    from (0:1);     // forward-bias linearisation
+    parameter real Is       = 1e-15  from (0:inf);   // A
+    parameter real Nd       = 1.5    from (0:inf);   // ideality
+    parameter real tau_c    = 1e-9   from [0:inf);   // s, minority-carrier lifetime
+    parameter real Cpad     = 10e-15 from [0:inf);   // F
+    parameter real Cox      = 0.0    from [0:inf);   // F, substrate oxide cap (0=off)
+    parameter real RSi      = 1.0e3  from (0:inf);   // ohm, substrate resistance
+    parameter real gmin_j   = 1e-12  from [0:inf);   // S, convergence shunt
+
+    // ------------------------------------------- thermal
+    parameter real dlam_dT  = 75.0   from [0:inf);   // pm/K
+    parameter real Rth      = 5.0e3  from (0:inf);   // K/W
+    parameter real Cth      = 1.0e-9 from [0:inf);   // J/K
+    parameter real Rh0      = 1.0e3  from (0:inf);   // ohm
+    parameter real TCR      = 0.0    from [0:inf);   // 1/K
+    parameter real eta_h    = 1.0    from [0:1];     // heater-to-ring efficiency
+    parameter real f_abs    = 0.5    from [0:1];     // absorbing part of intrinsic loss
+    parameter integer self_heat = 1  from [0:1];
+
+    real Vj, vr, Id, Qdep, Qinj, dl_car, dl_T, lam_res, lam_L, dlam, dw, w0, wn;
+    real Qi_eff, ti, tc, inv_ti, inv_tc, inv_td, inv_tcn, gam;
+    real mu_c, mu_n, mu_d, kin, kout, kdrop, tau_n, tl;
+    real sr, si, y_r, y_i, P_abs, P_h, P_j, Rh, T, Vh;
+
+
+    analog begin
+        // ============================ electrical =============================
+        I(b_rs) <+ V(b_rs) / Rs;
+        // junction limiting (standard SPICE pnjlim) - Newton convergence aid only;
+        // the converged value is V(b_j) itself.
+        // (arguments written from parameters only, so the model stays eligible
+        //  for statically scheduled / compiled evaluation in verilog-a-sim)
+        Vj   = $limit(V(b_j), "pnjlim", Nd * $vt,
+                      Nd * $vt * ln(Nd * $vt / (1.41421356 * Is)));
+        vr   = -Vj;                                  // reverse bias
+        Id   = Is * (limexp(Vj / (Nd * $vt)) - 1.0);
+        // depletion charge, SPICE style with FC linearisation; Qdep(0) = 0
+        // (inlined rather than an analog function: same reason as above)
+        if (Vj < FC * Vbi)
+            Qdep = Cj0 * Vbi / (1.0 - Mj) * (1.0 - pow(1.0 - Vj / Vbi, 1.0 - Mj));
+        else
+            Qdep = Cj0 * (Vbi / (1.0 - Mj) * (1.0 - pow(1.0 - FC, 1.0 - Mj))
+                   + ((1.0 - FC * (1.0 + Mj)) * (Vj - FC * Vbi)
+                      + 0.5 * Mj / Vbi * (Vj * Vj - FC * FC * Vbi * Vbi))
+                     / pow(1.0 - FC, 1.0 + Mj));
+        Qinj = tau_c * Id;
+        I(b_j)   <+ Id + gmin_j * Vj;
+        I(b_j)   <+ ddt(Qdep + Qinj);
+        I(b_pad) <+ ddt(Cpad * V(b_pad));
+        I(b_ox)  <+ ddt(Cox * V(b_ox));
+        I(b_si)  <+ V(b_si) / RSi;
+
+        // ============================== heater ===============================
+        T   = Temp(b_th);
+        Rh  = Rh0 * (1.0 + TCR * T);
+        Vh  = V(b_h);
+        I(b_h) <+ Vh / Rh;
+        P_h = eta_h * Vh * Vh / Rh;
+        dl_T = dlam_dT * T;                          // pm
+
+        // ====================== resonance and decay rates ====================
+        if (mode == 0) begin
+            dl_car  = -eta_mod * Qdep / Cj0
+                      - eta_inj * max(Qinj, 0.0) * 1e15;            // pm
+            lam_res = lambda0 + 1e-3 * (dl_car + dl_T);             // nm
+            w0      = `TWOPI * `C0 / (lam_res * 1e-9);
+            Qi_eff  = 1.0 / max(1.0 / Qi - r_abs * 1e-3 * dl_car / lambda0,
+                                1e-3 / Qi);
+            inv_ti  = w0 / (2.0 * Qi_eff);
+            inv_tc  = w0 / (2.0 * Qc);
+            wn      = `TWOPI * `C0 / (lambda0 * 1e-9);
+            inv_tcn = wn / (2.0 * Qc);                              // nominal
+            tau_n   = 1.0 / (wn / 2.0 * (1.0 / Qi + 1.0 / Qc
+                                         + ((Qd > 0.0) ? 1.0 / Qd : 0.0)));
+        end else begin
+            lam_res = lf0 + 1e-3 * (lf1 * vr + lf2 * vr * vr + dl_T);
+            w0      = `TWOPI * `C0 / (lam_res * 1e-9);
+            tc      = max(tc0 + tc1 * vr + tc2 * vr * vr, 1e-3 * tc0);
+            ti      = max(tl0 + tl1 * vr + tl2 * vr * vr, 1e-3 * tl0);
+            inv_ti  = 1.0 / ti;
+            inv_tc  = 1.0 / tc;
+            wn      = `TWOPI * `C0 / (lf0 * 1e-9);
+            inv_tcn = 1.0 / tc0;
+            tau_n   = 1.0 / (1.0 / tl0 + 1.0 / tc0
+                             + ((Qd > 0.0) ? wn / (2.0 * Qd) : 0.0));
+        end
+        inv_td = (Qd > 0.0) ? w0 / (2.0 * Qd) : 0.0;
+        gam    = inv_ti + inv_tc + inv_td;
+
+        // detuning w0 - wL with periodic map (rad/s)
+        lam_L = max(V(wl), 1.0);    // floor: V(wl)=0 on the first Newton guess
+        dlam  = (FSR / `PI_) * sin(`PI_ * (lam_L - lam_res) / FSR);
+        dw    = `TWOPI * `C0 * dlam * 1e-9 / (lam_L * lam_res * 1e-18);
+
+        // ============================== TCMT =================================
+        // state y = mu_n * a (mu_n fixed) -> sqrt(mW), exact even when tc(V)
+        mu_c  = sqrt(2.0 * inv_tc);
+        mu_n  = sqrt(2.0 * inv_tcn);
+        kin   = mu_n * mu_c;
+        kout  = mu_c / mu_n;
+        // guard: d(sqrt)/dx is infinite at 0 -> NaN Jacobian in the all-pass case
+        if (Qd > 0.0) begin
+            mu_d  = sqrt(2.0 * inv_td);
+            kdrop = mu_d / mu_n;
+        end else begin
+            mu_d  = 0.0;
+            kdrop = 0.0;
+        end
+
+        sr  = V(o_in_re);   si  = V(o_in_im);
+        y_r = V(yr);        y_i = V(yi);
+        // dy/dt = (j dw - gam) y - j kin s_in   (scaled by tau_n)
+        // (each ddt in a contribution of its own: keeps the static path in verilog-a-sim)
+        I(yr) <+ ddt(tau_n * y_r);
+        I(yr) <+ -tau_n * (-gam * y_r - dw * y_i + kin * si);
+        I(yi) <+ ddt(tau_n * y_i);
+        I(yi) <+ -tau_n * ( dw * y_r - gam * y_i - kin * sr);
+
+        tl = pow(10.0, -ilossdB / 20.0);
+        V(o_thru_re) <+ tl * (sr + kout * y_i);
+        V(o_thru_im) <+ tl * (si - kout * y_r);
+        V(o_drop_re) <+ tl * ( kdrop * y_i);
+        V(o_drop_im) <+ tl * (-kdrop * y_r);
+
+        // ============================== thermal ==============================
+        // U = |y|^2 / mu_n^2 ;  P_abs = f_abs * 2 inv_ti * U   (W)
+        P_abs = f_abs * 2.0 * inv_ti / (mu_n * mu_n)
+                * (y_r * y_r + y_i * y_i) * 1e-3;
+        P_j   = V(b_rs) * V(b_rs) / Rs + Vj * Id;
+        Pwr(b_th) <+ ddt(Cth * T);
+        Pwr(b_th) <+ T / Rth - P_h - ((self_heat == 1) ? (P_abs + P_j) : 0.0);
+    end
+endmodule

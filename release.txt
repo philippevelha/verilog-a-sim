@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+2 - 2026-10-24
+---------------------
+**Paper: micro-ring modulator case study.** Docs only; no code changes.
+  * `paper_writing/mrm_tcmt/` (depletion-mode ring + driver, TCMT) and
+    `paper_writing/mrm_injection/` (carrier-injection ring after Wang et al., JLT 2016) are
+    committed with their decks, digitised reference data and stored outputs. Both models run
+    from the same source in verilog-a-sim and, through OpenVAF, in ngspice.
+  * New paper subsection `sections/09b-mrm.tex`, plus one sentence in the abstract, one
+    contribution bullet and two limitations. It states that the published model's main results
+    are reproduced (I-V, spectra, closed NRZ eye and open 80 ps pre-emphasis eye), and that
+    Fig. 7's measured current is not: the pad/probe parasitics are not given. Two of eight eye
+    trends (Figs. 13(a), 21(a)) are not reproduced either; the parasitics are named as the first
+    of three candidates, not as the established cause.
+  * Windows re-run of the four verilog-a-sim reference cases (`reference/outputs_windows/`,
+    i7-1185G7, this source at 2.42.0): bit-identical to the Linux VM run at 2.42.0 (points,
+    step sequence, output SHA-256). Wall 1.74 s default / 1.65 s JIT / 41.9 s tight.
+  * Cost, stated in the paper: on this small model verilog-a-sim is 10-20x slower than
+    ngspice with the OpenVAF-compiled model (1.96 s vs 0.18 s; 45.9 s vs 2.34 s tight).
+  * Open: the "ngspice lost up to 4x of the free charge with the two-ddt form" claim has no
+    deck behind it yet (README only); a 	odo in the paper tracks it.
+  * Note: the previous commit was titled 2.42.0+1 but left Cargo.toml at 2.42.0; this entry
+    moves both to 2.42.0+2.
+  * Windows-gnu build note: since the JIT, building needs a 64-bit dlltool + as on PATH (a
+    32-bit CppSim dlltool broke it here; Ruby's MSYS2 ucrt64 binutils work).
+
+
 2.42.0 - 2026-10-15
 --------------------
 **`$rdist_*` draws random numbers.** `$rdist_uniform`, `_normal`, `_exponential`, `_poisson`,

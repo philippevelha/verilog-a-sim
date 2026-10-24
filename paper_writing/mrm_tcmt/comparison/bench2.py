@@ -1,0 +1,8 @@
+exec(open('bench.py').read().split('bench("openvaf')[0])
+bench("ngspice DC (num_threads=1)",[NG,'-b','ng_dc_def.cir'])
+bench("va-sim DC (incl. VA compile)",[VA,'sim','dc.net','--model','.','--report','tre,tim'],cwd='vasim')
+bench("ngspice tran (num_threads=1)",[NG,'-b','ng_tran_def.cir'],n=7)
+bench("va-sim tran (incl. VA compile)",[VA,'sim','tran.net','--model','.','--tran','--report','kk,tre,tim'],cwd='vasim',n=7)
+bench("va-sim compile only (check --codegen)",[VA,'check','.','--codegen'],cwd='vasim')
+bench("ngspice tran TIGHT (num_threads=1)",[NG,'-b','ng_tran_tight.cir'],n=3)
+bench("va-sim tran TIGHT",[VA,'sim','tran.net','--model','.','--tran','--reltol','1e-7','--abstol','1e-10','--report','kk,tre,tim'],cwd='vasim',n=2)

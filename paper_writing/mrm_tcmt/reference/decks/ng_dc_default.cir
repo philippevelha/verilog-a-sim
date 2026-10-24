@@ -1,0 +1,19 @@
+* DC sweep, V_R=0
+.model mrm mrm_tcmt mode=0 lambda0=1550 FSR=10 Qi=20000 Qc=22000 eta_mod=20
++ Rs=100 Cj0=20f Vbi=0.8 Mj=0.5 Cpad=10f dlam_dT=75 Rth=5k Cth=1n Rh0=1k f_abs=0.5 self_heat=0
+Vin_re in_re 0 1.0
+Vin_im in_im 0 0
+Vwl wl 0 1550
+Vk k 0 0
+Vh hp 0 0
+N1 0 k hp 0 in_re in_im th_re th_im dr_re dr_im wl tdt mrm
+.control
+pre_osdi mrm_tcmt.osdi
+set wr_singlescale
+set wr_vecnames
+option numdgt=15 
+dc Vwl 1549.6 1550.6 0.0005
+wrdata ng_dc_default.dat v(th_re) v(th_im)
+quit
+.endc
+.end

@@ -1,0 +1,22 @@
+* -----------------------------------------------------------------------------
+*  mrm_tcmt parameter card, mode=1 (measured fit), AIM Photonics microdisk
+*  modulator extracted by V. Saxena and M. J. Shawon, arXiv:2311.16174 (2023):
+*    Table I (electrical, heater), Fig. 7 (lambda0, tau_c, tau_l vs reverse bias),
+*    Fig. 8b (heater tuning, 251.5 pm/mW), tau_h = 15 us.
+*  Paper's polynomials are in metres and seconds of reverse bias v = V(N,P):
+*    lambda0(v) = 1.5667e-6 + 8.8004e-11 v           -> lf0, lf1 (nm, pm/V)
+*    tau_c(v)   = 1.9445e-11 + 6.0589e-14 v + 1.5738e-13 v^2
+*    tau_l(v)   = 1.0769e-11 + 8.3349e-13 v + 1.1627e-15 v^2
+*  NOT given in the paper (placeholders, replace with your data):
+*    FSR (30 nm: Fig. 8a shows a single resonance over 20 nm), dlam_dT (75 pm/K;
+*    only gamma = eta_h*dlam_dT*Rth = 251.5 pm/mW is fitted, so Rth follows),
+*    Is, Nd, tau_c (diode forward branch), f_abs.
+* -----------------------------------------------------------------------------
+.model mdm_aim mrm_tcmt mode=1
++ lf0=1566.7 lf1=88.004 lf2=0
++ tc0=19.445e-12 tc1=6.0589e-14 tc2=1.5738e-13
++ tl0=10.769e-12 tl1=8.3349e-13 tl2=1.1627e-15
++ FSR=30 Qd=0
++ Rs=79.28 Cj0=143e-15 Vbi=1.328 Mj=0.5 Cpad=20.3e-15 Cox=65.3e-15 RSi=1.4e3
++ Rh0=8e3 eta_h=1 dlam_dT=75 Rth=3353 Cth=4.473e-9
++ f_abs=0.5 self_heat=0

@@ -1,0 +1,317 @@
+// =============================================================================
+//  mrm_pin.va  --  Silicon CARRIER-INJECTION (p-i-n) micro-ring modulator,
+//                  Verilog-A compact model
+// =============================================================================
+//
+//  Reference: B. Wang, C. Li, C.-H. Chen, K. Yu, M. Fiorentino, R. G. Beausoleil,
+//  S. Palermo, "A Compact Verilog-A Model of Silicon Carrier-Injection Ring
+//  Modulators for Optical Interconnect Transceiver Circuit Design",
+//  J. Lightwave Technol. 34(12), 2996-3005 (2016)  -- below "[W]".
+//  Its p-i-n network is A. G. M. Strollo, IEEE Trans. Power Electron. 12(1),
+//  12-20 (1997), extended in [W] to tenth order and with contact resistors.
+//
+//  ELECTRICAL  -- [W] Fig. 4, Table I, implemented element by element:
+//    anode -Rc- n10 -[ Repi || (Rlim - n11 - Gmod) ]- n12 -[Gpin]- n20 -Rc- cathode
+//    Vj = V(n12,n20);   q0/tau = Is (exp(Vj/(N Vt)) - 1)          (Fig. 4c)
+//    V2 = q0/tau  drives the tenth-order ladder (Fig. 4d):
+//        series  R = 1, 5, 9, 13, 17   ||  C = tau, tau/5, tau/9, tau/13, tau/17
+//        shunt   G3 at V3, then  R = T0/(7 tau), T0/(11 tau), T0/(15 tau), T0/(19 tau)
+//    Iepi = current into the ladder, Ir = GE = (q0/tau)^2 / IE  (anode recombination)
+//    Gpin = I = Iepi + Ir
+//    Gmod = V(11,12) [ LAM/VM V2 + (1-LAM)/VM (V2 - V3) ]       (conductivity modulation)
+//    G3   = V3 / [ T0/(3 tau) (1 - sqrt((PHI - Vj)/(VPT - RSC I)))^2 ]  (moving boundary)
+//    The ladder is a network of "unit" impedances: node values are currents
+//    (here stored in uA, i.e. scaled by 1e6, for solver conditioning: with mA
+//    scaling the small shunt nodes fell below ngspice's default vntol).
+//
+//  CARRIERS    -- [W] Fig. 3: Q_total = int I dt / q, Q_free = high-pass(Q_total)
+//    with time constant tau_c = carrier lifetime, i.e.
+//        tau_c dX/dt + X = I_src,     Q_free = tau_c X
+//    I_src = Iepi by default (fc_src = 1): the anode-recombination current Ir does
+//    not put carriers in the waveguide core. fc_src = 0 integrates I = Iepi + Ir,
+//    the literal reading of [W] Fig. 3 (see README for the comparison).
+//    Density  dN = Q_free / (q V_act),  dNe = dNh = dN  ([W] assumption).
+//
+//  PLASMA DISPERSION -- [W] Eqs. (2)-(3), 1.31 um coefficients by default:
+//    dn = -ce dNe - ch dNh^0.8 ,  dalpha = ae dNe + ah dNh   [cm^-1]
+//
+//  OPTICAL     -- [W] Eqs. (4)-(6) are a delay-line sum over round trips, which
+//    needs absdelay() (not compiled by OpenVAF, refused in transient by
+//    verilog-a-sim). This model uses the temporal coupled-mode (TCMT) form of
+//    the same ring, valid because the round trip tau_res = ng L / c (0.26 ps)
+//    is far shorter than the photon lifetime (~21 ps); checked numerically
+//    against Eq. (4) in tests/eq4_check.py. Mapping (per round trip):
+//        1/tau_c = -ln(sigma)/tau_res ,  1/tau_i = (-ln(a) + Gamma dalpha L/2)/tau_res
+//        lambda_res = lambda0 (1 + Gamma dn / ng) + dlam_dT dT
+//    [W] fits sigma, a, n_eff with a dispersion-free phase 2 pi n_eff L / lambda,
+//    so ng defaults to n_eff: this reproduces [W]'s linewidth (and implies an
+//    FSR of lambda^2/(n_eff L) = 22 nm; set ng to the true group index for the
+//    real FSR, and re-fit sigma, a if you do).
+//
+//  NOT IN [W] -- added, OFF by default so the defaults reproduce [W]:
+//    * optional drop port (sigma_d < 1), depletion capacitance (Cj0 > 0),
+//      pad capacitance (Cpad > 0; [W] used external 40 fF pads + 500 pH wires);
+//    * heater and thermal node; self-heating (self_heat = 1) from electrical
+//      power I*V and absorbed optical power. Thermal values are placeholders.
+//
+//  NOT IN [W], REQUIRED -- (1) V_T: Table I reproduces [W] Fig. 6 only if the
+//    junction thermal voltage is taken at ~58 C (Tvt, default 331 K; at 27 C the
+//    current is 4x too high at 0.7-0.9 V). (2) the active volume V_act is not given in [W]. The
+//    default is calibrated so that this model reproduces the -90 pm shift of
+//    [W] Fig. 10 at 0.86 V DC (see calib/). Regularisations (convergence only):
+//    junction $limit(pnjlim); smooth max(PHI - Vj, 0) (eps_phi); smooth clamp of
+//    the moving-boundary root at s_max; smooth clamp dN >= 0 (N_floor).
+//
+//  PORTS / CONVENTIONS -- identical to mrm_tcmt.va (simple model):
+//    optical pins carry the field envelope in sqrt(mW) (|E|^2 = mW), referenced
+//    to the laser; V(wl) = laser wavelength in nm; dt = thermal node (K).
+//
+//  PORTABILITY: no analog functions, each ddt() in its own contribution,
+//    $limit arguments from parameters only (verilog-a-sim static/JIT path);
+//    compiles with OpenVAF (ngspice/Xyce via OSDI) and commercial simulators.
+// =============================================================================
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+`define C0     2.99792458e8
+`define TWOPI  6.283185307179586
+`define PI_    3.141592653589793
+`define QE     1.602176634e-19
+`define KB     1.380649e-23
+// internal state scaling: ladder / carrier-filter nodes hold currents in uA (x1e6), so the
+// smallest ladder node stays far above default absolute tolerances (vntol 1e-6) in any simulator
+`define SC     1.0e6
+// junction thermal voltage: Tvt > 0 overrides the circuit temperature
+`define VTJ    ((Tvt > 0.0) ? `KB * Tvt / `QE : $vt)
+
+module mrm_pin(anode, cathode, htp, htn,
+               o_in_re, o_in_im, o_thru_re, o_thru_im, o_drop_re, o_drop_im,
+               wl, dt);
+
+    inout  anode, cathode;           // p-i-n terminals (anode = p+)
+    inout  htp, htn;                 // integrated heater (not in [W])
+    input  o_in_re, o_in_im;         // optical in      [sqrt(mW)]
+    output o_thru_re, o_thru_im;     // optical through [sqrt(mW)]
+    output o_drop_re, o_drop_im;     // optical drop    [sqrt(mW)]
+    input  wl;                       // laser wavelength [V = nm]
+    inout  dt;                       // thermal node [K above ambient]
+
+    electrical anode, cathode, htp, htn, wl;
+    electrical o_in_re, o_in_im, o_thru_re, o_thru_im, o_drop_re, o_drop_im;
+    thermal    dt;
+    electrical n10, n11, n12, n20;   // [W] Fig. 4(b) nodes
+    electrical l3, l4, l5, l6, l7;   // ladder nodes, Fig. 4(d) (uA)
+    electrical nf;                   // free-carrier filter state W (uA)
+    electrical xfc;                  // monitor: free-carrier current X = Q_free/tau_c (mA)
+    electrical yr, yi;               // cavity field (sqrt(mW))
+
+    branch (anode, n10)   b_rca;
+    branch (n20, cathode) b_rck;
+    branch (n10, n12)     b_epi;
+    branch (n10, n11)     b_lim;
+    branch (n11, n12)     b_mod;
+    branch (n12, n20)     b_pin;
+    branch (anode, cathode) b_pad;
+    branch (htp, htn)     b_h;
+    branch (dt)           b_th;
+
+    // ------------------------------------------- p-i-n, [W] Table I (5 um ring)
+    parameter real Rc    = 50.0     from (0:inf);   // ohm, contact resistance (each terminal)
+    parameter real Is    = 5.78e-14 from (0:inf);   // A, saturation current
+    parameter real N     = 1.46     from (0:inf);   // emission coefficient
+    parameter real PHI   = 0.7      from (0:inf);   // V, built-in voltage
+    parameter real T0    = 1.046e-10 from (0:inf);  // s, transit time
+    parameter real IE    = 1.0e-3   from (0:inf);   // A, emitter recombination knee
+    parameter real VM    = 0.12     from (0:inf);   // V, high-injection base drop
+    parameter real Rlim  = 1.8e-3   from (0:inf);   // ohm, carrier-scattering resistance
+    parameter real LAM   = 0.03     from [0:1];     // forward-recovery coefficient
+    parameter real tau   = 1.0e-9   from (0:inf);   // s, carrier lifetime in the base
+    parameter real Repi  = 300.0    from (0:inf);   // ohm, base region resistance
+    parameter real VPT   = 10.0     from (0:inf);   // V, reverse-recovery coefficient
+    parameter real RSC   = 18.0     from [0:inf);   // ohm, reverse-recovery coefficient
+    parameter real Tvt   = 331.15   from [0:inf);   // K, temperature for V_T in the junction law
+                                                    //  (0 = circuit temperature). NOT in [W]:
+                                                    //  Table I reproduces Fig. 6 only with V_T at
+                                                    //  ~58 C (fit, 12 % RMS); at 27 C it is 4x high.
+
+    // ------------------------------------------- carriers -> index, [W] Fig. 3, Eqs. (2)-(3)
+    parameter real tau_c = 0.0      from [0:inf);   // s, free-carrier filter (0 = use tau, as [W])
+    parameter integer fc_src = 1    from [0:1];     // current integrated into free carriers:
+                                                    //  1 = Iepi only: Ir recombines in the p+ anode,
+                                                    //      outside the waveguide (default; reproduces
+                                                    //      [W] Figs. 12-15 best, see README)
+                                                    //  0 = total I = Iepi + Ir (literal [W] Fig. 3;
+                                                    //      set V_act = 4.581 um^3)
+    parameter real V_act = 4.408    from (0:inf);   // um^3, active volume (NOT in [W]; calibrated on Fig. 10 for fc_src=1, see calib/)
+    parameter real Gamma = 1.0      from (0:inf);   // confinement x coverage ([W]: dn_eff = dn)
+    parameter real ce    = 6.2e-22  from [0:inf);   // cm^3, electron index coefficient (1.31 um)
+    parameter real ch    = 6.0e-18  from [0:inf);   // hole index coefficient, times dNh^0.8
+    parameter real ae    = 6.0e-18  from [0:inf);   // cm^2, electron absorption (1.31 um)
+    parameter real ah    = 4.0e-18  from [0:inf);   // cm^2, hole absorption (1.31 um)
+
+    // ------------------------------------------- ring, [W] Section II, Fig. 10
+    parameter real sigma   = 0.9944  from (0:1);     // bus self-coupling
+    parameter real a0      = 0.9931  from (0:1];     // round-trip amplitude at dN = 0
+    parameter real neff    = 2.5188  from (0:inf);   // effective index
+    parameter real ng      = 0.0     from [0:inf);   // group index (0 = neff, as [W])
+    parameter real Rring   = 5.0e-6  from (0:inf);   // m, ring radius
+    parameter real lambda0 = 1318.812 from (0:inf);  // nm, resonance at 0 V (digitised, [W] Fig. 10)
+    parameter real sigma_d = 1.0     from (0:1];     // drop self-coupling (1 = all-pass, as [W])
+    parameter real ilossdB = 0.0     from [0:inf);   // dB, extra loss on each output
+
+    // ------------------------------------------- extensions (OFF = [W])
+    parameter real Cj0   = 0.0      from [0:inf);   // F, depletion capacitance at 0 V
+    parameter real Vbi   = 0.8      from (0:inf);   // V, its built-in potential
+    parameter real Mj    = 0.5      from (0:1);     // grading coefficient
+    parameter real FC    = 0.5      from (0:1);     // forward linearisation point
+    parameter real Cpad  = 0.0      from [0:inf);   // F, pad capacitance across the terminals
+
+    // ------------------------------------------- thermal (placeholders, not in [W])
+    parameter real dlam_dT = 75.0   from [0:inf);   // pm/K
+    parameter real Rth     = 5.0e3  from (0:inf);   // K/W
+    parameter real Cth     = 1.0e-9 from [0:inf);   // J/K
+    parameter real Rh0     = 1.0e3  from (0:inf);   // ohm
+    parameter real TCR     = 0.0    from [0:inf);   // 1/K
+    parameter real eta_h   = 1.0    from [0:1];     // heater-to-ring efficiency
+    parameter real f_abs   = 0.5    from [0:1];     // absorbing part of intrinsic loss
+    parameter integer self_heat = 0 from [0:1];     // 0 = as [W]
+
+    // ------------------------------------------- regularisation (convergence aids)
+    parameter real eps_phi = 1.0e-3 from (0:inf);   // V, smoothing of max(PHI - Vj, 0)
+    parameter real s_max   = 0.9    from (0:1);     // clamp of the moving-boundary root
+    parameter real N_floor = 1.0e14 from (0:inf);   // cm^-3, smoothing of dN >= 0
+
+    real Vj, x, v2, v3, Ir, gm, Iterm, xph, den, s, sc, R3, Qdep;
+    real tcf, Ncar, dN, Np, Np0, dn, dalpha, ngr, L, tres, lam_L, lam_res, dlam, dw;
+    real inv_tc, inv_ti, inv_td, gam, gam0, kin, kdrop, tau_n, FSR;
+    real sr, si, y_r, y_i, tl, P_abs, P_el, P_h, Rh, T, Vh;
+
+    analog begin
+        // ===================== electrical: [W] Fig. 4 =====================
+        I(b_rca) <+ V(b_rca) / Rc;
+        I(b_rck) <+ V(b_rck) / Rc;
+        Iterm = V(b_rca) / Rc;                       // terminal current I
+
+        Vj = $limit(V(b_pin), "pnjlim", N * `VTJ,
+                    N * `VTJ * ln(N * `VTJ / (1.41421356 * Is)));
+        x  = Is * (limexp(Vj / (N * `VTJ)) - 1.0);  // q0/tau  (A)
+        v2 = `SC * x;                                // V2 in uA
+        v3 = V(l3);                                  // V3 in uA
+        Ir = x * x / IE;                             // GE = (q0/tau)^2 / IE
+
+        // Gpin = Iepi + Ir,  Iepi = (V2 - V3)/1 + tau d(V2 - V3)/dt
+        I(b_pin) <+ (v2 - v3) / `SC + Ir;
+        I(b_pin) <+ ddt(tau * (v2 - v3) / `SC);
+
+        // optional depletion charge across the junction (not in [W])
+        if (Cj0 > 0.0) begin
+            if (Vj < FC * Vbi)
+                Qdep = Cj0 * Vbi / (1.0 - Mj) * (1.0 - pow(1.0 - Vj / Vbi, 1.0 - Mj));
+            else
+                Qdep = Cj0 * (Vbi / (1.0 - Mj) * (1.0 - pow(1.0 - FC, 1.0 - Mj))
+                       + ((1.0 - FC * (1.0 + Mj)) * (Vj - FC * Vbi)
+                          + 0.5 * Mj / Vbi * (Vj * Vj - FC * FC * Vbi * Vbi))
+                         / pow(1.0 - FC, 1.0 + Mj));
+        end else
+            Qdep = 0.0;
+        I(b_pin) <+ ddt(Qdep);
+        I(b_pad) <+ ddt(Cpad * V(b_pad));
+
+        // intrinsic region: Repi || (Rlim + Gmod)
+        I(b_epi) <+ V(b_epi) / Repi;
+        I(b_lim) <+ V(b_lim) / Rlim;
+        gm = LAM / VM * x + (1.0 - LAM) / VM * (v2 - v3) / `SC;
+        I(b_mod) <+ V(b_mod) * gm;
+
+        // ===================== tenth-order ladder: [W] Fig. 4(d) =====================
+        // G3: moving boundary, R3 = T0/(3 tau) (1 - sqrt((PHI - Vj)/(VPT - RSC I)))^2
+        xph = 0.5 * ((PHI - Vj) + sqrt((PHI - Vj) * (PHI - Vj) + eps_phi * eps_phi));
+        den = VPT - RSC * Iterm;
+        den = 0.5 * (den + sqrt(den * den + 1.0e-4 * VPT * VPT));   // keep > 0
+        s   = sqrt(xph / den);
+        sc  = s / pow(1.0 + pow(s / s_max, 8.0), 0.125);
+        R3  = T0 / (3.0 * tau) * (1.0 - sc) * (1.0 - sc);
+
+        // node V3: series (1 || tau) from V2, shunt G3, series (5 || tau/5) to l4
+        I(l3) <+ v3 - v2;
+        I(l3) <+ ddt(tau * (v3 - v2));
+        I(l3) <+ v3 / R3;
+        I(l3, l4) <+ V(l3, l4) / 5.0;
+        I(l3, l4) <+ ddt(tau / 5.0 * V(l3, l4));
+        I(l4)     <+ V(l4) * 7.0 * tau / T0;
+        I(l4, l5) <+ V(l4, l5) / 9.0;
+        I(l4, l5) <+ ddt(tau / 9.0 * V(l4, l5));
+        I(l5)     <+ V(l5) * 11.0 * tau / T0;
+        I(l5, l6) <+ V(l5, l6) / 13.0;
+        I(l5, l6) <+ ddt(tau / 13.0 * V(l5, l6));
+        I(l6)     <+ V(l6) * 15.0 * tau / T0;
+        I(l6, l7) <+ V(l6, l7) / 17.0;
+        I(l6, l7) <+ ddt(tau / 17.0 * V(l6, l7));
+        I(l7)     <+ V(l7) * 19.0 * tau / T0;
+
+        // ===================== free carriers: [W] Fig. 3 =====================
+        // tau_c dX/dt + X = I_src (uA),  I_src = Iepi [+ Ir if fc_src = 0],
+        //                                Iepi  = (V2 - V3) + tau d(V2 - V3)/dt.
+        // Integrated in the equivalent derivative-free form (no ddt of the exponential V2):
+        //   W = X - (tau/tau_c)(V2 - V3),  tau_c dW/dt + W = (1 - tau/tau_c)(V2 - V3) [+ Ir]
+        // The direct form made ngspice/OSDI lose up to 4x of the free charge after a fall
+        // (cancelling ddt pair); verilog-a-sim integrated both forms correctly.
+        tcf = (tau_c > 0.0) ? tau_c : tau;
+        I(nf) <+ ddt(tcf * V(nf));
+        I(nf) <+ V(nf) - (1.0 - tau / tcf) * (v2 - v3) - ((fc_src == 0) ? `SC * Ir : 0.0);
+        Ncar = tcf * (V(nf) + tau / tcf * (v2 - v3)) / `SC / `QE;   // free carriers (number)
+        V(xfc) <+ 1.0e3 * (V(nf) + tau / tcf * (v2 - v3)) / `SC;   // monitor only (X, mA)
+        dN   = Ncar / (V_act * 1.0e-12);             // cm^-3
+        Np   = 0.5 * (dN + sqrt(dN * dN + N_floor * N_floor));
+        Np0  = 0.5 * N_floor;                        // Np at dN = 0
+        dn     = -(ce * (Np - Np0) + ch * (pow(Np, 0.8) - pow(Np0, 0.8)));
+        dalpha = (ae + ah) * (Np - Np0);             // cm^-1
+
+        // ===================== heater / thermal (not in [W]) =====================
+        T   = Temp(b_th);
+        Rh  = Rh0 * (1.0 + TCR * T);
+        Vh  = V(b_h);
+        I(b_h) <+ Vh / Rh;
+        P_h = eta_h * Vh * Vh / Rh;
+
+        // ===================== ring: TCMT form of [W] Eqs. (4)-(6) =====================
+        ngr  = (ng > 0.0) ? ng : neff;
+        L    = `TWOPI * Rring;
+        tres = ngr * L / `C0;
+        FSR  = lambda0 * lambda0 * 1.0e-9 / (ngr * L);           // nm
+        lam_res = lambda0 * (1.0 + Gamma * dn / ngr) + 1.0e-3 * dlam_dT * T;
+        inv_tc  = -ln(sigma) / tres;
+        inv_ti  = (-ln(a0) + Gamma * 100.0 * dalpha * L / 2.0) / tres;
+        inv_td  = -ln(sigma_d) / tres;
+        gam     = inv_ti + inv_tc + inv_td;
+        gam0    = (-ln(a0) - ln(sigma) - ln(sigma_d)) / tres;
+        tau_n   = 1.0 / gam0;                        // fixed scaling for conditioning
+        kin     = 2.0 * inv_tc;                      // y = mu_c a, mu_c^2 = 2 inv_tc
+        kdrop   = (sigma_d < 1.0) ? sqrt(inv_td / inv_tc) : 0.0;
+
+        lam_L = max(V(wl), 1.0);
+        dlam  = (FSR / `PI_) * sin(`PI_ * (lam_L - lam_res) / FSR);
+        dw    = `TWOPI * `C0 * dlam * 1.0e-9 / (lam_L * lam_res * 1.0e-18);
+
+        sr  = V(o_in_re);   si  = V(o_in_im);
+        y_r = V(yr);        y_i = V(yi);
+        // dy/dt = (j dw - gam) y - j kin s_in
+        I(yr) <+ ddt(tau_n * y_r);
+        I(yr) <+ -tau_n * (-gam * y_r - dw * y_i + kin * si);
+        I(yi) <+ ddt(tau_n * y_i);
+        I(yi) <+ -tau_n * ( dw * y_r - gam * y_i - kin * sr);
+
+        tl = pow(10.0, -ilossdB / 20.0);
+        V(o_thru_re) <+ tl * (sr + y_i);
+        V(o_thru_im) <+ tl * (si - y_r);
+        V(o_drop_re) <+ tl * ( kdrop * y_i);
+        V(o_drop_im) <+ tl * (-kdrop * y_r);
+
+        // ===================== thermal balance =====================
+        P_abs = f_abs * (inv_ti / inv_tc) * (y_r * y_r + y_i * y_i) * 1.0e-3;
+        P_el  = V(anode, cathode) * Iterm;
+        Pwr(b_th) <+ ddt(Cth * T);
+        Pwr(b_th) <+ T / Rth - P_h - ((self_heat == 1) ? (P_el + P_abs) : 0.0);
+    end
+endmodule

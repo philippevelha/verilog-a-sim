@@ -33,6 +33,10 @@ This paper makes the following contributions:
   \item A validation methodology in which every analysis is gated against committed QSPICE
   reference outputs, and results at scale are checked against an independent oracle, the Boolean
   function of the circuit (Sections~\ref{sec:validation} and~\ref{sec:scale}).
+  \item A case study showing that Verilog-A written for an OSDI flow runs unchanged and
+  standalone: two electro-optic micro-ring modulator models agree with OpenVAF and ngspice on the
+  same source, and one reproduces the main results of the published model it implements, without
+  the solver-specific rewrites ngspice needed (Section~\ref{sec:mrm}).
 \end{itemize}
 
 \todo{Roadmap paragraph for the rest of the paper, once the section order is fixed.}

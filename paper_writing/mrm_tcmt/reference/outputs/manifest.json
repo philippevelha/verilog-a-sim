@@ -1,0 +1,247 @@
+{
+  "created": "2026-10-23 20:01:51 +0200",
+  "host": {
+    "machine": "x86_64",
+    "cpus": 2,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz"
+  },
+  "tools": {
+    "ngspice": [
+      "** ngspice-47 : Circuit level simulation program"
+    ],
+    "openvaf": [
+      "OpenVAF-reloaded unknown"
+    ],
+    "va-cli": "/home/claude/verilog-a-sim/target/release/va-cli"
+  },
+  "models": {
+    "mrm_tcmt.va": "8c5bb48bb89ff459",
+    "mrm_driver.va": "f2c034d7f173184e"
+  },
+  "notes": [
+    "ngspice runs with .spiceinit 'set num_threads=1' (OpenMP sync overhead otherwise dominates)",
+    "verilog-a-sim timing includes parsing + compiling the Verilog-A each run",
+    "verilog-a-sim prints 6 decimals; ngspice decks use numdgt=15",
+    "timings: median of N repeats; rss = peak resident set size"
+  ],
+  "cases": {
+    "ng_dc_default": {
+      "simulator": "ngspice",
+      "deck": "ng_dc_default.cir",
+      "command": "ngspice -b ng_dc_default.cir",
+      "repeats": 5,
+      "wall_s_median": 0.01,
+      "wall_s_min": 0.01,
+      "wall_s_max": 0.03,
+      "user_s_mean": 0.008,
+      "sys_s_mean": 0.002,
+      "rss_mb_peak": 10.96875,
+      "output_csv": "ng_dc_default.csv.gz",
+      "output_sha256_16": "6c7631c2b2905602",
+      "points": 2000,
+      "x_first": 1549.6,
+      "x_last": 1550.599500000204,
+      "P_min_mW": 0.0022634317313880085,
+      "P_max_mW": 0.9848482668117926,
+      "P_mean_mW": 0.7905454230340997
+    },
+    "ng_dc_tight": {
+      "simulator": "ngspice",
+      "deck": "ng_dc_tight.cir",
+      "command": "ngspice -b ng_dc_tight.cir",
+      "repeats": 5,
+      "wall_s_median": 0.01,
+      "wall_s_min": 0.01,
+      "wall_s_max": 0.02,
+      "user_s_mean": 0.01,
+      "sys_s_mean": 0.0,
+      "rss_mb_peak": 10.92578125,
+      "output_csv": "ng_dc_tight.csv.gz",
+      "output_sha256_16": "9c47a352de77b113",
+      "points": 2000,
+      "x_first": 1549.6,
+      "x_last": 1550.599500000204,
+      "P_min_mW": 0.0022675736961593404,
+      "P_max_mW": 0.9848482274149493,
+      "P_mean_mW": 0.7905406432143484
+    },
+    "ng_tran_default": {
+      "simulator": "ngspice",
+      "deck": "ng_tran_default.cir",
+      "command": "ngspice -b ng_tran_default.cir",
+      "repeats": 5,
+      "wall_s_median": 0.18,
+      "wall_s_min": 0.18,
+      "wall_s_max": 0.2,
+      "user_s_mean": 0.148,
+      "sys_s_mean": 0.028,
+      "rss_mb_peak": 16.1171875,
+      "output_csv": "ng_tran_default.csv.gz",
+      "output_sha256_16": "f9e48df62d412a75",
+      "points": 21091,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 2e-15,
+      "dt_median": 4.999999999999983e-13,
+      "dt_max": 5.000000000104931e-13,
+      "steps_below_1fs": 0,
+      "P_min_mW": 0.6461551003123984,
+      "P_max_mW": 0.8440455283390745,
+      "P_mean_mW": 0.7367897068434948
+    },
+    "ng_tran_tight": {
+      "simulator": "ngspice",
+      "deck": "ng_tran_tight.cir",
+      "command": "ngspice -b ng_tran_tight.cir",
+      "repeats": 1,
+      "wall_s_median": 2.34,
+      "wall_s_min": 2.34,
+      "wall_s_max": 2.34,
+      "user_s_mean": 2.0,
+      "sys_s_mean": 0.31,
+      "rss_mb_peak": 75.9296875,
+      "output_csv": "ng_tran_tight.csv.gz",
+      "output_sha256_16": "ea30257763b18f30",
+      "points": 239343,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 4.118564513401802e-16,
+      "dt_median": 4.999999999980854e-14,
+      "dt_max": 5.0000000004358035e-14,
+      "steps_below_1fs": 130,
+      "P_min_mW": 0.6461930706249627,
+      "P_max_mW": 0.8440277696866575,
+      "P_mean_mW": 0.728718848754061
+    },
+    "va_dc_default": {
+      "simulator": "va-sim",
+      "deck": "va_dc.net",
+      "command": "va-cli sim va_dc.net --model . --report tre,tim",
+      "repeats": 5,
+      "wall_s_median": 0.14,
+      "wall_s_min": 0.13,
+      "wall_s_max": 0.2,
+      "user_s_mean": 0.134,
+      "sys_s_mean": 0.01,
+      "rss_mb_peak": 6.4375,
+      "output_csv": "va_dc_default.csv.gz",
+      "output_sha256_16": "ee49788a4c32f3a5",
+      "points": 2001,
+      "x_first": 1549.6,
+      "x_last": 1550.6,
+      "P_min_mW": 0.0022675691610000003,
+      "P_max_mW": 0.9848721197289999,
+      "P_mean_mW": 0.7906377566000379
+    },
+    "va_tran_default": {
+      "simulator": "va-sim",
+      "deck": "va_tran.net",
+      "command": "va-cli sim va_tran.net --model . --tran --report kk,tre,tim",
+      "repeats": 5,
+      "wall_s_median": 1.96,
+      "wall_s_min": 1.82,
+      "wall_s_max": 1.98,
+      "user_s_mean": 1.884,
+      "sys_s_mean": 0.032,
+      "rss_mb_peak": 7.8203125,
+      "output_csv": "va_tran_default.csv.gz",
+      "output_sha256_16": "162f60dd4771b4c2",
+      "points": 24650,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 1.09999999985434e-14,
+      "dt_median": 4.999999999997398e-13,
+      "dt_max": 5.00000000000567e-13,
+      "steps_below_1fs": 0,
+      "P_min_mW": 0.6461582998119999,
+      "P_max_mW": 0.8440451375239999,
+      "P_mean_mW": 0.7328077816447022
+    },
+    "va_tran_jit": {
+      "simulator": "va-sim",
+      "deck": "va_tran.net",
+      "command": "VA_JIT=on va-cli sim va_tran.net --model . --tran --report kk,tre,tim",
+      "repeats": 5,
+      "wall_s_median": 1.72,
+      "wall_s_min": 1.66,
+      "wall_s_max": 1.96,
+      "user_s_mean": 1.67,
+      "sys_s_mean": 0.064,
+      "rss_mb_peak": 15.87890625,
+      "output_csv": "va_tran_jit.csv.gz",
+      "output_sha256_16": "162f60dd4771b4c2",
+      "points": 24650,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 1.09999999985434e-14,
+      "dt_median": 4.999999999997398e-13,
+      "dt_max": 5.00000000000567e-13,
+      "steps_below_1fs": 0,
+      "P_min_mW": 0.6461582998119999,
+      "P_max_mW": 0.8440451375239999,
+      "P_mean_mW": 0.7328077816447022
+    },
+    "va_tran_tight": {
+      "simulator": "va-sim",
+      "deck": "va_tran.net",
+      "command": "VA_JIT=on va-cli sim va_tran.net --model . --tran --reltol 1e-7 --abstol 1e-10 --report kk,tre,tim",
+      "repeats": 1,
+      "wall_s_median": 45.86,
+      "wall_s_min": 45.86,
+      "wall_s_max": 45.86,
+      "user_s_mean": 44.9,
+      "sys_s_mean": 0.35,
+      "rss_mb_peak": 25.60546875,
+      "output_csv": "va_tran_tight.csv.gz",
+      "output_sha256_16": "6de50923fd56478b",
+      "points": 237229,
+      "x_first": 0.0,
+      "x_last": 1.016e-08,
+      "dt_min": 4.999999999525905e-16,
+      "dt_median": 2.819999999999376e-14,
+      "dt_max": 5.00000000000567e-13,
+      "steps_below_1fs": 12698,
+      "P_min_mW": 0.646192953157,
+      "P_max_mW": 0.844028439656,
+      "P_mean_mW": 0.7267545255192033
+    }
+  },
+  "accuracy": {
+    "ng_dc_default": {
+      "vs": "closed-form Lorentzian",
+      "max_abs_dP": 2.524437534834334e-05
+    },
+    "ng_dc_tight": {
+      "vs": "closed-form Lorentzian",
+      "max_abs_dP": 4.11226608321158e-12
+    },
+    "va_dc_default": {
+      "vs": "closed-form Lorentzian",
+      "max_abs_dP": 1.1601767502256166e-06
+    },
+    "ng_tran_default": {
+      "vs": "ng_tran_tight",
+      "rms_dP_over_Pmean": 4.1853492404534336e-05,
+      "max_dP_over_Pmean": 0.00016557100778996978,
+      "rms_dV_kk": 0.0006917277054240438
+    },
+    "va_tran_default": {
+      "vs": "ng_tran_tight",
+      "rms_dP_over_Pmean": 3.191603818863721e-05,
+      "max_dP_over_Pmean": 0.0001116602529899323,
+      "rms_dV_kk": 0.0001940706597405563
+    },
+    "va_tran_jit": {
+      "vs": "ng_tran_tight",
+      "rms_dP_over_Pmean": 3.191603818863721e-05,
+      "max_dP_over_Pmean": 0.0001116602529899323,
+      "rms_dV_kk": 0.0001940706597405563
+    },
+    "va_tran_tight": {
+      "vs": "ng_tran_tight",
+      "rms_dP_over_Pmean": 1.531975528943654e-06,
+      "max_dP_over_Pmean": 1.01226584903028e-05,
+      "rms_dV_kk": 1.4826565519885329e-05
+    }
+  }
+}

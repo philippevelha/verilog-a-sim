@@ -1,0 +1,23 @@
+* static through-port spectra at 0 V and 0.86 V (Wang 2016 Fig. 10)
+.model pin mrm_pin
+Va a 0 0
+Vin_re in_re 0 1.0
+Vin_im in_im 0 0
+Vwl wl 0 1318.8
+Vh hp 0 0
+N1 a 0 hp 0 in_re in_im th_re th_im dr_re dr_im wl tdt pin
+.control
+pre_osdi mrm_pin.osdi
+set wr_singlescale
+set wr_vecnames
+option numdgt=12 reltol=1e-5
+dc Vwl 1318.5 1319.1 0.0005
+let p = v(th_re)^2 + v(th_im)^2
+wrdata spec_0V.dat p
+alter Va dc = 0.86
+dc Vwl 1318.5 1319.1 0.0005
+let p = v(th_re)^2 + v(th_im)^2
+wrdata spec_0p86V.dat p
+quit
+.endc
+.end

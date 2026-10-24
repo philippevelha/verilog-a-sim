@@ -12,7 +12,10 @@ Every analysis is checked against QSPICE golden outputs on 28 circuits to stated
 finite differences. On the transistor-level ISCAS'85 suite built from PSP103 devices, all eleven
 circuits, up to \num{268676} unknowns and \num{15882} PSP103 instances, reach operating
 points whose every gate output matches the Boolean logic, and a c432 vector-sequence transient
-matches on \num{1196800} settled samples. The simulator produces bit-identical output on Linux,
+matches on \num{1196800} settled samples. Without a host simulator, a published compact model of a
+silicon carrier-injection ring modulator reproduces that paper's main results, and a
+depletion-mode ring model agrees with the same source compiled by OpenVAF for ngspice to
+$3\times10^{-5}$. The simulator produces bit-identical output on Linux,
 macOS and Windows and at any thread count. We describe the design choices that make this
 determinism possible, the DC rescue strategy that makes the large circuits converge, and the
 limitations that remain.

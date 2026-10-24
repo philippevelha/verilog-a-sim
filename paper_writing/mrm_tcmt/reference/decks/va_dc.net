@@ -1,0 +1,9 @@
+* MRM static through-port spectrum, V_R = 0, verilog-a-sim
+Vre inre gnd DC 1.0
+Vim inim gnd DC 0
+Vwl wl   gnd DC 1550
+Vk  k    gnd DC 0
+Vh  hp   gnd DC 0
+X1 gnd k hp gnd inre inim tre tim dre dim wl tdt mrm_tcmt lambda0=1550 FSR=10 Qi=20000 Qc=22000 eta_mod=20 Rs=100 Cj0=20e-15 Vbi=0.8 Mj=0.5 Cpad=10e-15 dlam_dT=75 Rth=5e3 Cth=1e-9 Rh0=1e3 f_abs=0.5 self_heat=0
+.dc Vwl 1549.6 1550.6 0.0005
+.end

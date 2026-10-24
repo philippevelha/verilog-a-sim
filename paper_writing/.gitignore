@@ -8,3 +8,8 @@ build/
 *.out
 *.synctex.gz
 main.pdf
+# ring-modulator case study: archives duplicate the folders, OSDI files are compiled
+# binaries (rebuild with openvaf-r), and publisher PDFs are not ours to redistribute
+*.zip
+*.osdi
+*.pdf

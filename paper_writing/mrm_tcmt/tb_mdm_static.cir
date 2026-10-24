@@ -1,0 +1,42 @@
+* Saxena & Shawon MDM (mode=1) static spectra and heater tuning
+.include mdm_saxena2023.lib
+Vin_re in_re 0 1.0
+Vin_im in_im 0 0
+Vwl wl 0 1566.7
+Va a 0 0
+Vk k 0 0
+Vh hp 0 0
+N1 a k hp 0 in_re in_im th_re th_im dr_re dr_im wl tdt mdm_aim
+.control
+pre_osdi mrm_tcmt.osdi
+set wr_singlescale
+set wr_vecnames
+option numdgt=10
+alter Vk dc = -0.5
+dc Vwl 1565.9 1567.7 0.001
+let pt = v(th_re)^2 + v(th_im)^2
+wrdata mdm_vrm05.dat pt
+alter Vk dc = 0
+dc Vwl 1565.9 1567.7 0.001
+let pt = v(th_re)^2 + v(th_im)^2
+wrdata mdm_vr0.dat pt
+alter Vk dc = 1
+dc Vwl 1565.9 1567.7 0.001
+let pt = v(th_re)^2 + v(th_im)^2
+wrdata mdm_vr1.dat pt
+alter Vk dc = 2
+dc Vwl 1565.9 1567.7 0.001
+let pt = v(th_re)^2 + v(th_im)^2
+wrdata mdm_vr2.dat pt
+alter Vk dc = 0
+alter Vh dc = 0
+dc Vwl 1565.9 1567.7 0.001
+let pt = v(th_re)^2 + v(th_im)^2
+wrdata mdm_ph0.dat pt
+alter Vh dc = 2.8284271
+dc Vwl 1565.9 1567.7 0.001
+let pt = v(th_re)^2 + v(th_im)^2
+wrdata mdm_ph1mW.dat pt
+quit
+.endc
+.end

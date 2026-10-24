@@ -1,0 +1,165 @@
+\subsection{Case Study: Silicon Micro-Ring Modulators}
+\label{sec:mrm}
+
+The golden circuits above test the simulator against a reference simulator. This case study
+tests the claim the tool is built for: that a Verilog-A model written for a commercial or OSDI
+flow runs in \vas{} unchanged, with no host simulator and no native compiler, and reproduces the
+published results the model was written to reproduce. Two electro-optic micro-ring modulator
+(MRM) models were written as ordinary Verilog-A, using only \texttt{ddt}, \texttt{limexp},
+\texttt{\$limit} and the standard disciplines, so that the same source compiles with
+OpenVAF~\cite{openvaf} for ngspice~\cite{ngspice} through OSDI. Both models share one port list:
+the optical field envelope travels on electrical nets in units of $\sqrt{\text{mW}}$ (real and
+imaginary parts on two nets), the laser wavelength on a net in nanometres, and the ring
+temperature on a \texttt{thermal} node. The ring itself is described by temporal coupled-mode
+theory (TCMT), two real ODEs on internal nodes.
+
+\subsubsection{Depletion-mode ring against an OSDI flow}
+The first model (\texttt{mrm\_tcmt}) couples a TCMT ring to a lumped p-n junction, a heater and
+a thermal node, and is driven by a behavioural two-pole driver at 25\,Gb/s with a PRBS7 sequence
+(254 bits). Table~\ref{tab:mrm-tcmt} compares \vas{} with ngspice-47 running the same source
+through OpenVAF. The DC spectrum is checked against the closed-form Lorentzian; the transient
+power waveform against a tightly converged ngspice run (reltol $10^{-7}$, maximum step 50\,fs),
+resampled on a 50\,fs grid. At default settings the two simulators agree with that reference
+to the same order, $3.2\times10^{-5}$ and $4.2\times10^{-5}$ RMS of the mean power, and \vas{}
+at tight tolerances matches the ngspice reference to $1.5\times10^{-6}$. The same source with
+the measured-fit parameters of Saxena and Shawon~\cite{saxena2023mdm} reproduces the resonance
+position and depth of their Eq.~(6) exactly over $-0.5$ to 2\,V, with a largest deviation of
+$1.2\times10^{-4}$ in transmission in the far skirts, which comes from the FSR-periodic detuning
+map used away from resonance.
+\src{paper\_writing/mrm\_tcmt/reference/REFERENCE.md and outputs/manifest.json, 2.42.0;
+mrm\_tcmt/README.md (Saxena mode 1)}
+
+\begin{table}[t]
+  \centering
+  \caption{Depletion-mode MRM, 25\,Gb/s PRBS7: \vas{} and ngspice/OpenVAF on the same
+  Verilog-A source (2-vCPU x86-64 VM)
+  \src{mrm\_tcmt/reference/REFERENCE.md, verilog-a-sim 2.42.0, ngspice-47, 2026-10-23}}
+  \label{tab:mrm-tcmt}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    Case & Points & Wall (s) & Error \\
+    \midrule
+    ngspice DC, default            & \num{2000}   & 0.010 & $2.5\times10^{-5}$ \\
+    \vas{} DC, default             & \num{2001}   & 0.14  & $1.2\times10^{-6}$\,$^a$ \\
+    ngspice tran, default          & \num{21091}  & 0.18  & $4.2\times10^{-5}$ \\
+    \vas{} tran, default           & \num{24650}  & 1.96  & $3.2\times10^{-5}$ \\
+    \vas{} tran, default, JIT      & \num{24650}  & 1.72  & identical \\
+    ngspice tran, tight (reference)& \num{239343} & 2.34  & --- \\
+    \vas{} tran, tight, JIT        & \num{237229} & 45.9  & $1.5\times10^{-6}$ \\
+    \bottomrule
+    \multicolumn{4}{@{}p{0.95\columnwidth}@{}}{\footnotesize DC error: max.\ $|\Delta T|$
+    against the closed form. Transient error: RMS $\Delta P/\bar P$ against the tight ngspice
+    run. $^a$\,the print precision of the output (six decimals), not the solver.}
+  \end{tabular}
+\end{table}
+
+Two further observations follow from this comparison. First, the \vas{} outputs are
+bit-identical across machines: re-run on Windows~11 (Intel Core i7-1185G7), the four \vas{} cases
+of Table~\ref{tab:mrm-tcmt} reproduce the Linux point counts, step sequence and output hashes
+exactly, as Section~\ref{sec:determinism} predicts.
+\src{mrm\_tcmt/reference/outputs\_windows, check\_rerun.py, 2.42.0+1, 2026-10-24}
+Second, \vas{} is 10 to 20 times slower than the OpenVAF-compiled model in ngspice on this
+circuit, and its timing includes parsing and compiling the Verilog-A source on every run.
+For a model of this size that is the difference between a fraction of a second and a few
+seconds; Section~\ref{sec:limitations} returns to it.
+
+\subsubsection{Reproducing a published carrier-injection model}
+The second model (\texttt{mrm\_pin}) is an independent implementation of the compact model of
+Wang \emph{et al.}~\cite{wang2016mrm}, a carrier-injection (p-i-n) ring for 1.31\,\textmu m
+optical interconnects whose electrical part is Strollo's tenth-order p-i-n
+model~\cite{strollo1997pin}. The ring's delayed-feedback equation, Eq.~(4) of~\cite{wang2016mrm},
+needs \texttt{absdelay}, which OpenVAF does not support and which \vas{} refuses in transient
+analysis; the model therefore uses the equivalent TCMT form, which agrees with Eq.~(4) to
+1.7--2.2\,\textmu W RMS on the same carrier waveform. The quantities the paper does not give
+were set as follows, and are flagged in the model: the thermal voltage of the junction law is
+taken at 58\,$^\circ$C, the only temperature at which the paper's Table~I reproduces its own
+I--V curve, and the active carrier volume is calibrated on a single point, the $-90.7$\,pm
+resonance shift at 0.86\,V.
+\src{paper\_writing/mrm\_injection/README.md}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/mrm_pin_static.png}
+  \caption{Carrier-injection MRM~\cite{wang2016mrm} in \vas{}. (a) DC I--V against the paper's
+  simulation and measurement. (b) Through-port spectra at 0 and 0.86\,V against the measured
+  spectra; only the shift at 0.86\,V was used for calibration, not the depth. (c) Current under
+  a 10\,Gb/s clock: without the pad and probe parasitics, which the paper does not give, the
+  model does not reproduce the paper's near-sinusoidal waveform; adding about 40\,fF of pad
+  capacitance and a sinusoidal drive moves it towards it.
+  \src{mrm\_injection/tests/plot\_validation.py}}
+  \label{fig:mrm-pin-static}
+\end{figure*}
+
+The main results of~\cite{wang2016mrm} are reproduced (Fig.~\ref{fig:mrm-pin-static} and
+Table~\ref{tab:mrm-pin}). The DC I--V curve lies within 12\,\% RMS of the paper's simulation and
+22\,\% of its measurement between 0.66 and 2\,V. The 0\,V spectrum matches the paper's closed form
+to $8\times10^{-5}$ in transmission, and the 0.86\,V spectrum, whose depth was not used in the
+calibration, reaches $-16.0$\,dB against $-15.4$\,dB simulated and $-14.9$\,dB measured. At
+8\,Gb/s, PRBS7, 2\,V$_\text{pp}$, observed through the paper's 20\,GHz Bessel--Thomson receiver,
+the model reproduces the central result of the paper (Fig.~\ref{fig:mrm-pin-eyes}): a plain NRZ
+drive leaves the eye closed, and pre-emphasis with an 80\,ps pulse opens it to 792\,\textmu W
+with a 12.1\,dB extinction ratio. The degradations the paper reports when the emphasis depth is
+raised to 0.9\,V or the bias moved to 0.75\,V or 0.65\,V are also reproduced.
+
+\begin{table}[t]
+  \centering
+  \caption{Carrier-injection MRM at 8\,Gb/s against~\cite{wang2016mrm}: eye height through a
+  20\,GHz receiver \src{mrm\_injection/tests/eyes\_va.json, eyes\_ng.json}}
+  \label{tab:mrm-pin}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}llrc@{}}
+    \toprule
+    Case in~\cite{wang2016mrm} & Paper & Model (\textmu W) & Agrees \\
+    \midrule
+    Fig.~12, NRZ, no pre-emphasis   & closed   & closed & yes \\
+    Fig.~13(b), 80\,ps pre-emphasis & optimum  & 792    & yes \\
+    Fig.~13(a), 40\,ps              & degraded & 844    & no \\
+    Fig.~14(a), depth 0.9\,V        & degraded & 292    & yes \\
+    Fig.~14(b), depth 0.7\,V        & degraded & 784    & weak \\
+    Fig.~15(a), bias 0.75\,V        & degraded & 772    & yes \\
+    Fig.~15(b), bias 0.65\,V        & degraded & 702    & yes \\
+    Fig.~21(a), asym.\ vs sym.\ (15\,Gb/s) & asym.\ better & 428 vs 467 & no \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/mrm_pin_eyes.png}
+  \caption{Carrier-injection MRM at 8\,Gb/s, PRBS7, laser at the 0\,V resonance: drive
+  (top) and optical eye (bottom; red: through the 20\,GHz receiver, light blue: unfiltered) for
+  the cases of Figs.~12, 13(a) and 13(b) of~\cite{wang2016mrm}.
+  \src{mrm\_injection/tests/plot\_eyes.py va}}
+  \label{fig:mrm-pin-eyes}
+\end{figure*}
+
+What is not reproduced traces to the measurement setup rather than to the device. The 10\,Gb/s
+current waveform of Fig.~7 in~\cite{wang2016mrm} is near-sinusoidal; the model's is not, with
+an RMS difference of 0.5--0.75\,mA on $\pm2$\,mA. That waveform depends on elements the paper
+does not give, the source impedance, the drive at the probe and the pad and probe parasitics,
+and Fig.~\ref{fig:mrm-pin-static}(c) shows that about 40\,fF of pad capacitance alone moves
+the model most of the way. Without the pad parasitics of the measured device, the experimental
+waveforms cannot be reproduced exactly. Two eye trends are not reproduced either (Fig.~13(a)
+and Fig.~21(a)); both have the same signature, a rising edge that depends less on the charge
+left by the preceding low level than in the paper. The missing setup parasitics are the first
+candidate; a carrier volume calibrated on a single DC point and the depletion capacitance, which
+the paper's model omits, are the others, and none of them can be settled from the paper alone.
+
+\subsubsection{Numerical robustness without tuning}
+The same nine eye cases run in ngspice through OpenVAF agree with \vas{} to within
+0.24\,\textmu W in eye height and 0.01\,dB in extinction ratio. Getting there, however, required
+three changes for ngspice and none for \vas{}. The direct form of the free-carrier filter
+contains two \texttt{ddt} terms of an exponential that cancel analytically; with it, ngspice
+lost up to a factor of four of the free charge after a falling edge, and the model had to be
+rewritten in an equivalent form without a derivative of the exponential. The ladder state had
+to be scaled to microamperes, because in milliamperes the small shunt nodes fell below
+ngspice's default voltage tolerance and Newton stopped early (6.8\,\% current error); OSDI passes
+only the global tolerances to the model, so the discipline \texttt{abstol} could not be used
+instead. Finally, the testbenches needed reltol $10^{-5}$ to bring the remaining error from
+0.4\,\% to 0.08\,\%. \vas{} gave the correct result with both forms of the model at its default
+settings, whose Newton tolerance is $10^{-9}$.
+\src{mrm\_injection/README.md "Numerics"}
+\todo{Keep a deck with the direct (two-\texttt{ddt}) form of the carrier filter in
+\texttt{mrm\_injection/tests/} so the factor-of-four charge loss can be re-measured; it is
+currently documented in the README only.}
