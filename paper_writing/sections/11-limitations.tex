@@ -14,7 +14,10 @@ on a small model the price of compiling the source on every run and of the evalu
 OpenVAF's native code is a factor 10--20 in wall time against ngspice (Section~\ref{sec:mrm}:
 1.96\,s against 0.18\,s, and 45.9\,s against 2.34\,s at tight tolerances), seconds rather than
 tenths of a second;
-\texttt{absdelay} is refused in transient, so delay-line forms such as Eq.~(4) of the
-carrier-injection ring model must be rewritten (here, in coupled-mode form);
+\texttt{absdelay} in transient (2.44.0) requires the delay to stay fixed for the run, keeps
+a 512-sample history (a feature of the input shorter than delay/509 is smoothed when the steps
+are finer than that), and puts no breakpoint at a delayed edge; a model with an
+\texttt{absdelay} also leaves the static schedule, which doubled the run time of the Eq.~(4)
+ring against its TCMT form (14.8\,s against 7.4\,s, eq4\_va\_check.json);
 no golden reference for PSP103 circuits, so ISCAS'85 is checked against logic, not waveforms;
 language coverage is incomplete (token-reference numbers).}

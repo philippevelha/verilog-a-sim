@@ -1,6 +1,37 @@
 # Proposal: `absdelay` — a real transport delay, across disciplines
 
-**Status: stage 1 RATIFIED and implemented, 2026-09-01.** Stages 2-3 remain proposed.
+**Status: stage 1 RATIFIED and implemented, 2026-09-01. Stage 2 implemented in 2.44.0
+(2026-10-24).** Stage 3 remains proposed.
+
+**2026-10-24 (2.44.0)** — stage 2, a constant delay in transient, with three departures from
+the plan in §4, each for a reason:
+
+- **The history is thinned rather than bounded with an error.** Each site keeps a fixed ring
+  of `ABSDELAY_POINTS` = 512 `(t, value)` samples at least `delay/509` apart, plus the last
+  accepted point, so the window always covers the delay and the buffer cannot overflow (§2.2's
+  memory question and §6 question 2). The cost is resolution: when the steps are finer than
+  `delay/509` (the thermal regime), a feature of the input shorter than that is smoothed.
+  When they are coarser (the photonic regime), every accepted point is kept and the history
+  is exact at them.
+- **The delay is fixed for the run, and a change is an error.** The plan sized the buffer from
+  `maxdelay`, but Interface α drops `maxdelay` at elaboration, and carrying it would be a §6
+  change. Constant delays are every corpus use. A delay that changes is a `$fatal` (`E0608`)
+  naming stage 3, not a waveform computed from a buffer sized for another delay.
+- **No `bound_step(tau/k)`.** At a photonic sub-step delay it would force steps of a fraction
+  of a picosecond for no gain: the value at every solved point is already the interpolated
+  history. The cost is that a sharp input edge comes out `delay` later with no breakpoint
+  there; the step controller resolves it only as far as the rest of the circuit's error
+  estimate asks.
+
+The sub-step case is the discriminating one, as §5 said: its weight is a Jacobian entry,
+checked against a central difference (`absdelay_sub_step_weight_matches_finite_difference`),
+and through the pipeline a 0.3 ns delay in 5 ns steps is 67 times closer to the delayed input
+than to the undelayed one (`absdelay_is_a_transport_delay_in_transient`).
+
+**Found on the way, and fixed:** a model whose only frequency-domain term was an `absdelay` was
+compiled to the static schedule, because `Lowered::laplace_terms` left `absdelay` terms out.
+A delay held in a variable assigned after the model's setup then could not be evaluated where
+the term is stamped, and the whole term was silently dropped, at DC and in AC, since stage 1.
 
 **2026-09-06** — the other half of implement-or-refuse landed first: a transient run now
 **refuses** a model calling `absdelay` or any `laplace_*`, instead of warning and printing

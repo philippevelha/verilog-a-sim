@@ -69,9 +69,14 @@ The second model (\texttt{mrm\_pin}) is an independent implementation of the com
 Wang \emph{et al.}~\cite{wang2016mrm}, a carrier-injection (p-i-n) ring for 1.31\,\textmu m
 optical interconnects whose electrical part is Strollo's tenth-order p-i-n
 model~\cite{strollo1997pin}. The ring's delayed-feedback equation, Eq.~(4) of~\cite{wang2016mrm},
-needs \texttt{absdelay}, which OpenVAF does not support and which \vas{} refuses in transient
-analysis; the model therefore uses the equivalent TCMT form, which agrees with Eq.~(4) to
-1.7--2.2\,\textmu W RMS on the same carrier waveform. The quantities the paper does not give
+needs \texttt{absdelay}, which OpenVAF does not support; the model therefore uses the
+equivalent TCMT form, so that both simulators run the same source. \vas{} also runs Eq.~(4) as
+written, with the ring field delayed by one round trip
+($\tau_\text{res} = n_\text{eff}\,2\pi R/c = 0.26$\,ps, a fraction of every time step). On the
+10\,Gb/s clock of Wang's Fig.~7 the two forms agree to 2.7\,\textmu W RMS (8.0\,\textmu W
+maximum) on a through power of 78--1337\,\textmu W.
+\src{mrm\_injection/tests/eq4\_va\_check.py, verilog-a-sim 2.44.0; the Python check of Eq.~(4)
+on the TCMT carrier waveform gave 1.7--2.2\,\textmu W RMS (eq4\_check.py)} The quantities the paper does not give
 were set as follows, and are flagged in the model: the thermal voltage of the junction law is
 taken at 58\,$^\circ$C, the only temperature at which the paper's Table~I reproduces its own
 I--V curve, and the active carrier volume is calibrated on a single point, the $-90.7$\,pm

@@ -88,7 +88,7 @@ transport delay: every change comes out, `td` later.
 `td` apart, so a model whose input never pulses faster than its delay is unaffected. Otherwise
 there is no in-model fix: `absdelay` would be the natural replacement
 (`absdelay(V(mid), td)` after a zero-delay `transition`), but `absdelay` is refused in transient
-(`docs/proposals/absdelay.md`, stage 2). When the input comes from a deck source, the delay can
+(`docs/proposals/absdelay.md`, stage 2). *(Since 2.44.0 it is not: that replacement works.)* When the input comes from a deck source, the delay can
 be moved there instead (a `PULSE`'s own delay).
 
 **Fix.** Give each `transition` site a bounded queue of pending (time, value) changes in its state
@@ -138,7 +138,9 @@ arrays give. Small to medium, depending on how the diagnostic reaches `va-cli` f
 ### 2.6 `absdelay` in AC: negative delay, `maxdelay` — rank 6
 
 **What happens.** A negative `delay` becomes a phase advance, and `maxdelay` is not applied.
-Transient is unaffected, because transient refuses `absdelay` altogether.
+Transient is unaffected, because transient refuses `absdelay` altogether. *(Until 2.44.0. In
+transient the delay is now clamped to be non-negative, as in AC, and fixed for the run; `maxdelay` is
+still not applied.)*
 
 **Workaround.** `absdelay(x, min(max(td, 0), tmax))` in the model.
 

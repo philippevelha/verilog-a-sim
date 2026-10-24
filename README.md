@@ -188,10 +188,10 @@ Shipped this way on purpose, with the reasoning in `release.txt`'s 1.0.0 entry:
   RC mesh), where dense took 52 ms at 800 (`docs/validation.md`, "The circuit-size limit"). Every
   `sim` prints its own size, the solver it uses, and a rough cost bracket calibrated on that
   solver before it starts.
-- **Refused, not approximated:** `absdelay` in a transient run (a pure delay is not an ODE),
-  the analog events `absdelta` and `last_crossing`, compound triggers mixing a step event with
-  a scheduled one, and `$rdist_*` (this engine has no RNG). Each raises the standard refusal
-  block above.
+- **Refused, not approximated:** the analog events `absdelta` and `last_crossing`, and
+  compound triggers mixing a step event with a scheduled one. Each raises the standard refusal
+  block above. (`$rdist_*` draws since 2.42.0, and `absdelay` is a transport delay in transient
+  since 2.44.0, with the delay fixed for the run.)
 - `I(<port>)` inside case statements and loops, and vector ports in `I(<port>)`, are narrower
   than the LRM.
 - A cross-domain plot puts watts and amperes on one axis; `--report` one unit at a time is the

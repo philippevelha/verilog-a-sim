@@ -313,6 +313,9 @@ pub struct LaplaceTerm {
     /// the same `G = Re(H)`, `C = Im(H)/w` stamping, the same top-level-term restriction, and
     /// the same "this model is frequency-dependent" flag.
     pub delay: Option<ExprId>,
+    /// The call's own `ExprId.0`, which keys its state slots (`StatefulKind::Absdelay`, the
+    /// transient history buffer, 2.44.0).
+    pub site: u32,
     /// The auxiliary unknowns that carry this filter's **time-domain** state (2026-09-11), or
     /// `None` for an `absdelay` term, which has no rational part to realize. Allocated by
     /// [`allocate_laplace_states`] once the whole analog block is lowered, so that the slot
@@ -464,6 +467,7 @@ fn laplace_term_shape(
                 num: Vec::new(),
                 den: Vec::new(),
                 delay: Some(delay),
+                site: expr.0,
                 states: None,
             }));
         }
@@ -511,6 +515,7 @@ fn laplace_term_shape(
         num: num.to_vec(),
         den: den.to_vec(),
         delay: None,
+        site: expr.0,
         states: None,
     }))
 }
@@ -558,7 +563,9 @@ fn allocate_laplace_states(
         match s {
             LoweredStmt::Contribute(c) => {
                 for term in &mut c.laplace {
+                    // Listed with no states (see `Lowered::laplace_terms` for why it is listed).
                     if term.delay.is_some() {
+                        out.push(term.clone());
                         continue;
                     }
                     let order = if term.den_is_roots {
@@ -993,11 +1000,20 @@ pub struct Lowered {
     /// is the module's implicit ground reference (see [`NodeKclProbe`]), in ascending
     /// [`BranchId`] order, past every [`FlowCurrentAccumulator`] slot.
     pub node_kcl_probes: Vec<NodeKclProbe>,
-    /// Every rational `laplace_*` term in the analog block, in statement order, each carrying
-    /// its [`LaplaceStates`] block — allocated past every [`NodeKclProbe`] slot. The state
-    /// rows are stamped from this list after the statement walk
-    /// (`crate::GeneratedModel::stamp_laplace_states`); the term's *output* is stamped where
-    /// its contribution runs.
+    /// Every frequency-domain term in the analog block, in statement order: each rational
+    /// `laplace_*` term carrying its [`LaplaceStates`] block (allocated past every
+    /// [`NodeKclProbe`] slot), and each `absdelay` term with `states: None`. The state rows are
+    /// stamped from this list after the statement walk
+    /// (`crate::GeneratedModel::stamp_laplace_states`, which skips the `absdelay` entries); the
+    /// term's *output* is stamped where its contribution runs.
+    ///
+    /// The `absdelay` entries are what make an empty list mean "no frequency-domain term at
+    /// all", which two consumers read that way: the static schedule refuses a model with any
+    /// (`crate::sched`), and device bypass treats a model with none as pure in `x`. Until
+    /// 2.44.0 they were left out, so a model whose only such term was an `absdelay` was
+    /// scheduled: its variables lived in the schedule's registers, the delay argument (read
+    /// with `crate::ad::eval`) could not see them when it was a variable assigned after the
+    /// setup, and the whole term was silently dropped in DC and AC.
     pub laplace_terms: Vec<LaplaceTerm>,
     /// Every `zi_*` term in the analog block, in statement order, for the breakpoint schedule
     /// (`crate::GeneratedModel::events`) and the ramp step bound; the term's own stamp happens
@@ -1057,6 +1073,24 @@ pub const TRANSITION_QUEUE: usize = 8;
 /// The state slot of a `transition` site holding its pending-change count; the queue follows.
 pub const TRANSITION_PENDING: usize = 7;
 
+/// How many past `(t, value)` samples an `absdelay` site keeps for transient (2.44.0). The
+/// delay is fixed at its value at the start of the run (`maxdelay` is dropped at elaboration,
+/// so a delay that changes is an error, `crate::GeneratedModel::absdelay_at`). The samples are
+/// at least `delay / (ABSDELAY_POINTS - 3)` apart, so the buffer always spans the whole delay
+/// and never overflows: memory is
+/// fixed, and the price is resolution. When the accepted steps are wider than that spacing
+/// (a delay of a few steps or less, the photonic case) every accepted point is kept and the
+/// history is exact at them; when they are narrower (a delay of thousands of steps, the thermal
+/// case) the history is resampled at about `delay / 509`, and a feature of the input shorter
+/// than that is smoothed. Each sample costs two state slots, which the integrator copies on
+/// every evaluation, so the number is a trade between resolution and per-iteration cost.
+pub const ABSDELAY_POINTS: usize = 512;
+
+/// The state slots of an `absdelay` site before its sample ring: `(tau, count, head, t_tail,
+/// v_tail, t_first, v_first)`, `tau` being the delay as fixed at the start of the run. The tail is the last accepted point, always kept;
+/// the ring holds the thinned history before it.
+pub const ABSDELAY_HEAD: usize = 7;
+
 /// Which time-domain construct a [`StatefulCall`] is, and how many state slots it needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StatefulKind {
@@ -1090,6 +1124,10 @@ pub enum StatefulKind {
     /// switches only when that event fires, so the output's jump happens in the integrator's
     /// event re-solve at an accepted point, never inside a step.
     IdtReset { event_slot: usize },
+    /// `absdelay(value, delay)` in transient (2.44.0) — [`ABSDELAY_HEAD`] slots,
+    /// then a ring of [`ABSDELAY_POINTS`] `(t, value)` samples (see
+    /// `crate::GeneratedModel::absdelay_at`).
+    Absdelay,
 }
 
 impl StatefulKind {
@@ -1110,6 +1148,7 @@ impl StatefulKind {
             // method-agnostic.
             StatefulKind::Ddt => 3,
             StatefulKind::IdtReset { .. } => 3,
+            StatefulKind::Absdelay => ABSDELAY_HEAD + 2 * ABSDELAY_POINTS,
         }
     }
 }
@@ -1174,6 +1213,7 @@ fn collect_stateful_calls(module: &Module) -> (Vec<StatefulCall>, usize) {
             Expr::Call(Builtin::Slew, _) => StatefulKind::Slew,
             Expr::Call(Builtin::Transition, _) => StatefulKind::Transition,
             Expr::Call(Builtin::Ddt, _) => StatefulKind::Ddt,
+            Expr::Call(Builtin::Absdelay, _) => StatefulKind::Absdelay,
             Expr::Call(Builtin::Idt, args) if idt_reset(module, args).is_some() => {
                 resets += 1;
                 StatefulKind::IdtReset {

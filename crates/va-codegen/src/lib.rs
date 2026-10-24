@@ -443,6 +443,15 @@ impl CompiledModel {
     }
 }
 
+/// One `absdelay` lookup in transient (`GeneratedModel::absdelay_at`).
+struct Delayed {
+    /// `u(t − tau)`.
+    value: f64,
+    /// `∂value/∂u` at this evaluation: nonzero only when `t − tau` falls inside the step being
+    /// solved, so the delayed value depends on the current input.
+    weight: f64,
+}
+
 /// A rational `laplace_*` filter's scaled state-space coefficients, ready to stamp — see
 /// `GeneratedModel::laplace_realization` for the scaling and `lower::LaplaceStates` for the
 /// realization.
@@ -1793,6 +1802,52 @@ impl GeneratedModel {
                     continue;
                 }
             }
+            // `absdelay` in transient (2.44.0): the input's value `delay` seconds ago, read from
+            // the site's history on the state channel. DC keeps the identity below.
+            if let (Some(delay), va_abi::AnalysisKind::Transient) = (term.delay, ctx.analysis.kind)
+            {
+                let Ok(tau) = eval(ctx, delay) else {
+                    continue;
+                };
+                let d = match Self::absdelay_at(ctx, term.site, tau.value, u.value) {
+                    Ok(d) => d,
+                    Err(why) => {
+                        sink.task(va_abi::TaskKind::Fatal(1), &format!("{}: {why}", self.name));
+                        continue;
+                    }
+                };
+                // No `dy/dtau` term: the delay is fixed for the run (`absdelay_at`), so it has no
+                // sensitivity to `x` to carry.
+                let (y, w) = (term.sign * d.value, term.sign * d.weight);
+                let mut stamp = |gk: usize, v: f64, charge: bool| match (gb, charge) {
+                    (None, false) => {
+                        sink.jacobian(gp, gk, v);
+                        sink.jacobian(gn, gk, -v);
+                    }
+                    (None, true) => {
+                        sink.dcharge(gp, gk, v);
+                        sink.dcharge(gn, gk, -v);
+                    }
+                    (Some(gb), false) => sink.jacobian(gb, gk, -v),
+                    (Some(gb), true) => sink.dcharge(gb, gk, -v),
+                };
+                if w != 0.0 {
+                    for (slot, dg) in u.grad() {
+                        stamp(self.terminals[slot], w * dg, false);
+                    }
+                    for (slot, dg) in u.grad_ddt() {
+                        stamp(self.terminals[slot], w * dg, true);
+                    }
+                }
+                match gb {
+                    None => {
+                        sink.residual(gp, y);
+                        sink.residual(gn, -y);
+                    }
+                    Some(gb) => sink.residual(gb, -y),
+                }
+                continue;
+            }
             let omega = 2.0 * std::f64::consts::PI * ctx.analysis.freq;
             let ac = ctx.analysis.kind == va_abi::AnalysisKind::Ac && omega != 0.0;
 
@@ -1926,6 +1981,174 @@ impl GeneratedModel {
             ctx.analysis.kind,
             va_abi::AnalysisKind::Dc | va_abi::AnalysisKind::Transient
         )
+    }
+
+    /// `absdelay(u, tau)` at the transient timepoint `ctx` is evaluating (2.44.0): `u(t − tau)`
+    /// from the site's history, and how much of it is the current input `u`.
+    ///
+    /// **The history** is on the state channel (`lower::StatefulKind::Absdelay`): the last
+    /// accepted point (the *tail*) and a ring of up to `lower::ABSDELAY_POINTS` earlier samples,
+    /// at least `tau / (ABSDELAY_POINTS − 3)` apart. Each evaluation proposes the next history:
+    /// the old tail joins the ring if it is far enough past the ring's newest sample, samples
+    /// older than the delay window are dropped, and the current point becomes the tail. Only an
+    /// accepted evaluation's proposal is committed, so a rejected step leaves no trace. The ring
+    /// therefore always reaches back past `t − tau` and cannot overflow (§ `ABSDELAY_POINTS`
+    /// for what that costs in resolution).
+    ///
+    /// **The lookup** is linear interpolation in the samples, in three cases:
+    ///
+    /// - `t − tau` inside the step being solved (after the tail: the delay is shorter than the
+    ///   step): between the tail and the current point, so the value depends on the current
+    ///   unknowns, with weight `(t − tau − t_tail) / (t − t_tail)` on `u`. That weight is the
+    ///   Jacobian entry. A delay shorter than every step is the photonic norm, not a corner case;
+    /// - `t − tau` at or before the start of the run: the input's value at the start, its
+    ///   operating point;
+    /// - otherwise between the two stored samples around `t − tau`, with no dependence on `x`.
+    ///
+    /// **The delay is fixed for the run** at its value at the first timepoint. The IR does not
+    /// carry `maxdelay` (it is dropped at elaboration, `va_ir::Builtin::Absdelay`), and the
+    /// buffer is sized from the delay, so a delay that changes during the run is an error rather
+    /// than an answer computed from a buffer sized for another delay. A time-varying delay is
+    /// stage 3 of `docs/proposals/absdelay.md`.
+    ///
+    /// **Not handled:** a sharp edge in the input comes out `tau` later with no breakpoint
+    /// there, so the step controller places points around it only as far as the rest of the
+    /// circuit's error estimate asks. The value at every solved point is still the interpolated
+    /// history, whatever the step.
+    ///
+    /// # Errors
+    ///
+    /// The text of a `$fatal` (the caller raises it): a negative or non-finite delay, a delay
+    /// that changed since the first timepoint, or a history that no longer reaches `t − tau`
+    /// (which the thinning rule makes unreachable; checked rather than assumed).
+    fn absdelay_at(ctx: &Ctx, site: u32, tau: f64, u: f64) -> Result<Delayed, String> {
+        use lower::{ABSDELAY_HEAD as H, ABSDELAY_POINTS as N};
+        let Some(&(_, base)) = ctx.state_slots.get(&site) else {
+            return Err("absdelay: internal error, no state slots for this call".into());
+        };
+        let t = ctx.analysis.time;
+        if !(tau.is_finite() && tau >= 0.0) {
+            return Err(format!("absdelay: the delay is {tau:e} s at t = {t:e} s"));
+        }
+        let set = |k: usize, v: f64| ctx.state_set(base, k, v);
+        let get = |k: usize| ctx.state_get(base, k);
+        if ctx.analysis.is_initial_step {
+            for (k, v) in [(0, tau), (1, 0.0), (2, 0.0), (3, t), (4, u), (5, t), (6, u)] {
+                set(k, v);
+            }
+            return Ok(Delayed {
+                value: u,
+                weight: 1.0,
+            });
+        }
+        let tau0 = get(0);
+        if (tau - tau0).abs() > 1e-12 * tau0.max(f64::MIN_POSITIVE) {
+            return Err(format!(
+                "absdelay: the delay changed from {tau0:e} s to {tau:e} s at t = {t:e} s; a delay \
+                 that varies during a transient run is not implemented (docs/proposals/absdelay.md \
+                 stage 3), and maxdelay does not lift this"
+            ));
+        }
+        let (count, head) = (get(1) as usize, get(2) as usize);
+        let (t_tail, v_tail) = (get(3), get(4));
+        let (t_first, v_first) = (get(5), get(6));
+        let sample = |k: usize| {
+            let at = H + 2 * ((head + k) % N);
+            (get(at), get(at + 1))
+        };
+        let s = t - tau;
+        let delayed = if tau == 0.0 {
+            Delayed {
+                value: u,
+                weight: 1.0,
+            }
+        } else if s >= t_tail && t > t_tail {
+            let w = (s - t_tail) / (t - t_tail);
+            Delayed {
+                value: v_tail + w * (u - v_tail),
+                weight: w,
+            }
+        } else if s <= t_first {
+            Delayed {
+                value: v_first,
+                weight: 0.0,
+            }
+        } else {
+            // The stored samples, oldest first, then the tail: interpolate in the pair around `s`.
+            let at = |k: usize| {
+                if k < count {
+                    sample(k)
+                } else {
+                    (t_tail, v_tail)
+                }
+            };
+            if at(0).0 > s {
+                return Err(format!(
+                    "absdelay: the history no longer reaches t - delay = {s:e} s (oldest sample \
+                     {:e} s) at t = {t:e} s",
+                    at(0).0
+                ));
+            }
+            let (mut lo, mut hi) = (0usize, count);
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                if at(mid).0 <= s {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let ((t0, v0), (t1, v1)) = (at(lo), at(lo + 1));
+            let w = if t1 > t0 { (s - t0) / (t1 - t0) } else { 1.0 };
+            Delayed {
+                value: v0 + w * (v1 - v0),
+                weight: 0.0,
+            }
+        };
+
+        // The next history. Only a point strictly after the tail moves it on: an evaluation at
+        // the tail's own time (an event re-solve at an accepted point) re-proposes the same one.
+        if t > t_tail {
+            let spacing = tau / (N - 3) as f64;
+            let (mut count, mut head) = (count, head);
+            let newest = if count > 0 {
+                Some(sample(count - 1).0)
+            } else {
+                None
+            };
+            // `set` writes the proposal and `get` reads the committed history, so the sample
+            // pushed here is read back from `pushed`, not from the state.
+            let mut pushed: Option<usize> = None;
+            if newest.is_none_or(|n| t_tail - n >= spacing) {
+                if count == N {
+                    head = (head + 1) % N;
+                    count -= 1;
+                }
+                let ring = (head + count) % N;
+                set(H + 2 * ring, t_tail);
+                set(H + 2 * ring + 1, v_tail);
+                pushed = Some(ring);
+                count += 1;
+            }
+            let time_of = |ring: usize| {
+                if pushed == Some(ring) {
+                    t_tail
+                } else {
+                    get(H + 2 * ring)
+                }
+            };
+            // Drop the oldest sample while the next one is still at or before the window's
+            // start: every later lookup asks for a time at or after `t − tau`.
+            while count >= 2 && time_of((head + 1) % N) <= t - tau {
+                head = (head + 1) % N;
+                count -= 1;
+            }
+            set(1, count as f64);
+            set(2, head as f64);
+            set(3, t);
+            set(4, u);
+        }
+        Ok(delayed)
     }
 
     /// Build a rational filter's scaled state-space coefficients from its evaluated
@@ -7200,6 +7423,87 @@ mod tests {
             value,
         }];
         m
+    }
+
+    /// `absdelay` in transient (2.44.0), when the delay is shorter than the step: `t − tau`
+    /// falls between the last accepted point and the point being solved, so the delayed value
+    /// is `v_tail + w·(u − v_tail)` and depends on the current unknowns through `w`. That weight
+    /// is a Jacobian entry, and it must match a central difference of the residual (CLAUDE.md
+    /// §5). The input is nonlinear (`3·V²`), so a weight applied to the wrong quantity would
+    /// show. A second point, with `t − tau` before the tail, has no dependence on `x` at all,
+    /// and the difference must be zero there too.
+    #[test]
+    fn absdelay_sub_step_weight_matches_finite_difference() {
+        use lower::{ABSDELAY_HEAD, ABSDELAY_POINTS};
+        let mut m = laplace_module("dly", &[1.0], &[1.0], false, false);
+        // Replace the laplace call with `absdelay(input, tau)`: same input, same contribution.
+        let Stmt::Contribute { value, .. } = m.analog[0] else {
+            unreachable!()
+        };
+        let Expr::Call(_, args) = m.expr(value).clone() else {
+            unreachable!()
+        };
+        let tau = m.push_expr(Expr::Const(2e-9));
+        let call = m.push_expr(Expr::Call(Builtin::Absdelay, vec![args[0], tau]));
+        if let Stmt::Contribute { value, .. } = &mut m.analog[0] {
+            *value = call;
+        }
+        let inst = build_instance(&m, &[0, 1], &mut 2).expect("builds");
+        assert_eq!(inst.state_len(), ABSDELAY_HEAD + 2 * ABSDELAY_POINTS);
+
+        let x0 = [0.7, -0.2];
+        let (t, h) = (1e-6, 5e-9);
+        // u = 3·0.9² = 2.43. Inside the step: 0.4 + 0.6·(2.43 − 0.4). In the history: between
+        // the ring's one sample (t − 5 ns, 0.2) and the tail (t − 1 ns, 0.4), 3/4 of the way.
+        for (t_tail, expect_weight, want) in [
+            (t - h, true, 0.4 + 0.6 * (2.43 - 0.4)),
+            (t - 1e-9, false, 0.35),
+        ] {
+            // (tau, count, head, t_tail, v_tail, t_first, v_first), then the ring.
+            let mut committed = vec![0.0; inst.state_len()];
+            let count = if expect_weight { 0.0 } else { 1.0 };
+            committed[..ABSDELAY_HEAD].copy_from_slice(&[2e-9, count, 0.0, t_tail, 0.4, 0.0, 0.1]);
+            committed[ABSDELAY_HEAD..ABSDELAY_HEAD + 2].copy_from_slice(&[t - 5e-9, 0.2]);
+            let ctx = va_abi::AnalysisCtx::transient(t).with_initial_step(false);
+            let load = |x: &[f64]| {
+                let mut next = committed.clone();
+                let mut st = va_abi::ModelState::new(&committed, &mut next);
+                let mut sink = DenseStamp::new(2);
+                inst.load(x, &ctx, &mut st, &mut sink);
+                sink
+            };
+            let at = load(&x0);
+            assert!(at.tasks.is_empty(), "no error raised: {:?}", at.tasks);
+            assert!(
+                (at.residual[0] - want).abs() < 1e-12,
+                "delayed value {} vs {want}",
+                at.residual[0]
+            );
+            let d = 1e-6;
+            let mut any = 0.0_f64;
+            for col in 0..2 {
+                let (mut xp, mut xm) = (x0.to_vec(), x0.to_vec());
+                xp[col] += d;
+                xm[col] -= d;
+                let (fp, fm) = (load(&xp), load(&xm));
+                for row in 0..2 {
+                    let fd = (fp.residual[row] - fm.residual[row]) / (2.0 * d);
+                    let analytic = at.jacobian[row * 2 + col];
+                    any = any.max(analytic.abs());
+                    assert!(
+                        (analytic - fd).abs() < 1e-6 * analytic.abs().max(1.0),
+                        "t_tail {t_tail:e}, row {row} col {col}: analytic {analytic} vs fd {fd}"
+                    );
+                }
+            }
+            // `t − tau` inside the step: w = (t − tau − t_tail)/h = 0.6, times d(3V²)/dV = 6V
+            // at V = 0.9. Before the tail: the history alone, no x-dependence.
+            if expect_weight {
+                assert!((any - 0.6 * 6.0 * 0.9).abs() < 1e-9, "weight entry {any}");
+            } else {
+                assert_eq!(any, 0.0, "a lookup in the history has no Jacobian");
+            }
+        }
     }
 
     /// The time-domain realization of a `laplace_*` filter (2026-09-11): a second-order

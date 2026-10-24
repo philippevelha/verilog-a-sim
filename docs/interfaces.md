@@ -219,7 +219,10 @@ The shipped `va-ir` fleshes this out (adds `VarId`, `VarDecl`, `FuncId`, `Discip
 >
 > **In transient it still folds to its undelayed input**, and says so: `va-cli` warns, and
 > `check` counts such files separately from plain passes. A real time-domain delay needs an
-> interpolated history buffer — stage 2 of the proposal.
+> interpolated history buffer — stage 2 of the proposal. *(2.44.0: stage 2 is implemented, in
+> `va-codegen` on the existing state channel, with no change to either interface. The delay must
+> stay fixed during a transient run, because `maxdelay` is still dropped here; changing that
+> would be a §6 event.)*
 >
 > **Revision (§6 change, 2026-08-05):** added `Builtin::NoiseTableLog`, the IR spelling of
 > `noise_table_log()` (LRM §4.6.4.4) — the same table, interpolated in `log₁₀ f`/`log₁₀ power`.
@@ -713,7 +716,9 @@ trait at bootstrap, so `va-core` has something real to solve on commit #1.
 >   junction the access names away as well — that half landed on 2026-09-09 through Interface α
 >   instead, which is the channel it always belonged in.)*
 > - **`absdelay`** needs an unbounded interpolated **trajectory**, which no fixed-size state
->   vector holds. A second design; the channel is shaped not to preclude it.
+>   vector holds. A second design; the channel is shaped not to preclude it. *(2.44.0: built on
+>   this channel after all, by bounding the history instead: a fixed ring thinned to
+>   `delay / 509` spacing, `docs/proposals/absdelay.md` stage 2.)*
 > - **True event-scheduled `transition`** — approximated here via `bound_step` rather than exact
 >   corner breakpoints, and `docs/token-reference.md` says so at the construct.
 

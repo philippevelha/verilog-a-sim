@@ -5032,7 +5032,8 @@ to choose, as 2.0's was, and the list below is evidence for that choice, not a p
    c432 `.op` and c17's transient are not in it.
 
 Also still open from before 2.0, in `docs/future_development.md`: a results file, `absdelay` in
-transient, Interface β changes (seeded RNG, sensitivities), GPU, PSS/HB, a Python binding.
+transient (**done in 2.44.0**, constant delay only), Interface β changes (seeded RNG, sensitivities),
+GPU, PSS/HB, a Python binding.
 
 ## How to keep this document honest
 

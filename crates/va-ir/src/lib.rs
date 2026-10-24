@@ -1020,9 +1020,10 @@ pub enum Builtin {
     /// approximation of a delay by a rational filter.
     ///
     /// At DC it is the identity (`H(0) = 1`), which is the correct steady-state answer and the
-    /// behaviour this operator already had when it was folded away at elaboration. **In
-    /// transient it still folds to its undelayed input** — a real time-domain delay needs an
-    /// interpolated history buffer, which is stage 2 of the proposal.
+    /// behaviour this operator already had when it was folded away at elaboration. In
+    /// transient (2.44.0, stage 2 of the proposal) `va-codegen` reads `value(t − delay)` from a
+    /// bounded history on the state channel. The delay must stay fixed for the run there,
+    /// because `maxdelay`, which a varying delay would need, is dropped here.
     Absdelay,
     /// `white_noise(pwr)` — a frequency-flat noise source of power spectral density `pwr`,
     /// in the units of the contribution it appears in (A²/Hz in a flow contribution).

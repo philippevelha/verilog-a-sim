@@ -30,8 +30,9 @@
 //!
 //! Likewise this channel carries no **state**: `transition`, `slew`, `absdelay`, `$limit` and
 //! `@(initial_step)` need a model to remember something between evaluations, which needs its own
-//! contract (who owns the storage, and what happens on a *rejected* timestep). Those folds stay
-//! wrong after this change, and `docs/token-reference.md` says so per construct.
+//! contract (who owns the storage, and what happens on a *rejected* timestep). That contract is
+//! `crate::state`, which came later; `docs/token-reference.md` says per construct where each
+//! stands.
 
 /// Which analysis is driving an evaluation.
 ///

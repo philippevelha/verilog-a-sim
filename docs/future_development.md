@@ -116,7 +116,14 @@ expects and what `va-harness` effectively re-implements internally.
 **Cost.** Small. `va-cli` only. **Decide first:** the results format — the harness's golden
 format already exists and is the obvious candidate.
 
-## 3. `absdelay` in transient (proposal stage 2)
+## 3. `absdelay` in transient (proposal stage 2) — **done in 2.44.0**
+
+*Implemented differently on one point: no `bound_step(τ/k)`. At the sub-step delays of the
+photonic case it would force steps of a fraction of a picosecond for no accuracy gain, since
+the interpolated value at each solved point is already the delayed input. The memory question
+is answered by thinning (a fixed 512-sample ring at `τ/509` spacing), not by an error: the
+buffer never overflows, and the cost is resolution. A delay that changes during the run is an
+error (stage 3). The text below is the plan as it was written.*
 
 **What.** A real transport delay: a bounded `(t, value)` ring buffer per call site on the
 state channel, linear interpolation to `t − τ`, the sub-timestep case carrying its

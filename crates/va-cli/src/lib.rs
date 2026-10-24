@@ -246,63 +246,32 @@ pub enum Analysis {
     Noise,
 }
 
-/// Analog operators this engine **approximates in a transient run**, paired with what it
-/// actually computes instead. Enforced by [`refuse_transient_approximations`].
+/// Refuse a transient run of a model that uses a step-scoped trigger this engine still runs at
+/// every timepoint (`@(initial_instance)`, `@(initial_model)`, [`step_triggers_in`]).
 ///
-/// Deliberately not a list of everything unimplemented: these are the constructs that
-/// produce a *plausible number that is wrong* rather than an error. `transition` and
-/// `slew` are absent because they are genuinely evaluated against Interface beta's state
-/// channel; the Z-domain family is absent because it is **implemented** (v0.9.20: a sampled
-/// difference equation on the state channel -- before that it was refused, and before
-/// v0.9.17 it folded to its z=1 gain and sat in no list at all, which the pre-1.0 audit of
-/// `token-reference.md` found). The `laplace_*` family left this table on 2026-09-11 (v0.9.16): a
-/// rational filter is now integrated as an ODE on its own state unknowns
-/// (`va_codegen::lower::LaplaceStates`), so a transient run computes the filter rather than
-/// its DC gain. `absdelay` remains: a pure delay is not an ODE, and its time-domain form
-/// (`docs/proposals/absdelay.md` stage 2) is still unimplemented.
-const TRANSIENT_APPROXIMATIONS: &[(&str, &str)] = &[(
-    "absdelay",
-    "folds to its undelayed input (a true delay needs an interpolated history buffer)",
-)];
-
-/// Warn, on stderr, when `src` uses an operator this engine approximates in transient.
+/// **An error, not a warning** (changed 2026-09-06). Running the body unconditionally is
+/// *correct* in a static solve, where one solve point is both the first and the last step, so DC
+/// and AC are untouched. A transient run is the case where it is simply wrong, and a warning on
+/// stderr is not enough: it scrolls past, it does not survive being piped into a file alongside
+/// the waveform, and the numbers that follow it look exactly like numbers that were computed.
 ///
-/// Lexes rather than string-searches, so a mention inside a comment or inside a longer
-/// identifier does not trigger it — every name here is a reserved word, so it arrives as a
-/// `Keyword` token. (`absdelay` only became reserved on 2026-08-31; before that this check
-/// would have had to match raw identifiers and would have been the weaker for it.)
-///
-/// **An error, not a warning** (changed 2026-09-06). The fold is *correct* for DC and AC, where
-/// these operators settle to their steady-state value, so those analyses are untouched and stay
-/// perfectly sound. A transient run is the case where the fold is simply wrong, and a warning
-/// on stderr is not enough: it scrolls past, it does not survive being piped into a file
-/// alongside the waveform, and the numbers that follow it look exactly like numbers that were
-/// computed. `docs/proposals/absdelay.md` states the principle for this operator family
-/// directly - "an error naming the limit, never a quietly wrong waveform".
-///
-/// The real fix is that proposal's stage 2 (a ring buffer of `(t, value)` on the state channel,
-/// with an interpolation weight carried through AD); until it lands, refusing is the honest
-/// half of implement-or-refuse.
+/// `absdelay` was refused here too until 2.44.0, when it became a real transport delay in
+/// transient (`docs/proposals/absdelay.md` stage 2); the table of operators approximated in
+/// transient went with it, empty. `laplace_*` left it in v0.9.16 and the `zi_*` family in
+/// v0.9.20.
 ///
 /// # Errors
 ///
-/// If any model source calls an operator in [`TRANSIENT_APPROXIMATIONS`].
+/// If any model source uses a step-scoped trigger.
 fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
     // Every offender, not just the first: a model library hitting two of these should say so
     // once rather than make the reader fix them one run at a time.
     let mut found: Vec<String> = Vec::new();
     for (path, src) in models {
-        for name in approximations_in(src) {
-            let effect = TRANSIENT_APPROXIMATIONS
-                .iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, e)| *e)
-                .unwrap_or("is approximated");
-            found.push(format!("{path} uses `{name}`, which {effect}"));
-        }
         for name in step_triggers_in(src) {
             found.push(format!(
-                "{path} uses `@({name})`, whose body this engine runs at every timepoint                  instead of only when the event fires"
+                "{path} uses `@({name})`, whose body this engine runs at every timepoint \
+                 instead of only when the event fires"
             ));
         }
     }
@@ -320,10 +289,11 @@ fn refuse_transient_approximations(models: &[(String, String)]) -> Result<()> {
         )
         .instead(
             "run this model as DC (`.op`/`.dc`), AC (`--ac`) or noise (`--noise`), which are \
-             unaffected: these constructs are correct in a static solve - an operator settles \
-             to exactly this value, and a single solve point is both the first and the last step",
+             unaffected: a single solve point is both the first and the last step, so running \
+             the body once is right there; for transient, move the body into \
+             `@(initial_step)`",
         )
-        .tracking("docs/proposals/absdelay.md stage 2"),
+        .tracking("docs/token-reference.md, `initial_instance`/`initial_model`"),
     ))
 }
 
@@ -395,27 +365,6 @@ fn model_sources(model: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The [`TRANSIENT_APPROXIMATIONS`] operators `src` actually calls, in table order, each named
-/// once. Split out from the warning so the detection is testable without capturing stderr.
-fn approximations_in(src: &str) -> Vec<&'static str> {
-    let Ok(tokens) = va_frontend::lexer::lex(src) else {
-        return Vec::new(); // A model that does not lex will fail louder elsewhere.
-    };
-    let mut seen: Vec<&'static str> = Vec::new();
-    for tok in &tokens {
-        if let va_frontend::lexer::Token::Keyword(kw) = tok {
-            if let Some((name, _)) = TRANSIENT_APPROXIMATIONS
-                .iter()
-                .find(|(n, _)| *n == kw.as_str())
-            {
-                if !seen.contains(name) {
-                    seen.push(name);
-                }
-            }
-        }
-    }
-    seen
-}
 /// Parse `netlist` and, if `model` is given, compile it through the real frontend → codegen
 /// pipeline — the common prelude every driver needs before solving. Split out of [`run_sim`]
 /// (which still calls it, unchanged) so a caller that wants the *values* — `va-harness`
@@ -1129,10 +1078,6 @@ pub fn check_models(paths: &[String], codegen: bool) -> Result<usize> {
     // Separated from the headline for the same reason `passed_incomplete` is: building is not
     // the same as computing what the source says, and a number that merges the two overstates
     // what the engine actually supports.
-    println!(
-        "  of the {} passes, {} use an operator approximated in transient (absdelay)",
-        tally.passed, tally.passed_approximated
-    );
     println!("  {total} file(s) scanned in total");
     Ok(tally.failed)
 }
@@ -1173,16 +1118,6 @@ struct CheckTally {
     failed_incomplete: usize,
     /// Files that parsed but declare no module — headers and statement-body fragments.
     no_module: usize,
-    /// The subset of `passed` that uses an analog operator this engine **approximates rather
-    /// than evaluates** (§ [`TRANSIENT_APPROXIMATIONS`]), and so builds into a `ModelInstance`
-    /// that computes something other than what the source says in a transient run.
-    ///
-    /// This exists because "passed" measures *builds*, not *is right*. `absdelay` folds to its
-    /// undelayed input and a `laplace_*` filter folds to its DC gain, so a file using either
-    /// contributes to the headline number while silently returning the wrong waveform. That is
-    /// the same class of overcounting the `passed_incomplete` split above was introduced to
-    /// stop — a file scored as coverage for something it does not actually do.
-    passed_approximated: usize,
 }
 
 impl std::ops::AddAssign for CheckTally {
@@ -1192,7 +1127,6 @@ impl std::ops::AddAssign for CheckTally {
         self.failed += rhs.failed;
         self.failed_incomplete += rhs.failed_incomplete;
         self.no_module += rhs.no_module;
-        self.passed_approximated += rhs.passed_approximated;
     }
 }
 
@@ -1244,9 +1178,7 @@ struct ParsedFile {
 /// The module really did elaborate, so this is a *note* on a pass, never a new verdict, and it
 /// is deliberately not folded into the headline figure: `check` measures "does the frontend
 /// handle this file", and a portless structural circuit that elaborates is a genuine frontend
-/// success. It is a different axis from `CheckTally::passed_approximated` — that one builds but
-/// computes something approximate, this one computes correctly but cannot be reached from a
-/// deck.
+/// success.
 ///
 /// Suppressed when an `` `include `` was dropped: a truncated vendor distribution whose port
 /// list lived in the absent header elaborates with zero ports too, and calling that a
@@ -1557,19 +1489,6 @@ fn check_group(group: &[(String, std::path::PathBuf)], codegen: bool) -> CheckTa
         // files report "0 params, 0 funcs" and still be scored as coverage.
         if !skipped.is_empty() {
             tally.passed_incomplete += 1;
-        }
-        // Built, but out of a source whose meaning this engine does not fully honour. Re-read
-        // rather than threaded down from `parse_file`: this is a diagnostic command, and the
-        // cost of one extra read per passing file is not worth widening a return type for.
-        let approximated = std::fs::read_to_string(file)
-            .map(|src| approximations_in(&src))
-            .unwrap_or_default();
-        if !approximated.is_empty() {
-            tally.passed_approximated += 1;
-            println!(
-                "  [approx] {file}: builds, but uses {} (approximated in transient)",
-                approximated.join(", ")
-            );
         }
     }
     tally
@@ -4413,7 +4332,7 @@ mod tests {
     use va_abi::reference::GROUND;
 
     /// A library directory may hold models a deck never places, and a *transient* refusal
-    /// (`absdelay`/`laplace_*` fold) must be about the models the deck uses — 2026-09-11,
+    /// (a step-scoped trigger; `absdelay` until 2.44.0) must be about the models the deck uses — 2026-09-11,
     /// found by `circuits/microring_thermal.net` run against `--model models`, which also holds
     /// `laplace_lowpass.va`. Covers the transitive case too: a placed module that instantiates
     /// a sibling file's module reaches that file.
@@ -4437,8 +4356,8 @@ mod tests {
         );
         let folded = write(
             "folded.va",
-            "module folded(p, n); inout p, n; electrical p, n; \
-             analog I(p, n) <+ absdelay(V(p, n), 1e-6); endmodule",
+            "module folded(p, n); inout p, n; electrical p, n; real k; \
+             analog begin @(initial_model) k = 1.0; I(p, n) <+ V(p, n) / 1000.0; end endmodule",
         );
         let (_, files) = compile_model_library(&dir.display().to_string()).expect("compiles");
         assert_eq!(files.len(), 3);
@@ -4475,7 +4394,7 @@ mod tests {
         assert_eq!(reached2, vec![folded.clone()]);
         let err = refuse_transient_approximations(&sources(&reached2))
             .expect_err("placing the folded model is still refused");
-        assert!(err.to_string().contains("absdelay"), "{err}");
+        assert!(err.to_string().contains("initial_model"), "{err}");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -6562,27 +6481,15 @@ X1 out gnd offsetcap
         }
     }
 
-    /// The transient-approximation warning fires on the operators this engine folds, stays
-    /// quiet on models using none, and is driven by the *lexer* rather than a substring
-    /// search -- so the word in a comment, or an identifier merely containing it, is ignored.
-    /// That precision is only available because `absdelay` became a reserved word on
-    /// A transient run **refuses** a model whose operator this engine only folds, rather than
-    /// printing a waveform that looks computed. DC and AC on the same model stay fine, which is
-    /// the whole reason this is analysis-scoped rather than a compile-time rejection.
+    /// Since 2.44.0 a transient run no longer refuses `absdelay` (it is a real delay now, see
+    /// `absdelay_is_a_transport_delay_in_transient`), and a `laplace_*` filter has not been
+    /// refused since v0.9.16. An ordinary model never was.
     #[test]
-    fn a_transient_run_refuses_an_approximated_operator() {
+    fn a_transient_run_no_longer_refuses_absdelay_or_laplace() {
         let model = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/delay_line.va");
         let src = std::fs::read_to_string(model).expect("read delay_line.va");
-        let models = vec![(model.to_string(), src)];
-
-        let err = refuse_transient_approximations(&models).expect_err("absdelay is folded");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("absdelay"), "names the operator: {msg}");
-        assert!(msg.contains("refused"), "says it refused: {msg}");
-        assert!(
-            msg.contains("--ac") && msg.contains("unaffected"),
-            "points at the analyses that are still correct: {msg}"
-        );
+        refuse_transient_approximations(&[(model.to_string(), src)])
+            .expect("absdelay runs in transient since 2.44.0");
 
         // A model using none of them is not refused.
         let plain = vec![(
@@ -8401,11 +8308,11 @@ endmodule
         // 3. `va-cli` — a whole model refused in one analysis.
         let cli = refuse_transient_approximations(&[(
             "m.va".to_string(),
-            "module m(p, n); inout p, n; electrical p, n;
-             analog I(p, n) <+ absdelay(V(p, n), 1u); endmodule"
+            "module m(p, n); inout p, n; electrical p, n; real k;
+             analog begin @(initial_model) k = 1.0; I(p, n) <+ V(p, n); end endmodule"
                 .to_string(),
         )])
-        .expect_err("absdelay folds in transient");
+        .expect_err("`@(initial_model)` runs at every timepoint in transient");
 
         for (layer, err) in [
             ("va-frontend", anyhow::Error::new(frontend)),
@@ -8428,9 +8335,12 @@ endmodule
                 "{layer}: must point at where the limitation is tracked: {block}"
             );
             // The `what` has to name something the user actually wrote. Each of the three
-            // sources above is about `absdelay` or `final_step`; a message naming neither would
-            // be the `laplace_*`-for-an-`absdelay` defect that prompted this.
-            let names_the_construct = block.contains("absdelay") || block.contains("final_step");
+            // sources above is about `absdelay`, `final_step` or `initial_model`; a message
+            // naming none of them would be the `laplace_*`-for-an-`absdelay` defect that
+            // prompted this.
+            let names_the_construct = block.contains("absdelay")
+                || block.contains("final_step")
+                || block.contains("initial_model");
             assert!(
                 names_the_construct,
                 "{layer}: must name the construct the user wrote: {block}"
@@ -8721,30 +8631,156 @@ endmodule
             srcs.len()
         );
         assert!(
-            srcs.iter().any(|(p, _)| p.contains("laplace_lowpass")),
-            "including the one that would be refused"
+            srcs.iter().any(|(p, _)| p.contains("delay_line")),
+            "including the absdelay model that was refused until 2.44.0"
         );
-        refuse_transient_approximations(&srcs)
-            .expect_err("the directory contains an approximated model");
+        // The check reads every file: a step-scoped trigger written into a copy of the
+        // directory listing is found wherever it sits in it.
+        let mut with_trigger = srcs.clone();
+        with_trigger.push((
+            "im.va".to_string(),
+            "module im(p); inout p; electrical p; real k; \
+             analog begin @(initial_model) k = 1.0; I(p) <+ V(p); end endmodule"
+                .to_string(),
+        ));
+        refuse_transient_approximations(&srcs).expect("the zoo uses no step-scoped trigger");
+        refuse_transient_approximations(&with_trigger).expect_err("the added one is found");
     }
 
-    /// 2026-08-31; before that it lexed as a plain identifier.
+    /// `absdelay` in transient (2.44.0) is a transport delay, checked point by point against
+    /// the delayed sine in the three regimes the history is built for, through the real
+    /// pipeline. `V(o) = absdelay(V(i), td)`, `V(i) = sin(2π·1 MHz·t)`. The bound in each is the
+    /// linear-interpolation error `ω²h²/8` of the samples it interpolates, and each is checked
+    /// against the undelayed input too, so the test fails if the delay is dropped.
+    ///
+    /// - `td` = 100 steps: every accepted point is kept, `h` = 2 ns, `ω²h²/8` ≈ 2e-5;
+    /// - `td` shorter than the step (0.3 ns in 5 ns steps): `t − td` lies inside the step being
+    ///   solved, the Jacobian-weight path; the delay moves the output by `ω·td` ≈ 1.9e-3 and
+    ///   the error must be well under that;
+    /// - `td` = 5000 steps: more than `ABSDELAY_POINTS`, so the history is thinned to
+    ///   `td/509` ≈ 1 ns spacing, `ω²(1 ns)²/8` ≈ 5e-6.
     #[test]
-    fn transient_approximations_are_detected_by_token_not_by_substring() {
-        let uses_it = include_str!("../../../tests/fixtures/delay_probe.va");
-        assert_eq!(approximations_in(uses_it), vec!["absdelay"]);
+    fn absdelay_is_a_transport_delay_in_transient() {
+        let design = va_frontend::compile_with_includes(
+            "`include \"disciplines.vams\"
+             module dly(i, o); inout i, o; electrical i, o;
+             parameter real td = 1e-6 from [0:inf);
+             analog I(o) <+ V(o) - absdelay(V(i), td);
+             endmodule
+",
+            &models_dir(),
+        )
+        .expect("compiles");
+        let f = 1e6;
+        for (td, tstep, tstop, bound, undelayed_at_least) in [
+            (0.2e-6, 2e-9, 3e-6, 3e-5, 0.5),
+            (0.3e-9, 5e-9, 3e-6, 1e-4, 1.5e-3),
+            (0.5e-6, 1e-10, 1.2e-6, 1e-5, 0.5),
+        ] {
+            let net = va_netlist::parser::parse(&format!(
+                "V1 i gnd SIN(0 1 {f:e} 0 0 0)\nX1 i o dly td={td:e}\n.tran {tstep:e} {tstop:e}\n.end\n"
+            ))
+            .unwrap();
+            let (i, o) = (net.nodes["i"], net.nodes["o"]);
+            let w = solve_transient(&net, &design.modules, Integration::default())
+                .expect("transient runs");
+            let (mut err, mut undelayed) = (0.0_f64, 0.0_f64);
+            for (t, x) in w.t.iter().zip(&w.x) {
+                let want = if *t >= td {
+                    libm::sin(2.0 * PI * f * (t - td))
+                } else {
+                    0.0
+                };
+                err = err.max((x[o] - want).abs());
+                undelayed = undelayed.max((x[o] - x[i]).abs());
+            }
+            assert!(
+                err < bound,
+                "td {td:e}: max error {err:e} (bound {bound:e})"
+            );
+            assert!(
+                undelayed > undelayed_at_least,
+                "td {td:e}: the output must differ from the undelayed input ({undelayed:e})"
+            );
+        }
+    }
 
-        // The zoo's own diode uses none of them.
-        assert!(approximations_in(include_str!("../../../models/diode.va")).is_empty());
-
-        // A comment mentioning it, and an identifier containing it, are both ignored: the
-        // lexer skips the first and yields an `Ident` (not a `Keyword`) for the second.
-        let decoy = "// absdelay is not used here\nmodule m(a); inout a;\nelectrical a;\nreal absdelay_count;\nanalog absdelay_count = 1.0;\nendmodule\n";
+    /// An `absdelay` whose delay is a variable assigned after the model's setup (here after a
+    /// bias-dependent statement, so it is evaluated in the main walk) is stamped. Until 2.44.0
+    /// a model whose only frequency-domain term was an `absdelay` ran on the static schedule,
+    /// which holds such variables in its own registers, and the delay (read outside the
+    /// schedule) failed to evaluate: the term was silently skipped and `V(q)` read 0 instead
+    /// of the input, at DC and in AC. Found writing Wang 2016 Eq. (4) as a delay line
+    /// (`paper_writing/mrm_injection/tests/make_eq4.py`), whose round-trip time is such a
+    /// variable.
+    #[test]
+    fn an_absdelay_with_a_walk_assigned_delay_is_stamped() {
+        let design = va_frontend::compile_with_includes(
+            "`include \"disciplines.vams\"
+             module s(a, q); inout a, q; electrical a, q;
+             parameter real neff = 2.0;
+             real td, x;
+             analog begin
+                 x = V(a) * 2.0;
+                 td = neff * 1e-12;
+                 V(q) <+ absdelay(V(a), td);
+             end
+             endmodule
+",
+            &models_dir(),
+        )
+        .expect("compiles");
+        let net = va_netlist::parser::parse("V1 a gnd DC 0.7\nX1 a q s\n.op\n.end\n").unwrap();
+        let op = solve_dc(&net, &design.modules).expect("solves");
         assert!(
-            approximations_in(decoy).is_empty(),
-            "a comment or a longer identifier must not trigger the warning"
+            (op.x[net.nodes["q"]] - 0.7).abs() < 1e-12,
+            "V(q) = {}, the delayed input is 0.7 at DC",
+            op.x[net.nodes["q"]]
+        );
+        // And in transient, with the delay reached the same way.
+        let tran =
+            va_netlist::parser::parse("V1 a gnd PWL(0 0 1n 1)\nX1 a q s\n.tran 10p 2n\n.end\n")
+                .unwrap();
+        let w = solve_transient(&tran, &design.modules, Integration::default()).expect("runs");
+        let (a, q) = (tran.nodes["a"], tran.nodes["q"]);
+        for (t, x) in w.t.iter().zip(&w.x) {
+            let want = ((t - 2e-12) / 1e-9).clamp(0.0, 1.0);
+            assert!(
+                (x[q] - want).abs() < 1e-9,
+                "t {t:e}: V(q) = {} (V(a) = {}), want {want}",
+                x[q],
+                x[a]
+            );
+        }
+    }
+
+    /// The delay is fixed for the run (2.44.0): the IR does not carry `maxdelay`, and the
+    /// history is sized from the delay, so one that changes mid-run is a coded error naming the
+    /// limit, not a waveform computed from a buffer sized for another delay.
+    #[test]
+    fn an_absdelay_whose_delay_changes_is_an_error_in_transient() {
+        let design = va_frontend::compile_with_includes(
+            "`include \"disciplines.vams\"
+             module vdly(i, c, o); inout i, c, o; electrical i, c, o;
+             analog I(o) <+ V(o) - absdelay(V(i), 1e-9 * (1.0 + V(c)));
+             endmodule
+",
+            &models_dir(),
+        )
+        .expect("compiles");
+        let net = va_netlist::parser::parse(
+            "V1 i gnd SIN(0 1 1e6 0 0 0)\nV2 c gnd PWL(0 0 1u 1)\nX1 i c o vdly\n.tran 10n 2u\n.end\n",
+        )
+        .unwrap();
+        let err = solve_transient(&net, &design.modules, Integration::default())
+            .expect_err("the delay changes");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("absdelay") && msg.contains("changed") && msg.contains("stage 3"),
+            "{msg}"
         );
     }
+
     /// `absdelay` in AC, against the closed form. The deck is a 1 k resistor into a delay
     /// line whose own conductance is delayed, so KCL gives exactly
     ///

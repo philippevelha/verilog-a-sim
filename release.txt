@@ -22,6 +22,53 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0 - 2026-10-24
+-------------------
+**`absdelay` is a transport delay in transient** (docs/proposals/absdelay.md stage 2). Until now
+it folded to its undelayed input in transient, and va-cli refused the run.
+  * How: each call site keeps a fixed ring of 512 `(t, value)` samples on the state channel,
+    plus the last accepted point. Samples are kept at least delay/509 apart, so the window
+    always covers the delay and the buffer never overflows. The value is linear interpolation
+    at t - delay.
+  * Sub-step delays: when t - delay falls inside the step being solved (a delay shorter than
+    the step, the photonic norm), the value depends on the current input. Its weight is a
+    Jacobian entry, checked against a central difference.
+  * Measured, sine input through the pipeline (`absdelay_is_a_transport_delay_in_transient`).
+    The error matches the interpolation bound w^2 h^2/8 in each regime: 1.9e-5 at delay =
+    100 steps; 2.8e-5 for a 0.3 ns delay in 5 ns steps, where dropping the delay would be
+    off by 1.9e-3; 5.7e-6 at delay = 5000 steps (thinned to 1 ns).
+  * Real model: Wang 2016 Eq. (4), the micro-ring's delay-line form, now runs as written
+    (paper_writing/mrm_injection/tests/make_eq4.py, eq4_va_check.py). Round-trip delay
+    0.26 ps. On the Fig. 7 clock it agrees with the TCMT form to 2.71 uW RMS (8.03 uW max) on
+    78-1337 uW. The earlier Python check of Eq. (4) gave 1.7-2.2 uW.
+  * Departures from the proposal, each stated in it:
+    - The history is thinned instead of erroring when full. The cost is resolution: an input
+      feature shorter than delay/509 is smoothed when the steps are finer than that.
+    - The delay is fixed for the run. Interface alpha drops maxdelay, and carrying it is a
+      section-6 change, not made. A changing delay is a `$fatal`/E0608 naming stage 3.
+    - No bound_step. The cost: a delayed input edge gets no breakpoint.
+  * Fixed, found while writing Eq. (4), present since stage 1 (2026-09-01): a model whose only
+    frequency-domain term was an `absdelay` ran on the static schedule. `Lowered::laplace_terms`
+    left absdelay terms out, so an empty list read as "none". A delay held in a variable
+    assigned after the setup could not be evaluated, and the whole term was silently dropped
+    in DC and AC: V(q) = 0 instead of the input. The same omission would have let device
+    bypass treat such a model as pure in x. The cost of the fix: absdelay models leave the
+    static schedule, so the Eq. (4) ring takes about twice as long as TCMT (14.8 s against 7.4 s, single runs).
+  * va-cli: the "approximated in transient" table, its check tally and its `[approx]` lines
+    are gone, because nothing is left in them. The transient refusal keeps only
+    @(initial_instance)/@(initial_model). Its tracking line pointed at absdelay.md and now
+    names the right place, and a missing line continuation that put 18 spaces into its
+    message is fixed.
+  * Docs: token-reference, interfaces.md (notes only, no contract change), va-ir/va-abi doc
+    comments, proposal status, future_development section 3, roadmap, openvaf-shared-defects,
+    README. README also still listed $rdist_* as refused, stale since 2.42.0; corrected.
+    Paper: 09b (Eq. 4 run as written) and Limitations.
+
+Measured: `cargo test --workspace` 1035 passed, 0 failed (1032, plus 4 new: the FD check of the
+sub-step weight, the three-regime transport-delay check, the changed-delay error and the
+walk-assigned-delay regression; minus the token-detection test of the retired table);
+`cargo xtask validate` 28 checked, 0 failed, convergence 28/28; clippy and fmt clean.
+
 2.43.0 - 2026-10-24
 -------------------
 **`.nodeset` holds its nets first, as SPICE does.** A deck with `.nodeset` is now solved twice.
