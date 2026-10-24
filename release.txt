@@ -22,6 +22,14 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+5 - 2026-10-24
+---------------------
+**Paper bibliography: ngspice manual entry.** Docs only. `@manual{ngspice}` now has four
+authors (Vogt, Atkinson, Warning, Nenzi), 2026, and the docs URL, read from the current
+development manual's title page; the release-47 PDF's own title page is still to be checked
+(VERIFY note kept).
+
+
 2.42.0+4 - 2026-10-24
 ---------------------
 **Paper bibliography: Strollo 1997 checked.** Docs only. The entry matched the publisher's
