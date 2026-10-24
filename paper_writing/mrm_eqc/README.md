@@ -78,6 +78,35 @@ What this shows:
 
 So [B]'s open PAM8 eye is consistent with this model only with equalisation (FFE or pre-emphasis). [B] does not state what it used. A wider-bandwidth ring than the Table I/II parameters describe is the other possible explanation. The eye here has no receiver noise or receiver bandwidth.
 
+## 3c. A lower-Q, wider-bandwidth ring (t7, `tests/t7_lowq_sweep.py`)
+
+This variant of the [B] dual-segment ring changes **only the bus coupling**, i.e. a narrower ring–bus gap. τ_e is swept; everything else stays the DUAL card: intrinsic loss τ_l(V) (junction doping and waveguide), modulation efficiency c1/c2 (junction), circumference (FSR 6.5 nm), and every electrical parasitic.
+
+The coupling is given as power coupling per round trip, κ² = 2T_rt/τ_e with T_rt = λ²/(FSR·c) = 1.23 ps. Q_L = ωτ/2, and the optical pole is 1/(2πτ), where τ is the amplitude decay time.
+
+The setup is otherwise t6's: PAM8 case, eye metric, peak-limited FFE, 1 mW, 0.5–3 V. `self_heat=0`, because t6d/t6e showed that self-heating only moves the right laser position. Detuning is scaled to each ring's half-linewidth. The runs use verilog-a-sim 2.42.0+8 on Windows, made 2026-10-24.
+
+| τ_e (ps) | κ² | Q_L | optical pole | no FFE | best with FFE (eye height / OMA) |
+|---|---|---|---|---|---|
+| 27.1 ([B]) | 9 % | 7540 | 12.8 GHz | −117 % | +8 % (1.1 / 92 µW) |
+| 20 | 12 % | 6480 | 14.9 GHz | −61 % | +27 % (4.1 / 106 µW) |
+| 15 | 17 % | 5500 | 17.6 GHz | −17 % | **+37 %** (5.6 / 105 µW)¹ |
+| 12 | 21 % | 4780 | 20.2 GHz | −16 % | +34 % (5.6 / 114 µW) |
+| 10 | 25 % | 4230 | 22.9 GHz | +8 % | +34 % (4.8 / 98 µW) |
+| 8 | 31 % | 3600 | 26.8 GHz | **+25 %**² | +31 % (3.9 / 87 µW)² |
+| 6 | 41 % | 2890 | 33.5 GHz | +18 % | +18 % (1.9 / 74 µW) |
+
+¹ t7b (`--refine`): pre −0.15, post −0.10, laser 1.0 half-linewidth (141 pm) from the best-OMA point. The optimum is inside the finer grid.
+² t7b: 24.7 % with no FFE at 0.2 half-linewidth (43 pm), eye 3.9 µW on 112 µW OMA. The optimum is broad: >22 % anywhere from 0.15 to 0.35 half-linewidth. With pre −0.06 the eye reaches 31.3 %.
+
+Points in the first table are from the coarse t7 grid (pre 0…−0.15, post 0…−0.3, 8 detunings). The [B] ring's 8 % here is below t6d's 17 % only because this grid is coarser.
+
+What this shows:
+- **Stronger coupling opens the PAM8 eye without equalisation** once τ_e ≤ 10 ps (κ² ≥ 25 %, Q_L ≤ 4200). The best is τ_e = 8 ps (κ² 31 %, Q_L 3600), at +25 %.
+- **There is a trade-off.** Wider coupling widens the bandwidth but also the linewidth, so the same junction shift gives less modulation depth. At τ_e = 6 ps the OMA falls to 74 µW and FFE no longer helps.
+- **With FFE**, a moderate change is best: τ_e = 15 ps (κ² 17 %, Q_L 5500) gives +37 %, four times what the [B] ring reaches on the same grid.
+- These rings are over-coupled (τ_e < τ_l ≈ 23 ps), so the static dip is shallower than [B]'s. A κ² of 17–31 % per round trip is within reach of a narrower gap or a pulley coupler. That is a judgement, not a design: no coupler geometry is modelled here.
+
 ## 4. Wall time and peak memory (`tests/benchmark.py` → `benchmark.json`)
 
 | test | model | ngspice: runs / total wall / peak RSS | verilog-a-sim: runs / total wall / peak RSS |

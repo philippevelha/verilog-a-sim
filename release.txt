@@ -22,6 +22,23 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+9 - 2026-10-24
+---------------------
+**mrm_eqc: a lower-Q ring opens the 212 Gb/s PAM8 eye (t7).** Docs/tests only; no code changes.
+  * `paper_writing/mrm_eqc/tests/t7_lowq_sweep.py` changes only the bus coupling of the Bao
+    et al. dual-segment ring (tau_e 27.1 -> 6 ps, kappa^2 9 % -> 41 % per round trip). Intrinsic
+    loss, junction efficiency, FSR and parasitics stay the paper's. 896 + 132 verilog-a-sim
+    runs, 0 failed.
+  * Without FFE the eye opens once tau_e <= 10 ps. The best is tau_e = 8 ps (Q_L 3600):
+    +24.7 % of ideal, 3.9 uW on 112 uW OMA, with a broad optimum.
+  * With FFE, tau_e = 15 ps (Q_L 5500) gives +37.2 % (5.6 uW). The paper's ring reaches +8 % on
+    the same grid.
+  * Trade-off: below ~8 ps the OMA falls (74 uW at 6 ps) and FFE no longer helps.
+  * Limits: self_heat = 0 (t6d/t6e: self-heating only moves the laser position); no coupler
+    geometry modelled; these rings are over-coupled, so the static dip is shallower; no receiver
+    noise or bandwidth; ngspice not run.
+
+
 2.42.0+8 - 2026-10-24
 ---------------------
 **mrm_eqc: can the 212 Gb/s PAM8 eye of Bao et al. be opened? (t6).** Docs/tests only; no code
