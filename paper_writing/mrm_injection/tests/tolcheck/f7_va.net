@@ -1,0 +1,9 @@
+* 10 Gb/s clock, -0.5..1.5 V, 40 ps transitions (Wang 2016 Fig. 7) - verilog-a-sim twin of tb_fig7.cir
+Va a gnd PULSE(-0.5 1.5 0 40p 40p 60p 200p)
+Vin_re in_re gnd DC 1.0
+Vin_im in_im gnd DC 0
+Vwl wl gnd DC 1318.813
+Vh hp gnd DC 0
+X1 a gnd hp gnd in_re in_im th_re th_im dr_re dr_im wl tdt mrm_pin
+.tran 0.1p 6n
+.end

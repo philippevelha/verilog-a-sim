@@ -1,0 +1,19 @@
+* DC I-V of the p-i-n (Wang 2016 Fig. 6)
+.model pin mrm_pin
+Va a 0 0
+Vin_re in_re 0 1.0
+Vin_im in_im 0 0
+Vwl wl 0 1318.813
+Vh hp 0 0
+N1 a 0 hp 0 in_re in_im th_re th_im dr_re dr_im wl tdt pin
+.control
+pre_osdi mrm_pin.osdi
+set wr_singlescale
+set wr_vecnames
+option numdgt=10 reltol=1e-5
+dc Va -1 2 0.005
+let ia = -i(Va)*1e3
+wrdata dc_mA_1e-5.dat ia v(n1#xfc) v(th_re) v(th_im)
+quit
+.endc
+.end

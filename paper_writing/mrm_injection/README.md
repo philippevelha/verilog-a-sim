@@ -119,8 +119,16 @@ missing depletion capacitance.
   | µA (shipped) | 0.87 % / 0.35 % | **0.038 % / 0.014 %** |
   | mA | 7.7 % / 5.1 % | 0.45 % / 0.22 % |
 
+  | verilog-a-sim, defaults (µA model) | **0.028 % / 0.011 %** | (reltol 1e-4 and 1e-5: 0.024–0.025 % / 0.011 %) |
+
   µA scaling is about 10× more accurate at either reltol, and reltol 1e-5 is still needed: the
-  testbenches set it. The DC I–V does not depend on the scaling: both give 0.0025 % at default
+  testbenches set it. verilog-a-sim at its defaults is as close to the reference as ngspice's
+  tuned setting. Tightening its step control does not move it below ≈ 0.025 % / 0.011 %. That
+  is the floor at which the two simulators agree, and it may include the reference's own error
+  (the mA model at 1e-9). verilog-a-sim wall time on Windows (i7-1185G7) is 6.8 s for 61 827
+  points; ngspice's 0.33 s for the µA/1e-5 run was on the Linux machine.
+  Data, decks and logs: `tests/tolcheck/` (the `.dat` files are gzipped); `tests/tolcheck/compare.py`
+  regenerates both tables, and `--va` re-runs verilog-a-sim (`f7_va.net`). The DC I–V does not depend on the scaling: both give 0.0025 % at default
   reltol and 0.0005 % at 1e-5, against the µA model at 1e-9. (Earlier figures in this note were
   6.8 %, 0.4 % and 0.08 %, with no stated quantity or reference; they are replaced by this
   table.)

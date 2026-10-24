@@ -173,8 +173,10 @@ negative after the fall.
 \src{mrm\_injection/README.md "Numerics": ngspice-47 + OpenVAF on Linux, pulse\_ng.cir and
 pulse\_direct\_ng.cir, 2026-10-24, data in tests/24-10-4times; tests/fc\_form\_check.py,
 verilog-a-sim 2.42.0+5}
-\todo{The \vas{} side of the 10\,Gb/s current is not yet compared against the same ngspice
-reference; run tb\_fig7's deck in \vas{} and state its error alongside the 0.04\,\%.}
+On the same 10\,Gb/s current and against the same reference, \vas{} at its defaults is within
+0.028\,\% (0.011\,\% RMS), as close as ngspice's tuned setting. Tightening its step control
+leaves that at about 0.025\,\%, the level at which the two simulators agree.
+\src{mrm\_injection/tests/tolcheck/compare.py --va, verilog-a-sim 2.42.0+13, 2026-10-24}
 
 \subsubsection{An equivalent-circuit ring model, and the simulator as a design tool}
 The third package (\texttt{mrm\_eqc}) implements the depletion-ring model of Bao

@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+14 - 2026-10-24
+----------------------
+**mrm_injection: tolerance data committed; verilog-a-sim compared against the same reference.**
+Docs/tests only; no code changes.
+  * `paper_writing/mrm_injection/tests/tolcheck/`: the user's ngspice runs (uA/mA x reltol
+    def/1e-5/1e-9, DC and 10 Gb/s, decks, logs, .dat gzipped, 9.8 MB). They were dropped in
+    `mrm_eqc/tolcheck/` and moved here, where the model lives.
+  * `compare.py` regenerates both tables. It now prints how much of the reference interval
+    each run covers, so an aborted run is flagged instead of compared over its stub; this
+    was the 2.42.0+13 mistake. Every 2.42.0+13 figure reproduces.
+  * `--va` runs the same 10 Gb/s deck in verilog-a-sim (`f7_va.net`). Against the ngspice
+    reference at defaults: 0.028 % max / 0.011 % RMS, as close as ngspice's tuned uA/1e-5
+    (0.038 / 0.014 %). It does not go below ~0.025 % at tighter reltol: the floor where the two
+    simulators agree, possibly including the reference's own error.
+  * Wall: verilog-a-sim 6.8 s (Windows) vs ngspice 0.33 s (Linux); different machines,
+    stated as such.
+  * Paper: the robustness paragraph carries the verilog-a-sim figure; its last 	odo is closed.
+
+
 2.42.0+13 - 2026-10-24
 ----------------------
 **mrm_injection: the ngspice tolerance figures re-measured.** Docs only; no code changes.

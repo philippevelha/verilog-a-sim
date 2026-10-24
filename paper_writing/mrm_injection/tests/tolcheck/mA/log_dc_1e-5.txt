@@ -1,0 +1,13 @@
+
+Note: No compatibility mode selected!
+
+
+Circuit: * dc i-v of the p-i-n (wang 2016 fig. 6)
+
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Using SPARSE 1.3 as Direct Linear Solver
+
+No. of Data Rows : 601
+ngspice-47 done
+mA 1e-5 dc 0.04s
