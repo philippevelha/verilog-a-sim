@@ -22,6 +22,43 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+1 - 2026-10-24
+---------------------
+**Small-model transient: three overheads removed, with no change to any answer.** Profiled with
+samply on the 25 Gb/s ring deck of paper_writing/mrm_tcmt (27 unknowns, 24 650 points), the case
+behind the paper's "10-20x slower than ngspice". All three were costs that do no physics:
+  * **Model breakpoints grew by one entry per accepted step.** A PWL source re-reports its next
+    corner at every accepted point, and va-transient appended each report to a Vec that was
+    never pruned, then scanned all of it, several times, to plan each step. By the end of this
+    run the list had 24 649 entries, 255 distinct, and the scans were about a sixth of the
+    wall time, growing with the square of the run length. It is now sorted, without
+    duplicates, pruned as t advances, and searched by bisection (`ModelBreakpoints`). Same
+    answers by construction: every lookup asks for the first breakpoint after a time at or past
+    the current one.
+  * **The transient report made one write call per point** (println!), about a tenth of the
+    profile, much of it in the OS file path (on this machine, also filesystem filter drivers).
+    It now writes through one locked, buffered handle; a write error is returned, not a panic.
+  * **Per-iteration copies and maps.** newton_step cloned the residual and the dense Jacobian on
+    every iteration and allocated the negated residual; it now takes them. Every load() built
+    three slot hash maps from the module's lowering; they are built once per compiled model
+    (`SlotMaps`). The `ctx_maps_built` counter, which only counted those, is removed.
+  * Measured, interleaved, 6 runs each, VA_JIT=on: 2.44.0 median 1.63 s, now 1.34 s (-18%);
+    byte-identical output. The fixed cost of a run is about 0.14 s, nearly all process start
+    (`va-cli --help` alone takes 0.138 s here). That leaves about 49 us per point.
+  * Where the rest goes (profile after the changes): model evaluation about 31% (the statement
+    walk, of which JIT-compiled code about 10%), the dense 27x27 LU and its checks about 20%,
+    stamping 16%, heap about 17% (now spread thin, none above 2%). One evaluation per accepted
+    step is a fresh "commit" load at the accepted point (SPICE reuses the last Newton
+    evaluation), about 1 in 3.9 loads. Changing that would change answers, so it is not done
+    here.
+
+Measured: `cargo xtask deck-diff` 2.44.0 against this build, every deck under circuits/: 142
+byte-identical, 0 different, 14 skipped (xtask's 13 slow ISCAS'85 decks, plus
+iscas85/c7552_tran.net, which is not on that list but runs for more than 10 minutes). It was run
+one deck at a time to stay inside the foreground time limit. `cargo test --workspace` 1035
+passed, 0 failed; `cargo xtask validate` 28 checked, 0 failed, convergence 28/28; clippy and fmt
+clean.
+
 2.44.0 - 2026-10-24
 -------------------
 **`absdelay` is a transport delay in transient** (docs/proposals/absdelay.md stage 2). Until now

@@ -1405,9 +1405,17 @@ fn newton_step(
             sim.at_iteration(iteration, 0.0),
             linear,
         )?;
-        let mut f = sink.residual.clone();
-        let mut j = sink.jacobian.clone();
-        for ((fi, qi), oi) in f.iter_mut().zip(&sink.charge).zip(&companion.offset) {
+        // Taken, not cloned (2.44.0+1): the assembled arrays are this iteration's own, and two
+        // copies of a dense Jacobian per iteration were a measurable share of a small model's
+        // transient.
+        let Assembled {
+            residual: mut f,
+            jacobian: mut j,
+            charge,
+            dcharge,
+            ..
+        } = sink;
+        for ((fi, qi), oi) in f.iter_mut().zip(&charge).zip(&companion.offset) {
             *fi += companion.coeff * qi + oi;
         }
         // The companion matrix `J + coeff·dQ`, entry by entry. On the sparse path both live on
@@ -1417,20 +1425,22 @@ fn newton_step(
             Linear::Dense => {
                 for i in 0..dim {
                     for k in 0..dim {
-                        j[i * dim + k] += companion.coeff * sink.dcharge[i * dim + k];
+                        j[i * dim + k] += companion.coeff * dcharge[i * dim + k];
                     }
                 }
             }
             Linear::Sparse { .. } => {
-                for (jv, qv) in j.iter_mut().zip(&sink.dcharge) {
+                for (jv, qv) in j.iter_mut().zip(&dcharge) {
                     *jv += companion.coeff * qv;
                 }
             }
         }
         let residual_norm = f.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
 
-        let neg_f: Vec<f64> = f.iter().map(|v| -v).collect();
-        let dx = linear.solve(&j, &neg_f, dim)?;
+        for v in f.iter_mut() {
+            *v = -*v;
+        }
+        let dx = linear.solve(&j, &f, dim)?;
 
         let mut update_small = true;
         let mut update_stalled = true;
@@ -1505,6 +1515,44 @@ fn newton_step(
         residual: last_residual,
     }
     .into())
+}
+
+/// The breakpoints models have asked for, kept **sorted, without duplicates, and only those
+/// still ahead of the run** (2.44.0+1).
+///
+/// Until then this was a plain `Vec` that every accepted step appended to and nothing pruned,
+/// and every step planned its landing with a linear scan of all of it, several times. A source
+/// that re-reports its next corner at every accepted step (a `PWL`'s does) grew it by one entry
+/// per step: 24 649 entries, 255 distinct, by the end of the 25 Gb/s ring deck in
+/// `paper_writing/mrm_tcmt/`, and the scans were about a sixth of that run's wall time, growing
+/// with the square of its length.
+///
+/// The answers are unchanged by construction: a lookup only ever asks for the first breakpoint
+/// after a time at or past the current `t`, which neither a duplicate nor an entry at or before
+/// `t` can be. A `NaN` is dropped on insertion, as the old `bp > from` filter never selected one.
+#[derive(Default)]
+struct ModelBreakpoints(Vec<f64>);
+
+impl ModelBreakpoints {
+    fn insert(&mut self, bp: f64) {
+        if bp.is_nan() {
+            return;
+        }
+        if let Err(i) = self.0.binary_search_by(|x| x.total_cmp(&bp)) {
+            self.0.insert(i, bp);
+        }
+    }
+
+    /// The first breakpoint strictly after `from`.
+    fn next_after(&self, from: f64) -> Option<f64> {
+        self.0.get(self.0.partition_point(|&x| x <= from)).copied()
+    }
+
+    /// Forget every breakpoint at or before `t`, the time just accepted.
+    fn prune(&mut self, t: f64) {
+        let passed = self.0.partition_point(|&x| x <= t);
+        self.0.drain(..passed);
+    }
 }
 
 /// Integrate `instances` over `[cfg.tstart, cfg.tstop]` from initial condition `x0`, returning
@@ -1665,12 +1713,12 @@ fn integrate(
         &state.committed,
         &state.offsets,
     );
-    let mut model_breakpoints: Vec<f64> = event_prev
-        .breakpoints
-        .iter()
-        .copied()
-        .filter(|&bp| bp > cfg.tstart)
-        .collect();
+    let mut model_breakpoints = ModelBreakpoints::default();
+    for &bp in &event_prev.breakpoints {
+        if bp > cfg.tstart {
+            model_breakpoints.insert(bp);
+        }
+    }
     // Timer registrations still owed a firing: `(instance, slot, time)`. A model re-registers
     // its next occurrence at every accepted timepoint, so this is refreshed as the run goes
     // rather than computed once.
@@ -1695,12 +1743,11 @@ fn integrate(
             }
         }
     }
-    model_breakpoints.extend(
-        pending_timers
-            .iter()
-            .map(|&(_, _, t)| t)
-            .filter(|&t| t > cfg.tstart),
-    );
+    for &(_, _, t) in &pending_timers {
+        if t > cfg.tstart {
+            model_breakpoints.insert(t);
+        }
+    }
     let is_dynamic = linear.dynamic_rows(&initial, dim);
     // Which rows the step controller may still judge once shrinking has stopped helping.
     // See the floor rule at the accept/reject decision, and `lte_controllable_rows`.
@@ -1814,11 +1861,7 @@ fn integrate(
             // SPICE merges breakpoints closer than its minimum break the same way.
             let after = |from: f64| -> Option<f64> {
                 let consumer = events.next_after(from);
-                let model = model_breakpoints
-                    .iter()
-                    .copied()
-                    .filter(|&bp| bp > from)
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let model = model_breakpoints.next_after(from);
                 match (consumer, model) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
@@ -2346,7 +2389,12 @@ fn integrate(
                 history.truncate(if restart { 1 } else { history_cap });
 
                 waveform.model_crossings.extend(crossings);
-                model_breakpoints.extend(poll.breakpoints.iter().copied().filter(|&bp| bp > t));
+                model_breakpoints.prune(t);
+                for &bp in &poll.breakpoints {
+                    if bp > t {
+                        model_breakpoints.insert(bp);
+                    }
+                }
                 // Re-poll when a body ran, so the baseline for the *next* step is the
                 // trajectory actually accepted. Using the pre-body values instead would
                 // compare the next step against a solution that was superseded — and where a
@@ -2368,7 +2416,7 @@ fn integrate(
                 for &(i, slot, next) in &event_prev.timers {
                     if next > t && !pending_timers.contains(&(i, slot, next)) {
                         pending_timers.push((i, slot, next));
-                        model_breakpoints.push(next);
+                        model_breakpoints.insert(next);
                     }
                 }
                 // An event fires *at* a timepoint, not continuously: the next candidate step is

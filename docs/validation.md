@@ -1013,7 +1013,7 @@ checks the answers bit for bit, both paths, all aids on).
 | `iterations`, `outcome` | per stage: the iterations it took, and `converged`, `no convergence` or `failed: <error>` |
 | `instances` | every device after flattening, compiled or not — divide by the compiled count `va-cli`'s `circuit:` line gives for a per-model cost |
 | `stamp_lookups` | (1.14.0) hash lookups by sparse stamping, one per Jacobian/`dcharge` stamp; `0` on the dense path (`va_core::counters`) |
-| `ctx_maps_built` | (1.14.0) lookup maps a compiled instance builds at the start of each evaluation — three per call, so ÷3 = compiled-instance evaluations (`va_codegen::counters`) |
+| `ctx_maps_built` | (1.14.0, **removed in 2.44.0+1**) lookup maps a compiled instance built at the start of each evaluation — three per call, so ÷3 = compiled-instance evaluations. The maps are now built once per compiled model, so the counter and its `[logfull]` line are gone; older logs in this document still show it |
 | `probe_allocs` | (1.14.0) gradient vectors allocated by a `V(…)`, `I(…)` or `idt` read, one per read, each the instance's own size |
 | `ctx_map_lookups` | (1.14.0) hash lookups into those per-call maps and sets |
 | `grad_allocs` | (1.14.0) dense gradient vectors the dual-number arithmetic allocates — one per operation on a value that depends on an unknown, and one per copy of such a value; probe reads excluded (they are `probe_allocs`) |

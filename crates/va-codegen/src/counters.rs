@@ -3,10 +3,9 @@
 //! Three things a compiled instance's `load` does that cost time without computing physics,
 //! counted so their price can be put next to the time they take:
 //!
-//! - [`Counters::ctx_maps_built`] — lookup maps built from the module's lowering at the start of
-//!   every evaluation (`GeneratedModel::ctx`: branch-current slots, `idt` slots, stateful-call
-//!   slots — three per call). They are the same on every call of a given instance; counted here
-//!   because each one is a hash-map construction on the hot path.
+//! - (Until 2.44.0+1, `ctx_maps_built`: the three slot maps `GeneratedModel::ctx` built from the
+//!   module's lowering on every evaluation. They are now built once per compiled model,
+//!   `SlotMaps`, so the counter went with them.)
 //! - [`Counters::probe_allocs`] — gradient vectors allocated by a potential or flow read
 //!   (`V(...)`, `I(...)`, an `idt` value), one per read, each sized by the instance's own
 //!   unknowns (never the circuit's).
@@ -40,7 +39,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static CTX_MAPS_BUILT: AtomicU64 = AtomicU64::new(0);
 static PROBE_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static CTX_MAP_LOOKUPS: AtomicU64 = AtomicU64::new(0);
 static GRAD_ALLOCS: AtomicU64 = AtomicU64::new(0);
@@ -52,8 +50,6 @@ static EXPRS_HOISTABLE: AtomicU64 = AtomicU64::new(0);
 /// A snapshot of the counters since the process started (or since [`reset`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
-    /// Lookup maps built by `GeneratedModel::ctx`, three per evaluation.
-    pub ctx_maps_built: u64,
     /// Gradient vectors allocated by potential/flow/`idt` reads.
     pub probe_allocs: u64,
     /// Hash lookups into the evaluation context's maps and sets.
@@ -80,7 +76,6 @@ pub fn enable(on: bool) {
 
 /// Zero every counter.
 pub fn reset() {
-    CTX_MAPS_BUILT.store(0, Ordering::Relaxed);
     PROBE_ALLOCS.store(0, Ordering::Relaxed);
     CTX_MAP_LOOKUPS.store(0, Ordering::Relaxed);
     GRAD_ALLOCS.store(0, Ordering::Relaxed);
@@ -93,7 +88,6 @@ pub fn reset() {
 /// The current totals.
 pub fn snapshot() -> Counters {
     Counters {
-        ctx_maps_built: CTX_MAPS_BUILT.load(Ordering::Relaxed),
         probe_allocs: PROBE_ALLOCS.load(Ordering::Relaxed),
         ctx_map_lookups: CTX_MAP_LOOKUPS.load(Ordering::Relaxed),
         grad_allocs: GRAD_ALLOCS.load(Ordering::Relaxed),
@@ -109,11 +103,6 @@ fn bump(counter: &AtomicU64, n: u64) {
     if ENABLED.load(Ordering::Relaxed) {
         counter.fetch_add(n, Ordering::Relaxed);
     }
-}
-
-#[inline]
-pub(crate) fn ctx_maps_built(n: u64) {
-    bump(&CTX_MAPS_BUILT, n);
 }
 
 #[inline]

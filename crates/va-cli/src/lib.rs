@@ -66,7 +66,6 @@ fn newton_cfg(solver: Solver) -> NewtonConfig {
 /// `va-codegen`'s evaluation counters, for the `[logfull]` lines ([`NewtonConfig::log_counters`]).
 fn codegen_counts(out: &mut Vec<(&'static str, u64)>) {
     let c = va_codegen::counters::snapshot();
-    out.push(("ctx_maps_built", c.ctx_maps_built));
     out.push(("probe_allocs", c.probe_allocs));
     out.push(("ctx_map_lookups", c.ctx_map_lookups));
     out.push(("grad_allocs", c.grad_allocs));
@@ -915,7 +914,7 @@ pub fn run_sim(
                 wf.stalled_steps
             );
         }
-        report_transient(&shown, &wf);
+        report_transient(&shown, &wf).context("writing the transient waveform to stdout")?;
         if let Some(f) = &wf.finished {
             tasks::report_finish(f.kind, &f.by, &format!("t={:e}", f.t));
         }
@@ -4306,12 +4305,20 @@ fn report_noise(
 }
 
 /// Print the transient waveform: one line per accepted timepoint, every node's voltage.
-fn report_transient(quantities: &[Quantity], wf: &Waveform) {
-    println!(
+///
+/// Written through one locked, buffered handle (2.44.0+1): `println!` per point made one write
+/// call per line, which on a 24 650-point ring run was about a tenth of the wall time, most of it
+/// in the operating system's file path. The text is unchanged, byte for byte. A failed write is
+/// returned rather than panicking as `println!` would.
+fn report_transient(quantities: &[Quantity], wf: &Waveform) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    writeln!(
+        out,
         "Transient analysis ({} points, t=0 to t={:e}s):",
         wf.t.len(),
         wf.t.last().copied().unwrap_or(0.0)
-    );
+    )?;
     let cols: Vec<(&Quantity, Option<usize>)> =
         quantities.iter().map(|q| (q, wf.column(q.index))).collect();
     for (t, x) in wf.t.iter().zip(&wf.x) {
@@ -4322,8 +4329,9 @@ fn report_transient(quantities: &[Quantity], wf: &Waveform) {
                     .map(|v| q.render(*v).replace(" = ", "="))
             })
             .collect();
-        println!("  t={t:.6e}s  {}", cols.join("  "));
+        writeln!(out, "  t={t:.6e}s  {}", cols.join("  "))?;
     }
+    out.flush()
 }
 
 #[cfg(test)]

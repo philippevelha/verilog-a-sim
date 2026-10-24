@@ -222,10 +222,12 @@ impl CompiledModel {
         } else {
             tape::Tapes::default()
         };
+        let slot_maps = SlotMaps::of(&lowered);
         let shared = Arc::new(SharedModel {
             module: module.clone(),
             params,
             lowered,
+            slot_maps,
             ideal_shorts,
             collapse: OnceLock::new(),
             vt: VT,
@@ -443,6 +445,57 @@ impl CompiledModel {
     }
 }
 
+/// The three slot lookups an evaluation reads (`crate::ad::Ctx::branch_current_slots`,
+/// `idt_slots`, `state_slots`). They depend on the lowering alone, so they are built once per
+/// compiled model (2.44.0+1). Until then `GeneratedModel::ctx_sized` built all three on every
+/// `load`: three hash maps per Newton iteration per instance, a visible share of a small model's
+/// transient.
+struct SlotMaps {
+    branch_current: HashMap<u32, usize>,
+    idt: HashMap<u32, usize>,
+    state: HashMap<u32, (lower::StatefulKind, usize)>,
+}
+
+impl SlotMaps {
+    fn of(lowered: &Lowered) -> Self {
+        // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
+        // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't
+        // (and shouldn't) need to know which of the two reasons gave this branch a slot.
+        let branch_current = lowered
+            .branch_currents
+            .iter()
+            .map(|bc| (bc.branch.0, bc.local_slot))
+            .chain(
+                lowered
+                    .flow_current_accumulators
+                    .iter()
+                    .map(|acc| (acc.branch.0, acc.local_slot)),
+            )
+            .chain(
+                lowered
+                    .node_kcl_probes
+                    .iter()
+                    .map(|p| (p.branch.0, p.local_slot)),
+            )
+            .collect();
+        let idt = lowered
+            .idt_accumulators
+            .iter()
+            .map(|acc| (acc.expr_id, acc.local_slot))
+            .collect();
+        let state = lowered
+            .stateful_calls
+            .iter()
+            .map(|c| (c.expr_id, (c.kind, c.base)))
+            .collect();
+        Self {
+            branch_current,
+            idt,
+            state,
+        }
+    }
+}
+
 /// One `absdelay` lookup in transient (`GeneratedModel::absdelay_at`).
 struct Delayed {
     /// `u(t − tau)`.
@@ -509,6 +562,8 @@ struct SharedModel {
     module: Module,
     params: Vec<f64>,
     lowered: Lowered,
+    /// The slot lookups every evaluation reads, built once from `lowered` ([`SlotMaps`]).
+    slot_maps: SlotMaps,
     /// [`lower::ideal_shorts`] under `params`.
     ideal_shorts: Vec<lower::IdealShort>,
     /// [`CompiledModel::collapse`], once asked for.
@@ -700,40 +755,8 @@ impl GeneratedModel {
         static_vars: &'a [Option<crate::ad::Dual>],
         presize_vars: bool,
     ) -> Ctx<'a> {
-        // Three maps built per call (branch-current slots, `idt` slots, stateful-call slots):
-        // counted for `--logfull` (`crate::counters`).
-        crate::counters::ctx_maps_built(3);
-        // A self-probed flow branch's accumulator slot is merged into the *same* map a potential
-        // contribution's branch-current slot lives in — `ad::eval`'s flow-probe read doesn't (and
-        // shouldn't) need to know which of the two reasons gave this branch a slot.
-        let branch_current_slots = self
-            .shared
-            .lowered
-            .branch_currents
-            .iter()
-            .map(|bc| (bc.branch.0, bc.local_slot))
-            .chain(
-                self.shared
-                    .lowered
-                    .flow_current_accumulators
-                    .iter()
-                    .map(|acc| (acc.branch.0, acc.local_slot)),
-            )
-            .chain(
-                self.shared
-                    .lowered
-                    .node_kcl_probes
-                    .iter()
-                    .map(|p| (p.branch.0, p.local_slot)),
-            )
-            .collect();
-        let idt_slots = self
-            .shared
-            .lowered
-            .idt_accumulators
-            .iter()
-            .map(|acc| (acc.expr_id, acc.local_slot))
-            .collect();
+        // The slot maps are the shared model's, built once ([`SlotMaps`], 2.44.0+1); until then
+        // three were built here on every call.
         // Pre-sized to the module's declared locals: `set_var` would grow it anyway,
         // but doing it once here keeps a 1400-variable model from reallocating its way up.
         let mut vars = if presize_vars || !self.shared.lowered.persistent_vars.is_empty() {
@@ -773,13 +796,7 @@ impl GeneratedModel {
             // path this evaluation doesn't take leaves its history untouched rather than
             // resetting it (the same rule `va_abi::state`'s consumer contract states).
             state_next: RefCell::new(state_prev.to_vec()),
-            state_slots: self
-                .shared
-                .lowered
-                .stateful_calls
-                .iter()
-                .map(|c| (c.expr_id, (c.kind, c.base)))
-                .collect(),
+            state_slots: &self.shared.slot_maps.state,
             bound_step: std::cell::Cell::new(None),
             tasks: RefCell::new(Vec::new()),
             instance_name: &self.name,
@@ -790,8 +807,8 @@ impl GeneratedModel {
             hoistable: &self.shared.lowered.invariance.hoistable,
             tapes: &self.shared.tapes,
             tape_stack: RefCell::new(Vec::with_capacity(self.shared.tapes.max_depth)),
-            branch_current_slots,
-            idt_slots,
+            branch_current_slots: &self.shared.slot_maps.branch_current,
+            idt_slots: &self.shared.slot_maps.idt,
             mixed_branch_potential_used: RefCell::new(std::collections::HashSet::new()),
             flow_current_totals: RefCell::new(HashMap::new()),
             sched: None,
@@ -4494,7 +4511,6 @@ mod tests {
         (0..loads).for_each(|_| load());
         let after = crate::counters::snapshot();
         crate::counters::enable(false);
-        assert!(after.ctx_maps_built - before.ctx_maps_built >= 3 * loads);
         // Only the tree-walking evaluator allocates a probe: the static schedule (2.4.0, the
         // default) reads it from a slot. The bound was written before the schedule existed, and
         // went red with it -- run with `VA_SCHED=off` to exercise it.
