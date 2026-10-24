@@ -22,6 +22,13 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+4 - 2026-10-24
+---------------------
+**Paper bibliography: Strollo 1997 checked.** Docs only. The entry matched the publisher's
+record (IEEE Trans. Power Electron. 12(1), 12-20); the DOI 10.1109/63.554165 is added and the
+VERIFY note removed.
+
+
 2.42.0+3 - 2026-10-24
 ---------------------
 **Ring-modulator case study: the direct carrier-filter form is kept and measured.** Docs/tests
