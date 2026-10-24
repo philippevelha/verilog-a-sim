@@ -6,7 +6,10 @@ every ISCAS'85 circuit from c432 up needs the $g_\text{min}$ rescue (175--365 Ne
 where a clean solve takes about 20), and the rows that go singular are not yet identified;
 the 320-stage PSP103 inverter chain (\num{10566} unknowns) fails, undiagnosed;
 HiSIM2 produces a NaN on the first Newton iteration;
-\texttt{.nodeset} implements only the starting-guess phase;
+\texttt{.nodeset} implements only the starting-guess phase, so it cannot select a branch of a
+bistable state whose sustaining variables are not nets: a seeded ring temperature is erased in
+Newton's first step because the internal optical field starts at zero (Section~\ref{sec:mrm});
+the frozen-temperature method works around it for that case, it does not fix it;
 transient cost is evaluation-dominated (1\,ns of c432 in about 15\,min);
 on a small model the price of compiling the source on every run and of the evaluator against
 OpenVAF's native code is a factor 10--20 in wall time against ngspice (Section~\ref{sec:mrm}:

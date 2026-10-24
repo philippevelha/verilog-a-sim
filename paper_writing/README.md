@@ -58,6 +58,12 @@ entries. The claims below are the ones in the draft now.
 | p-i-n MRM, va vs ngspice | eye height within 0.24 µW, ER within 0.01 dB, 9 cases | `eyes_va.json` vs `eyes_ng.json` (re-checked 2026-10-24) |
 | ngspice needed rewrites, va did not | direct form: negative free-charge residue 0.04 % of peak (reltol 1e-5) / 0.2 % (default), 2.6 / 11 µW through power, +20 % steps at reltol 1e-5 (none at default); µA scaling (6.8 % error), reltol 1e-5 | residue: ngspice-47 + OpenVAF on Linux, `pulse_direct_ng.cir`, 2026-10-24, data in `mrm_injection/tests/24-10-4times/` (the earlier "4×" was an overstatement, withdrawn); µA/reltol: `mrm_injection/README.md` only, **re-measure** |
 | va: direct form = W form | max \|ΔX\| 1e-6 mA (print precision), post-fall charge ratio 1.0000, max \|ΔP\| 0.002 µW; stored ngspice W form vs va: ratio 1.0009, 0.54 µW | `mrm_injection/tests/fc_form_check.py`, 2.42.0+3, 2026-10-24 |
+| mrm_eqc: RLC vs large-signal; ngspice vs va | 0.06–0.16 % small-signal; eye waveforms 5–6e-5 RMS | `mrm_eqc/README.md` §1, §3 (package's own runs, not re-run here) |
+| mrm_eqc vs Bao 2024 | resonances within 0.3 pm; dips 2–10 dB too deep; 32 GHz only with cold-resonance detunings | `mrm_eqc/README.md` §2 |
+| PAM8 212 Gb/s, paper ring | no FFE best −86 % (180 runs); +45 % at 1/4 rate; 3-tap FFE +17 % | `mrm_eqc/tests/t6*.json`, 2.42.0+8 |
+| PAM8, lower-Q ring (bus coupling only) | no FFE +25 % at Q_L 3600; FFE +37 % at Q_L 5500 | `t7_lowq_sweep.json`, `t7b_lowq_refine.json`, 2.42.0+9 |
+| design-sweep cost | ~3500 runs, ~8000 points each, 1.3–1.6 s/run, 7 in parallel, i7-1185G7 | `t6*.json`, `t7*.json` `wall_s` |
+| PAM8 vs laser power (frozen-temperature method) | eye never closes; red-side optimum unstable > 1.1 mW; 38 → 31 %; direct check 0.5 % | `t8_power.json`, 2.42.0+11 |
 
 ## Open decisions (for the author)
 

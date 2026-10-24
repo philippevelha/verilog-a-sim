@@ -49,8 +49,8 @@ def pam8_case(vlo, vhi, pre=0.0, post=0.0, post2=0.0):
                 lo=(vlo, vlo), hi=(vhi, vhi))
 
 
-def run_point(tag, c, lam, P, extra=()):
-    """extra: netlist lines inserted before .end (e.g. a .nodeset)."""
+def run_point(tag, c, lam, P, extra=(), keep=False):
+    """extra: netlist lines inserted before .end (e.g. a .nodeset); keep: also return t, P."""
     T = 1 / c["baud"]
     p = dict(c["card"]); p.update(FSR=c["fsr"], loss_mod=1)
     circ = [("V", "a", "sa", "0", t5.pwl([-v for v in c["v1"]], T)), ("R", "a", "sa", "a", 50.0),
@@ -77,7 +77,10 @@ def run_point(tag, c, lam, P, extra=()):
     if len(a) == 0:
         return dict(error=(r.stdout + r.stderr)[-400:])
     e = t5.eye(a[:, 0], a[:, 1], c["sym"], c["M"], T)
-    return dict(eye=e, points=len(a), wall_s=wall, Pmean_mW=float(a[:, 1].mean()))
+    out = dict(eye=e, points=len(a), wall_s=wall, Pmean_mW=float(a[:, 1].mean()))
+    if keep:
+        out.update(t=a[:, 0], P=a[:, 1])
+    return out
 
 
 def extra(mode):

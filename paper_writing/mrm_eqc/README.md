@@ -124,6 +124,25 @@ What this shows:
 - **Checked against direct self-heating runs** at 0.5/1/2 mW, where the static equation has a single root: 2.91/5.79/11.10 µW direct against 2.91/5.82/11.11 µW predicted.
 - **Limits:** the heating is evaluated at the mean drive, not the pattern average. Stability is quasi-static, so fast optical–thermal dynamics such as self-pulsing are not included. As before, verilog-a-sim only, with no receiver noise or bandwidth.
 
+## 3e. PAM4 with FFE on the [B] ring cards (t9, `tests/t9_pam4_ffe.py`)
+
+The four t5 PAM4 cases are re-optimised at 1 mW with the frozen-temperature method. The runs use `self_heat=0`, a mean-level lead-in, and δ = laser − resonance at the mean drive. Each point must be thermally stable at 1 mW. The taps are the peak-limited FFE of t6, now also positive. 1680 runs, 0 failed. Every reported point was checked with a direct `self_heat=1` run, which agreed to ≤ 0.2 µW. The runs use verilog-a-sim 2.42.0+11 and were made 2026-10-24.
+
+| case | t5 (laser at max static OMA) | best placement, no FFE | best FFE by eye height | best FFE by % of ideal |
+|---|---|---|---|---|
+| single 80 Gb/s | 28.7 µW (53 %) | 60.2 µW (71 %), δ −80 pm | 60.9 µW (77 %), pre −0.05 | 50.5 µW (83 %), pre −0.05 post −0.10 |
+| dual 80 Gb/s | 24.6 µW (42 %) | 51.6 µW (54 %), δ −80 pm | = no FFE | 45.7 µW (56 %), pre −0.05 post −0.05 |
+| single 106 Gb/s | 17.8 µW (31 %) | 39.8 µW (51 %), δ −100 pm | = no FFE | 29.8 µW (64 %), pre −0.10 post +0.15, δ +130 pm ¹ |
+| dual 106 Gb/s | 11.2 µW (17 %) | 27.9 µW (33 %), δ −100 pm | 31.7 µW (39 %), pre −0.05 | 29.4 µW (41 %), pre −0.10 post −0.05 |
+
+¹ On the red side, at a laser wavelength where the static thermal equation has three roots. The point is stable, and the direct run found the same branch, but a device must reach it from the correct side.
+
+- **The main gain is laser placement, not equalisation.** 80–100 pm on the blue side of the heated resonance roughly doubles the eye height compared with t5's maximum-static-OMA wavelength. That wavelength came from a static model that heats each level separately, while the transient kept the first symbol's temperature.
+- **FFE improves the eye as a fraction of ideal, but rarely its height.** A peak-limited FFE gives up swing for flatness. Ranked by eye height, it helps only dual 106 Gb/s (+14 %).
+- Ranking by % of ideal and by µW picks different taps. A receiver sees µW.
+- `t9_pam4_eyes.png` shows the best placement without FFE (top) against the best FFE by % of ideal (bottom).
+- Data: `t9_pam4_ffe.json` (all runs + summary) and `t9_pam4_height.json` (`--height`). The first attempt under t5's own setup is kept as `t9_pam4_ffe_t5conditions.json` / `t9b_..._wide.json`. There the best point sat at the grid edge in an unchecked thermal region, which is why the method was changed.
+
 ## 4. Wall time and peak memory (`tests/benchmark.py` → `benchmark.json`)
 
 | test | model | ngspice: runs / total wall / peak RSS | verilog-a-sim: runs / total wall / peak RSS |

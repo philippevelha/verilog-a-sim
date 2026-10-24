@@ -22,6 +22,31 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+12 - 2026-10-24
+----------------------
+**Paper: mrm_eqc results in the case study; PAM4 with FFE (t9).** Docs/tests only; no code
+changes.
+  * `paper_writing/sections/09b-mrm.tex` gains a subsection on the Bao et al. models.
+    - Reproduction: partial, with the reasons.
+    - PAM8 at 212 Gb/s: closed without FFE; a 3-tap FFE opens it to +17 %.
+    - Lower-Q ring: +25 % with no FFE at Q_L 3600, +37 % with FFE at Q_L 5500.
+    - Design-sweep cost: ~3500 runs at 1.3-1.6 s each.
+    - Laser power with the frozen-temperature method.
+    - PAM4 table, plus three figures.
+    Also: introduction bullet, a `.nodeset` limitation, the Bao 2024 reference, and
+    claims-ledger rows.
+  * `mrm_eqc/tests/t9_pam4_ffe.py`: the four PAM4 cases at 1 mW, frozen-temperature method,
+    peak-limited FFE including positive taps. 1680 runs, 0 failed. Every reported point is
+    checked with a direct self-heating run (<= 0.2 uW).
+  * Result: the main gain is laser placement. 80-100 pm blue of the heated resonance roughly
+    doubles the eye height against the old max-static-OMA wavelength (single 80G 28.7 -> 60.2
+    uW). FFE raises the eye as a fraction of ideal (71 -> 83 %) but rarely its height; ranked by
+    height it helps only dual 106G (+14 %).
+  * Cost, stated: the first t9 attempt under t5's own setup put the best point at a grid edge
+    in an unchecked thermal region. It is kept (`t9_pam4_ffe_t5conditions.json`) but not used.
+  * `t6.run_point` gained `keep=` (return the waveform).
+
+
 2.42.0+11 - 2026-10-24
 ----------------------
 **mrm_eqc t8: laser-power sweep finished, with a frozen-temperature method.** Docs/tests only;
