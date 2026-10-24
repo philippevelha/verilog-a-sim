@@ -107,6 +107,23 @@ What this shows:
 - **With FFE**, a moderate change is best: τ_e = 15 ps (κ² 17 %, Q_L 5500) gives +37 %, four times what the [B] ring reaches on the same grid.
 - These rings are over-coupled (τ_e < τ_l ≈ 23 ps), so the static dip is shallower than [B]'s. A κ² of 17–31 % per round trip is within reach of a narrower gap or a pulley coupler. That is a judgement, not a design: no coupler geometry is modelled here.
 
+## 3d. Eye diagram and laser power for the τ_e = 15 ps ring (t8, `tests/t8_eye_power.py`)
+
+`--eye` produces `t8_eye.png`, the t7b best case: 1 mW, `self_heat=0`, 152 periods folded. The eye is 37.2 % of ideal, 5.6 µW on 105 µW OMA, RLM 0.70.
+
+`--power` produces `t8_power.json` and `t8_power.png`. It sweeps laser power from 0.1 to 8 mW with the same ring, taps and window, using the **frozen-temperature method** (`docs/frozen-temperature-method.md`). Direct `self_heat=1` runs could not be used above about 2 mW: the DC solve lands on the cold or unstable thermal branch, and a `.nodeset` on the thermal node does not change that.
+
+| P (mW) | eye, % of ideal | worst eye (µW) | operating detuning δ |
+|---|---|---|---|
+| 0.1–1 | 38.0 | 0.58 → 5.8 (∝ P) | +55 pm (red side) |
+| 2–8 | 30.9 | 11.1 → 44.4 (∝ P) | −70 pm (blue side) |
+
+- **Self-heating does not close the eye at any power.** The eye height keeps growing in proportion to laser power.
+- **What changes is where the laser can sit.** The best point is 55 pm on the red side of the heated resonance, and it becomes thermally unstable above **1.1 mW**. Above that, the best stable point is on the blue side, which gives 30.9 % instead of 38 %.
+- **The laser must track the heating:** the heating shift reaches 1.38 nm at 8 mW.
+- **Checked against direct self-heating runs** at 0.5/1/2 mW, where the static equation has a single root: 2.91/5.79/11.10 µW direct against 2.91/5.82/11.11 µW predicted.
+- **Limits:** the heating is evaluated at the mean drive, not the pattern average. Stability is quasi-static, so fast optical–thermal dynamics such as self-pulsing are not included. As before, verilog-a-sim only, with no receiver noise or bandwidth.
+
 ## 4. Wall time and peak memory (`tests/benchmark.py` → `benchmark.json`)
 
 | test | model | ngspice: runs / total wall / peak RSS | verilog-a-sim: runs / total wall / peak RSS |

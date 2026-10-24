@@ -22,6 +22,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+11 - 2026-10-24
+----------------------
+**mrm_eqc t8: laser-power sweep finished, with a frozen-temperature method.** Docs/tests only;
+no code changes.
+  * Direct self-heating runs above ~2 mW were deciding the answer by solver branch. From a cold
+    start the DC solve lands on the cold (or unstable middle) thermal root. A `.nodeset` on the
+    thermal net does not move it (seeds 7.96 K and 9.5 K gave the same 0.84 K as no seed): the
+    optical field starts at 0, so Newton's first step erases the seeded temperature. A limit of
+    `.nodeset`'s starting-guess-only phase, recorded here rather than fixed.
+  * New method, `docs/frozen-temperature-method.md`: over a transient much shorter than tau_th, a
+    frozen heating shift is a laser offset. So one self-heating-off detuning scan, plus a
+    quasi-static stability filter (k P dL/d(delta) > -1), gives the best eye per power. Checked
+    against direct runs at 0.5/1/2 mW: 2.91/5.79/11.10 uW direct vs 2.91/5.82/11.11 predicted.
+  * Result for the tau_e = 15 ps ring: self-heating never closes the eye, and the height grows
+    with power (0.58 -> 44.4 uW from 0.1 to 8 mW). The red-side optimum (+55 pm, 38.0 %) is
+    thermally unstable above 1.1 mW. Above that the best stable point is blue-side (-70 pm,
+    30.9 %). The laser must track up to 1.38 nm of heating at 8 mW.
+  * Limits: heating evaluated at the mean drive, not the pattern average; quasi-static
+    stability (no self-pulsing); verilog-a-sim only; no receiver noise or bandwidth.
+  * Replaces the "power sweep in progress" note of 2.42.0+10.
+
+
 2.42.0+10 - 2026-10-24
 ----------------------
 **mrm_eqc t8: PAM8 eye figure for the tau_e = 15 ps ring; power sweep in progress.** Docs/tests only.

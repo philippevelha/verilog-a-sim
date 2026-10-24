@@ -126,39 +126,80 @@ def eye_figure():
 
 # ----------------------------------------------------------------------------------- power
 POWERS = [0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0]
+CL = 2.99792458e8
+
+
+def mean_ring(c):
+    """Cold resonance (nm) and total amplitude decay rate g (1/s) at the mean drive bias."""
+    card = c["card"]
+    v1, v2 = float(np.mean(c["v1"])), float(np.mean(c["v2"]))
+    lr = card["lam0"] + 1e-3 * (card["s1"] * (card["c1"] * v1 + card["c2"] * v1 ** 2)
+                                + card["s2"] * (card["c1"] * v2 + card["c2"] * v2 ** 2))
+    w1 = card["s1"] / (card["s1"] + card["s2"]); w2 = 1 - w1
+    f = lambda v: card["tl0"] + card["tl1"] * v + card["tl2"] * v * v
+    tl = 1e-12 / (1 / card["tl0"] + w1 * (1 / f(v1) - 1 / card["tl0"]) + w2 * (1 / f(v2) - 1 / card["tl0"]))
+    return lr, 1 / tl + 1 / card["tau_e"]
+
+
+def lorentz(delta_pm, lres, g):
+    """Normalised intracavity power g^2/(D^2+g^2) at laser - resonance = delta (pm)."""
+    lres_m = lres * 1e-9
+    D = 2 * np.pi * CL * (1 / (lres_m + delta_pm * 1e-12) - 1 / lres_m)
+    return g * g / (D * D + g * g)
 
 
 def power_sweep():
+    """Frozen-temperature method (see module docstring of this mode in README 3d):
+    over the 2.4 ns pattern the ring temperature is constant (tau_th = 1 us), so a self-heating
+    shift d is exactly a laser offset -d. The eye at power P and effective detuning delta
+    (laser minus heated resonance, at the mean drive) is therefore the self_heat = 0 eye at that
+    delta, with the eye height scaled by P. Power decides which delta can be held: the point is
+    thermally stable iff 0.215 P dL/d(delta) > -1 (red side: heating pulls the resonance onto the
+    laser). Step 1: one self_heat = 0 scan of delta at 1 mW. Step 2: per power, best stable delta.
+    Step 3 (check): direct self_heat = 1 runs at 0.5/1/2 mW at the laser that gives that delta,
+    compared with the prediction."""
     c = case(LEAD)
     lam_c = laser_cold(c)
+    lr, g = mean_ring(c)
     workers = max(1, (os.cpu_count() or 2) - 1)
-
-    def scan(P, offsets_pm, sh, tag):
-        jobs = [(P, o) for o in offsets_pm]
-        with ThreadPoolExecutor(workers) as ex:
-            rs = list(ex.map(lambda j: (j[1], run(c, lam_c + j[1] * 1e-3, j[0], sh, f"{tag}_P{j[0]}_o{j[1]}")), jobs))
-        return rs
-
-    res = []
+    deltas = list(np.arange(-250, 201, 5))                       # pm, laser - resonance (mean bias)
+    with ThreadPoolExecutor(workers) as ex:
+        scan = list(ex.map(lambda dl: (float(dl), run(c, lr + dl * 1e-3, 1.0, 0, f"t8f_d{dl}")), deltas))
+    scan = [(dl, r) for dl, r in scan if "eye" in r]
+    dls = np.array([dl for dl, _ in scan])
+    dLd = np.gradient(lorentz(dls, lr, g), dls)                   # 1/pm
+    res = dict(lam_res_mean_nm=lr, laser_cold_ref_nm=lam_c, delta_ref_pm=1e3 * (lam_c - lr),
+               scan=[dict(delta_pm=dl, eye=r["eye"], Pmean_mW=r["Pmean_mW"]) for dl, r in scan],
+               powers=[], checks=[])
     for P in POWERS:
-        r0 = run(c, lam_c, P, 0, f"t8p_sh0_P{P}")
-        res.append(dict(P=P, self_heat=0, offset_pm=0.0, lam=lam_c, **r0))
-        hi = 300 * P + 100                                  # > 0.215 nm/mW * P with margin
-        coarse = scan(P, list(np.arange(-100, hi + 1, 20)), 1, "t8p_c")
-        ok = [(o, r) for o, r in coarse if "eye" in r]
-        fails = len(coarse) - len(ok)
-        o_best = max(ok, key=lambda x: x[1]["eye"]["worst"])[0]
-        fine = scan(P, list(np.arange(o_best - 20, o_best + 21, 5)), 1, "t8p_f")
-        ok += [(o, r) for o, r in fine if "eye" in r]
-        fails += sum("eye" not in r for _, r in fine)
-        o, b = max(ok, key=lambda x: x[1]["eye"]["worst"])
-        res.append(dict(P=P, self_heat=1, offset_pm=float(o), lam=lam_c + o * 1e-3, failed_runs=fails,
-                        scanned=len(coarse) + len(fine), **b))
-        e0, e1 = r0["eye"], b["eye"]
-        print(f"P {P:5.2f} mW | self_heat 0: eye {e0['worst'] * 1e3:7.2f} uW ({100 * e0['norm']:5.1f} %) | "
-              f"self_heat 1: eye {e1['worst'] * 1e3:7.2f} uW ({100 * e1['norm']:5.1f} %), laser +{o:.0f} pm, "
-              f"OMA {e1['oma'] * 1e3:5.0f} uW, RLM {e1['rlm']:.2f}, {fails} of {len(coarse) + len(fine)} runs failed",
+        stable = 0.215 * P * 1e3 * dLd > -1.0                     # 0.215 nm/mW -> pm
+        cand = [(dl, r) for (dl, r), s in zip(scan, stable) if s]
+        dl, r = max(cand, key=lambda x: x[1]["eye"]["norm"])
+        dl_best_all = max(scan, key=lambda x: x[1]["eye"]["norm"])[0]
+        d_shift = 0.215 * P * float(lorentz(np.array([dl]), lr, g)[0])      # nm, heating at that delta
+        res["powers"].append(dict(P=P, delta_pm=dl, eye_norm=r["eye"]["norm"], worst_uW=r["eye"]["worst"] * 1e3 * P,
+                                  oma_uW=r["eye"]["oma"] * 1e3 * P, heat_shift_pm=1e3 * d_shift,
+                                  laser_nm=lr + d_shift + dl * 1e-3, optimum_stable=bool(dl == dl_best_all),
+                                  stable_red_limit_pm=float(dls[stable][dls[stable] > 0].min()) if np.any(~stable) else None))
+        print(f"P {P:5.2f} mW: best stable delta {dl:+5.0f} pm -> eye {100 * r['eye']['norm']:5.1f} % of ideal, "
+              f"{r['eye']['worst'] * 1e3 * P:6.2f} uW; heating shift {1e3 * d_shift:6.1f} pm; "
+              f"{'unconstrained optimum' if dl == dl_best_all else 'optimum (' + format(dl_best_all, '+.0f') + ' pm) unstable'}",
               flush=True)
+    # check against direct self_heat = 1 runs (single-root region)
+    for P in (0.5, 1.0, 2.0):
+        p = next(x for x in res["powers"] if x["P"] == P)
+        r = run(c, p["laser_nm"], P, 1, f"t8chk_P{P}")
+        res["checks"].append(dict(P=P, laser_nm=p["laser_nm"], predicted_uW=p["worst_uW"],
+                                  direct_uW=r["eye"]["worst"] * 1e3, direct_norm=r["eye"]["norm"],
+                                  static_roots=r.get("static_roots")))
+        print(f"check P {P} mW, self_heat=1 at laser {p['laser_nm']:.4f} nm: direct {r['eye']['worst'] * 1e3:6.2f} uW "
+              f"({100 * r['eye']['norm']:.1f} %) vs predicted {p['worst_uW']:6.2f} uW "
+              f"({100 * p['eye_norm']:.1f} %); static roots {r.get('static_roots')}", flush=True)
+    dl_opt = max(scan, key=lambda x: x[1]["eye"]["norm"])[0]
+    slope = float(np.diff(lorentz(np.array([dl_opt - 0.5, dl_opt + 0.5]), lr, g))[0])   # 1/pm
+    res["threshold_mW"] = -1.0 / (0.215 * 1e3 * slope) if slope < 0 else None
+    print(f"unconstrained optimum delta {dl_opt:+.0f} pm is thermally unstable above "
+          f"{res['threshold_mW']:.2f} mW" if res["threshold_mW"] else "optimum is on the stable side")
     json.dump(res, open("t8_power.json", "w"), indent=1)
     plot_power(res)
 
@@ -167,18 +208,31 @@ def plot_power(res):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    S = {0: ("self-heating off", "#2a78d6"), 1: ("self-heating on, laser re-tuned", "#eb6834")}
+    ps = res["powers"]; P = [p["P"] for p in ps]
     fig, axs = plt.subplots(1, 3, figsize=(10.5, 3.3), dpi=200)
     fig.patch.set_facecolor("#fcfcfb")
-    panels = [("worst eye opening (µW)", lambda r: r["eye"]["worst"] * 1e3, (0, 1)),
-              ("eye opening (% of ideal)", lambda r: 100 * r["eye"]["norm"], (0, 1)),
-              ("laser offset needed (pm)", lambda r: r["offset_pm"], (1,))]
-    for ax, (lab, f, shs) in zip(axs, panels):
+    sc = res["scan"]
+    best = max(sc, key=lambda s: s["eye"]["norm"])["eye"]["worst"] * 1e3
+    panels = [("worst eye opening (µW)", [p["worst_uW"] for p in ps], [best * x for x in P]),
+              ("eye opening (% of ideal)", [100 * p["eye_norm"] for p in ps],
+               [100 * max(s["eye"]["norm"] for s in sc)] * len(P)),
+              ("operating detuning (pm)\nlaser − heated resonance", [p["delta_pm"] for p in ps], None)]
+    Pth = res.get("threshold_mW")
+    for k, (ax, (lab, y, ref)) in enumerate(zip(axs, panels)):
+        if k == 1:
+            ax.set_ylim(0, 45)
+        if Pth and k > 0:
+            ax.axvline(Pth, color="#52514e", lw=0.8, ls=(0, (2, 2)))
+            ax.annotate(f"red-side optimum\nunstable above {Pth:.1f} mW", (Pth, 0.05 if k == 1 else 0.45),
+                        xycoords=("data", "axes fraction"), xytext=(4, 0), textcoords="offset points",
+                        fontsize=7, color="#52514e")
         ax.set_facecolor("#fcfcfb")
-        for sh in shs:
-            rs = sorted([r for r in res if r["self_heat"] == sh and "eye" in r], key=lambda r: r["P"])
-            ax.plot([r["P"] for r in rs], [f(r) for r in rs], color=S[sh][1], lw=2, marker="o", ms=4,
-                    label=S[sh][0])
+        if ref is not None:
+            ax.plot(P, ref, color="#2a78d6", lw=2, ls=(0, (4, 3)), label="without self-heating")
+        ax.plot(P, y, color="#eb6834", lw=2, marker="o", ms=4, label="with self-heating (stable point)")
+        for ch in res["checks"] if ref is not None and lab.startswith("worst") else []:
+            ax.plot(ch["P"], ch["direct_uW"], ls="none", marker="s", ms=7, mfc="none", mec="#0b0b0b",
+                    label="direct self-heating run" if ch is res["checks"][0] else None)
         ax.set_xscale("log"); ax.set_xlabel("laser power (mW)", color="#52514e")
         ax.set_title(lab, fontsize=9, color="#0b0b0b", loc="left")
         for sp in ("top", "right"):
@@ -187,7 +241,7 @@ def plot_power(res):
             ax.spines[sp].set_color("#9a9893")
         ax.tick_params(colors="#52514e", labelsize=8); ax.grid(True, color="#e6e5e1", lw=0.5)
     axs[0].legend(fontsize=7, frameon=False)
-    fig.suptitle("212 Gb/s PAM8, ring τe = 15 ps (Q_L ≈ 5500), FFE pre −0.15 / post −0.10, 0.5–3 V",
+    fig.suptitle("212 Gb/s PAM8, ring $\\tau_e$ = 15 ps ($Q_L$ ≈ 5500), FFE pre −0.15 / post −0.10, 0.5–3 V",
                  fontsize=9, x=0.01, ha="left", color="#0b0b0b")
     fig.tight_layout(); fig.savefig("t8_power.png"); plt.close(fig)
 
@@ -196,5 +250,7 @@ if __name__ == "__main__":
     t6.VACLI = os.environ.get("VACLI", t6.VACLI)
     if "--eye" in sys.argv:
         eye_figure()
+    if "--plot" in sys.argv:                     # redraw t8_power.png from t8_power.json
+        plot_power(json.load(open("t8_power.json")))
     if "--power" in sys.argv:
         power_sweep()
