@@ -80,6 +80,12 @@ missing depletion capacitance.
   falling edge with it. The model integrates the equivalent form
   `W = X − (τ/τ_c)(V2 − V3)`, `τ_c dW/dt + W = (1 − τ/τ_c)(V2 − V3) [+ I_r]`, which has no
   derivative of the exponential. verilog-a-sim was correct with both forms.
+  The direct form is kept as `tests/mrm_pin_direct.va` (a test variant, not the model) with the
+  ngspice deck `tests/pulse_direct_ng.cir`; `tests/fc_form_check.py` compares the forms.
+  Measured 2026-10-24 (verilog-a-sim 2.42.0+3, single pre-emphasis bit): direct = W form to
+  1e-6 mA in X (print precision), post-fall charge ratio 1.0000. The ngspice 4x has not been
+  re-measured since the direct form was replaced: `openvaf-r mrm_pin_direct.va`, then
+  `ngspice -b pulse_direct_ng.cir`, then `python fc_form_check.py`.
 * The ladder state is stored in µA (`` `SC = 1e6``). In mA, the small shunt nodes sat below
   ngspice's default `vntol` (1 µV) and Newton stopped early (6.8 % current error at defaults).
   Discipline `abstol` would not help in ngspice: its OSDI interface passes only the global

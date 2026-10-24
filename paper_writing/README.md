@@ -56,7 +56,8 @@ entries. The claims below are the ones in the draft now.
 | p-i-n MRM vs Wang 2016 | I–V 12 % / 22 % RMS; 0 V spectrum 8e-5; 0.86 V depth −16.0 vs −15.4 (meas −14.9) dB; TCMT vs Eq. 4 1.7–2.2 µW | `mrm_injection/README.md` |
 | p-i-n MRM eyes, 8 Gb/s | 5 of 8 trends agree, 1 weak, 2 not (13a, 21a); Fig. 13(b) 792 µW / 12.1 dB | `mrm_injection/tests/eyes_va.json` |
 | p-i-n MRM, va vs ngspice | eye height within 0.24 µW, ER within 0.01 dB, 9 cases | `eyes_va.json` vs `eyes_ng.json` (re-checked 2026-10-24) |
-| ngspice needed rewrites, va did not | 4× charge loss (direct form), µA scaling (6.8 % error), reltol 1e-5 | `mrm_injection/README.md` only — **no deck kept for the 4×** |
+| ngspice needed rewrites, va did not | 4× charge loss (direct form), µA scaling (6.8 % error), reltol 1e-5 | 4×: `mrm_injection/README.md` only — deck now kept (`tests/pulse_direct_ng.cir`), **not re-run** (no ngspice here) |
+| va: direct form = W form | max \|ΔX\| 1e-6 mA (print precision), post-fall charge ratio 1.0000, max \|ΔP\| 0.002 µW; stored ngspice W form vs va: ratio 1.0009, 0.54 µW | `mrm_injection/tests/fc_form_check.py`, 2.42.0+3, 2026-10-24 |
 
 ## Open decisions (for the author)
 

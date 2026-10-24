@@ -158,8 +158,9 @@ ngspice's default voltage tolerance and Newton stopped early (6.8\,\% current er
 only the global tolerances to the model, so the discipline \texttt{abstol} could not be used
 instead. Finally, the testbenches needed reltol $10^{-5}$ to bring the remaining error from
 0.4\,\% to 0.08\,\%. \vas{} gave the correct result with both forms of the model at its default
-settings, whose Newton tolerance is $10^{-9}$.
-\src{mrm\_injection/README.md "Numerics"}
-\todo{Keep a deck with the direct (two-\texttt{ddt}) form of the carrier filter in
-\texttt{mrm\_injection/tests/} so the factor-of-four charge loss can be re-measured; it is
-currently documented in the README only.}
+settings, whose Newton tolerance is $10^{-9}$: on a single pre-emphasis bit the two forms give
+the same free-carrier current to $10^{-6}$\,mA, the output's print precision, and the same
+charge after the falling edge to four digits.
+\src{mrm\_injection/README.md "Numerics"; tests/fc\_form\_check.py, 2.42.0+3, 2026-10-24}
+\todo{Re-measure the ngspice factor of four with tests/pulse\_direct\_ng.cir (needs ngspice
+$\geq$\,44 and OpenVAF); until then it rests on the README.}

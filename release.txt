@@ -22,6 +22,23 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+3 - 2026-10-24
+---------------------
+**Ring-modulator case study: the direct carrier-filter form is kept and measured.** Docs/tests
+only; no code changes.
+  * `paper_writing/mrm_injection/tests/mrm_pin_direct.va`: test variant of `mrm_pin.va` with
+    the free-carrier filter integrated literally (a ddt() of the exponential V2), reconstructed
+    from the model's own comment. `fc_form_check.py` runs both forms in verilog-a-sim on the
+    single pre-emphasis bit of `pulse_ng.cir`.
+  * Measured here: direct = derivative-free form to 1e-6 mA in X (the print precision), charge
+    after the falling edge ratio 1.0000, power 0.002 uW. The stored ngspice run of the
+    derivative-free form agrees with verilog-a-sim to ratio 1.0009 and 0.54 uW.
+  * Not measured: the README's "ngspice/OSDI lost up to 4x of the free charge with the direct
+    form". The deck to measure it, `pulse_direct_ng.cir`, is added; ngspice and OpenVAF are not
+    installed on this machine. The paper's 	odo now says exactly that.
+  * Saxena & Shawon bib entry completed (arXiv:2311.16174).
+
+
 2.42.0+2 - 2026-10-24
 ---------------------
 **Paper: micro-ring modulator case study.** Docs only; no code changes.
