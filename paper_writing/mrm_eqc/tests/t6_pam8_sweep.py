@@ -49,7 +49,8 @@ def pam8_case(vlo, vhi, pre=0.0, post=0.0, post2=0.0):
                 lo=(vlo, vlo), hi=(vhi, vhi))
 
 
-def run_point(tag, c, lam, P):
+def run_point(tag, c, lam, P, extra=()):
+    """extra: netlist lines inserted before .end (e.g. a .nodeset)."""
     T = 1 / c["baud"]
     p = dict(c["card"]); p.update(FSR=c["fsr"], loss_mod=1)
     circ = [("V", "a", "sa", "0", t5.pwl([-v for v in c["v1"]], T)), ("R", "a", "sa", "a", 50.0),
@@ -62,7 +63,11 @@ def run_point(tag, c, lam, P):
     shutil.copy(os.path.join(ROOT, "mrm_eqc_ls.va"), w)
     for h in ("disciplines.vams", "constants.vams"):
         shutil.copy(os.path.join(ROOT, "vasim", h), w)
-    open(os.path.join(w, "deck.net"), "w").write(deck_va(circ, ("tran", T / 40, len(c["sym"]) * T)))
+    deck = deck_va(circ, ("tran", T / 40, len(c["sym"]) * T))
+    if extra:
+        lines = deck.rstrip("\n").split("\n")
+        deck = "\n".join(lines[:-1] + list(extra) + lines[-1:]) + "\n"   # before .end
+    open(os.path.join(w, "deck.net"), "w").write(deck)
     t0 = time.perf_counter()
     r = subprocess.run([VACLI, "sim", "deck.net", "--model", ".", "--tran", "--threads", "1",
                         "--report", "X1.pmon"], cwd=w, capture_output=True, text=True,
