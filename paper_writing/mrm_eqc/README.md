@@ -55,6 +55,29 @@ The dual-segment case is an optical DAC with two NRZ drivers, and the MSB goes t
 
 Without FFE and with these drive conditions, PAM8 at 212 Gb/s is closed. [B] reports an open PAM8 eye; their drive swing, laser power and detuning are not stated. The dual DAC has a lower RLM than single-segment PAM4. That comes from the unequal segment efficiencies and the nonlinear spectral transfer, which equal NRZ swings do not compensate. See `tests/t5_eyes.png`.
 
+## 3b. Can the PAM8 eye be opened? (t6, `tests/t6_pam8_sweep.py`)
+
+[B] reports an open 212 Gb/s PAM8 eye but gives no drive swing, laser power, detuning or
+equalisation. t6 sweeps the conditions for the t5 PAM8 case. It keeps the same pattern, segment split, card, 50 Ω sources and 8 ps edges, and uses `t5_eyes.eye()` as the metric. The runs use verilog-a-sim 2.42.0+7 on Windows (`VA_JIT=on`, `--threads 1`) and were made 2026-10-24. ngspice was not re-run; t5 shows the two simulators agree to 6e-5 on this case.
+
+| Run | What is swept | Best worst-eye (% of ideal) |
+|---|---|---|
+| t6 (`t6_pam8_sweep.json`) | no FFE; 5 bias windows × laser 0.5/1/2/4 mW × detuning −40…+10 pm (180 runs) | **−86 %** (0.5–3 V, 0.5 mW, −40 pm); the t5 point reproduces exactly (−96.5 %) |
+| t6b (`--ffe`) | 3-tap FFE, pre 0…−0.2, post 0…−0.35; 0.5/1 mW (640 runs) | −13 % |
+| t6c (`--refine`) | finer taps, a 4th tap, 0.1/0.25/0.5 mW, +5…+20 pm (1440 runs) | +11 %, but only at 0.1 mW (0.2 µW eye) |
+| t6d (`--noselfheat`) | 1 mW, `self_heat=0`, laser from the cold best-OMA point (240 runs) | **+17 %**: pre −0.08, post −0.25, 0.5–3 V, +30 pm; eye 2.3 µW on 93 µW OMA |
+| t6e (`--detscan`) | 1 mW, `self_heat=1`, the t6c taps, detuning −100…+300 pm | **+11 %** at +180 pm (1.8 µW on 112 µW OMA); +240 pm fails the operating point (`E0601`, thermal bistability) |
+
+The FFE is peak-limited. Its taps satisfy |pre| + |main| + |post| (+ |post2|) = 1, so the equalised drive stays inside the same bias window, as a fixed driver swing would require.
+
+What this shows:
+- **Without equalisation the eye cannot be opened** by swing, laser power or detuning. Bandwidth closes it, not the drive. The same pattern and settings give −86 % at 70.7 GBd, −25 % at 35.3 GBd, and +45 % at 17.7 GBd. Even at 7.1 GBd the eye reaches only +56 %, the limit set by the static level spacing (RLM ≈ 0.6).
+- **With a 3-tap FFE the eye opens**, to 11–17 % of ideal. That is about 2 µW per mW of laser power, a small eye. The fourth tap never helped.
+- **Self-heating does not close it, but moves the laser.** With `self_heat=0` the result is the same at 1 and 2 mW (12.7 %), and the eye height scales with power. With self-heating on, the eye opens only once the laser is placed 180 pm from the static estimate. The static model heats each level separately, while the transient keeps the first symbol's temperature: `tau_th` = 1 µs is much longer than the 2.4 ns pattern. Placed correctly, 1 mW gives the same eye as low power. The apparent "worse at high power" in t6/t6b/t6c is this mis-placement, not physics.
+- The optimum lies at the edge of the t6d grid (detuning +30 pm). A wider search may find a few more percent; it will not change the conclusion.
+
+So [B]'s open PAM8 eye is consistent with this model only with equalisation (FFE or pre-emphasis). [B] does not state what it used. A wider-bandwidth ring than the Table I/II parameters describe is the other possible explanation. The eye here has no receiver noise or receiver bandwidth.
+
 ## 4. Wall time and peak memory (`tests/benchmark.py` → `benchmark.json`)
 
 | test | model | ngspice: runs / total wall / peak RSS | verilog-a-sim: runs / total wall / peak RSS |

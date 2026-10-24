@@ -13,3 +13,6 @@ main.pdf
 *.zip
 *.osdi
 *.pdf
+
+# simulation scratch written by the test scripts (harness.py, t6_pam8_sweep.py)
+mrm_eqc/tests/work/

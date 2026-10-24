@@ -22,6 +22,26 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+8 - 2026-10-24
+---------------------
+**mrm_eqc: can the 212 Gb/s PAM8 eye of Bao et al. be opened? (t6).** Docs/tests only; no code
+changes.
+  * `paper_writing/mrm_eqc/tests/t6_pam8_sweep.py`, five modes, all verilog-a-sim (this build,
+    Windows, VA_JIT=on). The t5 PAM8 point reproduces exactly (-96.5 % of ideal, 7879 points).
+  * Without equalisation, no swing, laser power or detuning opens it. The best is -86 % over
+    180 points. Bandwidth closes it: the same settings give +45 % at 17.7 GBd and -25 % at
+    35.3 GBd.
+  * With a peak-limited 3-tap FFE it opens, to +17 % of ideal: pre -0.08, post -0.25, 1 mW,
+    eye 2.3 uW on 93 uW OMA. That is small. A fourth tap never helped.
+  * Self-heating does not close the eye; it moves the right laser position by ~180 pm. The
+    transient keeps the first symbol's temperature (tau_th 1 us >> 2.4 ns), while the static
+    laser placement heats each level. Placed correctly, 1 mW with self-heating gives +11 %.
+  * Limits, stated: the t6d optimum sits at the grid edge (+30 pm); no receiver noise or
+    bandwidth; ngspice not re-run. One far-detuned run (+240 pm, 1 mW) fails the operating
+    point with E0601, in the thermal-bistability region the model warns about.
+  * `paper_writing/.gitignore` now ignores `mrm_eqc/tests/work/` (112 MB of simulation scratch).
+
+
 2.42.0+7 - 2026-10-24
 ---------------------
 **Paper: third ring-modulator package, `paper_writing/mrm_eqc/` (Bao et al., JLT 2024).** Docs
