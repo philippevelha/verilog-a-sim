@@ -185,6 +185,17 @@ large-signal TCMT model with the same parasitics, bias-dependent loss and a ther
 heater and self-heating. The two agree to 0.06--0.16\,\% in small-signal response, and the
 ngspice and \vas{} eye waveforms agree to $5$--$6\times10^{-5}$ RMS.
 \src{mrm\_eqc/README.md sections 1, 3}
+Writing the model also exposed a compiler bug, in OpenVAF rather than in \vas{}. A \texttt{for}
+loop anywhere in the analog block of the RLC model, even two iterations of a trivial
+assignment, makes the OpenVAF-compiled model drop the inductor's reactive term in AC. The
+inductor node then stays at 0\,V at every frequency, and the output differs by up to 27\,\%.
+\vas{} compiles the same source correctly: it agrees with an unrolled version of the model to
+$4\times10^{-7}$, and the shipped models unroll the loop so that both flows work.
+\src{mrm\_eqc/README.md section 5; compiler\_note/, ngspice-47 + OpenVAF-reloaded on Linux and
+verilog-a-sim 2.42.0+6, 2026-10-24}
+\todo{Report to OpenVAF-reloaded with mrm\_eqc\_rlc\_loop2.va as the reproducer, and cite the
+issue here; name the OpenVAF version used (5063fda per mrm\_tcmt/reference/REFERENCE.md --
+confirm it is the same build).}
 The reproduction of~\cite{bao2024mrm} is partial, and the model says where. The resonance
 positions match within 0.3\,pm. The dips come out 2--10\,dB too deep, because the paper's
 Table~II makes the ring under-coupled, so its dip must deepen with reverse bias while the

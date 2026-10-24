@@ -22,6 +22,24 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+15 - 2026-10-24
+----------------------
+**mrm_eqc compiler note: the bug is OpenVAF's, and any for loop triggers it.** Docs only; one
+comment changed in `mrm_eqc_rlc.va`, no code changes.
+  * The user ran the ngspice side on Linux (ngspice-47 + OpenVAF-reloaded).
+    - loop2 and loop60: |V(nind)| = 0 at every frequency; |V(out)| off by 27 % max against
+      verilog-a-sim.
+    - The shipped unrolled model: matches verilog-a-sim to 3.6e-7 (nind 4.2e-7).
+    - verilog-a-sim gives the same answer for loop2, loop60 and unrolled; the values at
+      3.16 GHz match this machine's 2.42.0+6 runs digit for digit.
+  * The README's section 5 said "loop2 works, loop60 fails". That was wrong too: a
+    2-iteration loop with a trivial body is enough. Section 5 is rewritten with the table, and
+    `mrm_eqc_rlc_loop2.va` is named as the minimal reproducer for an upstream report.
+  * Paper: one paragraph in the mrm_eqc subsection, plus a 	odo to file the OpenVAF issue and
+    pin the OpenVAF build.
+  * Also noted: my check script labelled its index-6 point "5.6 GHz"; it is 3.16 GHz.
+
+
 2.42.0+14 - 2026-10-24
 ----------------------
 **mrm_injection: tolerance data committed; verilog-a-sim compared against the same reference.**

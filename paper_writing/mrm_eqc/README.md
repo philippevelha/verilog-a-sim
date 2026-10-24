@@ -159,16 +159,35 @@ Timer resolution is 10 ms, so "<0.01 s" means below the resolution. Fixed start-
 
 On transient and DC sweeps, verilog-a-sim takes **about 10× longer per time point** than ngspice: about 60 µs vs 4–5 µs. It uses about 20 % less peak memory. The waveforms agree to 5–6e-5 relative.
 
-## 5. Compiler note (`compiler_note/`)
+## 5. Compiler note (`compiler_note/`): an OpenVAF bug
 
-A `for` loop with 60 iterations (a bisection) in the same module as the inductor's `ddt` was reported to make OpenVAF drop the inductor's reactive term: the node ended up pinned at 0 V in AC. Unrolling the loop fixes it (`mrm_eqc_rlc_loop2.va` works; `_loop60.va` fails), so the shipped models use an unrolled macro. `ng_ac_10GHz.cir` is the ngspice/OpenVAF reproduction; it has not been re-run since.
+A `for` loop in the same analog block as the inductor's `ddt` makes **OpenVAF-reloaded
+(openvaf-r)** drop the inductor's reactive contribution: node `nind` stays at 0 V in AC at every
+frequency. A **2-iteration loop with a trivial body** (`dlsh = 0.0;`) is enough to trigger it.
+**verilog-a-sim compiles both variants correctly.** The shipped models unroll the bisection with
+a macro, which avoids the bug in OpenVAF.
 
-**verilog-a-sim is not affected** (corrected 2026-10-24; an earlier version of this note said both compilers were). Checked with verilog-a-sim 2.42.0+6, `VA_JIT` off and on, AC 0.1–100 GHz, 13 points, using `va_ac_10GHz.net` (the same parameters as `ng_ac_10GHz.cir`):
-- `loop2` and `loop60` give byte-identical output, and the inductor node is not pinned (|V(nind)| = 4.7e-2 at 5.6 GHz);
-- `loop60` equals the shipped, unrolled `mrm_eqc_rlc.va` (`op_mode=1`) at all 13 points;
-- the shipped model with its 50 `BISECT` steps written back as a `for` loop, self-heating on (`dlam_dPin=0.215`), equals the unrolled model at all 13 points.
+Re-run 2026-10-24 (ngspice-47 + OpenVAF-reloaded on Linux; verilog-a-sim 2.42.0+6 on Windows, and the local
+verilog-a-sim build on Linux), AC 0.1–100 GHz, 13 points, parameters of `ng_ac_10GHz.cir`, values at 3.16 GHz:
 
-Run it with `va-cli sim va_ac_10GHz.net --model <dir> --ac --report out,X1.nind`, where `<dir>` holds `mrm_eqc_rlc_loop60.va` (module `mrm_eqc_rlc_loop`) and `../vasim/*.vams`. To test `loop2`, change the module name in the deck. Whether OpenVAF is really affected still needs the ngspice deck re-run before anything is reported upstream.
+| run | \|V(out)\| | \|V(nind)\| | \|V(out)\| vs verilog-a-sim |
+|---|---|---|---|
+| verilog-a-sim, `loop60` | 1.301449e-1 | 2.696714e-2 | reference |
+| verilog-a-sim, `loop2` | identical | identical | byte-identical output |
+| ngspice/OpenVAF, `loop2` | 1.267095e-1 | **0 at every frequency** | 27 % max |
+| ngspice/OpenVAF, `loop60` | 1.267095e-1 | **0 at every frequency** | 27 % max |
+| ngspice/OpenVAF, shipped (unrolled) | 1.301449e-1 | 2.696714e-2 | 3.6e-7 (nind 4.2e-7) |
+
+verilog-a-sim, `VA_JIT` off and on, also matches the shipped model when its 50 `BISECT` steps are
+written back as a `for` loop with self-heating on (`dlam_dPin=0.215`), at all 13 points.
+
+Reproducer: `mrm_eqc_rlc_loop2.va` (the minimal one for a bug report) or `_loop60.va`, with
+`ng_ac_10GHz.cir` for ngspice (change the `.model` line to the module and `pre_osdi` to its
+`.osdi`) and `va_ac_10GHz.net` for verilog-a-sim (`va-cli sim va_ac_10GHz.net --model <dir> --ac
+--report out,X1.nind`, `<dir>` holding the `.va` and `../vasim/*.vams`; the deck instantiates the
+loop-60 module `mrm_eqc_rlc_loop`). History: the first version of this note blamed both compilers
+and said `loop2` worked; both claims were wrong (corrected in 2.42.0+7 for verilog-a-sim and
+2.42.0+15 for the loop count).
 
 ## 6. Re-running
 

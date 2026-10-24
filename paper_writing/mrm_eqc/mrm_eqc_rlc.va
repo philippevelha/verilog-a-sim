@@ -111,9 +111,9 @@ module mrm_eqc_rlc(in1, in2, out);
         // operating point. op_mode 0: detuning from the heated resonance is given, so the
         // self-heating shift follows directly from Eq. (12) - unique, no fixed point.
         // op_mode 1: absolute laser wavelength; Eq. (12) is solved by bisection on the shift
-        // (straight-line code: a for-loop here was reported to make OpenVAF drop the
-        // inductor's ddt coefficient; verilog-a-sim is not affected - see compiler_note/
-        // and README section 5). In the thermal-bistability region
+        // (straight-line code: any for-loop here, even 2 trivial iterations, makes
+        // OpenVAF-reloaded drop the inductor's ddt term in AC; verilog-a-sim is not
+        // affected - see compiler_note/ and README section 5). In the thermal-bistability region
         // (laser red of the cold resonance, high power) Eq. (12) has three roots and the
         // bisection returns one of them; prefer op_mode 0 there.
         if (op_mode == 0) begin

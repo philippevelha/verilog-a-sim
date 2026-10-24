@@ -65,6 +65,7 @@ entries. The claims below are the ones in the draft now.
 | PAM8, lower-Q ring (bus coupling only) | no FFE +25 % at Q_L 3600; FFE +37 % at Q_L 5500 | `t7_lowq_sweep.json`, `t7b_lowq_refine.json`, 2.42.0+9 |
 | design-sweep cost | ~3500 runs, ~8000 points each, 1.3–1.6 s/run, 7 in parallel, i7-1185G7 | `t6*.json`, `t7*.json` `wall_s` |
 | PAM8 vs laser power (frozen-temperature method) | eye never closes; red-side optimum unstable > 1.1 mW; 38 → 31 %; direct check 0.5 % | `t8_power.json`, 2.42.0+11 |
+| OpenVAF drops an inductor's ddt with any for loop; va correct | ng/OpenVAF \|V(nind)\| = 0 at all f, \|V(out)\| off 27 %; va vs unrolled 4e-7 | `mrm_eqc/README.md` §5, user's Linux run 2026-10-24 (/tmp/loopcheck, not committed) + va 2.42.0+6 |
 
 ## Open decisions (for the author)
 
