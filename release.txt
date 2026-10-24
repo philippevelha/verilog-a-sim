@@ -22,6 +22,32 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+2 - 2026-10-24
+---------------------
+**Paper: a section on domains beyond electronics, and the SNN at circuit level.** Docs only; no
+code changes.
+  * paper_writing/sections/09c-domains.tex (new, in Validation after the ring case study) has two
+    parts:
+    - Table V: 17 examples coupling thermal, mechanical, magnetic, acoustic, electrochemical,
+      optical, neural, power-grid and traffic domains. Each row gives the independent check it
+      is held to and its result, taken from docs/multiphysics.md sections 1-15,
+      docs/photonic-noise.md and docs/traffic.md.
+    - The memristor-crossbar SNN of Xuan et al. 2026, at the functional (switch) level. The
+      neuron reproduces the paper's Fig. 4 and Fig. 5 spike times. On MNIST, ten held-out images
+      run at circuit level (2 626 unknowns, 10 973 devices) give the quantized model's class on
+      all ten, with 40 011 of 40 020 spike slots agreeing.
+  * The section replaces the Validation 	odo that asked for it. The abstract gains one sentence
+    and the introduction one contribution bullet.
+  * Claims ledger: rows for the new claims, plus the Eq. (4) run (2.44.0) and the held .nodeset
+    (2.43.0), which had no rows yet.
+  * refs.bib gains five entries: Hodgkin-Huxley 1952, Glenn 1989, Bartolo 2012, Bellemans 2002
+    and Xuan 2026. They are written from the repository's own records; four carry VERIFY notes
+    for page ranges and DOIs.
+  * Checked while writing: two claims in the first draft were wrong and were corrected. "Output
+    bit-identical on Linux, Windows and macOS" for the SNN is not recorded: Linux and Windows
+    agree on points, slots and classes, and no hashes were compared. And the microring "found a
+    defect": it was a modelling lesson, not a defect. Builds cleanly with latexmk.
+
 2.44.0+1 - 2026-10-24
 ---------------------
 **Small-model transient: three overheads removed, with no change to any answer.** Profiled with

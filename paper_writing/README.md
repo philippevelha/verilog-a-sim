@@ -66,6 +66,13 @@ entries. The claims below are the ones in the draft now.
 | design-sweep cost | ~3500 runs, ~8000 points each, 1.3–1.6 s/run, 7 in parallel, i7-1185G7 | `t6*.json`, `t7*.json` `wall_s` |
 | PAM8 vs laser power (frozen-temperature method) | eye never closes; red-side optimum unstable > 1.1 mW; 38 → 31 %; direct check 0.5 % | `t8_power.json`, 2.42.0+11 |
 | OpenVAF drops an inductor's ddt when a for loop is added to the RLC ring model (a minimal R-L model with the same loop is unaffected); va correct | ng/OpenVAF \|V(nind)\| = 0 at all f, \|V(out)\| off 27 %; va vs unrolled 4e-7 | `mrm_eqc/README.md` §5, user's Linux run 2026-10-24 (/tmp/loopcheck, not committed) + va 2.42.0+6 |
+| p-i-n MRM, Eq. 4 run as Verilog-A (absdelay in transient) | Eq. 4 − TCMT 2.71 µW RMS, 8.03 µW max on 78–1337 µW; 14.8 s vs 7.4 s | `mrm_injection/tests/eq4_va_check.json`, 2.44.0 |
+| held `.nodeset` selects the hot ring branch | hot seed → hot root at 5 bistable points, 0.03–1.10 mK from the python twin; before: all cold | `mrm_eqc/tests/t10_nodeset.json`, 2.43.0 |
+| 17 examples outside electronics (Table domains) | each vs a closed form / paper / independent integrator; figures per row in `09c-domains.tex` | `docs/multiphysics.md` §1–15, `docs/photonic-noise.md`, `docs/traffic.md` §6 |
+| SNN neuron, Xuan 2026 Figs. 4–5 | spikes at 1.50 / 3.75 µs and steps 6, 10, 14 as in the paper; V_m within 11 / 12 mV of the paper's equations | `circuits/snn/README.md` |
+| SNN MNIST at circuit level | 10/10 classes = quantized model; 40 011 / 40 020 spike slots; 2 626 unknowns, 10 973 devices | `circuits/snn/mnist/README.md`, `results.jsonl` |
+| SNN MNIST wall time | 51–64 min/image i7-1185G7 Windows (8 thr); 664–831 s Ryzen 9 9950X Linux (32 thr); same points, slots, classes on both | `mnist/LOG.md` step 12, `scripts/benchmark/bench_snn.txt` |
+| SNN model accuracy | 94.04 % on 10 000 held-out (paper 97.46 %) | `circuits/snn/mnist/README.md` |
 
 ## Open decisions (for the author)
 

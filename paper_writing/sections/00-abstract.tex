@@ -15,7 +15,10 @@ points whose every gate output matches the Boolean logic, and a c432 vector-sequ
 matches on \num{1196800} settled samples. Without a host simulator, a published compact model of a
 silicon carrier-injection ring modulator reproduces that paper's main results, and a
 depletion-mode ring model agrees with the same source compiled by OpenVAF for ngspice to
-$3\times10^{-5}$. The simulator produces bit-identical output on Linux,
+$3\times10^{-5}$. Beyond electronics, the same solver reproduces closed-form and published results
+in seventeen examples across thermal, mechanical, acoustic, electrochemical, optical, neural and
+traffic domains, and runs a trained memristor-crossbar spiking network at circuit level with the
+trained model's class on every image tested. The simulator produces bit-identical output on Linux,
 macOS and Windows and at any thread count. We describe the design choices that make this
 determinism possible, the DC rescue strategy that makes the large circuits converge, and the
 limitations that remain.

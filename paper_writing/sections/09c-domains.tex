@@ -1,0 +1,135 @@
+\subsection{Beyond electronics: one solver, many physical domains}
+\label{sec:domains}
+
+Nothing in the simulator knows about a physical domain. A Verilog-A \texttt{nature} declares a
+quantity and its tolerance, a \texttt{discipline} pairs a potential with a flow, and the solver
+sees rows of one Newton system whatever they stand for (Section~\ref{sec:arch}). The
+examples in Table~\ref{tab:domains} test that claim. Each couples two or more domains through
+models written for it in plain Verilog-A, each declares its own natures where the standard
+disciplines do not cover it, and each is checked against a result the simulator does not
+produce: a closed form, a conservation law, a published figure, or an independent integration
+of the same equations. They are demonstrations, not validations against a reference simulator,
+because no SPICE can run them. Taken together they use most of the language
+(Section~\ref{sec:frontend}): user natures and disciplines, \texttt{analog function}s,
+\texttt{generate} loops over vector nets of user disciplines, \texttt{laplace\_nd},
+\texttt{transition}, and the event family \texttt{@(cross)}, \texttt{@(timer)},
+\texttt{@(above)} and \texttt{@(final\_step)}.
+\src{docs/multiphysics.md, its Verilog-A coverage table; docs/photonic-noise.md; docs/traffic.md}
+
+\begin{table*}[!t]
+  \centering
+  \caption{Examples outside electronics: domains coupled in one system, and the independent check
+  each is held to. Every deck is in \texttt{circuits/multiphysics/} (traffic and photonic noise in
+  \texttt{circuits/}) and runs as written.}
+  \src{docs/multiphysics.md sections 1-15; docs/photonic-noise.md; docs/traffic.md section 6}
+  \label{tab:domains}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}p{0.17\textwidth}p{0.22\textwidth}p{0.29\textwidth}p{0.27\textwidth}@{}}
+    \toprule
+    Example & Domains & Check & Result \\
+    \midrule
+    Peltier cooler, PID control & electrical, thermal (absolute K) &
+      maximum $\Delta T$ against the closed form; energy balance at an operating point &
+      $T_c = 232.4555$\,K vs 232.455\,K; $Q_h - Q_c - P_e = -2.5\times10^{-6}$\,W \\
+    Electrostatic MEMS & electrical, mechanical, gas damping &
+      pull-in voltage $\sqrt{8kg^3/27\varepsilon A}$; AC resonance and $Q$ at two pressures &
+      pull-in at 5.2259\,V as predicted; $Q$ = 1605 and 78.2, matching the models' equations \\
+    Filamentary ReRAM & electrical, thermal, filament state &
+      SET/RESET voltages under step refinement &
+      agree to 0.1\,mV between 1\,\textmu s and 0.2\,\textmu s maximum steps \\
+    Hodgkin--Huxley axon & electrical cable, ionic gating, temperature &
+      conduction velocity against~\cite{hodgkin1952} &
+      18.97\,m/s vs 18.8\,m/s computed in~\cite{hodgkin1952} (0.9\,\%), spatially converged \\
+    Power-grid swing & electromechanical (rotors), network &
+      equal-area criterion: critical clearing and peak angle &
+      peak 130.39$^\circ$ vs 130.40$^\circ$ from the equal areas \\
+    Thermo-optic ring bank & optical, thermal, control &
+      linewidth and peak temperature against the closed form (16\,ps photon lifetime, 1\,ms thermal
+      time, one system) &
+      0.1562\,nm vs 0.1564\,nm; 7.1416\,K vs 7.1423\,K; sweep jumps within 0.009\,nm of the folds \\
+    Li-ion cell & electrochemical, electrical, thermal &
+      capacity at C/20 against the open-circuit curve's closed form; oven abuse test &
+      1.9604\,Ah vs 1.9609\,Ah ($-0.03$\,\%); runaway threshold at 134.07\,$^\circ$C \\
+    Electromagnetic relay & electrical, magnetic (Jiles--Atherton), mechanical, thermal &
+      holding flux density $B = \sqrt{2\mu_0 F/A}$ &
+      0.1588\,T vs 0.15853\,T \\
+    Gray--Scott reaction--diffusion & chemical (2-D grid, nested \texttt{generate}) &
+      well-mixed reactor against its steady states &
+      ends at $(0.200000, 0.400000)$, the stable state, to print precision \\
+    Piezoelectric harvester & mechanical (Duffing beam), electrical &
+      voltage into a matched load against the exact two-degree-of-freedom steady state; Duffing
+      jump &
+      6.3194\,V vs 6.3193\,V; bistable band 51.762--52.809\,Hz \\
+    Circuit-breaker arc & electrical, fluid, thermal (Mayr arc) &
+      Mayr static characteristic; recovery voltage after current chopping &
+      20\,004\,W vs 20\,000\,W at 10\,A; recovery peak within 1.5\,\% of the closed form \\
+    Cavity optomechanics & optical, mechanical, thermal &
+      optical damping rate against the eigenvalues of the linearized model; phonon-laser amplitude &
+      within 0.1\,\%; 4.7559\,pm vs 4.7577\,pm from an independent integration \\
+    Horn loudspeaker & electrical, mechanical, acoustic, thermal &
+      input impedance against the exact exponential horn (Webster equation) &
+      within 0.011\,\%; radiated power within 0.2\,\% to 1\,kHz at 256 sections \\
+    SRAM single-event upset & carrier transport (diffusion), electrical &
+      collected charge against the diffusion equation's eigen-series &
+      within 0.002\,\% from 2\,ns on; critical charge 10.54\,fC deposited \\
+    Microring bistability and chaos & optical, free carriers, thermal &
+      self-pulsing period and amplitude against an independent integrator (LSODA, rtol $10^{-10}$) &
+      40.500\,ns vs 40.497\,ns; two-ring chaotic peak interval 25.062\,ns vs 25.118\,ns \\
+    Photonic phase and detector noise & optical phase, electrical &
+      thermal phase-noise PSD~\cite{glenn1989,bartolo2012}; shot and RIN budget of a ring gyroscope &
+      within the tabulated PSD's 0.7\,\% interpolation error; budget as computed from the operating point \\
+    Motorway ramp metering & traffic (vehicles as a conservative discipline) &
+      fundamental diagram, exact; the uncontrolled case of~\cite{bellemans2002} against its own
+      discretization &
+      fundamental diagram exact; total time spent within 0.6\,\% \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+Building them was also a test of the simulator, and some found what the electronic gates had
+not. The circuit-breaker arc exposed a junction-limiting guess that treated the breaker's
+terminals as a p-n junction, fixed in 2.16.2. Others were lessons about the models rather than
+defects: a microring started exactly on its unstable steady state stays there, as it should, so
+its decks switch the laser on with a ramp, as an experiment does. The SRAM upset is the deck that
+uses \texttt{.nodeset} to choose one state of a bistable circuit.
+\src{docs/multiphysics.md, "What building this found" paragraphs; release.txt 2.16.2}
+
+\subsubsection{A spiking neural network at circuit level}
+The largest of these runs is a trained neural network. Xuan \emph{et al.}~\cite{xuan2026snn}
+design a spiking neural network as 2T2R memristor crossbars feeding clocked analog
+leaky-integrate-and-fire neurons, so that, sampled once per clock cycle, each circuit neuron
+matches the software neuron it was trained as. We reproduce it at the level of the paper's
+functional diagram: the capacitors (998\,fF and 660\,fF), the RRAM conductances at the stated
+levels and the clocked switches are circuit elements, the op-amp, attenuator and comparator are
+ideal blocks, and the flip-flops of the refractory timer are built as sample-and-hold circuits.
+The neuron's leak is not a parameter but the result of charge sharing between the two
+capacitors, $998/(998+660) = 0.602$.
+
+At neuron level, both of the paper's figures are reproduced. In its Fig.~4 (five identical
+synapses, 1\,\textmu s refractory period) the circuit spikes at 1.50\,\textmu s and
+3.75\,\textmu s, as in the paper. In its Fig.~5 (four synapses from the paper's codebook) it
+spikes at steps 6, 10 and 14, as in the paper, with the membrane voltage within 12\,mV of the
+paper's equations at every step. Each deck runs in about 3\,s (76 unknowns, about
+\num{13000} time points). The paper leaves the attenuator gain open, and its two figures imply
+different values (a range of $[2.872, 3.047]$ for Fig.~4 and $[0.656, 0.762]$ for Fig.~5); each
+deck uses its own.
+\src{circuits/snn/README.md}
+
+At network level, the network was trained on MNIST in software with the circuit's own neuron
+model, cycle for cycle, then quantized to the codebook. It reaches 94.04\,\% on \num{10000}
+held-out images, against 97.46\,\% reported by the paper, whose input encoding is not specified.
+As in the paper, the first hidden layer runs in software. The circuit holds the other three
+layers: three crossbars with \num{8832} 2T2R synapses and 138 analog neurons, \num{10973}
+devices and \num{2626} unknowns per image. Ten held-out images were run through it. \textbf{The
+circuit's class equals the quantized model's on all ten}, and \num{40011} of the \num{40020}
+cycle-by-neuron spike slots agree (99.978\,\%). Every disagreement is on an image whose model
+membrane passes within about 2\,mV of the threshold. Each image takes 51--64\,min on an
+i7-1185G7 under Windows (8 threads; about \num{63000} time points) and 11--14\,min on a
+Ryzen~9 9950X under Linux (32 threads), with the same time-point counts, the same spike slots and
+the same classes on both. The time follows the number of time points, which the network's
+switching activity sets, not the matrix size. The transistor-level version
+of the neuron is in progress with IHP's open SG13G2 devices, as the paper's SG13S process with
+its memristor module is not public.
+\src{circuits/snn/mnist/README.md, results.jsonl, LOG.md step 12; scripts/benchmark/bench\_snn.txt;
+release.txt 2.2.0}
