@@ -13,7 +13,7 @@ python3 check_rerun.py outputs rerun
 identical (the step sequence is deterministic) and the waveform matches to print precision.
 Times and memory are reported as ratios, for information only.
 
-Tools: ngspice-47 (master a80f6e3, built with `--enable-osdi`), OpenVAF-reloaded 5063fda
+Tools: ngspice-47 (KLU, built with `--enable-osdi`; build commit not recorded), OpenVAF-reloaded 5063fda
 (LLVM 18), verilog-a-sim 2.42.0 (7321404, built with rustc 1.97 — the pinned 1.92 could not
 be downloaded here). Paths can be overridden with `NGSPICE`, `VACLI`, `OPENVAF`.
 

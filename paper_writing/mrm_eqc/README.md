@@ -189,6 +189,15 @@ loop-60 module `mrm_eqc_rlc_loop`). History: the first version of this note blam
 and said `loop2` worked; both claims were wrong (corrected in 2.42.0+7 for verilog-a-sim and
 2.42.0+15 for the loop count).
 
+**The loop alone is not the trigger.** `issue/rl_loop.va` is a 1 Ω resistor into the same
+explicit-current inductor, with the same 2-iteration loop assigning a variable that feeds `L`.
+Under OpenVAF it gives the correct jωL/(R + jωL) at all 5 points from 0.1 to 10 GHz, identical
+to `rl_noloop.va` (user's Linux run, 2026-10-24, OpenVAF-reloaded 5063fda, ngspice-47 with KLU;
+`issue/RESULTS.md`). `issue/ISSUE.md` is the draft report, not yet filed. `bisect/gen.py`
+generates `loop2` with one feature removed at a time, to find what else the trigger needs;
+`bisect/run_ngspice.sh` prints `<- BUG` on each variant that still reads V(nind) = 0. All
+variants give a non-zero V(nind) in verilog-a-sim. The bisection has not been run under OpenVAF yet.
+
 ## 6. Re-running
 
 ```

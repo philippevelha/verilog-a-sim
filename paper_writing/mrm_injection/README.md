@@ -100,7 +100,7 @@ missing depletion capacitance.
   | 2.00 | 0.00001 | −0.00006 | 0.00001 | −0.00028 | 0.00001 | 0.00001 |
   | 3.00 | 0.00001 | −0.00002 | 0.00001 | −0.00010 | 0.00001 | 0.00001 |
 
-  ngspice-47 (master a80f6e3) + OpenVAF-reloaded on Linux: `pulse_ng.cir` 6308 points,
+  ngspice-47 (KLU; build commit not recorded) + OpenVAF-reloaded on Linux: `pulse_ng.cir` 6308 points,
   bit-identical to the stored `pulse_ng.dat`; `pulse_direct_ng.cir` 7570 points. verilog-a-sim
   2.42.0+5 on Windows, default settings: 30 113 points for both forms; minimum of X after the
   fall +9.2e-6 mA for both (the DC floor), and the two forms agree to 1e-6 mA (print precision).

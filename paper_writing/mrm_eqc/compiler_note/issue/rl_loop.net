@@ -1,0 +1,5 @@
+* verilog-a-sim counterpart of rl_loop.cir
+Va a gnd DC 0 AC 1
+X1 a rl_loop
+.ac dec 2 1e8 1e10
+.end

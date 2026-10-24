@@ -189,13 +189,15 @@ Writing the model also exposed a compiler bug, in OpenVAF rather than in \vas{}.
 loop anywhere in the analog block of the RLC model, even two iterations of a trivial
 assignment, makes the OpenVAF-compiled model drop the inductor's reactive term in AC. The
 inductor node then stays at 0\,V at every frequency, and the output differs by up to 27\,\%.
+The loop alone is not the trigger: a resistor--inductor model with the same loop and the same
+inductor formulation compiles correctly.
 \vas{} compiles the same source correctly: it agrees with an unrolled version of the model to
 $4\times10^{-7}$, and the shipped models unroll the loop so that both flows work.
 \src{mrm\_eqc/README.md section 5; compiler\_note/, ngspice-47 + OpenVAF-reloaded on Linux and
-verilog-a-sim 2.42.0+6, 2026-10-24}
-\todo{Report to OpenVAF-reloaded with mrm\_eqc\_rlc\_loop2.va as the reproducer, and cite the
-issue here; name the OpenVAF version used (5063fda per mrm\_tcmt/reference/REFERENCE.md --
-confirm it is the same build).}
+verilog-a-sim 2.42.0+6, 2026-10-24; OpenVAF-reloaded commit 5063fda; minimal contrast
+compiler\_note/issue/rl\_loop.va}
+\todo{File the OpenVAF-reloaded issue (draft: mrm\_eqc/compiler\_note/issue/ISSUE.md, reproducer
+mrm\_eqc\_rlc\_loop2.va) and cite it here, naming commit 5063fda.}
 The reproduction of~\cite{bao2024mrm} is partial, and the model says where. The resonance
 positions match within 0.3\,pm. The dips come out 2--10\,dB too deep, because the paper's
 Table~II makes the ring under-coupled, so its dip must deepen with reverse bias while the

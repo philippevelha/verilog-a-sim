@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+16 - 2026-10-24
+----------------------
+**OpenVAF issue drafted; a for loop alone does not trigger the bug; ngspice commit softened.**
+Docs and scripts only, no code changes.
+  * `mrm_eqc/compiler_note/issue/`: ISSUE.md is the draft report for OpenVAF-reloaded, not yet
+    filed. It cites commit 5063fda and leads with mrm_eqc_rlc_loop2.va. It also adds a minimal
+    contrast case, rl_loop.va/rl_noloop.va (1 ohm into the same explicit-current inductor, same
+    2-iteration loop). The user's Linux run (RESULTS.md): rl_loop is correct and identical to
+    rl_noloop at all 5 points, so the loop is not the whole trigger. 2.42.0+15's "any for loop"
+    was too broad, and the claims-ledger row is narrowed to the RLC ring model. The paper now
+    says the minimal model is unaffected.
+  * `mrm_eqc/compiler_note/bisect/`: gen.py writes loop2 with one feature removed at a time
+    (b0/b1 controls, b2-b9). run_ngspice.sh flags each variant that still reads V(nind) = 0.
+    All 10 give a non-zero V(nind) in verilog-a-sim. Not yet run under OpenVAF. The generated
+    files are gitignored.
+  * The ngspice build commit a80f6e3 could not be confirmed (its source tree is gone), so it is
+    removed from both REFERENCE.md copies, the mrm_injection READMEs and the refs.bib note.
+    They now say "ngspice-47 with KLU, build commit not recorded".
+
 2.42.0+15 - 2026-10-24
 ----------------------
 **mrm_eqc compiler note: the bug is OpenVAF's, and any for loop triggers it.** Docs only; one

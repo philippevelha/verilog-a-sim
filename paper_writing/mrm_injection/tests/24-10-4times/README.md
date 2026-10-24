@@ -1,6 +1,6 @@
 # ngspice runs of the two carrier-filter forms, 2026-10-24
 
-ngspice-47 (master a80f6e3) + OpenVAF-reloaded, Linux. Decks in `..`: `pulse_ng.cir`
+ngspice-47 (KLU; build commit not recorded) + OpenVAF-reloaded, Linux. Decks in `..`: `pulse_ng.cir`
 (derivative-free W form, `mrm_pin.osdi`) and `pulse_direct_ng.cir` (direct form,
 `mrm_pin_direct.osdi`), both with `option reltol=1e-5`; the `_deftol` files are the same decks
 at ngspice's default reltol. Columns: time, ia, v(n1#xfc) (free-carrier current X, mA),

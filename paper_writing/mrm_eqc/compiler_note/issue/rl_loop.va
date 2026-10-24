@@ -1,0 +1,25 @@
+// Minimal candidate reproducer: R in series with an inductor written as an explicit
+// current state (V(il) = inductor current, L dV(il)/dt = V(nind)). Expected AC response
+// V(nind)/V(a) = jwL / (R + jwL), corner at R/(2 pi L) = 1 GHz.
+`include "disciplines.vams"
+
+module rl_loop(a);
+    inout a;
+    electrical a, nind, il;
+    parameter real R = 1.0;
+    parameter real L = 1.5915494309189535e-10;   // 1/(2 pi 1 GHz)
+    integer it;
+    real x, Lx;
+
+    analog begin
+        x = 0.0;
+        for (it = 0; it < 2; it = it + 1) begin
+            x = 0.0;
+        end
+        Lx = L * (1.0 + x);
+        I(a, nind) <+ V(a, nind) / R;
+        I(nind) <+ V(il);
+        I(il) <+ ddt(Lx * V(il));
+        I(il) <+ -V(nind);
+    end
+endmodule

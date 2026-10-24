@@ -1,0 +1,12 @@
+* OpenVAF for-loop reproducer, noloop variant
+Va a 0 DC 0 AC 1
+.model m_rl rl_noloop
+N1 a m_rl
+.control
+pre_osdi rl_noloop.osdi
+option numdgt=12
+ac dec 2 1e8 1e10
+print vm(n1#nind) vp(n1#nind)
+quit
+.endc
+.end
