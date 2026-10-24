@@ -106,12 +106,28 @@ missing depletion capacitance.
   fall +9.2e-6 mA for both (the DC floor), and the two forms agree to 1e-6 mA (print precision).
   To compile with OpenVAF, use its built-in headers: `vasim/disciplines.vams` (verilog-a-sim's
   minimal header) defines only `electrical`, so OpenVAF fails on `thermal` if it is in the folder.
-* The ladder state is stored in µA (`` `SC = 1e6``). In mA, the small shunt nodes sat below
-  ngspice's default `vntol` (1 µV) and Newton stopped early (6.8 % current error at defaults).
-  Discipline `abstol` would not help in ngspice: its OSDI interface passes only the global
-  reltol/vntol/abstol to the model, not the nature tolerances.
-* Remaining error with ngspice defaults: 0.4 %. The testbenches use `option reltol=1e-5`
-  (0.08 %). verilog-a-sim defaults are converged (Newton reltol 1e-9).
+* The ladder state is stored in µA (`` `SC = 1e6``). In mA, the small shunt nodes sit near
+  ngspice's default `vntol` (1 µV) and Newton stops early. Discipline `abstol` would not help
+  in ngspice: its OSDI interface passes only the global reltol/vntol/abstol to the model, not the
+  nature tolerances.
+* Measured 2026-10-24, ngspice-47 + OpenVAF on Linux. The quantity is the error of the terminal current under the
+  10 Gb/s clock of `tb_fig7.cir` (6 ns), max / RMS. The reference is the mA model at reltol 1e-9
+  (181 006 points); the µA model at 1e-9 aborts, see below.
+
+  | scaling | default reltol | reltol 1e-5 |
+  |---|---|---|
+  | µA (shipped) | 0.87 % / 0.35 % | **0.038 % / 0.014 %** |
+  | mA | 7.7 % / 5.1 % | 0.45 % / 0.22 % |
+
+  µA scaling is about 10× more accurate at either reltol, and reltol 1e-5 is still needed: the
+  testbenches set it. The DC I–V does not depend on the scaling: both give 0.0025 % at default
+  reltol and 0.0005 % at 1e-5, against the µA model at 1e-9. (Earlier figures in this note were
+  6.8 %, 0.4 % and 0.08 %, with no stated quantity or reference; they are replaced by this
+  table.)
+* **Tightening reltol alone is not safe in ngspice.** At reltol 1e-9 the µA model aborts at the
+  first edge (t = 0.1 ns) with "Timestep too small … trouble with node va#branch": the step
+  collapses to 6e-25 s. A tighter ngspice reference for the µA model probably needs abstol/vntol
+  relaxed alongside it (not tried). verilog-a-sim defaults are converged (Newton reltol 1e-9).
 * Static/JIT path in verilog-a-sim: `xtask sched-check` → static.
 
 ## Running

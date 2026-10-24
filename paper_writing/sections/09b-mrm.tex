@@ -157,19 +157,24 @@ reltol, or 2.6 and 11\,\textmu W on the through power, and at reltol $10^{-5}$ i
 20\,\% more time steps.
 The model was therefore rewritten in an equivalent form without a derivative of the
 exponential. The ladder state had
-to be scaled to microamperes, because in milliamperes the small shunt nodes fell below
-ngspice's default voltage tolerance and Newton stopped early (6.8\,\% current error); OSDI passes
-only the global tolerances to the model, so the discipline \texttt{abstol} could not be used
-instead. Finally, the testbenches needed reltol $10^{-5}$ to bring the remaining error from
-0.4\,\% to 0.08\,\%. \vas{} gave the correct result with both forms of the model at its default
+to be scaled to microamperes, because in milliamperes the small shunt nodes sit near ngspice's
+default voltage tolerance and Newton stops early. OSDI passes only the global tolerances to the
+model, so the discipline \texttt{abstol} could not be used instead. On the 10\,Gb/s terminal
+current, the milliampere form is off by 7.7\,\% at ngspice's defaults and the microampere form by
+0.87\,\%. The testbenches therefore also need reltol $10^{-5}$, which brings the shipped form to
+0.04\,\%. Tightening reltol further is not safe either: at $10^{-9}$ ngspice aborts the
+microampere form at the first edge with a timestep collapse to $6\times10^{-25}$\,s.
+\src{mrm\_injection/README.md "Numerics": ngspice-47 + OpenVAF on Linux, tb\_fig7.cir, scaling
+$\times$ reltol, reference mA at reltol $10^{-9}$, 2026-10-24}
+\vas{} gave the correct result with both forms of the model at its default
 settings, whose Newton tolerance is $10^{-9}$: on a single pre-emphasis bit the two forms give
 the same free-carrier current to $10^{-6}$\,mA, the output's print precision, and neither goes
 negative after the fall.
 \src{mrm\_injection/README.md "Numerics": ngspice-47 + OpenVAF on Linux, pulse\_ng.cir and
 pulse\_direct\_ng.cir, 2026-10-24, data in tests/24-10-4times; tests/fc\_form\_check.py,
 verilog-a-sim 2.42.0+5}
-\todo{The vntol (6.8\,\%) and reltol (0.4\,\% $\to$ 0.08\,\%) figures are from the model README
-and were not re-measured with the direct-form run; re-measure before submission.}
+\todo{The \vas{} side of the 10\,Gb/s current is not yet compared against the same ngspice
+reference; run tb\_fig7's deck in \vas{} and state its error alongside the 0.04\,\%.}
 
 \subsubsection{An equivalent-circuit ring model, and the simulator as a design tool}
 The third package (\texttt{mrm\_eqc}) implements the depletion-ring model of Bao

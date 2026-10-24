@@ -22,6 +22,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+13 - 2026-10-24
+----------------------
+**mrm_injection: the ngspice tolerance figures re-measured.** Docs only; no code changes.
+  * The user ran the uA/mA scaling x reltol matrix on Linux (ngspice-47 + OpenVAF).
+    Quantity: terminal current under the 10 Gb/s clock of `tb_fig7.cir`, 6 ns. Reference:
+    the mA model at reltol 1e-9, 181 006 points.
+  * Max / RMS error:
+      mA, default reltol   7.7 / 5.1 %
+      uA, default reltol   0.87 / 0.35 %
+      uA, reltol 1e-5      0.038 / 0.014 %
+      mA, reltol 1e-5      0.45 / 0.22 %
+  * The DC I-V does not depend on the scaling: 0.0025 % at default reltol, 0.0005 % at 1e-5.
+  * These replace the README's unsourced 6.8 / 0.4 / 0.08 %. The conclusions hold: uA
+    scaling and reltol 1e-5 are both needed. New: at reltol 1e-9 ngspice aborts the uA model at
+    the first edge (timestep 6e-25 s).
+  * Cost, stated: my first comparison script was wrong. Its uA 1e-9 reference had aborted at
+    0.1 ns, so it compared only the pre-pulse interval. The user caught it and re-referenced to
+    mA at 1e-9. Raw .dat files were not committed.
+  * Paper: the 09b robustness paragraph carries the measured figures. The open 	odo is now
+    the verilog-a-sim side against the same reference.
+
+
 2.42.0+12 - 2026-10-24
 ----------------------
 **Paper: mrm_eqc results in the case study; PAM4 with FFE (t9).** Docs/tests only; no code
