@@ -76,16 +76,36 @@ missing depletion capacitance.
 ## Numerics (read before running ngspice)
 
 * The direct form of the carrier filter contains two `ddt()` terms of the exponential
-  V2 = q0/τ that cancel analytically; ngspice/OSDI lost up to 4× of the free charge after a
-  falling edge with it. The model integrates the equivalent form
+  V2 = q0/τ that cancel analytically. In ngspice/OSDI the direct form leaves a small
+  **negative** free-charge residue after a fall, which is unphysical and persists: about 0.04 %
+  of the peak free-carrier current at reltol 1e-5, about 0.2 % at ngspice's default reltol; the
+  effect on through power is 2.6 µW at reltol 1e-5 and 11 µW at the default reltol, on a signal
+  between 0.011 and 1.46 mW. At reltol 1e-5 the direct form also needs about 20 % more time steps (7570 vs 6308);
+  at the default reltol the counts are equal (6051 vs 6049). The model
+  therefore integrates the equivalent form
   `W = X − (τ/τ_c)(V2 − V3)`, `τ_c dW/dt + W = (1 − τ/τ_c)(V2 − V3) [+ I_r]`, which has no
-  derivative of the exponential. verilog-a-sim was correct with both forms.
+  derivative of the exponential, stays physical, and depends less on the tolerance.
+  verilog-a-sim gives the same result with both forms and no residue.
+  (An earlier version of this note said ngspice lost "up to 4×" of the free charge; re-measured,
+  that overstated it.)
   The direct form is kept as `tests/mrm_pin_direct.va` (a test variant, not the model) with the
   ngspice deck `tests/pulse_direct_ng.cir`; `tests/fc_form_check.py` compares the forms.
-  Measured 2026-10-24 (verilog-a-sim 2.42.0+3, single pre-emphasis bit): direct = W form to
-  1e-6 mA in X (print precision), post-fall charge ratio 1.0000. The ngspice 4x has not been
-  re-measured since the direct form was replaced: `openvaf-r mrm_pin_direct.va`, then
-  `ngspice -b pulse_direct_ng.cir`, then `python fc_form_check.py`.
+  Measured 2026-10-24, single pre-emphasis bit (`pulse_ng.cir`), free-carrier current X (mA):
+
+  | t (ns) | ngspice W, reltol 1e-5 | ngspice direct, 1e-5 | ngspice W, default | ngspice direct, default | verilog-a-sim W | verilog-a-sim direct |
+  |---|---|---|---|---|---|---|
+  | 1.10 (high) | 0.15193 | 0.15188 | 0.15250 | 0.15193 | 0.15188 | 0.15188 |
+  | 1.55 (fall) | 0.03276 | 0.03266 | 0.03288 | 0.03244 | 0.03273 | 0.03273 |
+  | 1.70 | 0.00014 | 0.00005 | 0.00014 | −0.00025 | 0.00014 | 0.00014 |
+  | 2.00 | 0.00001 | −0.00006 | 0.00001 | −0.00028 | 0.00001 | 0.00001 |
+  | 3.00 | 0.00001 | −0.00002 | 0.00001 | −0.00010 | 0.00001 | 0.00001 |
+
+  ngspice-47 (master a80f6e3) + OpenVAF-reloaded on Linux: `pulse_ng.cir` 6308 points,
+  bit-identical to the stored `pulse_ng.dat`; `pulse_direct_ng.cir` 7570 points. verilog-a-sim
+  2.42.0+5 on Windows, default settings: 30 113 points for both forms; minimum of X after the
+  fall +9.2e-6 mA for both (the DC floor), and the two forms agree to 1e-6 mA (print precision).
+  To compile with OpenVAF, use its built-in headers: `vasim/disciplines.vams` (verilog-a-sim's
+  minimal header) defines only `electrical`, so OpenVAF fails on `thermal` if it is in the folder.
 * The ladder state is stored in µA (`` `SC = 1e6``). In mA, the small shunt nodes sat below
   ngspice's default `vntol` (1 µV) and Newton stopped early (6.8 % current error at defaults).
   Discipline `abstol` would not help in ngspice: its OSDI interface passes only the global

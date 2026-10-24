@@ -22,6 +22,29 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+6 - 2026-10-24
+---------------------
+**Ring modulator: the ngspice "4x free charge lost" claim re-measured and withdrawn.** Docs
+only; one comment changed in `mrm_pin.va`, no code changes.
+  * The user ran `pulse_ng.cir` and `pulse_direct_ng.cir` in ngspice-47 + OpenVAF on Linux.
+    The stored `pulse_ng.dat` reproduces bit for bit. The direct form (cancelling ddt pair)
+    does not lose 4x of the charge: it leaves a small *negative* free-carrier residue after
+    the fall, 0.04 % of peak at reltol 1e-5 and 0.2 % at ngspice's default, 2.6 / 11 uW on the
+    through power, and at reltol 1e-5 takes ~20 % more steps (7570 vs 6308 points; at the
+    default reltol 6051 vs 6049). The four .dat files are committed in
+    `tests/24-10-4times/`, and every figure above was recomputed from them here.
+  * verilog-a-sim (this version, default settings): both forms identical to the print precision
+    at every time in that table, and neither goes negative (min after fall +9.2e-6 mA, the DC
+    floor).
+  * Cost, stated: the paper's robustness paragraph is weaker than in 2.42.0+2. It now says
+    ngspice leaves an unphysical residue, not that it lost 4x of the charge. The model README,
+    the model comment, the paper and the claims ledger all carry the corrected figure. The
+    vntol (6.8 %) and reltol (0.4 % -> 0.08 %) figures are still from the README only; a paper
+    	odo says so.
+  * The suggested README wording "under 0.01 mW" was not used: it holds at reltol 1e-5
+    (2.6 uW) but not at the default reltol (11 uW).
+
+
 2.42.0+5 - 2026-10-24
 ---------------------
 **Paper bibliography: ngspice manual entry.** Docs only. `@manual{ngspice}` now has four

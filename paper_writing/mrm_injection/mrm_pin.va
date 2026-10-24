@@ -255,8 +255,9 @@ module mrm_pin(anode, cathode, htp, htn,
         //                                Iepi  = (V2 - V3) + tau d(V2 - V3)/dt.
         // Integrated in the equivalent derivative-free form (no ddt of the exponential V2):
         //   W = X - (tau/tau_c)(V2 - V3),  tau_c dW/dt + W = (1 - tau/tau_c)(V2 - V3) [+ Ir]
-        // The direct form made ngspice/OSDI lose up to 4x of the free charge after a fall
-        // (cancelling ddt pair); verilog-a-sim integrated both forms correctly.
+        // In ngspice/OSDI the direct form (cancelling ddt pair, tests/mrm_pin_direct.va) leaves
+        // a small negative free charge after a fall: ~0.04 % of peak at reltol 1e-5, ~0.2 % at
+        // the default; verilog-a-sim gives the same result with both forms (README, Numerics).
         tcf = (tau_c > 0.0) ? tau_c : tau;
         I(nf) <+ ddt(tcf * V(nf));
         I(nf) <+ V(nf) - (1.0 - tau / tcf) * (v2 - v3) - ((fc_src == 0) ? `SC * Ir : 0.0);

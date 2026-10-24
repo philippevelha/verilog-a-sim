@@ -149,18 +149,24 @@ the paper's model omits, are the others, and none of them can be settled from th
 \subsubsection{Numerical robustness without tuning}
 The same nine eye cases run in ngspice through OpenVAF agree with \vas{} to within
 0.24\,\textmu W in eye height and 0.01\,dB in extinction ratio. Getting there, however, required
-three changes for ngspice and none for \vas{}. The direct form of the free-carrier filter
-contains two \texttt{ddt} terms of an exponential that cancel analytically; with it, ngspice
-lost up to a factor of four of the free charge after a falling edge, and the model had to be
-rewritten in an equivalent form without a derivative of the exponential. The ladder state had
+changes for ngspice and none for \vas{}. The direct form of the free-carrier filter contains
+two \texttt{ddt} terms of an exponential that cancel analytically. With it, ngspice leaves a
+small \emph{negative} free charge after a falling edge, which is unphysical and persists:
+0.04\,\% of the peak free-carrier current at reltol $10^{-5}$ and 0.2\,\% at its default
+reltol, or 2.6 and 11\,\textmu W on the through power, and at reltol $10^{-5}$ it takes
+20\,\% more time steps.
+The model was therefore rewritten in an equivalent form without a derivative of the
+exponential. The ladder state had
 to be scaled to microamperes, because in milliamperes the small shunt nodes fell below
 ngspice's default voltage tolerance and Newton stopped early (6.8\,\% current error); OSDI passes
 only the global tolerances to the model, so the discipline \texttt{abstol} could not be used
 instead. Finally, the testbenches needed reltol $10^{-5}$ to bring the remaining error from
 0.4\,\% to 0.08\,\%. \vas{} gave the correct result with both forms of the model at its default
 settings, whose Newton tolerance is $10^{-9}$: on a single pre-emphasis bit the two forms give
-the same free-carrier current to $10^{-6}$\,mA, the output's print precision, and the same
-charge after the falling edge to four digits.
-\src{mrm\_injection/README.md "Numerics"; tests/fc\_form\_check.py, 2.42.0+3, 2026-10-24}
-\todo{Re-measure the ngspice factor of four with tests/pulse\_direct\_ng.cir (needs ngspice
-$\geq$\,44 and OpenVAF); until then it rests on the README.}
+the same free-carrier current to $10^{-6}$\,mA, the output's print precision, and neither goes
+negative after the fall.
+\src{mrm\_injection/README.md "Numerics": ngspice-47 + OpenVAF on Linux, pulse\_ng.cir and
+pulse\_direct\_ng.cir, 2026-10-24, data in tests/24-10-4times; tests/fc\_form\_check.py,
+verilog-a-sim 2.42.0+5}
+\todo{The vntol (6.8\,\%) and reltol (0.4\,\% $\to$ 0.08\,\%) figures are from the model README
+and were not re-measured with the direct-form run; re-measure before submission.}
