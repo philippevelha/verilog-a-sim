@@ -1,0 +1,165 @@
+// =============================================================================
+//  mrm_eqc_ls.va -- large-signal micro-ring modulator, single or dual segment,
+//                   with the parameters and effects of Bao et al. 2024
+// =============================================================================
+//
+//  Reference: S. Bao et al., J. Lightwave Technol. 42(14), 4924-4932 (2024) [B].
+//  Same physics as [B]'s equivalent circuit, written in large-signal form so it
+//  can carry NRZ/PAM4/PAM8 and closed-loop thermal control without re-deriving
+//  the RLC at each operating point. Its small-signal response equals the linear
+//  model mrm_eqc_rlc.va (checked in tests/).
+//
+//  ELECTRICAL  -- [B] Fig. 2 / Table I, per segment k:
+//      in_k -Cpad- ref,  in_k -Rsi- sb_k -Csi- ref,  in_k -Rs- j_k -Cj- ref
+//      Vj_k = V(j_k, ref); reverse bias Vr_k = -Vj_k (paper's "-2 V" = Vr 2 V)
+//  RESONANCE   -- lam_res = lam0 + sum_k s_k (c1 Vr_k + c2 Vr_k^2) [pm]
+//                           + dlam_dT * dT                          (fit of [B] Fig. 4)
+//  LOSS        -- tau_l(Vr): [B] Eq. (16)/(17); unequal segment biases combine
+//                 as a weighted sum of loss-rate changes (weights s_k / sum s).
+//                 tau_e constant ([B] Table II).
+//  OPTICS      -- coupled-mode equations [B] (1)-(2), amplitude decay times,
+//                 state y = mu_e a (sqrt(mW)), FSR-periodic detuning map.
+//  THERMAL     -- [B] Eqs. (12), (14), (15) with a thermal node (K):
+//        Cth dT/dt + T/Rth = P_heater + (dlam_dPin / k_h) * P_res
+//        P_res = |y|^2 (gamma / mu_e^2)^2 = P_in (1/tau^2)/(D^2 + 1/tau^2)  (steady state)
+//        Rth   = k_h / dlam_dT  so that  dlam = k_h P_heater  +  dlam_dPin P_res
+//    i.e. [B]'s self-heating shift (Eq. 12) and heater shift (Eq. 14) in steady
+//    state, self-consistent (bistability appears naturally). dlam_dT and the
+//    thermal time constant tau_th are NOT in [B] (placeholders; only their
+//    product with Rth matters in steady state).
+//
+//  NOT IN [B] / CHOICES -- s_k, c1, c2 fitted to Fig. 4 (digitised); dlam_dPin =
+//    0.215 nm/mW from Fig. 6(b) ([B]'s R = 0.519 /mW is not usable as printed);
+//    k_h = 0.150 nm/mW from the Fig. 7 points ([B] text: 0.12 nm/mW).
+//
+//  PORTS: in1, in2, ref (segments; tie in2 to ref for a single segment),
+//         htp, htn (heater), o_in_re/im, o_thru_re/im, o_drop_re/im (sqrt(mW)),
+//         wl (laser wavelength, V = nm), dt (thermal node).
+//  PORTABILITY: no analog functions, each ddt() in its own contribution
+//    (verilog-a-sim static/JIT path), OpenVAF/OSDI.
+// =============================================================================
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+`define C0     2.99792458e8
+`define TWOPI  6.283185307179586
+`define PI_    3.141592653589793
+
+module mrm_eqc_ls(in1, in2, ref, htp, htn,
+                  o_in_re, o_in_im, o_thru_re, o_thru_im, o_drop_re, o_drop_im,
+                  wl, dt);
+    inout  in1, in2, ref, htp, htn;
+    input  o_in_re, o_in_im, wl;
+    output o_thru_re, o_thru_im, o_drop_re, o_drop_im;
+    inout  dt;
+    electrical in1, in2, ref, htp, htn, wl;
+    electrical o_in_re, o_in_im, o_thru_re, o_thru_im, o_drop_re, o_drop_im;
+    thermal    dt;
+    electrical j1, j2, sb1, sb2, yr, yi, pmon;
+
+    branch (htp, htn) b_h;
+    branch (dt)       b_th;
+
+    // ------------------------------------------- electrical parasitics, [B] Table I
+    parameter integer nseg = 1        from [1:2];
+    parameter real Cpad1 = 38.7e-15   from [0:inf);
+    parameter real Rs1   = 192.8      from (0:inf);
+    parameter real Rsi1  = 12285.0    from (0:inf);
+    parameter real Csi1  = 29.6e-15   from [0:inf);
+    parameter real Cj1   = 12.1e-15   from [0:inf);
+    parameter real Cpad2 = 38.7e-15   from [0:inf);
+    parameter real Rs2   = 144.1      from (0:inf);
+    parameter real Rsi2  = 14775.0    from (0:inf);
+    parameter real Csi2  = 25.78e-15  from [0:inf);
+    parameter real Cj2   = 8.0e-15    from [0:inf);
+
+    // ------------------------------------------- optics
+    parameter real lam0  = 1553.0686  from (0:inf);  // nm, resonance at 0 V, cold ([B] Fig. 4a)
+    parameter real FSR   = 8.0        from (0:inf);  // nm ([B] Sec. II)
+    parameter real tau_e = 23.86e-12  from (0:inf);  // s ([B] Table II)
+    parameter real tl0   = 21.32      from (0:inf);  // ps, tau_l = tl0 + tl1 Vr + tl2 Vr^2 ([B] Eq. 16)
+    parameter real tl1   = 0.56       from (-inf:inf);
+    parameter real tl2   = -5.25e-2   from (-inf:inf);
+    parameter real c1    = 26.103     from (-inf:inf);  // pm/V   (fit, Fig. 4a)
+    parameter real c2    = -2.1816    from (-inf:inf);  // pm/V^2
+    parameter real s1    = 1.0        from [0:inf);
+    parameter real s2    = 0.0        from [0:inf);
+    parameter real tau_d = 0.0        from [0:inf);     // s, drop coupling (0 = all-pass)
+    parameter integer loss_mod = 1    from [0:1];       // 1: tau_l follows the instantaneous bias
+                                                        // 0: tau_l frozen at Vr1_l/Vr2_l (as [B]'s RLC g)
+    parameter real Vr1_l = 0.0        from (-inf:inf);  // V, bias for frozen tau_l (loss_mod = 0)
+    parameter real Vr2_l = 0.0        from (-inf:inf);
+
+    // ------------------------------------------- thermal ([B] Eqs. 12, 14)
+    parameter real k_h       = 0.150   from [0:inf);   // nm/mW heater efficiency
+    parameter real dlam_dPin = 0.215   from [0:inf);   // nm/mW self-heating at resonance
+    parameter real dlam_dT   = 0.08    from (0:inf);   // nm/K  (placeholder)
+    parameter real tau_th    = 1.0e-6  from (0:inf);   // s     (placeholder)
+    parameter real Rh        = 1.0e3   from (0:inf);   // ohm   heater resistance (placeholder)
+    parameter integer self_heat = 1    from [0:1];
+
+    real vr1, vr2, vl1, vl2, w1, w2, tl, inv_tl, inv_te, inv_td, gam, gam0, tau_n, kin, kdrop;
+    real lam_res, lam_L, dlam, dw, sr, si, y_r, y_i, Pres, Ph, Rth, Cth, T;
+
+    analog begin
+        // ===================== electrical parasitics =====================
+        I(in1, ref) <+ ddt(Cpad1 * V(in1, ref));
+        I(in1, sb1) <+ V(in1, sb1) / Rsi1;
+        I(sb1, ref) <+ ddt(Csi1 * V(sb1, ref));
+        I(in1, j1)  <+ V(in1, j1) / Rs1;
+        I(j1, ref)  <+ ddt(Cj1 * V(j1, ref));
+        I(in2, ref) <+ ddt(Cpad2 * V(in2, ref));
+        I(in2, sb2) <+ V(in2, sb2) / Rsi2;
+        I(sb2, ref) <+ ddt(Csi2 * V(sb2, ref));
+        I(in2, j2)  <+ V(in2, j2) / Rs2;
+        I(j2, ref)  <+ ddt(Cj2 * V(j2, ref));
+        vr1 = -V(j1, ref);
+        vr2 = (nseg == 2) ? -V(j2, ref) : 0.0;
+
+        // ===================== resonance and decay rates =====================
+        w1 = (nseg == 2) ? s1 / (s1 + s2) : 1.0;
+        w2 = (nseg == 2) ? s2 / (s1 + s2) : 0.0;
+        vl1 = (loss_mod == 1) ? vr1 : Vr1_l;
+        vl2 = (loss_mod == 1) ? vr2 : Vr2_l;
+        inv_tl = 1.0e12 * (1.0 / tl0
+                 + w1 * (1.0 / (tl0 + tl1 * vl1 + tl2 * vl1 * vl1) - 1.0 / tl0)
+                 + w2 * (1.0 / (tl0 + tl1 * vl2 + tl2 * vl2 * vl2) - 1.0 / tl0));
+        inv_te = 1.0 / tau_e;
+        inv_td = (tau_d > 0.0) ? 1.0 / tau_d : 0.0;
+        gam    = inv_tl + inv_te + inv_td;
+        gam0   = 1.0e12 / tl0 + inv_te + inv_td;
+        tau_n  = 1.0 / gam0;
+        kin    = 2.0 * inv_te;                         // y = mu_e a,  mu_e^2 = 2/tau_e
+        kdrop  = (tau_d > 0.0) ? sqrt(tau_e / tau_d) : 0.0;
+
+        T   = Temp(b_th);
+        lam_res = lam0 + 1.0e-3 * (s1 * (c1 * vr1 + c2 * vr1 * vr1) + s2 * (c1 * vr2 + c2 * vr2 * vr2))
+                  + dlam_dT * T;
+        lam_L = max(V(wl), 1.0);
+        dlam  = (FSR / `PI_) * sin(`PI_ * (lam_L - lam_res) / FSR);
+        dw    = `TWOPI * `C0 * dlam * 1.0e-9 / (lam_L * lam_res * 1.0e-18);   // omega_L - omega_res
+
+        // ===================== coupled-mode equations =====================
+        sr = V(o_in_re); si = V(o_in_im); y_r = V(yr); y_i = V(yi);
+        // dy/dt = (j dw - gam) y - j kin s_in
+        I(yr) <+ ddt(tau_n * y_r);
+        I(yr) <+ -tau_n * (-gam * y_r - dw * y_i + kin * si);
+        I(yi) <+ ddt(tau_n * y_i);
+        I(yi) <+ -tau_n * ( dw * y_r - gam * y_i - kin * sr);
+        V(o_thru_re) <+ sr + y_i;
+        V(o_thru_im) <+ si - y_r;
+        V(o_drop_re) <+  kdrop * y_i;
+        V(o_drop_im) <+ -kdrop * y_r;
+        V(pmon) <+ (sr + y_i) * (sr + y_i) + (si - y_r) * (si - y_r);   // monitor: through power (mW)
+
+        // ===================== thermal node =====================
+        I(b_h) <+ V(b_h) / Rh;
+        Ph   = V(b_h) * V(b_h) / Rh;                                     // W
+        Pres = (y_r * y_r + y_i * y_i) * (gam / kin) * (gam / kin) * 1.0e-3;   // W, = P_in L(D)
+        Rth  = 1.0e3 * k_h / dlam_dT;                                    // K/W
+        Cth  = tau_th / Rth;
+        Pwr(b_th) <+ ddt(Cth * T);
+        Pwr(b_th) <+ T / Rth - Ph - ((self_heat == 1) ? (dlam_dPin / k_h) * Pres : 0.0);
+    end
+endmodule

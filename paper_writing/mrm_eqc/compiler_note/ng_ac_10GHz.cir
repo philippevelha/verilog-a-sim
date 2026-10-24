@@ -1,0 +1,17 @@
+* generated
+
+Va a 0 DC 0 AC 1
+Vb b 0 DC 0
+.model m_1 mrm_eqc_rlc nseg=1 Cpad1=3.87e-14 Rs1=192.8 Rsi1=12285 Csi1=2.96e-14 Cj1=1.21e-14 lam0=1553.0686 tau_e=2.386e-11 tl0=21.32 tl1=0.56 tl2=-0.0525 c1=26.103 c2=-2.1816 s1=1 s2=0 lam_L=1552.9686 Vr1=0 P_in=1 dlam_dPin=0
+N1 a b out m_1
+.control
+pre_osdi mrm_eqc_rlc.osdi
+pre_osdi mrm_eqc_ls.osdi
+set wr_singlescale
+set wr_vecnames
+option numdgt=12 reltol=1e-5
+ac dec 4 100000000.0 100000000000.0
+print vm(out) vp(out) vm(n1#nind) vp(n1#nind) vm(n1#il) vm(n1#j1) vp(n1#j1)
+quit
+.endc
+.end

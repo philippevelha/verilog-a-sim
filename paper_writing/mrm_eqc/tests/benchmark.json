@@ -1,0 +1,146 @@
+[
+ {
+  "test": "t1_ac_crosscheck",
+  "sim": "ngspice",
+  "model": "rlc",
+  "runs": 6,
+  "wall_total_s": 0.0,
+  "wall_max_s": 0.0,
+  "rss_peak_mb": 10.7
+ },
+ {
+  "test": "t1_ac_crosscheck",
+  "sim": "ngspice",
+  "model": "ls",
+  "runs": 12,
+  "wall_total_s": 0.0,
+  "wall_max_s": 0.0,
+  "rss_peak_mb": 11.0
+ },
+ {
+  "test": "t1_ac_crosscheck",
+  "sim": "va",
+  "model": "rlc",
+  "runs": 6,
+  "wall_total_s": 0.01,
+  "wall_max_s": 0.01,
+  "rss_peak_mb": 9.7
+ },
+ {
+  "test": "t1_ac_crosscheck",
+  "sim": "va",
+  "model": "ls",
+  "runs": 12,
+  "wall_total_s": 0.18,
+  "wall_max_s": 0.02,
+  "rss_peak_mb": 11.0
+ },
+ {
+  "test": "t2_eo_response",
+  "sim": "ngspice",
+  "model": "rlc",
+  "runs": 6,
+  "wall_total_s": 0.0,
+  "wall_max_s": 0.0,
+  "rss_peak_mb": 10.8
+ },
+ {
+  "test": "t2_eo_response",
+  "sim": "ngspice",
+  "model": "ls",
+  "runs": 6,
+  "wall_total_s": 0.0,
+  "wall_max_s": 0.0,
+  "rss_peak_mb": 11.0
+ },
+ {
+  "test": "t2_eo_response",
+  "sim": "va",
+  "model": "rlc",
+  "runs": 6,
+  "wall_total_s": 0.03,
+  "wall_max_s": 0.01,
+  "rss_peak_mb": 9.7
+ },
+ {
+  "test": "t2_eo_response",
+  "sim": "va",
+  "model": "ls",
+  "runs": 6,
+  "wall_total_s": 0.11,
+  "wall_max_s": 0.02,
+  "rss_peak_mb": 11.0
+ },
+ {
+  "test": "t2b_eo_selfheat",
+  "sim": "ngspice",
+  "model": "ls",
+  "runs": 6,
+  "wall_total_s": 0.0,
+  "wall_max_s": 0.0,
+  "rss_peak_mb": 11.0
+ },
+ {
+  "test": "t2b_eo_selfheat",
+  "sim": "va",
+  "model": "ls",
+  "runs": 6,
+  "wall_total_s": 0.06,
+  "wall_max_s": 0.01,
+  "rss_peak_mb": 10.9
+ },
+ {
+  "test": "t3_static",
+  "sim": "ngspice",
+  "model": "ls",
+  "runs": 16,
+  "wall_total_s": 0.17,
+  "wall_max_s": 0.02,
+  "rss_peak_mb": 11.4
+ },
+ {
+  "test": "t3_static",
+  "sim": "va",
+  "model": "ls",
+  "runs": 16,
+  "wall_total_s": 2.37,
+  "wall_max_s": 0.18,
+  "rss_peak_mb": 11.1
+ },
+ {
+  "test": "t4_selfheat_shape",
+  "sim": "ngspice",
+  "model": "ls",
+  "runs": 4,
+  "wall_total_s": 0.08,
+  "wall_max_s": 0.02,
+  "rss_peak_mb": 11.3
+ },
+ {
+  "test": "t4_selfheat_shape",
+  "sim": "va",
+  "model": "ls",
+  "runs": 4,
+  "wall_total_s": 0.63,
+  "wall_max_s": 0.16,
+  "rss_peak_mb": 11.0
+ },
+ {
+  "test": "t5_eyes",
+  "sim": "ngspice",
+  "model": "ls",
+  "runs": 5,
+  "wall_total_s": 0.37,
+  "wall_max_s": 0.08,
+  "rss_peak_mb": 13.6
+ },
+ {
+  "test": "t5_eyes",
+  "sim": "va",
+  "model": "ls",
+  "runs": 5,
+  "wall_total_s": 4.07,
+  "wall_max_s": 0.93,
+  "rss_peak_mb": 11.0
+ }
+]

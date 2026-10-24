@@ -1,0 +1,36 @@
+{
+ "8a": {
+  "green": {
+   "peak_dB": 0.79,
+   "f_peak_GHz": 12.4,
+   "f3dB_GHz": 31.9
+  },
+  "red": {
+   "peak_dB": 1.74,
+   "f_peak_GHz": 17.4,
+   "f3dB_GHz": 35.3
+  },
+  "blue": {
+   "peak_dB": 2.69,
+   "f_peak_GHz": 17.2,
+   "f3dB_GHz": 41.1
+  }
+ },
+ "8b": {
+  "green": {
+   "peak_dB": 1.04,
+   "f_peak_GHz": 12.4,
+   "f3dB_GHz": 34.4
+  },
+  "red": {
+   "peak_dB": 1.57,
+   "f_peak_GHz": 13.5,
+   "f3dB_GHz": 42.5
+  },
+  "blue": {
+   "peak_dB": 2.67,
+   "f_peak_GHz": 18.1,
+   "f3dB_GHz": NaN
+  }
+ }
+}

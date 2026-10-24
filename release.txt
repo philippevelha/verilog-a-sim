@@ -22,6 +22,25 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.42.0+7 - 2026-10-24
+---------------------
+**Paper: third ring-modulator package, `paper_writing/mrm_eqc/` (Bao et al., JLT 2024).** Docs
+only; no code changes.
+  * A linear RLC equivalent-circuit model and a large-signal coupled-mode model of the ring in
+    Bao et al., with tests t1-t5 and figures. Per its README, not re-run here: reproduction is
+    partial and says so. Resonances match, dips are 2-10 dB too deep, Fig. 8 matches only with
+    the detunings re-read as offsets from the cold resonance, and the PAM8 eye is closed under
+    the README's own drive conditions. verilog-a-sim takes ~10x longer per time point than
+    ngspice, uses ~20 % less memory, and the waveforms agree to 5-6e-5.
+  * Compiler note corrected before commit. The package said a 60-iteration `for` loop made both
+    OpenVAF and verilog-a-sim drop an inductor's ddt in AC. Checked here at 2.42.0+6, JIT off
+    and on: verilog-a-sim is not affected. loop2 = loop60 byte for byte; loop60 = the shipped
+    unrolled model at all 13 frequencies; the shipped bisection rewritten as a 50-step `for`
+    loop with self-heating on = unrolled at all 13 points. The OpenVAF half is unverified (not
+    installed here), so nothing is reported upstream yet. New deck
+    `compiler_note/va_ac_10GHz.net`.
+
+
 2.42.0+6 - 2026-10-24
 ---------------------
 **Ring modulator: the ngspice "4x free charge lost" claim re-measured and withdrawn.** Docs

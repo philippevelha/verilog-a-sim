@@ -1,0 +1,6 @@
+* verilog-a-sim counterpart of ng_ac_10GHz.cir (compiler note, see README section 5)
+Va a gnd DC 0 AC 1
+Vb b gnd DC 0
+X1 a b out mrm_eqc_rlc_loop nseg=1 Cpad1=3.87e-14 Rs1=192.8 Rsi1=12285 Csi1=2.96e-14 Cj1=1.21e-14 lam0=1553.0686 tau_e=2.386e-11 tl0=21.32 tl1=0.56 tl2=-0.0525 c1=26.103 c2=-2.1816 s1=1 s2=0 lam_L=1552.9686 Vr1=0 P_in=1 dlam_dPin=0
+.ac dec 4 1e8 1e11
+.end

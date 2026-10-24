@@ -1,0 +1,217 @@
+// =============================================================================
+//  mrm_eqc_rlc.va -- linear equivalent-circuit model of a depletion micro-ring
+//                    modulator, single or dual segment
+// =============================================================================
+//
+//  Reference: S. Bao, Y. Ma, J. Xue, J. Wu, N. Qi, B. Wang, "A Comprehensive
+//  Equivalent Circuit Model of Silicon Microring Modulators for Photonics-
+//  Electronics Codesign", J. Lightwave Technol. 42(14), 4924-4932 (2024) [B],
+//  Fig. 2, Eqs. (3)-(7), (12), (15); RLC network after Shin et al., IEEE TED
+//  64(3), 2017.
+//
+//  ELECTRICAL (per segment k, [B] Fig. 2):
+//      in_k -Cpad- gnd,  in_k -Rsi- -Csi- gnd,  in_k -Rs- j_k -Cj- gnd
+//  ELECTRO-OPTIC ([B] Fig. 2 right): sum_k g_k V(j_k) drives C || R1 || (R2 + L):
+//      R1 C = tau_e/2                                       (4)
+//      L / R2 = tau_l/2                                     (5)
+//      R1 / R2 = (tau_e tau_l / 4)(1/tau^2 + D^2) - 1       (6)
+//      g_k = 2 (d omega_res/dV_jk) D / (D^2 + 1/tau^2) / R1 * P_in       (7)
+//    1/tau = 1/tau_l + 1/tau_e (3), amplitude decay times.  With these values
+//    V(out) is the small-signal change of the through-port power, in mW per volt
+//    of V(j_k) -- the exact linearisation of the coupled-mode equations (1)-(2):
+//    poles -1/tau +/- jD, zero -2/tau_l, DC gain dT/d omega_res * d omega_res/dV.
+//    [B]'s Eq. (7) is written with kappa (2/n_eff) dn/dV omega_res; here the
+//    product is expressed as d omega_res/dV_j taken from the measured resonance
+//    shift law (Fig. 4), the same quantity.
+//
+//  OPERATING POINT (parameters): detuning det_pm from the heated resonance
+//    (op_mode 0, default; [B] Fig. 8b is specified this way) or absolute laser
+//    wavelength lam_L (op_mode 1), reverse bias Vr_k, input power P_in, heater
+//    power P_h. The resonance includes the bias shift, the heater shift k_h P_h
+//    (14) and the self-heating shift of Eq. (12),
+//        dlam_sh = dlam_dPin * P_in * (1/tau^2) / (D^2 + 1/tau^2)
+//    -- the "adjustments of D and omega_res" [B] makes in g for self-heating.
+//
+//  DEVIATIONS / CHOICES (not in [B], flagged):
+//    * D is signed (laser minus resonance): the response changes sign between
+//      the blue and red side of the resonance ([B] uses |D|).
+//    * R1 is a free normalisation (default 1 ohm); only the products matter.
+//    * resonance-shift law dlam = s_k (c1 Vr + c2 Vr^2) fitted to [B] Fig. 4.
+//    * tau_l(Vr): [B] Eqs. (16)-(17); dual segment with unequal bias uses a
+//      weighted sum of the loss-rate changes (weights = s_k / sum s).
+//
+//  Ports: in1, in2 (segment inputs; tie in2 to ground for a single segment),
+//         out (V = small-signal through power, mW), reference = ground.
+// =============================================================================
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+`define C0     2.99792458e8
+`define TWOPI  6.283185307179586
+// one bisection step on f(d) = dlam_dPin P_in L(D(d)) - d  (f(blo) > 0 >= f(bhi))
+`define BISECT bmid = 0.5 * (blo + bhi); fmid = dlam_dPin * P_in / (1.0 + pow(`TWOPI * `C0 * (1.0 / (lam_L * 1.0e-9) - 1.0 / ((lr + bmid) * 1.0e-9)) * tau, 2.0)) - bmid; if (fmid > 0.0) blo = bmid; else bhi = bmid;
+
+module mrm_eqc_rlc(in1, in2, out);
+    inout in1, in2, out;
+    electrical in1, in2, out;
+    electrical j1, j2, sb1, sb2, nind, il;
+
+    // ------------------------------------------- electrical parasitics, [B] Table I
+    parameter real Cpad1 = 38.7e-15  from [0:inf);
+    parameter real Rs1   = 192.8     from (0:inf);
+    parameter real Rsi1  = 12285.0   from (0:inf);
+    parameter real Csi1  = 29.6e-15  from [0:inf);
+    parameter real Cj1   = 12.1e-15  from [0:inf);
+    parameter real Cpad2 = 38.7e-15  from [0:inf);
+    parameter real Rs2   = 144.1     from (0:inf);
+    parameter real Rsi2  = 14775.0   from (0:inf);
+    parameter real Csi2  = 25.78e-15 from [0:inf);
+    parameter real Cj2   = 8.0e-15   from [0:inf);
+    parameter integer nseg = 1       from [1:2];
+
+    // ------------------------------------------- optics, [B] Table II, Eq. (16)
+    parameter real lam0   = 1553.0686 from (0:inf);  // nm, resonance at 0 V, no heating
+    parameter real tau_e  = 23.86e-12 from (0:inf);  // s
+    parameter real tl0    = 21.32     from (0:inf);  // ps   tau_l = tl0 + tl1 V + tl2 V^2
+    parameter real tl1    = 0.56      from (-inf:inf);
+    parameter real tl2    = -5.25e-2  from (-inf:inf);
+    parameter real c1     = 26.103    from (-inf:inf);  // pm/V   dlam = s_k (c1 Vr + c2 Vr^2)
+    parameter real c2     = -2.1816   from (-inf:inf);  // pm/V^2
+    parameter real s1     = 1.0       from [0:inf);     // segment scale (single: 1)
+    parameter real s2     = 0.0       from [0:inf);
+
+    // ------------------------------------------- operating point
+    parameter integer op_mode = 0     from [0:1];    // 0: operating point given by det_pm (default)
+                                                     // 1: given by absolute laser wavelength lam_L
+    parameter real det_pm = -100.0    from (-inf:inf);  // pm, laser minus (heated) resonance, op_mode 0
+    parameter real lam_L  = 1553.10   from (0:inf);  // nm, laser, op_mode 1
+    parameter real Vr1    = 0.0       from (-inf:inf);  // V, reverse bias of segment 1 (>0 = reverse)
+    parameter real Vr2    = 0.0       from (-inf:inf);
+    parameter real P_in   = 1.0       from [0:inf);  // mW, input optical power
+    parameter real P_h    = 0.0       from [0:inf);  // mW, heater power
+    parameter real k_h    = 0.150     from [0:inf);  // nm/mW, heater ([B] Fig. 7 points; text: 0.12)
+    parameter real dlam_dPin = 0.215  from [0:inf);  // nm/mW, self-heating at resonance ([B] Fig. 6b)
+    parameter real Rn     = 1.0       from (0:inf);  // ohm, R1 normalisation
+
+    real blo, bhi, bmid, fmid, w1, w2, tl, tlv1, tlv2, tau, lr, dlsh, D, dwdv1, dwdv2, R1, R2, Cc, Lind, g1, g2, Lsh;
+
+    analog begin
+        // ---------- operating point (parameters only; evaluated every iteration, cheap)
+        w1 = (nseg == 2) ? s1 / (s1 + s2) : 1.0;
+        w2 = (nseg == 2) ? s2 / (s1 + s2) : 0.0;
+        tlv1 = tl0 + tl1 * Vr1 + tl2 * Vr1 * Vr1;
+        tlv2 = tl0 + tl1 * Vr2 + tl2 * Vr2 * Vr2;
+        tl = 1.0e-12 / (1.0 / tl0 + w1 * (1.0 / tlv1 - 1.0 / tl0) + w2 * (1.0 / tlv2 - 1.0 / tl0));
+        tau = 1.0 / (1.0 / tl + 1.0 / tau_e);
+        lr = lam0 + 1.0e-3 * (s1 * (c1 * Vr1 + c2 * Vr1 * Vr1)
+                              + ((nseg == 2) ? s2 * (c1 * Vr2 + c2 * Vr2 * Vr2) : 0.0))
+             + k_h * P_h;
+        // self-heating, Eq. (12), fixed point from the cold resonance (lower branch)
+        // operating point. op_mode 0: detuning from the heated resonance is given, so the
+        // self-heating shift follows directly from Eq. (12) - unique, no fixed point.
+        // op_mode 1: absolute laser wavelength; Eq. (12) is solved by bisection on the shift
+        // (straight-line code: a for-loop here was reported to make OpenVAF drop the
+        // inductor's ddt coefficient; verilog-a-sim is not affected - see compiler_note/
+        // and README section 5). In the thermal-bistability region
+        // (laser red of the cold resonance, high power) Eq. (12) has three roots and the
+        // bisection returns one of them; prefer op_mode 0 there.
+        if (op_mode == 0) begin
+            D    = `TWOPI * `C0 * det_pm * 1.0e-12 / ((lr) * (lr) * 1.0e-18) * (-1.0);
+            dlsh = dlam_dPin * P_in / (1.0 + D * D * tau * tau);
+            D    = -`TWOPI * `C0 * det_pm * 1.0e-12 / ((lr + dlsh) * (lr + dlsh) * 1.0e-18);
+        end else begin
+            blo = 0.0; bhi = dlam_dPin * P_in + 1.0e-9;
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            `BISECT
+            dlsh = 0.5 * (blo + bhi);
+            D = `TWOPI * `C0 * (1.0 / (lam_L * 1.0e-9) - 1.0 / ((lr + dlsh) * 1.0e-9));
+        end
+
+        // d omega_res / d V_j  (V_j = -Vr):  domega = -2 pi c / lam^2 * dlam
+        dwdv1 = `TWOPI * `C0 / ((lr + dlsh) * (lr + dlsh) * 1.0e-18) * s1 * (c1 + 2.0 * c2 * Vr1) * 1.0e-12;
+        dwdv2 = `TWOPI * `C0 / ((lr + dlsh) * (lr + dlsh) * 1.0e-18) * s2 * (c1 + 2.0 * c2 * Vr2) * 1.0e-12;
+
+        R1 = Rn;
+        Cc = tau_e / (2.0 * R1);
+        R2 = R1 / ((tau_e * tl / 4.0) * (1.0 / (tau * tau) + D * D) - 1.0);
+        Lind = R2 * tl / 2.0;
+        // dT/dVj = -8 ge gl D/(D^2+g^2)^2 * domega/dVj ; the RLC DC gain carries
+        // 4/(tau_e tau_l (D^2 + 1/tau^2)), leaving g = -2 D/(D^2 + 1/tau^2) domega/dVj / R1
+        g1 = -2.0 * D / (D * D + 1.0 / (tau * tau)) * dwdv1 / R1 * P_in;
+        g2 = -2.0 * D / (D * D + 1.0 / (tau * tau)) * dwdv2 / R1 * P_in;
+
+        // ---------- electrical parasitics
+        I(in1)     <+ ddt(Cpad1 * V(in1));
+        I(in1, sb1) <+ V(in1, sb1) / Rsi1;
+        I(sb1)      <+ ddt(Csi1 * V(sb1));
+        I(in1, j1) <+ V(in1, j1) / Rs1;
+        I(j1)      <+ ddt(Cj1 * V(j1));
+        I(in2)     <+ ddt(Cpad2 * V(in2));
+        I(in2, sb2) <+ V(in2, sb2) / Rsi2;
+        I(sb2)      <+ ddt(Csi2 * V(sb2));
+        I(in2, j2) <+ V(in2, j2) / Rs2;
+        I(j2)      <+ ddt(Cj2 * V(j2));
+
+        // ---------- electro-optic RLC; source g V(j) drawn into the node (sign: Vj = -Vr)
+        // ΔT = dT/dVj * ΔVj ; with current INTO node "out" the DC voltage is +g R1||R2 ΔVj
+        I(out) <+ -(g1 * V(j1) + ((nseg == 2) ? g2 * V(j2) : 0.0));
+        I(out) <+ ddt(Cc * V(out));
+        I(out) <+ V(out) / R1;
+        I(out, nind) <+ V(out, nind) / R2;
+        // inductor nind -> ground with its current as an explicit state V(il):
+        //   current leaving nind through L = V(il),   L d V(il)/dt = V(nind)
+        // (no branch-current probe, portable to every simulator)
+        I(nind) <+ V(il);
+        I(il) <+ ddt(Lind * V(il));
+        I(il) <+ -V(nind);
+    end
+endmodule
