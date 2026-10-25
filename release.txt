@@ -22,6 +22,39 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+7 - 2026-10-25
+---------------------
+**Multiphysics example 16, part 3: the nonlinear bubble cloud, its Poincare snapshots, and a
+reusable Poincare tool.** No simulator change.
+  * scripts/poincare.py works with any model that prints `<instance>: poincare t=... name=value`
+    lines from an `@(timer)`. Its subcommands: `run` (keeps the whole log and writes a CSV),
+    `table`, `snapshots` (the paper's waterfall of profiles against a sweep parameter) and
+    `bifurcation` (local diagrams at chosen instances). Its functions can be imported.
+  * The nonlinear check (bubble_cloud_check.net, mu = 0.05, omega = 0.25, g = 0.1) compares
+    199 radii x 30 samples with an independent scipy integration of the 398 equations, which
+    solves (A1) for the pressure at every evaluation. They agree within 4.6e-4. A 1 % error
+    planted in one (A1) term gives 0.62, and bubble_plots.py plants it on every run.
+  * At the paper's mu = 0.002 a pointwise check is not possible. The difference grows as
+    ~e^(0.024 t) (1.6e-5 to 0.57 in 50 periods at omega = 0.85), at the same rate as between
+    scipy's own two tolerances: that cloud amplifies small differences.
+  * Six sweep decks reproduce the paper's Figs. 9-19 (bubble_cloud_sweeps.py), and every
+    qualitative feature the paper reports appears. At omega = 2 the edge bubbles are period 2
+    from g = 0.481 (paper ~0.4) and the centre first moves at 3.085 (paper ~2.9). At omega = 0.55
+    the centre is period 2 from g = 0.176 (paper ~0.3). The other sweeps' first changes are at
+    g = 0.102 (omega = 0.25), 0.145 (0.62; paper ~0.2), 0.257 (0.85) and 0.151 (0.5 with
+    alpha0 = 0.01; paper ~0.25).
+  * Those thresholds are 20-50 % lower than the paper's. They are delayed bifurcations: they
+    depend on the sweep rate and on the integrator's error, and the paper states neither. They
+    are reported, not used as a check.
+  * Cost: 599 unknowns at --reltol 1e-5 take about 1.8 ms per time point. The JIT, threads and
+    VA_BTF=off each change it by under 15 %; dense LU is 20x slower. The sweeps took 30-92 min
+    each, with all six running at once, one thread each.
+  * The waterfall figures are rasterised inside their SVGs (11 figures, 3.0 MB). Fully vector,
+    they were 23 MB.
+  * docs/multiphysics_tutorial.qmd: a new chapter 18 covers the whole bubble example, with its
+    commands and run times.
+
+
 2.44.0+6 - 2026-10-25
 ---------------------
 **Multiphysics example 16, part 2: the bubble cloud's linear response.** 199 bubble cells joined

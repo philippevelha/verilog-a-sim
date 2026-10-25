@@ -16,6 +16,7 @@ It prints the checks quoted in the decks' headers. The reference equations below
 models/multiphysics/bubble/bubble_parts.va implements (Smereka & Banerjee, Phys. Fluids 31, 3519,
 1988, eq. 32b, dimensionless, gamma = 4/3).
 """
+import os
 import re
 import subprocess
 import sys
@@ -293,3 +294,66 @@ axes[-1].set_xlabel("x / R₀")
 fig.tight_layout()
 fig.savefig(f"{OUT}/bubble_cloud_profiles.svg")
 print(f"wrote {OUT}/bubble_cloud_response.svg and {OUT}/bubble_cloud_profiles.svg")
+
+# --- 3: the nonlinear cloud against an independent integrator -----------------------------------
+# bubble_cloud_check.net: mu = 0.05, omega = 0.25, g = 0.1, 30 periods. scipy integrates the same
+# 398 equations, solving (A1) for the pressure at every evaluation (the paper's A3).
+from scipy.linalg import solve_banded  # noqa: E402
+
+sys.path.insert(0, "scripts")
+import poincare  # noqa: E402
+
+
+def cloud_rhs(omega, g, mu, alpha0=A0):
+    def f(t, z):
+        y = np.exp(z[:N])
+        w = z[N:]
+        yi = 1 / y
+        y4 = yi**4
+        damp = w * (mu * yi + NU * y4)
+        pb = 1 + g * np.sin(omega * t)
+        # (A1) on the grid: p[i+1] - (2 + 3 alpha0 y) p[i] + p[i-1] = -12 alpha0 y K
+        ab = np.zeros((3, N))
+        ab[0, 1:] = 1
+        ab[2, :-1] = 1
+        ab[1] = -(2 + 3 * alpha0 * y)
+        r = -12 * alpha0 * y * (0.5 * w * w + 0.25 * y4 - damp)
+        r[0] -= pb
+        r[-1] -= pb
+        p = solve_banded((1, 1), ab, r)
+        return np.concatenate([w * yi, (0.25 * (y4 - p) - 1.5 * w * w - damp) * yi])
+    return f
+
+
+def check_cloud(log):
+    rows = poincare.load(log)
+    ts = sorted({r[2] for r in rows})
+    sim = {(r[1], round(r[2], 9)): r[3]["y"] for r in rows}
+    s = solve_ivp(cloud_rhs(0.25, 0.1, 0.05), (0, ts[-1]), np.zeros(2 * N), method="DOP853",
+                  rtol=1e-10, atol=1e-12, t_eval=ts)
+    ref = np.exp(s.y[:N])
+    got = np.array([[sim[(i, round(t, 9))] for t in ts] for i in range(1, N + 1)])
+    return np.abs(got - ref).max(), ref.min(), ref.max()
+
+
+log = "target/bubble_cloud_check.txt"
+with open(log, "w", encoding="utf-8") as fh:
+    fh.write(run("bubble_cloud_check.net", "--tran", "--reltol", "1e-5", "--report", "pb"))
+err, lo, hi = check_cloud(log)
+print(f"[nonlinear] 199 radii x 30 samples within {err:.1e} of scipy's (radii {lo:.2f} to {hi:.2f})")
+# The same check against a model with a 1 % error planted in one term of (A1): it must fail.
+planted = "target/bubble_planted"
+os.makedirs(planted, exist_ok=True)
+for name in ("bubble_natures.vams", "bubble_parts.va"):
+    text = open(f"{MODEL}/{name}", encoding="utf-8").read()
+    if name == "bubble_parts.va":
+        assert text.count("Pxx(p) <+ 3.0 * alpha0") == 1
+        text = text.replace("Pxx(p) <+ 3.0 * alpha0", "Pxx(p) <+ 1.01 * 3.0 * alpha0")
+    open(f"{planted}/{name}", "w", encoding="utf-8").write(text)
+r = subprocess.run([VA, "sim", f"{DECKS}/bubble_cloud_check.net", "--model", planted, "--tran",
+                    "--reltol", "1e-5", "--report", "pb"], capture_output=True, text=True,
+                   encoding="utf-8")
+with open(log, "w", encoding="utf-8") as fh:
+    fh.write(r.stdout)
+print(f"[nonlinear] with 1 % planted in (A1)'s 3 alpha0 y p term: {check_cloud(log)[0]:.1e} "
+      "(the check must tell it apart)")

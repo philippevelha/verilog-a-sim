@@ -1213,8 +1213,14 @@ The largest Lyapunov exponent of the same equations, computed with the Benettin 
 `models/multiphysics/bubble/bubble_parts.va` and `bubble_natures.vams`.
 
 The bubble cloud of Smereka & Banerjee, "The dynamics of periodically driven bubble clouds",
-Phys. Fluids 31, 3519 (1988) (in `references/`), built up in steps: one bubble driven by the
-pressure around it (parts 1–2), then the cloud's linear response (part 3). The paper's model is dimensionless (radius y = R/R₀, pressure p = P/P₀,
+Phys. Fluids 31, 3519 (1988) (in `references/`), built up in steps:
+
+- one bubble driven by the pressure around it (parts 1–2);
+- the cloud's linear response (part 3);
+- the nonlinear cloud against an independent integrator (part 4);
+- slow sweeps of the drive, drawn as the paper's Poincaré snapshots (part 5).
+
+The erratum (Phys. Fluids A 1, 898, 1989) corrects only a grant number. The paper's model is dimensionless (radius y = R/R₀, pressure p = P/P₀,
 time in units of the bubble's natural period /2π). Each bubble obeys a Rayleigh–Plesset equation
 with viscous and acoustic damping (μ = 0.002, ν = 0.015: about a 100 µm bubble in water):
 
@@ -1320,6 +1326,75 @@ within 5.7·10⁻³.
 
 All of this runs in about a second: 599 unknowns, sparse LU.
 
+### 4. The nonlinear cloud, against an independent integrator
+
+`bubble_cloud_check.net` drives the cloud at ω = 0.25, just below the first resonance, at g = 0.1
+for 30 periods. Its μ = 0.05 is the value the paper uses for its Fig. 16. The radii swing from
+0.84 to 1.61, so the nonlinear part of (A1) is fully at work.
+
+**The reference.** scipy integrates the same 398 equations (DOP853, rtol 10⁻¹⁰). At every
+evaluation it solves (A1) for the pressure with a banded solve, which is the paper's own (A3).
+
+| Model | Largest radius difference (199 bubbles × 30 samples) |
+|---|---|
+| as committed | 4.6·10⁻⁴ |
+| with a 1 % error planted in the 3α₀yp term of (A1) | 0.62 |
+
+`bubble_plots.py` plants that error and reruns the check every time. This proves the check can
+tell a wrong equation from integration error.
+
+**Why μ = 0.05.** At the paper's μ = 0.002 the comparison drifts:
+
+- At ω = 0.85, g = 0.2, the difference grows as about e^{0.024 t}, from 1.6·10⁻⁵ at the first
+  sample to 0.57 after 50 periods.
+- scipy's own runs at rtol 10⁻⁸ and 10⁻¹⁰ separate at the same rate.
+
+That cloud amplifies any small difference, so a pointwise comparison there measures the
+amplification, not the simulator. The stronger damping makes the cloud forget its start.
+
+### 5. Slow sweeps: the paper's Poincaré snapshots
+
+Six decks, `bubble_cloud_sweep_*.net`, are the paper's runs at μ = 0.002. Each drives the cloud
+at one frequency, with g ramped from 0, and every bubble prints its state once per period at the
+paper's phase 0 (`@(timer)`).
+
+**The tool.** They run through `scripts/poincare.py`, a tool for any model that prints
+`<instance>: poincare t=… name=value …` lines:
+
+- `run` keeps the whole log, so figures can be redrawn without rerunning;
+- `snapshots` draws the waterfall of profiles that the paper calls Poincaré snapshots;
+- `bifurcation` draws local bifurcation diagrams at chosen bubbles;
+- `table` writes a CSV.
+
+`docs/examples/multiphysics/bubble_cloud_sweeps.py` draws the figures and prints the measurements
+below. With `--run`, it runs any sweep whose log is missing.
+
+**Cost.** 599 unknowns at `--reltol 1e-5`, about 1.8 ms per time point. Neither the JIT nor
+threads changes that much, and dense LU is 20 times slower. The six sweeps take 30–92 min each,
+run together, one thread each.
+
+| ω | Paper | The paper reports | Measured here |
+|---|---|---|---|
+| 2 | Figs. 9–10 | only the edge bubbles move; they period-double near g = 0.4, and again near 2.9, which puts a frequency below the cutoff and excites the cloud | edge bubbles period 2 from g = 0.481; the subharmonic, at exactly the cutoff ω/2 = 1, reaches ~40 cells in; the centre first moves at g = 3.085 and the cloud then turns irregular from the edges inward |
+| 0.85 | Fig. 11 | the core is excited, then the edge bubbles jump onto a resonant orbit | the profile first changes by > 0.1 in one period at g = 0.257; the bubbles near \|x\| = 90 then jump onto large orbits (y up to 2.2) |
+| 0.25 | Figs. 12–13 | a jump bifurcation; spiky radii under a smooth pressure | the first change at g = 0.102; spikes in y up to 2.6 from g ≈ 0.27, under a smooth pressure profile |
+| 0.62 | Fig. 15 | a jump near g = 0.2 to a smooth nonlinear mode | the first change at g = 0.145; a smooth new mode by g ≈ 0.2, its maxima moved from the centre to \|x\| ≈ 60 |
+| 0.55 | Figs. 17–18 | a period-2 cloud mode from g ≈ 0.3 | period 2 at the centre from g = 0.176, at the edge from 0.470; irregular from g ≈ 0.8 |
+| 0.5, α₀ = 0.01 | Fig. 19 | complex spatial structure from g ≈ 0.25 | the first change at g = 0.151 |
+
+![Radius along the cloud at ω = 2](examples/multiphysics/bubble_sweep_w2_y.svg)
+![Local bifurcation diagrams at ω = 2](examples/multiphysics/bubble_sweep_w2_bif.svg)
+![Radius along the cloud at ω = 0.25](examples/multiphysics/bubble_sweep_w025_y.svg)
+![Pressure along the cloud at ω = 0.25](examples/multiphysics/bubble_sweep_w025_p.svg)
+
+The remaining figures are `bubble_sweep_w085_y`, `w062_y`, `w055_y`, `w055_bif`, `w05_a01_p` and
+`w2_late_y`, all in `docs/examples/multiphysics/`.
+
+**Every qualitative feature the paper reports is reproduced.** The thresholds come out 20–50 %
+lower than the paper's. A threshold read off a sweep is a delayed bifurcation (part 2). It depends
+on the sweep rate and on the integrator's error, and the paper states neither. These thresholds
+are therefore not a check on the simulator; parts 2–4 are.
+
 **What this showed.**
 
 - **A slow sweep delays a period doubling by an amount set by the noise, not by the bubble.**
@@ -1343,8 +1418,10 @@ All of this runs in about a second: 599 unknowns, sparse LU.
 
 **Limitations.**
 
-- The cloud has so far been checked only in the linear (AC) regime. The nonlinear part of (A1)
-  first acts in a transient of the ladder, which is the next step (the paper's Figs. 9–19).
+- The nonlinear cloud is checked pointwise only where it is damped enough to forget its start
+  (μ = 0.05). At the paper's μ = 0.002 only what survives the amplification of small differences
+  can be compared: which features appear, in what order, and roughly where.
+- The sweeps are long: 30–92 min each on the development laptop.
 - The cloud is the paper's: 199 cells at Δx = 1. Near the cutoff the grid stops resolving the
   wavelength, so it departs from the continuous equations there (part 3), as the paper's own
   computations do.

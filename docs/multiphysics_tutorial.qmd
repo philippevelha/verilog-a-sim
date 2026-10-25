@@ -39,6 +39,7 @@ The examples, in the order they were built:
 | [15](#speaker) | Horn loudspeaker | electrical, mechanical, acoustic, thermal | an acoustic transmission line as a `generate` ladder, distortion through a horn, thermal compression |
 | [16](#seu) | SRAM single-event upset | carrier diffusion, electrical | a diffusion PDE against its exact series, a transistor model, `.nodeset`, critical charge by bisection |
 | [17](#ringchaos) | Silicon microring bank | optical, free carriers, thermal | bistability, self-pulsing and chaos, against bifurcation analysis, scipy and a Lyapunov exponent |
+| [18](#bubble) | Periodically driven bubble cloud | fluid (bubbles in a liquid) | a PDE as a generated ladder, a state held as its log, a cutoff, Poincaré snapshots with a reusable tool, a delayed bifurcation |
 
 Every number quoted below was measured with the command shown next to it. Each figure is the
 file in `docs/examples/multiphysics/` that the command writes.
@@ -2342,6 +2343,333 @@ perturbation set it. With edges this sharp, 2.4 ns is a large pointwise differen
 map and the Lyapunov exponent are what separate periodic from chaotic.
 :::
 
+# Periodically driven bubble clouds: Rayleigh–Plesset, cutoff, Poincaré snapshots {#bubble}
+
+**Source:** P. Smereka and S. Banerjee, "The dynamics of periodically driven bubble clouds",
+Phys. Fluids 31, 3519 (1988), in `references/`. The erratum (Phys. Fluids A 1, 898, 1989)
+corrects only a grant number.
+
+**Library:** `models/multiphysics/bubble/`, which contains:
+
+- `bubble_parts.va`:
+  - `bubble`: one bubble and the slice of mixture around it;
+  - `bubble_link`: the mixture between two neighbouring bubbles;
+  - `bubble_drive`: the imposed pressure, with an optional slow ramp of its amplitude;
+- `bubble_natures.vams`, everything dimensionless as in the paper:
+  - `bubble_pressure`: p = P/P₀, whose flow is ∂²p/∂x²;
+  - `bubble_radius`: ln y, the log of y = R/R₀;
+  - `bubble_velocity`: dy/dt.
+
+Time is in units of 1/Ω₀, the bubble's natural angular frequency, and lengths are in units of
+R₀. With μ = 0.002 and ν = 0.015 the bubbles are about 100 µm across, in water, and Ω₀/2π is
+about 32 kHz.
+
+**The paper's model.** A dilute cloud (void fraction α₀ ≪ 1), averaged over thin slices, is two
+equations:
+
+    p_xx = −4 α₀ (y³)_tt                                                (32a)
+    y y_tt + 3/2 y_t² = ¼ (y⁻⁴ − p) − y_t (μ/y + ν/y⁴)                  (32b)
+
+The first is the mean pressure along the cloud, an elliptic equation in x at each instant. The
+second is a Rayleigh–Plesset bubble at every x, driven by the local pressure, with viscous (μ)
+and acoustic (ν) damping. Both ends of the cloud (x = ±L) are held at p = 1 + g cos ωt.
+
+## The cell, as a circuit
+
+Discretise x with spacing Δx, and (32a) becomes Kirchhoff's current law at each node:
+conductances 1/Δx² to the two neighbours, and the bubble's own flow to ground. The cell
+eliminates y_tt from (32a) through (32b), which is the paper's eq. (A1):
+
+```verilog
+// (32b) as two first-order rows: (ln y)_t = w/y, w_t = (1/y)[1/4 (y^-4 - p) - 3/2 w^2 - damping].
+Rad_res(y) <+ ddt(ly) - ww * yi;
+Vel_res(w) <+ ddt(ww) - yi * (0.25 * (y4 - pp) - 1.5 * ww * ww - damp);
+
+// (A1): the flow d^2p/dx^2 this slice draws from its pressure node.
+Pxx(p) <+ 3.0 * alpha0 * yy * pp
+          - 12.0 * alpha0 * yy * (0.5 * ww * ww + 0.25 * y4 - damp);
+```
+
+Two choices here are worth copying into other models:
+
+- **The pressure row has no `ddt`.** It is algebraic: a conductance 3α₀y to ground plus a
+  state-dependent source. The cloud is then an index-1 DAE that the implicit integrator handles
+  directly, the same structure as the paper's own scheme (a tridiagonal solve for p at each step).
+- **The radius is held as its logarithm.** Every solve starts from all unknowns at zero. With y
+  as the unknown, the first DC iterate is y = 0, where y⁻⁴ is infinite, and the operating point
+  fails with `error[E0603]: a model produced a non-finite value`. With ln y, zero is the bubble
+  at rest, and no Newton iterate can take the radius negative. The breaker (§13) holds its arc
+  conductance as a logarithm for the same kind of reason.
+
+**The drive.** `bubble_drive` writes `Pb(p) <+ 1.0 + amp * sin(omega * $abstime)`, with
+`amp = g + gdot * $abstime`. The paper writes cos; sin puts the DC operating point at rest, with
+p = 1. Its `$bound_step` keeps at least `nper` = 50 steps per period.
+
+**The samples.** With `tpoinc` > 0 the cell prints its state once per period:
+
+```verilog
+@(timer(tskip, tpoinc))
+    $strobe("%m: poincare t=%.15e y=%.12e w=%.12e p=%.12e", $abstime, yy, ww, pp);
+```
+
+`@(timer)` makes every sample an exact time point, so no interpolation is involved. The decks
+set `tskip` = T/4 + nT, where the paper's cos drive peaks: the paper's phase φ = 0.
+
+## One bubble
+
+```bash
+python docs/examples/multiphysics/bubble_plots.py "$VA"
+```
+
+The script runs every deck of this section and the next two with its scipy or closed-form
+reference, and prints each check (about 5 minutes).
+
+**Small signal** (`bubble_linear.net`). `VP p gnd DC 1 AC 1` holds the pressure node, which
+belongs to a user discipline, directly from the netlist. Linearising (32b) gives the paper's
+(13b): y₁/p₁ = −¼/(1 − ω² + ibω), with b = μ + ν. The simulated response agrees within
+4.8·10⁻⁷ relative at all 401 points, the printout's precision.
+
+![](examples/multiphysics/bubble_linear.svg)
+
+::: {.callout-note}
+## `.ac` needs a netlist source
+`va-cli`'s AC analysis requires a netlist source with an `AC` spec. An `ac_stim()` inside a
+Verilog-A source does not count (E0720). The bubble decks hold the pressure with `V... AC 1`.
+:::
+
+**Driven at twice its natural frequency** (`bubble_single.net`): ten bubbles at fixed g, each
+started from rest, sampled over the last 100 of 700 periods, against scipy (DOP853,
+rtol 10⁻¹¹) at the same instants.
+
+| g | 0.05 | 0.15 – 2.5 | 3.0 | 3.5 |
+|---|---|---|---|---|
+| period, simulated and scipy | 1 | 2 | 3 | 6 |
+
+The orbit values agree within 3.8·10⁻⁴.
+
+The script also computes, from the model's own equations, where the period-1 orbit loses
+stability: its Floquet multiplier crosses −1 at **g_c = 0.10201**.
+
+![](examples/multiphysics/bubble_bifurcation.svg)
+
+::: {.callout-warning}
+## `--reltol 1e-5`, and why
+At the default `1e-3` the periodic orbits agree with scipy within about 4·10⁻³. At g = 2.5,
+though, the bubble settles on a different attractor, a long irregular orbit, where scipy finds
+period 2. At `1e-5` they agree. Strongly driven runs can have several attractors, and the
+integrator's error can choose between them. Every transient bubble deck runs at `1e-5`.
+:::
+
+**A slow sweep** (`bubble_ramp.net`): g grows from 0 to 1 over 6366 periods. The jump to
+period 2 comes at g = 0.2284, more than twice g_c.
+
+::: {.callout-important}
+## A jump in a sweep is not a threshold
+Past g_c the subharmonic grows from whatever perturbation it is given. The smaller that seed,
+the later the jump: a *delayed bifurcation*. An integrator's error is such a seed:
+
+| Run | Jump at g |
+|---|---|
+| `--reltol 1e-3` | 0.2149 |
+| `--reltol 1e-4` | 0.2198 |
+| `--reltol 1e-5` | 0.2284 |
+| scipy, rtol 10⁻¹¹ | 0.2695 |
+
+None of these is g_c = 0.102. Read thresholds off fixed-amplitude runs or a stability
+computation, not off a sweep. The paper's sweeps have the same property. Their rate and
+integration error are not stated, so their jump points are not numbers to match to three digits.
+:::
+
+## The cloud, linear: resonances below the cutoff, shielding above it
+
+`bubble_cloud_response.net` and `bubble_cloud_profiles.net` are the paper's cloud:
+199 `bubble`s (α₀ = 0.001), joined by 200 `bubble_link`s at Δx = 1. Both ends are one node,
+`pb`, so a single source drives the cloud. Node `p<i>` sits at x = i − 100.
+
+::: {.callout-note}
+## Why the cloud is a generated netlist
+A Verilog-A `generate` loop around module *instances* is not supported yet: `generate` here
+unrolls analog code only (`docs/token-reference.md`). So
+`docs/examples/multiphysics/bubble_cloud_decks.py` writes the 400 instance lines, and the decks
+are committed. Rerun it after changing the cloud's size or parameters.
+:::
+
+Linearised, the pressure obeys q″ = h²q, with h² = −3α₀ω²/(1 − ω² + ibω). That gives two
+references:
+
+- **The ladder's own exact solution**, a tridiagonal solve. It checks the simulator.
+- **The paper's continuous solution**, q = cosh(hx)/cosh(hL) (eq. 38). It checks the
+  discretisation.
+
+| Check | Result |
+|---|---|
+| response function G = \|q(0)\| (Fig. 8), against the ladder | within 5.0·10⁻⁷ at 3601 points |
+| profiles at ω = 0.85, 0.97, 2.0 (Figs. 5–7), against the ladder | within 10⁻⁴, the 0.01° phase printout |
+| the ladder against eq. (38), ω < 0.95 | within 6.8·10⁻³ |
+| the ladder against eq. (38), just below the cutoff | up to 24 % |
+
+![](examples/multiphysics/bubble_cloud_response.svg)
+
+The resonances, from the peaks of G. Damping lowers each one, and more so towards the cutoff:
+
+| n | Simulated | Eq. (52), undamped |
+|---|---|---|
+| 1 | 0.27567 | 0.27567 |
+| 3 | 0.65213 | 0.65220 |
+| 5 | 0.82002 | 0.82024 |
+| 7 | 0.89458 | 0.89510 |
+
+![](examples/multiphysics/bubble_cloud_profiles.svg)
+
+- **Below the cutoff** (ω = 0.85) the cloud is spatially periodic, with wavelength 2π/β₊ = 71.2.
+- **Near it** (0.97) the amplitude decays from the edge at 0.02898; the paper's β₋ (eq. 43c) is
+  0.02909.
+- **Above it** (2.0) the amplitude decays at 0.06323, against β₋ = 0.06324. The core is shielded:
+  its amplitude is 3.6·10⁻³.
+
+::: {.callout-warning}
+## The grid has a cutoff of its own
+At the cutoff ω = 1 the wavelength goes to zero (the paper's Sec. III), so no fixed grid resolves
+the cloud just below it. The 24 % there is the Δx = 1 grid, which the paper's computations
+share, not an error of the simulator. A result about bubbles driven near the cutoff depends on
+Δx.
+:::
+
+## The cloud, nonlinear: a check that can fail
+
+`bubble_cloud_check.net` drives the cloud at ω = 0.25 (just below the first resonance) with
+g = 0.1 for 30 periods. Its μ = 0.05 is 25 times larger, the value the paper uses for its
+Fig. 16. The radii swing from 0.84 to 1.61, so the nonlinear part of (A1) is fully at work.
+
+**The reference** is an independent integration of the same 398 equations with scipy (DOP853,
+rtol 10⁻¹⁰). At every evaluation it solves (A1) for the pressure with a banded solve, which is
+the paper's own (A3).
+
+| Model | Largest radius difference, 199 bubbles × 30 samples |
+|---|---|
+| as committed | 4.6·10⁻⁴ |
+| with a 1 % error planted in one term of (A1) | 0.62 |
+
+The script plants the error and reruns the check every time, so it proves that it can tell a
+wrong equation from integration error.
+
+::: {.callout-important}
+## Why μ = 0.05 for the check
+At the paper's μ = 0.002, the same comparison drifts. The difference grows as ~e^{0.024 t},
+from 1.6·10⁻⁵ to 0.6 in 50 periods, and scipy's own two tolerances (10⁻⁸ and 10⁻¹⁰) separate at
+the same rate. A cloud that weakly damped amplifies *any* small difference, so a pointwise
+comparison measures the amplification, not the simulator. Stronger damping makes the cloud
+forget its start, and a pointwise check becomes meaningful. For the weakly damped sweeps below,
+only what survives the amplification can be compared: thresholds, periods, spatial structure.
+:::
+
+## Poincaré snapshots: a reusable tool
+
+`scripts/poincare.py` collects samples from **any** model that prints lines of the form
+
+```text
+<instance>: poincare t=<time> <name>=<value> <name>=<value> ...
+```
+
+It is not specific to bubbles: a driven Duffing beam, a ring or a neuron can opt in with one
+`@(timer)` and one `$strobe`.
+
+```bash
+# run a deck, keep its stdout as the log, and write <log>.csv (instance, index, t, values)
+python scripts/poincare.py run <deck.net> --model <library> --va "$VA" --log out.txt -- --reltol 1e-5 --report pb
+
+# Poincaré snapshots: one profile per sample time, raised by the sweep parameter
+python scripts/poincare.py snapshots out.txt --var y --param "g=7.215e-4*t" --x "index-100" --every 5 --out snap.svg
+
+# local bifurcation diagrams at chosen instances
+python scripts/poincare.py bifurcation out.txt --var y --at XB100,XB190 --param "g=7.215e-4*t" --out bif.svg
+```
+
+- **`run`** keeps the whole stdout. A sweep takes up to an hour, and a figure can then be
+  redrawn as often as needed without rerunning it.
+- **`--param NAME=EXPR`** turns time into the sweep parameter. For a ramp of `gdot`, the value
+  `g=<gdot>*t`.
+- **`--x`** maps an instance's index (the last integer in its name, XB17 → 17) to a position.
+- The functions `load`, `snapshots` and `bifurcation` can also be imported from a script, as
+  `bubble_cloud_sweeps.py` does.
+
+## The cloud, swept: the paper's Figs. 9–19
+
+Six decks, `bubble_cloud_sweep_*.net`, ramp g from 0 at one frequency each, at the paper's
+μ = 0.002, sampling all 199 bubbles once per period. They are long, so run them in the
+background, then draw:
+
+```bash
+python docs/examples/multiphysics/bubble_cloud_sweeps.py "$VA" --run   # runs any missing sweep, all in parallel
+```
+
+Each run takes 30–92 minutes with all six running at once, one thread each. The cost is about
+1.8 ms per time point for the 599 unknowns at `--reltol 1e-5`; neither the JIT nor threads
+changes it much, and dense LU is 20 times slower. The script prints what it measures in each
+sweep:
+
+```text
+[bubble_cloud_sweep_w2] omega = 2.0: 298500 samples. Period 2 from g = 0.481 at the edge (x = -99), never at the centre; ...; the centre first moves by > 0.02 in one period at g = 3.085
+[bubble_cloud_sweep_w055] omega = 0.55: 159200 samples. Period 2 from g = 0.470 at the edge (x = -99), 0.176 at the centre; ...
+```
+
+| ω | Paper | The paper reports | Measured here |
+|---|---|---|---|
+| 2 | Figs. 9–10 | edge bubbles period-double near g = 0.4; a second doubling near 2.9 excites the cloud | edge period 2 from g = 0.481; the centre first moves at 3.085 |
+| 0.85 | Fig. 11 | core excited; then the edge bubbles jump to a resonant orbit | first change at g = 0.257; bubbles near \|x\| = 90 jump to y ≈ 2.2 |
+| 0.25 | Figs. 12–13 | a jump; spiky radii under a smooth pressure | first change at g = 0.102; spikes to y = 2.6 from g ≈ 0.27, pressure smooth |
+| 0.62 | Fig. 15 | a jump near g = 0.2 to a smooth mode | first change at g = 0.145; new smooth mode by g ≈ 0.2 |
+| 0.55 | Figs. 17–18 | a period-2 mode from g ≈ 0.3 | period 2 at the centre from g = 0.176; irregular from g ≈ 0.8 |
+| 0.5, α₀ = 0.01 | Fig. 19 | complex structure from g ≈ 0.25 | first change at g = 0.151 |
+
+![](examples/multiphysics/bubble_sweep_w2_bif.svg)
+
+**Reading the local bifurcation diagrams** (ω = 2, Fig. 9's positions x = 0, 40, 70, 90, 98).
+Each panel is one bubble's sampled radius against g:
+
+- **One line** is a period-1 response.
+- **Two lines** are period 2.
+- **A cloud of dots** is irregular motion.
+
+The edge bubbles (x = 98, 90) double at g ≈ 0.5. Their subharmonic is at ω/2 = 1, exactly the
+cutoff, so it reaches only about 40 cells in: x = 70 doubles, x = 40 and the centre do not.
+Past g ≈ 3 the edge goes irregular, and a frequency below the cutoff carries it to the centre.
+That is the paper's account of how a cloud driven above its cutoff suddenly becomes noisy.
+
+![](examples/multiphysics/bubble_sweep_w2_y.svg)
+
+**Reading the snapshots.** Each line is the radius along the whole cloud at one sample instant,
+raised by the g of that instant. Lines drawn later hide those behind them, as in the paper's
+figures.
+
+![](examples/multiphysics/bubble_sweep_w025_y.svg)
+![](examples/multiphysics/bubble_sweep_w025_p.svg)
+
+At ω = 0.25 the radius profile is spiky while the pressure is smooth: the paper's Figs. 12–13.
+The spikes are single bubbles driven onto large resonant orbits. Their frequency matches the
+cutoff, so they cannot radiate, and the drive keeps them there.
+
+The remaining figures are `bubble_sweep_w085_y.svg` (Fig. 11), `w062_y` (Fig. 15), `w055_y` and
+`w055_bif` (Figs. 17–18), `w05_a01_p` (Fig. 19) and `w2_late_y` (Fig. 10).
+
+::: {.callout-important}
+## Compare features, not thresholds
+Every qualitative feature the paper reports is reproduced. The thresholds come out 20–50 % lower
+than the paper's. A threshold read off a sweep is a delayed bifurcation, and it depends on the
+sweep rate and on the integrator's error (see *A jump in a sweep is not a threshold*, above). The paper states neither for
+its runs. The simulator is checked by the fixed-amplitude, linear and nonlinear comparisons above.
+The sweeps show that it reproduces the paper's phenomena, in the order the paper reports them.
+:::
+
+**Limitations.**
+
+- The paper's model: a polytropic gas with γ = 4/3, no heat or mass transfer, and liquid
+  compressibility only as Herring's damping term.
+- The paper's grid, Δx = 1, which does not resolve the cloud just below its cutoff.
+- The sampled values carry the integrator's error at the sample instant.
+- At the paper's damping, the cloud amplifies small differences: two runs agree on features,
+  not sample by sample.
+
 # Reproducing every figure
 
 From the repository root, after `cargo build --release`, with `va-cli` aliased as in §2.1.
@@ -2407,6 +2735,11 @@ python $F/seu_plots.py "$VA"
 
 # Silicon microring bank (add --lyapunov for the Lyapunov exponent, ~40 min more)
 python $F/ringchaos_plots.py "$VA"
+
+# Bubble cloud: one bubble, the linear cloud, the nonlinear check
+python $F/bubble_plots.py "$VA"
+# Bubble cloud sweeps: runs the six sweeps whose logs are missing (target/bubble_sweeps/), in parallel
+python $F/bubble_cloud_sweeps.py "$VA" --run
 ```
 
 Approximate run times on the development laptop (Intel i7-1185G7):
@@ -2428,6 +2761,8 @@ Approximate run times on the development laptop (Intel i7-1185G7):
 | the three loudspeaker decks (`speaker_plots.py`) | about 4 min together (the thermal deck is most of it) |
 | the SEU decks and the bisection runs (`seu_plots.py`) | about 3.5 min together |
 | the microring decks and their scipy references (`ringchaos_plots.py`) | about 10 min; 52 min with `--lyapunov` |
+| the bubble decks and their references (`bubble_plots.py`) | about 5 min |
+| the six bubble-cloud sweeps (`bubble_cloud_sweeps.py --run`) | 30–92 min each, about 1.5 h together on 8 cores |
 
 These were measured with other simulations running on the same machine, so they are upper
 bounds.
