@@ -259,6 +259,35 @@ filter's own `T` and a breakpoint per sample instant.)
 
 ---
 
+## 11. A cheaper DC solve for logic circuits: capped plain Newton before the `gmin` ladder
+
+**What.** Insert one tier at the front of `va_core::dc::with_gmin_rescue`: plain Newton with the
+0.5 V node-step cap and no shunt, whose linear solves are accepted on their **backward error**
+(|r| / (|A||x| + |b|) at rounding level) rather than on `SparseLu`'s absolute residual test. The
+ladder stays behind it for every circuit this tier does not solve. The full diagnosis is
+`docs/proposals/iscas-plain-newton.md` (2.44.0+3).
+
+**Why.** Every ISCAS'85 circuit from c432 up fails plain Newton and pays the whole `gmin` ladder.
+The cause is not a singular Jacobian. A leakage-held stack node runs away, which the cap cures.
+After one capped step the circuit sits mid-rail, its linearization is a ~17-gate amplifier chain,
+and the correct Newton step (~10¹⁵ V, backward error 3×10⁻¹⁷) is rejected as "singular". With
+both handled, c432 converges in 60 iterations instead of 228 and c880 in 55 instead of 177, at the
+rescued answer (1.8 µV, identical logic).
+
+**Cost and dependencies.** `va-core` only (`dc.rs`, `sparse.rs`); no interface change. Measured
+gain on 2 of 7 circuits. On c499, c1355, c1908, c2670 and c3540 the tier fails after 10–18
+iterations, because the ideal shorts' branch currents, which the node cap does not touch, run away.
+That is 5–8 % of those circuits' rescue. A deck that needs no rescue is untouched. A rescued deck's
+answer moves at the µV level, deterministically on every platform, so `repro-compare` stays valid
+but deck-diff is not a no-op. `xtask newton-trace` and `scripts/diagnostics/iscas_capped.py`
+measure it.
+
+**Decide first.** Whether a 2-of-7 gain is worth a new tier, or whether to try first what might
+widen it: a cap on branch-current unknowns (needs a current scale), or SPICE-style per-device
+terminal-voltage limiting (`fetlim`/`limvds`; PSP103 declares no `$limit`). And the tier's
+iteration bound and early-failure test, tuned on the full suite including c5315, c6288 and c7552,
+which were not measured.
+
 ## Not planned, and why
 
 - **Verilog-AMS mixed-signal** (`connectmodule`, discrete events, `wreal`) — excluded by

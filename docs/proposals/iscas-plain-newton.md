@@ -1,7 +1,8 @@
 # Why plain Newton fails on ISCAS'85: the rows, named
 
-**Status:** findings, 2026-10-25 (verilog-a-sim 2.44.0+2). No simulator change: the options in §4
-are for the author to choose. This answers the first question of `docs/roadmap.md` "After 2.0"
+**Status:** findings, 2026-10-25 (verilog-a-sim 2.44.0+2). No simulator change. **Decision
+(2026-10-25): leave the rescue as it is for now.** Option 2 is kept as a future possibility,
+`docs/future_development.md` §11. This answers the first question of `docs/roadmap.md` "After 2.0"
 item 1, "name the rows whose pivots vanish".
 **Tool:** `cargo xtask newton-trace` (new with this document), which runs plain Newton on a deck
 and names what moves: dense on a small deck, `--sparse` on a large one, with `--cap`, `--shunt`,

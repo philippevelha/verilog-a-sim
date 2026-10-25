@@ -22,6 +22,13 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+4 - 2026-10-25
+---------------------
+**The ISCAS'85 plain-Newton finding is parked as future work.** Docs only. The author decided to
+leave the DC rescue as it is for now. The capped-plain tier with backward-error acceptance (2.44.0+3)
+is recorded as docs/future_development.md section 11, with its measured gain (2 of 7 circuits),
+its cost, and what to decide first. The roadmap and the proposal note the decision.
+
 2.44.0+3 - 2026-10-25
 ---------------------
 **Why plain Newton fails on ISCAS'85: found; no pivot vanishes.** Findings and a diagnostic tool;
