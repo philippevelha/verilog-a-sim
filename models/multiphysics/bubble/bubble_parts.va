@@ -23,9 +23,10 @@
 //   p_xx = 3 alpha0 y p - 12 alpha0 y [ w^2/2 + y^-4/4 - w (mu/y + nu/y^4) ],
 //
 // so the pressure row has no ddt in it: it is algebraic, with a shunt conductance 3 alpha0 y and
-// a state-dependent source. A chain of cells joined by conductances 1/dx^2 is then the paper's
-// discretised cloud (A3); a single cell driven by `bubble_drive` is one bubble in an infinite
-// liquid (alpha0 has no effect there: an ideal pressure source absorbs the cell's flow).
+// a state-dependent source. A chain of cells joined by `bubble_link`s (conductance 1/dx^2) is then
+// the paper's discretised cloud (A3), its two ends held at the imposed pressure; a single cell
+// driven by `bubble_drive` is one bubble in an infinite liquid (alpha0 has no effect there: an
+// ideal pressure source absorbs the cell's flow).
 //
 // `bubble_drive` imposes p = 1 + g sin(omega t) on its node, with g growing at `gdot` per unit
 // time from `g` for slow sweeps. The paper writes cos(omega t); sin is used so that the DC
@@ -104,4 +105,16 @@ module bubble_drive(p);
         Pb(p) <+ 1.0 + amp * sin(omega * $abstime);
         $bound_step(6.283185307179586 / (omega * nper));
     end
+endmodule
+
+// The mixture between two neighbouring cells: the second difference of (32a), a flow
+// (p_a - p_b)/dx^2 from a to b, so that the cells' KCL rows read (p[i+1] - 2 p[i] + p[i-1])/dx^2
+// = p_xx (the paper's A3; dx in units of R0, a Lagrangian spacing).
+module bubble_link(a, b);
+    inout a, b;
+    bubble_pressure a, b;
+
+    parameter real dx = 1 from (0:inf);
+
+    analog Pxx(a, b) <+ Pb(a, b) / (dx * dx);
 endmodule

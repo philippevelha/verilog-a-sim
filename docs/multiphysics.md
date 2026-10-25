@@ -1212,9 +1212,9 @@ The largest Lyapunov exponent of the same equations, computed with the Benettin 
 **Domains:** fluid (a gas bubble in a liquid, and the mixture's mean pressure). **Models:**
 `models/multiphysics/bubble/bubble_parts.va` and `bubble_natures.vams`.
 
-The first step towards the bubble cloud of Smereka & Banerjee, "The dynamics of periodically
-driven bubble clouds", Phys. Fluids 31, 3519 (1988) (in `references/`): one bubble, driven by
-the pressure around it. The paper's model is dimensionless (radius y = R/R₀, pressure p = P/P₀,
+The bubble cloud of Smereka & Banerjee, "The dynamics of periodically driven bubble clouds",
+Phys. Fluids 31, 3519 (1988) (in `references/`), built up in steps: one bubble driven by the
+pressure around it (parts 1–2), then the cloud's linear response (part 3). The paper's model is dimensionless (radius y = R/R₀, pressure p = P/P₀,
 time in units of the bubble's natural period /2π). Each bubble obeys a Rayleigh–Plesset equation
 with viscous and acoustic damping (μ = 0.002, ν = 0.015: about a 100 µm bubble in water):
 
@@ -1276,6 +1276,50 @@ period 2 does not come at g_c:
 
 Past the jump, the sweep lies on the fixed-amplitude orbits and on scipy's within 3.5·10⁻⁴.
 
+### 3. The cloud: resonances below the cutoff, shielding above it
+
+![Cloud response function](examples/multiphysics/bubble_cloud_response.svg)
+
+`bubble_cloud_response.net` is the paper's cloud: 199 cells (α₀ = 0.001) joined by
+`bubble_link`s at Δx = 1, between two boundary nodes held at p = 1 with a unit AC amplitude
+(half-length L = 100). `docs/examples/multiphysics/bubble_cloud_decks.py` writes it. Linearised,
+the pressure obeys q″ = h²q with h² = −3α₀ω²/(1 − ω² + ibω) (eq. 36b). The response function is
+the amplitude at the centre, G = 1/|cosh hL| (eq. 50).
+
+The simulation is checked against two references:
+
+- **The exact solution of the ladder's own equations:** within 5.0·10⁻⁷ relative at all 3601
+  points, the precision of the printout.
+- **The paper's continuous solution, eq. (38):** the ladder is within 6.8·10⁻³ below ω = 0.95,
+  but up to 24 % off just below the cutoff. There the wavelength shrinks to zero (the paper's
+  Sec. III), and a grid of spacing 1 no longer resolves it.
+
+| n | Peak, simulated | G on the grid | Undamped, eq. (52) | Undamped, ladder |
+|---|---|---|---|---|
+| 1 | 0.27567 | 249.2 | 0.27567 | 0.27567 |
+| 3 | 0.65213 | 22.0 | 0.65220 | 0.65216 |
+| 5 | 0.82002 | 5.95 | 0.82024 | 0.82017 |
+| 7 | 0.89458 | 2.32 | 0.89510 | 0.89501 |
+| 9 | 0.93106 | 1.05 | 0.93246 | 0.93236 |
+
+The peak positions are refined by a parabola through the three grid points around each
+maximum. Damping lowers each peak below its undamped frequency, and more so near the cutoff.
+The paper quotes ω₁ ≈ 0.275 and ω₃ ≈ 0.652.
+
+![Pressure along the cloud](examples/multiphysics/bubble_cloud_profiles.svg)
+
+`bubble_cloud_profiles.net` reports every node from ω = 0.85 to 2.0. Each profile agrees with
+the ladder's exact solution within 10⁻⁴, set by the 0.01° phase printout, and with eq. (38)
+within 5.7·10⁻³.
+
+| ω | Paper's figure | Behaviour | Measured |
+|---|---|---|---|
+| 0.85 | Fig. 5 | spatially periodic | wavelength 2π/β₊ = 71.2; amplitude at the centre 1.161 |
+| 0.97 | Fig. 6 | just below the cutoff: decays within a few wavelengths | decay rate at the edge 0.02898, against β₋ = 0.02909 (eq. 43c) |
+| 2.0 | Fig. 7 | above the cutoff: decays from the boundary, the core is shielded | decay rate 0.06323, against β₋ = 0.06324; amplitude at the centre 3.6·10⁻³ |
+
+All of this runs in about a second: 599 unknowns, sparse LU.
+
 **What this showed.**
 
 - **A slow sweep delays a period doubling by an amount set by the noise, not by the bubble.**
@@ -1289,15 +1333,23 @@ Past the jump, the sweep lies on the fixed-amplitude orbits and on scipy's withi
   periodic orbits agree with scipy within about 4·10⁻³. At g = 2.5, however, the bubble settles
   into a long irregular orbit where scipy finds period 2. At 10⁻⁵ both find period 2. Strongly
   driven runs need the tighter tolerance, and the decks state it.
+- **The cutoff is where the paper's continuous model and its own grid part company.** Below
+  ω = 0.95 the 199-cell ladder is within 0.7 % of eq. (38). Next to ω = 1 it is up to 24 % off,
+  because the wavelength goes to zero there. Any claim about bubbles driven near the cutoff
+  depends on Δx, in the paper's computations as here.
 - **A netlist source drives a user discipline's node.** `V… p gnd DC 1 AC 1` holds the pressure
   node directly; the AC deck needs it. va-cli's AC analysis requires a netlist source with an
   `AC` spec and does not count an `ac_stim` inside a Verilog-A source (E0720).
 
 **Limitations.**
 
-- So far one bubble in an infinite liquid. The cell's pressure flow (A1) is written but not yet
-  exercised: an ideal source absorbs it. The ladder (the cloud's linear response, the paper's
-  Figs. 4–8 and eq. 52) is the next step.
+- The cloud has so far been checked only in the linear (AC) regime. The nonlinear part of (A1)
+  first acts in a transient of the ladder, which is the next step (the paper's Figs. 9–19).
+- The cloud is the paper's: 199 cells at Δx = 1. Near the cutoff the grid stops resolving the
+  wavelength, so it departs from the continuous equations there (part 3), as the paper's own
+  computations do.
+- The ladder is a generated netlist, because a module-level `generate` around instances is
+  not supported yet (`docs/token-reference.md`).
 - The paper's model: a polytropic gas with γ = 4/3, no heat or mass transfer, and liquid
   compressibility only as Herring's damping term.
 - A sample time is a breakpoint, but the sampled value carries the integrator's error at that

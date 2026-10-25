@@ -1,4 +1,4 @@
-"""Draw the single-bubble decks of circuits/multiphysics/bubble_*.net, and check them.
+"""Draw the bubble decks of circuits/multiphysics/bubble_*.net, and check them.
 
   python docs/examples/multiphysics/bubble_plots.py [path/to/va-cli]
 
@@ -8,6 +8,10 @@ runs the three decks through va-cli and writes
   docs/examples/multiphysics/bubble_bifurcation.svg -- the stroboscopic radius against the drive
       amplitude at omega = 2: a slow sweep, the fixed-amplitude orbits, scipy's, and the Floquet
       threshold of the period-1 orbit.
+  docs/examples/multiphysics/bubble_cloud_response.svg -- the cloud's response function G(omega)
+      (Fig. 8) against the ladder's exact solution, the paper's continuous eq. (38) and eq. (52);
+  docs/examples/multiphysics/bubble_cloud_profiles.svg -- the pressure amplitude and in-phase part
+      along the cloud at omega = 0.85, 0.97, 2.0 (Figs. 5-7), against eq. (38).
 It prints the checks quoted in the decks' headers. The reference equations below are the ones
 models/multiphysics/bubble/bubble_parts.va implements (Smereka & Banerjee, Phys. Fluids 31, 3519,
 1988, eq. 32b, dimensionless, gamma = 4/3).
@@ -166,3 +170,126 @@ ax.legend(frameon=False, loc="lower right", fontsize=8)
 fig.tight_layout()
 fig.savefig(f"{OUT}/bubble_bifurcation.svg")
 print(f"wrote {OUT}/bubble_linear.svg and {OUT}/bubble_bifurcation.svg")
+
+# --- 2: the cloud, linear ------------------------------------------------------------------------
+# bubble_cloud_*.net: N = 199 cells at dx = 1 between two boundary nodes at x = -L, L (L = 100),
+# alpha0 = 0.001. q is the pressure perturbation's complex amplitude per unit drive.
+A0, N, L = 0.001, 199, 100
+XS = np.arange(1, N + 1) - 100                         # node p<i> sits at x = i - 100
+
+
+def h2(w):
+    """eq. (36b) at s = i omega: q_xx = h^2 q."""
+    return -3 * A0 * w * w / (1 - w * w + 1j * B * w)
+
+
+def q_ladder(w):
+    """The discrete cloud's exact steady state: q[i+1] - (2 + h^2) q[i] + q[i-1] = 0, q = 1 at
+    both boundaries (A3 linearised; dx = 1)."""
+    m = (np.diag(np.full(N, 2 + h2(w))) - np.eye(N, k=1) - np.eye(N, k=-1)).astype(complex)
+    r = np.zeros(N, complex)
+    r[0] = r[-1] = 1
+    return np.linalg.solve(m, r)
+
+
+def q_paper(w, x):
+    """The continuous cloud, eq. (38) at s = i omega: cosh(h x)/cosh(h L)."""
+    h = np.sqrt(h2(w) + 0j)
+    return np.cosh(h * x) / np.cosh(h * L)
+
+
+def ac_grid(deck):
+    """The deck's frequencies from its `.ac lin` card (the printout carries 7 digits only)."""
+    n, f0, f1 = re.search(r"\.ac lin (\d+) (\S+) (\S+)", open(f"{DECKS}/{deck}").read()).groups()
+    return 2 * np.pi * np.linspace(float(f0), float(f1), int(n))
+
+
+def ac_nodes(line):
+    return {int(i): float(a) * np.exp(1j * np.radians(float(p)))
+            for i, a, p in re.findall(r"Pb\(p(\d+)\)=(\S+) \S+∠(\S+)°", line)}
+
+
+def omega_n(n):
+    """eq. (52): the undamped resonances of the continuous cloud, n odd."""
+    return (1 + 12 * L * L * A0 / (n * n * np.pi**2)) ** -0.5
+
+
+def omega_n_ladder(n):
+    """The same for the discrete ladder: h^2 = -4 sin^2(n pi / 2(N+1))."""
+    c = 4 * np.sin(n * np.pi / (2 * (N + 1))) ** 2
+    return np.sqrt(c / (3 * A0 + c))
+
+
+def beta(w):
+    """eq. (43c-d): beta+ sets the wavelength, beta- the decay into the cloud."""
+    d = (1 - w * w) ** 2 + (w * B) ** 2
+    k = 3 * A0 / (2 * d)
+    return (w * np.sqrt(k * (np.sqrt(d) + (1 - w * w))),
+            w * np.sqrt(k * (np.sqrt(d) - (1 - w * w))))
+
+
+# 2a: the response function G = |q(0)|, eqs. (49)-(50), Fig. 8.
+w = ac_grid("bubble_cloud_response.net")
+lines = [ln for ln in run("bubble_cloud_response.net", "--ac", "--report", "p100").splitlines()
+         if ln.lstrip().startswith("f=")]
+assert len(lines) == w.size
+g_sim = np.array([abs(ac_nodes(ln)[100]) for ln in lines])
+g_lad = np.array([abs(q_ladder(x)[99]) for x in w])
+g_pap = np.abs(q_paper(w, 0.0))
+print(f"[cloud] G against the ladder's exact solution: within {np.max(np.abs(g_sim - g_lad) / g_lad):.1e} "
+      f"relative at {w.size} points")
+for lo, hi in [(0.1, 0.95), (0.95, 1.0)]:
+    s = (w >= lo) & (w < hi)
+    print(f"[cloud] ladder against the continuous eq. (38), omega in [{lo}, {hi}): "
+          f"{np.max(np.abs(g_lad - g_pap)[s] / g_pap[s]):.1e} relative")
+peaks = [i for i in range(1, w.size - 1) if g_sim[i - 1] < g_sim[i] > g_sim[i + 1]]
+for n, i in zip(range(1, 99, 2), peaks):
+    y0, y1, y2 = np.log(g_sim[i - 1:i + 2])
+    wp = w[i] + 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2) * (w[1] - w[0])
+    print(f"[cloud] peak {n}: omega = {wp:.5f}, G = {g_sim[i]:.2f} on the grid; undamped "
+          f"eq. (52) {omega_n(n):.5f}, ladder {omega_n_ladder(n):.5f}")
+
+fig, ax = plt.subplots(figsize=(6.4, 4.0))
+ax.semilogy(w, g_pap, "-", color="0.6", lw=2.2, label="continuous, eq. (38)")
+ax.semilogy(w, g_lad, "k-", lw=0.8, label="ladder, exact")
+ax.semilogy(w[::12], g_sim[::12], "o", ms=2.5, mfc="none", color="C0", label="simulated (.ac)")
+for n in range(1, 12, 2):
+    ax.axvline(omega_n(n), color="C3", lw=0.6, ls=":")
+ax.plot([], [], color="C3", lw=0.6, ls=":", label="eq. (52), n = 1, 3, 5 …")
+ax.set_xlabel("ω / Ω₀")
+ax.set_ylabel("G = |q(0)| / g")
+ax.set_title("Cloud response, L = 100, α₀ = 0.001, b = 0.017 (Fig. 8)", fontsize=10)
+ax.legend(frameon=False, fontsize=8)
+fig.tight_layout()
+fig.savefig(f"{OUT}/bubble_cloud_response.svg")
+
+# 2b: the pressure along the cloud, eqs. (43)-(48), Figs. 5-7.
+w = ac_grid("bubble_cloud_profiles.net")
+report = ",".join(f"p{i}" for i in range(1, N + 1))
+lines = [ln for ln in run("bubble_cloud_profiles.net", "--ac", "--report", report).splitlines()
+         if ln.lstrip().startswith("f=")]
+assert len(lines) == w.size
+fig, axes = plt.subplots(3, 1, figsize=(6.4, 6.6), sharex=True)
+for ax, wt, figno in zip(axes, (0.85, 0.97, 2.0), (5, 6, 7)):
+    k = int(np.argmin(np.abs(w - wt)))
+    v = ac_nodes(lines[k])
+    q = np.array([v[i] for i in range(1, N + 1)])
+    ql, qp = q_ladder(w[k]), q_paper(w[k], XS)
+    bp, bm = beta(w[k])
+    edge = slice(0, 30)
+    decay = -np.polyfit(XS[edge] + L, np.log(np.abs(q[edge])), 1)[0]
+    print(f"[cloud] omega = {w[k]:.2f}: profile within {np.abs(q - ql).max():.1e} of the ladder's "
+          f"(the 0.01 deg phase printout), ladder within {np.abs(ql - qp).max():.1e} of eq. (38); "
+          f"|q(0)| = {abs(q[99]):.3e}; beta+ = {bp:.5f} (wavelength {2 * np.pi / bp:.1f}), "
+          f"beta- = {bm:.5f}" + (f"; decay fitted at the edge {decay:.5f}" if wt > 0.9 else ""))
+    ax.plot(XS, np.abs(qp), "-", color="0.6", lw=2.2, label="A(x), eq. (38)")
+    ax.plot(XS, qp.real, "-", color="0.75", lw=1.2, label="R(x), eq. (38)")
+    ax.plot(XS[::3], np.abs(q[::3]), "o", ms=2.5, mfc="none", color="C0", label="A(x), simulated")
+    ax.plot(XS[::3], q.real[::3], "+", ms=3.5, color="C1", label="R(x), simulated")
+    ax.set_ylabel("q / g")
+    ax.set_title(f"ω = {w[k]:.2f} (Fig. {figno})", fontsize=9)
+axes[-1].legend(frameon=False, fontsize=7, ncol=2, loc="upper center")
+axes[-1].set_xlabel("x / R₀")
+fig.tight_layout()
+fig.savefig(f"{OUT}/bubble_cloud_profiles.svg")
+print(f"wrote {OUT}/bubble_cloud_response.svg and {OUT}/bubble_cloud_profiles.svg")

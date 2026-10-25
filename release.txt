@@ -22,6 +22,28 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+6 - 2026-10-25
+---------------------
+**Multiphysics example 16, part 2: the bubble cloud's linear response.** 199 bubble cells joined
+by a new `bubble_link` (conductance 1/dx^2) between two driven boundary nodes, which is the
+paper's discretised cloud (L = 100, alpha0 = 0.001, b = 0.017). Decks bubble_cloud_response.net
+(G(omega), Fig. 8) and bubble_cloud_profiles.net (Figs. 5-7). The decks are written by
+bubble_cloud_decks.py, because a module-level `generate` around instances is not supported yet.
+bubble_plots.py checks them. No simulator change.
+  * Against the ladder's exact solution: G within 5.0e-7 at 3601 points, and the profiles within
+    1e-4. Both are the limits of the printout (7 digits; phase to 0.01 deg).
+  * Resonances: 0.27567, 0.65213, 0.82002, 0.89458, 0.93106 (paper: ~0.275, ~0.652). Undamped
+    eq. (52) gives 0.27567, 0.65220, 0.82024, 0.89510, 0.93246. The difference grows towards the
+    cutoff, as damping says it should.
+  * Profiles: wavelength 71.2 at omega = 0.85. Edge decay 0.02898 (beta- = 0.02909) at 0.97 and
+    0.06323 (beta- = 0.06324) at 2.0.
+  * Cost and limitation: the 199-cell grid is within 6.8e-3 of the paper's continuous eq. (38)
+    below omega = 0.95, but up to 24 % off just below the cutoff, where the wavelength shrinks
+    to the grid spacing. The paper's own grid has the same property.
+  * Both decks run in about a second (599 unknowns, sparse LU). The nonlinear cloud (a transient
+    of the ladder) is the next step.
+
+
 2.44.0+5 - 2026-10-25
 ---------------------
 **Multiphysics example 16, part 1: one periodically driven bubble** (Smereka & Banerjee, Phys.
