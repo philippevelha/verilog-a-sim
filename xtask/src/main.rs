@@ -20,6 +20,7 @@ use va_abi::ModelInstance;
 mod bench_dense;
 mod btf;
 mod ladder;
+mod newton_trace;
 mod repro;
 
 fn main() -> Result<()> {
@@ -43,6 +44,7 @@ fn main() -> Result<()> {
         Some("jit-check") => jit_check(&rest),
         Some("btf") => btf::btf(&rest),
         Some("ladder") => ladder::ladder_cmd(&rest),
+        Some("newton-trace") => newton_trace::newton_trace(&rest),
         Some("--help") | Some("-h") | None => {
             print_usage();
             Ok(())

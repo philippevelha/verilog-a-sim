@@ -5012,6 +5012,13 @@ to choose, as 2.0's was, and the list below is evidence for that choice, not a p
    factorization, not by assembling densely (c432 densely is 1.9 GB). If they are PSP103 internal
    branch rows, the question becomes a constraint row; if they are node rows, a pivot tolerance.
    A fix here would be the largest single speed-up left on the `.op` side.
+   **Answered 2026-10-25 (`docs/proposals/iscas-plain-newton.md`): no pivot vanishes.** Plain
+   Newton runs away on leakage-held stack nodes (a node-step cap cures it). After one capped step
+   the circuit is mid-rail, and its linearization is a ~17-gate amplifier chain. The correct,
+   backward-stable step is ~10¹⁵ V, and `SparseLu`'s absolute residual test calls it
+   singular. Accepting it by backward error, capped plain Newton converges on c432 and c880
+   (60/55 iterations against 228/177), but fails on c499, c1355, c1908, c2670 and c3540. The
+   options are in that document; none is chosen yet.
 2. **The 320-stage PSP103 chain** (10 566 unknowns) still fails, undiagnosed. It may share a
    cause with 1.
 3. **Transient cost.** 1 ns of c432 takes ~15 min, and the vector-sequence check takes 46.8 min.

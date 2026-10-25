@@ -22,6 +22,36 @@ Versioning, from 0.9.0 onward:
 Newest first.
 
 
+2.44.0+3 - 2026-10-25
+---------------------
+**Why plain Newton fails on ISCAS'85: found; no pivot vanishes.** Findings and a diagnostic tool;
+the simulator is unchanged. Roadmap After-2.0 item 1 asked to name the rows; it is answered in
+docs/proposals/iscas-plain-newton.md.
+  * Cause 1, a runaway. In a single c432 cell (nand4c, input a = 1), the and4 stack node between
+    two off NMOS is held only by leakage. Plain Newton multiplies its step by 2.4 per
+    iteration, to 1e15 V. It is not a junction unknown, so junction limiting skips it. A 0.5 V
+    node-step cap cures it: all 10 cell types converge for all 70 input combinations.
+  * Cause 2, a false "singular". After one capped step c432 sits near mid-rail, and its
+    linearization is a chain of high-gain gates. The correct Newton step grows about tenfold per
+    logic level, to 8e13 V at depth 13. It is backward stable (backward error 3.3e-17), and no
+    block of its block triangular form is near singular (worst sigma_min/sigma_max 4.9e-10). But
+    SparseLu's absolute residual test rejects it and reports `Singular`.
+  * Accepting that step on backward error, capped plain Newton converges on c432 (60 iterations
+    against the rescue's 228; all 8 099 nets within 1.8 uV; logic 196/196) and on c880 (55
+    against 177). It fails on c499, c1355, c1908, c2670 and c3540, where the uncapped
+    branch currents of the ideal shorts run away. Backward-error acceptance alone, in the
+    existing rescue, changes no iteration count. Options in the doc; none chosen.
+  * Tool: `cargo xtask newton-trace <deck>`, plain Newton naming what moves, with dense or
+    `--sparse` assembly and `--cap`, `--shunt`, `--accept-backward`, `--solve` (the real
+    va_core::newton). On a failed sparse solve it reports zero rows, zero columns, duplicate
+    rows, a direct faer solve with its residual, and per-block conditioning in block triangular
+    form. Scripts: scripts/diagnostics/iscas_cells.py, iscas_capped.py. xtask now depends on
+    faer (workspace version), for that diagnosis.
+  * Limitations: c5315, c6288 and c7552 were not run. The tool's wall times include its own
+    overheads. Iteration counts are the comparison.
+
+Measured: `cargo test -p xtask` 42 passed; clippy (xtask) and fmt clean.
+
 2.44.0+2 - 2026-10-24
 ---------------------
 **Paper: a section on domains beyond electronics, and the SNN at circuit level.** Docs only; no

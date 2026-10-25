@@ -17,6 +17,8 @@ va-frontend = { workspace = true }
 va-cli = { workspace = true }
 va-core = { workspace = true }
 va-harness = { workspace = true }
+# `newton-trace --sparse` factors a failing Jacobian directly, to report its backward error.
+faer = { workspace = true }
 va-netlist = { workspace = true }
 
 [features]

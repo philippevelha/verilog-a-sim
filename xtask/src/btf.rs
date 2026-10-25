@@ -272,7 +272,7 @@ fn decompose(n: usize, entries: &[(usize, usize)]) -> Option<Blocks> {
 
 /// Row matched to each column so every column has one (augmenting paths, iterative DFS — MC21
 /// in spirit). `None` when no perfect matching exists.
-fn max_transversal(n: usize, col_rows: &[Vec<usize>]) -> Option<Vec<usize>> {
+pub(crate) fn max_transversal(n: usize, col_rows: &[Vec<usize>]) -> Option<Vec<usize>> {
     let mut col_of_row = vec![usize::MAX; n];
     let mut row_of_col = vec![usize::MAX; n];
     // Cheap pass first: take an unmatched row if the column has one.
@@ -324,7 +324,7 @@ fn max_transversal(n: usize, col_rows: &[Vec<usize>]) -> Option<Vec<usize>> {
 }
 
 /// Tarjan's strongly connected components, iterative. Returns each node's component number.
-fn tarjan(n: usize, adj: &[Vec<usize>]) -> Vec<usize> {
+pub(crate) fn tarjan(n: usize, adj: &[Vec<usize>]) -> Vec<usize> {
     const UNSEEN: usize = usize::MAX;
     let mut index = vec![UNSEEN; n];
     let mut low = vec![0usize; n];
